@@ -1479,7 +1479,8 @@ def _interim_fallback_text(tool_calls):
     return "(" + ", ".join(parts) + "…)"
 
 
-def _artifact_write_report(tr, user_id, licence=None, numbers=None):
+def _artifact_write_report(tr, user_id, licence=None, numbers=None,
+                           known=None):
     """The system's answer to one update_artifact call (#604): what the
     next round of the same turn sees, and, replayed as the call's tool
     result, what every later turn of the thread sees. Without it the
@@ -1494,40 +1495,72 @@ def _artifact_write_report(tr, user_id, licence=None, numbers=None):
     ARTIFACT_ECHO_DIFF_THRESHOLD_CHARS, and when the previous version
     may not reach a model. A failed write gives its error.
 
-    Built from the two stored version ids (content never sits in
-    plaintext tool_calls_meta) and nothing else, so one write reads the
+    *known* (the history replay only) is the set of version ids whose
+    full text the prompt already shows before this answer: the inline
+    copies (_pinned_inline_versions) and the versions earlier answers
+    showed. A diff is shown only against one of them; otherwise the
+    answer is the full new text, as a diff against a version the model
+    never saw (changed in another thread, by the user's hand, read in a
+    turn whose read is not replayed, or written in a reply the user
+    deleted) would leave that change out of every later turn while the
+    version check accepts writes based on the new number. For the same
+    reason a refusal that showed the current text in its turn replays it
+    too, unless the prompt shows that version already, and a write
+    recorded before writes kept their previous version names no number.
+    Each answer adds the version it shows to *known*; in the turn's own
+    next round (known=None) everything the model was shown is still in
+    the prompt.
+
+    Built from the stored version ids (content never sits in plaintext
+    tool_calls_meta) and the chain before it, so one write reads the
     same bytes on every later turn and the cached prompt prefix keeps
     growing. A version the user has since kept away from AI (AI usage
     None), or that no longer exists, shows no text. The rows whose text
     the answer shows report to *licence* (#326). *numbers* caches
     version numbers within one prompt (artifact_versions.version_number).
     """
-    if tr.get("status") != "success":
-        return f"update_artifact failed — {tr.get('error', 'unknown error')}"
-
     def _note(row):
         if licence is not None:
             _note_artifact_content(licence, row)
 
+    def _shown(row):
+        if known is not None:
+            known.add(row.id)
+
+    if tr.get("status") != "success":
+        text = f"update_artifact failed — {tr.get('error', 'unknown error')}"
+        if known is None:
+            return text
+        # In its turn the refusal came with the current text
+        # (_artifact_current_text): the reason names that version.
+        current = stored_version(tr.get("current_artifact_id"), user_id)
+        if (current is None or current.ai_usage not in AI_ALLOWED
+                or current.id in known):
+            return text
+        _note(current)
+        _shown(current)
+        return (f"{text}\n\nCurrent text of '{current.kind}' · "
+                f"v{version_number(current, numbers)}:\n"
+                f"{current.get_content() or ''}")
+
     kind = tr.get("kind") or "?"
     prev_id = tr.get("previous_artifact_id")
-    # A write recorded before writes kept their previous version (an
-    # older thread) says only whether it created the artifact.
-    prev_known = "previous_artifact_id" in tr
-    created = prev_id is None if prev_known else bool(tr.get("created"))
-    verb = "created as" if created else "updated to"
     new = stored_version(tr.get("artifact_id"), user_id)
     if new is None:
         return f"'{kind}' was saved, but that version no longer exists."
+    if "previous_artifact_id" not in tr:
+        # Recorded before writes kept their previous version (an older
+        # thread): no number, as there is no text to go with it.
+        return f"'{kind}' was {'created' if tr.get('created') else 'updated'}."
     number = version_number(new, numbers)
+    verb = "created as" if prev_id is None else "updated to"
     if new.ai_usage not in AI_ALLOWED:
         return (f"'{kind}' {verb} v{number}. That version is kept away "
                 "from AI, so its text is not shown.")
-    if not prev_known:
-        return f"'{kind}' {verb} v{number}."
     new_text = new.get_content() or ""
     if prev_id is None:
         _note(new)
+        _shown(new)
         return f"'{kind}' created as v{number}. Its text:\n{new_text}"
     previous = stored_version(prev_id, user_id)
     if previous is None or previous.ai_usage not in AI_ALLOWED:
@@ -1535,13 +1568,21 @@ def _artifact_write_report(tr, user_id, licence=None, numbers=None):
         # refuses to write over one; this keeps the answer safe on its
         # own, also when the user changes the setting later).
         _note(new)
+        _shown(new)
         return f"'{kind}' updated to v{number}. Its full new text:\n{new_text}"
     head = (f"'{kind}' updated to v{number} "
             f"(from v{version_number(previous, numbers)})")
+    if known is not None and previous.id not in known:
+        # The prompt never showed the version this one was made from.
+        _note(new)
+        _shown(new)
+        return f"{head}. Its full new text:\n{new_text}"
     diff = artifact_diff(previous.get_content() or "", new_text)
     if not diff:
+        _shown(new)
         return f"{head}, with no changes."
     _note(new)
+    _shown(new)
     if len(diff) > ARTIFACT_ECHO_DIFF_THRESHOLD_CHARS:
         # A rewrite this heavy reads clearer (and usually shorter) in full.
         return (f"{head}. The changes are large, so here is its full new "
@@ -1560,8 +1601,10 @@ def _artifact_current_text(tr, user_id, licence=None):
 
     Fetched from the row the refusal names by id (current_artifact_id),
     with the ai_usage check, and reported to *licence* (#326); the text
-    is never stored, and later turns replay only the refusal's reason.
-    Returns (text, row), or (None, None) when there is nothing to show."""
+    is never stored. Later turns replay it with the refusal, from the
+    same id, unless the prompt shows that version already
+    (_artifact_write_report). Returns (text, row), or (None, None) when
+    there is nothing to show."""
     if tr.get("name") != "update_artifact" or tr.get("status") == "success":
         return None, None
     row = stored_version(tr.get("current_artifact_id"), user_id)
@@ -1575,7 +1618,7 @@ def _artifact_current_text(tr, user_id, licence=None):
 
 
 def _replayed_write_blocks(node, writes, user_id, licence=None,
-                           numbers=None):
+                           numbers=None, known=None):
     """The update_artifact calls of *node* (the user's own reply), as a
     later turn's history replays them (#604): one tool_use block per call
     to append after the reply's text, and one tool_result block per call
@@ -1586,10 +1629,12 @@ def _replayed_write_blocks(node, writes, user_id, licence=None,
 
     *writes* is [(index in the node's tool_calls_meta, entry)]. The call
     shows the input as stored, without the redacted content keys; its id
-    is derived from the node and the index. Everything depends only on
-    the node, the stored entry and the two versions' rows, so the bytes
-    are the same on every later turn and the cached prefix keeps
-    growing. Nothing here reaches node content or speech."""
+    is derived from the node and the index. *known* is the prompt's set
+    of versions shown so far (see _artifact_write_report), updated in
+    chain order. Everything depends only on the chain up to the node,
+    the stored entries and the versions' rows, so the bytes are the same
+    on every later turn and the cached prefix keeps growing. Nothing
+    here reaches node content or speech."""
     calls, results = [], []
     for index, entry in writes:
         call_id = f"loore_{node.id}_{index}"
@@ -1603,11 +1648,42 @@ def _replayed_write_blocks(node, writes, user_id, licence=None,
                       "name": "update_artifact", "input": shown})
         result = {"type": "tool_result", "tool_use_id": call_id,
                   "content": _artifact_write_report(
-                      entry, user_id, licence=licence, numbers=numbers)}
+                      entry, user_id, licence=licence, numbers=numbers,
+                      known=known)}
         if entry.get("status") != "success":
             result["is_error"] = True
         results.append(result)
     return calls, results
+
+
+# The inline artifact kinds and the placeholder each is shown by.
+_INLINE_PLACEHOLDER_OF = {
+    "memory": USER_MEMORY_PLACEHOLDER,
+    "scratchpad": USER_SCRATCHPAD_PLACEHOLDER,
+    "intentions": USER_INTENTIONS_PLACEHOLDER,
+    "ai_preferences": USER_AI_PREFERENCES_PLACEHOLDER,
+}
+
+
+def _pinned_inline_versions(node, user_id, kinds):
+    """Ids of the inline artifact versions the prompt shows from *node*'s
+    own pins (#604): of *kinds*, each whose placeholder the node's text
+    carries and whose pinned version AI may read. *node* is the one the
+    render takes them from (the system node of a cached render, else the
+    first node carrying the placeholder). A version the render takes
+    otherwise (the latest, for a node without that pin) is not counted:
+    counting too few only turns a replayed diff into the full text."""
+    if node is None or not node_is_users(node, user_id):
+        return set()
+    text = node.get_content() or ""
+    pins = node.get_user_artifacts()
+    ids = set()
+    for kind in kinds:
+        row = _own_pin(pins.get(kind), user_id)
+        if (row is not None and row.ai_usage in AI_ALLOWED
+                and _INLINE_PLACEHOLDER_OF[kind] in text):
+            ids.add(row.id)
+    return ids
 
 
 def _messages_text(messages):
@@ -4145,6 +4221,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # here, so this runs once the licence exists.
             proposal_notes = []
             proposal_to_mark = []
+            inline_shown = set()
             if is_agentic:
                 proposal_notes, proposal_to_mark = (
                     _scan_proposal_statuses(
@@ -4152,6 +4229,17 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 )
                 # The artifact versions the history replays (#604).
                 _prefetch_replayed_versions(node_chain, user_id)
+                # The versions whose text the prompt shows inline: a
+                # replayed write is a diff only against one of them or a
+                # version an earlier answer showed (_artifact_write_report).
+                inline_shown = _pinned_inline_versions(
+                    artifacts_node, user_id,
+                    ("memory", "scratchpad", "intentions"))
+                inline_shown |= _pinned_inline_versions(
+                    ai_prefs_node, user_id, ("ai_preferences",))
+                if cached_system_render is not None:
+                    inline_shown |= _pinned_inline_versions(
+                        system_node, user_id, tuple(_INLINE_PLACEHOLDER_OF))
 
             model_config = flask_app.config["SUPPORTED_MODELS"][model_id]
             provider = model_config["provider"]
@@ -4384,8 +4472,10 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # verdicts on their intros go in the note too (#502).
                 rendered_read_ids = []
                 # Version numbers of the artifact versions the replayed
-                # writes show, counted once per prompt (#604).
+                # writes show, counted once per prompt, and the versions
+                # whose text the prompt has shown so far (#604).
                 replay_numbers = {}
+                replay_known = set(inline_shown)
                 for node in node_chain:
                     author = node.user.username if node.user else "Unknown"
                     is_llm_node = node.node_type == "llm" or (node.llm_model is not None)
@@ -4662,7 +4752,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         # answers in a user message of their own (#604).
                         calls, answers = _replayed_write_blocks(
                             node, replayed_writes, user_id,
-                            licence=licence, numbers=replay_numbers)
+                            licence=licence, numbers=replay_numbers,
+                            known=replay_known)
                         messages[-1]["content"].extend(calls)
                         messages.append({"role": "user", "content": answers})
 

@@ -263,6 +263,138 @@ def test_someone_elses_version_is_never_replayed(app):  # noqa: F811
     assert "BOB SECRET" not in report
 
 
+# ── A change made elsewhere stays in every later turn ────────────────────
+# The version check only protects a change the model has seen: every
+# version a later turn names must come with its text. A replayed write
+# is a diff only against a version the prompt already shows (the inline
+# copy, or one an earlier answer showed); otherwise its full new text.
+
+LONG_V1 = "## Facts\n- has a dog\n- a1\n- a2\n- a3\n- a4\n- a5"
+ELSEWHERE = ["- GARDEN ONE", "- GARDEN TWO", "- GARDEN THREE"]
+LONG_V2 = LONG_V1 + "\n" + "\n".join(ELSEWHERE)
+
+
+def _long_thread_changed_elsewhere():
+    """Pinned v1; then v2 saved elsewhere, its lines far from the edit
+    the model will make (outside a diff's context)."""
+    alice, system = _thread()
+    v1 = UserArtifact.latest_for(alice.id, "memory")
+    v1.set_content(LONG_V1)
+    _mk_artifact(alice.id, "memory", LONG_V2)
+    _db.session.commit()
+    return alice, system
+
+
+def _answers(raw):
+    """The tool results' texts in a prompt."""
+    return "\n".join(b["content"] for m in raw if m["role"] == "user"
+                     for b in m["content"] if b.get("type") == "tool_result")
+
+
+def test_a_change_made_elsewhere_stays_in_every_later_turn(app):  # noqa: F811
+    """The reviewer's case on #606: pinned v1, v2 saved elsewhere, a
+    refused write and a retry that saves v3 on v2. Every later turn shows
+    v2's lines, so a write naming v3 is based on a copy that has them."""
+    alice, system = _long_thread_changed_elsewhere()
+    _, final = _turn(alice, system, "Second dog.", [
+        _resp("Noting.", tool_calls=[
+            _edit(1, "- has a dog", "- has two dogs")]),
+        _resp("Retrying.", tool_calls=[
+            _edit(2, "- has a dog", "- has two dogs", call_id="w2")]),
+        _resp("Noted."),
+    ])
+    assert UserArtifact.latest_for(alice.id, "memory").get_content() == (
+        LONG_V2.replace("- has a dog", "- has two dogs"))
+
+    _, final2 = _turn(alice, final, "Anything else?", [_resp("No.")])
+    raw2 = _ScriptedProvider.calls[0]["raw"]
+    answers = _answers(raw2)
+    for line in ELSEWHERE:
+        assert line in answers, line
+    # The model's copy of v3 is complete: v2's text, then v3's diff on it.
+    assert "'memory' updated to v3 (from v2). Changes:" in answers
+
+    # The same bytes on the next turn.
+    _turn(alice, final2, "Thanks.", [_resp("Sure.")])
+    raw3 = _ScriptedProvider.calls[0]["raw"]
+    end = _assistant_at(raw2, "Noted.") + 1
+    assert json.dumps(raw2[:end]) == json.dumps(raw3[:end])
+
+
+def test_a_refusal_alone_still_shows_the_version_it_names(app):  # noqa: F811
+    """No retry in the turn: the next turn sees "now v2" with v2's text,
+    so a write naming v2 is not based on the inline v1."""
+    alice, system = _long_thread_changed_elsewhere()
+    _, final = _turn(alice, system, "Second dog.", [
+        _resp("Noting.", tool_calls=[
+            _edit(1, "- has a dog", "- has two dogs")]),
+        _resp("Memory changed elsewhere; I'll leave it."),
+    ])
+    _turn(alice, final, "Go on.", [_resp("Ok.")])
+    answers = _answers(_ScriptedProvider.calls[0]["raw"])
+    assert "now v2. Nothing was saved.\n\nCurrent text of 'memory' · v2:\n" \
+        in answers
+    for line in ELSEWHERE:
+        assert line in answers, line
+
+
+def test_a_write_on_a_version_the_history_never_showed_is_replayed_in_full(app):  # noqa: F811
+    """A custom artifact read in an earlier turn: the read is not
+    replayed, so the write made from it comes back as its full text."""
+    alice, system = _thread()
+    _mk_artifact(alice.id, "plans", "- trip in May\n- paint the fence")
+    _db.session.commit()
+    _, final = _turn(alice, system, "Add the dentist to my plans.", [
+        _resp("Pulling up your plans.", tool_calls=[
+            {"id": "r1", "name": "read_artifact",
+             "input": {"kind": "plans"}}]),
+        _resp("Adding it.", tool_calls=[
+            {"id": "w1", "name": "update_artifact",
+             "input": {"kind": "plans", "base_version": 1,
+                       "edits": [{"old_text": "- paint the fence",
+                                  "new_text": "- paint the fence\n"
+                                              "- book the dentist"}]}}]),
+        _resp("Added."),
+    ])
+    _turn(alice, final, "Thanks.", [_resp("Sure.")])
+    answers = _answers(_ScriptedProvider.calls[0]["raw"])
+    assert answers == ("'plans' updated to v2 (from v1). Its full new "
+                       "text:\n- trip in May\n- paint the fence\n"
+                       "- book the dentist")
+
+
+def test_after_a_reply_is_deleted_the_next_write_is_replayed_in_full(app):  # noqa: F811
+    alice, system = _thread()
+    interim1, final1 = _turn(alice, system, "Second dog.", TWO_DOGS)
+    _, final2 = _turn(alice, final1, "And I moved.", [
+        _resp("Updating.", tool_calls=[
+            _edit(2, "- lives in Prague", "- lives in Brno")]),
+        _resp("Done."),
+    ])
+    # v2 came from the turn-1 write's diff: turn 2's write is a diff.
+    _turn(alice, final2, "Ok.", [_resp("Ok.")])
+    assert "'memory' updated to v3 (from v2). Changes:" in _answers(
+        _ScriptedProvider.calls[0]["raw"])
+
+    from datetime import datetime
+    interim1.deleted_at = datetime.utcnow()
+    _db.session.commit()
+    _turn(alice, final2, "Ok again.", [_resp("Ok.")])
+    answers = _answers(_ScriptedProvider.calls[0]["raw"])
+    assert answers == ("'memory' updated to v3 (from v2). Its full new "
+                       "text:\n## Facts\n- has two dogs\n- lives in Brno")
+
+
+def test_a_write_recorded_before_versions_names_no_number(app):  # noqa: F811
+    alice = _mk_user("alice", approved=True, plan="alpha")
+    row = _mk_artifact(alice.id, "memory", "a fact")
+    _db.session.commit()
+    report = _llm_task_mod._artifact_write_report(
+        {"name": "update_artifact", "status": "success", "kind": "memory",
+         "artifact_id": row.id, "created": False}, alice.id, known=set())
+    assert report == "'memory' was updated."
+
+
 # ── Version labels ───────────────────────────────────────────────────────
 
 def test_versions_on_the_inline_copy_reads_and_writes(app):  # noqa: F811
@@ -329,15 +461,16 @@ def test_a_stale_base_version_is_refused_and_the_retry_keeps_both_changes(app): 
     assert UserArtifact.query.filter_by(
         user_id=alice.id, kind="memory").count() == 3
 
-    # A later turn replays the refusal's reason (not the text it was
-    # shown) and the retry's diff.
+    # A later turn replays the refusal with the text it was shown (v2 is
+    # in no other part of the prompt), then the retry's diff against it.
     _turn(alice, final, "Thanks.", [_resp("Sure.")])
     raw = _ScriptedProvider.calls[0]["raw"]
     i = _assistant_at(raw, "Noting the second dog.")
     assert raw[i + 1]["content"] == [{
         "type": "tool_result", "tool_use_id": f"loore_{interim.id}_0",
         "content": ("update_artifact failed — 'memory' changed since v1, "
-                    "now v2. Nothing was saved."),
+                    "now v2. Nothing was saved.\n\n"
+                    f"Current text of 'memory' · v2:\n{garden}"),
         "is_error": True}]
     j = _assistant_at(raw, "Memory changed; retrying.")
     assert raw[j + 1]["content"][0]["content"].startswith(
