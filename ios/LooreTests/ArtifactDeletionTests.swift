@@ -1,3 +1,4 @@
+import SwiftUI
 import XCTest
 @testable import Loore
 
@@ -221,5 +222,55 @@ final class ArtifactsStoreDeletionTests: StubbedAppTestCase {
         await store.refresh(api: app.api)
         XCTAssertEqual(StubURLProtocol.requests.count, 2)
         XCTAssertTrue(store.isDeleted("landlord-case"))
+    }
+}
+
+/// Edit chosen in the menu of a bubble that is not open (review of #605,
+/// finding 1): the new page opens the editor on the server's current text, not
+/// on the list cached from an earlier visit.
+@MainActor
+final class ArtifactEditFromMenuTests: StubbedAppTestCase {
+    private static func list(_ content: String) -> String {
+        #"{"artifacts":[{"id":7,"kind":"notes","title":"Notes","content":"\#(content)","created_at":"2026-11-01T08:00:00Z","deletable":true}],"deleted_kinds":[]}"#
+    }
+
+    private func textViews(in view: UIView) -> [UITextView] {
+        ((view as? UITextView).map { [$0] } ?? []) + view.subviews.flatMap { textViews(in: $0) }
+    }
+
+    func testEditFromTheMenuStartsFromTheServersCurrentText() async throws {
+        // The list as an earlier visit left it; the artifact changed on the server since.
+        StubURLProtocol.install { _ in .json(200, Self.list("OLD")) }
+        await app.artifacts.refresh(api: app.api)
+        StubURLProtocol.install { request in
+            switch request.url?.path(percentEncoded: true) ?? "" {
+            case "/api/artifacts/": return .json(200, Self.list("NEW"))
+            case "/api/artifacts/notes/versions": return .json(200, #"{"versions":[]}"#)
+            default: return .json(204, "")
+            }
+        }
+        let actions = WorkspaceActions()
+        actions.editRequest = .artifact("notes")
+        let host = UIHostingController(rootView: ArtifactsPage(kind: "notes", creating: false, onSelect: { _ in })
+            .environment(app)
+            .environment(actions))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+
+        var editor: UITextView?
+        for _ in 0..<150 {
+            try await Task.sleep(nanoseconds: 20_000_000)
+            if actions.editRequest == nil, app.artifacts.artifact("notes")?.content == "NEW",
+               let found = textViews(in: host.view).first {
+                editor = found
+                break
+            }
+        }
+        try await Task.sleep(nanoseconds: 200_000_000) // a render after the refresh
+        XCTAssertEqual(try XCTUnwrap(editor, "the edit form did not open").text, "NEW")
     }
 }
