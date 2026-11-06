@@ -1,6 +1,22 @@
 import os
 from datetime import timedelta
 
+
+def float_from_env(name, default):
+    """A float setting that never stops the app at import: a missing,
+    empty or non-numeric value falls back to *default* (with a warning)."""
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        import logging
+        logging.getLogger(__name__).warning(
+            "%s=%r is not a number; using %s", name, raw, default)
+        return default
+
+
 class Config:
     SECRET_KEY = os.environ.get("SECRET_KEY", "this-should-be-changed")
     # Make sure your DATABASE_URL looks something like
@@ -97,9 +113,7 @@ class Config:
     # 24 h; again at 95 %). Ships dark: set DISK_ALERT_ENABLED=true in prod.
     DISK_ALERT_ENABLED = os.environ.get(
         "DISK_ALERT_ENABLED", "false").lower() in ("1", "true", "yes")
-    DISK_ALERT_PERCENT = float(
-        os.environ.get("DISK_ALERT_PERCENT", "90") or "90"
-    )
+    DISK_ALERT_PERCENT = float_from_env("DISK_ALERT_PERCENT", 90.0)
 
     # Per-user monthly spend hard cap in USD, summed across ALL providers
     # (issue #85 follow-up; free-alpha guardrail). 0 (default) disables the

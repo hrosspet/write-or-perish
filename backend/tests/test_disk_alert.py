@@ -3,14 +3,9 @@
 Pure logic: usage and the sender are injected, time is patched, no app.
 """
 import pathlib
-import sys
 from unittest.mock import MagicMock
 
 import pytest
-
-sys.modules.setdefault("celery", MagicMock())
-sys.modules.setdefault("celery.utils", MagicMock())
-sys.modules.setdefault("celery.utils.log", MagicMock())
 
 from backend.utils import disk_alert  # noqa: E402
 
@@ -125,3 +120,23 @@ def test_task_registered_in_beat_schedule_and_imported():
     assert "from backend.tasks import disk_monitor  # noqa: F401" in text
     assert "backend.tasks.disk_monitor.check_disk_usage" in (
         ROOT / "tasks" / "disk_monitor.py").read_text()
+
+
+def test_unreadable_disk_does_not_raise(monkeypatch):
+    def boom(path):
+        raise OSError("no such device")
+    monkeypatch.setattr(disk_alert.shutil, "disk_usage", boom)
+    send = MagicMock()
+    r = disk_alert.check_disk_and_alert(cfg(), None, send)
+    assert r["status"] == "unreadable" and not r["sent"]
+    send.assert_not_called()
+
+
+def test_non_numeric_percent_env_falls_back(monkeypatch):
+    from backend.config import float_from_env
+    monkeypatch.setenv("DISK_ALERT_PERCENT", "ninety")
+    assert float_from_env("DISK_ALERT_PERCENT", 90.0) == 90.0
+    monkeypatch.setenv("DISK_ALERT_PERCENT", "85.5")
+    assert float_from_env("DISK_ALERT_PERCENT", 90.0) == 85.5
+    monkeypatch.setenv("DISK_ALERT_PERCENT", "")
+    assert float_from_env("DISK_ALERT_PERCENT", 90.0) == 90.0

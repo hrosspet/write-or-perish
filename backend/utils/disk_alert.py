@@ -113,7 +113,12 @@ def check_disk_and_alert(config, usage=None, send_email=None):
     if not config.get("DISK_ALERT_ENABLED"):
         return {"status": "disabled"}
     if usage is None:
-        usage = shutil.disk_usage(disk_usage_path())
+        try:
+            usage = shutil.disk_usage(disk_usage_path())
+        except OSError:
+            logger.warning("Disk alert: could not measure disk usage",
+                           exc_info=True)
+            return {"status": "unreadable", "sent": False}
     total, used, free = usage[0], usage[1], usage[2]
     # As df reports it: used / (used + free), which leaves out the blocks
     # reserved for root.
