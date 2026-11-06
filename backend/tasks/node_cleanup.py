@@ -3,15 +3,23 @@ soft-deleted artifacts (backend/utils/artifact_deletion.py).
 
 Runs once per day. Two distinct actions per soft-deleted candidate:
 
-1. **Full purge** when the row has zero children in DB. Deletes
-   NodeVersion / NodeTranscriptChunk / TTSChunk / Draft references and the
-   row itself. Same body as the legacy `delete_node()` cleanup minus the
-   orphan-children step (which is unnecessary by the predicate).
+1. **Full purge** when the row has zero children in DB. Deletes the
+   node's audio files, then NodeVersion / NodeTranscriptChunk / TTSChunk /
+   Draft references and the row itself. Same body as the legacy
+   `delete_node()` cleanup minus the orphan-children step (which is
+   unnecessary by the predicate).
 
 2. **Content wipe** when the row still has children but content hasn't yet
-   been cleared. Sets `content = None`, removes versions and audio
-   artifacts. Row stays as a tombstone shell until its descendants
-   eventually purge.
+   been cleared. Deletes the node's audio files, sets `content = None`,
+   removes versions and audio rows. Row stays as a tombstone shell until
+   its descendants eventually purge.
+
+Audio files go first, in both actions (backend/utils/audio_storage.py,
+`delete_node_audio`: the node's ``user/<author>/node/<id>/``,
+``nodes/<author>/<id>/`` and streaming-session folders). When a file
+cannot be deleted, the node is left exactly as it is for this run (no
+row changed) and logged by id, so the next run finds it again and
+retries; the rest of the batch goes on.
 
 The predicate "no child rows in DB" (rather than "no alive descendants")
 matches Postgres' default FK behavior — `Node.parent_id` has no
@@ -23,6 +31,9 @@ The needs-action SQL filter (`content IS NOT NULL OR no children`)
 excludes long-stable tombstones from per-day re-scan; one bad row's
 exception is caught and logged without poisoning the batch (per-node
 commits).
+
+Files of nodes finalized before the audio step existed are deleted by
+backend/scripts/purge_orphaned_node_audio.py.
 """
 
 from datetime import datetime, timedelta
@@ -41,12 +52,44 @@ from backend.models import (
 logger = get_task_logger(__name__)
 
 
+class AudioNotDeleted(Exception):
+    """Some of a node's audio files could not be deleted; nothing of the
+    node was changed, and the next run tries again."""
+
+    def __init__(self, node_id, result):
+        self.node_id = node_id
+        self.result = result
+        super().__init__(
+            f"node_id={node_id}: {result.failed} audio file(s) not deleted "
+            f"({', '.join(result.errors)})")
+
+
+def _delete_audio(node):
+    """Delete the node's audio files before any of its rows change.
+    Raises AudioNotDeleted when a file is left, so the caller changes
+    nothing this run. Returns the FolderDeletion."""
+    from backend.utils.audio_storage import delete_node_audio
+    result = delete_node_audio(node)
+    if result.skipped:
+        # A symlink or a folder outside the storage root: never followed
+        # or deleted, and not a reason to keep the node.
+        logger.warning(
+            "cleanup_deleted_nodes: node_id=%s: %d audio folder(s) left "
+            "alone (symlink or outside the storage root)",
+            node.id, result.skipped)
+    if result.failed:
+        raise AudioNotDeleted(node.id, result)
+    return result
+
+
 def _full_purge(node):
-    """Hard-delete a node + cascading dependents.
+    """Hard-delete a node + cascading dependents, its audio files first.
 
     Same body as the legacy delete_node() cleanup steps, minus the
     orphan-children line: the predicate guarantees zero child rows.
+    Raises AudioNotDeleted (nothing changed) when a file is left.
     """
+    audio = _delete_audio(node)
     NodeVersion.query.filter_by(node_id=node.id).delete()
     NodeTranscriptChunk.query.filter_by(node_id=node.id).delete()
     TTSChunk.query.filter_by(node_id=node.id).delete()
@@ -79,93 +122,119 @@ def _full_purge(node):
 
     # No orphan-children: predicate guarantees zero child rows.
     db.session.delete(node)
+    return audio
 
 
 def _wipe_content_and_versions(node):
-    """Clear a tombstone's content + edit history + audio artifacts.
+    """Clear a tombstone's content + edit history + audio, its audio
+    files first.
 
     Keeps the row so descendants still have a parent_id anchor; the row
     will become eligible for full purge in a later cleanup run once all
-    its child rows have purged.
+    its child rows have purged. Raises AudioNotDeleted (nothing changed)
+    when a file is left: the content stays until a run deletes the
+    files, so the wipe is retried with them.
     """
+    audio = _delete_audio(node)
     node.content = None
     NodeVersion.query.filter_by(node_id=node.id).delete()
     NodeTranscriptChunk.query.filter_by(node_id=node.id).delete()
     TTSChunk.query.filter_by(node_id=node.id).delete()
-    # Audio file URLs are kept on the row but the underlying chunks are
-    # gone; clear the URL columns too so the frontend doesn't try to
-    # fetch what's no longer there.
+    # The files are gone; clear the URL columns too so the frontend
+    # doesn't try to fetch them.
     node.audio_original_url = None
     node.audio_tts_url = None
+    return audio
+
+
+def finalize_deleted_nodes(cutoff=None):
+    """The cleanup's work, in the caller's app context: wipe content and
+    audio of, or purge, every soft-deleted node past the grace period
+    (deleted at or before *cutoff*, default now minus
+    SOFT_DELETE_GRACE_DAYS), then purge deleted artifacts."""
+    if cutoff is None:
+        cutoff = datetime.utcnow() - timedelta(days=SOFT_DELETE_GRACE_DAYS)
+
+    # "Has any child row in DB" subquery — true when the node still
+    # has children referencing it (alive or soft-deleted, doesn't
+    # matter for the FK constraint). When false, full-purge eligible.
+    # Aliased so the inner Child.parent_id refers to a distinct row
+    # while the outer Node.id is the candidate row being filtered.
+    from sqlalchemy.orm import aliased
+    Child = aliased(Node)
+    has_any_child = exists().where(Child.parent_id == Node.id)
+
+    # Needs-action filter: content not yet wiped, OR no children
+    # (purge-eligible). Excludes long-stable tombstones from per-day
+    # re-scan.
+    # A node a "Delete all my writing" hid (#268) is the purge's: it
+    # comes back whole on a restore, or the purge deletes it with
+    # everything else the request hid.
+    from backend.utils.hidden_rows import hidden_ids
+    candidates = (
+        Node.query
+        .filter(Node.deleted_at <= cutoff)
+        .filter(~Node.id.in_(hidden_ids("node")))
+        .filter(or_(
+            Node.content.isnot(None),
+            ~has_any_child,
+        ))
+        .order_by(Node.deleted_at.asc())
+        .yield_per(100)
+    )
+
+    purged = 0
+    wiped = 0
+    errors = 0
+    audio_files = 0
+    audio_errors = 0
+    for node in candidates:
+        try:
+            child_count = Node.query.filter_by(parent_id=node.id).count()
+            if child_count == 0:
+                audio_files += _full_purge(node).files
+                purged += 1
+            elif node.content is not None:
+                audio_files += _wipe_content_and_versions(node).files
+                wiped += 1
+            # Else: stable tombstone, content already None, children
+            # still exist — skip until next descendant cleanup pass.
+            db.session.commit()
+        except AudioNotDeleted as e:
+            # Nothing of the node changed; the next run tries again.
+            db.session.rollback()
+            logger.error("cleanup_deleted_nodes: %s; kept for the next run", e)
+            audio_errors += 1
+            continue
+        except Exception:
+            db.session.rollback()
+            logger.exception(
+                "cleanup_deleted_nodes failed on node_id=%s", node.id,
+            )
+            errors += 1
+            continue
+
+    # Deleted artifacts (#603) go for good after the same grace
+    # period, with the sessions' pins to their versions.
+    from backend.utils.artifact_deletion import purge_deleted_artifacts
+    artifacts = purge_deleted_artifacts(cutoff)
+
+    logger.info(
+        "cleanup_deleted_nodes: purged=%d wiped=%d errors=%d "
+        "audio_files_deleted=%d audio_errors=%d "
+        "artifact_versions_purged=%d artifact_errors=%d",
+        purged, wiped, errors, audio_files, audio_errors,
+        artifacts["purged"], artifacts["errors"],
+    )
+    return {"purged": purged, "wiped": wiped, "errors": errors,
+            "audio_files_deleted": audio_files,
+            "audio_errors": audio_errors,
+            "artifact_versions_purged": artifacts["purged"],
+            "artifact_errors": artifacts["errors"]}
 
 
 @celery.task(name='backend.tasks.node_cleanup.cleanup_deleted_nodes')
 def cleanup_deleted_nodes():
     """Daily cleanup: wipe content + finalize purge for soft-deleted nodes."""
     with flask_app.app_context():
-        cutoff = datetime.utcnow() - timedelta(days=SOFT_DELETE_GRACE_DAYS)
-
-        # "Has any child row in DB" subquery — true when the node still
-        # has children referencing it (alive or soft-deleted, doesn't
-        # matter for the FK constraint). When false, full-purge eligible.
-        # Aliased so the inner Child.parent_id refers to a distinct row
-        # while the outer Node.id is the candidate row being filtered.
-        from sqlalchemy.orm import aliased
-        Child = aliased(Node)
-        has_any_child = exists().where(Child.parent_id == Node.id)
-
-        # Needs-action filter: content not yet wiped, OR no children
-        # (purge-eligible). Excludes long-stable tombstones from per-day
-        # re-scan.
-        # A node a "Delete all my writing" hid (#268) is the purge's: it
-        # comes back whole on a restore, or the purge deletes it with
-        # everything else the request hid.
-        from backend.utils.hidden_rows import hidden_ids
-        candidates = (
-            Node.query
-            .filter(Node.deleted_at <= cutoff)
-            .filter(~Node.id.in_(hidden_ids("node")))
-            .filter(or_(
-                Node.content.isnot(None),
-                ~has_any_child,
-            ))
-            .order_by(Node.deleted_at.asc())
-            .yield_per(100)
-        )
-
-        purged = 0
-        wiped = 0
-        errors = 0
-        for node in candidates:
-            try:
-                child_count = Node.query.filter_by(parent_id=node.id).count()
-                if child_count == 0:
-                    _full_purge(node)
-                    purged += 1
-                elif node.content is not None:
-                    _wipe_content_and_versions(node)
-                    wiped += 1
-                # Else: stable tombstone, content already None, children
-                # still exist — skip until next descendant cleanup pass.
-                db.session.commit()
-            except Exception:
-                db.session.rollback()
-                logger.exception(
-                    "cleanup_deleted_nodes failed on node_id=%s", node.id,
-                )
-                errors += 1
-                continue
-
-        # Deleted artifacts (#603) go for good after the same grace
-        # period, with the sessions' pins to their versions.
-        from backend.utils.artifact_deletion import purge_deleted_artifacts
-        artifacts = purge_deleted_artifacts(cutoff)
-
-        logger.info(
-            "cleanup_deleted_nodes: purged=%d wiped=%d errors=%d "
-            "artifact_versions_purged=%d artifact_errors=%d",
-            purged, wiped, errors, artifacts["purged"], artifacts["errors"],
-        )
-        return {"purged": purged, "wiped": wiped, "errors": errors,
-                "artifact_versions_purged": artifacts["purged"],
-                "artifact_errors": artifacts["errors"]}
+        return finalize_deleted_nodes()

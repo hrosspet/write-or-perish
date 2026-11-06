@@ -1,12 +1,14 @@
 """
-Audio storage helpers: building paths under the storage root, and moving
-a streaming draft session's audio and transcript rows to the node it
-becomes (so the original recording plays in the Log view).
+Audio storage helpers: building paths under the storage root, finding and
+deleting a node's audio folders, and moving a streaming draft session's
+audio and transcript rows to the node it becomes (so the original
+recording plays in the Log view).
 """
 import os
 import pathlib
 import re
 import shutil
+from typing import NamedTuple
 
 from flask import current_app
 
@@ -55,6 +57,120 @@ def storage_path(root, *parts) -> pathlib.Path:
     if os.path.commonpath([base, os.path.normpath(str(path))]) != base:
         raise ValueError(f"Storage path outside {root}: {path}")
     return path
+
+
+# ── A node's audio on disk ──────────────────────────────────────────────
+#
+# A node's audio is kept in folders named by the node's author, which for
+# an AI reply is the model's account (backend/routes/media.py,
+# ``_node_id_in``):
+#
+# - ``user/<author>/node/<node id>/``: an uploaded recording
+#   (``original.*``) and generated speech (``tts.*``, ``tts_chunk_*``,
+#   also a reply spoken while it is written);
+# - ``nodes/<author>/<node id>/``: a recording's chunks, moved there from
+#   its streaming session when the recording became the node;
+# - ``streaming/<author>/<session id>/``: the chunks of a recording made
+#   with the node streaming endpoint, until its transcription finishes.
+#
+# Each file is ``.enc`` when encrypted at rest and plain otherwise.
+
+class FolderDeletion(NamedTuple):
+    """What delete_folders did."""
+    files: int = 0       # files (and symlinks, never followed) deleted
+    bytes: int = 0       # their size on disk
+    failed: int = 0      # files that could not be deleted
+    errors: tuple = ()   # the failures' error types, e.g. ("PermissionError",)
+    skipped: int = 0     # folders left alone: a symlink, or not inside the root
+
+
+def node_audio_dirs(node, root=None) -> list:
+    """The folders that hold *node*'s audio (see above), for the node's
+    author and its human owner (the same pair the user purge uses, so an
+    AI reply's folder under the model account is found). Folders that
+    do not exist are included; delete_folders passes over them."""
+    root = AUDIO_STORAGE_ROOT if root is None else root
+    dirs = []
+    for author in sorted({node.user_id, node.human_owner_id} - {None}):
+        dirs.append(storage_path(root, "user", author, "node", node.id))
+        dirs.append(storage_path(root, "nodes", author, node.id))
+    session_id = getattr(node, "streaming_session_id", None)
+    if node.user_id is not None and is_storage_id(session_id):
+        # A server uuid4 made for this node (nodes.py streaming/init).
+        dirs.append(storage_path(root, "streaming", node.user_id, session_id))
+    return dirs
+
+
+def _inside(real_root, path) -> bool:
+    """True when *path*, with symlinks resolved, is strictly inside
+    *real_root* (itself already resolved)."""
+    try:
+        real = os.path.realpath(path)
+        return (real != real_root
+                and os.path.commonpath([real_root, real]) == real_root)
+    except (OSError, ValueError):
+        return False
+
+
+def delete_folders(dirs, root=None) -> FolderDeletion:
+    """Delete every file under *dirs*, then the emptied folders.
+
+    Reads names and sizes only, never a file's content. Symlinks are
+    never followed: one inside a folder is removed as a link (its target
+    stays), and a folder that is itself a symlink, or that resolves
+    outside the storage *root* (default AUDIO_STORAGE_ROOT), is left
+    alone and counted as skipped. A missing folder or file is not an
+    error. A file that cannot be deleted is counted as failed with its
+    error type, and the rest goes on; the caller decides what to log
+    (paths hold ids only) and when to try again."""
+    root = AUDIO_STORAGE_ROOT if root is None else root
+    real_root = os.path.realpath(root)
+    totals = [0, 0, 0]   # files, bytes, failed
+    errors = set()
+    skipped = 0
+    for d in dirs:
+        d = str(d)
+        if not os.path.lexists(d):
+            continue
+        if (os.path.islink(d) or not os.path.isdir(d)
+                or not _inside(real_root, d)):
+            skipped += 1
+            continue
+        _empty_folder(d, totals, errors)
+        for dirpath, _, _ in os.walk(d, topdown=False, followlinks=False):
+            try:
+                os.rmdir(dirpath)
+            except OSError:
+                pass   # not empty: a file in it failed, and is counted
+    return FolderDeletion(totals[0], totals[1], totals[2],
+                          tuple(sorted(errors)), skipped)
+
+
+def _empty_folder(folder, totals, errors):
+    """Unlink every file and symlink under *folder* (never following a
+    symlink), adding to *totals* (files, bytes, failed) and *errors*."""
+    for dirpath, dirnames, filenames in os.walk(folder, followlinks=False):
+        links = [n for n in dirnames
+                 if os.path.islink(os.path.join(dirpath, n))]
+        for name in filenames + links:
+            path = os.path.join(dirpath, name)
+            try:
+                n_bytes = os.lstat(path).st_size
+                os.unlink(path)
+            except FileNotFoundError:
+                continue
+            except OSError as e:
+                totals[2] += 1
+                errors.add(type(e).__name__)
+                continue
+            totals[0] += 1
+            totals[1] += n_bytes
+
+
+def delete_node_audio(node, root=None) -> FolderDeletion:
+    """Delete *node*'s audio folders (node_audio_dirs) and every file in
+    them, encrypted or plain, recordings and generated speech alike."""
+    return delete_folders(node_audio_dirs(node, root), root)
 
 
 def clear_tts_artifacts(entity) -> bool:
