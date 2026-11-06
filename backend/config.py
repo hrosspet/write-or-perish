@@ -91,6 +91,16 @@ class Config:
         or "21600"
     )
 
+    # Disk-full alert (backend/utils/disk_alert.py): an hourly beat task
+    # emails SPEND_ALERT_EMAIL when the filesystem holding the audio
+    # storage root is at DISK_ALERT_PERCENT or more used (at most once per
+    # 24 h; again at 95 %). Ships dark: set DISK_ALERT_ENABLED=true in prod.
+    DISK_ALERT_ENABLED = os.environ.get(
+        "DISK_ALERT_ENABLED", "false").lower() in ("1", "true", "yes")
+    DISK_ALERT_PERCENT = float(
+        os.environ.get("DISK_ALERT_PERCENT", "90") or "90"
+    )
+
     # Per-user monthly spend hard cap in USD, summed across ALL providers
     # (issue #85 follow-up; free-alpha guardrail). 0 (default) disables the
     # cap. When a user's month-to-date spend reaches this, they are
