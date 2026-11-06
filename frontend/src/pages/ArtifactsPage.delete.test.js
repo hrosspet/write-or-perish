@@ -139,6 +139,26 @@ test('deleting the last tab selects the one to its left', async () => {
   expect(mockAddToast).toHaveBeenCalledWith('Winter Solstice Gathering deleted', 3000);
 });
 
+test('an artifact already deleted elsewhere counts as deleted here too', async () => {
+  // Deleted in another tab or on the phone since this page loaded.
+  api.delete.mockRejectedValue({
+    response: { status: 404, data: { error: 'This artifact was deleted.', deleted: true } },
+  });
+  renderAt('/artifacts/landlord-case');
+  await openMenu();
+  fireEvent.click(screen.getByText('Delete'));
+  fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+
+  await waitFor(() => expect(screen.getByTestId('location'))
+    .toHaveTextContent('/artifacts/loore-map'));
+  expect(mockAddToast).toHaveBeenCalledWith('Landlord Dispute deleted', 3000);
+  expect(mockAddToast).not.toHaveBeenCalledWith('This artifact was deleted.', 4000);
+  expect(await screen.findByRole('heading', { name: 'Loore Development Map' })).toBeInTheDocument();
+  expect(screen.queryByText('Landlord Dispute body')).not.toBeInTheDocument();
+  // The list is fetched again, as after a delete made here.
+  await waitFor(() => expect(api.get.mock.calls.filter(([u]) => u === '/artifacts')).toHaveLength(2));
+});
+
 test('a failed delete stays on the artifact and says why', async () => {
   api.delete.mockRejectedValue({ response: { data: { error: 'Artifact not found' } } });
   renderAt('/artifacts/landlord-case');

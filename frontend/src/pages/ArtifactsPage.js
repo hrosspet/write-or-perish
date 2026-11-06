@@ -298,9 +298,13 @@ export default function ArtifactsPage() {
     try {
       await api.delete(`/artifacts/${target.kind}`);
     } catch (err) {
-      addToast((err.response && err.response.data && err.response.data.error)
-        || 'Could not delete the artifact.', 4000);
-      return;
+      const data = err.response && err.response.data;
+      // Deleted already, in another tab or on the phone: the server says
+      // so (404, "deleted": true), and the delete counts as done here too.
+      if (!(data && data.deleted)) {
+        addToast((data && data.error) || 'Could not delete the artifact.', 4000);
+        return;
+      }
     }
     addToast(`${target.title} deleted`, 3000);
     setArtifacts((prev) => prev.filter((a) => a.kind !== target.kind));

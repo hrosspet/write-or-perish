@@ -6,9 +6,10 @@ its tools, session pins, exports); a new artifact of the same name
 starts at v1; the daily cleanup deletes the rows after the grace period
 with the sessions' pins to them.
 
-The generation loop and the render cache (the session instructions a
-model actually receives) are covered end to end in
-test_retrieval_loop.py (test_deleted_artifact_leaves_the_index_*).
+The generation loop, the render cache and the voice pre-warm (the
+session instructions a model actually receives) are covered end to end
+in test_artifact_deletion_prompt.py, on test_retrieval_loop.py's
+harness.
 
 Patterned after test_artifacts.py: sqlite in-memory, minimal Flask app,
 ENCRYPTION_DISABLED.
@@ -406,6 +407,28 @@ def test_update_echo_of_a_deleted_version_is_empty(app):
     soft_delete_artifact(alice.id, "landlord-case")
     _db.session.commit()
     assert _artifact_update_echo(tr) is None
+
+
+def test_update_echo_never_diffs_against_a_deleted_previous_version(app):
+    """The race under Known limits: the AI's write lands after the user
+    deleted the version it was built on, so the new version is live and
+    the previous one is deleted. The echo shows the new text only; the
+    deleted version's lines never reach the model as the diff's context
+    or removed lines."""
+    alice = _user("alice")
+    rows = _landlord(alice.id)
+    soft_delete_artifact(alice.id, "landlord-case")
+    _db.session.commit()
+    written = _mk(alice.id, "landlord-case", "the AI's new line",
+                  title="Landlord Dispute")
+    tr = {"name": "update_artifact", "status": "success",
+          "kind": "landlord-case", "artifact_id": written.id,
+          "previous_artifact_id": rows[-1].id}
+    echo = _artifact_update_echo(tr)
+    assert echo is not None
+    assert "+the AI's new line" in echo
+    # A diff against the deleted v3 would carry "-landlord v3".
+    assert "landlord v3" not in echo
 
 
 def test_pinned_row_lookup_misses_a_deleted_version(app):
