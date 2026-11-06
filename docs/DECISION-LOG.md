@@ -2703,6 +2703,253 @@ Kinds (one per entry and per table row):
 - **Score:** hit. The lab's profile driver was still enabled at boot; it ran for 6 seconds and sent nothing. It is now disabled.
 - **Source:** Claude Code session 2026-11-05 (Opus 5.5)
 
+### 2026-11-05 · A Shadow Map tone test in the merge prompt
+
+- **Kind:** testing
+- **Situation:** after the merge-prompt tests, offered four more merges (about $1) with a prompt change for the Shadow Map: claims only on his own words, interpretation labelled as a possibility. He had said the Shadow Map frames good observations harshly.
+- **Prediction:** yes, test it (60 %); file an issue only, for later (20 %); leave it (20 %).
+- **Peter:** "no"
+- **Score:** miss.
+- **Why it missed:** took his dislike of the tone as a wish to test a fix at once. His reason was not recorded; the answer suggests the tone is not for #589's evaluation.
+- **Source:** Claude Code session 2026-11-05 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-11-06 · #599 built inside #589
+
+- **Kind:** product scope
+- **Situation:** #589 had the consent column but no question; asked whether to build the question (#599) now as its own PR on top of #589.
+- **Prediction:** yes, now (70 %); after #589 merges (20 %); other (10 %).
+- **Peter:** "yes, I want to merge these two together"
+- **Score:** hit. Built inside #589's branch (as #598 was) instead of as a stacked PR.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #589, #599
+
+### 2026-11-06 · #599 built inside #589: ask or decide
+
+- **Kind:** escalation
+- **Situation:** as in the entry before.
+- **Decision:** decided without asking Peter: built #599 in #589's branch.
+- **Score:** hit. He wanted the two merged together.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #589, #599
+
+### 2026-11-06 · A no does not cancel batches already sent
+
+- **Kind:** privacy
+- **Situation:** a user who answers "no" to using both providers after a yes: batches already sent to the other provider hold many users' requests, so one user's requests cannot be cancelled alone. Nothing new is sent after the no.
+- **Decision:** no cancel of batches already sent; the answer applies before anything else is sent.
+- **Peter:** "good"
+- **Score:** hit.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #589, #599
+- **Rule:** "A user's model is theirs" in `LOORE-ESSENCE.md`.
+
+### 2026-11-06 · A no does not cancel batches already sent: ask or decide
+
+- **Kind:** escalation
+- **Situation:** as in the entry before.
+- **Decision:** decided without asking Peter.
+- **Peter:** "good"
+- **Score:** hit.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #589, #599
+
+### 2026-11-06 · Where an artifact is deleted
+
+- **Kind:** UX
+- **Situation:** a preview of deleting an artifact. Recommended a ⋮ menu (Edit and Delete) at the end of the meta line, Delete only on custom artifacts, the node-deletion dialog, 30 days silent.
+- **Prediction:** ⋮ menu (70 %); a link beside the history link (15 %); in the edit form (5 %); other (10 %). The dialog does not mention the 30 days (55 %).
+- **Peter:** "Let's go with the kebab menu for web, and long press on the artifact bubble on iPhone"
+- **Score:** hit. The placement was right; the 30 days and the build questions were not answered; the builder decided them under his rules (30 days not shown, as for nodes).
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #603, #605
+
+### 2026-11-06 · The both-providers dialog wording
+
+- **Kind:** user-facing text
+- **Situation:** after Peter asked for the dialog to start with the test result and give fewer details on how the two providers are used, proposed: "In our tests, using both gave the best results. With both, your writing can be read by OpenAI's and Anthropic's models.", and an opening that names the profile as one example of background work.
+- **Prediction:** confirmed as proposed (60 %); small edit (35 %); other (5 %). The opening accepted (70 %).
+- **Peter:** "yes to both"
+- **Score:** hit + hit.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #589, #599
+
+### 2026-11-06 · A sentence in the terms for the both-providers question
+
+- **Kind:** user-facing text
+- **Situation:** the terms already say that content may be sent to either provider. Recommended adding an optional sentence at the next terms update, not now.
+- **Decision:** recommended adding the sentence at the next terms update.
+- **Peter:** "no change pls"
+- **Score:** partial. Not now was agreed; adding it later is not wanted.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #599
+
+### 2026-11-06 · Telling Peter to merge #589, then #596
+
+- **Kind:** release/ops
+- **Situation:** #596 was stacked on #589. Told Peter to merge #589 and then #596, without retargeting #596's base to main first.
+- **Decision:** told him the order without retargeting #596.
+- **Score:** miss. He merged both; #596 landed in #589's branch, not main.
+- **Why it missed:** did not check where the second merge would land. Fixed by cancelling #589's deploy and opening #602 (the branch to main), so one deploy carried both.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #589, #596, #602
+- **Rule:** candidate: before telling Peter to merge a stacked PR, retarget its base to main once the lower PR is in, or say so.
+
+### 2026-11-06 · Profile and Todo in the artifact menu
+
+- **Kind:** UX
+- **Situation:** the preview of the artifact delete menu treated Profile and Todo as not being artifacts and gave them no menu.
+- **Decision:** no menu on Profile and Todo.
+- **Peter:** "profile and todo not being artifacts is only our internal thing, they should behave the same as Predictions which are built in, so can't be deleted, but are editable"
+- **Score:** miss. Both got the menu with Edit only.
+- **Why it missed:** followed the code's split between built-in pages and artifacts, not what the user sees.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #603, #605
+- **Rule:** candidate: a user sees one kind of thing; internal categories do not decide the menu.
+
+### 2026-11-06 · Fixing the stale artifact copies before reproducing them on the current model
+
+- **Kind:** testing
+- **Situation:** an issue about the model editing a stale copy of an artifact in a later turn. Started the builder on fixes without first reproducing it on the model users have now.
+- **Decision:** started the fix builder without a repro on Opus 5.5.
+- **Peter:** "have you replicated the artifact issue with Opus 5.5 locally? Otherwise I wouldn't care fixing it"
+- **Score:** miss. The builder was paused.
+- **Why it missed:** the report came from a run on an older model, and the current model was not checked.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #604
+- **Rule:** candidate: reproduce a model-behaviour bug on the current model before building a fix.
+
+### 2026-11-06 · Fixing the stale artifact copies before reproducing them: ask or decide
+
+- **Kind:** escalation
+- **Situation:** as in the entry before.
+- **Decision:** decided without asking Peter.
+- **Peter:** "have you replicated the artifact issue with Opus 5.5 locally? Otherwise I wouldn't care fixing it"
+- **Score:** miss.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #604
+
+### 2026-11-06 · A local repro of the stale copies on Opus 5.5
+
+- **Kind:** testing
+- **Situation:** offered a local run on Opus 5.5 (about 10 trials of a write followed by an edit in a later turn, inline and custom artifacts, $2 to $4).
+- **Prediction:** yes (65 %); drop the issue (25 %); other (10 %).
+- **Peter:** "yes pls"
+- **Score:** hit. Opus 5.5 failed 0 of 45 writes; the older control model failed 5 of 5 memory trials. Peter then set the design (a diff in the history, a version check on all writes), and #604 was reopened.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #604, #606
+
+### 2026-11-06 · Fixes A, B and C for the stale copies, without asking
+
+- **Kind:** product scope
+- **Situation:** listed fixes A to D for the stale copies. Built A, B and C (root-cause fixes) at once; D (show a failed artifact update to the user) was asked, with a prediction of yes (70 %) and no answer.
+- **Decision:** built A, B and C without asking.
+- **Score:** not scored. Peter later replaced A with his own design (a version check on every write); B stayed.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #604, #606
+
+### 2026-11-06 · Fixes A, B and C for the stale copies: ask or decide
+
+- **Kind:** escalation
+- **Situation:** as in the entry before.
+- **Decision:** decided without asking Peter.
+- **Score:** not scored.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #604, #606
+
+### 2026-11-06 · Replaying the thread's own artifact writes
+
+- **Kind:** product scope
+- **Situation:** Peter's idea for the stale copies was a system node in the thread. Proposed instead a replay at assembly time: each earlier write returns "updated to vN" and the diff through the tool-result channel, built from the two stored version ids.
+- **Decision:** render-time replay instead of a node.
+- **Peter:** "yes pls"
+- **Score:** hit. He also set a version check on all writes, the current text in a refusal, and a diff in the Actions taken row on demand.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #604, #606
+
+### 2026-11-06 · Putting the tool call and its parameters in the history
+
+- **Kind:** product scope
+- **Situation:** listed five fixes for the stale copies and left out replaying the tool calls with their parameters in later turns' history.
+- **Decision:** five options inside the current design.
+- **Peter:** "why didn't you name putting the function call incl. its parameters into the conversation history?"
+- **Score:** miss.
+- **Why it missed:** took the investigator's options inside the current design instead of asking why tool arguments are dropped from history.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #604
+
+### 2026-11-06 · Calling a slow deploy step stuck
+
+- **Kind:** release/ops
+- **Situation:** the deploy's package-install step had run for 30 minutes. Called it stuck, proposed cancelling and rerunning, and did so once with Peter's yes, without seeing the live log.
+- **Decision:** judged "stuck" from the step's status.
+- **Peter:** "I've been watching it from time to time, it's moving, but very slowly. Cancellation wouldn't help"
+- **Score:** miss. The rerun restarted a slow but moving install.
+- **Why it missed:** an in-progress status says nothing about progress.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #605
+- **Rule:** candidate: ask for the live log or wait before cancelling a step.
+
+### 2026-11-06 · Running the 5.5 test before the prompt clause was fixed
+
+- **Kind:** testing
+- **Situation:** Peter removed one sentence from the artifact prompt. Started the Opus 5.5 rerun on exactly his edit while telling him that a remaining clause in the same sentence would likely still block reads.
+- **Decision:** ran the test on the edit as it was.
+- **Peter:** "you shouldn't have run the test when the fix is not expected to work"
+- **Score:** miss. The test was stopped.
+- **Why it missed:** named the clause as a problem and ran anyway, instead of raising it first.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #604
+
+### 2026-11-06 · Running the 5.5 test before the prompt clause was fixed: ask or decide
+
+- **Kind:** escalation
+- **Situation:** as in the entry before.
+- **Decision:** decided without asking Peter.
+- **Peter:** "you shouldn't have run the test when the fix is not expected to work"
+- **Score:** miss. The clause should have been raised first and the test run after his answer.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #604
+
+### 2026-11-06 · No changelog entry for #606
+
+- **Kind:** user-facing text
+- **Situation:** #606 changes how the model edits artifacts across turns. Left out a changelog entry.
+- **Decision:** no changelog entry.
+- **Peter:** "no changelog pls for 606"
+- **Score:** hit.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #606
+
+### 2026-11-06 · Recording for a provider support case
+
+- **Kind:** process
+- **Situation:** a provider support case needed evidence of the batches. Offered (a) a reply first asking whether IDs, timestamps and error lines suffice, or (b) a terminal script fetching the batches and their error files live from the API (no content), recorded with two or three dashboard pages.
+- **Prediction:** script and recording (45 %); reply first (40 %); dashboard and downloaded files (15 %).
+- **Peter:** chose (a), a reply first
+- **Score:** miss.
+- **Why it missed:** chose the stronger evidence over asking whether the cheaper one was enough.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-11-06 · Fixing leftover audio files of purged nodes
+
+- **Kind:** privacy
+- **Situation:** after checking the audio files left behind by purged nodes, started a fix: node cleanup deletes the node's audio files, plus a one-off script that reports first and deletes on --apply. Peter runs the one-off script himself.
+- **Decision:** started the fix PR; the clean-up of existing files stays his step.
+- **Score:** not scored.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #608
+
+### 2026-11-06 · Fixing leftover audio files of purged nodes: ask or decide
+
+- **Kind:** escalation
+- **Situation:** as in the entry before.
+- **Decision:** decided without asking Peter.
+- **Score:** not scored.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #608
+
 ## Decided by the builder
 
 Choices that agents flagged in PRs and that the builder decided because a rule above already covers them (Peter, 2026-10-02: decide what the log supports, raise only real judgement calls). Each is also recorded on its PR, or in the session where Peter asked. The Decided column holds only the builder's part; a rule or decision of Peter's goes in the Rule column. Questions raised to Peter instead are not listed; his answers become entries. Model is the model that wrote the PR (its Co-Authored-By line). Result is "accepted by merge (PR #N, date)" once the PR has merged and Peter didn't correct the choice, "pending" until it merges, and "corrected → entry <title>" when he overrules it; the entry is then scored as a miss.
@@ -2943,35 +3190,57 @@ Choices that agents flagged in PRs and that the builder decided because a rule a
 | 2026-10-20 | #414 | data safety | A profile edit that changes only whitespace (blank lines, trailing spaces, a trailing newline) | Saved in place, no new version | Every added heuristic is named | Opus 5.5 | accepted by merge (PR #548, 2026-10-21) |
 | 2026-10-20 | #414 | product scope | The date a rebuild merges the user's version at | Its cutoff, or the time it was written for a hand-written profile with no cutoff; the merge follows the first step whose cutoff reaches that date | A rebuild merges the user's version at its date (Peter, 2026-10-20); every added heuristic is named | Opus 5.5 | accepted by merge (PR #548, 2026-10-21) |
 | 2026-10-20 | #414 | product scope | The version a user's edit replaced, when a later integration runs | Not an integration input: the integration chain starts at the user's version (found by the real-model check) | An edit is a new version, with the version it changed as its predecessor (Peter, 2026-10-20) | Opus 5.5 | accepted by merge (PR #548, 2026-10-21) |
-| 2026-10-21 | #589 | testing | The window size of the Haiku 5.5 versions in the Haiku test | Prod's chunk planner size for Haiku (46.6k units here), under Haiku's 100k-token price step: 53 versions against the 26 Luna windows, so the test mixes the change of model with the number of versions; said so before the run | Test what would ship; #259 (no request across a price tier) | Opus 5.5 | pending |
-| 2026-10-22 | #589 | testing | When Haiku 5.5 is good enough to write Anthropic users' versions | Set before the evaluation: the Sol bar applied to Haiku. Against the Luna events final with an Opus merge (33 core facts, 1 wrong): at least 30 core facts, at most 2 wrong, specific maps, at least 15 of 18 sub-headings; refusals noted as a risk. Haiku scored 31, 0 wrong, 18 of 18, and is the default in #589 | "potentially Haiku if accuracy allows" (Peter, 2026-10-22); the Sol thresholds he accepted (2026-10-21); every added heuristic is named | Opus 5.5 | pending |
-| 2026-10-22 | #589 | product scope | The merge structure of a set of independent versions | `flat`: one merge while all versions fit under the merge model's input cap, groups of 30 above it; switched from `grouped` after the 149-version test. Flat: 32 of 41 core facts, 1 wrong, 18 of 18 sub-headings. Grouped: 34 (4 of them borderline), 0 wrong core facts, 3 other errors, 13 of 18 sub-headings, $0.50 more. Grouped met the bar set before the test (within 3 core facts and 1 wrong core fact of flat); flat was chosen on the other errors, the sub-headings and the cost | Fixed groups with only the newest merged again (Peter, 2026-10-20), now above the cap only; every added heuristic is named | Opus 5.5 | pending |
+| 2026-10-21 | #589 | testing | The window size of the Haiku 5.5 versions in the Haiku test | Prod's chunk planner size for Haiku (46.6k units here), under Haiku's 100k-token price step: 53 versions against the 26 Luna windows, so the test mixes the change of model with the number of versions; said so before the run | Test what would ship; #259 (no request across a price tier) | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-10-22 | #589 | testing | When Haiku 5.5 is good enough to write Anthropic users' versions | Set before the evaluation: the Sol bar applied to Haiku. Against the Luna events final with an Opus merge (33 core facts, 1 wrong): at least 30 core facts, at most 2 wrong, specific maps, at least 15 of 18 sub-headings; refusals noted as a risk. Haiku scored 31, 0 wrong, 18 of 18, and is the default in #589 | "potentially Haiku if accuracy allows" (Peter, 2026-10-22); the Sol thresholds he accepted (2026-10-21); every added heuristic is named | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-10-22 | #589 | product scope | The merge structure of a set of independent versions | `flat`: one merge while all versions fit under the merge model's input cap, groups of 30 above it; switched from `grouped` after the 149-version test. Flat: 32 of 41 core facts, 1 wrong, 18 of 18 sub-headings. Grouped: 34 (4 of them borderline), 0 wrong core facts, 3 other errors, 13 of 18 sub-headings, $0.50 more. Grouped met the bar set before the test (within 3 core facts and 1 wrong core fact of flat); flat was chosen on the other errors, the sub-headings and the cost | Fixed groups with only the newest merged again (Peter, 2026-10-20), now above the cap only; every added heuristic is named | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
 | 2026-10-22 | #589 | cost | The merge model for OpenAI users | GPT-6.1 Sol at high reasoning effort, although no OpenAI merge reached the bar Opus sets: on the same versions Sol at its default effort kept 25 of 41 core facts, at high effort 27, GPT-6 Astra 26 and Opus 33, none of them with errors; Sol costs a fifth of Astra. A prompt asking for about 650 tokens a section was no clear gain (30 and 26 in two runs, against 26 for a repeat without it). Under Needs Peter in #589 | A user's model is theirs (an OpenAI user's merge stays with OpenAI); Quality first, for now | Opus 5.5 | hit: accepted by Peter (2026-10-22), entry "#589: OpenAI merges by Sol at high effort" |
-| 2026-11-05 | #589 | cost | Which passes the estimate gate covers | Every pass with windows to read: a first build, an import on a set, an update's windows, a retried window; windows in flight are not counted again | Peter, 2026-11-05: estimate the to-be-submitted job | Opus 5.5 | pending |
-| 2026-11-05 | #589 | cost | The output each call is priced at in the estimate | Measured mean output (Haiku 11k tokens, Luna 2.5k, merges 4k), the last group at its real size | Peter, 2026-11-05: err towards the job going through | Opus 5.5 | pending |
-| 2026-11-05 | #589 | UX | How a build held by the estimate is shown | The admin note and Sentry error from before 2026-10-22, cleared when the windows go out | Reuse what the code had | Opus 5.5 | pending |
-| 2026-11-05 | #589 | UX | Where #598's quiet period is measured from | The later of the last import's finish and the newest entry written after it; a running import holds the build | Peter, 2026-11-05: reuse the 30-minute window | Opus 5.5 | pending |
-| 2026-11-05 | #589 | reliability | An import while the profile job is in the refusal stop | The import's seed still skips the stop once the quiet period is over | An import seeds and skips the refusal stop (Peter, 2026-10-01) | Opus 5.5 | pending |
-| 2026-11-05 | #589 | product scope | Which starts skip #598's wait | The admin's Build profile, pre-fills and the synchronous path start at once | Admin actions are explicit | Opus 5.5 | pending |
-| 2026-11-05 | #589 | user-facing text | The import dialog's line about the wait | Shown only when the build was deferred and a build is due | Calm over clever | Opus 5.5 | pending |
-| 2026-11-05 | #589 | provider | A window, group or final blocked by the content-policy filter | Outcome `blocked`: a $0 cost row, a Sentry event, a note in the admin column, the account's build stops; ported from #596 | A content-policy block is final (#597) | Opus 5.5 | pending |
-| 2026-11-05 | #589 | privacy | How "public only" is decided | From metadata: every entry pre-filled and unedited (no `NodeVersion`), no profile row with other sources, no sticky private mark, and an account nobody signed into; anything else is private | A user's writing never reaches the other provider unless public-only or consented; when in doubt, private | Opus 5.5 | pending |
-| 2026-11-05 | #589 | privacy | The consent flag | `User.profile_both_providers`, default false, no UI (#599 builds the question) | The user's provider is theirs | Opus 5.5 | pending |
-| 2026-11-05 | #589 | privacy | Existing accounts before the private mark exists | A backfill script after deploy marks every account with private data; until then signed-in accounts count as private | When in doubt, private | Opus 5.5 | pending |
-| 2026-11-05 | #589 | product scope | What counts as a regular update | A merged set with nothing in flight whose only new range plans into one chunk on the chat model | Peter, 2026-11-05: one-window updates are chained | Opus 5.5 | pending |
-| 2026-11-05 | #589 | data safety | The parent of a chained version | The set's base, with the profile it updated kept in its job item, so no earlier final is merged in again | Fix the cause | Opus 5.5 | pending |
-| 2026-11-05 | #596 | provider | A one-window build of public-only writing | GPT-6 Luna, then Opus 5.5 | Peter, 2026-11-05: public-only data gets Luna for versions and Opus for merges | Opus 5.5 | pending |
-| 2026-11-05 | #596 | provider | A one-window build of private writing | The user's chat model for the version and the integration | Peter, 2026-11-05: Haiku is for imports; one window uses the preferred model | Opus 5.5 | pending |
-| 2026-11-06 | #599 | privacy | Whether "never answered" is kept apart from "no" | `User.profile_both_providers_answered_at`, NULL until the user answers; the flag stays false meanwhile, so nothing crosses providers | Ask when the choice matters: no answer means "we don't know", not "no" | Opus 5.5 | pending |
-| 2026-11-06 | #599 | UX | The form of the question | A dialog with two equal buttons, "Use both" and "Keep to <the user's provider>", nothing preselected; closing it records nothing and the next occasion asks again | Ask when the choice matters; a costly choice is a dialog, never a pre-ticked checkbox | Opus 5.5 | pending |
-| 2026-11-06 | #599 | UX | When opening Loore asks | Once per visit, after the first entry (written or imported), on the first suitable page; never on Voice, Text, Welcome, Account or Import, during a recording or over another dialog; a visit that starts on /welcome does not ask; a close without an answer holds it for the tab; the updates modal waits for it | Peter, 2026-11-05: "after the 1st reflection"; Reflection comes first (the updates modal's rule, #392) | Opus 5.5 | pending |
-| 2026-11-06 | #599 | UX | A preferred-model change | Asks after the user's own pick on the Account page while never answered, not for the default the picker fills in when the page opens | Peter, 2026-11-05: ask when the user sets their preferred model | Opus 5.5 | pending |
-| 2026-11-06 | #599 | product scope | Which imports ask | An import that added entries with AI usage chat or train, for a user who never answered or said no at least 30 days ago (a month read as 30 days); never after a yes; a PDF saved as a Reference does not ask | Peter, 2026-11-05: "also after any import", a no asked again after a month; No AI means no AI; every added heuristic is named | Opus 5.5 | pending |
-| 2026-11-06 | #599 | privacy | Accounts set to AI usage None | Never asked, in any context | No AI means no AI | Opus 5.5 | pending |
-| 2026-11-06 | #599 | privacy | A no given while a profile pass renders | The consent is read from the database before each slice is sent; the rest of the pass is dropped unsent and a new task plans it for the user's own provider | A user's writing never reaches the other provider without a yes | Opus 5.5 | pending |
-| 2026-11-06 | #599 | user-facing text | The question's wording | Peter's question nearly verbatim, what goes where, the test result as the reason, a note that replies keep the default model; in #589's Needs Peter with alternatives | Peter's own words where they fit; describe what happens to the user | Opus 5.5 | pending |
-| 2026-11-06 | #599 | UX | Where the answer is changed | Account page, "Background tasks" right below Default model: "Not answered yet" (not selectable), "Anthropic and OpenAI", "<provider> only"; changing it stamps the time | Show the choices; the user's choice wins | Opus 5.5 | pending |
-| 2026-11-06 | #599 | product scope | The iPhone app and the privacy text | Web only; the iPhone app is a follow-up. The terms already name both providers for AI chat; an optional sentence is under Needs Peter, nothing changed | Scope set for this build; no change to the terms without Peter | Opus 5.5 | pending |
+| 2026-11-05 | #589 | cost | Which passes the estimate gate covers | Every pass with windows to read: a first build, an import on a set, an update's windows, a retried window; windows in flight are not counted again | Peter, 2026-11-05: estimate the to-be-submitted job | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-05 | #589 | cost | The output each call is priced at in the estimate | Measured mean output (Haiku 11k tokens, Luna 2.5k, merges 4k), the last group at its real size | Peter, 2026-11-05: err towards the job going through | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-05 | #589 | UX | How a build held by the estimate is shown | The admin note and Sentry error from before 2026-10-22, cleared when the windows go out | Reuse what the code had | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-05 | #589 | UX | Where #598's quiet period is measured from | The later of the last import's finish and the newest entry written after it; a running import holds the build | Peter, 2026-11-05: reuse the 30-minute window | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-05 | #589 | reliability | An import while the profile job is in the refusal stop | The import's seed still skips the stop once the quiet period is over | An import seeds and skips the refusal stop (Peter, 2026-10-01) | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-05 | #589 | product scope | Which starts skip #598's wait | The admin's Build profile, pre-fills and the synchronous path start at once | Admin actions are explicit | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-05 | #589 | user-facing text | The import dialog's line about the wait | Shown only when the build was deferred and a build is due | Calm over clever | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-05 | #589 | provider | A window, group or final blocked by the content-policy filter | Outcome `blocked`: a $0 cost row, a Sentry event, a note in the admin column, the account's build stops; ported from #596 | A content-policy block is final (#597) | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-05 | #589 | privacy | How "public only" is decided | From metadata: every entry pre-filled and unedited (no `NodeVersion`), no profile row with other sources, no sticky private mark, and an account nobody signed into; anything else is private | A user's writing never reaches the other provider unless public-only or consented; when in doubt, private | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-05 | #589 | privacy | The consent flag | `User.profile_both_providers`, default false, no UI (#599 builds the question) | The user's provider is theirs | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-05 | #589 | privacy | Existing accounts before the private mark exists | A backfill script after deploy marks every account with private data; until then signed-in accounts count as private | When in doubt, private | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-05 | #589 | product scope | What counts as a regular update | A merged set with nothing in flight whose only new range plans into one chunk on the chat model | Peter, 2026-11-05: one-window updates are chained | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-05 | #589 | data safety | The parent of a chained version | The set's base, with the profile it updated kept in its job item, so no earlier final is merged in again | Fix the cause | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-05 | #596 | provider | A one-window build of public-only writing | GPT-6 Luna, then Opus 5.5 | Peter, 2026-11-05: public-only data gets Luna for versions and Opus for merges | Opus 5.5 | accepted by merge (PR #596, 2026-11-06) |
+| 2026-11-05 | #596 | provider | A one-window build of private writing | The user's chat model for the version and the integration | Peter, 2026-11-05: Haiku is for imports; one window uses the preferred model | Opus 5.5 | accepted by merge (PR #596, 2026-11-06) |
+| 2026-11-06 | #599 | privacy | Whether "never answered" is kept apart from "no" | `User.profile_both_providers_answered_at`, NULL until the user answers; the flag stays false meanwhile, so nothing crosses providers | Ask when the choice matters: no answer means "we don't know", not "no" | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #599 | UX | The form of the question | A dialog with two equal buttons, "Use both" and "Keep to <the user's provider>", nothing preselected; closing it records nothing and the next occasion asks again | Ask when the choice matters; a costly choice is a dialog, never a pre-ticked checkbox | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #599 | UX | When opening Loore asks | Once per visit, after the first entry (written or imported), on the first suitable page; never on Voice, Text, Welcome, Account or Import, during a recording or over another dialog; a visit that starts on /welcome does not ask; a close without an answer holds it for the tab; the updates modal waits for it | Peter, 2026-11-05: "after the 1st reflection"; Reflection comes first (the updates modal's rule, #392) | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #599 | UX | A preferred-model change | Asks after the user's own pick on the Account page while never answered, not for the default the picker fills in when the page opens | Peter, 2026-11-05: ask when the user sets their preferred model | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #599 | product scope | Which imports ask | An import that added entries with AI usage chat or train, for a user who never answered or said no at least 30 days ago (a month read as 30 days); never after a yes; a PDF saved as a Reference does not ask | Peter, 2026-11-05: "also after any import", a no asked again after a month; No AI means no AI; every added heuristic is named | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #599 | privacy | Accounts set to AI usage None | Never asked, in any context | No AI means no AI | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #599 | privacy | A no given while a profile pass renders | The consent is read from the database before each slice is sent; the rest of the pass is dropped unsent and a new task plans it for the user's own provider | A user's writing never reaches the other provider without a yes | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #599 | user-facing text | The question's wording | Peter's question nearly verbatim, what goes where, the test result as the reason, a note that replies keep the default model; in #589's Needs Peter with alternatives | Peter's own words where they fit; describe what happens to the user | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #599 | UX | Where the answer is changed | Account page, "Background tasks" right below Default model: "Not answered yet" (not selectable), "Anthropic and OpenAI", "<provider> only"; changing it stamps the time | Show the choices; the user's choice wins | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #599 | product scope | The iPhone app and the privacy text | Web only; the iPhone app is a follow-up. The terms already name both providers for AI chat; an optional sentence is under Needs Peter, nothing changed | Scope set for this build; no change to the terms without Peter | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | product scope | Where the both-providers question (#599) is built | Inside #589's branch, as #598 was, not as a stacked PR | Peter, 2026-11-06: "yes, I want to merge these two together" | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #606 | UX | How earlier artifact writes reach later turns | Replayed through the native tool channel at assembly time ("updated to vN" and the diff), from the two stored version ids; nothing is stored in a new node | Peter's design comment, 2026-11-06; nobody decrypts users' content | Opus 5.5 | pending |
+| 2026-11-06 | #606 | reliability | The model's copy after a failed edit | The current text is given after a failed edit (text not found, ambiguous or no content) when the base was right, so a retry need not become a full rewrite | Problems show | Opus 5.5 | pending |
+| 2026-11-06 | #606 | data safety | A write based on a version of an artifact that has no versions | Refused, so a stale copy cannot recreate an artifact that is gone | The user's edit wins | Opus 5.5 | pending |
+| 2026-11-06 | #606 | UX | What the diff endpoint returns | Line operations built on the server, not the two texts; 404, not 403, for someone else's version | Nobody decrypts users' content | Opus 5.5 | pending |
+| 2026-11-06 | #606 | reliability | The forms of `base_version` and the labels in the history | `12`, `"12"`, `"v12"` and `12.0` are accepted; booleans and other strings are refused; the inline copy is labelled "[kind · vN, as of the start of this conversation]"; the replayed call keeps its input minus the content | Smallest change | Opus 5.5 | pending |
+| 2026-11-06 | #606 | UX | Older threads and the cross-turn note | Writes recorded before the previous version was stored replay only "updated to vN"; the "was updated" note for writes without a result round stays, and now duplicates the replay once | Smallest change | Opus 5.5 | pending |
+| 2026-11-06 | #606 | UX | The "Show changes" box | A maximum height of 320 px with its own scroll; the iPhone version is a follow-up | Scope set for this build | Opus 5.5 | pending |
+| 2026-11-06 | #606 | cost | The prompt-cache cost of the change | Shipped with a one-time rewrite of every agentic thread's cached prefix at deploy (the tool definitions change) and about 1k tokens of history per earlier write; saving expected from later-turn edits replacing full rewrites | Quality first, for now | Opus 5.5 | pending |
+| 2026-11-06 | #607 | reliability | How the disk percentage is computed | As `df` shows it (used over used plus free), so it matches what Peter sees on the server | Problems show | Opus 5.5 | pending |
+| 2026-11-06 | #607 | reliability | Where the alert's sent-state lives | In Redis, as for the provider alerts; no model or migration for a throttle flag | Smallest change | Opus 5.5 | pending |
+| 2026-11-06 | #607 | reliability | Which disk is measured | The disk holding the recordings (the nearest existing parent if the folder is absent) | Problems show | Opus 5.5 | pending |
+| 2026-11-06 | #607 | release/ops | Who gets the disk email | The existing cost-alert address | Smallest change | Opus 5.5 | pending |
+| 2026-11-06 | #607 | reliability | The warning level, the second alert and the cadence | A warning at 90 % (a setting), a second alert at 95 % (a constant), checked hourly, at most one email per 24 h per level. Introduced numbers, flagged in the PR | Every added heuristic is named | Opus 5.5 | pending |
+| 2026-11-06 | #608 | data safety | A file that cannot be deleted | Never holds back a purge or the text wipe; the nightly sweep retries the file, including a finalized node's recording-session folder | Peter, review of this PR; a user's words are never lost | Opus 5.5 | pending |
+| 2026-11-06 | #608 | data safety | Recordings in a folder whose node row is gone | Kept for 30 days (the deleted-node grace period, no new number) instead of 24 h, because the folder may hold the only copy of a recording whose node never committed; speech files in the same folder keep the 24 h guard | A user's words are never lost | Opus 5.5 | pending |
+| 2026-11-06 | #608 | data safety | Which folders the sweep leaves alone | Any folder changed (modified or ctime) in the last 24 h (`RECENT_SECONDS`), which also protects a playback in progress; a symlinked or outside-root folder is never followed or deleted | Introduced number, flagged in the PR; a user's words are never lost | Opus 5.5 | pending |
+| 2026-11-06 | #608 | data safety | Files that rows still point at | Never deleted: speech shared between profile versions and merged reference copies is real today | A user's words are never lost | Opus 5.5 | pending |
+| 2026-11-06 | #608 | privacy | Rows hidden by "Delete all my writing" | Kept, for nodes, references and profiles alike, as the node cleanup already does | Nobody decrypts users' content | Opus 5.5 | pending |
+| 2026-11-06 | #608 | privacy | A saved reference's speech | Deleted when the reference is deleted, because references have no grace period today | Deletion means deletion | Opus 5.5 | pending |
+| 2026-11-06 | #608 | reliability | The sweep's batch size | 500 folders per round of lookups (`BATCH_SIZE`), the same as the user purge's chunk size | Every added heuristic is named | Opus 5.5 | pending |
+| 2026-11-06 | #608 | testing | Tests and real audio folders | An autouse fixture gives every test a scratch audio root, so no test deletes or marks anything under a real folder | Data safety first | Opus 5.5 | pending |
 
 ## Backfilled decisions
 
@@ -3735,3 +4004,65 @@ Builder decisions listed in PRs that merged without Peter correcting them, backf
 | 2026-10-20 | #542 | user-facing text | No changelog entry: a fix, not an announcement | Opus 5.5 | accepted by merge (PR #542, 2026-10-20) |
 | 2026-10-20 | #542 | release/ops | 500 messages per commit; a stash expires after 24 h; a lock untouched for 30 min no longer counts; at most 5 resumes after the 55-minute time limit (`CONVERSATION_BATCH_SIZE`, `STASH_TTL_SECONDS`, `LOCK_STALE_SECONDS`, `MAX_TIME_LIMIT_RESUMES`) | Opus 5.5 | accepted by merge (PR #542, 2026-10-20) |
 | 2026-10-20 | #542 | UX | The export's upload gets a 10-minute timeout with progress; the dialog polls every 1.5 s and gives up after 5 failed polls in a row; the iPhone's 10-minute stall limit covers chat imports too | Opus 5.5 | accepted by merge (PR #542, 2026-10-20) |
+| 2026-11-06 | #589 | product scope | The independent-version path applies where today's plan on the preferred model has two or more chunks; one-chunk builds and one-chunk chained updates run as before | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | product scope | The events paragraph is inserted in code in the window prompts only; removing it gives the generation prompt back byte for byte | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | provider | Version and merge models are chosen per pass; a provider-pair setting of another provider refuses to boot, and every request is checked before it is queued | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | product scope | Windows and groups are hidden from every reader of the profile, the history and the version numbers; the current profile stays until the final is saved | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | reliability | Every window output must carry the three map headings and exactly one events section; a refusal written as text counts as refused | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | reliability | Window failures have their own bound: a refused, cut-off or invalid output is retried once, then the window is skipped and Sentry alerted; a provider failure is retried up to three submissions, then the window waits 24 h | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | cost | Window-set users are pinned to Batch and never take the full-price synchronous fallback | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | cost | All windows of a user go out in one submission, split only above 100 MB | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | reliability | A window is rendered again smaller while it is over the version model's cap; it is never cut and never sent over it; one entry larger than the cap is skipped with a Sentry alert | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | product scope | A last group of one window is not merged; the window enters the final as it is | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | data safety | The user's version is merged inside the final at its date; a version saved while the final is in the batch discards that final (cost row kept) and the next run merges again | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | product scope | An import older than a set's tip rebuilds the set from scratch; a newer one is read as new windows | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | reliability | The 80k gate counts creation time for every user, because an import's nodes carry the import time as their update time | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | reliability | The hourly seeder clears a pending flag that no pending job and no live task carries | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | reliability | Expired or cancelled OpenAI batches have their finished items collected; a profile job is stale after 25 h | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | cost | The per-user spend cap is checked before every submission; a user over the limit is held and the hourly seeder resumes the set when the month turns or the limit is raised | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | reliability | The tokens-per-unit ratio is read once per advance task, so one build's windows share one ratio | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | cost | OpenAI merges are Batch requests on the Responses endpoint with a reasoning effort (default high); windows stay on chat completions | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | release/ops | The kill switch `PROFILE_INDEPENDENT_VERSIONS` defaults on; off, a user whose profile is a set gets chained updates on its final | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | user-facing text | Progress text for the new steps: "Generating profile: reading all N chunks" and "Integrating profile versions" | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | product scope | Version numbers in an export's reference lines and a reply's artifact panel leave set rows out | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | reliability | A range whose units are counted but which renders nothing counts as covered, with a log line and no alert, so the set can finish | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | product scope | A chained version is saved as a hidden row of the set; each regular update keeps its own place in later merges | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | user-facing text | In a merge a chained version is labelled as covering all the writing from its start to its end, so the merge reads it as a profile of everything | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | reliability | A chained version must carry the three maps; a failed one follows the window rules, not the chained path's user-level refusal backoff | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | cost | Merges after a regular update run on the preferred model without a reasoning-effort parameter, as live replies do | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | product scope | One chained window per pass; a remainder is chained on the new version in the next pass | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | cost | Introduced constants for batch size and rendering: 100 MB per batch, 2,400 s of rendering time, 8 fit rounds at a safety factor of 0.97, 1.5 as the over-cap estimate factor | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | reliability | Introduced constants for failures: 2 content attempts, 3 provider attempts, an attempt history of 7 days | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | cost | Introduced estimate constants: expected output Haiku 11k, Luna 2.5k, Opus 5.5 7k (a chained update), else 6k tokens; 4.7k merge tokens per version for Haiku and others, 2.0k for Luna; prompts 3k, 8k and 4k; 4k merge output | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | product scope | Introduced merge settings: a merge group size of 30 and the flat structure by default | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | data safety | Set ids are 12 hex characters, unique per user and short enough for the batch custom id | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | UX | #599 asks once per visit after a close without an answer (a new tab asks again), counts "at least one entry" as a non-deleted user node that is not a session's prompt node, and treats a recorder in the recording or paused state as a recording in progress | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | UX | #599's close of the dialog by the mark, Escape, the backdrop or leaving the page records nothing; the Account trigger fires only on the user's own pick | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | privacy | #599's consent is read from the database at each check and before anything of a pass goes to the other provider; changing it is a strict true or false (anything else is a 400), and no admin route sets it | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | UX | #599 reuses 30 days for "at least a month old" (`REASK_AFTER_NO`); existing users are asked by the same rules at their next visit, with no email and no backfill | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #596 | provider | #596 names no model pair of its own: `pass_models` chooses per pass from #589's rules; the per-provider switches only decide whether the window path is taken | Opus 5.5 | accepted by merge (PR #596, 2026-11-06) |
+| 2026-11-06 | #596 | product scope | A from-scratch build that fits one window on the preferred model, over private writing, is read and integrated by the preferred model; public-only writing and consent take Luna and Opus at any size | Opus 5.5 | accepted by merge (PR #596, 2026-11-06) |
+| 2026-11-06 | #596 | privacy | The models are chosen again when the final goes out, so a pre-fill whose owner signed in after Luna read the window is integrated by the preferred model, never by the other provider | Opus 5.5 | accepted by merge (PR #596, 2026-11-06) |
+| 2026-11-06 | #596 | product scope | Windows are sized on the preferred model first (the 90k-unit planner target); two or more chunks use the provider's pair | Opus 5.5 | accepted by merge (PR #596, 2026-11-06) |
+| 2026-11-06 | #596 | product scope | A one-chunk build's final has its own prompt, and a final carrying an events section is refused like any non-profile output; the many-version prompt stays byte-identical | Opus 5.5 | accepted by merge (PR #596, 2026-11-06) |
+| 2026-11-06 | #596 | data safety | A build whose only window was given up sends no final; the previous profile stays and the admin column says why | Opus 5.5 | accepted by merge (PR #596, 2026-11-06) |
+| 2026-11-06 | #596 | product scope | A small profile built this way is rebuilt on the early schedule; updates past the ladder are #589's regular updates | Opus 5.5 | accepted by merge (PR #596, 2026-11-06) |
+| 2026-11-06 | #596 | reliability | Profile batches are polled by listing (page sizes 1000 and 100, at most 50 pages, stop one hour before the oldest pending job); a job the listing misses is polled on its own | Opus 5.5 | accepted by merge (PR #596, 2026-11-06) |
+| 2026-11-06 | #596 | reliability | A full provider queue waits and is never a failed attempt, only while another profile batch of ours is pending in the same queue; otherwise it counts as a failed attempt | Opus 5.5 | accepted by merge (PR #596, 2026-11-06) |
+| 2026-11-06 | #596 | reliability | Waiting batch work is resent by the hourly seeder also for accounts not yet activated, through `User.profile_work_held`; deactivated accounts stay paused | Opus 5.5 | accepted by merge (PR #596, 2026-11-06) |
+| 2026-11-06 | #596 | product scope | A first profile takes two Batch turnarounds, and the previous profile stays in use meanwhile | Opus 5.5 | accepted by merge (PR #596, 2026-11-06) |
+| 2026-11-06 | #596 | provider | Policy blocks: a blocked window is skipped and its range remembered in its own table for good; a blocked group or final stops the account until the admin's confirmed Build profile; nothing is resent | Opus 5.5 | accepted by merge (PR #596, 2026-11-06) |
+| 2026-11-06 | #596 | privacy | Policy blocks: a range runs from just before the blocked window's earliest entry; an account whose AI usage does not allow AI gets no skip path, but its range is recorded with dates only; one $0 record and one Sentry event with tags only per blocked item | Opus 5.5 | accepted by merge (PR #596, 2026-11-06) |
+| 2026-11-06 | #596 | release/ops | Where #596 and #589 conflict, #589's model rules and provider checks win; elsewhere each PR's decided behaviour stays (the blocked-window skip over #589's account stop) | Opus 5.5 | accepted by merge (PR #596, 2026-11-06) |
+| 2026-11-06 | #596 | reliability | Introduced numbers: list page sizes 1000 and 100, 50 pages, a one-hour listing slack; the 14-day backfill window of the policy-block script | Opus 5.5 | accepted by merge (PR #596, 2026-11-06) |
+| 2026-11-06 | #605 | data safety | Deleting an artifact is a soft delete of every version at once, removed for good by the daily cleanup after the 30-day grace period, with no restore UI and no new task or schedule | Opus 5.5 | accepted by merge (PR #605, 2026-11-06) |
+| 2026-11-06 | #605 | product scope | Only custom artifacts can be deleted: the built-in kinds and the saved-references digest are refused with a 403, and only the owner can delete; there is no admin path | Opus 5.5 | accepted by merge (PR #605, 2026-11-06) |
+| 2026-11-06 | #605 | UX | After a delete the same name starts at v1, and a link to a deleted artifact says it was deleted (`deleted_kinds`, a 404 with `deleted: true`) | Opus 5.5 | accepted by merge (PR #605, 2026-11-06) |
+| 2026-11-06 | #605 | data safety | The permanent delete removes the sessions' pins on the purged versions first, then the rows with their content | Opus 5.5 | accepted by merge (PR #605, 2026-11-06) |
+| 2026-11-06 | #605 | privacy | The delete, the cache stamp and the purge read only ids and timestamps; a deleted version is never decrypted again, and a read the AI made before the delete is not delivered after it | Opus 5.5 | accepted by merge (PR #605, 2026-11-06) |
+| 2026-11-06 | #605 | user-facing text | The delete dialog does not mention the 30 days, as for nodes | Opus 5.5 | accepted by merge (PR #605, 2026-11-06) |
+| 2026-11-06 | #605 | reliability | The purge deletes in chunks of 500 ids (`PURGE_CHUNK`, introduced) | Opus 5.5 | accepted by merge (PR #605, 2026-11-06) |
+| 2026-11-06 | #605 | reliability | The render-cache key carries the user's last delete, only once the user has deleted an artifact, so the deploy invalidates nothing for others | Opus 5.5 | accepted by merge (PR #605, 2026-11-06) |
+| 2026-11-06 | #605 | UX | The ⋮ is hidden while the edit form is open, so a delete never drops a draft; after a delete the URL is replaced, not pushed | Opus 5.5 | accepted by merge (PR #605, 2026-11-06) |
+| 2026-11-06 | #605 | privacy | No name is kept after the purge, so a link to it opens an empty artifact like any unused name; the purge also deletes the kind's view pings when no live version is left | Opus 5.5 | accepted by merge (PR #605, 2026-11-06) |
+| 2026-11-06 | #605 | reliability | A repeated DELETE answers 404 with `deleted: true`, so a second device can treat it as done; the page's view ping is not sent for a deleted kind | Opus 5.5 | accepted by merge (PR #605, 2026-11-06) |
