@@ -1487,6 +1487,12 @@ Artifact JSON:
 ##### `GET /api/artifacts/versions/<int:version_id>`
 - Response 200: `{"artifact": Artifact}` (with content, no version_number). Errors: 404; 403 `Unauthorized`.
 
+##### `GET /api/artifacts/versions/<int:version_id>/changes?from=<int>` (#604)
+- Called from: components/ToolActionsTaken.js ("Show changes" on a successful `update_artifact` entry of the owner's own reply), with `version_id` = the entry's `artifact_id` and `from` = its `previous_artifact_id` (left out for a creation; without it the server diffs against the version just before).
+- Response 200: `{"kind", "title", "version_number": int, "previous_version_number": int|null, "lines": [{"type": "same"|"del"|"add", "text"}]}`: every line in order; the web folds unchanged runs and marks changed words (`utils/diff.js` over `lines`).
+- Errors: 404 `{"error": "Version not found"}` for a version that is not the caller's (no admin path) or a `from` that is not another version of the same artifact.
+- `update_artifact` entries in `tool_calls_meta` also carry `version` / `previous_version` (the numbers the artifacts page shows) since #604.
+
 ##### `POST /api/artifacts/<kind>/revert/<int:version_id>`
 - Response 200: `{"artifact": Artifact + version_number}` (new row, `generated_by: "revert"`).
 - Errors: 404; 403; 400 `"Version does not belong to this artifact"`; 400 `"Already the current version"`.

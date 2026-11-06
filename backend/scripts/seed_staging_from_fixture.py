@@ -55,12 +55,16 @@ def _delete_owner_nodes(owner):
     """--force cleanup: remove the owner's existing nodes so the seed can
     run on a staging DB that already saw some activity (e.g. a test
     thread). Constraint order matters: null the forward continuation
-    links, drop context-artifact pins, then delete children-first."""
+    links, drop context-artifact pins, then delete children-first. The
+    nodes' audio folders go once the rows are gone (the same folders the
+    nightly cleanup deletes, built inside the audio root)."""
+    from backend.utils.audio_storage import delete_folders, node_audio_dirs
     ns = Node.query.filter_by(human_owner_id=owner.id).order_by(
         Node.id.desc()).all()
     if not ns:
         return 0
     ids = [n.id for n in ns]
+    audio_dirs = [d for n in ns for d in node_audio_dirs(n)]
     for n in ns:
         n.continuation_node_id = None
     db.session.flush()
@@ -70,6 +74,11 @@ def _delete_owner_nodes(owner):
     for n in ns:
         db.session.delete(n)
     db.session.commit()
+    audio = delete_folders(audio_dirs)
+    if audio.failed:
+        print(f"  {audio.failed} audio file(s) of the deleted nodes not "
+              f"deleted ({', '.join(audio.errors)}); the nightly cleanup's "
+              f"audio sweep deletes them")
     return len(ns)
 
 
