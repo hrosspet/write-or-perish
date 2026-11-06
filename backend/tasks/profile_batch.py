@@ -38,7 +38,7 @@ from backend.utils.privacy import account_allows_ai
 from backend.utils import refusal_backoff
 from backend.utils.llm_batch import (
     BATCH_JOB_MAX_AGE, batch_submit, batch_check_and_collect,
-    apply_batch_key_override, blocked_items)
+    apply_batch_key_override, batch_ended, blocked_items, list_batches)
 # Module reference, not `from ... import names`: exports imports
 # celery_app, which imports this module to register its tasks. When a
 # web request touches backend.tasks.exports FIRST (e.g. POST
@@ -211,11 +211,71 @@ def _cap_held_users(exclude_ids):
     them in without the eligibility query). A deactivated account stays
     paused (deactivation is the admin's pause switch); a never-activated
     one (a pre-fill waiting for its owner) is resumed."""
+    return _held_users(User.profile_cap_held, exclude_ids)
+
+
+def _held_users(flag, exclude_ids):
     return [u for u in User.query.filter(
-        User.profile_cap_held.is_(True),
+        flag.is_(True),
         User.deleted_at.is_(None),
         or_(User.approved.is_(True), User.deactivated_at.is_(None)),
     ).all() if u.id not in exclude_ids]
+
+
+# ── batch profile work waiting for a later pass (Peter, 2026-11-03) ─────
+# The hourly seeder's cohort leaves out accounts not yet activated (the
+# pre-filled Beta cohort), so profile work that waits for a later pass
+# would wait there until activation: work a full queue sent back, a step
+# or final waiting out a refusal backoff, a window stopped for a day
+# after provider failures, a failed step re-seeded next cycle. As for
+# the spend cap's hold: remember it, and the hourly seeder sends it again
+# for such accounts too, after the same gates (backoff, stops, attempt
+# limits), which this hold leaves exactly as they are.
+
+def _hold_work(user_ids):
+    """Remember that these users' batch profile work waits for a later
+    pass (a full queue, a failed or refused step, a refused merge)."""
+    changed = False
+    for user_id in set(user_ids):
+        u = User.query.get(user_id)
+        if u is not None and not u.profile_work_held:
+            u.profile_work_held = True
+            changed = True
+    if changed:
+        db.session.commit()
+
+
+def _release_work_hold(user, done=False):
+    """Release the hold: ``done`` when the work went out; otherwise only
+    when nothing waits for time to pass (``_work_waits``): a gate that is
+    closed for the backoff hour or a window's provider stop is not
+    "nothing left to do"."""
+    if not user.profile_work_held:
+        return
+    if not done and _work_waits(user):
+        return
+    user.profile_work_held = False
+    db.session.commit()
+
+
+def _work_waits(user):
+    """Whether the user's batch profile work waits for time to pass: the
+    refusal backoff's hour after a first refused output, or a window of
+    the user's set stopped for a day after provider failures. A refusal
+    stop that only a new version lifts is not waiting: the build gave up
+    (the admin column and Sentry show it), and the hold goes."""
+    n, until, _stopped = refusal_backoff.profile_backoff_state(user.id)
+    if n and until is not None and until > datetime.utcnow():
+        return True
+    from backend.tasks import profile_windows
+    return profile_windows.provider_stop_waits(user)
+
+
+def _work_held_users(exclude_ids):
+    """Users whose batch profile work waits for a later pass, outside the
+    hourly cohort, by the cap hold's rule: not deleted, and approved or
+    never deactivated (a deactivated account stays paused)."""
+    return _held_users(User.profile_work_held, exclude_ids)
 
 
 def _model_for(user):
@@ -406,6 +466,15 @@ def _build_next_profile_request(user, allow_chunk=True, chunk_num=1):
     # incremental machinery.
     remaining = _exports.count_remaining_units(user.id, cutoff) if allow_chunk else 0
     if remaining > 0:
+        from backend.tasks import profile_windows
+        if profile_windows.meets_blocked(user.id, cutoff):
+            # A chained chunk would hold a blocked range whole; only the
+            # window path cuts around it (wants_window_build routes the
+            # build there; with the window path switched off nothing is
+            # built). Never sent.
+            logger.warning(f"User {user.id}: the writing after {cutoff} "
+                           f"meets a blocked range; no chained chunk")
+            return None
         cfg = current_app.config["SUPPORTED_MODELS"].get(model_id) or {}
         input_cap = model_input_cap(cfg, DEFAULT_MAX_OUTPUT_TOKENS)
         rho = _exports.tokens_per_unit(user, model_id)
@@ -472,6 +541,11 @@ def _build_next_profile_request(user, allow_chunk=True, chunk_num=1):
                         chunk.get("origin_stats")),
                     "source_data_cutoff": (
                         latest_ts.isoformat() if latest_ts else None),
+                    # The chunk's first entry: where a blocked range
+                    # starts if the provider blocks it.
+                    "earliest": (chunk["earliest_node_created_at"].isoformat()
+                                 if chunk.get("earliest_node_created_at")
+                                 else None),
                     # When the window was rendered: the saved version's
                     # continue-rule boundary (data written after it is
                     # organic growth).
@@ -768,25 +842,47 @@ def _submit_requests(built, keys):
                             b["request"].get("endpoint"))
         items_by_key.setdefault(key, []).append(b["meta"])
 
-    # Provider keys refused for an account reason (llm_batch.SubmittedBatches;
-    # a plain dict from a stand-in has none).
+    # Provider keys refused for an account reason, and refused because the
+    # provider's batch queue or rate limit is full (llm_batch
+    # .SubmittedBatches; a plain dict from a stand-in has neither).
     account_refused = getattr(batch_ids, "account_refused", None) or set()
+    queue_full = getattr(batch_ids, "queue_full", None) or set()
     now = datetime.utcnow()
     submitted = 0
     for provider_key, items in items_by_key.items():
         batch_id = batch_ids.get(provider_key)
         if not batch_id:
             refused = provider_key in account_refused
+            # A full provider queue (Peter, 2026-11-03: "as many accounts
+            # in the queue as the provider allows"): the items wait for
+            # the next seed or advance pass. No batch attempt (which would
+            # move an unpinned user to the full-price path after
+            # MAX_BATCH_ATTEMPTS), no refusal backoff, and no "missing"
+            # outcome for a window set's items (which would stop a window
+            # for a day after three).
+            waiting = provider_key in queue_full
+            if waiting and not _queue_holds_others(provider_key):
+                # Nothing else of ours is queued there: the provider's
+                # limit refuses this submission by itself. A failed
+                # attempt, and an error event, as before the queue rule.
+                waiting = False
+                logger.error(
+                    f"Batch submit for {provider_key} refused on the "
+                    f"provider's queue limit with no other batch of ours "
+                    f"queued: counted as a failed attempt")
             logger.warning(
                 f"Batch submit failed for {provider_key}; "
                 f"{len(items)} item(s) not in flight"
                 + ("; refused for an account reason (reported), "
-                   "not counted as a batch attempt" if refused else ""))
+                   "not counted as a batch attempt" if refused else "")
+                + ("; the provider's batch queue is full, they wait for "
+                   "the next pass (no batch attempt counted)"
+                   if waiting else ""))
             for item in items:
                 u = User.query.get(item["user_id"])
                 if u:
                     u.profile_batch_pending = False
-                    if not refused:
+                    if not (refused or waiting):
                         u.profile_batch_attempts = (
                             (u.profile_batch_attempts or 0) + 1)
             # A window set's items (#545) that never went out are recorded
@@ -795,9 +891,13 @@ def _submit_requests(built, keys):
             # wait), so a refusal that lasts (a spend limit) does not have
             # the whole set rendered again every hour. Nothing to poll, and
             # no collected_at: it does not re-dispatch the advance at once.
+            # Re-seeded next cycle: by the hourly seeder, also for an
+            # account not yet activated (its cohort leaves those out).
+            _hold_work(i["user_id"] for i in items
+                       if i.get("kind") != "intentions")
             set_items = [dict(i, outcome="missing") for i in items
                          if i.get("kind") in SET_ITEM_KINDS]
-            if set_items:
+            if set_items and not waiting:
                 db.session.add(ProfileBatchJob(
                     provider_key=provider_key, batch_id="unsubmitted",
                     status="failed", items=set_items, submitted_at=now))
@@ -811,6 +911,7 @@ def _submit_requests(built, keys):
             if u:
                 u.profile_batch_pending = True
                 u.profile_cap_held = False
+                u.profile_work_held = False
         db.session.commit()
         submitted += len(items)
         logger.info(f"Profile batch {batch_id} ({provider_key}): "
@@ -870,6 +971,17 @@ def _stop_for_policy_block(user, item, code):
     refusal_backoff.record_policy_block(
         user.id, "profile_batch", item.get("model_id"), code,
         f"profile batch {item.get('kind') or 'step'}")
+    if item.get("kind") == "chunk" and item.get("source_data_cutoff"):
+        # The chunk's writing is remembered as a blocked range: a later
+        # build (after the admin's override, on the window path) skips it
+        # (profile_windows.cut_around_blocked).
+        from backend.tasks import profile_windows
+        start, end = profile_windows.blocked_range_of(item)
+        if not item.get("earliest") and item.get("prev_profile_id"):
+            prev = db.session.get(UserProfile, item["prev_profile_id"])
+            start = prev.source_data_cutoff if prev is not None else None
+        profile_windows.record_blocked_range(
+            user.id, start, end, code, item.get("model_id"))
 
 
 def _fail_job(job, reason):
@@ -890,6 +1002,8 @@ def _fail_job(job, reason):
         if u:
             u.profile_batch_pending = False
             u.profile_batch_attempts = (u.profile_batch_attempts or 0) + 1
+            if item.get("kind") != "intentions":
+                u.profile_work_held = True   # re-seeded next cycle
     db.session.commit()
     logger.warning(f"Profile batch {job.batch_id} failed ({reason})")
     _advance_users(advance_users)
@@ -905,6 +1019,25 @@ def _advance_users(user_ids):
         except Exception as e:
             logger.error(f"Dispatching the profile window advance for user "
                          f"{user_id} failed: {type(e).__name__}")
+
+
+def _queue_of(provider_key):
+    """The provider queue a batch waits in: "anthropic", or the OpenAI
+    model (its enqueued-token limit is per model, whatever the endpoint)."""
+    key = provider_key or ""
+    return key[:-len(":responses")] if key.endswith(":responses") else key
+
+
+def _queue_holds_others(provider_key, exclude_job_id=None):
+    """Whether another profile batch of ours is pending in the same
+    provider queue. A queue-full refusal is waited out only then: with
+    nothing else of ours queued, the batch is larger than the limit by
+    itself (an OpenAI batch over the model's enqueued-token limit), and
+    waiting would never end, so it counts as a failed attempt and shows,
+    as before the queue-full rule (review of #596)."""
+    queue = _queue_of(provider_key)
+    return any(j.id != exclude_job_id and _queue_of(j.provider_key) == queue
+               for j in ProfileBatchJob.query.filter_by(status="pending"))
 
 
 def _clear_stuck_pending():
@@ -973,6 +1106,9 @@ def _seed_profile_batches(users=None, ignore_backoff=False,
         # lifts: a pre-filled account not yet activated is outside the
         # eligible cohort, and its build started from an immediate seed.
         users += _cap_held_users({u.id for u in users})
+        # Plus the profile work waiting for a later pass (a full queue, a
+        # refusal backoff, a stop), by the same rule (Peter, 2026-11-03).
+        users += _work_held_users({u.id for u in users})
     for user in users:
         if user.profile_batch_pending:
             continue
@@ -1014,6 +1150,7 @@ def _seed_profile_batches(users=None, ignore_backoff=False,
         if not _should_seed(user,
                             ignore_backoff=ignore_backoff or imports_done):
             _release_cap_hold(user)   # nothing (left) to resume
+            _release_work_hold(user)
             continue
         try:
             # A build that plans into two or more chunks, or the next step
@@ -1048,6 +1185,7 @@ def _seed_profile_batches(users=None, ignore_backoff=False,
             _hold_for_cap(user)   # the builder's own check blocked them
         else:
             _release_cap_hold(user)
+            _release_work_hold(user)
     return _submit_requests(built, keys)
 
 
@@ -1114,18 +1252,53 @@ def _poll_profile_batches():
     keys = apply_batch_key_override(
         get_api_keys_for_usage(config, 'chat'), config)
     next_built = []
-    for job in ProfileBatchJob.query.filter_by(status="pending").all():
+    jobs = ProfileBatchJob.query.filter_by(status="pending").all()
+    now = datetime.utcnow()
+    live = [j for j in jobs if now - j.submitted_at <= BATCH_STALE_AFTER]
+    # Every pending job's status from the providers' list endpoints, many
+    # per call (Peter, 2026-11-03: "I just don't want to spam them with
+    # querying for results thousands of times per minute"); a job the
+    # listing does not show is polled on its own, as before.
+    listed = list_batches(
+        [(j.provider_key, j.batch_id) for j in live], keys,
+        oldest=min((j.submitted_at for j in live), default=None)) \
+        if live else {}
+    for job in jobs:
         if datetime.utcnow() - job.submitted_at > BATCH_STALE_AFTER:
             _fail_job(job, "stale")
             continue
+        batch = listed.get(job.batch_id)
         try:
-            results, still_pending, _ = batch_check_and_collect(
-                {job.provider_key: job.batch_id}, keys)
+            if batch is None:
+                results, still_pending, _ = batch_check_and_collect(
+                    {job.provider_key: job.batch_id}, keys)
+            elif not batch_ended(job.provider_key, batch):
+                continue  # not ended yet, and no call made for it
+            else:
+                results, still_pending, _ = batch_check_and_collect(
+                    {job.provider_key: job.batch_id}, keys,
+                    known={job.batch_id: batch})
         except Exception as e:
             logger.warning(f"Poll failed for batch {job.batch_id}: {e}")
             continue
         if job.provider_key in still_pending:
             continue  # not ended yet
+        # The batch failed only because the provider's queue was full
+        # (OpenAI's enqueued-token limit): its items wait for the next
+        # pass, with no attempt counted (Peter, 2026-11-03).
+        queue_full = job.provider_key in (
+            getattr(results, "queue_full", None) or ())
+        if queue_full and not _queue_holds_others(job.provider_key, job.id):
+            # Nothing else of ours is queued for that model: the batch is
+            # over the enqueued-token limit by itself and would fail on
+            # every pass. Its items fail as before the queue rule (an
+            # attempt counted; a window stops after three), and it shows.
+            queue_full = False
+            logger.error(
+                f"Profile batch {job.batch_id} ({job.provider_key}) failed "
+                f"on the enqueued-token limit with no other batch of ours "
+                f"queued: the batch is larger than the limit; its items "
+                f"count as failed")
         # An admin "Cancel batch" may have landed while the provider call
         # above was in flight: re-read the row, and never collect (or
         # overflow-resubmit) a job that is no longer pending.
@@ -1183,10 +1356,19 @@ def _poll_profile_batches():
             if item["custom_id"] in blocked:
                 _stop_for_policy_block(user, item, blocked[item["custom_id"]])
                 continue
+            if result is None and queue_full:
+                # Nothing ran: the next seed pass builds the step again
+                # (the hold brings in an account not yet activated). No
+                # batch attempt, so no full-price fallback.
+                user.profile_batch_pending = False
+                user.profile_work_held = True
+                db.session.commit()
+                continue
             if result is None:
                 user.profile_batch_attempts = (
                     user.profile_batch_attempts or 0) + 1
                 user.profile_batch_pending = False
+                user.profile_work_held = True   # re-seeded next cycle
                 db.session.commit()
                 logger.warning(
                     f"Batch item failed for user {user.id} "
@@ -1202,9 +1384,12 @@ def _poll_profile_batches():
                 # Counts as a failed attempt like a provider-side error:
                 # the step produced nothing, retries stay bounded, and
                 # the progress endpoint reports the chain as failed.
+                # Re-seeded after the refusal backoff, also for an account
+                # not yet activated.
                 user.profile_batch_attempts = (
                     user.profile_batch_attempts or 0) + 1
                 user.profile_batch_pending = False
+                user.profile_work_held = True
                 db.session.commit()
                 continue
             if nxt:
@@ -1229,10 +1414,29 @@ def _poll_profile_batches():
         advance_users = set()
         if set_items:
             from backend.tasks import profile_windows
-            advance_users = profile_windows.collect(job, set_items, results)
-        job.status = "collected"
+            advance_users = profile_windows.collect(
+                job, set_items, results, queue_full=queue_full)
+        if queue_full:
+            logger.warning(
+                f"Profile batch {job.batch_id} ({job.provider_key}) failed "
+                f"on the provider's full queue: {len(job.items or [])} "
+                f"item(s) wait for the next pass, no attempt counted")
+        job.status = "failed" if queue_full else "collected"
         job.collected_at = datetime.utcnow()
         db.session.commit()
+        if queue_full and set_items:
+            # Nothing of these window sets is in flight any more (unless a
+            # user has another job pending): clear the flag as the chained
+            # branch does, so "Build profile" and an import's seed are not
+            # held, and the hourly R7 clean-up has nothing to report.
+            from backend.tasks import profile_windows
+            for user_id in {i["user_id"] for i in set_items}:
+                u = User.query.get(user_id)
+                if u is not None:
+                    u.profile_batch_pending = bool(
+                        profile_windows.inflight_items(user_id))
+                    u.profile_work_held = True
+            db.session.commit()
         _advance_users(advance_users)
 
     _submit_requests(next_built, keys)

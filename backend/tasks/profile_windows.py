@@ -25,14 +25,28 @@ out one Batch round trip at a time. Instead:
 - Later updates of such a profile add windows to the same set and redo
   only the newest group and the final.
 
-Which models read the writing (Peter, 2026-11-05):
+A from-scratch build that fits ONE chunk on the user's chat model takes
+this path too where its provider's PROFILE_ONE_CHUNK_WINDOW_* is on
+(Peter, 2026-11-03; both on by default): its writing is read as a window
+version with the events paragraph, and a final rewrites that version as
+the profile with the single-version integration prompt
+(exports.single_integration_messages). Two Batch rounds, one after the
+other. Later updates are the set's, as for a large build.
 
-- A pass with more than one window to read: the version and merge models
-  of the provider of the user's chat model (Haiku 5.5 and Opus 5.5, or
-  GPT-6 Luna and GPT-6.1 Sol at high effort), unless every entry the
-  build can read is public (a pre-fill, the lab) or the user agreed to
-  both providers (User.profile_both_providers): then GPT-6 Luna writes the
-  versions and Opus 5.5 merges them (``profile_models_for``).
+Which models read the writing (Peter, 2026-11-05), chosen per pass
+(``pass_models``):
+
+- A from-scratch build that fits one window on the user's chat model,
+  writing that may reach only the user's provider: the chat model reads
+  the window and writes the final (``one_window_pass``,
+  ``single_models_for``).
+- More than one window, writing that may reach only the user's provider:
+  the version and merge models of the provider of the user's chat model
+  (Haiku 5.5 and Opus 5.5, or GPT-6 Luna and GPT-6.1 Sol at high effort).
+- Every entry the build can read is public (a pre-fill, the lab) or the
+  user agreed to both providers (User.profile_both_providers): GPT-6 Luna
+  writes the versions and Opus 5.5 merges them, whatever the number of
+  windows (``profile_models_for`` with ``cross``).
 - A regular update of a merged set, one window to read: the user's chat
   model writes a chained update of the set's newest profile (the update
   prompt, as main's chained path), which stands in the window's place, and
@@ -69,13 +83,14 @@ from sqlalchemy.orm import defer
 
 from backend.celery_app import celery, flask_app
 from backend.extensions import db
-from backend.models import User, UserProfile, ProfileBatchJob, Node
+from backend.models import (
+    User, UserProfile, ProfileBatchJob, ProfileBlockedRange, Node)
 from backend.llm_providers import (
     DEFAULT_MAX_OUTPUT_TOKENS, LLMProvider, EmptyTruncatedOutputError,
     model_input_cap)
 from backend.utils.chunk_plan import (
-    UPDATE_THRESHOLD_UNITS, max_units_for_cap, next_window_budget,
-    plan_chunks)
+    CHUNK_TARGET_UNITS, UPDATE_THRESHOLD_UNITS, max_units_for_cap,
+    next_window_budget, plan_chunks)
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.error_privacy import describe_exception
 from backend.utils.hidden_rows import WritingOnHold, writing_on_hold
@@ -105,11 +120,19 @@ CONTENT_FAILURES = ("refused", "invalid", "truncated")
 PROVIDER_FAILURES = ("missing", "error")
 # The provider's content-policy filter blocked the item (an error code in
 # llm_batch.OPENAI_POLICY_BLOCK_CODES, e.g. bio_policy; Peter,
-# 2026-11-04). Neither a content nor a provider failure: it is never
-# retried, never waits out a stop, and it stops the account's whole
-# build (refusal_backoff.policy_block_for) until the admin's confirmed
-# Build profile lifts the stop.
+# 2026-11-04). Neither a content nor a provider failure, and never sent
+# again automatically. A blocked WINDOW is skipped: a window_skip row
+# takes its place and the build goes on over the other windows (Peter,
+# 2026-11-04: "skip the flagged windows, but finish their profile"), and
+# its range is remembered for good (ProfileBlockedRange), so every later
+# window plan cuts around it (cut_around_blocked). A
+# blocked GROUP or FINAL cannot be skipped: it stops the account's build
+# (refusal_backoff.policy_block_for) until the admin's confirmed Build
+# profile lifts the stop.
 POLICY_BLOCKED = "blocked"
+# The cost row's request type of a skipped window's block: a $0 record of
+# the block that is not one of PROFILE_REQUEST_TYPES, so it stops nothing.
+WINDOW_BLOCK_REQUEST_TYPE = "profile_window"
 
 # ── Heuristics (named here, flagged in the PR) ────────────────────────────
 # How far back the attempt history reaches. Long enough to span a batch's
@@ -161,13 +184,32 @@ FIT_SAFETY = 0.97
 HOLD_NOTE = "Waiting for spend headroom"
 STOP_NOTE = "Stopped: a profile chunk failed at the provider"
 MERGE_STOP_NOTE = "Stopped: a profile merge is over the merge model's cap"
+NOTHING_READ_NOTE = ("Stopped: every window of the profile build was given "
+                     "up; no profile from it")
 POLICY_STOP_NOTE = "Stopped: the provider's policy filter blocked"
+POLICY_SKIP_NOTE = "Skipped window"
 
 
 def enabled():
     """The kill switch (PROFILE_INDEPENDENT_VERSIONS). An app config
     without the key (the unit tests' bare apps) has it off."""
     return bool(current_app.config.get("PROFILE_INDEPENDENT_VERSIONS", False))
+
+
+def one_chunk_windows(user):
+    """Whether a from-scratch build of this user that fits one chunk on
+    their chat model takes the window path (a window version with the
+    events paragraph, then the single-version integration) rather than
+    main's one chained call: PROFILE_ONE_CHUNK_WINDOW_<PROVIDER> of the
+    provider of the user's chat model. It decides the path only; the
+    models come from ``pass_models``. An app config without the key has
+    it off, as has a provider without profile models."""
+    supported = current_app.config.get("SUPPORTED_MODELS") or {}
+    provider = (supported.get(_batch._model_for(user)) or {}).get("provider")
+    if provider not in ("anthropic", "openai"):
+        return False
+    return bool(current_app.config.get(
+        f"PROFILE_ONE_CHUNK_WINDOW_{provider.upper()}", False))
 
 
 def _setting(key, default):
@@ -226,8 +268,24 @@ def chained_models_for(user):
                   chained=True)
 
 
+def single_models_for(user):
+    """A from-scratch build that fits one window on the user's chat model,
+    over writing that may reach only the user's provider: the chat model
+    reads the window, with the events paragraph, and rewrites that version
+    as the profile with the single-version prompt. Peter, 2026-11-05: "for
+    1 window updates on prod I'd like to use the chained version we just
+    tested, with user preferred model producing both the version and the
+    merge"; 2026-11-03: "the events paragraph is definitely needed" and
+    "then we need one more step to convert it into the final profile". No
+    reasoning-effort parameter on an OpenAI chat model, as for the merges
+    after a regular update (the live replies send none)."""
+    chat_model = _batch._model_for(user)
+    return Models(_users_provider(user), chat_model, chat_model)
+
+
 def profile_models_for(user, cross=False):
-    """The version and merge models for a pass with more than one window.
+    """The version and merge models for a pass with more than one window,
+    and with ``cross`` for any window pass that is not a regular update.
     By default the settings of the provider of the user's chat model
     (``default_model_for``): each must be that provider's model, anything
     else raises, so a user's writing never reaches another provider (also
@@ -489,8 +547,12 @@ def set_state(user, set_id, base, history=None, now=None):
     when the last window was rendered (the continue rule, a build cut by
     the render budget or a restart), or the 80k gate's worth of new
     writing (an update), or anything at all on a set with no windows yet.
-    A range with nothing to read in it is not missing. A range whose
-    window failed at the provider too often waits (``stopped``)."""
+    The 80k gate does not apply to a provisional set (it covers less than
+    one full chunk, ``exports.profile_is_provisional``: a small one-window
+    build): the provisional ladder rebuilds it from scratch instead, as it
+    does a chained provisional profile. A range with nothing to read in it
+    is not missing. A range whose window failed at the provider too often
+    waits (``stopped``)."""
     history = attempt_history(user.id, now) if history is None else history
     inflight = [i for i in inflight_items(user.id) if i.get("set") == set_id]
     windows = set_windows(user.id, set_id)
@@ -521,9 +583,11 @@ def set_state(user, set_id, base, history=None, now=None):
         ranges.append((cursor, None))
     else:
         last = entries[-1]
+        provisional = (last.cumulative or 0) < CHUNK_TARGET_UNITS
         if (_unread_before(user, last.cutoff, last.rendered_at)
-                or _exports.count_remaining_units(user.id, cursor)
-                >= UPDATE_THRESHOLD_UNITS):
+                or (not provisional
+                    and _exports.count_remaining_units(user.id, cursor)
+                    >= UPDATE_THRESHOLD_UNITS)):
             ranges.append((cursor, None))
     for start, end in ranges:
         units = (_exports.count_remaining_units(
@@ -572,15 +636,55 @@ def chained_update_base(user, state, fresh):
     return base if k == 1 else None
 
 
+def _fits_one_chat_window(user, units):
+    """Whether ``units`` of writing plan into one chunk on the user's chat
+    model, as the chained path plans it (and wants_window_build)."""
+    chat_model = _batch._model_for(user)
+    k, _size = plan_chunks(units, max_units=max_units_for_cap(
+        _cap(chat_model), _exports.tokens_per_unit(user, chat_model)))
+    return k == 1
+
+
+def one_window_pass(user, state):
+    """Whether this pass belongs to a from-scratch build (no base) that
+    fits one window on the user's chat model: all its writing is still to
+    read and plans into one chunk on the chat model (the window pass), or
+    its one window is saved or in flight, starts at the first writing,
+    covers no more than one such chunk, and nothing more is to read (the
+    final). The count comes from the chat model, as wants_window_build
+    decides the path, so the window is sized for the chat model too. A
+    build of more, or one that a blocked range cut into several windows,
+    is not one."""
+    if state.base is not None:
+        return False
+    if not state.entries:
+        if len(state.due) != 1:
+            return False
+        start, end, units = state.due[0]
+        return (start is None and end is None
+                and _fits_one_chat_window(user, units))
+    if len(state.entries) != 1 or state.due:
+        return False
+    entry = state.entries[0]
+    return (entry.start is None
+            and _fits_one_chat_window(user, entry.cumulative or 0))
+
+
 def pass_models(user, state, chained_base, cross):
-    """The models of this pass: the user's chat model for a regular update
-    (``chained_base``) and for the merges after one (the set's last window
-    is a chained version), else the version and merge models of
-    ``profile_models_for``."""
+    """The models of this pass (Peter, 2026-11-05): the user's chat model
+    for a regular update (``chained_base``) and for the merges after one
+    (the set's last window is a chained version); the chat model for both
+    steps of a from-scratch build that fits one window on it, unless the
+    writing may reach both providers (``one_window_pass``); else the
+    version and merge models of ``profile_models_for``: the user's
+    provider's pair, or Luna and Opus for public-only writing or a user
+    who agreed to both providers, whatever the number of windows."""
     if chained_base is not None or (
             not state.due and state.windows
             and state.windows[-1].generation_type == CHAINED_TYPE):
         return chained_models_for(user)
+    if not cross and one_window_pass(user, state):
+        return single_models_for(user)
     return profile_models_for(user, cross=cross)
 
 
@@ -592,6 +696,7 @@ class MergePlan:
     final_inputs: list = None                        # None: not due
     user_version: object = None
     waiting: bool = False                            # something in flight
+    nothing_read: bool = False                       # every input skipped
 
 
 def _group_size():
@@ -679,7 +784,10 @@ def merge_plan(user, state, grouped=None):
     than every member; a slice of one window is not merged. The final is
     due when every window is in, every group is current, nothing of the
     set is in flight, and the set has no final yet over these same inputs
-    and the same version of the user's."""
+    and the same version of the user's. A final whose inputs are all
+    skipped windows (a one-window build whose window was given up) is not
+    sent: there is nothing to merge, and a merge of the skip note alone
+    would be saved as the user's profile (``nothing_read``)."""
     plan = MergePlan()
     from backend.utils.profile_versions import latest_set_final
     final = latest_set_final(user.id, state.set_id)
@@ -733,6 +841,9 @@ def merge_plan(user, state, grouped=None):
     version = user_version_for(user, state.set_id, windows)
     inputs = ([base] if base is not None else []) + mid
     inputs = _with_user_version(inputs, version, base)
+    if all(p.generation_type == "window_skip" for p in inputs):
+        plan.nothing_read = True
+        return plan
     tip = windows[-1]
     if (final is not None and final.parent_profile_id == tip.id
             and final.merged_profile_id == (version.id if version else None)
@@ -743,7 +854,15 @@ def merge_plan(user, state, grouped=None):
     return plan
 
 
+def single_version(inputs):
+    """Whether a merge's inputs are one window version and nothing else
+    (no base, no version of the user's): a one-window set's final."""
+    return len(inputs) == 1 and inputs[0].generation_type == "window"
+
+
 def _merge_messages(user, inputs):
+    if single_version(inputs):
+        return _exports.single_integration_messages(user.id, inputs[0])
     return _exports._integration_messages(user.id, inputs, independent=True)
 
 
@@ -786,8 +905,12 @@ def wants_window_build(user):
     profile adds windows and re-merges), else when the remainder after the
     update base (all the writing, for a full rebuild) plans into two or
     more chunks on the user's chat model, as the chained pipeline plans
-    it. A build that fits one chunk, and a chained update that does, take
-    the chained path unchanged."""
+    it. A from-scratch build (no update base) that fits one chunk is a
+    window set too where its provider's switch is on
+    (``one_chunk_windows``); else it takes the chained path, as does a
+    chained update that fits one chunk, unchanged. A remainder that meets
+    a blocked range always takes the window path, the only one that cuts
+    around it."""
     if not enabled() or not account_allows_ai(user):
         return False
     if inflight_items(user.id):
@@ -796,13 +919,20 @@ def wants_window_build(user):
             else _exports.profile_update_base(user.id))
     if prev is not None and prev.generation_type in WINDOW_TYPES:
         return True
+    if meets_blocked(user.id, prev.source_data_cutoff
+                     if prev is not None else None):
+        # Only the window path cuts around a blocked range; a chained
+        # chunk would hold it whole.
+        return True
     chat_model = _batch._model_for(user)
     cap = _cap(chat_model)
     rho = _exports.tokens_per_unit(user, chat_model)
     remaining = _exports.count_remaining_units(
         user.id, prev.source_data_cutoff if prev is not None else None)
     k, _size = plan_chunks(remaining, max_units=max_units_for_cap(cap, rho))
-    return k >= 2
+    if k >= 2:
+        return True
+    return k == 1 and prev is None and one_chunk_windows(user)
 
 
 # ── the spend estimate ────────────────────────────────────────────────────
@@ -1086,9 +1216,12 @@ def _render_windows(user, state, models, sub, history, deadline,
                     chained_base=None):
     """Plan and render every due range into window requests, oldest
     first, exactly as the chain loop sizes its chunks, but at the version
-    model's cap. Returns "partial" when the render budget ran out (the
-    rendered windows are submitted and a new task renders the rest), else
-    None.
+    model's cap. A due range is first cut around the user's blocked
+    ranges (``cut_around_blocked``): a window ends where a blocked range
+    starts, the next begins where it ends, and the blocked range itself
+    gets a window_skip row without a request. Returns "partial" when the
+    render budget ran out (the rendered windows are submitted and a new
+    task renders the rest), else None.
 
     With ``chained_base`` (a regular update, chained_update_base) the one
     window is a chained update of that profile: the update prompt over the
@@ -1107,120 +1240,163 @@ def _render_windows(user, state, models, sub, history, deadline,
     planned = sum(plan_chunks(units, max_units=max_units)[0]
                   for _s, _e, units in state.due)
     total = len(state.windows) + len(state.windows_in_flight) + planned
+    blocked = blocked_ranges(user.id)
     n = 0
     for rng in list(state.due):
         start, end, _units = rng
-        cur = start
         cumulative, stats = _cumulative_before(state, start)
         rendered = False
-        while True:
-            remaining = (_exports.count_remaining_units(
-                user.id, cur, created_before=_after(end))
-                if end is not None else
-                _exports.count_remaining_units(user.id, cur))
-            if remaining <= 0:
-                break
-            _k, _size, budget = next_window_budget(
-                remaining, max_units=max_units)
-            rendered_at = datetime.utcnow()
-
-            def _prompt(chunk):
-                if chained_base is not None:
-                    return _exports.build_chunk_prompt(
-                        update_template, base_content,
-                        chained_base.source_tokens_used or 0, chunk,
-                        chained_base.source_origin_stats)
-                return template.replace(
-                    "{user_export}", _exports.chunk_content_for_prompt(chunk))
-
-            if not sub.may_reach(provider, user.id):
-                # A no given while the pass rendered: not even the window's
-                # token count goes to the other provider.
-                return None
-            fitted = fit_window(user, models.version, keys, cap, cur,
-                                budget, end, _prompt, rho)
-            if fitted is None:
-                if not rendered:
-                    # Units are counted in the range but nothing in it
-                    # renders (for example threads holding only a system
-                    # prompt, or tombstones): it is covered, so the set
-                    # can complete and its final go out.
-                    logger.info("User %s: profile set %s: the range %s..%s "
-                                "counts %s units but renders nothing; "
-                                "counted as covered", user.id, state.set_id,
-                                _iso(start) or "start", _iso(end) or "end",
-                                remaining)
-                    state.due.remove(rng)
-                break
-            rendered = True
-            chunk, prompt, tokens, fits = fitted
-            cutoff = chunk["latest_node_created_at"]
-            units = chunk["unit_count"]
-            cumulative += units
-            stats = _exports.merge_origin_stats(
-                stats, chunk.get("origin_stats"))
-            key = _attempt_key("window", _iso(cur))
-            attempts = len(history.get(key, ()))
-            n += 1
-            meta = {
-                "user_id": user.id, "kind": "window", "set": state.set_id,
-                "base_id": state.base.id if state.base is not None else None,
-                "n": n, "total": None if chained_base is not None else total,
-                "attempt": attempts + 1,
-                "start": _iso(cur), "cutoff": _iso(cutoff),
-                "earliest": _iso(chunk.get("earliest_node_created_at")),
-                "units": units, "cumulative": cumulative,
-                "origin_stats": stats, "rendered_at": _iso(rendered_at),
-                "model_id": models.version,
-                "generation_type": ("window" if chained_base is None
-                                    else CHAINED_TYPE),
-            }
-            if chained_base is not None:
-                meta["chained_base_id"] = chained_base.id
-            if not fits:
-                # One entry larger than the version model's cap: never cut,
-                # never sent across the cap's price tier. Given up, loudly.
-                _save_skip(user, meta)
+        for is_blocked, piece_start, piece_end in cut_around_blocked(
+                start, end, blocked):
+            if is_blocked:
+                units = _units_in(user, piece_start, piece_end)
+                if units <= 0:
+                    continue
+                cumulative += units
+                _save_skip(user, {
+                    "user_id": user.id, "kind": "window",
+                    "set": state.set_id,
+                    "base_id": (state.base.id if state.base is not None
+                                else None),
+                    "start": _iso(piece_start), "cutoff": _iso(piece_end),
+                    "earliest": _iso(
+                        piece_start or _exports._first_writing_date(
+                            user.id, piece_end)),
+                    "units": units, "cumulative": cumulative,
+                    "origin_stats": stats,
+                    "rendered_at": _iso(datetime.utcnow()),
+                    "model_id": models.version})
                 sub.skipped += 1
-                _report("Profile window over the version model's cap",
-                        user_id=user.id, set=state.set_id, start=_iso(cur),
-                        end=_iso(cutoff), model=models.version,
-                        tokens=tokens, cap=cap, reason="over cap")
-            elif _count(history, key, CONTENT_FAILURES) >= _content_attempts():
-                # The same window failed twice before, in this set or an
-                # earlier one: give it up without another call.
-                _save_skip(user, meta)
-                sub.skipped += 1
-                _report("Profile window skipped after repeated failures",
-                        user_id=user.id, set=state.set_id,
-                        start=_iso(cur), end=_iso(cutoff),
-                        model=models.version, reason="earlier failures")
-            elif provider_stop_until(history, key) is not None:
-                pass   # waits; the range stays missing
-            else:
-                tag = "w" if chained_base is None else "u"
-                cid = (f"profile_{user.id}_{state.set_id}_{tag}{n}_"
-                       f"{attempts + 1}")
-                meta["custom_id"] = cid
-                sub.add(provider, _request(
-                    models, models.version, cid,
-                    [{"role": "user", "content": [
-                        {"type": "text", "text": prompt}]}]), meta)
-                if sub.stopped:
-                    # A slice was refused at submission, or withdrawn
-                    # before it: nothing rendered after it would go out in
-                    # this run.
+                rendered = True
+                logger.info("User %s: profile set %s: blocked range %s..%s "
+                            "skipped without a request", user.id,
+                            state.set_id, _iso(piece_start) or "start",
+                            _iso(piece_end))
+                continue
+            cur, end_ = piece_start, piece_end
+            while True:
+                remaining = _units_in(user, cur, end_)
+                if remaining <= 0:
+                    break
+                _k, _size, budget = next_window_budget(
+                    remaining, max_units=max_units)
+                rendered_at = datetime.utcnow()
+
+                def _prompt(chunk):
+                    if chained_base is not None:
+                        return _exports.build_chunk_prompt(
+                            update_template, base_content,
+                            chained_base.source_tokens_used or 0, chunk,
+                            chained_base.source_origin_stats)
+                    return template.replace(
+                        "{user_export}",
+                        _exports.chunk_content_for_prompt(chunk))
+
+                if not sub.may_reach(provider, user.id):
+                    # A no given while the pass rendered (#599): not even
+                    # the window's token count goes to the other provider.
                     return None
-            if chained_base is not None:
-                return None
-            cur = cutoff
-            if end is not None and cutoff is not None and cutoff >= end:
-                break
-            if time.monotonic() > deadline:
-                logger.info("User %s: render budget used after %d windows; "
-                            "the rest goes to a new task", user.id, n)
-                return "partial"
+                fitted = fit_window(user, models.version, keys, cap, cur,
+                                    budget, end_, _prompt, rho)
+                if fitted is None:
+                    break
+                rendered = True
+                chunk, prompt, tokens, fits = fitted
+                cutoff = chunk["latest_node_created_at"]
+                units = chunk["unit_count"]
+                cumulative += units
+                stats = _exports.merge_origin_stats(
+                    stats, chunk.get("origin_stats"))
+                key = _attempt_key("window", _iso(cur))
+                attempts = len(history.get(key, ()))
+                n += 1
+                meta = {
+                    "user_id": user.id, "kind": "window",
+                    "set": state.set_id,
+                    "base_id": (state.base.id if state.base is not None
+                                else None),
+                    "n": n,
+                    "total": None if chained_base is not None else total,
+                    "attempt": attempts + 1,
+                    "start": _iso(cur), "cutoff": _iso(cutoff),
+                    "earliest": _iso(chunk.get("earliest_node_created_at")),
+                    "units": units, "cumulative": cumulative,
+                    "origin_stats": stats, "rendered_at": _iso(rendered_at),
+                    "model_id": models.version,
+                    "generation_type": ("window" if chained_base is None
+                                        else CHAINED_TYPE),
+                }
+                if chained_base is not None:
+                    meta["chained_base_id"] = chained_base.id
+                if not fits:
+                    # One entry larger than the version model's cap: never
+                    # cut, never sent across the cap's price tier. Given
+                    # up, loudly.
+                    _save_skip(user, meta)
+                    sub.skipped += 1
+                    _report("Profile window over the version model's cap",
+                            user_id=user.id, set=state.set_id,
+                            start=_iso(cur), end=_iso(cutoff),
+                            model=models.version, tokens=tokens, cap=cap,
+                            reason="over cap")
+                elif (_count(history, key, CONTENT_FAILURES)
+                        >= _content_attempts()):
+                    # The same window failed twice before, in this set or
+                    # an earlier one: give it up without another call.
+                    _save_skip(user, meta)
+                    sub.skipped += 1
+                    _report("Profile window skipped after repeated failures",
+                            user_id=user.id, set=state.set_id,
+                            start=_iso(cur), end=_iso(cutoff),
+                            model=models.version, reason="earlier failures")
+                elif provider_stop_until(history, key) is not None:
+                    pass   # waits; the range stays missing
+                else:
+                    tag = "w" if chained_base is None else "u"
+                    cid = (f"profile_{user.id}_{state.set_id}_{tag}{n}_"
+                           f"{attempts + 1}")
+                    meta["custom_id"] = cid
+                    sub.add(provider, _request(
+                        models, models.version, cid,
+                        [{"role": "user", "content": [
+                            {"type": "text", "text": prompt}]}]), meta)
+                    if sub.stopped:
+                        # A slice was refused at submission, or withdrawn
+                        # before it: nothing rendered after it would go
+                        # out in this run.
+                        return None
+                if chained_base is not None:
+                    # One chained window per pass: a remainder that did
+                    # not fit is chained on this version in the next pass.
+                    return None
+                cur = cutoff
+                if end_ is not None and cutoff is not None and cutoff >= end_:
+                    break
+                if time.monotonic() > deadline:
+                    logger.info("User %s: render budget used after %d "
+                                "windows; the rest goes to a new task",
+                                user.id, n)
+                    return "partial"
+        if not rendered:
+            # Units are counted in the range but nothing in it renders
+            # (for example threads holding only a system prompt, or
+            # tombstones): it is covered, so the set can complete and its
+            # final go out.
+            logger.info("User %s: profile set %s: the range %s..%s counts "
+                        "units but renders nothing; counted as covered",
+                        user.id, state.set_id, _iso(start) or "start",
+                        _iso(end) or "end")
+            state.due.remove(rng)
     return None
+
+
+def _units_in(user, start, end):
+    """Stored units of the writing after ``start`` up to ``end``
+    inclusive (None: to the newest)."""
+    if end is not None:
+        return _exports.count_remaining_units(
+            user.id, start, created_before=_after(end))
+    return _exports.count_remaining_units(user.id, start)
 
 
 def _merge_config_tag():
@@ -1339,10 +1515,12 @@ def next_work(user, keys, deadline, wait_for_imports=True):
     groups whose windows are all in, and the final when everything is.
     Returns "submitted", "partial" (render budget used; the caller hands
     the rest to a new task), "idle", "held", "waiting", "blocked" (a
-    content-policy block stops the account's build) or "failed"."""
+    content-policy block of a group or final stops the account's build) or
+    "failed"."""
     code = _policy_blocked(user)
     if code:
-        # Nothing goes out for this account, not the blocked item and not
+        # A blocked group or final (a blocked window is skipped instead):
+        # nothing goes out for this account, not the blocked merge and not
         # the rest of its set, until the admin's confirmed Build profile
         # lifts the stop (Peter, 2026-11-04).
         _show_policy_stop(user, code)
@@ -1370,10 +1548,25 @@ def next_work(user, keys, deadline, wait_for_imports=True):
                 user, _visible_profile(user.id)) is not None:
             db.session.commit()
     state = set_state(user, set_id, base, history)
+    # Again after the in-flight items are read: the poller may have
+    # collected a blocked item since the check at the top. It commits the
+    # block's row before the job stops being pending, so a blocked item
+    # that set_state no longer sees in flight is seen here, and its range
+    # or final is not rendered again (review of #596).
+    code = _policy_blocked(user)
+    if code:
+        _show_policy_stop(user, code)
+        return POLICY_BLOCKED
     plan = (MergePlan() if merge_stopped(user)
             else merge_plan(user, state))
     if not (state.due or state.stopped or plan.groups
             or plan.final_inputs is not None):
+        if plan.nothing_read and not (user.profile_seed_error or "").startswith(
+                NOTHING_READ_NOTE):
+            # Shown in the admin Profile column; the skip itself was
+            # reported to Sentry. The next saved version clears it.
+            user.profile_seed_error = NOTHING_READ_NOTE
+            db.session.commit()
         return "idle"
     # The models of this pass and the providers the writing may reach
     # (Peter, 2026-11-05).
@@ -1451,30 +1644,197 @@ def _policy_blocked(user):
         user.id, refusal_backoff.PROFILE_REQUEST_TYPES)
 
 
+def _span(item):
+    return f"{item.get('start') or 'start'}..{item.get('cutoff') or 'end'}"
+
+
 def _policy_note(item, code):
-    """The admin Profile column's note for a blocked item: which window,
-    group or final, and the code."""
-    span = f"{item.get('start') or 'start'}..{item.get('cutoff') or 'end'}"
-    what = {"window": "window", "group": "group merge",
-            "final": "final merge"}.get(item.get("kind"), "request")
-    return (f"{POLICY_STOP_NOTE} {what} {span} ({code}); no automatic "
-            f"resend, Build profile with the override sends it again")[:255]
+    """The admin Profile column's note for a blocked group or final."""
+    what = {"group": "group merge", "final": "final merge"}.get(
+        item.get("kind"), "request")
+    return (f"{POLICY_STOP_NOTE} {what} {_span(item)} ({code}); no "
+            f"automatic resend, Build profile with the override sends it "
+            f"again")[:255]
+
+
+def _skip_note(item, code):
+    """The admin Profile column's note for a skipped window."""
+    return (f"{POLICY_SKIP_NOTE} {_span(item)}: provider policy block "
+            f"({code})")[:255]
+
+
+def record_blocked_range(user_id, start, end, code, model_id=None):
+    """Remember, for good, that the writing after ``start`` (None: from
+    the first writing) up to ``end`` was blocked: every later window plan
+    cuts around it (``cut_around_blocked``). Recorded whatever the
+    account's AI usage. Once per range. Commits."""
+    if end is None:
+        return None
+    row = ProfileBlockedRange.query.filter_by(
+        user_id=user_id, range_start=start, range_end=end,
+        lifted_at=None).first()
+    if row is None:
+        row = ProfileBlockedRange(user_id=user_id, range_start=start,
+                                  range_end=end, code=code or "unknown",
+                                  model_id=model_id)
+        db.session.add(row)
+        db.session.commit()
+    return row
+
+
+def blocked_range_of(item):
+    """(start, end) of the writing a blocked window or chunk held: from
+    just before its earliest entry (the item's ``earliest``) to its
+    cutoff, so writing imported later before that entry, which was never
+    sent, is read by the next plan. An item without ``earliest`` (sent
+    before it was recorded) falls back to its start."""
+    earliest = _dt(item.get("earliest"))
+    start = (earliest - timedelta(microseconds=1) if earliest is not None
+             else _dt(item.get("start")))
+    return start, _dt(item.get("cutoff") or item.get("source_data_cutoff"))
+
+
+def meets_blocked(user_id, start, end=None):
+    """Whether the writing after ``start`` (None: from the first writing)
+    up to ``end`` (None: the newest) meets a blocked range not lifted."""
+    for r_start, r_end in blocked_ranges(user_id):
+        a, b = _max_start(start, r_start), _min_end(end, r_end)
+        if a is None or a < b:
+            return True
+    return False
+
+
+def remainder_meets_blocked(user):
+    """Whether the writing the user's next build reads (after the update
+    base; all of it for a full rebuild) meets a blocked range: such a
+    build must take the window path, which cuts around it."""
+    prev = (None if user.profile_needs_full_regen
+            else _exports.profile_update_base(user.id))
+    return meets_blocked(
+        user.id, prev.source_data_cutoff if prev is not None else None)
+
+
+def blocked_ranges(user_id):
+    """[(start, end)] of the user's blocked ranges not lifted, by start."""
+    rows = (ProfileBlockedRange.query
+            .with_entities(ProfileBlockedRange.range_start,
+                           ProfileBlockedRange.range_end)
+            .filter(ProfileBlockedRange.user_id == user_id,
+                    ProfileBlockedRange.lifted_at.is_(None)).all())
+    return sorted(((s, e) for s, e in rows),
+                  key=lambda r: (r[0] or datetime.min, r[1]))
+
+
+def lift_blocked_ranges(user_id):
+    """Let the user's blocked ranges be read again: the next window plan
+    sends that writing to the provider once more. The one way to resend a
+    blocked window, from a shell only: no button does it (Peter,
+    2026-11-04, skip the flagged windows). Returns how many were
+    lifted. Commits."""
+    n = ProfileBlockedRange.query.filter(
+        ProfileBlockedRange.user_id == user_id,
+        ProfileBlockedRange.lifted_at.is_(None)).update(
+        {ProfileBlockedRange.lifted_at: datetime.utcnow()},
+        synchronize_session=False)
+    db.session.commit()
+    return n
+
+
+def _max_start(a, b):
+    """The later of two range starts, None standing for the first
+    writing."""
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return max(a, b)
+
+
+def _min_end(a, b):
+    """The earlier of two range ends, None standing for the newest
+    writing."""
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return min(a, b)
+
+
+def cut_around_blocked(start, end, ranges):
+    """The range (start, end] (start None: from the first writing; end
+    None: to the newest) cut around the blocked ``ranges`` [(start, end)],
+    as [(blocked, piece_start, piece_end)] in order: a piece to read ends
+    where a blocked range starts, the blocked piece is exactly the overlap,
+    and the next piece to read begins where it ends."""
+    pieces, lo = [], start
+    for r_start, r_end in sorted(ranges,
+                                 key=lambda r: (r[0] or datetime.min, r[1])):
+        a, b = _max_start(lo, r_start), _min_end(end, r_end)
+        if a is not None and not a < b:
+            continue   # no overlap
+        if a is not None and (lo is None or a > lo):
+            pieces.append((False, lo, a))
+        pieces.append((True, a, b))
+        lo = b
+        if end is not None and lo >= end:
+            return pieces
+    pieces.append((False, lo, end))
+    return pieces
+
+
+def skip_blocked_window(user, item, code, report=True):
+    """A window the provider's content-policy filter blocked: its range is
+    remembered for good (``record_blocked_range``, also for an account
+    whose AI usage is off), a window_skip row takes its place, so the
+    set's other windows are merged without it, and a $0 record of the
+    block stops nothing (WINDOW_BLOCK_REQUEST_TYPE). No skip row for an
+    account that no longer allows AI, nor for a set the user's own version
+    superseded (as for a window's result); none twice for the same range.
+    Shared by collect() and scripts/backfill_policy_blocks.py. Returns the
+    skip row written, or None."""
+    row = None
+    start = _dt(item.get("start"))
+    record_blocked_range(user.id, *blocked_range_of(item), code,
+                         item.get("model_id"))
+    if (account_allows_ai(user) and item.get("set")
+            and not set_superseded(user, item["set"])
+            and not UserProfile.query.filter(
+                UserProfile.user_id == user.id,
+                UserProfile.window_set == item["set"],
+                UserProfile.covers_start == start,
+                UserProfile.generation_type.in_(WINDOW_TYPES)).first()):
+        # No row of the set starts there yet: a version saved by another
+        # attempt (whatever its cutoff) is kept, never replaced.
+        row = _save_skip(user, item)
+    refusal_backoff.record_policy_block(
+        user.id, WINDOW_BLOCK_REQUEST_TYPE, item.get("model_id"), code,
+        "profile window", report=report)
+    return row
+
+
+def stop_for_blocked_merge(user, item, code, report=True):
+    """A group or final the provider's content-policy filter blocked: it
+    cannot be skipped (it is what makes the profile), so the account's
+    build stops (a PROFILE_REQUEST_TYPES block row) until the admin's
+    confirmed Build profile lifts it. Shared like skip_blocked_window."""
+    refusal_backoff.record_policy_block(
+        user.id, "profile_batch", item.get("model_id"), code,
+        f"profile {item.get('kind')}", report=report)
 
 
 def _show_policy_stop(user, code):
     """Keep the block's note in the admin Profile column: a window of the
     same batch saved after the block clears profile_seed_error. The note
-    names the newest blocked item of the attempt history, else only the
-    code."""
+    names the newest blocked group or final of the attempt history (only
+    those stop the build), else only the code."""
     if (user.profile_seed_error or "").startswith(POLICY_STOP_NOTE):
         return
     blocked = [(when, key) for key, entries in attempt_history(user.id).items()
-               for outcome, when in entries if outcome == POLICY_BLOCKED]
+               for outcome, when in entries
+               if outcome == POLICY_BLOCKED and key[0] in ("group", "final")]
     if blocked:
         _when, key = max(blocked, key=lambda b: b[0])
-        kind = key[0]
-        item = {"kind": kind, "start": key[1],
-                "cutoff": key[2] if len(key) > 2 else None}
+        item = {"kind": key[0], "start": key[1], "cutoff": key[2]}
         note = _policy_note(item, code)
     else:
         note = (f"{POLICY_STOP_NOTE} a profile request ({code}); no "
@@ -1590,6 +1950,9 @@ def advance(user_id, task_id, wait_for_imports=True):
             user.profile_generation_task_dispatched_at = None
             user.profile_batch_pending = bool(inflight_items(user_id))
             db.session.commit()
+            if outcome == "idle":
+                # Nothing of the set is due: no queue-full work waits.
+                _batch._release_work_hold(user)
             if outcome not in ("off", "error", "held", "waiting",
                                POLICY_BLOCKED) and (
                     redispatch or _collected_since(user_id, started)):
@@ -1730,7 +2093,8 @@ def _collect_merge(user, item, result, job, gen_template, history, notes):
         _exports.refuse_truncated_profile(
             user, item["model_id"], response, f"batch {kind}", batch=True,
             problem=_exports.profile_output_problem(
-                response.get("content"), gen_template))
+                response.get("content"), gen_template,
+                final=(kind == "final")))
     except EmptyTruncatedOutputError:
         return "refused"
     start, cutoff = _dt(item.get("start")), _dt(item.get("cutoff"))
@@ -1812,7 +2176,7 @@ def _notify_prefill_set_complete(user, set_id):
         logger.exception(f"User {user.id}: pre-fill-complete notification failed")
 
 
-def collect(job, items, results):
+def collect(job, items, results, queue_full=False):
     """Save the collected results of a job's window, group and final items
     and write each item's outcome back onto the job ("saved", "missing",
     "error", "refused", "invalid", "truncated", "superseded", "dropped"),
@@ -1821,10 +2185,22 @@ def collect(job, items, results):
     after it commits the job.
 
     An item the provider's content-policy filter blocked (``results``'
-    ``blocked``, llm_batch.blocked_items) gets the outcome "blocked": the
-    block is recorded and reported (refusal_backoff.record_policy_block),
-    which stops the account's build, and nothing sends it again on its own
-    (Peter, 2026-11-04)."""
+    ``blocked``, llm_batch.blocked_items) gets the outcome "blocked" and is
+    never sent again on its own; the block is recorded and reported. A
+    window is skipped (``skip_blocked_window``) and the build goes on; a
+    group or final stops the account's build (``stop_for_blocked_merge``;
+    Peter, 2026-11-04).
+
+    ``queue_full``: the batch failed only because the provider's queue was
+    full (Peter, 2026-11-03). Every item gets the outcome "queue_full",
+    which is neither a content nor a provider failure, so nothing is
+    stopped or skipped; nobody is advanced at once (the queue is still
+    full), and the hourly seeder sends the work again."""
+    if queue_full:
+        job.items = [dict(i, outcome="queue_full")
+                     if i.get("kind") in ITEM_KINDS else i
+                     for i in job.items or []]
+        return set()
     outcomes = {}
     users = set()
     by_user = {}
@@ -1864,13 +2240,58 @@ def collect(job, items, results):
                 outcome = "error"
             outcomes[item["custom_id"]] = outcome
         _report_notes(user, notes)
+        if any(outcomes.get(i["custom_id"]) in WAITING_OUTCOMES
+               for i in user_items):
+            # Something of the set waits for a later pass (a retry, the
+            # refusal backoff, a provider stop): the hourly seeder sends
+            # it again also for an account not yet activated.
+            _batch._hold_work([user_id])
     job.items = [dict(i, outcome=outcomes[i["custom_id"]])
                  if i.get("custom_id") in outcomes else i
                  for i in job.items or []]
     return users
 
 
+# Outcomes that leave work of the set for a later pass (a refused merge
+# is "refused" too).
+WAITING_OUTCOMES = CONTENT_FAILURES + PROVIDER_FAILURES
+
+
+def provider_stop_waits(user):
+    """Whether a window, group or final of the user's set waits out a
+    provider stop (a day after three failed submissions,
+    ``provider_stop_until``). Reads metadata only."""
+    if not enabled():
+        return False
+    try:
+        history = attempt_history(user.id)
+        now = datetime.utcnow()
+        if any(key[0] in ("group", "final")
+               and provider_stop_until(history, key, now) is not None
+               for key in history):
+            return True
+        set_id, base, _fresh = resolve_set(user)
+        return bool(set_state(user, set_id, base, history, now).stopped)
+    except Exception:  # pragma: no cover — a hold is never worth a crash
+        logger.exception("User %s: reading the set's stops failed", user.id)
+        return False
+
+
 def _report_notes(user, notes):
+    """After a job's items of one user: Sentry reports and the admin
+    Profile column's note. Notes by weight: a skipped window's, then a
+    provider stop's, then a blocked merge's (which stops the build)."""
+    blocked = notes.get("blocked") or []
+    windows = [(i, c) for i, c in blocked if i.get("kind") == "window"]
+    merges = [(i, c) for i, c in blocked if i.get("kind") != "window"]
+    # Recorded after the user's other items: a window of the same batch
+    # saved after the block would clear the note.
+    skipped = [(item, code) for item, code in windows
+               if skip_blocked_window(user, item, code) is not None]
+    if skipped:
+        item, code = skipped[0]
+        user.profile_seed_error = _skip_note(item, code)
+        db.session.commit()
     for item, problem in notes["skipped"]:
         _report("Profile window skipped after repeated failures",
                 user_id=user.id, set=item.get("set"),
@@ -1890,14 +2311,9 @@ def _report_notes(user, notes):
                 user_id=user.id, set=first.get("set"), windows=len(stopped),
                 start=first.get("start") or "start", end=first.get("cutoff"),
                 model=first.get("model_id"), reason="provider")
-    if notes.get("blocked"):
-        # Recorded after the user's other items: a window of the same
-        # batch saved after the block would clear the note. The block's
-        # note outranks a provider stop's.
-        for item, code in notes["blocked"]:
-            refusal_backoff.record_policy_block(
-                user.id, "profile_batch", item.get("model_id"), code,
-                f"profile {item.get('kind')}")
-        item, code = notes["blocked"][0]
+    for item, code in merges:
+        stop_for_blocked_merge(user, item, code)
+    if merges:
+        item, code = merges[0]
         user.profile_seed_error = _policy_note(item, code)
         db.session.commit()

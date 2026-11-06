@@ -62,6 +62,7 @@ class Corpus:
         self.renders = []
         self.hot = set()   # row timestamps that render 10x their units
         self.silent = set()   # rows that are counted but render nothing
+        self.origin = "loore"   # the rows' origin in the chunk's stats
 
     def add(self, n, units=1000, start=None, step=timedelta(hours=1)):
         start = start or (self.rows[-1][0] + step)
@@ -95,8 +96,8 @@ class Corpus:
                 "latest_node_created_at": picked[-1][0],
                 "earliest_node_created_at": picked[0][0],
                 "node_count": len(picked), "node_ids": set(),
-                "origin_stats": {"loore": {"nodes": len(picked),
-                                           "tokens": total}}}
+                "origin_stats": {self.origin: {"nodes": len(picked),
+                                               "tokens": total}}}
 
 
 class Provider:
@@ -207,6 +208,8 @@ def world(app, monkeypatch):
                         lambda *a, **k: w.provider.submit(*a, **k))
     monkeypatch.setattr(pb, "batch_check_and_collect",
                         lambda *a, **k: w.provider.collect(*a, **k))
+    # The poller's listing shows nothing: each job is polled on its own.
+    monkeypatch.setattr(pb, "list_batches", lambda *a, **k: {})
     # The continue rule on the synthetic corpus: rows after the cutoff
     # that existed when the window was rendered.
     monkeypatch.setattr(pw, "_unread_before", lambda user, cutoff, boundary: (
@@ -829,15 +832,23 @@ def test_refused_submissions_stop_rendering_after_the_third(world):
 
 # ── 9. merges ─────────────────────────────────────────────────────────────
 
+# The coverage of one window of a large build in these fixtures: a Haiku
+# window is about 43k units, a Luna window up to about 108k.
+WINDOW_UNITS = 40_000
+
+
 def _set_of(user, n, set_id="set1", base=None, start=T0, step=None,
-            created=None):
-    """``n`` saved windows of one set, contiguous, a day each."""
+            created=None, units=WINDOW_UNITS):
+    """``n`` saved windows of one set, contiguous, a day each, each
+    covering ``units`` (cumulative coverage, as a large build's windows
+    have: a set below CHUNK_TARGET_UNITS is provisional, and the ladder,
+    not the 80k gate, rebuilds it)."""
     step = step or timedelta(days=1)
     rows, cum = [], (base.source_tokens_used if base else 0)
     prev = base.source_data_cutoff if base else None
     for i in range(n):
         cutoff = start + step * (i + 1)
-        cum += 1000
+        cum += units
         row = UserProfile(
             user_id=user.id, generated_by="claude-haiku-5.5", tokens_used=0,
             generation_type="window", window_set=set_id, covers_start=prev,
@@ -1623,12 +1634,795 @@ def test_the_estimate_for_a_large_anthropic_build(app, world):
     assert pw.estimate_cost_usd(u, state, models, (n, 14_100_000)) == est
 
 
+# ── 14. a from-scratch build that fits one chunk (Peter, 2026-11-03) ──────
+# One window version (with the events paragraph) and one integration of it,
+# where the provider's PROFILE_ONE_CHUNK_WINDOW_* is on. Private writing:
+# the user's chat model for both steps (Peter, 2026-11-05).
+
+def _one_chunk_user(app, **kw):
+    """An OpenAI user with a from-scratch build due, the OpenAI switch on
+    and the shipped merge structure."""
+    app.config["PROFILE_ONE_CHUNK_WINDOW_OPENAI"] = True
+    app.config["PROFILE_MERGE_STRUCTURE"] = "flat"
+    kw.setdefault("profile_needs_full_regen", True)
+    return _user(preferred_model="gpt-6-astra", **kw)
+
+
+def _finals(user):
+    return [f for f in _rows(user, "integration") if f.window_set]
+
+
+def _all_requests(world):
+    return [r for s in world.provider.submits for rs in s.values()
+            for r in rs]
+
+
+def test_a_one_chunk_build_is_one_window_and_its_integration(app, world):
+    world.corpus = Corpus(50)                    # 50k units: one chunk
+    u = _one_chunk_user(app)
+    assert pw.wants_window_build(u)
+    _advance(u)
+    reqs = world.provider.requests()
+    assert len(reqs) == 1 and reqs[0]["api_model"] == "gpt-6-astra"
+    assert ex.EVENTS_IN_WINDOW_PARAGRAPH in (
+        reqs[0]["messages"][0]["content"][0]["text"])
+    assert _items("window")[0]["total"] == 1
+    _poll()
+    windows = _rows(u, "window")
+    assert len(windows) == 1 and windows[0].covers_start is None
+    from backend.routes.dashboard import get_latest_profile
+    assert get_latest_profile(u) is None         # no profile until the final
+    _advance(u)
+    final_reqs = [r for r in _all_requests(world) if "_f_" in r["custom_id"]]
+    assert len(final_reqs) == 1
+    req = final_reqs[0]
+    assert req["api_model"] == "gpt-6-astra"
+    assert req["endpoint"] == "/v1/responses"
+    # No reasoning effort on the chat model, as the live replies send.
+    assert "reasoning_effort" not in req
+    msgs = req["messages"]
+    assert msgs == pw._exports.single_integration_messages(u.id, windows[0])
+    assert len(msgs) == 2
+    label, stored = msgs[0]["content"][0]["text"].split("\n\n", 1)
+    assert label == ("Profile No. 1\n- Covers the writing from 2024-01-01 "
+                     "to 2024-01-03")
+    assert stored == windows[0].get_content()
+    assert DATE_LINE_RE.match(stored)
+    assert msgs[1]["content"][0]["text"] == (
+        pw._exports.single_integration_prompt(u.id))
+    _poll()
+    finals = _finals(u)
+    assert len(finals) == 1
+    f = finals[0]
+    assert (f.window_set, f.parent_profile_id) == (
+        windows[0].window_set, windows[0].id)
+    assert f.generated_by == "gpt-6-astra"
+    assert f.source_tokens_used == windows[0].source_tokens_used == 50_000
+    assert get_latest_profile(u)["id"] == f.id
+    # Done: nothing more goes out.
+    n = len(world.provider.submits)
+    _advance(u)
+    assert len(world.provider.submits) == n
+    # The user's writing reached their own chat model only.
+    assert {r["api_model"] for r in _all_requests(world)} == {"gpt-6-astra"}
+
+
+def test_the_one_chunk_switch_is_per_provider(app, world):
+    world.corpus = Corpus(50)
+    oai = _user(preferred_model="gpt-6-astra", profile_needs_full_regen=True)
+    anth = _user(profile_needs_full_regen=True)
+    # A config without the keys: the chained path for both.
+    assert not pw.wants_window_build(oai)
+    assert not pw.wants_window_build(anth)
+    app.config["PROFILE_ONE_CHUNK_WINDOW_OPENAI"] = True
+    assert pw.wants_window_build(oai) and not pw.wants_window_build(anth)
+    app.config["PROFILE_ONE_CHUNK_WINDOW_ANTHROPIC"] = True
+    assert pw.wants_window_build(anth)
+    app.config["PROFILE_ONE_CHUNK_WINDOW_OPENAI"] = False
+    assert not pw.wants_window_build(oai)
+    # The kill switch turns it off with the rest of the window path.
+    app.config["PROFILE_INDEPENDENT_VERSIONS"] = False
+    assert not pw.wants_window_build(anth)
+
+
+def test_the_shipped_one_chunk_defaults(app, world, monkeypatch):
+    """Both providers on (Peter, 2026-11-03: "yes, we should do the same
+    for Ant"): the seeder hands a one-chunk build of either provider to
+    the window advance instead of a chained chunk."""
+    from backend.config import Config
+    assert Config.PROFILE_ONE_CHUNK_WINDOW_OPENAI is True
+    assert Config.PROFILE_ONE_CHUNK_WINDOW_ANTHROPIC is True
+    for key in ("PROFILE_ONE_CHUNK_WINDOW_OPENAI",
+                "PROFILE_ONE_CHUNK_WINDOW_ANTHROPIC"):
+        app.config[key] = getattr(Config, key)
+    world.corpus = Corpus(50)
+    monkeypatch.setattr(pb._exports, "count_remaining_units",
+                        lambda uid, cutoff=None: world.corpus.count(uid, cutoff))
+    for n, model in enumerate((None, "gpt-6-astra"), 1):
+        u = _user(preferred_model=model, profile_needs_full_regen=True)
+        _seed(u)
+        assert world.provider.submits == []      # no chained chunk
+        assert pw.advance_profile_windows.apply_async.call_count == n
+        db.session.refresh(u)
+        assert u.profile_batch_pending and u.profile_force_batch
+
+
+@pytest.mark.parametrize("units_k, ratio", [
+    (30, 3.1), (31, 3.1), (100, 3.1),
+    (134, 3.1),        # the largest one-chunk build on Opus
+    (40, None),        # the threads prior
+])
+def test_an_anthropic_one_chunk_build_is_one_window_on_the_chat_model(
+        app, world, units_k, ratio):
+    """A build that fits one chunk on the chat model (Opus 5.5, rounded at
+    the planner's 90k target) is one window on Opus and Opus's
+    single-version integration (Peter, 2026-11-05: the user's model
+    writes both), at any size up to that chunk; no Haiku window."""
+    app.config["PROFILE_ONE_CHUNK_WINDOW_ANTHROPIC"] = True
+    app.config["PROFILE_MERGE_STRUCTURE"] = "flat"
+    kw = ({"profile_token_ratio": ratio,
+           "profile_token_ratio_family": "claude_new"} if ratio else {})
+    u = _user(profile_needs_full_regen=True, **kw)
+    world.corpus = Corpus(units_k)
+    # One chunk on the chat model (Opus): the switch decides the path.
+    assert pw.wants_window_build(u)
+    app.config["PROFILE_ONE_CHUNK_WINDOW_ANTHROPIC"] = False
+    assert not pw.wants_window_build(u)
+    app.config["PROFILE_ONE_CHUNK_WINDOW_ANTHROPIC"] = True
+    _advance(u)
+    window_reqs = world.provider.requests()
+    assert len(window_reqs) == 1
+    assert window_reqs[0]["api_model"] == "claude-opus-5-5"
+    assert _items("window")[0]["units"] == units_k * 1000
+    _poll()
+    [row] = _rows(u, "window")
+    _advance(u)
+    final = [r for r in _all_requests(world) if "_f_" in r["custom_id"]]
+    assert len(final) == 1 and final[0]["api_model"] == "claude-opus-5-5"
+    assert final[0]["messages"] == (
+        pw._exports.single_integration_messages(u.id, row))
+    _poll()
+    assert len(_finals(u)) == 1
+    assert {r["api_model"] for r in _all_requests(world)} == {
+        "claude-opus-5-5"}
+
+
+def test_a_build_of_two_chat_model_chunks_takes_the_providers_pair(
+        app, world):
+    """Just above one Opus chunk (136k units round to two) the build has
+    more than one window: Haiku windows at its 100k tier and the Opus
+    merge of several versions (#589's rule for private writing)."""
+    app.config["PROFILE_ONE_CHUNK_WINDOW_ANTHROPIC"] = True
+    app.config["PROFILE_MERGE_STRUCTURE"] = "flat"
+    u = _user(profile_needs_full_regen=True, profile_token_ratio=3.1,
+              profile_token_ratio_family="claude_new")
+    world.corpus = Corpus(136)
+    _finish(world, u)
+    windows = [r for r in _all_requests(world) if "_w" in r["custom_id"]]
+    assert len(windows) == 5
+    assert {r["api_model"] for r in windows} == {"claude-haiku-5-5"}
+    [final] = [r for r in _all_requests(world) if "_f_" in r["custom_id"]]
+    assert final["api_model"] == "claude-opus-5-5"
+    rows = _rows(u, "window")
+    assert final["messages"] == pw._exports._integration_messages(
+        u.id, rows, independent=True)
+
+
+def test_the_sync_task_hands_a_one_chunk_build_to_the_advance(app, world):
+    world.corpus = Corpus(50)
+    u = _one_chunk_user(app)
+    result = ex.window_hand_off(u, "sync-task-1")
+    assert result is not None and result["status"] == "completed"
+    assert [r["api_model"] for r in world.provider.requests()] == [
+        "gpt-6-astra"]
+
+
+def test_a_chained_one_chunk_update_stays_chained_with_the_switch_on(
+        app, world):
+    world.corpus = Corpus(85, start=T0 + timedelta(days=400))
+    u = _one_chunk_user(app, profile_needs_full_regen=False)
+    _profile(u, gen_type="update", cutoff=T0 + timedelta(days=1),
+             units=100_000)
+    assert not pw.wants_window_build(u)
+
+
+def test_the_single_version_prompt(app):
+    u = _user()
+    prompt = ex.single_integration_prompt(u.id)
+    gen = ex._load_prompt("profile_generation.txt", user_id=u.id)
+    structure = ex.profile_structure_instructions(gen)
+    assert prompt.count(structure) == 1
+    own = prompt.replace(structure, "")
+    assert "{" not in own and "}" not in own
+    assert own.startswith("The above is a profile of the user")
+    assert prompt.endswith(
+        '\n\n## OUTPUT\nGenerate the profile now. No preamble, no '
+        'meta-commentary. Begin directly with "### SURFACE MAP"')
+    # (a) none of the many-version wording that leaked into finals.
+    for phrase in ("series", "update", "80k", "110k", "unif", "trajectory",
+                   "evolution", "months", "Profile No"):
+        assert phrase not in own, phrase
+    # (b) the events list is named, moved into the Surface Map, left out.
+    assert '"### EVENTS IN THIS WINDOW"' in own
+    assert "into the Surface Map, each with its date" in own
+    assert "with no events section" in own
+    # (c) no claims of the merge model's own.
+    assert "add no fact, outcome or trend of your own" in own
+    assert ex.EVENTS_IN_WINDOW_PARAGRAPH not in prompt
+
+
+def test_the_single_version_prompt_embeds_the_users_own_structure(
+        app, monkeypatch):
+    """The user's own generation prompt shapes the profile, as in every
+    merge; their own integration prompt (written for many versions) does
+    not replace this one."""
+    own_gen = "My own maps.\n\n## OUTPUT\nGo.\n\n## INPUT\n{user_export}"
+    own_integ = ("MY OWN INTEGRATION {profile_generation_prompt}\n\n"
+                 "## OUTPUT\nGo.")
+    import backend.utils.prompts as prompts
+    monkeypatch.setattr(prompts, "get_user_prompt", lambda uid, key: {
+        "profile_generation": own_gen,
+        "profile_integration": own_integ}.get(key))
+    u = _user()
+    prompt = ex.single_integration_prompt(u.id)
+    assert "My own maps." in prompt and "## INPUT" not in prompt
+    assert "MY OWN INTEGRATION" not in prompt
+    w = _profile(u, gen_type="window", window_set="s", covers_start=None)
+    many = ex._integration_messages(u.id, [w, w], independent=True)
+    assert many[-1]["content"][0]["text"].startswith("MY OWN INTEGRATION")
+
+
+def test_the_many_version_prompt_is_unchanged(app, world):
+    """#586's prompt file, byte for byte, and a set of two windows (a
+    one-window build after its first update) is merged with it."""
+    import hashlib
+    path = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "prompts", "profile_integration.txt")
+    with open(path, "rb") as fh:
+        assert hashlib.sha256(fh.read()).hexdigest() == (
+            "2d12819e3c450c74c0c65db1b3a70516eb1a9272b99c0eb786c47568f27a4e52")
+    app.config["PROFILE_MERGE_STRUCTURE"] = "flat"
+    u = _user(preferred_model="gpt-6-astra")
+    rows = _set_of(u, 2)
+    _corpus_for(world, rows)
+    _advance(u)
+    msgs = _merge_reqs(world)[0]["messages"]
+    assert msgs == pw._exports._integration_messages(
+        u.id, rows, independent=True)
+    assert msgs[-1]["content"][0]["text"] != ex.single_integration_prompt(
+        u.id)
+    assert not pw.single_version(rows) and pw.single_version(rows[:1])
+
+
+def test_output_problem_rejects_an_events_section_in_a_final():
+    gen = "SURFACE MAP SHADOW MAP LIGHT MAP"
+    assert ex.profile_output_problem(_good(events=False), gen,
+                                     final=True) is None
+    assert ex.profile_output_problem(_good(events=True), gen, final=True) == (
+        "an EVENTS IN THIS WINDOW heading in a final profile")
+    lower = _good(events=False) + "\n## Events in this window\n- x\n"
+    assert ex.profile_output_problem(lower, gen, final=True)
+    # A group or a chained step is not checked for it; a window has one.
+    assert ex.profile_output_problem(_good(events=True), gen) is None
+    assert ex.profile_output_problem(_good(events=True), gen,
+                                     events=True) is None
+
+
+def test_a_final_with_an_events_section_is_refused(app, world):
+    world.corpus = Corpus(50)
+    u = _one_chunk_user(app)
+    world.provider.respond = lambda cid, req: {
+        "content": _good(events=True, tag=cid), "input_tokens": 1000,
+        "output_tokens": 500, "batch": True}
+    _advance(u)
+    _poll()
+    assert len(_rows(u, "window")) == 1
+    _advance(u)
+    costs = APICostLog.query.filter_by(user_id=u.id).count()
+    _poll()
+    assert _items("final")[0]["outcome"] == "refused"
+    assert not _finals(u)
+    assert APICostLog.query.filter_by(user_id=u.id).count() == costs + 1
+    # The integration rule: no retry within the hour.
+    n = len(world.provider.submits)
+    _advance(u)
+    assert len(world.provider.submits) == n
+
+
+def test_an_edit_during_a_one_window_build_is_merged_in_its_final(
+        app, world):
+    """The user's edit wins: a version the user saves while the window is
+    in the batch is merged into the final, with the many-version prompt
+    (two inputs) and its "Written by the user" label."""
+    world.corpus = Corpus(50)
+    u = _one_chunk_user(app)
+    old = _profile(u, gen_type="initial", cutoff=T0 + timedelta(hours=10),
+                   units=5_000)
+    _advance(u)                                  # the window goes out
+    edit = _edit(u, old)
+    _poll()
+    windows = _rows(u, "window")
+    assert len(windows) == 1
+    _advance(u)
+    msgs = _merge_reqs(world)[0]["messages"]
+    assert len(msgs) == 3
+    labels = [m["content"][0]["text"].split("\n\n", 1)[0] for m in msgs[:-1]]
+    assert "Written by the user" in labels[0]
+    assert msgs == pw._exports._integration_messages(
+        u.id, [edit, windows[0]], independent=True)
+    _poll()
+    finals = _finals(u)
+    assert len(finals) == 1 and finals[0].merged_profile_id == edit.id
+
+
+def test_a_provisional_one_window_set_is_rebuilt_from_scratch(
+        app, world, monkeypatch):
+    """The ladder, not the 80k gate, replaces a provisional one-window
+    set, as it replaces a chained provisional profile."""
+    world.corpus = Corpus(5)                     # 5k units: the first rung
+    u = _one_chunk_user(app)
+    _finish(world, u)
+    first = _finals(u)
+    assert len(first) == 1
+    tip = ex.profile_update_base(u.id)
+    assert tip.generation_type == "window" and ex.profile_is_provisional(tip)
+    world.corpus.add(85, start=datetime.utcnow() + timedelta(days=2))
+    assert not pw.set_work_due(u, tip)
+    tip.created_at = datetime.utcnow() - timedelta(hours=2)
+    db.session.commit()
+    for mod in (ex, pw._exports, pb._exports):
+        monkeypatch.setattr(mod, "_estimate_source_tokens",
+                            lambda user: world.corpus.count(user.id))
+    assert pb._should_seed(u) is True
+    db.session.refresh(u)
+    assert u.profile_needs_full_regen
+    assert pw.wants_window_build(u)
+    _finish(world, u)
+    finals = _finals(u)
+    assert len(finals) == 2
+    assert finals[-1].window_set != first[0].window_set
+    newest = [w for w in _rows(u, "window")
+              if w.window_set == finals[-1].window_set]
+    assert len(newest) == 1 and newest[0].covers_start is None
+    assert newest[0].source_tokens_used == 90_000
+
+
+def test_a_one_window_set_past_the_ladder_is_updated_as_a_set(app, world):
+    """Its later updates are the set's. A regular one-window update is a
+    chained update by the user's chat model (Peter, 2026-11-05), which
+    stands in the window's place, and the final over the window and the
+    chained version runs on the chat model with the many-version prompt."""
+    world.corpus = Corpus(100)                   # one chunk, past the ladder
+    u = _one_chunk_user(app)
+    _finish(world, u)
+    assert len(_rows(u, "window")) == 1 and len(_finals(u)) == 1
+    world.corpus.add(85, start=datetime.utcnow() + timedelta(days=2))
+    assert pw.wants_window_build(u)
+    _finish(world, u)
+    [window] = _rows(u, "window")
+    [chained] = _rows(u, "window_update")
+    assert chained.covers_start == window.source_data_cutoff
+    final_req = [r for r in _all_requests(world)
+                 if "_f_" in r["custom_id"]][-1]
+    assert final_req["messages"] == pw._exports._integration_messages(
+        u.id, [window, chained], independent=True)
+    assert final_req["api_model"] == "gpt-6-astra"
+    assert len(_finals(u)) == 2
+
+
+def test_a_one_window_build_whose_window_is_given_up_sends_no_final(
+        app, world, monkeypatch):
+    """Nothing was read, so nothing is merged: a merge of the skip note
+    alone would be saved as the user's profile."""
+    monkeypatch.setattr(pw, "_report", lambda title, **tags: None)
+    world.corpus = Corpus(50)
+    u = _one_chunk_user(app)
+    world.provider.respond = lambda cid, req: {
+        "content": "I can't help with that.", "input_tokens": 1000,
+        "output_tokens": 20, "batch": True}
+    _finish(world, u)
+    assert len(_rows(u, "window_skip")) == 1 and not _rows(u, "window")
+    assert not _items("final") and not _finals(u)
+    db.session.refresh(u)
+    assert u.profile_seed_error == pw.NOTHING_READ_NOTE
+    assert not pw.set_work_due(u, ex.profile_update_base(u.id))
+
+
+def _other_batch(provider_key="openai:gpt-6-astra"):
+    """Another account's batch of ours, pending in the same queue (the
+    one-chunk user's chat model, GPT-6 Astra, reads the window)."""
+    other = _user()
+    job = ProfileBatchJob(
+        provider_key=provider_key, batch_id="other", status="pending",
+        items=[{"custom_id": f"profile_{other.id}_x", "user_id": other.id,
+                "kind": "window", "set": "zz", "start": None}],
+        submitted_at=datetime.utcnow())
+    db.session.add(job)
+    db.session.commit()
+    return job
+
+
+def _queue_full_except_other(bids, keys, known=None):
+    """A collect stand-in: every batch failed on a full queue, except the
+    other account's batch ("other"), which is still in progress."""
+    from backend.utils.llm_batch import CollectedResults
+    out = CollectedResults()
+    if "other" in bids.values():
+        return out, dict(bids), {}
+    out.queue_full.update(bids)
+    return out, {}, {}
+
+
+def test_a_window_refused_on_a_full_queue_waits_and_is_never_stopped(
+        app, world, monkeypatch):
+    """The provider refuses the create (its batch queue is full, other
+    batches of ours wait in it): nothing is recorded against the window,
+    so no number of such refusals stops or skips it; once the queue has
+    room the build goes through."""
+    from backend.utils.llm_batch import SubmittedBatches
+    world.corpus = Corpus(50)
+    u = _one_chunk_user(app)
+    other = _other_batch()
+
+    def full(*a, **k):
+        out = SubmittedBatches()
+        out.queue_full.update(world.provider.submit(*a, **k))
+        return out
+    monkeypatch.setattr(pb, "batch_submit", full)
+    for _ in range(pb.MAX_BATCH_ATTEMPTS + 2):
+        _advance(u)
+    assert ProfileBatchJob.query.count() == 1     # no "missing" records
+    assert pw.attempt_history(u.id) == {}
+    db.session.refresh(u)
+    assert u.profile_needs_full_regen and not u.profile_batch_pending
+    assert (u.profile_batch_attempts or 0) == 0
+    other.status = "collected"
+    db.session.commit()
+    monkeypatch.setattr(pb, "batch_submit",
+                        lambda *a, **k: world.provider.submit(*a, **k))
+    _finish(world, u)
+    assert len(_finals(u)) == 1
+
+
+def test_a_window_batch_failed_on_a_full_queue_waits(app, world,
+                                                     monkeypatch):
+    """OpenAI fails the batch on its enqueued-token limit while other
+    batches of ours are queued: the items get the outcome "queue_full",
+    which neither stops nor skips the window, and no advance is
+    dispatched at once (the queue is still full)."""
+    world.corpus = Corpus(50)
+    u = _one_chunk_user(app)
+    other = _other_batch()
+    monkeypatch.setattr(pb, "batch_check_and_collect",
+                        _queue_full_except_other)
+    for _ in range(pw._content_attempts() + 2):
+        _advance(u)
+        pw.advance_profile_windows.apply_async.reset_mock()
+        _poll()
+        pw.advance_profile_windows.apply_async.assert_not_called()
+    jobs = [j for j in ProfileBatchJob.query.all() if j.id != other.id]
+    assert {j.status for j in jobs} == {"failed"}
+    assert {i["outcome"] for j in jobs for i in j.items} == {"queue_full"}
+    assert not _rows(u, "window_skip")
+    state = pw.set_state(u, pw.resolve_set(u)[0], None)
+    assert state.due and not state.stopped
+    other.status = "collected"
+    db.session.commit()
+    monkeypatch.setattr(pb, "batch_check_and_collect",
+                        lambda *a, **k: world.provider.collect(*a, **k))
+    _finish(world, u)
+    assert len(_finals(u)) == 1
+
+
+def test_a_queue_full_window_batch_clears_the_pending_flag(app, world,
+                                                           monkeypatch):
+    """Review of #596 (its reproduction): after a window batch fails on a
+    full queue nothing of the user's is in flight, so the flag is
+    cleared: the seeder (and "Build profile") reaches the user at once,
+    with no hourly clean-up of a stuck flag."""
+    world.corpus = Corpus(50)
+    u = _one_chunk_user(app)
+    _other_batch()
+    monkeypatch.setattr(pb, "batch_check_and_collect",
+                        _queue_full_except_other)
+    _advance(u)
+    _poll()
+    db.session.refresh(u)
+    assert pw.inflight_items(u.id) == []
+    assert u.profile_batch_pending is False
+    pw.advance_profile_windows.apply_async.reset_mock()
+    _seed(u)
+    pw.advance_profile_windows.apply_async.assert_called_once()
+
+
+def test_an_unactivated_prefills_window_sent_back_by_a_full_queue_is_resent(
+        app, world, monkeypatch):
+    """Peter, 2026-11-03 ("yes, implement it pls"): a pre-filled account
+    not yet activated is outside the hourly cohort; a window batch a full
+    queue sent back marks it (profile_work_held), the hourly seeder
+    dispatches its advance, and the successful submit clears the mark."""
+    world.corpus = Corpus(50)
+    u = _one_chunk_user(app, profile_force_batch=True,
+                        prefilled_handle="someone")
+    u.approved = False
+    db.session.commit()
+    assert u.id not in {x.id for x in User.profile_eligible_query().all()}
+    other = _other_batch()
+    monkeypatch.setattr(pb, "batch_check_and_collect",
+                        _queue_full_except_other)
+    _advance(u)
+    _poll()
+    db.session.refresh(u)
+    assert u.profile_work_held is True and not u.profile_batch_pending
+    other.status = "collected"
+    db.session.commit()
+    pw.advance_profile_windows.apply_async.reset_mock()
+    pb._seed_profile_batches()                           # the hourly seed
+    calls = pw.advance_profile_windows.apply_async.call_args_list
+    assert [c.args[0] for c in calls] == [(u.id,)]
+    pw.advance(u.id, calls[0].kwargs["task_id"])         # the task it sent
+    db.session.refresh(u)
+    assert u.profile_work_held is False and u.profile_batch_pending
+    assert [r["api_model"] for r in world.provider.requests()] == [
+        "gpt-6-astra"]
+
+
+def _unactivated_prefill(app):
+    u = _one_chunk_user(app, profile_force_batch=True,
+                        prefilled_handle="someone")
+    u.approved = False
+    db.session.commit()
+    return u
+
+
+def _respond_final_with(world, final_text):
+    """Windows answer with a good version; a final with
+    ``final_text(custom_id)`` (the fake provider answers every request it
+    has seen on each poll, so the answer depends on the attempt's id)."""
+    def respond(cid, req):
+        content = (_good(tag=cid) if "_w" in cid else final_text(cid))
+        return {"content": content, "input_tokens": 1000,
+                "output_tokens": 500, "batch": True}
+    world.provider.respond = respond
+
+
+def _hour_later():
+    """The refusal backoff's hour has passed: the cost rows are moved two
+    hours back, and the saved versions three, so the refusals still count
+    as a streak after the last saved version."""
+    for row in APICostLog.query.all():
+        row.created_at = row.created_at - timedelta(hours=2)
+    for row in UserProfile.query.all():
+        row.created_at = row.created_at - timedelta(hours=3)
+    db.session.commit()
+
+
+def _hourly_seed_dispatches(u):
+    pw.advance_profile_windows.apply_async.reset_mock()
+    pb._seed_profile_batches()
+    calls = pw.advance_profile_windows.apply_async.call_args_list
+    return [c for c in calls if c.args[0] == (u.id,)]
+
+
+def test_an_unactivated_prefills_refused_final_is_retried_after_the_backoff(
+        app, world):
+    """Peter, 2026-11-03 ("yes pls"), the reviewer's case: the refused
+    final waits out the backoff hour, and then the hourly seeder (whose
+    cohort leaves the account out) sends it again because the account is
+    held. The backoff itself is unchanged."""
+    world.corpus = Corpus(50)
+    u = _unactivated_prefill(app)
+    _respond_final_with(world, lambda cid: _good(
+        events=cid.endswith("_f_1"), tag=cid))   # the first one refused
+    _advance(u)
+    _poll()                                       # the window
+    _advance(u)
+    _poll()                                       # the final, refused
+    assert _items("final")[0]["outcome"] == "refused"
+    _advance(u)                                   # the advance it dispatched
+    db.session.refresh(u)
+    assert u.profile_work_held is True and not _finals(u)
+    assert _hourly_seed_dispatches(u) == []       # within the backoff hour
+    _hour_later()
+    calls = _hourly_seed_dispatches(u)
+    assert len(calls) == 1
+    pw.advance(u.id, calls[0].kwargs["task_id"])  # the final goes out again
+    _poll()
+    db.session.refresh(u)
+    assert len(_finals(u)) == 1 and u.profile_work_held is False
+
+
+def test_an_unactivated_prefills_failed_window_is_resent_by_the_seeder(
+        app, world):
+    """A window of an unactivated prefill that failed (the advance that
+    would resend it at once may be lost): the account is held, and the
+    hourly seeder dispatches its advance."""
+    world.corpus = Corpus(50)
+    u = _unactivated_prefill(app)
+    world.provider.respond = lambda cid, req: {
+        "content": "I can't help with that.", "input_tokens": 1000,
+        "output_tokens": 20, "batch": True}
+    _advance(u)
+    _poll()
+    assert _items("window")[0]["outcome"] == "invalid"
+    db.session.refresh(u)
+    assert u.profile_work_held is True
+    assert len(_hourly_seed_dispatches(u)) == 1
+
+
+def test_a_deactivated_account_with_held_work_stays_paused(app, world):
+    world.corpus = Corpus(50)
+    u = _unactivated_prefill(app)
+    u.profile_work_held = True
+    u.deactivated_at = datetime.utcnow()
+    db.session.commit()
+    assert _hourly_seed_dispatches(u) == []
+
+
+def test_giving_up_after_the_refusal_limit_releases_the_hold(app, world):
+    """A final refused twice in a row stops (the refusal rule, unchanged):
+    nothing waits any more, the hold goes, and the stop shows."""
+    world.corpus = Corpus(50)
+    u = _unactivated_prefill(app)
+    _respond_final_with(world, lambda cid: _good(events=True, tag=cid))
+    _advance(u)
+    _poll()
+    _advance(u)
+    _poll()                                       # refused once
+    _advance(u)
+    db.session.refresh(u)
+    assert u.profile_work_held is True
+    _hour_later()
+    calls = _hourly_seed_dispatches(u)
+    pw.advance(u.id, calls[0].kwargs["task_id"])
+    _poll()                                       # refused again: stopped
+    _advance(u)
+    db.session.refresh(u)
+    assert u.profile_seed_error.startswith("Stopped")
+    assert u.profile_work_held is False
+    assert _hourly_seed_dispatches(u) == []
+
+
+def _a_day_later():
+    """The provider stop's day has passed: every job is moved 25 h back."""
+    for job in ProfileBatchJob.query.all():
+        job.submitted_at = job.submitted_at - timedelta(hours=25)
+        if job.collected_at:
+            job.collected_at = job.collected_at - timedelta(hours=25)
+    db.session.commit()
+
+
+def _missing_three_times(u, marker):
+    """Collect rounds until the merge whose custom id holds ``marker`` has
+    failed at the provider three times (no result), running each advance
+    the collector dispatched."""
+    for _ in range(int(pw._setting("PROFILE_VERSION_PROVIDER_ATTEMPTS", 3))):
+        _advance(u)
+        _poll()
+    _advance(u)                       # finds the merge stopped: idle
+    outcomes = [i["outcome"] for i in _items()
+                if marker in i["custom_id"]]
+    assert outcomes == ["missing"] * 3
+
+
+def test_an_unactivated_prefills_stopped_final_is_resent_after_the_day(
+        app, world, monkeypatch):
+    """Review of #596 (its reproduction): a final failed at the provider
+    three times waits out the day's stop with the hold kept, and the
+    hourly seeder then sends it again for an account not yet activated.
+    The stop itself is unchanged."""
+    monkeypatch.setattr(pw, "_report", lambda title, **tags: None)
+    world.corpus = Corpus(50)
+    u = _unactivated_prefill(app)
+    world.provider.respond = lambda cid, req: None if "_f_" in cid else {
+        "content": _good(tag=cid), "input_tokens": 1000,
+        "output_tokens": 500, "batch": True}
+    _advance(u)
+    _poll()                                       # the window is saved
+    _missing_three_times(u, "_f_")
+    db.session.refresh(u)
+    assert u.profile_work_held is True
+    # Within the day the stop holds: an hourly pass sends nothing, and the
+    # hold stays.
+    n = len(world.provider.submits)
+    for c in _hourly_seed_dispatches(u):
+        pw.advance(u.id, c.kwargs["task_id"])
+    db.session.refresh(u)
+    assert len(world.provider.submits) == n and u.profile_work_held is True
+    _a_day_later()
+    calls = _hourly_seed_dispatches(u)
+    assert len(calls) == 1
+    assert pw.advance(u.id, calls[0].kwargs["task_id"]) == "submitted"
+    assert [r["custom_id"] for r in world.provider.requests()][-1].endswith(
+        "_f_4")
+
+
+def test_an_unactivated_prefills_stopped_group_is_resent_after_the_day(
+        app, world, monkeypatch):
+    """The same for a group of a grouped set."""
+    monkeypatch.setattr(pw, "_report", lambda title, **tags: None)
+    app.config["PROFILE_MERGE_GROUP_SIZE"] = 2       # structure "grouped"
+    u = _user(profile_force_batch=True, prefilled_handle="someone")
+    u.approved = False
+    db.session.commit()
+    rows = _set_of(u, 3)
+    _corpus_for(world, rows)
+    world.provider.respond = lambda cid, req: None if "_g" in cid else {
+        "content": _good(events=False, tag=cid), "input_tokens": 1000,
+        "output_tokens": 500, "batch": True}
+    _missing_three_times(u, "_g1_")
+    db.session.refresh(u)
+    assert u.profile_work_held is True
+    _a_day_later()
+    calls = _hourly_seed_dispatches(u)
+    assert len(calls) == 1
+    assert pw.advance(u.id, calls[0].kwargs["task_id"]) == "submitted"
+    assert [r["custom_id"] for r in world.provider.requests()][-1].endswith(
+        "_g1_4")
+
+
+def test_a_held_set_with_nothing_due_is_released_by_its_advance(
+        app, world):
+    world.corpus = Corpus(50)
+    u = _one_chunk_user(app)
+    _finish(world, u)
+    assert len(_finals(u)) == 1
+    u.profile_work_held = True
+    db.session.commit()
+    assert _advance(u) == "idle"
+    db.session.refresh(u)
+    assert u.profile_work_held is False
+
+
+def test_a_window_batch_over_the_limit_by_itself_stops_and_shows(
+        app, world, monkeypatch):
+    """Review of #596: a batch failed on the enqueued-token limit with no
+    other batch of ours queued for that model is over the limit by
+    itself: its window counts provider failures as before the queue rule,
+    so it stops after three and the admin column says so."""
+    world.corpus = Corpus(50)
+    u = _one_chunk_user(app)
+    _other_batch("openai:gpt-6.1-sol:responses")   # another model's queue
+    monkeypatch.setattr(pb, "batch_check_and_collect",
+                        _queue_full_except_other)
+    monkeypatch.setattr(pw, "_report", lambda title, **tags: None)
+    for _ in range(int(app.config["PROFILE_VERSION_PROVIDER_ATTEMPTS"])):
+        _advance(u)
+        _poll()
+    outcomes = [i["outcome"] for j in ProfileBatchJob.query.all()
+                for i in j.items if i["user_id"] == u.id]
+    assert outcomes == ["missing"] * 3
+    db.session.refresh(u)
+    assert u.profile_seed_error.startswith(pw.STOP_NOTE)
+    state = pw.set_state(u, pw.resolve_set(u)[0], None)
+    assert state.stopped and not state.due
+
+
+def test_progress_labels_for_a_one_window_build(app):
+    from backend.routes import export_data as ed
+    u = _user(profile_batch_pending=True)
+    for kind, extra, message, progress in (
+            ("window", {"total": 1}, "Generating profile", 20),
+            ("final", {"inputs": [7]}, "Generating profile", 95),
+            ("final", {"inputs": [7, 8]}, "Integrating profile versions",
+             95)):
+        ProfileBatchJob.query.delete()
+        db.session.add(ProfileBatchJob(
+            provider_key="openai:gpt-6-luna", batch_id="b", status="pending",
+            items=[dict({"custom_id": "c", "user_id": u.id, "kind": kind},
+                        **extra)]))
+        db.session.commit()
+        out = ed._batch_progress(u)
+        assert (out["message"], out["progress"]) == (message, progress)
+
+
 # ── content-policy blocks (2026-11-04) ───────────────────────────────────
-# A window, group or final the provider's content-policy filter blocked
-# is final: its own outcome, never a provider failure, never resent by
-# the seeder, the poll path or the 24 h stop expiry, and the account
-# builds nothing further until the admin's confirmed Build profile lifts
-# the stop.
+# An item the provider's content-policy filter blocked is never sent
+# again automatically. A blocked window is skipped (a window_skip row in
+# its place) and the profile is finished from the other windows (Peter:
+# "skip the flagged windows, but finish their profile"). A blocked group
+# or final cannot be skipped: the account's build stops until the admin's
+# confirmed Build profile lifts it.
 
 def _blocking(world, monkeypatch, marker):
     """batch_check_and_collect that reports every item whose custom_id
@@ -1655,10 +2449,14 @@ def _policy_reports(monkeypatch):
     return reports
 
 
-def test_a_policy_blocked_window_stops_the_account_for_good(
+def _window_requests(world):
+    return [r["custom_id"] for s in world.provider.submits
+            for reqs in s.values() for r in reqs if "_w" in r["custom_id"]]
+
+
+def test_a_policy_blocked_window_is_skipped_and_the_profile_finished(
         world, monkeypatch):
     from backend.models import APICostLog
-    from backend.utils import refusal_backoff as rb
     world.corpus = _windows_corpus(3)
     reports = _policy_reports(monkeypatch)
     _blocking(world, monkeypatch, "_w1_")
@@ -1667,60 +2465,317 @@ def test_a_policy_blocked_window_stops_the_account_for_good(
     _advance(u)
     windows_sent = len(_items("window"))
     assert windows_sent >= 2
-    # Every OpenAI or Anthropic request names its user.
+    # Every request names its user (the OpenAI safety identifier).
     assert {r["user_id"] for r in world.provider.requests()} == {u.id}
     _poll()
 
     [blocked] = [i for i in _items("window") if i.get("outcome") == "blocked"]
     assert blocked["start"] is None
-    # The other windows of the batch are saved.
+    # A skip row in the blocked window's place, over its real range.
+    [skip] = _rows(u, "window_skip")
+    assert skip.covers_start is None
+    assert skip.source_data_cutoff == pw._dt(blocked["cutoff"])
+    assert skip.get_content().endswith(ex.WINDOW_SKIPPED_TEXT)
     assert len(_rows(u, "window")) == windows_sent - 1
     db.session.refresh(u)
-    assert u.profile_seed_error.startswith(pw.POLICY_STOP_NOTE + " window")
-    assert "bio_policy" in u.profile_seed_error
+    assert u.profile_seed_error == (
+        f"Skipped window start..{blocked['cutoff']}: provider policy block "
+        f"(bio_policy)")
+    # Recorded ($0) and reported, but nothing is stopped.
     row = APICostLog.query.filter_by(
         user_id=u.id, request_ref="policy_block:bio_policy").one()
+    assert row.request_type == pw.WINDOW_BLOCK_REQUEST_TYPE
     assert row.cost_microdollars == 0
     assert [r[:2] for r in reports] == [(u.id, "bio_policy")]
-    # Not a provider failure: no stop that expires.
-    history = pw.attempt_history(u.id)
-    assert pw.provider_stop_until(history, ("window", None)) is None
+    from backend.utils import refusal_backoff as rb
+    assert rb.policy_block_for(u.id, rb.PROFILE_REQUEST_TYPES) is None
 
-    # Nothing further goes out: not the window, not the rest of the set,
-    # not a merge; not from the advance, the hourly seeder or an import's
-    # seed; not a day later.
-    submits = len(world.provider.submits)
-    assert _advance(u) == "blocked"
-    assert pb._should_seed(u) is False
-    assert _seed(u) == 0
+    # The next passes finish the profile over the other windows (the skip
+    # row is one of the final's inputs) and never resend the window.
+    windows_before = len(_window_requests(world))
+    _build(world, u)
+    assert len(_window_requests(world)) == windows_before
+    [final] = _rows(u, "integration")
+    final_item = [i for i in _items("final") if i.get("outcome") == "saved"][-1]
+    assert skip.id in final_item["inputs"]
+    assert final.window_set == skip.window_set
+    # Days later nothing resends it either.
     for job in ProfileBatchJob.query.all():
         job.submitted_at -= timedelta(days=2)
-        job.collected_at = (job.collected_at or job.submitted_at) \
-            - timedelta(days=2)
     db.session.commit()
-    assert _advance(u) == "blocked"
-    assert _seed(u) == 0
+    assert _advance(u) == "idle"
+    assert len(_window_requests(world)) == windows_before
+
+
+def test_every_window_blocked_builds_no_profile(world, monkeypatch):
+    world.corpus = _windows_corpus(2)
+    _policy_reports(monkeypatch)
+    _blocking(world, monkeypatch, "_w")
+    u = _user(profile_needs_full_regen=True)
+    _advance(u)
+    windows_sent = len(_items("window"))
+    _poll()
+    assert len(_rows(u, "window_skip")) == windows_sent
+    assert not _rows(u, "window")
+    submits = len(world.provider.submits)
+    assert _advance(u) == "idle"
+    # No final over skip rows alone; the account shows why.
     assert len(world.provider.submits) == submits
-    assert not _rows(u, "integration")
-    assert not pw.set_work_due(u, ex.profile_update_base(u.id))
-    # The note stays (a saved window clears profile_seed_error).
+    assert not _items("final") and not _rows(u, "integration")
     db.session.refresh(u)
-    assert u.profile_seed_error.startswith(pw.POLICY_STOP_NOTE)
+    assert u.profile_seed_error == pw.NOTHING_READ_NOTE
+    assert pb._should_seed(u) is False
 
-    # The admin's confirmed Build profile lifts the stop: the next pass
-    # sends the blocked range again (and a block again stops it again).
-    rb.lift_policy_block(u.id, "profile_batch", rb.PROFILE_REQUEST_TYPES)
-    u.profile_needs_full_regen = False
+
+def test_a_blocked_window_of_an_account_without_ai_writes_no_skip_row(
+        world, monkeypatch):
+    world.corpus = _windows_corpus(3)
+    _policy_reports(monkeypatch)
+    _blocking(world, monkeypatch, "_w1_")
+    u = _user(profile_needs_full_regen=True)
+    _advance(u)
+    u.default_ai_usage = "none"       # switched while the batch ran
     db.session.commit()
-    assert _advance(u) == "submitted"
-    resent = [r for r in world.provider.requests() if "_w" in r["custom_id"]]
-    assert resent
-    assert any(i["start"] is None and i.get("outcome") is None
-               for i in _items("window"))
+    _poll()
+    [blocked] = [i for i in _items("window") if i.get("outcome") == "blocked"]
+    assert blocked["start"] is None
+    assert not _rows(u, "window_skip")
+    submits = len(world.provider.submits)
+    assert _advance(u) == "off"
+    assert len(world.provider.submits) == submits
 
 
-@pytest.mark.parametrize("kind", ["final"])
-def test_a_policy_blocked_merge_is_its_own_outcome(world, monkeypatch, kind):
+def _age_jobs(days):
+    for job in ProfileBatchJob.query.all():
+        job.submitted_at -= timedelta(days=days)
+        if job.collected_at:
+            job.collected_at -= timedelta(days=days)
+    db.session.commit()
+
+
+def _unblock(world, monkeypatch):
+    monkeypatch.setattr(pb, "batch_check_and_collect",
+                        lambda *a, **k: world.provider.collect(*a, **k))
+
+
+def _overlaps(item, blocked):
+    """Whether a window item's range (start, cutoff] meets the blocked
+    window's."""
+    s, c = pw._dt(item["start"]), pw._dt(item["cutoff"])
+    bs, bc = pw.blocked_range_of(blocked)
+    lo = max(s or datetime.min, bs or datetime.min)
+    hi = min(c or datetime.max, bc or datetime.max)
+    return lo < hi
+
+
+def _blocked_build(world, monkeypatch, marker, corpus=None, user=None):
+    """Build a set whose window ``marker`` is blocked, to its final; then
+    the provider blocks nothing more. Returns (user, blocked item)."""
+    world.corpus = corpus or _windows_corpus(3)
+    _policy_reports(monkeypatch)
+    _blocking(world, monkeypatch, marker)
+    u = user or _user(profile_needs_full_regen=True)
+    _build(world, u)
+    [blocked] = [i for i in _items("window") if i.get("outcome") == "blocked"]
+    _unblock(world, monkeypatch)
+    return u, blocked
+
+
+def _range(blocked):
+    """The blocked range a blocked window item leaves: from just before
+    its earliest entry to its cutoff."""
+    return pw.blocked_range_of(blocked)
+
+
+def _never_resent(u, blocked, before):
+    """No window sent after ``before`` meets the blocked range, and the
+    newest set skips exactly that range without a request."""
+    new = _items("window")[before:]
+    assert not [i for i in new if _overlaps(i, blocked)], [
+        (i["start"], i["cutoff"]) for i in new]
+    tip_set = ex.profile_update_base(u.id).window_set
+    skips = [r for r in _rows(u, "window_skip") if r.window_set == tip_set]
+    assert [(pw._iso(r.covers_start), pw._iso(r.source_data_cutoff))
+            for r in skips] == [tuple(pw._iso(x) for x in _range(blocked))]
+    return new
+
+
+def test_the_blocked_range_is_remembered_for_good(world, monkeypatch):
+    from backend.models import ProfileBlockedRange
+    u, blocked = _blocked_build(world, monkeypatch, "_w2_")
+    [row] = ProfileBlockedRange.query.filter_by(user_id=u.id).all()
+    # From just before the window's earliest entry, not its start.
+    assert (row.range_start, row.range_end) == (
+        pw._dt(blocked["earliest"]) - timedelta(microseconds=1),
+        pw._dt(blocked["cutoff"]))
+    assert row.code == "bio_policy" and row.lifted_at is None
+    assert pw.blocked_ranges(u.id) == [(row.range_start, row.range_end)]
+
+
+def test_cut_around_blocked():
+    d = [datetime(2024, 1, i) for i in range(1, 10)]
+    cut = pw.cut_around_blocked
+    assert cut(d[0], d[8], []) == [(False, d[0], d[8])]
+    assert cut(d[0], d[8], [(d[2], d[4])]) == [
+        (False, d[0], d[2]), (True, d[2], d[4]), (False, d[4], d[8])]
+    assert cut(None, None, [(None, d[3])]) == [
+        (True, None, d[3]), (False, d[3], None)]
+    # Clipped to the range; a range that ends inside a blocked one.
+    assert cut(d[3], d[5], [(d[2], d[7])]) == [(True, d[3], d[5])]
+    assert cut(d[3], None, [(d[1], d[2]), (d[4], d[5])]) == [
+        (False, d[3], d[4]), (True, d[4], d[5]), (False, d[5], None)]
+
+
+def test_a_rebuilt_set_skips_a_blocked_window_without_a_request(
+        world, monkeypatch):
+    u, blocked = _blocked_build(world, monkeypatch, "_w1_")
+    before = len(_items("window"))
+    u.profile_needs_full_regen = True      # e.g. Build profile
+    db.session.commit()
+    _build(world, u)
+    assert _never_resent(u, blocked, before)
+    assert len({r.window_set for r in _rows(u, "window_skip")}) == 2
+
+
+def test_an_import_of_older_writing_does_not_resend_a_blocked_range(
+        world, monkeypatch):
+    """Review of #596: an import of older writing rebuilds from scratch
+    and shifts every window start; the blocked range is still skipped
+    exactly."""
+    u, blocked = _blocked_build(world, monkeypatch, "_w2_")
+    assert blocked["start"] is not None
+    older = [(T0 - timedelta(hours=30 - i), 1000) for i in range(30)]
+    world.corpus.rows = older + world.corpus.rows
+    action, _v = ex.revert_profile_for_import(u.id, older[0][0])
+    assert action == "full"
+    db.session.commit()
+    before = len(_items("window"))
+    _build(world, u)
+    assert _never_resent(u, blocked, before)
+    assert _finals(u)
+
+
+@pytest.mark.parametrize("days", [0, 8])
+def test_new_writing_and_a_rebuild_do_not_resend_a_blocked_range(
+        world, monkeypatch, days):
+    """Review of #596: new writing resizes the windows of a rebuild (also
+    one Build profile starts without the dialog), within the attempt
+    history or long after it."""
+    u, blocked = _blocked_build(world, monkeypatch, "_w2_")
+    world.corpus.add(len(world.corpus.rows) // 5)
+    _age_jobs(days)
+    u.profile_needs_full_regen = True
+    db.session.commit()
+    before = len(_items("window"))
+    _build(world, u)
+    assert _never_resent(u, blocked, before)
+
+
+def test_an_import_inside_a_blocked_range_is_skipped_with_it(
+        world, monkeypatch):
+    u, blocked = _blocked_build(world, monkeypatch, "_w2_")
+    bs, bc = pw._dt(blocked["start"]), pw._dt(blocked["cutoff"])
+    inside = bs + (bc - bs) / 2 + timedelta(minutes=7)
+    world.corpus.rows = sorted(world.corpus.rows + [(inside, 1000)])
+    action, _v = ex.revert_profile_for_import(u.id, inside)
+    db.session.commit()
+    u.profile_needs_full_regen = True
+    db.session.commit()
+    before = len(_items("window"))
+    _build(world, u)
+    assert _never_resent(u, blocked, before)
+
+
+def test_ai_turned_back_on_long_after_does_not_resend_a_blocked_range(
+        world, monkeypatch):
+    """Review of #596: AI usage switched off while the batch ran (no skip
+    row) and back on more than the attempt history later: the range is
+    remembered all the same and skipped without a request."""
+    world.corpus = _windows_corpus(3)
+    _policy_reports(monkeypatch)
+    _blocking(world, monkeypatch, "_w1_")
+    u = _user(profile_needs_full_regen=True)
+    _advance(u)
+    u.default_ai_usage = "none"
+    db.session.commit()
+    _poll()
+    [blocked] = [i for i in _items("window") if i.get("outcome") == "blocked"]
+    assert not _rows(u, "window_skip")
+    assert pw.blocked_ranges(u.id)          # recorded with AI off
+    _unblock(world, monkeypatch)
+    u.default_ai_usage = "chat"
+    db.session.commit()
+    _age_jobs(8)
+    before = len(_items("window"))
+    _build(world, u)
+    assert _never_resent(u, blocked, before)
+    assert _finals(u)
+
+
+def _ladder_ready(world, monkeypatch, u, days):
+    world.corpus.add(20, start=datetime.utcnow() + timedelta(days=2))
+    for p in UserProfile.query.filter_by(user_id=u.id).all():
+        p.created_at = datetime.utcnow() - timedelta(days=days)
+    db.session.commit()
+    for mod in (ex, pw._exports, pb._exports):
+        monkeypatch.setattr(mod, "_estimate_source_tokens",
+                            lambda user: world.corpus.count(user.id))
+    monkeypatch.setattr(pb, "MIN_INACTIVITY", timedelta(0))
+
+
+@pytest.mark.parametrize("days", [2, 8])
+def test_the_ladder_rebuild_skips_only_the_blocked_range(
+        app, world, monkeypatch, days):
+    """Review of #596: a one-window set whose window was blocked built no
+    profile; new writing takes it up the provisional ladder, within the
+    attempt history or after it. The rebuild skips exactly the blocked
+    range and reads the new writing, so a profile is built from it."""
+    u, blocked = _blocked_build(world, monkeypatch, "_w", corpus=Corpus(5),
+                                user=_one_chunk_user(app))
+    assert not _finals(u)
+    _ladder_ready(world, monkeypatch, u, days)
+    if days > 7:
+        _age_jobs(days)
+    assert pb._should_seed(u)
+    before = len(_items("window"))
+    _build(world, u)
+    new = _never_resent(u, blocked, before)
+    assert new and all(pw._dt(i["start"]) >= pw._dt(blocked["cutoff"])
+                       for i in new)
+    assert _finals(u)
+
+
+def test_lifting_the_blocked_ranges_reads_them_again(world, monkeypatch):
+    """The one way to resend a blocked window: lift_blocked_ranges from a
+    shell. No button does it."""
+    u, blocked = _blocked_build(world, monkeypatch, "_w2_")
+    assert pw.lift_blocked_ranges(u.id) == 1
+    assert pw.blocked_ranges(u.id) == []
+    u.profile_needs_full_regen = True
+    db.session.commit()
+    before = len(_items("window"))
+    _advance(u)
+    assert [i for i in _items("window")[before:] if _overlaps(i, blocked)]
+
+
+def test_a_blocked_chained_chunk_is_remembered_as_a_blocked_range(
+        app, monkeypatch):
+    """A chained step's chunk blocked by the filter (#597 stops the
+    account) is remembered as a range too, so a later window build cuts
+    around it."""
+    from backend.models import ProfileBlockedRange
+    u = _user()
+    prev = _profile(u, gen_type="update", cutoff=T0)
+    item = {"custom_id": "c1", "user_id": u.id, "kind": "chunk",
+            "prev_profile_id": prev.id, "model_id": "claude-opus-5.5",
+            "source_data_cutoff": (T0 + timedelta(days=3)).isoformat()}
+    _policy_reports(monkeypatch)
+    pb._stop_for_policy_block(u, item, "bio_policy")
+    [row] = ProfileBlockedRange.query.filter_by(user_id=u.id).all()
+    assert (row.range_start, row.range_end) == (T0, T0 + timedelta(days=3))
+
+
+def test_a_policy_blocked_final_stops_the_account(world, monkeypatch):
     reports = _policy_reports(monkeypatch)
     u = _user()
     rows = _set_of(u, 5, created=datetime.utcnow())
@@ -1728,15 +2783,396 @@ def test_a_policy_blocked_merge_is_its_own_outcome(world, monkeypatch, kind):
     _blocking(world, monkeypatch, "_f_")
     _advance(u)
     _poll()
-    [item] = _items(kind)
+    [item] = _items("final")
     assert item["outcome"] == "blocked"
     db.session.refresh(u)
+    # The real cutoff of the final, not "..end".
     assert u.profile_seed_error.startswith(
-        pw.POLICY_STOP_NOTE + " final merge")
+        f"{pw.POLICY_STOP_NOTE} final merge start..{item['cutoff']} "
+        f"(bio_policy)")
     assert [r[1] for r in reports] == ["bio_policy"]
     submits = len(world.provider.submits)
     assert _advance(u) == "blocked"
     assert pb._should_seed(u) is False
+    assert len(world.provider.submits) == submits
+    # A later save clears the column; the advance restores the note with
+    # the real cutoff.
+    u.profile_seed_error = None
+    db.session.commit()
+    assert _advance(u) == "blocked"
+    db.session.refresh(u)
+    assert f"start..{item['cutoff']}" in u.profile_seed_error
+
+
+def test_a_block_collected_while_the_advance_runs_is_not_resent(
+        world, monkeypatch):
+    """Review of #596: the poller collects a blocked final after the
+    advance's first block check but before it reads what is in flight.
+    The final is no longer in flight, so without a second check it would
+    be submitted again."""
+    _policy_reports(monkeypatch)
+    u = _user()
+    rows = _set_of(u, 5, created=datetime.utcnow())
+    _corpus_for(world, rows)
+    _blocking(world, monkeypatch, "_f_")
+    _advance(u)
+    assert ProfileBatchJob.query.filter_by(status="pending").count()
+    submits = len(world.provider.submits)
+
+    real_history = pw.attempt_history
+    polled = []
+
+    def poll_meanwhile(user_id, now=None):
+        if not polled:
+            polled.append(user_id)
+            # The poller's dispatch finds the guard held by this advance.
+            monkeypatch.setattr(pb, "_advance_users", lambda ids: None)
+            _poll()
+        return real_history(user_id, now)
+    monkeypatch.setattr(pw, "attempt_history", poll_meanwhile)
+
+    assert _advance(u) == "blocked"
+    assert polled == [u.id]
+    assert not ProfileBatchJob.query.filter_by(status="pending").count()
+    assert len(world.provider.submits) == submits
+    assert [i["outcome"] for i in _items("final")] == ["blocked"]
+
+
+# ── the lab backfill (scripts/backfill_policy_blocks.py) ─────────────────
+
+def _backfill_module():
+    import importlib.util
+    path = os.path.join(os.path.dirname(__file__), "..", "scripts",
+                        "backfill_policy_blocks.py")
+    spec = importlib.util.spec_from_file_location("backfill_policy_blocks",
+                                                  path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _openai_world(app, world):
+    """A user on an OpenAI chat model (windows on Luna), a 3-window corpus."""
+    u = _user(preferred_model="gpt-6-astra", profile_needs_full_regen=True)
+    world.corpus = _windows_corpus(3)
+    return u
+
+
+def test_the_backfill_records_old_missing_blocks_and_the_set_finishes(
+        app, world, monkeypatch):
+    """Under the old code a blocked first window came back "missing" three
+    times. The backfill reads each batch's error file: the policy-coded
+    attempts become "blocked" with one skip row, an ordinary 500 stays
+    "missing"; the next pass sends the final, never the window."""
+    import json as _json
+    from types import SimpleNamespace
+    from backend.models import APICostLog
+    mod = _backfill_module()
+    _policy_reports(monkeypatch)
+    u = _openai_world(app, world)
+    world.provider.respond = lambda cid, req: (
+        None if "_w1_" in cid else {"content": _good(tag=cid),
+                                    "input_tokens": 1, "output_tokens": 1,
+                                    "batch": True})
+    for _ in range(3):
+        _advance(u)
+        _poll()
+    attempts = [i for i in _items("window") if i["start"] is None]
+    assert [i["outcome"] for i in attempts] == ["missing"] * 3
+    assert all(j.provider_key.startswith("openai:")
+               for j in ProfileBatchJob.query.all())
+    # The provider's error files: the first two attempts were blocked,
+    # the third was an outage.
+    codes = {attempts[0]["custom_id"]: "bio_policy",
+             attempts[1]["custom_id"]: "bio_policy",
+             attempts[2]["custom_id"]: "server_error"}
+    by_batch = {}
+    for job in ProfileBatchJob.query.all():
+        for item in job.items:
+            if item["custom_id"] in codes:
+                by_batch[job.batch_id] = item["custom_id"]
+
+    class _Files:
+        def content(self, file_id):
+            cid = file_id[len("ef-"):]
+            code = codes[cid]
+            line = _json.dumps({"custom_id": cid, "response": {
+                "status_code": 500 if code == "server_error" else 400,
+                "body": {"error": {"code": code, "message": "x",
+                                   "type": "invalid_request_error"}}}})
+            return SimpleNamespace(content=(line + "\n").encode())
+
+    class _Batches:
+        def retrieve(self, batch_id):
+            cid = by_batch.get(batch_id)
+            return SimpleNamespace(
+                status="completed", error_file_id=f"ef-{cid}" if cid else None)
+
+    client = SimpleNamespace(batches=_Batches(), files=_Files())
+    lines = []
+
+    found = mod.find_blocks(client_for=lambda: client, out=lines.append)
+    assert [(item["custom_id"], code) for _j, item, code in found] == [
+        (attempts[0]["custom_id"], "bio_policy"),
+        (attempts[1]["custom_id"], "bio_policy")]
+    # Dry run: printed, nothing written.
+    assert mod.record_blocks(found, apply=False, out=lines.append) == 2
+    assert not _rows(u, "window_skip")
+    assert {i["outcome"] for i in _items("window")
+            if i["start"] is None} == {"missing"}
+    assert all("bio_policy" in line for line in lines)
+    assert not any("message" in line for line in lines)
+
+    mod.record_blocks(found, apply=True, out=lines.append)
+    assert [i["outcome"] for i in _items("window") if i["start"] is None] \
+        == ["blocked", "blocked", "missing"]
+    assert len(_rows(u, "window_skip")) == 1
+    assert APICostLog.query.filter_by(
+        user_id=u.id, request_ref="policy_block:bio_policy").count() == 2
+    # The durable range record a later window plan cuts around.
+    assert pw.blocked_ranges(u.id) == [_range(attempts[0])]
+    assert _range(attempts[0])[0] is not None
+    # Idempotent: a second run finds nothing more.
+    again = mod.find_blocks(client_for=lambda: client, out=lines.append)
+    assert again == []
+    assert len(_rows(u, "window_skip")) == 1
+
+    # The new code finishes the profile without the window.
+    world.provider.respond = lambda cid, req: {
+        "content": _good(events="_w" in cid, tag=cid), "input_tokens": 1,
+        "output_tokens": 1, "batch": True}
+    windows_before = sum(1 for i in _items("window") if i["start"] is None)
+    _build(world, u)
+    assert sum(1 for i in _items("window") if i["start"] is None) \
+        == windows_before
+    assert len(_rows(u, "integration")) == 1
+
+
+def test_the_backfill_leaves_accounts_without_ai_without_a_skip_row(
+        app, world, monkeypatch):
+    import json as _json
+    from types import SimpleNamespace
+    mod = _backfill_module()
+    _policy_reports(monkeypatch)
+    u = _openai_world(app, world)
+    world.provider.respond = lambda cid, req: (
+        None if "_w1_" in cid else {"content": _good(tag=cid),
+                                    "input_tokens": 1, "output_tokens": 1,
+                                    "batch": True})
+    _advance(u)
+    _poll()
+    [attempt] = [i for i in _items("window") if i["start"] is None]
+    job = [j for j in ProfileBatchJob.query.all()
+           if any(i["custom_id"] == attempt["custom_id"] for i in j.items)][0]
+    u.default_ai_usage = "none"
+    db.session.commit()
+    line = _json.dumps({"custom_id": attempt["custom_id"], "response": {
+        "status_code": 400, "body": {"error": {"code": "bio_policy"}}}})
+    client = SimpleNamespace(
+        batches=SimpleNamespace(retrieve=lambda bid: SimpleNamespace(
+            status="completed",
+            error_file_id="ef-1" if bid == job.batch_id else None)),
+        files=SimpleNamespace(content=lambda fid: SimpleNamespace(
+            content=(line + "\n").encode())))
+    found = mod.find_blocks(client_for=lambda: client, out=lambda s: None)
+    mod.record_blocks(found, apply=True, out=lambda s: None)
+    [attempt] = [i for i in _items("window") if i["start"] is None]
+    assert attempt["outcome"] == "blocked"
+    assert not _rows(u, "window_skip")
+    # The range is remembered all the same.
+    assert pw.blocked_ranges(u.id) == [_range(attempt)]
+
+
+# ── review of 07a3f1d7 ────────────────────────────────────────────────────
+
+def test_older_writing_imported_before_a_blocked_first_window_is_read(
+        world, monkeypatch):
+    """A blocked first window is remembered from just before its earliest
+    entry, not "from the first writing": older writing imported later,
+    which was never sent, is read by the rebuild; the blocked range is
+    still skipped exactly."""
+    u, blocked = _blocked_build(world, monkeypatch, "_w1_")
+    assert blocked["start"] is None
+    older = [(T0 - timedelta(days=300 - i), 1000) for i in range(30)]
+    world.corpus.rows = older + world.corpus.rows
+    action, _v = ex.revert_profile_for_import(u.id, older[0][0])
+    assert action == "full"
+    db.session.commit()
+    before = len(_items("window"))
+    _build(world, u)
+    new = _never_resent(u, blocked, before)
+    read_older = [i for i in new if i["start"] is None
+                  or pw._dt(i["start"]) < T0]
+    assert read_older
+    assert sum(i["units"] for i in new
+               if pw._dt(i["cutoff"]) < T0) == 30_000
+    assert _finals(u)
+
+
+def test_a_superseded_update_window_block_never_reaches_a_chained_chunk(
+        world, monkeypatch):
+    """Review of 07a3f1d7: the user saves a version on the set's final
+    while an update window is in the batch, and that window is blocked.
+    Its set is superseded (no skip row), and the rest fits one chunk on
+    the user's version; the build must still take the window path, which
+    cuts around the blocked range, never a chained chunk holding it."""
+    _policy_reports(monkeypatch)
+    u = _user()
+    rows, final = _update_in_flight(world, u)
+    w = [i for i in _items("window") if "outcome" not in i][0]
+    _blocking(world, monkeypatch, w["custom_id"])
+    _edit(u, final)
+    _poll()
+    [w] = [i for i in _items("window") if i["custom_id"] == w["custom_id"]]
+    assert w["outcome"] == "blocked"
+    assert pw.blocked_ranges(u.id) == [_range(w)]
+    assert pw.wants_window_build(u) is True
+    _unblock(world, monkeypatch)
+    for p in UserProfile.query.filter_by(user_id=u.id).all():
+        p.created_at -= timedelta(days=8)
+    db.session.commit()
+    monkeypatch.setattr(pb, "MIN_INACTIVITY", timedelta(0))
+    monkeypatch.setattr(pb, "_new_token_count",
+                        lambda user, cutoff: world.corpus.count(user.id,
+                                                                cutoff))
+    n_jobs = ProfileBatchJob.query.count()
+    before = len(_items("window"))
+    for _ in range(4):
+        _seed(u)
+        db.session.refresh(u)
+        if u.profile_generation_task_id:
+            pw.advance(u.id, u.profile_generation_task_id)
+        if ProfileBatchJob.query.filter_by(status="pending").count():
+            _poll()
+    # The chained builder refuses it outright too.
+    assert pb._build_next_profile_request(u) is None or \
+        pb._build_next_profile_request(u)["meta"]["kind"] != "chunk"
+    jobs = ProfileBatchJob.query.order_by(ProfileBatchJob.id).all()[n_jobs:]
+    assert not [i for j in jobs for i in j.items if i.get("kind") == "chunk"]
+    assert not [i for i in _items("window")[before:] if _overlaps(i, w)]
+
+
+def test_no_chained_chunk_or_sync_build_meets_a_blocked_range(
+        app, world, monkeypatch):
+    """With the window path switched off, nothing that would hold a
+    blocked range is built: the chained batch builder returns no chunk,
+    and the synchronous task's hand-off builds nothing."""
+    from backend.utils import refusal_backoff  # noqa: F401
+    world.corpus = Corpus(50)
+    monkeypatch.setattr(pb._exports, "count_remaining_units",
+                        lambda uid, cutoff=None, **k: world.corpus.count(
+                            uid, cutoff))
+    u = _user(profile_needs_full_regen=True)
+    pw.record_blocked_range(u.id, T0 + timedelta(hours=5),
+                            T0 + timedelta(hours=9), "bio_policy")
+    app.config["PROFILE_INDEPENDENT_VERSIONS"] = False
+    assert pw.wants_window_build(u) is False
+    assert pb._build_next_profile_request(u) is None
+    result = ex.window_hand_off(u, "task-1")
+    assert result is not None and result["profile_id"] is None
+    assert not world.provider.submits
+
+
+# ── backfill: a blocked window another attempt saved (lab dry run) ────────
+
+def _error_file_client(errors):
+    """A fake OpenAI client whose batches' error files hold ``errors``
+    {batch_id: (custom_id, code)}."""
+    import json as _json
+    from types import SimpleNamespace
+
+    def retrieve(batch_id):
+        return SimpleNamespace(
+            status="completed",
+            error_file_id=f"ef-{batch_id}" if batch_id in errors else None)
+
+    def content(file_id):
+        cid, code = errors[file_id[len("ef-"):]]
+        line = _json.dumps({"custom_id": cid, "response": {
+            "status_code": 400, "body": {"error": {
+                "code": code, "type": "invalid_request_error"}}}})
+        return SimpleNamespace(content=(line + "\n").encode())
+    return SimpleNamespace(batches=SimpleNamespace(retrieve=retrieve),
+                           files=SimpleNamespace(content=content))
+
+
+def _job_of(custom_id):
+    return [j for j in ProfileBatchJob.query.all()
+            if any(i["custom_id"] == custom_id for i in j.items)][0]
+
+
+def _assert_saved_window_kept(u, mod, errors, blocked_cid):
+    """The backfill marks the blocked attempt and records its range, but
+    writes no skip row, keeps the saved version, and starts nothing."""
+    windows = {r.id for r in _rows(u, "window")}
+    finals = len(_finals(u))
+    lines = []
+    found = mod.find_blocks(client_for=lambda: _error_file_client(errors),
+                            out=lines.append)
+    assert [item["custom_id"] for _j, item, _c in found] == [blocked_cid]
+    mod.record_blocks(found, apply=False, out=lines.append)
+    assert "+ skip row" not in lines[-1]
+    assert "another attempt was saved" in lines[-1]
+    mod.record_blocks(found, apply=True, out=lambda s: None)
+    blocked = [i for i in _items("window") if i["custom_id"] == blocked_cid][0]
+    assert blocked["outcome"] == "blocked"
+    assert not _rows(u, "window_skip")
+    assert {r.id for r in _rows(u, "window")} == windows
+    assert pw.blocked_ranges(u.id) == [_range(blocked)]
+    assert len(_finals(u)) == finals
+    return blocked
+
+
+def test_the_backfill_keeps_a_window_saved_after_its_blocked_attempt(
+        app, world, monkeypatch):
+    """Lab dry run: the old poller resent a blocked window and the resend
+    was saved ("missing", then "saved", same set). No skip row, the saved
+    version and the profile stay; the range is recorded; nothing is
+    re-merged or sent."""
+    mod = _backfill_module()
+    _policy_reports(monkeypatch)
+    u = _openai_world(app, world)
+    world.provider.respond = lambda cid, req: (
+        None if ("_w1_" in cid and cid.endswith("_1")) else {
+            "content": _good(events="_w" in cid, tag=cid),
+            "input_tokens": 1, "output_tokens": 1, "batch": True})
+    _build(world, u)
+    attempts = [i for i in _items("window") if i["start"] is None]
+    assert [i["outcome"] for i in attempts] == ["missing", "saved"]
+    assert len(_finals(u)) == 1
+    first = attempts[0]
+    _assert_saved_window_kept(
+        u, mod, {_job_of(first["custom_id"]).batch_id:
+                 (first["custom_id"], "bio_policy")}, first["custom_id"])
+    submits = len(world.provider.submits)
+    assert _advance(u) == "idle"
+    assert len(world.provider.submits) == submits
+    assert [i["outcome"] for i in _items("window")
+            if i["start"] is None] == ["blocked", "saved"]
+
+
+def test_the_backfill_keeps_a_saved_window_when_a_later_duplicate_was_blocked(
+        app, world, monkeypatch):
+    """The other order: the window was saved, and a later duplicate of it
+    in the same set was blocked."""
+    mod = _backfill_module()
+    _policy_reports(monkeypatch)
+    u = _openai_world(app, world)
+    _build(world, u)
+    [saved] = [i for i in _items("window") if i["start"] is None]
+    assert saved["outcome"] == "saved" and len(_finals(u)) == 1
+    dup = dict(saved, custom_id=saved["custom_id"] + "_dup",
+               outcome="missing")
+    db.session.add(ProfileBatchJob(
+        provider_key=_job_of(saved["custom_id"]).provider_key,
+        batch_id="batch_dup", status="collected", items=[dup],
+        submitted_at=datetime.utcnow(), collected_at=datetime.utcnow()))
+    db.session.commit()
+    _assert_saved_window_kept(
+        u, mod, {"batch_dup": (dup["custom_id"], "bio_policy")},
+        dup["custom_id"])
+    submits = len(world.provider.submits)
+    assert _advance(u) == "idle"
     assert len(world.provider.submits) == submits
 
 
@@ -2296,3 +3732,178 @@ def test_the_backfill_marks_what_it_cannot_vouch_for(app):
         assert db.session.get(User, user.id).profile_private_read is False
     assert pw.writing_is_public_only(db.session.get(User, clean.id))
     assert bf.run(apply=True, out=out.append) == []    # idempotent
+
+
+# ── #596's paths under the rules of 2026-11-05: the hard line ────────────
+# A one-window build from scratch and a small build of more than one
+# window, for an Anthropic and an OpenAI user with private writing: every
+# request goes to the user's own provider. A public-only pre-fill: GPT-6
+# Luna versions and the Opus 5.5 integration, at any size. When in doubt
+# (the owner signed in before the final), private.
+
+def _one_chunk_switches(app):
+    app.config["PROFILE_ONE_CHUNK_WINDOW_OPENAI"] = True
+    app.config["PROFILE_ONE_CHUNK_WINDOW_ANTHROPIC"] = True
+    app.config["PROFILE_MERGE_STRUCTURE"] = "flat"
+
+
+@pytest.mark.parametrize("chat, provider", [
+    ("gpt-6-astra", "openai"), (None, "anthropic")])
+def test_a_private_one_window_build_stays_on_the_chat_model(
+        app, world, chat, provider):
+    _one_chunk_switches(app)
+    u = _user(preferred_model=chat, profile_needs_full_regen=True)
+    _node(u)                                   # one private entry
+    assert not pw.cross_provider_allowed(u)
+    world.corpus = Corpus(50)
+    _finish(world, u)
+    chat_model = chat or "claude-opus-5.5"
+    reqs = _all_reqs(world)
+    assert {p for p, _r in reqs} == {provider}
+    assert {r["model_id"] for _p, r in reqs} == {chat_model}
+    [window] = [r for _p, r in reqs if "_w" in r["custom_id"]]
+    assert ex.EVENTS_IN_WINDOW_PARAGRAPH in (
+        window["messages"][0]["content"][0]["text"])
+    [final] = [r for _p, r in reqs if "_f_" in r["custom_id"]]
+    [row] = _rows(u, "window")
+    assert final["messages"] == ex.single_integration_messages(u.id, row)
+    assert "reasoning_effort" not in final
+    [profile] = _finals(u)
+    assert profile.generated_by == chat_model
+    db.session.refresh(u)
+    assert u.profile_private_read is True
+
+
+@pytest.mark.parametrize("chat, provider, version, merge", [
+    ("gpt-6-astra", "openai", "gpt-6-luna", "gpt-6.1-sol"),
+    (None, "anthropic", "claude-haiku-5.5", "claude-opus-5.5")])
+def test_a_private_small_multi_window_build_stays_on_its_provider(
+        app, world, chat, provider, version, merge):
+    """Two chunks on the chat model (140k units): the provider's pair."""
+    _one_chunk_switches(app)
+    u = _user(preferred_model=chat, profile_needs_full_regen=True)
+    _node(u)
+    world.corpus = Corpus(140)
+    assert pw.wants_window_build(u)
+    assert not pw.one_window_pass(u, pw.set_state(u, "s", None))
+    _finish(world, u)
+    reqs = _all_reqs(world)
+    assert {p for p, _r in reqs} == {provider}
+    windows = [r for _p, r in reqs if "_w" in r["custom_id"]]
+    merges = [r for _p, r in reqs if "_w" not in r["custom_id"]]
+    assert len(windows) >= 2
+    assert {r["model_id"] for r in windows} == {version}
+    assert {r["model_id"] for r in merges} == {merge}
+    assert len(_finals(u)) == 1
+
+
+def test_a_no_during_a_consented_one_window_build_keeps_its_final_home(
+        app, world, monkeypatch):
+    """#596 with #599: an OpenAI user who said yes gets a one-window
+    build's window on GPT-6 Luna and its integration on Opus 5.5. A no
+    given after the final's pass picked its models sends nothing to
+    Anthropic, not even the integration's token count; the next pass
+    writes the integration with the user's preferred model."""
+    _one_chunk_switches(app)
+    u = _user(preferred_model="gpt-6-astra", profile_needs_full_regen=True,
+              profile_both_providers=True,
+              profile_both_providers_answered_at=datetime.utcnow())
+    _node(u)                                   # private, but agreed
+    world.corpus = Corpus(50)
+    _advance(u)
+    [(provider, window)] = _all_reqs(world)
+    assert (provider, window["model_id"]) == ("openai", "gpt-6-luna")
+    _poll()
+    n = len(world.provider.submits)
+    counted = []
+    import backend.llm_providers as lp
+    monkeypatch.setattr(lp.LLMProvider, "count_tokens", staticmethod(
+        lambda model_id, messages, k: counted.append(model_id)))
+    real = pw.chained_update_base
+
+    def models_then_no(*a, **k):
+        out = real(*a, **k)
+        _withdraw(u)                   # after the pass computed `cross`
+        return out
+    monkeypatch.setattr(pw, "chained_update_base", models_then_no)
+    assert _advance(u) == "partial"
+    assert "claude-opus-5.5" not in counted
+    assert len(world.provider.submits) == n       # nothing sent
+    monkeypatch.setattr(pw, "chained_update_base", real)
+    _finish(world, u)
+    after = _all_reqs(world, n)
+    assert [(p, r["model_id"]) for p, r in after] == [
+        ("openai", "gpt-6-astra")]
+    assert "_f_" in after[0][1]["custom_id"]
+    assert "claude-opus-5.5" not in counted
+    assert len(_finals(u)) == 1
+
+
+def _public_prefill(world, monkeypatch, units_k, **kw):
+    """A pre-filled account nobody signed into, whose writing is tweets
+    Loore fetched (public only), with ``units_k`` thousand units."""
+    import backend.utils.email as email
+    monkeypatch.setattr(email, "send_admin_prefill_complete_notification",
+                        lambda *a, **k: None)
+    u = _prefilled(profile_needs_full_regen=True, prefilled_handle="someone",
+                   **kw)
+    world.corpus = Corpus(units_k)
+    world.corpus.origin = "twitter"            # pre-filled tweets
+    return u
+
+
+@pytest.mark.parametrize("chat, units_k, ratio, n_windows", [
+    ("gpt-6-astra", 50, None, 1),   # one window: Opus, single-version
+    (None, 50, None, 1),
+    (None, 130, 2.4, 2),            # one Opus chunk, two Luna windows
+])
+def test_a_public_only_prefill_takes_luna_and_opus(
+        app, world, monkeypatch, chat, units_k, ratio, n_windows):
+    """Rule 2 names pre-fills and the lab: GPT-6 Luna for versions, Opus
+    5.5 for merges, also when the writing fits one chunk on the chat
+    model (no Sol, and not the chat model). The windows are sized for
+    Luna."""
+    _one_chunk_switches(app)
+    kw = ({"profile_token_ratio": ratio,
+           "profile_token_ratio_family": "o200k"} if ratio else {})
+    u = _public_prefill(world, monkeypatch, units_k, preferred_model=chat,
+                        **kw)
+    assert pw.cross_provider_allowed(u)
+    assert pw.wants_window_build(u)
+    _finish(world, u)
+    reqs = _all_reqs(world)
+    windows = {(p, r["model_id"]) for p, r in reqs if "_w" in r["custom_id"]}
+    assert windows == {("openai", "gpt-6-luna")}
+    assert len(_rows(u, "window")) == n_windows
+    [final] = [(p, r) for p, r in reqs if "_f_" in r["custom_id"]]
+    assert (final[0], final[1]["model_id"]) == ("anthropic",
+                                                "claude-opus-5.5")
+    assert "reasoning_effort" not in final[1]
+    rows = _rows(u, "window")
+    expected = (ex.single_integration_messages(u.id, rows[0])
+                if n_windows == 1 else
+                ex._integration_messages(u.id, rows, independent=True))
+    assert final[1]["messages"] == expected
+    db.session.refresh(u)
+    assert u.profile_private_read is False
+
+
+def test_a_prefill_signed_into_before_its_final_is_integrated_privately(
+        app, world, monkeypatch):
+    """When in doubt, private: the owner of an OpenAI pre-fill signs in
+    after Luna read the window, so the integration runs on their chat
+    model, never on Opus."""
+    _one_chunk_switches(app)
+    u = _public_prefill(world, monkeypatch, 50, preferred_model="gpt-6-astra")
+    _advance(u)
+    assert {(p, r["model_id"]) for p, r in _all_reqs(world)} == {
+        ("openai", "gpt-6-luna")}
+    _poll()
+    u.last_seen_at = datetime.utcnow()         # someone signed in
+    db.session.commit()
+    assert not pw.cross_provider_allowed(u)
+    n = len(world.provider.submits)
+    _advance(u)
+    [final] = _all_reqs(world, n)
+    assert final[0] == "openai" and final[1]["model_id"] == "gpt-6-astra"
+    assert "_f_" in final[1]["custom_id"]

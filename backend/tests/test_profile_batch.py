@@ -64,6 +64,9 @@ def app(monkeypatch):
     # No real keys in the test app — the network boundary is mocked anyway.
     monkeypatch.setattr(pb, "get_api_keys_for_usage",
                         lambda *a, **k: {"anthropic": "k", "openai": "k"})
+    # The poller's listing shows nothing: every job is polled on its own,
+    # through the batch_check_and_collect stand-ins the tests set.
+    monkeypatch.setattr(pb, "list_batches", lambda *a, **k: {})
     # Pre-submit sizing count: default to "unavailable" so existing tests
     # exercise the fall-through (submit at the calibrated budget as before).
     import backend.llm_providers as lp
@@ -1003,6 +1006,290 @@ def test_submit_refused_for_an_account_reason_is_not_a_batch_attempt(app, monkey
         {k: f"b-{k}" for k in reqs}))
     assert pb._seed_profile_batches(users=[u]) == 1
     assert User.query.get(u.id).profile_batch_pending is True
+
+
+# ── a full provider queue and polling by listing (Peter, 2026-11-03) ──────
+# "I want to have as many accounts in the queue as the provider allows. I
+# just don't want to spam them with querying for results thousands of
+# times per minute."
+
+def _other_pending(provider_key, batch_id="other"):
+    """Another account's batch of ours, pending in the same queue."""
+    other = _user()
+    job = ProfileBatchJob(
+        provider_key=provider_key, batch_id=batch_id, status="pending",
+        items=[{"custom_id": f"profile_{other.id}_x", "user_id": other.id,
+                "kind": "chunk", "prev_profile_id": None,
+                "model_id": "test-model"}],
+        submitted_at=datetime.utcnow())
+    db.session.add(job)
+    db.session.commit()
+    return job
+
+
+def _seed_refused_on_a_full_queue(app, monkeypatch):
+    from backend.utils.llm_batch import SubmittedBatches
+    u = _user(profile_needs_full_regen=True,
+              profile_batch_attempts=pb.MAX_BATCH_ATTEMPTS - 1)
+    app.config["PROFILE_USE_BATCH"] = True
+    db.session.commit()
+    _remaining(monkeypatch, 90000)
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=_chunk("DATA")))
+    monkeypatch.setattr(pb._exports, "_load_prompt",
+                        lambda *a, **k: "G {user_export}")
+
+    def full(reqs, keys, kind):
+        out = SubmittedBatches()
+        out.queue_full.update(reqs)  # "anthropic"
+        return out
+    monkeypatch.setattr(pb, "batch_submit", full)
+    return u
+
+
+def _prefill_not_activated(**kw):
+    """A pre-filled account its owner has not activated yet: outside the
+    hourly seeder's eligible cohort."""
+    u = _user(profile_force_batch=True, profile_needs_full_regen=True,
+              prefilled_handle="someone", **kw)
+    u.approved = False
+    db.session.commit()
+    return u
+
+
+def test_an_unactivated_prefill_sent_back_by_a_full_queue_is_resent_hourly(
+        app, monkeypatch):
+    """Peter, 2026-11-03 ("yes, implement it pls"): work a full queue sent
+    back is remembered (profile_work_held), and the hourly seeder sends it
+    again also for a pre-fill not yet activated, which its cohort leaves
+    out. A successful submit clears the mark."""
+    from backend.utils.llm_batch import SubmittedBatches
+    app.config["PROFILE_USE_BATCH"] = True
+    u = _prefill_not_activated()
+    _other_pending("anthropic")
+    assert u.id not in {x.id for x in User.profile_eligible_query().all()}
+    _remaining(monkeypatch, 90000)
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=_chunk("DATA")))
+    monkeypatch.setattr(pb._exports, "_load_prompt",
+                        lambda *a, **k: "G {user_export}")
+
+    def full(reqs, keys, kind):
+        out = SubmittedBatches()
+        out.queue_full.update(reqs)
+        return out
+    monkeypatch.setattr(pb, "batch_submit", full)
+    assert pb._seed_profile_batches(users=[u]) == 0      # the immediate seed
+    user = User.query.get(u.id)
+    assert user.profile_work_held is True
+    assert (user.profile_batch_attempts or 0) == 0
+    sent = []
+    monkeypatch.setattr(pb, "batch_submit", lambda reqs, keys, kind: (
+        sent.append(reqs) or {k: f"b-{k}" for k in reqs}))
+    assert pb._seed_profile_batches() == 1               # the hourly seed
+    assert [r["custom_id"] for r in sent[0]["anthropic"]][0].startswith(
+        f"profile_{u.id}_")
+    user = User.query.get(u.id)
+    assert user.profile_work_held is False and user.profile_batch_pending
+
+
+def test_a_deactivated_account_held_for_the_queue_stays_paused(
+        app, monkeypatch):
+    """Deactivation is the admin's pause switch: a deactivated account
+    whose work a full queue sent back is not sent again."""
+    app.config["PROFILE_USE_BATCH"] = True
+    u = _prefill_not_activated(profile_work_held=True)
+    u.deactivated_at = datetime.utcnow()
+    db.session.commit()
+    sent = []
+    monkeypatch.setattr(pb, "batch_submit", lambda reqs, keys, kind: (
+        sent.append(reqs) or {k: f"b-{k}" for k in reqs}))
+    pb._seed_profile_batches()
+    assert sent == []
+    assert User.query.get(u.id).profile_work_held is True
+
+
+def test_a_queue_hold_with_nothing_left_to_do_is_released(app, monkeypatch):
+    app.config["PROFILE_USE_BATCH"] = True
+    u = _prefill_not_activated(profile_work_held=True)
+    u.profile_needs_full_regen = False
+    db.session.commit()
+    monkeypatch.setattr(pb, "_should_seed", lambda user, **k: False)
+    pb._seed_profile_batches()
+    assert User.query.get(u.id).profile_work_held is False
+
+
+def test_a_submit_refused_on_a_full_queue_alone_is_a_failed_attempt(
+        app, monkeypatch):
+    """Review of #596: with no other batch of ours in that queue, the
+    limit refuses the submission by itself, and waiting would never end:
+    it counts as a failed attempt, as before the queue rule."""
+    u = _seed_refused_on_a_full_queue(app, monkeypatch)
+    pb._seed_profile_batches(users=[u])
+    assert User.query.get(u.id).profile_batch_attempts == (
+        pb.MAX_BATCH_ATTEMPTS)
+
+
+def test_a_full_provider_queue_at_submit_is_not_a_batch_attempt(
+        app, monkeypatch):
+    """The provider refuses the create because its batch queue is full
+    (other batches of ours wait in it): the items wait for the next seed
+    pass, never counted towards the full-price fallback."""
+    from backend.utils.llm_batch import SubmittedBatches
+    u = _user(profile_needs_full_regen=True,
+              profile_batch_attempts=pb.MAX_BATCH_ATTEMPTS - 1)
+    app.config["PROFILE_USE_BATCH"] = True
+    db.session.commit()
+    _other_pending("anthropic")
+    _remaining(monkeypatch, 90000)
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=_chunk("DATA")))
+    monkeypatch.setattr(pb._exports, "_load_prompt",
+                        lambda *a, **k: "G {user_export}")
+    submits = []
+
+    def full(reqs, keys, kind):
+        submits.append(reqs)
+        out = SubmittedBatches()
+        out.queue_full.update(reqs)  # "anthropic"
+        return out
+    monkeypatch.setattr(pb, "batch_submit", full)
+    for _ in range(pb.MAX_BATCH_ATTEMPTS + 1):
+        assert pb._seed_profile_batches(users=[u]) == 0
+    assert len(submits) == pb.MAX_BATCH_ATTEMPTS + 1
+    user = User.query.get(u.id)
+    assert user.profile_batch_pending is False
+    assert user.profile_batch_attempts == pb.MAX_BATCH_ATTEMPTS - 1
+    from backend.utils import refusal_backoff
+    assert not refusal_backoff.profile_in_backoff(user.id)
+
+
+def test_a_batch_failed_on_a_full_queue_is_not_a_batch_attempt(
+        app, monkeypatch):
+    """OpenAI creates the batch and fails it on its enqueued-token limit:
+    the poller counts no attempt, the job is closed as failed, and the
+    next seed pass builds the step again."""
+    from backend.utils.llm_batch import CollectedResults
+    u = _user(profile_batch_attempts=pb.MAX_BATCH_ATTEMPTS - 1)
+    prev = _prev_profile(u, datetime(2026, 5, 1))
+    job, item = _chunk_job(u, prev)
+    job.provider_key = "openai:gpt-x"
+    db.session.commit()
+    # Another account's batch for the same model, on another endpoint.
+    _other_pending("openai:gpt-x:responses")
+    monkeypatch.setattr(pb, "batch_check_and_collect", _queue_full_except(
+        "other"))
+    pb._poll_profile_batches()
+    user = User.query.get(u.id)
+    assert user.profile_batch_attempts == pb.MAX_BATCH_ATTEMPTS - 1
+    assert user.profile_batch_pending is False
+    assert user.profile_work_held is True      # sent again by the seeder
+    assert ProfileBatchJob.query.get(job.id).status == "failed"
+    assert UserProfile.query.filter_by(user_id=u.id).count() == 1
+
+
+def test_a_refused_chained_step_is_held_for_the_seeder(app, monkeypatch):
+    """Peter, 2026-11-03 ("yes pls"): a refused step waits out the refusal
+    backoff and is re-seeded after it, by the hourly seeder, also for an
+    account not yet activated: the account is held. The backoff and the
+    attempt count are unchanged."""
+    u = _user()
+    prev = _prev_profile(u, datetime(2026, 5, 1))
+    job, item = _chunk_job(u, prev)
+    monkeypatch.setattr(pb, "batch_check_and_collect", lambda bids, keys: (
+        {item["custom_id"]: {"content": "", "input_tokens": 100,
+                             "output_tokens": 32000, "truncated": True}},
+        {}, {}))
+    pb._poll_profile_batches()
+    user = User.query.get(u.id)
+    assert user.profile_batch_attempts == 1
+    assert user.profile_work_held is True
+    from backend.utils import refusal_backoff
+    assert refusal_backoff.profile_in_backoff(u.id)
+
+
+def test_the_seeder_releases_a_hold_when_the_builder_has_nothing(
+        app, monkeypatch):
+    app.config["PROFILE_USE_BATCH"] = True
+    u = _prefill_not_activated(profile_work_held=True)
+    monkeypatch.setattr(pb, "_should_seed", lambda user, **k: True)
+    monkeypatch.setattr(pb, "_build_next_profile_request",
+                        lambda user, **k: None)
+    pb._seed_profile_batches()
+    assert User.query.get(u.id).profile_work_held is False
+
+
+def _queue_full_except(pending_batch_id):
+    """A collect stand-in: every batch failed on a full queue, except
+    ``pending_batch_id``, which is still in progress."""
+    from backend.utils.llm_batch import CollectedResults
+
+    def collect(bids, keys, known=None):
+        out = CollectedResults()
+        if pending_batch_id in bids.values():
+            return out, dict(bids), {}
+        out.queue_full.update(bids)
+        return out, {}, {}
+    return collect
+
+
+def test_a_batch_over_the_limit_by_itself_is_a_failed_attempt(
+        app, monkeypatch):
+    """Review of #596: an OpenAI batch failed on the enqueued-token limit
+    with no other batch of ours queued for that model is larger than the
+    limit by itself. It would fail on every pass, so it counts as a failed
+    attempt and logs an error (a Sentry event), as before the queue rule.
+    Another model's pending batch does not count."""
+    u = _user(profile_batch_attempts=0)
+    prev = _prev_profile(u, datetime(2026, 5, 1))
+    job, _item = _chunk_job(u, prev)
+    job.provider_key = "openai:gpt-x"
+    db.session.commit()
+    _other_pending("openai:gpt-y")
+    monkeypatch.setattr(pb, "batch_check_and_collect", _queue_full_except(
+        "other"))
+    log = MagicMock()
+    monkeypatch.setattr(pb, "logger", log)
+    pb._poll_profile_batches()
+    user = User.query.get(u.id)
+    assert user.profile_batch_attempts == 1
+    assert ProfileBatchJob.query.get(job.id).status == "collected"
+    assert any("larger than the limit" in str(c.args[0])
+               for c in log.error.call_args_list)
+
+
+def test_the_poller_reads_statuses_from_the_listing(app, monkeypatch):
+    """One listing for all pending jobs: a job still in progress costs no
+    call of its own, an ended one is collected from the listed object,
+    and a job the listing does not show is polled on its own."""
+    from types import SimpleNamespace
+    users = [_user() for _ in range(3)]
+    jobs = []
+    for i, u in enumerate(users):
+        prev = _prev_profile(u, datetime(2026, 5, 1))
+        job, _item = _chunk_job(u, prev)
+        job.batch_id = f"b{i}"
+        jobs.append(job)
+    db.session.commit()
+    seen = []
+    monkeypatch.setattr(pb, "list_batches", lambda wanted, keys, oldest=None: (
+        seen.append((sorted(wanted), oldest)) or {
+            "b0": SimpleNamespace(id="b0", processing_status="in_progress"),
+            "b1": SimpleNamespace(id="b1", processing_status="ended")}))
+    calls = []
+
+    def collect(bids, keys, known=None):
+        calls.append((dict(bids), sorted(known or {})))
+        return {}, {}, {}
+    monkeypatch.setattr(pb, "batch_check_and_collect", collect)
+    pb._poll_profile_batches()
+    assert seen == [([("anthropic", "b0"), ("anthropic", "b1"),
+                      ("anthropic", "b2")],
+                     min(j.submitted_at for j in jobs))]
+    assert calls == [({"anthropic": "b1"}, ["b1"]),
+                     ({"anthropic": "b2"}, [])]
+    assert ProfileBatchJob.query.filter_by(batch_id="b0").one().status == (
+        "pending")
 
 
 def test_force_batch_user_never_exhausts_to_sync(app, monkeypatch):

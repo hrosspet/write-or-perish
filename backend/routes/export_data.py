@@ -1925,15 +1925,19 @@ def _batch_progress(user):
         # A rebuild merging the user's own version in (#183).
         message, progress = "Merging your own version", 85
     elif item.get("kind") == "window":
-        # A large build reading every window at once (#545).
+        # A large build reading every window at once (#545); a small one
+        # reads one window, then rewrites it as the profile.
         total = item.get("total")
         message = (f"Generating profile: reading all {total} chunks"
-                   if total else "Generating profile")
+                   if total and total > 1 else "Generating profile")
         progress = 20
     elif item.get("kind") == "group":
         message, progress = "Integrating profile versions", 80
     elif item.get("kind") == "final":
-        message, progress = "Integrating profile versions", 95
+        message = ("Generating profile"
+                   if len(item.get("inputs") or ()) == 1
+                   else "Integrating profile versions")
+        progress = 95
     elif item.get("chunk_num") and item.get("chunk_total"):
         n, total = int(item["chunk_num"]), int(item["chunk_total"])
         message = f"Generating profile: Chunk {n} of ~{total}"

@@ -196,6 +196,21 @@ Key properties:
   pending `ProfileBatchJob`s.
 - **Reuses PR #181's rule**: clear `profile_needs_full_regen` after the first
   committed chunk (here, the poller does it instead of the inline loop).
+- **Statuses by listing (2026-11-03).** Before the loop, the poller reads
+  every pending job's status from the providers' list endpoints
+  (`llm_batch.list_batches`: Anthropic `GET /v1/messages/batches`, 1,000 a
+  page, newest first; OpenAI `GET /v1/batches`, 100 a page, every batch of
+  the organisation, matched by id). It pages until every pending batch is
+  found, the pages run out, 50 pages, or the listing has passed the oldest
+  pending job's submission by an hour (only while the batches it sees come
+  newest first; OpenAI documents no order). A job still in progress costs
+  no call of its own; an ended one is collected from the listed object
+  (`batch_check_and_collect(..., known=...)`); a job the listing does not
+  show, or every job when a listing fails, is polled on its own as before.
+  Peter: "I want to have as many accounts in the queue as the provider
+  allows. I just don't want to spam them with querying for results
+  thousands of times per minute." The recent-context, digest and
+  poll-draft collectors still retrieve per job.
 
 **An import's build waits for the imports to stop (#598, Peter
 2026-11-05).** On the batch path an import does not seed at once. Its
@@ -269,7 +284,9 @@ updates. That leaves **essentially all failures transient**:
 | **Stuck `pending`** (no terminal status) | provider | staleness check (mirror `_is_task_stale`): `submitted_at` older than N h → mark failed, clear guard, re-seed. |
 | **Double-collect** (poller crash mid-tick) | infra | idempotent: a chunk whose `source_data_cutoff` already has a child profile is skipped; job flips to `collected` atomically. |
 | **Not selected for batch** (`use_batch(user)` false) | — | the synchronous path (PR #181) runs unchanged — the permanent fallback. |
-| **Content-policy block** (2026-11-04) | the provider's content-policy filter refuses a request (HTTP 400, e.g. `bio_policy`, in the batch's error file) | final, never resent automatically: a chained step is not a batch attempt (no full-price fallback); a window set's item gets the outcome `blocked`; the account's profile build stops until the admin's confirmed Build profile (`refusal_backoff.lift_policy_block`). |
+| **Content-policy block** (2026-11-04) | the provider's content-policy filter refuses a request (HTTP 400, e.g. `bio_policy`, in the batch's error file) | final, never resent automatically: a chained step is not a batch attempt (no full-price fallback) and stops the account; a window set's item gets the outcome `blocked`: a window is skipped (`window_skip` row) and the profile finished without it, a group or final stops the account's profile build until the admin's confirmed Build profile (`refusal_backoff.lift_policy_block`). |
+| **Provider queue full** (2026-11-03) | a run that fills the provider's batch queue on purpose | wait, never a failure: an Anthropic create refused with a 429 that is not the spend cap, or an OpenAI create refused on the enqueued-token limit (`SubmittedBatches.queue_full`), and an OpenAI batch failed in validation with `token_limit_exceeded` (`CollectedResults.queue_full`). No batch attempt (so no full-price fallback), no refusal backoff, no "missing" outcome for a window set (outcome `queue_full`, and `profile_batch_pending` cleared), no immediate advance; the next seed pass sends the work again. `User.profile_work_held` remembers it (next row). Logged as a warning, no Sentry event. Only while another profile batch of ours is pending in the same queue (OpenAI: the same model, whose enqueued-token limit it is): with nothing else of ours queued, the batch is over the limit by itself and would fail on every pass, so it counts as a failed attempt and logs an error, as before (review of #596). |
+| **Work waiting outside the hourly cohort** (2026-11-03) | the hourly seeder's cohort leaves out accounts not yet activated (the pre-filled Beta cohort) | `User.profile_work_held` marks batch profile work that waits for a later pass: a full queue, a refused or failed chained step, a set item that failed (a refused final waits out the refusal backoff's hour; a window may wait out a day's provider stop), a refused submit, a stale job. The hourly seeder adds held accounts to its pass by the spend-cap hold's rule (not deleted; approved or never deactivated, so a deactivated account stays paused), after the same gates: the backoff, the stops and the attempt limits are unchanged. Cleared when the work goes out, or when nothing is left to do and nothing waits for time to pass (a refusal stop that only a new version lifts counts as given up). Peter: "yes, implement it pls", "yes pls". |
 
 **Retry policy:** since failures are transient, the primary mechanism is simply
 **re-seed via batch next cycle**, bounded by `profile_batch_attempts` (≈3) plus
@@ -409,8 +426,9 @@ same task run.
 
 | Pass | Versions | Merges |
 |---|---|---|
+| A from-scratch build that fits one window on the chat model, private writing, no consent (#596) | the user's chat model, with the events paragraph | the user's chat model, single-version prompt |
 | More than one window, private writing, no consent | `PROFILE_VERSION_MODEL_ANTHROPIC` / `_OPENAI` (Haiku 5.5 / GPT-6 Luna) | `PROFILE_MERGE_MODEL_ANTHROPIC` / `_OPENAI` (Opus 5.5 / GPT-6.1 Sol at `PROFILE_MERGE_REASONING_EFFORT_OPENAI`) |
-| More than one window, public-only writing or `User.profile_both_providers` | `PROFILE_VERSION_MODEL_CROSS_PROVIDER` (GPT-6 Luna) | `PROFILE_MERGE_MODEL_CROSS_PROVIDER` (Opus 5.5) |
+| Any from-scratch or multi-window build, public-only writing or `User.profile_both_providers` | `PROFILE_VERSION_MODEL_CROSS_PROVIDER` (GPT-6 Luna) | `PROFILE_MERGE_MODEL_CROSS_PROVIDER` (Opus 5.5; the single-version prompt for one window) |
 | A regular update of a merged set: one window to read | the user's chat model, chained | the user's chat model |
 
 Public-only (`utils/profile_providers.writing_is_public_only`, metadata
@@ -529,20 +547,42 @@ renders nothing (threads holding only a system prompt) counts as covered.
 Expired and cancelled OpenAI batches
 have their finished results collected (#419); profile jobs are stale after
 25 h. Merges keep the integration rule (one retry after an hour, then
-stopped). Policy block (2026-11-04): a window, group or final the
-provider's content-policy filter blocked (`bio_policy` and the other
+stopped). Policy block (2026-11-04): an item the provider's
+content-policy filter blocked (`bio_policy` and the other
 `llm_batch.OPENAI_POLICY_BLOCK_CODES`, read from the batch's error file)
-gets the outcome `blocked`, which is neither a content nor a provider
-failure. It is recorded as a $0 cost row and a Sentry event
-(`refusal_backoff.record_policy_block`), `profile_seed_error` names the
-item ("Stopped: the provider's policy filter blocked window
-<start>..<end> (bio_policy)"), and the account builds nothing further:
-`next_work` returns "blocked" before rendering, the seeder's gate and the
-set's work check say no, and no stop expires. Only
-`refusal_backoff.lift_policy_block` lifts it: the admin's confirmed Build
-profile (which rebuilds the set from scratch and so sends every window
-again), or a call from a shell, after which the next advance sends the
-blocked range again.
+gets the outcome `blocked`, neither a content nor a provider failure, and
+is never sent again automatically. A blocked **window** is skipped
+(Peter, 2026-11-04: "skip the flagged windows, but finish their
+profile"): a `window_skip` row takes its place over its real range, a $0
+record of the block stops nothing (request type `profile_window`), the
+admin column says "Skipped window <start>..<cutoff>: provider policy block
+(bio_policy)", and the merges run over the other windows. The range
+itself is remembered for good, per user, whatever the account's AI usage
+(`ProfileBlockedRange`, no lookback): every later window plan, in any
+set, cuts around it (`cut_around_blocked`): a window ends where the
+blocked range starts, the next begins where it ends, and exactly that
+range, entries imported into it later included, gets a `window_skip` row
+without a request. So no rebuild resends it: an import that shifts the
+windows, new writing that resizes them, the provisional ladder, Build
+profile, or AI usage turned back on. Only `lift_blocked_ranges(user_id)`,
+from a shell, lets it be read again; no button does. An account whose AI
+usage does not allow AI gets no skip row (the range is recorded); a set
+whose windows are all skipped sends no final. A blocked chained chunk
+(the account stops, #597) is remembered as a range too. A range runs
+from just before the blocked window's (or chunk's) earliest entry to its
+cutoff, so older writing imported later, never sent, is read. Only the
+window path cuts around a range, so a build whose remainder meets one
+always takes it (`wants_window_build`); the chained batch builder builds
+no chunk that meets one, and the synchronous task builds nothing then
+(with the window path switched off, such an account gets no update). A blocked **group or final**
+cannot be skipped: it is recorded as a profile block
+(`refusal_backoff.record_policy_block`), `profile_seed_error` names it,
+and the account builds nothing further (`next_work` returns "blocked",
+also when the block is collected while an advance runs) until
+`refusal_backoff.lift_policy_block`: the admin's confirmed Build profile.
+`scripts/backfill_policy_blocks.py` records the blocks collected as
+"missing" before this code, from the batches' error files, with the
+same range records.
 
 **Running it.** `dispatch_advance` claims the per-user guard
 (`profile_generation_task_id`), sets `profile_batch_pending` and pins the
@@ -578,3 +618,91 @@ same advance (`window_hand_off`), so accounts off the batch path use it too.
 flight is not seen by that set (as for a chained build's first chunk). A
 revert from the history during a build is merged into the final as a full
 profile.
+
+### One-chunk builds as one window (2026-11-03)
+
+Code: `profile_windows.wants_window_build` / `one_chunk_windows`,
+`exports.single_integration_messages`,
+`backend/prompts/profile_single_integration.txt`.
+
+**When it applies.** A from-scratch build (no update base: a first build, a
+step of the provisional ladder, a full rebuild) that fits one chunk on the
+user's chat model, where the switch of that model's provider is on:
+`PROFILE_ONE_CHUNK_WINDOW_OPENAI` and `PROFILE_ONE_CHUNK_WINDOW_ANTHROPIC`
+(both default on; Peter, 2026-11-03: "yes, we should do the same for
+Ant"). The switch decides the path only (two steps, or main's one chained
+call); the models come from `pass_models`. Peter: "the events paragraph is
+definitely needed" (in one test window, 0 of 3 plain-prompt Luna versions
+kept a key recent event the writing states, 2 of 2 with the paragraph
+did), and "we need one more step to convert it into the final profile".
+
+**Models and window counts (Peter, 2026-11-05).** The window count comes
+from the user's chat model first, as `wants_window_build` decides the path
+(`plan_chunks` at the planner's 90k-unit target and the chat model's cap):
+
+- Private writing, no consent, one chunk on the chat model
+  (`one_window_pass`): one window sized for the chat model, read by the
+  chat model, and the single-version integration by the chat model
+  (`single_models_for`; no reasoning-effort parameter on an OpenAI chat
+  model, as the live replies send none). Peter: "for 1 window updates on
+  prod I'd like to use the chained version we just tested, with user
+  preferred model producing both the version and the merge". On Opus 5.5
+  one chunk holds up to about 135k units (the count rounds at 1.5 times
+  the 90k target); on GPT-6 Astra or GPT-6.1 Sol (272k tier) about 108k at
+  the tweets ratio (2.4 tokens a unit) and 135k at the threads prior.
+- Private writing, no consent, two or more chunks on the chat model: the
+  provider's pair, as any large build (Haiku 5.5 windows at its 100k tier
+  and the Opus 5.5 merge; GPT-6 Luna windows and the GPT-6.1 Sol merge).
+- Public-only writing (a pre-fill, the lab) or a user who agreed to both
+  providers: GPT-6 Luna versions and the Opus 5.5 merge at any size, the
+  windows sized for Luna's 272k tier (Peter's rule names "prefill, lab").
+  One Luna window gets Opus's single-version integration; more get the
+  many-version merge.
+- The models are chosen again on each pass: a pre-fill whose owner signs
+  in after Luna read the window counts as private from then on, so its
+  integration runs on the user's chat model.
+
+Before 2026-11-05 this path used each provider's pair (GPT-6 Luna, then
+GPT-6.1 Sol; Haiku 5.5 windows, then Opus 5.5); that is replaced by the
+rules above.
+
+**The build.** A window set of one window (or a few Luna windows for
+public-only writing), read with the events paragraph, then a final over
+that version: two Batch rounds, one after the other, so a first profile
+takes two batch turnarounds instead of one. Like every window build it
+pins the account to Batch.
+
+**The final's prompt.** A final whose only input is one window version (no
+base, no version of the user's) uses `profile_single_integration.txt`: "a
+profile of the user", the events list moved into the Surface Map with its
+dates and left out as a section, the length the structure asks for, the
+newest value of a fact that changed, and no fact, outcome or trend the
+version does not give. The many-version prompt (`profile_integration.txt`)
+is unchanged; its "series of profile updates" of 80k-110k tokens and its
+trajectory request leaked into 2 of 6 single-version finals on 2026-11-03,
+and its "keep the structure" kept the events list as a fourth section in 2
+of 2 Opus finals. Not on the prompts page and not replaced by a user's own
+integration prompt (written for many versions); the user's own generation
+prompt shapes it, as in every merge. A one-window set with a version of the
+user's merges both with the many-version prompt (two inputs, "Written by
+the user on D"): the user's edit wins.
+
+**Checks.** Every final (one window or many) is refused when it has an
+`EVENTS IN THIS WINDOW` heading (`profile_output_problem(final=True)`); the
+integration rule then retries it once after an hour. No many-version merge
+of the 2026-10-21/22 tests had one (0 of 32 outputs). A set whose final
+inputs are all skipped windows (the one window declined twice) sends no
+final: a merge of the skip note alone would become the profile. The admin
+column says "Stopped: every window of the profile build was given up".
+
+**Later builds.** A set below one full chunk is provisional: the ladder
+rebuilds it from scratch at its next step (a new set), and the 80k gate
+does not add windows to it. From one full chunk on, its updates are the
+set's: a regular one-window update is a chained update by the user's chat
+model in the window's place, and the chat model merges the window and the
+chained version with the many-version prompt (#589's rule of 2026-11-05).
+
+**Live check, 2026-11-03** (window 23's two events versions, standard API,
+$0.26): with the single-version prompt, Sol at high effort and Opus each
+wrote three maps and no fourth section in 4 of 4 finals, with none of the
+many-version wording; Opus still added one unsupported status in 1 of 2.
