@@ -959,13 +959,16 @@ class _Submission:
     """Requests collected for one user's submission, sent in slices of
     PROFILE_BATCH_MAX_BYTES, every slice in the same run."""
 
-    def __init__(self, keys, providers, recheck=None):
+    def __init__(self, keys, providers, recheck=None, own=None):
         self.keys = keys
         # The providers this user's writing may reach in this pass.
         self.providers = set(providers)
         # Returns the providers allowed now; called before each slice is
-        # sent, since rendering a pass can take many minutes (#599).
+        # sent and before anything (a request or a token count) goes to a
+        # provider other than ``own``, the provider of the user's preferred
+        # model, since rendering a pass can take many minutes (#599).
         self.recheck = recheck
+        self.own = own
         self.built = []
         self.size = 0
         self.sent = 0
@@ -980,6 +983,37 @@ class _Submission:
     @property
     def stopped(self):
         return self.failed or self.withdrawn
+
+    def may_reach(self, provider, user_id=None):
+        """Whether anything of this pass, a request or a token count, may
+        go to ``provider`` now. A provider outside the pass's providers
+        raises (the hard line). A provider other than the user's own is
+        checked again first: after a no, the pass is withdrawn and nothing
+        more goes out, not even a token count (#599)."""
+        if self.stopped:
+            return False
+        if provider not in self.providers:
+            raise ProfileModelError(
+                f"user {user_id}: a profile request to {provider} is not "
+                f"allowed for this user's writing")
+        if self.recheck is None or provider == self.own:
+            return True
+        allowed = set(self.recheck())
+        if provider in allowed:
+            return True
+        self._withdraw(allowed, user_id)
+        return False
+
+    def _withdraw(self, allowed, user_id):
+        # A no given while this pass ran: what was built is dropped unsent
+        # (nothing is in flight for it), and the next pass plans it again
+        # for the user's own provider.
+        logger.info("User %s: profile requests to %s withdrawn before "
+                    "sending; the next pass plans again", user_id,
+                    sorted(self.providers - allowed))
+        self.providers &= allowed
+        self.withdrawn = True
+        self.built, self.size = [], 0
 
     def add(self, provider, request, meta):
         if self.stopped:
@@ -999,20 +1033,11 @@ class _Submission:
         if not self.built or self.stopped:
             self.built, self.size = [], 0
             return
-        if self.recheck is not None:
+        if self.recheck is not None and any(
+                b["provider"] != self.own for b in self.built):
             allowed = set(self.recheck())
             if any(b["provider"] not in allowed for b in self.built):
-                # A no given while this pass rendered: the slice is
-                # dropped unsent (nothing is in flight for it), and the
-                # next pass renders it again for the user's own provider.
-                logger.info("User %s: profile requests to %s withdrawn "
-                            "before sending; the next pass plans again",
-                            self.built[0]["meta"].get("user_id"),
-                            sorted({b["provider"] for b in self.built}
-                                   - allowed))
-                self.providers &= allowed
-                self.withdrawn = True
-                self.built, self.size = [], 0
+                self._withdraw(allowed, self.built[0]["meta"].get("user_id"))
                 return
         n = _batch._submit_requests(self.built, self.keys)
         if n < len(self.built):
@@ -1108,6 +1133,10 @@ def _render_windows(user, state, models, sub, history, deadline,
                 return template.replace(
                     "{user_export}", _exports.chunk_content_for_prompt(chunk))
 
+            if not sub.may_reach(provider, user.id):
+                # A no given while the pass rendered: not even the window's
+                # token count goes to the other provider.
+                return None
             fitted = fit_window(user, models.version, keys, cap, cur,
                                 budget, end, _prompt, rho)
             if fitted is None:
@@ -1220,12 +1249,16 @@ def _stop_merge(user, kind, set_id, tokens, model_id):
 
 def _merge_requests(user, state, models, sub, keys, history):
     """Queue the due groups and the final. Returns True when a merge
-    stopped (over the cap)."""
+    stopped (over the cap). Each merge's token count and request is
+    preceded by ``sub.may_reach``: after a no given while the pass ran,
+    nothing more goes to the other provider, and the merges stop."""
     if refusal_backoff.profile_in_backoff(user.id) or merge_stopped(user):
         return False
     provider, _api = _batch._provider_and_model(models.merge)
     plan = merge_plan(user, state)
     if plan.final_inputs is not None and _structure() == "flat":
+        if not sub.may_reach(provider, user.id):
+            return False
         messages = _merge_messages(user, plan.final_inputs)
         over, tokens = merge_over_cap(models.merge, messages, keys)
         if over:
@@ -1245,6 +1278,8 @@ def _merge_requests(user, state, models, sub, keys, history):
                            _iso(members[-1].source_data_cutoff))
         if provider_stop_until(history, key) is not None:
             continue
+        if not sub.may_reach(provider, user.id):
+            return False
         messages = _merge_messages(user, members)
         over, tokens = merge_over_cap(models.merge, messages, keys)
         if over:
@@ -1273,6 +1308,8 @@ def _merge_requests(user, state, models, sub, keys, history):
     tip = windows[-1]
     key = _attempt_key("final", None, _iso(tip.source_data_cutoff))
     if provider_stop_until(history, key) is not None:
+        return False
+    if not sub.may_reach(provider, user.id):
         return False
     messages = _merge_messages(user, plan.final_inputs)
     over, tokens = merge_over_cap(models.merge, messages, keys)
@@ -1388,7 +1425,7 @@ def next_work(user, keys, deadline, wait_for_imports=True):
                 user.id, set_id, len(state.windows),
                 len(state.windows_in_flight), len(state.due),
                 plan_windows[0], estimate)
-    sub = _Submission(keys, providers, recheck)
+    sub = _Submission(keys, providers, recheck, own=models.provider)
     outcome = None
     if state.due:
         outcome = _render_windows(user, state, models, sub, history,
