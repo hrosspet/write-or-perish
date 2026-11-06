@@ -643,13 +643,15 @@ class Node(db.Model):
         """Load pinned UserArtifact instances ({kind: artifact}).
 
         Multiple "user_artifact" rows may exist per node (one per kind,
-        pinned at session start — #191).
+        pinned at session start — #191). A version the user deleted
+        (#603) is left out: the session's instructions, exports and
+        quote preambles no longer carry it.
         """
         result = {}
         for a in self.context_artifacts:
             if a.artifact_type != "user_artifact":
                 continue
-            row = UserArtifact.query.get(a.artifact_id)
+            row = UserArtifact.get_live(a.artifact_id)
             if row is not None:
                 result[row.kind] = row
         return result
@@ -1086,6 +1088,13 @@ class UserArtifact(db.Model):
     privacy_level = db.Column(db.String(16), nullable=False, default="private")
     # Artifacts are LLM working memory — must be AI-readable to function.
     ai_usage = db.Column(db.String(16), nullable=False, default="chat")
+    # Soft delete (#603), as for nodes: the user's delete stamps every
+    # version of the kind at once, and from then on no reader sees them
+    # (read through live() / get_live() / latest_for()). The daily
+    # cleanup deletes the rows after SOFT_DELETE_GRACE_DAYS
+    # (backend/utils/artifact_deletion.py). A new artifact of the same
+    # kind starts again at v1: version numbers count live rows only.
+    deleted_at = db.Column(db.DateTime, nullable=True, index=True)
 
     user = db.relationship("User", backref="artifacts")
 
@@ -1127,6 +1136,13 @@ class UserArtifact(db.Model):
     # silently desync one side (which once left {user_intentions} unrendered).
     INLINE_KINDS = ("memory", "scratchpad", "ai_preferences", "intentions")
 
+    # Kinds the user cannot delete (#603): the built-ins, which the list
+    # would bring back empty at once, and the saved-references digest
+    # (backend/tasks/external_digest.py DIGEST_KIND), which the nightly
+    # job rebuilds. Only custom artifacts (made by the user or the AI)
+    # can be deleted.
+    UNDELETABLE_KINDS = frozenset(DEFAULT_KINDS) | {"external_digest"}
+
     def set_content(self, plaintext):
         self.content = encrypt_content(plaintext)
 
@@ -1134,14 +1150,42 @@ class UserArtifact(db.Model):
         return decrypt_content(self.content)
 
     @classmethod
+    def is_deletable_kind(cls, kind):
+        return kind not in cls.UNDELETABLE_KINDS
+
+    @classmethod
+    def live(cls):
+        """Query of the versions that are not deleted (#603). Every
+        reader of artifacts starts here, so a deleted artifact is gone
+        everywhere from the moment of the delete."""
+        return cls.query.filter(cls.deleted_at.is_(None))
+
+    @classmethod
+    def get_live(cls, artifact_id):
+        """The version with *artifact_id*, or None when there is none or
+        it was deleted (#603). For ids kept elsewhere: session pins
+        (NodeContextArtifact) and the ids in tool_calls_meta."""
+        if artifact_id is None:
+            return None
+        row = cls.query.get(artifact_id)
+        if row is None or row.deleted_at is not None:
+            return None
+        return row
+
+    @classmethod
     def latest_for(cls, user_id, kind):
-        return cls.query.filter_by(user_id=user_id, kind=kind).order_by(
+        return cls.live().filter_by(user_id=user_id, kind=kind).order_by(
             cls.created_at.desc(), cls.id.desc()).first()
+
+    @classmethod
+    def version_count(cls, user_id, kind):
+        """How many live versions the kind has: the latest one's number."""
+        return cls.live().filter_by(user_id=user_id, kind=kind).count()
 
     @classmethod
     def latest_per_kind(cls, user_id):
         """Latest version of every artifact kind the user has, as a dict."""
-        rows = cls.query.filter_by(user_id=user_id).order_by(
+        rows = cls.live().filter_by(user_id=user_id).order_by(
             cls.created_at.asc(), cls.id.asc()).all()
         latest = {}
         for row in rows:

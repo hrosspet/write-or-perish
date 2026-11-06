@@ -3,6 +3,7 @@ import MarkdownBody from '../components/MarkdownBody';
 import api from '../api';
 import VersionHistoryDrawer from '../components/VersionHistoryDrawer';
 import ArtifactsNav from '../components/ArtifactsNav';
+import BubbleKebabMenu from '../components/BubbleKebabMenu';
 import SpeakerIcon from '../components/SpeakerIcon';
 import RegenerateTtsDialog from '../components/RegenerateTtsDialog';
 import { useUser } from '../contexts/UserContext';
@@ -224,6 +225,33 @@ export default function ProfilePage() {
   // Esc cancels the edit (matches the Cancel button).
   useEscapeKey(() => setEditing(false), editing && !saving);
 
+  // Edit from the version badge or the ⋮ menu: the same form.
+  const openEditor = () => {
+    if (!profile) return;
+    setEditing(true);
+    setEditContent(profile.content);
+  };
+
+  // Generation progress indicator: in the meta line once a profile
+  // exists, on its own before the first one.
+  const progress = (generating || failMessage) && (
+    <span style={{
+      fontFamily: 'var(--sans)',
+      fontSize: '0.85rem',
+      fontWeight: 300,
+      color: failMessage ? 'var(--text-muted)' : 'var(--accent)',
+      animation: generating ? 'pulse 2s ease-in-out infinite' : 'none',
+    }}>
+      {failMessage || (genData?.message
+        // A batch step has no within-step percentage; its label
+        // already reads "Chunk n of ~N".
+        ? (genData.source === 'batch'
+          ? genData.message
+          : `${genData.message} \u00b7 ${genProgress || 0}%`)
+        : 'Starting generation...')}
+    </span>
+  );
+
   if (loading) {
     return (
       <div style={{ padding: '60px 24px', maxWidth: '800px', margin: '0 auto' }}>
@@ -258,10 +286,12 @@ export default function ProfilePage() {
         )}
 
         {profile && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: '12px', flex: '1 1 auto', flexWrap: 'wrap',
+          }}>
             <button
               onClick={() => {
-                if (editing) { handleSave(); } else { setEditing(true); setEditContent(profile.content); }
+                if (editing) { handleSave(); } else { openEditor(); }
               }}
               style={{
                 background: 'none', border: 'none', cursor: 'pointer', padding: 0,
@@ -287,27 +317,23 @@ export default function ProfilePage() {
             >
               history
             </button>
+            {progress}
+            {/* ⋮ with Edit only, like a built-in artifact (#603; Peter:
+                the profile behaves like Predictions, editable, never
+                deleted). */}
+            {!editing && (
+              <BubbleKebabMenu
+                inline
+                visible
+                items={[{ label: 'Edit', action: openEditor, color: 'var(--text-primary)' }]}
+                style={{ marginLeft: 'auto' }}
+              />
+            )}
           </div>
         )}
 
-        {/* Generation progress indicator */}
-        {(generating || failMessage) && (
-          <span style={{
-            fontFamily: 'var(--sans)',
-            fontSize: '0.85rem',
-            fontWeight: 300,
-            color: failMessage ? 'var(--text-muted)' : 'var(--accent)',
-            animation: generating ? 'pulse 2s ease-in-out infinite' : 'none',
-          }}>
-            {failMessage || (genData?.message
-              // A batch step has no within-step percentage; its label
-              // already reads "Chunk n of ~N".
-              ? (genData.source === 'batch'
-                ? genData.message
-                : `${genData.message} \u00b7 ${genProgress || 0}%`)
-              : 'Starting generation...')}
-          </span>
-        )}
+        {/* Before the first profile there is no meta line to sit in. */}
+        {!profile && progress}
       </div>
 
       {/* Meta line */}

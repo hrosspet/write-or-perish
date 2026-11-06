@@ -9,6 +9,7 @@ import { formatDate } from '../utils/date';
 import { computeLineDiff } from '../utils/diff';
 import VersionHistoryDrawer from '../components/VersionHistoryDrawer';
 import ArtifactsNav from '../components/ArtifactsNav';
+import BubbleKebabMenu from '../components/BubbleKebabMenu';
 import useSubmitShortcut from '../hooks/useSubmitShortcut';
 import useEscapeKey from '../hooks/useEscapeKey';
 
@@ -666,7 +667,7 @@ export default function TodoPage() {
         </h1>
 
         {todo && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flex: '1 1 auto' }}>
             <button
               onClick={() => {
                 if (editing) { if (!editConflict) handleSave(); } else { openEditor(); }
@@ -723,6 +724,17 @@ export default function TodoPage() {
               >
                 {quickAddOpen ? '×' : '+'}
               </button>
+            )}
+            {/* ⋮ with Edit only, like a built-in artifact (#603; Peter:
+                the todo list behaves like Predictions, editable, never
+                deleted). */}
+            {!editing && (
+              <BubbleKebabMenu
+                inline
+                visible
+                items={[{ label: 'Edit', action: openEditor, color: 'var(--text-primary)' }]}
+                style={{ marginLeft: 'auto' }}
+              />
             )}
           </div>
         )}

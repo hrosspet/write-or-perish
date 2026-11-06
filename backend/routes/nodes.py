@@ -506,12 +506,13 @@ def _context_artifact_fields(n, viewer_id):
             # pinned content under the kind key for QuotedContent to resolve.
             # Non-inline kinds reach the model via the artifacts index / tools
             # and have no inline placeholder, so they're skipped here.
-            art = UserArtifact.query.get(row.artifact_id)
+            # Deleted versions (#603) are never shown.
+            art = UserArtifact.get_live(row.artifact_id)
             if (art and art.kind in UserArtifact.INLINE_KINDS
                     and art.user_id == viewer_id):
                 artifacts[art.kind] = {
                     "id": art.id,
-                    "version_number": UserArtifact.query.filter(
+                    "version_number": UserArtifact.live().filter(
                         UserArtifact.user_id == art.user_id,
                         UserArtifact.kind == art.kind,
                         UserArtifact.created_at <= art.created_at,
@@ -1134,9 +1135,12 @@ def _render_set_ciphertexts(nodes):
     for artifact_type, artifact_ids in wanted.items():
         model = _ARTIFACT_MODELS.get(artifact_type)
         if model is not None:
+            # A deleted artifact version (#603) is loaded (the lookup
+            # that skips it stays free) but never decrypted.
             texts.extend(
                 a.content for a in
                 model.query.filter(model.id.in_(list(artifact_ids))).all()
+                if getattr(a, "deleted_at", None) is None
             )
     return texts
 

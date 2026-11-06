@@ -1,4 +1,5 @@
-"""Daily Celery task that finalizes soft-deleted nodes.
+"""Daily Celery task that finalizes soft-deleted nodes, and since #603
+soft-deleted artifacts (backend/utils/artifact_deletion.py).
 
 Runs once per day. Two distinct actions per soft-deleted candidate:
 
@@ -155,8 +156,16 @@ def cleanup_deleted_nodes():
                 errors += 1
                 continue
 
+        # Deleted artifacts (#603) go for good after the same grace
+        # period, with the sessions' pins to their versions.
+        from backend.utils.artifact_deletion import purge_deleted_artifacts
+        artifacts = purge_deleted_artifacts(cutoff)
+
         logger.info(
-            "cleanup_deleted_nodes: purged=%d wiped=%d errors=%d",
-            purged, wiped, errors,
+            "cleanup_deleted_nodes: purged=%d wiped=%d errors=%d "
+            "artifact_versions_purged=%d artifact_errors=%d",
+            purged, wiped, errors, artifacts["purged"], artifacts["errors"],
         )
-        return {"purged": purged, "wiped": wiped, "errors": errors}
+        return {"purged": purged, "wiped": wiped, "errors": errors,
+                "artifact_versions_purged": artifacts["purged"],
+                "artifact_errors": artifacts["errors"]}
