@@ -71,13 +71,14 @@ struct ArtifactsPage: View {
         }
         .task {
             if creating { editing = true }
-            takeEditRequest()
             await app.artifacts.refresh(api: app.api)
             // After the list (#603): no view ping for a deleted kind, which would
             // name it again after the cleanup removed its views.
             if !creating, let kind, app.artifacts.loaded, !app.artifacts.isDeleted(kind) {
                 app.api.fireAndForget(APIRequest(.post, APIPath.artifactViewed(kind)))
             }
+            // Edit from a bubble's menu waits for the list, so the form starts from
+            // the server's current text, not the list cached on an earlier visit.
             takeEditRequest()
             await fetchVersionCount()
         }
