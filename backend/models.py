@@ -174,6 +174,13 @@ class User(db.Model, UserMixin):
     profile_cap_held = db.Column(
         db.Boolean, nullable=False, default=False,
         server_default=db.text("false"))
+    # True while this user's batch profile work waits because the
+    # provider's batch queue was full (a refused submit, or an OpenAI batch
+    # failed on its enqueued-token limit). The hourly seeder sends it again,
+    # also for a pre-filled account not yet activated, as for the cap hold.
+    profile_work_held = db.Column(
+        db.Boolean, nullable=False, default=False,
+        server_default=db.text("false"))
     # When the user's last import finished (or a Twitter import last
     # committed a batch), while the profile build it leads to waits for
     # the imports to stop (#598): the batch seeder builds only after
@@ -386,6 +393,32 @@ class ProfileBatchJob(db.Model):
     submitted_at = db.Column(
         db.DateTime, nullable=False, default=datetime.utcnow)
     collected_at = db.Column(db.DateTime, nullable=True)
+
+
+class ProfileBlockedRange(db.Model):
+    """A stretch of a user's writing that the provider's content-policy
+    filter blocked in a profile window (Peter, 2026-11-04: "skip the
+    flagged windows, but finish their profile"). Every later window plan,
+    in any set and however long after, cuts around it and skips exactly
+    this range without a request (tasks/profile_windows
+    .cut_around_blocked), entries imported into it later included. Only
+    ``lift_blocked_ranges`` (a shell call) lets it be read again. Dates
+    and the provider's code only, no content."""
+    __tablename__ = "profile_blocked_range"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=False, index=True)
+    # The writing created after range_start (None: from the first
+    # writing) up to range_end inclusive: the blocked window's start and
+    # cutoff.
+    range_start = db.Column(db.DateTime, nullable=True)
+    range_end = db.Column(db.DateTime, nullable=False)
+    code = db.Column(db.String(64), nullable=False)
+    model_id = db.Column(db.String(64), nullable=True)
+    created_at = db.Column(db.DateTime, nullable=False,
+                           default=datetime.utcnow)
+    lifted_at = db.Column(db.DateTime, nullable=True)
 
 
 class Node(db.Model):

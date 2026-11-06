@@ -23,7 +23,7 @@ import json
 import logging
 import os
 import tempfile
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 log = logging.getLogger(__name__)
 
@@ -168,14 +168,16 @@ def openai_batch_errors(client, batch_id, batch):
 
 class CollectedResults(dict):
     """The results batch_check_and_collect returns, by custom_id, plus
-    ``blocked``: {custom_id: code} of the items the provider's
-    content-policy filter blocked (OPENAI_POLICY_BLOCK_CODES). Such an
-    item has no result, and its caller must not send it again. A plain
-    dict from a stand-in has no ``blocked``; read it with
-    ``blocked_items(results)``."""
+    ``queue_full``: the provider keys whose batch failed on the provider's
+    full queue (``batch_queue_full``), and ``blocked``: {custom_id: code}
+    of the items the provider's content-policy filter blocked
+    (OPENAI_POLICY_BLOCK_CODES). A blocked item has no result, and its
+    caller must not send it again. A plain dict from a stand-in has
+    neither; read ``blocked`` with ``blocked_items(results)``."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.queue_full = set()
         self.blocked = {}
 
 
@@ -205,11 +207,76 @@ class SubmittedBatches(dict):
     refused for an account reason (a spend limit, billing, the key; #369),
     already reported to the admin. The requests themselves were fine and
     go through once the account is fixed, so a caller that counts failed
-    submits against its items leaves these out."""
+    submits against its items leaves these out. ``queue_full``: the
+    provider keys refused because the provider's batch queue or batch rate
+    limit is full (``queue_full_error``): nothing is wrong with the
+    requests or the account, and they go out on a later pass."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.account_refused = set()
+        self.queue_full = set()
+
+
+# ── A full provider queue (Peter, 2026-11-03) ───────────────────────────
+# A run that fills the provider's batch queue on purpose must not count
+# the refusals against the items: they wait and go out on a later pass.
+# Anthropic: the Message Batches API's limits (requests per minute and
+# batch requests in the processing queue) answer a create with HTTP 429
+# rate_limit_error (platform.claude.com/docs/en/api/rate-limits,
+# "Message Batches API"); its spend cap is a 429 too, but with
+# error_code enforced_spend_limit_reached, an account failure.
+# OpenAI: the per-model enqueued-token limit
+# (developers.openai.com/api/docs/guides/rate-limits, "batch queue
+# limits") lets the batch be created and then fails it in validation,
+# its errors carrying code token_limit_exceeded ("Enqueued token limit
+# reached for <model> ..."). OpenAI's docs name no code; this one is what
+# the API returns (community.openai.com reports), and the message is
+# matched as well.
+OPENAI_QUEUE_FULL_CODES = ("token_limit_exceeded",)
+OPENAI_QUEUE_FULL_TEXT = "enqueued token limit"
+
+
+def queue_full_error(exc):
+    """Whether a batch create failed because the provider's batch queue
+    or batch rate limit is full: a 429 that is not an account failure
+    (once the SDK's own retries ran out), or an OpenAI error naming the
+    enqueued-token limit."""
+    import anthropic
+    import openai
+    status_errors = tuple(
+        t for t in (getattr(anthropic, "APIStatusError", None),
+                    getattr(openai, "APIStatusError", None))
+        if isinstance(t, type))
+    if not status_errors or not isinstance(exc, status_errors):
+        return False
+    try:
+        from backend.llm_providers import account_failure_kind
+        if account_failure_kind(exc) is not None:
+            return False
+    except Exception:  # pragma: no cover — classify as before
+        log.exception("Classifying the batch submit error failed")
+        return False
+    if exc.status_code == 429:
+        return True
+    return (getattr(exc, "code", None) in OPENAI_QUEUE_FULL_CODES
+            or OPENAI_QUEUE_FULL_TEXT in str(exc).lower())
+
+
+def batch_queue_full(key, batch):
+    """Whether an ended batch failed only because the provider's queue was
+    full: an OpenAI batch "failed" in validation on its enqueued-token
+    limit. Nothing ran and nothing was billed."""
+    if not key.startswith("openai:") or getattr(batch, "status", None) != "failed":
+        return False
+    errors = getattr(batch, "errors", None)
+    data = (getattr(errors, "data", None) if errors is not None else None) or []
+    for err in data:
+        code = getattr(err, "code", None)
+        message = (getattr(err, "message", None) or "").lower()
+        if code in OPENAI_QUEUE_FULL_CODES or OPENAI_QUEUE_FULL_TEXT in message:
+            return True
+    return False
 
 
 def apply_batch_key_override(api_keys, config):
@@ -295,6 +362,14 @@ def batch_submit(requests_by_provider, api_keys, phase=None):
                 batch_ids.account_refused.add("anthropic")
                 log.warning(f"Anthropic batch submission refused for an "
                             f"account reason (reported): {e}")
+            elif queue_full_error(e):
+                # A warning, not an error: no Sentry event for each pass
+                # while the queue stays full.
+                batch_ids.queue_full.add("anthropic")
+                log.warning(f"Anthropic batch submission refused: the "
+                            f"batch queue or rate limit is full "
+                            f"({len(anthropic_reqs)} requests wait for a "
+                            f"later pass): {e}")
             else:
                 log.error(f"Anthropic batch submission failed: {e}")
 
@@ -384,6 +459,13 @@ def batch_submit(requests_by_provider, api_keys, phase=None):
                     log.warning(f"OpenAI batch submission for {oai_model} "
                                 f"refused for an account reason "
                                 f"(reported): {e}")
+                elif queue_full_error(e):
+                    batch_ids.queue_full.add(
+                        openai_batch_key(oai_model, endpoint))
+                    log.warning(f"OpenAI batch submission for {oai_model} "
+                                f"refused: the batch queue or rate limit "
+                                f"is full ({len(reqs)} requests wait for a "
+                                f"later pass): {e}")
                 else:
                     log.error(f"OpenAI batch submission failed for "
                               f"{oai_model}: {e}")
@@ -393,8 +475,157 @@ def batch_submit(requests_by_provider, api_keys, phase=None):
     return batch_ids
 
 
-def batch_check_and_collect(batch_ids, api_keys):
+# ── Batch statuses by listing (Peter, 2026-11-03) ───────────────────────
+# "I want to have as many accounts in the queue as the provider allows. I
+# just don't want to spam them with querying for results thousands of
+# times per minute." A poller with many pending batches reads their
+# statuses from the providers' list endpoints, many per call, and
+# retrieves a batch on its own only when the listing does not show it.
+#   Anthropic GET /v1/messages/batches: limit 1-1000 (default 20),
+#   after_id = the page's last_id for the next page, newest first
+#   (platform.claude.com/docs/en/api/messages/batches/list).
+#   OpenAI GET /v1/batches: limit 1-100 (default 20), after = the last
+#   id of the page; every batch of the organisation, other jobs' too; the
+#   order is not documented
+#   (developers.openai.com/api/reference/resources/batches/methods/list).
+# Page size: each provider's documented maximum.
+LIST_PAGE_SIZE = {"anthropic": 1000, "openai": 100}
+# At most this many pages per provider in one poll (a bound on the calls;
+# a batch the listing did not reach is retrieved on its own). 50 OpenAI
+# pages are 5,000 batches, more than a 25 h window of jobs holds.
+LIST_MAX_PAGES = 50
+# The listing stops once it reaches batches created this long before the
+# oldest pending job was saved (the job row is written after the create
+# returns, and the two clocks differ). Only while the batches come newest
+# first, as observed in the listing itself, so an order OpenAI does not
+# document cannot hide a batch: without it the listing runs to the end
+# or to LIST_MAX_PAGES.
+LIST_STOP_SLACK = timedelta(hours=1)
+
+
+def _family(key):
+    if key == "anthropic":
+        return "anthropic"
+    if key.startswith("openai:"):
+        return "openai"
+    return None
+
+
+def _created_utc(batch):
+    """A batch's created_at as a naive UTC datetime (Anthropic gives a
+    datetime, OpenAI unix seconds), or None."""
+    value = getattr(batch, "created_at", None)
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value, timezone.utc).replace(
+            tzinfo=None)
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            value = value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value
+    return None
+
+
+def _list_pages(family, api_keys):
+    """Yield the provider's batches page by page (newest first where the
+    provider lists them so)."""
+    size = LIST_PAGE_SIZE[family]
+    cursor = None
+    if family == "anthropic":
+        from anthropic import Anthropic
+        client = Anthropic(api_key=api_keys["anthropic"])
+    else:
+        from openai import OpenAI
+        client = OpenAI(api_key=api_keys["openai"])
+    while True:
+        if family == "anthropic":
+            page = client.messages.batches.list(
+                limit=size, **({"after_id": cursor} if cursor else {}))
+        else:
+            page = client.batches.list(
+                limit=size, **({"after": cursor} if cursor else {}))
+        data = list(getattr(page, "data", None) or [])
+        yield data
+        if not data or not getattr(page, "has_more", False):
+            return
+        cursor = getattr(page, "last_id", None) or data[-1].id
+
+
+def list_batches(wanted, api_keys, oldest=None):
+    """The batch objects of ``wanted`` ((provider key, batch id) pairs)
+    that the providers' list endpoints show, as {batch_id: batch}: one
+    listing per provider (every OpenAI model and endpoint in one), paged
+    until each wanted batch is found, the pages run out, LIST_MAX_PAGES
+    is reached, or the listing has passed ``oldest`` (the earliest
+    submission time of the wanted batches, naive UTC) by LIST_STOP_SLACK.
+    A provider whose listing fails is left out (logged): its batches are
+    retrieved one by one, as before. Batches not wanted (another job's,
+    other features') are ignored."""
+    ids = {"anthropic": set(), "openai": set()}
+    for key, batch_id in wanted:
+        family = _family(key or "")
+        if family and batch_id:
+            ids[family].add(batch_id)
+    found = {}
+    for family, wanted_ids in ids.items():
+        if not wanted_ids:
+            continue
+        remaining = set(wanted_ids)
+        calls, previous, newest_first = 0, None, True
+        try:
+            for data in _list_pages(family, api_keys):
+                calls += 1
+                for batch in data:
+                    if batch.id in remaining:
+                        found[batch.id] = batch
+                        remaining.discard(batch.id)
+                    created = _created_utc(batch)
+                    if created is not None:
+                        if previous is not None and created > previous:
+                            newest_first = False
+                        previous = created
+                if not remaining or calls >= LIST_MAX_PAGES:
+                    break
+                if (oldest is not None and newest_first
+                        and previous is not None
+                        and previous < oldest - LIST_STOP_SLACK):
+                    break
+        except Exception as e:
+            log.warning(f"Listing {family} batches failed "
+                        f"({type(e).__name__}); each pending batch is "
+                        f"retrieved on its own")
+            continue
+        log.info(f"Listed {family} batches: {calls} call(s) for "
+                 f"{len(wanted_ids)} pending; {len(remaining)} not in the "
+                 f"listing")
+    return found
+
+
+def retrieve_batch(key, batch_id, api_keys):
+    """One batch's status object: the per-batch call, for a batch the
+    listing did not show."""
+    if key == "anthropic":
+        from anthropic import Anthropic
+        client = Anthropic(api_key=api_keys["anthropic"])
+        return client.messages.batches.retrieve(batch_id)
+    from openai import OpenAI
+    return OpenAI(api_key=api_keys["openai"]).batches.retrieve(batch_id)
+
+
+def batch_ended(key, batch):
+    """Whether the provider has ended the batch (Anthropic "ended";
+    OpenAI completed, failed, expired or cancelled)."""
+    if key == "anthropic":
+        return getattr(batch, "processing_status", None) == "ended"
+    return getattr(batch, "status", None) in OPENAI_BATCH_TERMINAL
+
+
+def batch_check_and_collect(batch_ids, api_keys, known=None):
     """Check batch statuses and collect completed results.
+
+    ``known``: {batch_id: batch object} already read (``list_batches``,
+    ``retrieve_batch``); such a batch is not retrieved again.
 
     Returns (results_by_custom_id, still_pending, batch_durations) where:
         results_by_custom_id: dict mapping custom_id -> result dict with
@@ -406,7 +637,10 @@ def batch_check_and_collect(batch_ids, api_keys):
             a batch result exactly like a live one (#286).
         still_pending: dict of batch_ids still processing
         batch_durations: dict mapping provider key -> duration in seconds
-    results_by_custom_id is a CollectedResults: its ``blocked`` names the
+    results_by_custom_id is a CollectedResults: its ``queue_full`` names
+    the provider keys whose batch failed only because the provider's
+    queue was full (``batch_queue_full``); their items have no result
+    and should wait, not count as failed. Its ``blocked`` names the
     OpenAI items the provider's content-policy filter blocked, read from
     the batch's error file (and any non-200 line of its output file).
     """
@@ -421,7 +655,8 @@ def batch_check_and_collect(batch_ids, api_keys):
     for key, batch_id in batch_ids.items():
         if key == "anthropic":
             client = Anthropic(api_key=api_keys["anthropic"])
-            batch = client.messages.batches.retrieve(batch_id)
+            batch = ((known or {}).get(batch_id)
+                     or client.messages.batches.retrieve(batch_id))
             log.info(f"Anthropic batch {batch_id}: "
                      f"status={batch.processing_status}, "
                      f"counts={batch.request_counts}")
@@ -467,12 +702,22 @@ def batch_check_and_collect(batch_ids, api_keys):
 
         elif key.startswith("openai:"):
             client = OpenAI(api_key=api_keys["openai"])
-            batch = client.batches.retrieve(batch_id)
+            batch = ((known or {}).get(batch_id)
+                     or client.batches.retrieve(batch_id))
             log.info(f"OpenAI batch {batch_id}: status={batch.status}, "
                      f"counts={batch.request_counts}")
             if batch.status not in ("completed", "failed", "expired",
                                     "cancelled"):
                 still_pending[key] = batch_id
+                continue
+            if batch_queue_full(key, batch):
+                # Failed in validation on the enqueued-token limit: nothing
+                # ran, nothing was billed, and the requests go out again on
+                # a later pass. A warning, not an error: no Sentry event
+                # for each such batch while the queue stays full.
+                results.queue_full.add(key)
+                log.warning(f"OpenAI batch {batch_id} failed: the "
+                            f"enqueued-token limit for its model is full")
                 continue
             # The requests that failed with a non-200 status are in the
             # error file, whatever the batch's end state.

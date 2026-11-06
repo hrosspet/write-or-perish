@@ -763,6 +763,220 @@ def test_collect_openai_reads_a_responses_result(monkeypatch):
         "cache_write_subset_tokens": 0, "truncated": False, "batch": True}
 
 
+# ── statuses by listing, and a full provider queue (Peter, 2026-11-03) ────
+
+def _page(batches, has_more):
+    return SimpleNamespace(data=batches, has_more=has_more,
+                           last_id=batches[-1].id if batches else None)
+
+
+def _utc(dt):
+    from datetime import timezone
+    return dt.replace(tzinfo=timezone.utc)
+
+
+def _ant_batch(bid, created, status="in_progress"):
+    return SimpleNamespace(id=bid, processing_status=status,
+                           request_counts="c", created_at=_utc(created),
+                           ended_at=None)
+
+
+def _oai_batch(bid, created, status="in_progress", errors=None):
+    return SimpleNamespace(id=bid, status=status, request_counts="c",
+                           errors=errors,
+                           created_at=int(_utc(created).timestamp()),
+                           completed_at=None, output_file_id=None)
+
+
+def test_list_batches_pages_anthropic_until_every_pending_batch_is_found(
+        monkeypatch):
+    from datetime import timedelta
+    from backend.utils.llm_batch import list_batches
+    t = datetime(2026, 11, 3, 12)
+    page1 = [_ant_batch(f"a{i}", t - timedelta(minutes=i)) for i in range(3)]
+    page2 = [_ant_batch(f"a{i}", t - timedelta(minutes=i))
+             for i in range(3, 6)]
+    client = MagicMock()
+    client.messages.batches.list.side_effect = [
+        _page(page1, True), _page(page2, True), AssertionError("too far")]
+    _install_fake_sdks(monkeypatch, anthropic_client=client)
+    found = list_batches([("anthropic", "a1"), ("anthropic", "a4")], KEYS)
+    assert set(found) == {"a1", "a4"}
+    calls = client.messages.batches.list.call_args_list
+    assert len(calls) == 2                  # stops once both are found
+    assert calls[0].kwargs == {"limit": 1000}
+    assert calls[1].kwargs == {"limit": 1000, "after_id": "a2"}
+
+
+def test_list_batches_stops_past_the_oldest_pending_batch(monkeypatch):
+    """Newest first: once the listing passes the oldest pending job's
+    submission (with LIST_STOP_SLACK), a batch still missing is not paged
+    for; the caller retrieves it on its own."""
+    from datetime import timedelta
+    from backend.utils.llm_batch import list_batches
+    t = datetime(2026, 11, 3, 12)
+    pages = [_page([_ant_batch(f"p{n}{i}", t - timedelta(hours=n * 3 + i))
+                    for i in range(3)], True) for n in range(5)]
+    client = MagicMock()
+    client.messages.batches.list.side_effect = pages
+    _install_fake_sdks(monkeypatch, anthropic_client=client)
+    found = list_batches([("anthropic", "gone")], KEYS,
+                         oldest=t - timedelta(hours=1))
+    assert found == {}
+    # Page 1 ends 2 h back, within the 1 h slack of the oldest job (1 h
+    # back); page 2 ends 5 h back, past it.
+    assert client.messages.batches.list.call_count == 2
+
+
+def test_list_batches_reads_one_openai_listing_and_ignores_other_jobs(
+        monkeypatch):
+    from datetime import timedelta
+    from backend.utils.llm_batch import list_batches
+    t = datetime(2026, 11, 3, 12)
+    page1 = [_oai_batch("digest-1", t), _oai_batch("o-luna", t),
+             _oai_batch("other", t - timedelta(minutes=1))]
+    page2 = [_oai_batch("o-sol", t - timedelta(minutes=2), "completed")]
+    client = MagicMock()
+    client.batches.list.side_effect = [_page(page1, True),
+                                       _page(page2, False)]
+    _install_fake_sdks(monkeypatch, openai_client=client)
+    found = list_batches([("openai:gpt-6-luna", "o-luna"),
+                          ("openai:gpt-6.1-sol:responses", "o-sol")], KEYS)
+    assert set(found) == {"o-luna", "o-sol"}
+    assert [c.kwargs for c in client.batches.list.call_args_list] == [
+        {"limit": 100}, {"limit": 100, "after": "other"}]
+
+
+def test_list_batches_seen_out_of_order_does_not_stop_early(monkeypatch):
+    """OpenAI does not document its list order: a listing seen out of
+    order is paged on, so no pending batch is missed for it."""
+    from datetime import timedelta
+    from backend.utils.llm_batch import list_batches
+    t = datetime(2026, 11, 3, 12)
+    pages = [_page([_oai_batch("x1", t - timedelta(days=3)),
+                    _oai_batch("x2", t - timedelta(days=2))], True),
+             _page([_oai_batch("x3", t - timedelta(days=4))], True),
+             _page([_oai_batch("want", t)], False)]
+    client = MagicMock()
+    client.batches.list.side_effect = pages
+    _install_fake_sdks(monkeypatch, openai_client=client)
+    found = list_batches([("openai:m", "want")], KEYS,
+                         oldest=t - timedelta(hours=1))
+    assert set(found) == {"want"}
+    assert client.batches.list.call_count == 3
+
+
+def test_a_failed_listing_returns_nothing(monkeypatch):
+    from backend.utils.llm_batch import list_batches
+    client = MagicMock()
+    client.messages.batches.list.side_effect = RuntimeError("down")
+    _install_fake_sdks(monkeypatch, anthropic_client=client)
+    assert list_batches([("anthropic", "a1")], KEYS) == {}
+
+
+def test_collect_uses_a_known_batch_without_retrieving_it(monkeypatch):
+    client = MagicMock()
+    client.messages.batches.retrieve.side_effect = AssertionError(
+        "no retrieve for a listed batch")
+    client.messages.batches.results.return_value = []
+    _install_fake_sdks(monkeypatch, anthropic_client=client)
+    known = SimpleNamespace(processing_status="ended", request_counts="c",
+                            created_at=None, ended_at=None)
+    results, still, _ = batch_check_and_collect(
+        {"anthropic": "b1"}, KEYS, known={"b1": known})
+    assert results == {} and still == {}
+    client.messages.batches.results.assert_called_once_with("b1")
+
+
+def _ant_error(status, etype, message, details=None):
+    import anthropic
+    import httpx
+    error = {"type": etype, "message": message}
+    if details is not None:
+        error["details"] = details
+    body = {"type": "error", "error": error, "request_id": "req_1"}
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/x")
+    return anthropic.Anthropic(api_key="k")._make_status_error(
+        str(body), body=body,
+        response=httpx.Response(status, request=request))
+
+
+def _oai_error(status, etype, code, message="boom"):
+    import httpx
+    import openai
+    body = {"error": {"message": message, "type": etype, "param": None,
+                      "code": code}}
+    request = httpx.Request("POST", "https://api.openai.com/v1/batches")
+    return openai.OpenAI(api_key="k")._make_status_error(
+        f"Error code: {status} - {body}", body=body,
+        response=httpx.Response(status, request=request))
+
+
+QUEUE_429 = ("Number of batch requests in the processing queue exceeds "
+             "your rate limit")
+
+
+def test_queue_full_errors_are_told_from_account_failures():
+    from backend.utils.llm_batch import queue_full_error
+    assert queue_full_error(_ant_error(429, "rate_limit_error", QUEUE_429))
+    assert not queue_full_error(_ant_error(
+        429, "rate_limit_error", "You have reached your API usage limits",
+        {"error_code": "enforced_spend_limit_reached"}))
+    assert not queue_full_error(_ant_error(500, "api_error", "boom"))
+    assert queue_full_error(_oai_error(429, "requests",
+                                       "rate_limit_exceeded"))
+    assert queue_full_error(_oai_error(
+        400, "invalid_request_error", "token_limit_exceeded",
+        "Enqueued token limit reached for gpt-6-luna"))
+    assert not queue_full_error(_oai_error(429, "insufficient_quota",
+                                           "insufficient_quota"))
+    assert not queue_full_error(RuntimeError("boom"))
+
+
+def test_a_full_anthropic_queue_at_submit_is_reported_as_queue_full(
+        monkeypatch):
+    import anthropic as real_anthropic
+    import openai as real_openai
+    client = MagicMock()
+    client.messages.batches.create.side_effect = _ant_error(
+        429, "rate_limit_error", QUEUE_429)
+    _install_fake_sdks(monkeypatch, anthropic_client=client)
+    # The classifier checks against the real error classes.
+    sys.modules["anthropic"].APIStatusError = real_anthropic.APIStatusError
+    sys.modules["openai"].APIStatusError = real_openai.APIStatusError
+    out = batch_submit({"anthropic": [{
+        "custom_id": "c1", "model_id": "claude", "api_model": "claude-x",
+        "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5,
+    }]}, KEYS, "profile")
+    assert out == {} and out.queue_full == {"anthropic"}
+    assert out.account_refused == set()
+
+
+def test_an_openai_batch_failed_on_the_enqueued_token_limit_is_queue_full(
+        monkeypatch):
+    def failed(code, message):
+        return SimpleNamespace(
+            status="failed", request_counts="c", created_at=1,
+            completed_at=None, output_file_id=None,
+            errors=SimpleNamespace(object="list", data=[SimpleNamespace(
+                code=code, line=None, param=None, message=message)]))
+    client = MagicMock()
+    client.batches.retrieve.return_value = failed(
+        "token_limit_exceeded", "Enqueued token limit reached for "
+        "gpt-6-luna in organization org-x. Limit: 1 enqueued tokens.")
+    client.files.content.side_effect = AssertionError("nothing to fetch")
+    _install_fake_sdks(monkeypatch, openai_client=client)
+    results, still, _ = batch_check_and_collect(
+        {"openai:gpt-6-luna": "o1"}, KEYS)
+    assert results == {} and still == {}
+    assert results.queue_full == {"openai:gpt-6-luna"}
+    # Another validation failure is not a full queue.
+    client.batches.retrieve.return_value = failed("invalid_json_line", "bad")
+    results, _still, _ = batch_check_and_collect(
+        {"openai:gpt-6-luna": "o1"}, KEYS)
+    assert results.queue_full == set()
+
+
 # ── content-policy blocks and safety identifiers (2026-11-04) ───────────
 # A request the provider's content-policy filter blocks comes back as a
 # 400 with a code such as bio_policy, in the batch's ERROR file (not its
