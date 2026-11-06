@@ -290,11 +290,13 @@ def test_the_update_echo_reports_both_versions(app, keys, previous_usage, follow
                      ai_usage=previous_usage)
         _db.session.commit()
 
+    write = {"kind": "memory",
+             "updated_content": "line one\nline two\nNEW LINE"}
+    if previous_usage:
+        write["base_version"] = 1  # a change names its version (#604)
     _ScriptedProvider.reset([
         _resp("Noting that.", tool_calls=[{
-            "id": "t1", "name": "update_artifact",
-            "input": {"kind": "memory",
-                      "updated_content": "line one\nline two\nNEW LINE"}}]),
+            "id": "t1", "name": "update_artifact", "input": write}]),
         _resp("Noted."),
     ])
     generate_llm_response(_FakeSelf(), user_node.id, llm_node.id, "gpt-5",
