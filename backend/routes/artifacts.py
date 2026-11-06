@@ -264,6 +264,50 @@ def get_artifact_version(version_id):
     return jsonify({"artifact": _serialize(artifact)}), 200
 
 
+@artifacts_bp.route("/versions/<int:version_id>/changes", methods=["GET"])
+@login_required
+def get_artifact_version_changes(version_id):
+    """What a version changed, for "Show changes" on an artifact write in
+    a reply's Actions taken (#604): the line diff from the version before
+    it to this one, built here from the version ids the write stored.
+
+    ``?from=<id>``: the version to diff against (the write's
+    previous_artifact_id); without it, the version just before this one.
+    The caller's own versions only, so another user's id reads as not
+    found; there is no admin path (admins never read content through the
+    API).
+
+    200: {"kind", "title", "version_number", "previous_version_number"
+    (null for a creation), "lines": [{"type": "same"|"del"|"add",
+    "text"}]}. 404: no such version of the caller's, or ``from`` is not
+    another version of the same artifact.
+    """
+    from backend.utils.artifact_versions import (
+        line_diff, previous_version, stored_version, version_number)
+
+    artifact = stored_version(version_id, current_user.id)
+    if artifact is None:
+        return jsonify({"error": "Version not found"}), 404
+    from_id = request.args.get("from", type=int)
+    if from_id is not None:
+        previous = stored_version(from_id, current_user.id)
+        if (previous is None or previous.kind != artifact.kind
+                or previous.id == artifact.id):
+            return jsonify({"error": "Version not found"}), 404
+    else:
+        previous = previous_version(artifact)
+    return jsonify({
+        "kind": artifact.kind,
+        "title": artifact.title,
+        "version_number": version_number(artifact),
+        "previous_version_number": (
+            version_number(previous) if previous is not None else None),
+        "lines": line_diff(
+            (previous.get_content() or "") if previous is not None else None,
+            artifact.get_content() or ""),
+    }), 200
+
+
 @artifacts_bp.route("/<kind>/revert/<int:version_id>", methods=["POST"])
 @login_required
 def revert_artifact(kind, version_id):

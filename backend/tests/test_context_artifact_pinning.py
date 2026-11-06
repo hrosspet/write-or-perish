@@ -263,6 +263,12 @@ class TestTodoPinning:
 
 # ── ai preferences ─────────────────────────────────────────────────────────
 
+def _inline(version, text):
+    """The prompt's copy of an AI-preferences version (#604)."""
+    return (f"[ai_preferences · v{version}, as of the start of this "
+            f"conversation]\n{text}")
+
+
 class TestAIPreferencesPinning:
     def test_returns_recorded_version_not_latest(self, app):
         u = _user()
@@ -272,8 +278,9 @@ class TestAIPreferencesPinning:
         _bind(node, "user_artifact", old.id)
         db.session.commit()
 
+        # The text follows its version header (#604).
         assert get_user_ai_preferences_content(
-            u.id, pinned_node=node) == "be terse"
+            u.id, pinned_node=node) == _inline(1, "be terse")
 
     def test_no_binding_falls_back_to_latest(self, app):
         u = _user()
@@ -283,8 +290,9 @@ class TestAIPreferencesPinning:
         db.session.commit()
 
         assert get_user_ai_preferences_content(
-            u.id, pinned_node=node) == "be verbose"
-        assert get_user_ai_preferences_content(u.id) == "be verbose"
+            u.id, pinned_node=node) == _inline(2, "be verbose")
+        assert get_user_ai_preferences_content(u.id) == _inline(
+            2, "be verbose")
 
     def test_train_preferences_are_allowed(self, app):
         """A 'train' prefs row must be returned: the resolver gates on
@@ -298,7 +306,7 @@ class TestAIPreferencesPinning:
         db.session.commit()
 
         assert get_user_ai_preferences_content(
-            u.id, pinned_node=node) == "train me"
+            u.id, pinned_node=node) == _inline(1, "train me")
 
     def test_mid_session_opt_out_honored(self, app):
         u = _user()

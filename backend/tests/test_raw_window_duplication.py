@@ -338,7 +338,9 @@ def test_a_user_export_is_not_filled_again(app, monkeypatch):  # noqa: F811
                           user.id)
 
     sent = "\n".join(m["text"] for m in _ScriptedProvider.calls[-1]["messages"])
-    assert f"read {archive} with THE MEMORY" in sent
+    # The memory with its version header (#604).
+    assert (f"read {archive} with [memory · v1, as of the start of this "
+            "conversation]\nTHE MEMORY") in sent
 
 
 # ── Exports that show the preamble keep it ──────────────────────────────
