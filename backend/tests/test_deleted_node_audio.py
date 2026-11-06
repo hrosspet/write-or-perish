@@ -290,7 +290,7 @@ def test_the_daily_run_sweeps_what_earlier_runs_left(app, root, users):
     in_grace = _node(alice, deleted_days=10)
     kept = _live_files(root, live) + _node_files(root, in_grace)
     left = [_file(root / f"user/{alice.id}/node/90001/tts.mp3.enc"),
-            _file(root / f"nodes/{alice.id}/90001/batch_0000.webm.enc")]
+            _file(root / f"user/{alice.id}/item/90002/tts.mp3.enc")]
 
     fresh = _cleanup()                         # the files are new: kept
     assert fresh["orphan_files_deleted"] == 0
@@ -355,6 +355,99 @@ def test_node_audio_dirs_refuse_a_bad_session_id(root):
     dirs = audio_storage.node_audio_dirs(n, root)
     assert all(str(d).startswith(str(root) + os.sep) for d in dirs)
     assert len(dirs) == 2
+
+
+def test_every_test_gets_a_scratch_audio_root():
+    # conftest.py: no test ever sees a checkout's data/audio or a
+    # developer's AUDIO_STORAGE_PATH.
+    current = str(audio_storage.AUDIO_STORAGE_ROOT)
+    assert os.environ["AUDIO_STORAGE_PATH"] == current
+    assert "scratch-audio" in current
+
+
+# ── Recordings and streaming sessions ───────────────────────────────────
+
+def test_recordings_of_a_gone_node_are_kept_for_the_grace_period(
+        app, root, users):
+    # A node whose commit failed after its recording was moved in leaves
+    # the only copy of the recording: kept for the grace period.
+    alice = users[0]
+    upload = _file(root / f"user/{alice.id}/node/90021/original.webm.enc")
+    speech = _file(root / f"user/{alice.id}/node/90021/tts.mp3.enc")
+    chunks = [_file(root / f"nodes/{alice.id}/90021/batch_0000.webm.enc"),
+              _file(root / f"nodes/{alice.id}/90021/chunk_0001.webm")]
+    streamed = _file(root / f"user/{alice.id}/node/90022/chunk_0000.webm")
+
+    audio_sweep.sweep(apply=True, now=_later(2))
+    assert not speech.exists()                 # speech: the 24 h guard
+    assert upload.exists() and streamed.exists()
+    assert all(c.exists() for c in chunks)
+
+    audio_sweep.sweep(apply=True, now=_later(31))
+    assert not any(p.exists() for p in [upload, streamed, *chunks])
+
+
+def test_streaming_sessions_no_node_or_draft_uses_go_after_the_grace_period(
+        app, root, users):
+    from backend.models import Draft
+    alice = users[0]
+    _node(alice, streaming_session_id="sess-live")
+    hidden = _node(alice, deleted_days=40, streaming_session_id="sess-hidden")
+    _db.session.add(UserDataPurgeHidden(job_id=1, kind="node",
+                                        row_id=hidden.id))
+    _node(alice, deleted_days=40, streaming_session_id="sess-past")
+    _db.session.add(Draft(user_id=alice.id, session_id="sess-draft"))
+    _db.session.commit()
+
+    def session(sid):
+        return _file(root / f"streaming/{alice.id}/{sid}/chunk_0000.webm")
+    kept = [session(s) for s in ("sess-live", "sess-hidden", "sess-draft")]
+    doomed = [session(s) for s in ("sess-past", "sess-gone")]
+    stray = _file(root / f"streaming/{alice.id}/not a session/x.webm")
+
+    audio_sweep.sweep(apply=True, now=_later(2))   # changed within 30 days
+    assert all(p.exists() for p in kept + doomed)
+
+    audio_sweep.sweep(apply=True, now=_later(31))
+    assert all(p.exists() for p in kept + [stray])
+    assert not any(p.exists() for p in doomed)
+
+
+def test_a_session_of_a_node_in_its_grace_period_is_in_use(app, root, users):
+    alice = users[0]
+    _node(alice, deleted_days=10, streaming_session_id="sess-grace")
+    f = audio_sweep.Folder("session", "streaming/<uid>/<session>", alice.id,
+                           "sess-grace", root / "unused", False)
+    grace_cutoff = datetime.utcnow() - timedelta(days=30)
+    assert "sess-grace" in audio_sweep.lookup([f], grace_cutoff).sessions
+    # Past its grace period the cleanup finalizes it; the session is free.
+    after = datetime.utcnow()
+    assert "sess-grace" not in audio_sweep.lookup([f], after).sessions
+
+
+def test_a_stuck_streaming_file_is_retried_by_the_sweep(
+        app, root, users, monkeypatch):
+    alice = users[0]
+    n = _node(alice, deleted_days=31, streaming_session_id="sess-stuck")
+    stuck = _file(root / f"streaming/{alice.id}/sess-stuck/chunk_0000.webm")
+    real_unlink = os.unlink
+
+    def unlink(path, *a, **kw):
+        if str(path) == str(stuck):
+            raise PermissionError(13, "denied")
+        return real_unlink(path, *a, **kw)
+    monkeypatch.setattr(os, "unlink", unlink)
+
+    result = _cleanup()
+    assert result["audio_errors"] == 1
+    assert _db.session.get(Node, n.id) is None   # the row goes all the same
+    assert stuck.exists()
+
+    monkeypatch.setattr(os, "unlink", real_unlink)
+    _cleanup(now=_later(2))                      # the session changed lately
+    assert stuck.exists()
+    _cleanup(now=_later(31))
+    assert not stuck.exists()
 
 
 # ── Superseded speech (#66) ─────────────────────────────────────────────
@@ -502,12 +595,13 @@ def _layout(root, users, tmp_path):
     item = _item(alice)
     profile = _profile(alice)
     _db.session.commit()
-    gone_ids = (90001, 90002)
-
     doomed = _node_files(root, past)
-    for gid in gone_ids:
-        doomed += [_file(root / f"user/{alice.id}/node/{gid}/tts.mp3.enc"),
-                   _file(root / f"nodes/{alice.id}/{gid}/batch_0000.webm")]
+    # Node rows that are gone: speech goes after a day; a recording is
+    # kept for the grace period (test_recordings_of_a_gone_node_...).
+    doomed += [_file(root / f"user/{alice.id}/node/90001/tts.mp3.enc"),
+               _file(root / f"user/{alice.id}/node/90002/tts.mp3.enc")]
+    held = [_file(root / f"nodes/{alice.id}/90001/batch_0000.webm"),
+            _file(root / f"user/{alice.id}/node/90002/original.webm.enc")]
     # A gone reference's and a gone profile's speech.
     doomed += [_file(root / f"user/{alice.id}/item/90003/tts.mp3.enc"),
                _file(root / f"user/{alice.id}/profile/90004/tts.mp3.enc")]
@@ -522,9 +616,10 @@ def _layout(root, users, tmp_path):
         _file(root / f"user/{alice.id}/item/{item.id}/tts_chunk_2.mp3.enc"),
         _file(root / f"user/{alice.id}/profile/{profile.id}/tts_chunk_2.mp3"),
     ]
-    kept = [item_speech, profile_speech,
-            _file(root / f"user/{alice.id}/node/{live.id}/original.webm.enc"),
-            _file(root / f"nodes/{alice.id}/{live.id}/batch_0000.webm.enc")]
+    kept = held + [
+        item_speech, profile_speech,
+        _file(root / f"user/{alice.id}/node/{live.id}/original.webm.enc"),
+        _file(root / f"nodes/{alice.id}/{live.id}/batch_0000.webm.enc")]
     kept += (_node_files(root, in_grace) + _node_files(root, hidden))
     reply_speech = _file(root / f"user/{model.id}/node/{reply.id}/tts.mp3")
     reply.audio_tts_url = _media(reply_speech, root)
@@ -551,9 +646,10 @@ def test_script_dry_run_deletes_nothing(app, root, users, tmp_path):
     lines = []
     result = _script().run(apply=False, now=_later(), out=lines.append)
     assert all(f.exists() for f in doomed + kept)
-    # past: 2 folders; 2 gone node ids x 2; gone item, gone profile;
-    # superseded speech of the live item and the live profile.
-    assert result["planned"][0] == 10
+    # past: 2 folders; the 2 gone nodes' user/ folders (one whole, one
+    # speech only); gone item, gone profile; superseded speech of the
+    # live item and the live profile.
+    assert result["planned"][0] == 8
     assert result["planned"][1] == len(doomed)
     text = "\n".join(lines)
     assert "would delete" in text and "row gone" in text

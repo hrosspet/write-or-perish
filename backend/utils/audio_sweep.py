@@ -15,7 +15,18 @@ counts per category). Under the audio storage root it deletes:
 * superseded speech in the folder of a live node, reference or profile:
   ``tts.mp3`` and ``tts_chunk_<i>.mp3`` (plain or ``.enc``) that no row
   points at any more, after an edit cleared the speech or a regeneration
-  made fewer chunks (#66).
+  made fewer chunks (#66);
+* a streaming session folder, ``streaming/<uid>/<session>/``, that no
+  node not yet finalized and no draft names, once nothing in it changed
+  for the grace period: what is left when the cleanup could not delete a
+  finalized node's session folder, or a recording was abandoned.
+
+A recording in a folder whose node row is gone (an upload,
+``chunk_*``/``batch_*``, or a ``nodes/`` folder) is kept until nothing in
+the folder changed for the grace period, since it may be the only copy
+of a node whose commit failed after the recording was moved in (Peter's
+rule: a user's words are never lost); until then only that folder's
+speech goes.
 
 A file a row points at is never deleted. Profile versions share speech
 files (routes/profile.py ``_copy_audio``) and merged reference copies keep
@@ -37,6 +48,8 @@ Never touched:
   regeneration that supersedes speech marks the folders of the old
   speech changed (audio_storage.mark_speech_superseded), so a playback
   that started before is not cut;
+* a streaming session a node not yet finalized or a draft names, or that
+  changed within the grace period;
 * anything outside those folders, and anything behind a symlink (never
   followed; paths are built with storage_path, and deleted only when
   they resolve inside the root).
@@ -56,6 +69,8 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import NamedTuple
 
+from backend.constants import SOFT_DELETE_GRACE_DAYS
+
 # ── Heuristics (see the PR for why each value) ──────────────────────────
 # A folder with a file (or itself) changed this recently is left for a
 # later run: the voice path moves a recording into nodes/<uid>/<id>/
@@ -64,32 +79,50 @@ from typing import NamedTuple
 # its folder changed. A day is far longer than either window, and than a
 # playback.
 RECENT_SECONDS = 24 * 3600
+# A user's recording is never lost to the sweep while it could still be
+# wanted (Peter's rule: a user's words are never lost): a recording in a
+# folder whose node row is gone (a node whose commit failed after the
+# recording was moved in), and a streaming session folder no node or
+# draft uses, are kept until nothing in them changed for the grace
+# period, the same 30 days a deleted node is kept.
+GRACE_SECONDS = SOFT_DELETE_GRACE_DAYS * 86400
 # Folders per round of database lookups.
 BATCH_SIZE = 500
 
 _ID_RE = re.compile(r"[0-9]{1,18}")
 # Generated speech (tasks/tts.py, utils/tts_stream.py), plain or encrypted.
 SPEECH_FILE_RE = re.compile(r"tts(?:_chunk_[0-9]{1,6})?\.mp3(?:\.enc)?")
+# A recording in a user/<uid>/node/<id>/ folder: an upload (original.*)
+# or streamed chunks (chunk_*, batch_*). A nodes/<uid>/<id>/ folder is a
+# recording as a whole.
+RECORDING_FILE_RE = re.compile(r"(?:original\.|chunk_|batch_).+")
 
 ROW_GONE = "row gone"
+SPEECH_ONLY = "row gone, speech only (recording younger than grace period kept)"
 PAST_GRACE = "node deleted > grace period"
 SUPERSEDED = "superseded speech of a live row"
-TO_DELETE = (ROW_GONE, PAST_GRACE, SUPERSEDED)
+SESSION_UNUSED = "no node or draft uses the session"
+TO_DELETE = (ROW_GONE, SPEECH_ONLY, PAST_GRACE, SUPERSEDED, SESSION_UNUSED)
 LIVE = "live (kept)"
 IN_GRACE = "node deleted, within grace period (kept)"
 HIDDEN = "hidden by a waiting 'Delete all my writing' (kept)"
 SHARED = "row gone, files used by another row (kept)"
+RECORDING_HELD = "row gone, recording younger than grace period (kept)"
+SESSION_IN_USE = "session of a node or draft (kept)"
 RECENT = "changed in the last 24 h (kept for a later run)"
+RECENT_GRACE = "changed within the grace period (kept for a later run)"
 SYMLINK = "symlink (left alone)"
 
 _USER_KINDS = ("node", "item", "profile")
+_NODES_LABEL = "nodes/<uid>/<id>"
+_SESSION_LABEL = "streaming/<uid>/<session>"
 
 
 class Folder(NamedTuple):
-    kind: str          # the row it belongs to: "node", "item" or "profile"
+    kind: str          # what it belongs to: "node", "item", "profile", "session"
     label: str         # its layout, ids left out
     owner: int         # the user id in its path
-    row_id: int
+    row_id: object     # the row id, or the session id of a "session"
     path: pathlib.Path
     is_link: bool
 
@@ -111,13 +144,44 @@ def _id_dirs(folder):
     return sorted(out, key=lambda pair: pair[0])
 
 
+def _session_dirs(folder):
+    """(session id, entry) of the entries of *folder* named like a
+    streaming session (audio_storage.is_storage_id), symlinks included
+    (never followed)."""
+    from backend.utils.audio_storage import is_storage_id
+    try:
+        entries = list(os.scandir(folder))
+    except OSError:
+        return []
+    return sorted(((e.name, e) for e in entries
+                   if is_storage_id(e.name)
+                   and (e.is_symlink() or e.is_dir(follow_symlinks=False))),
+                  key=lambda pair: pair[0])
+
+
 def iter_folders(root):
-    """Every row folder under *root*: ``user/<uid>/node|item|profile/<id>``
-    and ``nodes/<uid>/<id>``. A user folder (or its ``node``, ``item`` or
-    ``profile`` folder) that is a symlink is passed over, never followed.
-    Paths are built with storage_path, so they stay inside the root."""
+    """Every row folder under *root*: ``user/<uid>/node|item|profile/<id>``,
+    ``nodes/<uid>/<id>``, and every streaming session folder,
+    ``streaming/<uid>/<session>``. A user folder (or its ``node``,
+    ``item`` or ``profile`` folder) that is a symlink is passed over,
+    never followed. Paths are built with storage_path, so they stay
+    inside the root."""
     from backend.utils.audio_storage import storage_path
     root = pathlib.Path(root)
+    yield from _row_folders(root, storage_path)
+    top = root / "streaming"
+    if top.is_symlink() or not top.is_dir():
+        return
+    for owner_id, owner in _id_dirs(top):
+        if owner.is_symlink():
+            continue
+        for session_id, entry in _session_dirs(owner.path):
+            yield Folder("session", _SESSION_LABEL, owner_id, session_id,
+                         storage_path(root, "streaming", owner_id, session_id),
+                         entry.is_symlink())
+
+
+def _row_folders(root, storage_path):
     for top_name in ("user", "nodes"):
         top = root / top_name
         if top.is_symlink() or not top.is_dir():
@@ -131,8 +195,7 @@ def iter_folders(root):
                 base = storage_path(root, *prefix)
                 if base.is_symlink() or not base.is_dir():
                     continue
-                label = (f"user/<uid>/{kind}/<id>" if kind
-                         else "nodes/<uid>/<id>")
+                label = f"user/<uid>/{kind}/<id>" if kind else _NODES_LABEL
                 for row_id, entry in _id_dirs(base):
                     yield Folder(kind or "node", label, owner_id, row_id,
                                  storage_path(root, *prefix, row_id),
@@ -181,6 +244,30 @@ class Rows(NamedTuple):
     rows: dict     # kind -> {row id: (deleted_at, user_id)}
     hidden: dict   # kind -> {row id} a waiting "Delete all my writing" hid
     refs: dict     # ("node", node id) / (kind, user id) -> {path keys}
+    sessions: set = frozenset()   # streaming session ids still in use
+
+
+def _sessions_in_use(session_ids, cutoff):
+    """The streaming sessions a node not yet finalized names (live, in
+    the grace period, or hidden; any node when *cutoff* is None) or a
+    draft names. A node past the grace period does not count: the
+    cleanup deletes its session folder when it finalizes it."""
+    from backend.extensions import db
+    from backend.models import Draft, Node
+    sids = sorted(session_ids)
+    in_use = set()
+    finalizing = {}
+    for sid, nid, deleted_at in db.session.query(
+            Node.streaming_session_id, Node.id, Node.deleted_at).filter(
+            Node.streaming_session_id.in_(sids)):
+        if cutoff is None or deleted_at is None or deleted_at > cutoff:
+            in_use.add(sid)
+        else:
+            finalizing[nid] = sid
+    in_use |= {finalizing[nid] for nid in _hidden("node", finalizing)}
+    in_use |= {s for (s,) in db.session.query(Draft.session_id).filter(
+        Draft.session_id.in_(sids))}
+    return in_use
 
 
 def _hidden(kind_name, ids):
@@ -227,9 +314,11 @@ def _lookup_owned(kind, model, fk, ids, owners, rows, refs):
         _add_refs(refs[(kind, uid)], url)
 
 
-def lookup(folders):
+def lookup(folders, cutoff=None):
     """What the rows say about *folders*: ids, deletion times, stored
-    audio URLs. Hidden rows are read too (and kept by classify)."""
+    audio URLs, the streaming sessions in use (see _sessions_in_use;
+    *cutoff* is the grace period's). Hidden rows are read too (and kept
+    by classify)."""
     from backend.extensions import db
     from backend.models import ExternalItem, TTSChunk, UserProfile
     from backend.utils.hidden_rows import including_hidden_rows
@@ -253,15 +342,19 @@ def lookup(folders):
                               rows[kind], refs)
         hidden = {kind: _hidden(tables[kind], ids[kind])
                   for kind in _USER_KINDS}
+        sessions = (_sessions_in_use(ids["session"], cutoff)
+                    if ids["session"] else set())
     # Read-only: end the transaction so none stays open during the walk.
     db.session.rollback()
-    return Rows(rows, hidden, refs)
+    return Rows(rows, hidden, refs, sessions)
 
 
 def classify(f, rows, cutoff):
     """The category of a folder, before the files are looked at."""
     if f.is_link:
         return SYMLINK
+    if f.kind == "session":
+        return SESSION_IN_USE if f.row_id in rows.sessions else SESSION_UNUSED
     row = rows.rows[f.kind].get(f.row_id)
     if row is None:
         return ROW_GONE
@@ -301,11 +394,12 @@ def victims(f, cat, rows, root):
     whole folder (a node's folders past the grace period or of a gone
     row, a gone reference's or profile's when no other row uses a file
     in it); else the files to delete, which may be none."""
-    if cat == PAST_GRACE or (cat == ROW_GONE and f.kind == "node"):
+    if cat in (PAST_GRACE, SESSION_UNUSED) or (
+            cat == ROW_GONE and f.kind == "node"):
         return cat, None
     if cat not in (ROW_GONE, LIVE):
         return cat, []
-    if cat == LIVE and f.label == "nodes/<uid>/<id>":
+    if cat == LIVE and f.label == _NODES_LABEL:
         return cat, []                    # a recording: never superseded
     refs = _refs_for(f, rows)
     files = _children(f.path, speech_only=(cat == LIVE))
@@ -344,9 +438,21 @@ class _Totals:
         row[2] += size
 
 
+def _holds_recording(f):
+    """True when a node folder holds a recording: a nodes/ folder always
+    does; a user/ folder when an upload or streamed chunks are in it."""
+    if f.label == _NODES_LABEL:
+        return True
+    return any(RECORDING_FILE_RE.fullmatch(p.name)
+               for p in _children(f.path, speech_only=False))
+
+
 def _assess(f, rows, cutoff, now, root, measure_kept):
     """(category, files to delete or None for the whole folder, files,
-    bytes) of one folder, after the recent-change check."""
+    bytes) of one folder, after the age checks: nothing that changed in
+    the last 24 h; no unused streaming session, and no recording in a
+    folder whose node row is gone, that changed within the grace period
+    (only that folder's speech goes)."""
     cat, gone = victims(f, classify(f, rows, cutoff), rows, root)
     if cat not in TO_DELETE:
         if measure_kept and not f.is_link:
@@ -354,8 +460,18 @@ def _assess(f, rows, cutoff, now, root, measure_kept):
             return cat, [], files, size
         return cat, [], 0, 0
     files, size, newest = folder_stats(f.path)
-    if now - newest < RECENT_SECONDS:
+    age = now - newest
+    if age < RECENT_SECONDS:
         return f"{cat}, {RECENT}", [], files, size
+    if age < GRACE_SECONDS:
+        if cat == SESSION_UNUSED:
+            return f"{cat}, {RECENT_GRACE}", [], files, size
+        if cat == ROW_GONE and f.kind == "node" and _holds_recording(f):
+            speech = ([] if f.label == _NODES_LABEL
+                      else _children(f.path, speech_only=True))
+            if not speech:
+                return RECORDING_HELD, [], files, size
+            cat, gone = SPEECH_ONLY, speech
     if gone is not None:
         files, size = len(gone), _size(gone)
     return cat, gone, files, size
@@ -386,7 +502,6 @@ def sweep(apply=False, verbose=False, root=None, now=None, out=None,
     ``planned`` and ``done`` ((folders, files, bytes) to delete, and
     deleted), ``failed`` (files not deleted), ``errors`` (their error
     types), ``failed_ids`` ("<kind> <id>"), ``root``."""
-    from backend.constants import SOFT_DELETE_GRACE_DAYS
     from backend.utils import audio_storage
 
     root = pathlib.Path(audio_storage.AUDIO_STORAGE_ROOT
@@ -398,7 +513,7 @@ def sweep(apply=False, verbose=False, root=None, now=None, out=None,
     totals = _Totals()
     folders = iter_folders(root) if root.is_dir() else ()
     for batch in _batches(folders, BATCH_SIZE):
-        rows = lookup(batch)
+        rows = lookup(batch, cutoff)
         for f in batch:
             cat, gone, files, size = _assess(f, rows, cutoff, now, root,
                                              measure_kept)

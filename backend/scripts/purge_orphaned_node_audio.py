@@ -11,12 +11,16 @@ the audio storage root:
   (``user/<uid>/item/<id>/``, ``user/<uid>/profile/<id>/``) when its row
   is gone;
 * superseded speech (``tts.mp3``, ``tts_chunk_<i>.mp3``) in a live row's
-  folder that no row points at any more.
+  folder that no row points at any more;
+* a streaming session folder (``streaming/<uid>/<session>/``) that no
+  node not yet finalized and no draft names, once unchanged for the
+  grace period.
 
 Never a file a row points at, a live node's recording, a node within the
 grace period, a row a waiting "Delete all my writing" hid, a folder with
-anything changed in the last 24 hours, or anything outside those
-folders; symlinks are never followed. Reads folder names, file sizes and
+anything changed in the last 24 hours, a recording in a folder whose node
+row is gone until it is unchanged for the grace period, or anything
+outside those folders; symlinks are never followed. Reads folder names, file sizes and
 times, row ids, deletion times and stored audio URLs; never a file's
 content.
 
