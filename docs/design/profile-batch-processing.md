@@ -441,7 +441,13 @@ for the user):
   `--apply`, metadata only, idempotent) sets it for the accounts from
   before it that the rules above cannot vouch for. The check does not
   depend on that run. `profile_both_providers`
-(default false, no UI; #599 asks the question) is the user's consent.
+(default false) is the user's consent, set only by their own answer to
+#599's question (`profile_both_providers_answered_at` records when; the
+rules for asking are `utils/profile_providers.both_providers_ask`). It is
+read from the database at each check (`agreed_to_both`), and a pass that
+may cross providers checks it again before each slice is sent
+(`_Submission.recheck`): a no given while a pass renders stops the rest of
+that pass, and a new task plans it for the user's own provider.
 Without either, every model of a pass is of the provider of the user's
 chat model: checked at boot (`validate_profile_models`), per pass
 (`profile_models_for`) and for every request before it is queued
