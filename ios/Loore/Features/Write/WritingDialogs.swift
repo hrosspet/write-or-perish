@@ -121,6 +121,9 @@ struct DeleteConfirmDialog: View {
         case thread
         /// A saved reference (References list and page).
         case reference
+        /// A custom artifact with all its versions (#603). `unsavedEdits`: its
+        /// page holds edits that go with it.
+        case artifact(title: String, unsavedEdits: Bool)
         /// The follow-up when the delete would leave only the system prompt.
         case prompt(listedIn: String)
     }
@@ -152,6 +155,16 @@ struct DeleteConfirmDialog: View {
                     ChoiceButton(title: "Cancel", action: onCancel)
                 }
             }
+        case .artifact(let title, let unsavedEdits):
+            LooreDialogCard(title: "Delete artifact?") {
+                DialogBodyText(attributed: Self.artifactBody(title: title, unsavedEdits: unsavedEdits))
+                VStack(spacing: 8) {
+                    ChoiceButton(title: "Delete", tone: .accent) { onConfirm(false) }
+                        .accessibilityIdentifier("artifact.confirmDelete")
+                    ChoiceButton(title: "Cancel", action: onCancel)
+                        .accessibilityIdentifier("artifact.cancelDelete")
+                }
+            }
         case .thread:
             LooreDialogCard(title: "Delete entire thread?") {
                 DialogBodyText(text: "Your content in this thread will be removed. Your nodes remain as placeholders so other users' replies stay reachable (they own them).")
@@ -180,6 +193,18 @@ struct DeleteConfirmDialog: View {
                 }
             }
         }
+    }
+}
+
+extension DeleteConfirmDialog {
+    /// "**<title>** and its version history will be removed. The AI will no
+    /// longer see it." (web `DeleteConfirmDialog` "artifact"; like node
+    /// deletion, nothing about the 30 days before the rows are purged).
+    static func artifactBody(title: String, unsavedEdits: Bool) -> AttributedString {
+        var text = DialogBodyText.strong(title)
+        text += AttributedString(" and its version history will be removed. The AI will no longer see it.")
+        if unsavedEdits { text += AttributedString(" Your unsaved edits go with it.") }
+        return text
     }
 }
 

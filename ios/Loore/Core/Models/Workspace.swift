@@ -244,20 +244,23 @@ struct ArtifactDoc: Decodable, Identifiable, Equatable, Sendable {
     var content: String
     var generatedBy: String?
     var createdAt: Date?
+    /// The user may delete it (#603): custom kinds only. The server decides;
+    /// a list without the field (an older backend) offers no Delete.
+    var deletable: Bool
 
     var id: String { kind }
     /// The kind has a saved version (the web checks `created_at`).
     var exists: Bool { createdAt != nil }
 
     enum CodingKeys: String, CodingKey {
-        case kind, title, description, content
+        case kind, title, description, content, deletable
         case rowId = "id"
         case generatedBy = "generated_by"
         case createdAt = "created_at"
     }
 
     init(kind: String, rowId: Int? = nil, title: String, description: String? = nil, content: String = "",
-         generatedBy: String? = nil, createdAt: Date? = nil) {
+         generatedBy: String? = nil, createdAt: Date? = nil, deletable: Bool = false) {
         self.kind = kind
         self.rowId = rowId
         self.title = title
@@ -265,6 +268,7 @@ struct ArtifactDoc: Decodable, Identifiable, Equatable, Sendable {
         self.content = content
         self.generatedBy = generatedBy
         self.createdAt = createdAt
+        self.deletable = deletable
     }
 
     init(from decoder: Decoder) throws {
@@ -276,15 +280,20 @@ struct ArtifactDoc: Decodable, Identifiable, Equatable, Sendable {
         content = c.tolerant(.content, default: "")
         generatedBy = c.tolerant(.generatedBy)
         createdAt = c.tolerant(.createdAt)
+        deletable = c.tolerant(.deletable, default: false)
     }
 }
 
 struct ArtifactList: Decodable, Sendable {
     var artifacts: [ArtifactDoc]
+    /// The user's deleted kinds that were not made again (#603): a link to one
+    /// says "This artifact was deleted." instead of opening an empty artifact.
+    var deletedKinds: [String]
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: AnyCodingKey.self)
         artifacts = c.tolerant(AnyCodingKey("artifacts"), default: [])
+        deletedKinds = c.tolerant(AnyCodingKey("deleted_kinds"), default: [])
     }
 }
 
