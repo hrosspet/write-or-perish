@@ -310,7 +310,7 @@ Release build they are compiled out.
 ```sh
 cd ios && xcodegen
 xcodebuild -project Loore.xcodeproj -scheme Loore \
-  -destination 'platform=iOS Simulator,name=iPhone 17' test      # 578 unit tests
+  -destination 'platform=iOS Simulator,name=iPhone 17' test      # 615 unit tests
 python3 ios/scripts/check_terms_text.py                          # Terms text == TermsModal.js
 ```
 
@@ -340,14 +340,15 @@ xcodebuild -project Loore.xcodeproj -scheme LooreUITests \
 | `VoiceUITests`, `VoiceWiringUITests` (M3) | a voice turn, Continue; speaker, download, dictation, Voice Mode from a thread | billed, see below |
 | `NodeOpeningUITests` (#447) | Text → Send (auto-generate off), then the same entry from the Log: each time the screen stays with the spinner and the thread opens with no "Loading node..." page | `LOORE_BACKEND_URL=http://localhost:5099` with `python3 scripts/delay_proxy.py 5099 0.8` running (node GETs held 0.8 s; without a delay the spinner is too short to see). The test user's sent entries stay in the Log |
 | `HomeCardsUITests` (2026-10-13) | a user who gleans: a tap on a card's Voice / Text switch (middle, edge, end) opens nothing and changes what the card opens; the card opens Text mode or Voice; each card's choice survives a relaunch; the home in both modes, dark and light | a user with Glean (skips otherwise); no billed step |
+| `ArtifactDeleteUITests` (#603) | a long press on each kind of bubble: Edit and Delete on custom artifacts, Edit only on built-ins, the digest, Profile and Todo, no menu on "+"; Edit from the menu opens each form; the delete dialog (Cancel, unsaved edits); deleting the open, a not-open and the last bubble; a link to a deleted artifact; dark and light | makes three custom artifacts (`landlord-case`, `loore-development-map`, `winter-solstice-gathering`) through the API and deletes them; skips when the user already has one of those names. `LOORE_BACKEND_URL` for a backend other than :5010 |
 | `TextModeDraftUITests` (#425, #427) | Reflect home → Text → Send (auto-generate off) or Discard → back → Text again: the text must not come back as the draft | Send right after typing: `LOORE_BACKEND_URL=http://localhost:5099` with `python3 scripts/delay_proxy.py` running (production-like latency; without it the race cannot fail locally). Send or Discard next to a dead Voice session: `state clear_top_drafts dead_voice_session` before each test. The test user's sent entries stay in the Log |
 
 Notes: the M2 tests cancel every dialog and delete what they create; craft mode is
 switched on through More and back off (if a run stops halfway, switch it off again).
 The auto-generate path uses the test user's *preferred* model, as the web does, so
 pick the cheapest one before a billed run. M4 imports run with AI usage None, so no
-profile update starts; the backend has no delete for profiles, todos or artifacts,
-which is what `state m4_cleanup` is for. M4's import test needs `LOORE_IMPORT_DIR`
+profile update starts; the backend has no delete for profiles or todos (an
+artifact's delete keeps its rows for 30 days), which is what `state m4_cleanup` is for. M4's import test needs `LOORE_IMPORT_DIR`
 holding `notes.zip` (two `.md` files containing "M4 import test"),
 `chatgpt-renamed.zip` (a ChatGPT conversations array under another name) and
 `notazip.zip`. No test opens the Commons tab locally: it lists other users' public

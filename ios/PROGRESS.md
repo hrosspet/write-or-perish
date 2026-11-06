@@ -941,3 +941,33 @@ From Peter's first run on his iPhone. 395 unit tests pass (one skipped), 5 of th
 - The stored text is in the system serif, New York (`LooreFont.reading`, `MarkdownStyle.Face.readingSerif`),
   where the web uses Newsreader: the app bundles no Newsreader. 17 pt, line height 1.62.
 - Checked in the simulator against a mocked `/api` (tweet, page, video; dark and light).
+
+## Delete an artifact (#603, Peter 2026-11-06)
+
+- A long press on a bubble of the artifacts row opens a SwiftUI `.contextMenu` (Peter chose it from the
+  preview: "the iPhone delete via long press is awesome"). Custom artifacts: Edit (pencil) and Delete
+  (trash, destructive). Built-in kinds, the Saved References Digest, Profile and Todo: Edit only (Peter:
+  Profile and Todo behave like Predictions). "+": no menu. Delete follows the list's `deletable`
+  (`WorkspaceMenu.items`), so the rule stays on the server; a list without the field offers no Delete.
+  No ⋮ button in the header. VoiceOver gets the same commands as named actions.
+- Edit selects the bubble (through the artifact page's unsaved-changes guard) and opens the form its
+  version chip opens, or the empty state's "Write …" / "Write Profile" / "Create Todo" form. The request
+  goes through `WorkspaceActions` (one per `WorkspaceView`, in the environment), and each page takes it
+  once it has loaded, so the form never opens on a profile or todo that has not arrived yet.
+- Delete asks with `DeleteConfirmDialog(.artifact)`: "Delete artifact?", the title in bold
+  (`DialogBodyText(attributed:)` + `.strong`), "… and its version history will be removed. The AI will no
+  longer see it.", plus "Your unsaved edits go with it." when that artifact's page is being edited with
+  changes (from the preview). Nothing about the 30 days. The dialog opens straight from the menu action:
+  in the simulator (iOS 26.3) the cover presents while the menu closes, no extra run-loop turn needed.
+- After `DELETE /api/artifacts/<kind>`: the bubble leaves the row and, when it was open, the next bubble
+  opens (the previous one when it was the last; "+" does not count) in the same update, then a toast
+  "<title> deleted". A bubble that was not open leaves the open one as it is. A 404 with `deleted: true`
+  (deleted on another device) counts as done; any other error toasts the server's words (or "Could not
+  delete the artifact.") and removes nothing. A list fetched while the delete landed is fetched again.
+- A link to a deleted artifact (the list's `deleted_kinds`) shows "Artifacts" and "This artifact was
+  deleted." instead of an empty editable artifact, and sends no view ping (the ping now waits for the list).
+- Unselected bubbles are filled with the page colour instead of clear (the same in the row), and
+  `.contentShape(.contextMenuPreview, Capsule())` makes the lifted preview a capsule.
+- Tests: `ArtifactDeletionTests` (menu items per kind, row order, selection after a delete, the edit
+  request, the dialog text, the store's delete and its errors, the deleted link); `ArtifactDeleteUITests`
+  walks it all in the simulator against a native Flask on sqlite.
