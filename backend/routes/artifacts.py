@@ -4,6 +4,8 @@ Artifacts are generic named, versioned documents (memory, scratchpad,
 custom kinds). Same append-only versioning contract as AI preferences:
 PUT inserts a new row; the latest row per (user, kind) is current. PATCH
 (checklist clicks) may edit the latest row in place — see patch_artifact.
+DELETE soft-deletes every version of a custom artifact (#603) — see
+backend/utils/artifact_deletion.py. Every route reads live versions only.
 """
 import re
 
@@ -13,6 +15,10 @@ from flask_login import login_required, current_user
 from backend.extensions import db
 from backend.models import NodeContextArtifact, UserArtifact
 from backend.utils.timefmt import iso_utc
+
+# The answer for a deleted kind: the client says "This artifact was
+# deleted." instead of offering an empty artifact under its name (#603).
+_DELETED = {"error": "This artifact was deleted.", "deleted": True}
 
 artifacts_bp = Blueprint("artifacts", __name__)
 
@@ -43,6 +49,9 @@ def _serialize(artifact, version_number=None, include_content=True):
         "created_at": iso_utc(artifact.created_at),
         "privacy_level": artifact.privacy_level,
         "ai_usage": artifact.ai_usage,
+        # Whether the user may delete it (#603): the clients show Delete
+        # from this, so the rule lives on the server only.
+        "deletable": UserArtifact.is_deletable_kind(artifact.kind),
     }
     if include_content:
         data["content"] = artifact.get_content()
@@ -55,7 +64,11 @@ def _serialize(artifact, version_number=None, include_content=True):
 @login_required
 def list_artifacts():
     """Latest version of each artifact kind, defaults included even when
-    they don't exist yet (so the UI can always render memory/scratchpad)."""
+    they don't exist yet (so the UI can always render memory/scratchpad).
+
+    ``deleted_kinds``: the user's kinds that were deleted and not made
+    again (#603), so a link to one says it was deleted."""
+    from backend.utils.artifact_deletion import deleted_kinds
     latest = UserArtifact.latest_per_kind(current_user.id)
     items = []
     for kind, title in UserArtifact.DEFAULT_KINDS.items():
@@ -68,10 +81,14 @@ def list_artifacts():
             "generated_by": None, "created_at": None,
             "privacy_level": "private",
             "ai_usage": current_user.default_ai_usage,
+            "deletable": False,
         })
     for kind in sorted(latest):
         items.append(_serialize(latest[kind]))
-    return jsonify({"artifacts": items}), 200
+    return jsonify({
+        "artifacts": items,
+        "deleted_kinds": deleted_kinds(current_user.id),
+    }), 200
 
 
 @artifacts_bp.route("/<kind>", methods=["GET"])
@@ -88,11 +105,14 @@ def get_artifact(kind):
                 "content": "", "generated_by": None, "created_at": None,
                 "privacy_level": "private",
                 "ai_usage": current_user.default_ai_usage,
+                "deletable": False,
             }}), 200
+        from backend.utils.artifact_deletion import deleted_kinds
+        if kind in deleted_kinds(current_user.id):
+            return jsonify(_DELETED), 404
         return jsonify({"error": "Artifact not found"}), 404
 
-    version_count = UserArtifact.query.filter_by(
-        user_id=current_user.id, kind=kind).count()
+    version_count = UserArtifact.version_count(current_user.id, kind)
     return jsonify(
         {"artifact": _serialize(artifact, version_number=version_count)}
     ), 200
@@ -162,8 +182,8 @@ def update_artifact(kind):
     db.session.add(artifact)
     db.session.commit()
 
-    version_count = UserArtifact.query.filter_by(
-        user_id=current_user.id, kind=kind).count()
+    # A kind made again after a delete counts from v1 (#603).
+    version_count = UserArtifact.version_count(current_user.id, kind)
     return jsonify(
         {"artifact": _serialize(artifact, version_number=version_count)}
     ), 200
@@ -189,6 +209,8 @@ def patch_artifact(kind):
 
     latest = UserArtifact.latest_for(current_user.id, kind)
     if latest is None:
+        # A checklist click on a page left open after the delete in
+        # another tab saves nothing (#603).
         return jsonify({"error": "Artifact not found"}), 404
 
     pinned = NodeContextArtifact.query.filter_by(
@@ -210,8 +232,7 @@ def patch_artifact(kind):
     artifact.set_content(content)
     db.session.commit()
 
-    version_count = UserArtifact.query.filter_by(
-        user_id=current_user.id, kind=kind).count()
+    version_count = UserArtifact.version_count(current_user.id, kind)
     return jsonify(
         {"artifact": _serialize(artifact, version_number=version_count)}
     ), 200
@@ -220,7 +241,7 @@ def patch_artifact(kind):
 @artifacts_bp.route("/<kind>/versions", methods=["GET"])
 @login_required
 def get_artifact_versions(kind):
-    rows = UserArtifact.query.filter_by(
+    rows = UserArtifact.live().filter_by(
         user_id=current_user.id, kind=kind
     ).order_by(UserArtifact.created_at.desc(), UserArtifact.id.desc()).all()
 
@@ -235,7 +256,9 @@ def get_artifact_versions(kind):
 @artifacts_bp.route("/versions/<int:version_id>", methods=["GET"])
 @login_required
 def get_artifact_version(version_id):
-    artifact = UserArtifact.query.get_or_404(version_id)
+    artifact = UserArtifact.get_live(version_id)
+    if artifact is None:
+        return jsonify({"error": "Version not found"}), 404
     if artifact.user_id != current_user.id:
         return jsonify({"error": "Unauthorized"}), 403
     return jsonify({"artifact": _serialize(artifact)}), 200
@@ -245,7 +268,10 @@ def get_artifact_version(version_id):
 @login_required
 def revert_artifact(kind, version_id):
     """Create a new artifact version from a historical one."""
-    old = UserArtifact.query.get_or_404(version_id)
+    # A deleted version can't come back as a new one (#603).
+    old = UserArtifact.get_live(version_id)
+    if old is None:
+        return jsonify({"error": "Version not found"}), 404
     if old.user_id != current_user.id:
         return jsonify({"error": "Unauthorized"}), 403
     if old.kind != kind:
@@ -272,7 +298,45 @@ def revert_artifact(kind, version_id):
     db.session.add(new)
     db.session.commit()
 
-    version_count = UserArtifact.query.filter_by(
-        user_id=current_user.id, kind=kind).count()
+    version_count = UserArtifact.version_count(current_user.id, kind)
     return jsonify(
         {"artifact": _serialize(new, version_number=version_count)}), 200
+
+
+@artifacts_bp.route("/<kind>", methods=["DELETE"])
+@login_required
+def delete_artifact(kind):
+    """Delete a custom artifact with all its versions (#603).
+
+    A soft delete, as for nodes: every version is hidden at once from
+    every reader (the list, the history, the AI's index and tools,
+    exports), and the daily cleanup deletes the rows after
+    SOFT_DELETE_GRACE_DAYS. Built-in kinds and the saved-references
+    digest are refused. Only the owner's own versions are touched: the
+    query is scoped by the caller's id, so anyone else's kind of the
+    same name is not found.
+
+    200: {"deleted": kind, "versions": n, "grace_days": 30}.
+    403: a built-in kind or the digest. 404: no live version of it,
+    with "deleted": true when the user deleted it already (a repeated
+    delete, e.g. from a second device, can be taken as done).
+    """
+    from backend.constants import SOFT_DELETE_GRACE_DAYS
+    from backend.utils.artifact_deletion import (
+        deleted_kinds, soft_delete_artifact)
+
+    if not UserArtifact.is_deletable_kind(kind):
+        return jsonify({"error": (
+            "Built-in artifacts can't be deleted.")}), 403
+    count = soft_delete_artifact(current_user.id, kind)
+    if not count:
+        db.session.rollback()
+        if kind in deleted_kinds(current_user.id):
+            return jsonify(_DELETED), 404
+        return jsonify({"error": "Artifact not found"}), 404
+    db.session.commit()
+    return jsonify({
+        "deleted": kind,
+        "versions": count,
+        "grace_days": SOFT_DELETE_GRACE_DAYS,
+    }), 200

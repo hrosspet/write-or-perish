@@ -149,11 +149,22 @@ def _render_variant(user_id):
     would keep serving the archive-search guidance for the TTL, telling
     the model to use a tool that left the list on the same restart.
     The `u` part is the account's AI-usage setting, which licenses the
-    artifacts index (#326): it changes the verdict, not the text."""
+    artifacts index (#326): it changes the verdict, not the text.
+    The `d` part is when the user last deleted an artifact (#603): the
+    artifacts index of a render stored before a delete still lists the
+    artifact, so a delete takes a fresh key and the next turn renders
+    the index without it. Absent until the user's first delete, so the
+    keys of everyone else stay as they were. Both render paths (the
+    generation loop and the pre-warm's render_system_message) compute
+    the variant before they read the artifacts, so a render that still
+    saw the artifact is never stored under a key from after the delete."""
+    from backend.utils.artifact_deletion import deletion_stamp
+    deleted = deletion_stamp(user_id)
     return (f"a{int(archive_search_enabled(flask_app.config))}"
             f"u{_account_ai_usage(user_id)}"
             f"s{int(_share_enabled_for_user(user_id))}"
-            f"e{int(_external_references_for_user(user_id))}")
+            f"e{int(_external_references_for_user(user_id))}"
+            + (f"d{deleted}" if deleted else ""))
 
 
 def _system_render_variant(system_node, user_id):
@@ -1243,7 +1254,8 @@ def _retrieval_injection_text(tr, user_id, with_labels=False, licence=None):
     """
     name = tr.get("name")
     if name == "read_artifact":
-        artifact = UserArtifact.query.get(tr.get("artifact_id"))
+        # Deleted since the call (#603): "no longer available".
+        artifact = UserArtifact.get_live(tr.get("artifact_id"))
         if (artifact is None or artifact.user_id != user_id
                 or artifact.ai_usage not in AI_ALLOWED):
             return None
@@ -1461,7 +1473,8 @@ def _artifact_update_echo(tr, licence=None):
     AI may not read is never diffed against: the echo is the new text."""
     if tr.get("name") != "update_artifact" or tr.get("status") != "success":
         return None
-    artifact = UserArtifact.query.get(tr.get("artifact_id"))
+    # A deleted version (#603) is echoed by neither side of the diff.
+    artifact = UserArtifact.get_live(tr.get("artifact_id"))
     if artifact is None:
         return None
     new_text = artifact.get_content() or ""
@@ -1471,7 +1484,7 @@ def _artifact_update_echo(tr, licence=None):
         if licence is not None:
             _note_artifact_content(licence, artifact)
         return f"[You created '{kind}' with this content:\n{new_text}]"
-    previous = UserArtifact.query.get(prev_id)
+    previous = UserArtifact.get_live(prev_id)
     if previous is not None and previous.ai_usage not in AI_ALLOWED:
         # A version AI may not read never reaches a diff (update_artifact
         # refuses to write over one; this keeps the echo safe on its own).

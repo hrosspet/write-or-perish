@@ -33,7 +33,8 @@ What it carries (all of it, not "latest N"):
     load as prompt references, not as copies of the prompt text
 
 NOT carried: audio files / TTS artifacts, node versions (edit history),
-drafts, per-node context-artifact pins, deleted nodes, cost logs.
+drafts, per-node context-artifact pins, deleted nodes, deleted artifacts,
+cost logs.
 
 Public-only by default: non-public nodes are skipped entirely and public
 content is copied as stored (plaintext under #257 — no KMS calls; a legacy
@@ -215,12 +216,13 @@ def _todos(user, UserTodo):
 
 
 def _artifacts(user, UserArtifact):
+    # Deleted artifacts (#603) are not carried, like deleted nodes.
     return [{
         "kind": a.kind, "title": a.title, "description": a.description,
         "content": a.get_content(), "generated_by": a.generated_by,
         "tokens_used": a.tokens_used, "created_at": _iso(a.created_at),
         "privacy_level": a.privacy_level, "ai_usage": a.ai_usage,
-    } for a in UserArtifact.query.filter_by(user_id=user.id).order_by(UserArtifact.id).all()]
+    } for a in UserArtifact.live().filter_by(user_id=user.id).order_by(UserArtifact.id).all()]
 
 
 def main():

@@ -38,7 +38,10 @@ _ROW_MODELS = {
 
 def pinned_row(artifact_type, artifact_id):
     """The artifact version a pin of *artifact_type* points at, or None.
-    Each has a ``user_id``: whose version it is."""
+    Each has a ``user_id``: whose version it is. A user artifact the
+    user deleted (#603) is None, as if the pin were gone."""
+    if artifact_type == 'user_artifact':
+        return UserArtifact.get_live(artifact_id)
     model = _ROW_MODELS.get(artifact_type)
     return model.query.get(artifact_id) if model is not None else None
 
