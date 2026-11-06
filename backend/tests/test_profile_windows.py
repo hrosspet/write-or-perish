@@ -3797,6 +3797,48 @@ def test_a_private_small_multi_window_build_stays_on_its_provider(
     assert len(_finals(u)) == 1
 
 
+def test_a_no_during_a_consented_one_window_build_keeps_its_final_home(
+        app, world, monkeypatch):
+    """#596 with #599: an OpenAI user who said yes gets a one-window
+    build's window on GPT-6 Luna and its integration on Opus 5.5. A no
+    given after the final's pass picked its models sends nothing to
+    Anthropic, not even the integration's token count; the next pass
+    writes the integration with the user's preferred model."""
+    _one_chunk_switches(app)
+    u = _user(preferred_model="gpt-6-astra", profile_needs_full_regen=True,
+              profile_both_providers=True,
+              profile_both_providers_answered_at=datetime.utcnow())
+    _node(u)                                   # private, but agreed
+    world.corpus = Corpus(50)
+    _advance(u)
+    [(provider, window)] = _all_reqs(world)
+    assert (provider, window["model_id"]) == ("openai", "gpt-6-luna")
+    _poll()
+    n = len(world.provider.submits)
+    counted = []
+    import backend.llm_providers as lp
+    monkeypatch.setattr(lp.LLMProvider, "count_tokens", staticmethod(
+        lambda model_id, messages, k: counted.append(model_id)))
+    real = pw.chained_update_base
+
+    def models_then_no(*a, **k):
+        out = real(*a, **k)
+        _withdraw(u)                   # after the pass computed `cross`
+        return out
+    monkeypatch.setattr(pw, "chained_update_base", models_then_no)
+    assert _advance(u) == "partial"
+    assert "claude-opus-5.5" not in counted
+    assert len(world.provider.submits) == n       # nothing sent
+    monkeypatch.setattr(pw, "chained_update_base", real)
+    _finish(world, u)
+    after = _all_reqs(world, n)
+    assert [(p, r["model_id"]) for p, r in after] == [
+        ("openai", "gpt-6-astra")]
+    assert "_f_" in after[0][1]["custom_id"]
+    assert "claude-opus-5.5" not in counted
+    assert len(_finals(u)) == 1
+
+
 def _public_prefill(world, monkeypatch, units_k, **kw):
     """A pre-filled account nobody signed into, whose writing is tweets
     Loore fetched (public only), with ``units_k`` thousand units."""
