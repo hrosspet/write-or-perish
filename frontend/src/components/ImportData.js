@@ -12,6 +12,8 @@ import {
 import { FaSpinner } from "react-icons/fa";
 import api from "../api";
 import PrivacySelector from "./PrivacySelector";
+import { BothProvidersQuestion } from "./BothProvidersDialog";
+import { noteBothProvidersLater } from "../hooks/useBothProvidersQuestion";
 
 const ghostBtnStyle = {
   backgroundColor: "transparent",
@@ -760,6 +762,13 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     ? `${(importProgress.done || 0).toLocaleString()} of ${importProgress.total.toLocaleString()} messages`
     : null;
 
+  // Closing the import result reloads the page. A both-providers question
+  // left unanswered there is not asked again on that reload (#599).
+  const closeImportResult = () => {
+    if (importResult && importResult.ask_both_providers) noteBothProvidersLater();
+    window.location.reload();
+  };
+
   // While a confirm dialog is open, its errors show inside it (ModalError):
   // the dialog covers the page, so the page's error line would be hidden.
   const confirmDialogOpen = showImportDialog || showTwitterImportDialog
@@ -795,7 +804,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
 
       {/* Post-import summary: what was actually imported vs skipped */}
       {importResult && importResult.saved_as !== "reference" && (
-        <ModalShell onDismiss={() => window.location.reload()}>
+        <ModalShell onDismiss={closeImportResult}>
           <ModalTitle>Import Finished</ModalTitle>
           <div style={{ display: "flex", gap: "2.4rem", marginBottom: "1.3rem" }}>
             {[
@@ -848,10 +857,26 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
                   imported. There was nothing to write.
                 </p>
               )}
+              {importResult.profile_waits_for_imports && (
+                <p style={{ fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.88rem", color: "var(--text-secondary)", margin: "0 0 1.4rem" }}>
+                  Your profile will be built from this import once you have
+                  stopped importing for 30 minutes, so anything else you
+                  import now goes into the same build.
+                </p>
+              )}
+              {/* The both-providers question (#599): the server asks after
+                  an import that added entries AI may read, for a user who
+                  never answered or said no at least 30 days ago. OK
+                  without an answer records nothing. */}
+              {importResult.ask_both_providers && (
+                <div style={{ borderTop: "1px solid var(--border)", paddingTop: "1.3rem", margin: "0 0 1.4rem" }}>
+                  <BothProvidersQuestion title />
+                </div>
+              )}
             </>
           )}
           <button
-            onClick={() => window.location.reload()}
+            onClick={closeImportResult}
             style={primaryBtnStyle}
           >
             OK

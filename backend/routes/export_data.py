@@ -306,9 +306,11 @@ def _artifact_ref_lines(node, user_id):
 
     profile = node.get_artifact("profile")
     if profile is not None and profile.user_id == user_id:
+        from backend.utils.profile_versions import not_set_internal
         profile_ver = UserProfile.query.filter(
             UserProfile.user_id == profile.user_id,
             UserProfile.created_at <= profile.created_at,
+            not_set_internal(),
         ).count()
         lines.append(f"[User Profile v{profile_ver} (ref #{profile.id})]")
 
@@ -718,7 +720,8 @@ def _select_incremental_rows(user_id, filter_ai_usage=False,
     return list(rows_by_id.values())
 
 
-def count_remaining_units(user_id, created_after=None, filter_ai_usage=True):
+def count_remaining_units(user_id, created_after=None, filter_ai_usage=True,
+                          created_before=None):
     """Stored content units (Node.token_count) still ahead of the profile
     chunk loop after ``created_after``: the sum over exactly the rows the
     incremental export window draws from (anchor scope plus climb-up
@@ -726,10 +729,11 @@ def count_remaining_units(user_id, created_after=None, filter_ai_usage=True):
     filters), so the plan made from this figure and the window it
     produces agree. The chunk planner calls it before every chunk
     (docs/design/chunk-planner.md). No node is loaded or decrypted.
+    ``created_before`` (exclusive) bounds a window set's gap (#545).
     """
     rows = _select_incremental_rows(
         user_id, filter_ai_usage=filter_ai_usage,
-        created_after=created_after)
+        created_after=created_after, created_before=created_before)
     return sum((r.token_count or 0) for r in rows)
 
 
@@ -1612,9 +1616,12 @@ def build_user_export_content(
                         licence.note_usage(profile.ai_usage,
                                            f"archive profile {profile.id}",
                                            row=profile)
+                    from backend.utils.profile_versions import (
+                        not_set_internal)
                     pver = UserProfile.query.filter(
                         UserProfile.user_id == profile.user_id,
                         UserProfile.created_at <= profile.created_at,
+                        not_set_internal(),
                     ).count()
                     profile_versions[profile.id] = {
                         "version": pver,
@@ -1852,9 +1859,11 @@ def export_threads():
 def _latest_profile_snapshot(user):
     """id / created_at of the newest saved version. The client detects a
     chunk landing (and the end of a batch chain) by the id changing;
-    the content is fetched from /dashboard when it needs it."""
-    latest = (UserProfile.query.filter_by(user_id=user.id)
-              .order_by(UserProfile.created_at.desc()).first())
+    the content is fetched from /dashboard when it needs it. A window
+    set's intermediates are not versions (#545): the id changes when the
+    set's final merge is saved."""
+    from backend.utils.profile_versions import current_profile_query
+    latest = current_profile_query(user.id).first()
     if not latest:
         return None
     return {
@@ -1891,7 +1900,8 @@ def _pending_batch_item(user_id):
         for item in job.items or []:
             if (item.get("user_id") == user_id
                     and item.get("kind") in ("chunk", "integration",
-                                             "merge")):
+                                             "merge", "window", "group",
+                                             "final")):
                 return item
     return None
 
@@ -1914,6 +1924,16 @@ def _batch_progress(user):
     elif item.get("kind") == "merge":
         # A rebuild merging the user's own version in (#183).
         message, progress = "Merging your own version", 85
+    elif item.get("kind") == "window":
+        # A large build reading every window at once (#545).
+        total = item.get("total")
+        message = (f"Generating profile: reading all {total} chunks"
+                   if total else "Generating profile")
+        progress = 20
+    elif item.get("kind") == "group":
+        message, progress = "Integrating profile versions", 80
+    elif item.get("kind") == "final":
+        message, progress = "Integrating profile versions", 95
     elif item.get("chunk_num") and item.get("chunk_total"):
         n, total = int(item["chunk_num"]), int(item["chunk_total"])
         message = f"Generating profile: Chunk {n} of ~{total}"

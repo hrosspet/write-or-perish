@@ -174,6 +174,32 @@ class User(db.Model, UserMixin):
     profile_cap_held = db.Column(
         db.Boolean, nullable=False, default=False,
         server_default=db.text("false"))
+    # When the user's last import finished (or a Twitter import last
+    # committed a batch), while the profile build it leads to waits for
+    # the imports to stop (#598): the batch seeder builds only after
+    # MIN_INACTIVITY with no import and no new entry, and clears it then.
+    profile_import_quiet_from = db.Column(db.DateTime, nullable=True)
+    # The user agreed that their writing may reach both providers' models
+    # for a large profile build (Peter, 2026-11-05). Set only by the user's
+    # own answer to the question of #599 (the dialog, or Account), through
+    # PUT /dashboard/user. False: a build reads private writing only with
+    # models of the provider of the user's preferred model.
+    profile_both_providers = db.Column(
+        db.Boolean, nullable=False, default=False,
+        server_default=db.text("false"))
+    # When the user last answered that question (UTC). NULL: never
+    # answered, which is "we don't know", not "no"; the flag above is then
+    # false. The rules for asking read it
+    # (utils/profile_providers.both_providers_ask).
+    profile_both_providers_answered_at = db.Column(db.DateTime, nullable=True)
+    # Set for good once a profile pass read writing of this user that is
+    # not public-only (utils/profile_providers.note_private_read): their
+    # profiles may hold private writing even after those entries are
+    # purged, so the user's builds never count as public-only again.
+    # Nothing clears it automatically.
+    profile_private_read = db.Column(
+        db.Boolean, nullable=False, default=False,
+        server_default=db.text("false"))
     # Measured billed input tokens per stored content unit (Node.token_count)
     # on the user's last profile chunk, tagged with the tokenizer family it
     # was measured on (backend/tasks/exports.TOKENIZER_FAMILIES). The chunk
@@ -903,6 +929,16 @@ class UserProfile(db.Model):
     # user's version through it (tasks/exports.carried_user_version). A
     # plain id, not a foreign key: it only points within one user's rows.
     merged_profile_id = db.Column(db.Integer, nullable=True)
+    # Independent versions of a large build (#545,
+    # backend/tasks/profile_windows.py): the window set a "window",
+    # "window_skip", "group" or final "integration" row belongs to. Every
+    # row of one set carries the same id; a later update adds windows to
+    # the user's current set.
+    window_set = db.Column(db.String(32), nullable=True, index=True)
+    # The exclusive start of the writing a window, skipped window or group
+    # covers: the previous window's cutoff. None on the first window of a
+    # set built from the start of the writing.
+    covers_start = db.Column(db.DateTime, nullable=True)
 
     # --- Voice‑Mode fields ---
     audio_tts_url = db.Column(db.String, nullable=True)

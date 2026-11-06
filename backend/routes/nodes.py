@@ -7,6 +7,7 @@ from backend.models import (
 )
 from backend.extensions import db
 from backend.utils.timefmt import iso_utc
+from backend.utils.profile_versions import not_set_internal
 from backend.utils.slugs import permalink_for
 from datetime import datetime
 from openai import OpenAI
@@ -472,9 +473,11 @@ def _context_artifact_fields(n, viewer_id):
             if profile and profile.user_id == viewer_id:
                 artifacts["profile"] = {
                     "id": profile.id,
+                    # A large build's windows and groups don't count (#545).
                     "version_number": UserProfile.query.filter(
                         UserProfile.user_id == profile.user_id,
                         UserProfile.created_at <= profile.created_at,
+                        not_set_internal(),
                     ).count(),
                     "content": profile.get_content(),
                 }

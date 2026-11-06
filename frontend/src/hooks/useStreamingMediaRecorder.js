@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
+import { setRecordingActive } from '../utils/recordingActivity';
 
 // Preference-ordered MIME list. WebM/Opus first (existing browsers stay
 // on the optimized raw-byte-concat path), then MP4/AAC for iOS Safari
@@ -80,6 +81,19 @@ export function useStreamingMediaRecorder({
         streamRef.current.getTracks().forEach(track => track.stop());
       }
     };
+  }, []);
+
+  // Tell the rest of the app a recording is in progress (recording or
+  // paused), so dialogs that open on their own wait (#599).
+  const activityIdRef = useRef(null);
+  if (activityIdRef.current === null) activityIdRef.current = {};
+  useEffect(() => {
+    const id = activityIdRef.current;
+    setRecordingActive(id, status === 'recording' || status === 'paused');
+  }, [status]);
+  useEffect(() => {
+    const id = activityIdRef.current;
+    return () => setRecordingActive(id, false);
   }, []);
 
   const resetRecording = useCallback(() => {

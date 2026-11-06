@@ -164,6 +164,7 @@ from backend.tasks import voice_todo_merge  # noqa: F401
 from backend.tasks import recent_context  # noqa: F401
 from backend.tasks import node_cleanup  # noqa: F401
 from backend.tasks import profile_batch  # noqa: F401
+from backend.tasks import profile_windows  # noqa: F401
 from backend.tasks import spend_monitor  # noqa: F401
 from backend.tasks import embeddings  # noqa: F401
 from backend.tasks import poll_draft  # noqa: F401

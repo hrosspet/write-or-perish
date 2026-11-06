@@ -927,6 +927,7 @@ def confirm_import():
 
         # Determine if imported data predates the current profile cutoff
         profile_update_task_id = None
+        profile_waits = False
         if ai_usage in AI_ALLOWED:
             try:
                 user_obj = User.query.get(current_user.id)
@@ -950,6 +951,7 @@ def confirm_import():
                     profile_update_task_id = (
                         _hand_off_profile_update_after_import(
                             user_obj, earliest_ts, total_imported_tokens))
+                    profile_waits = _profile_waits_for_imports(user_obj.id)
             except Exception as e:
                 current_app.logger.warning(
                     "Auto-trigger profile update failed: %s", describe_exception(e)
@@ -960,6 +962,9 @@ def confirm_import():
             "nodes_created": nodes_created,
             "thread_count": thread_count,
             "profile_update_task_id": profile_update_task_id,
+            "profile_waits_for_imports": profile_waits,
+            "ask_both_providers": _ask_both_providers(
+                current_user.id, ai_usage, nodes_created + nodes_restored),
             "created": nodes_created,
             "skipped": nodes_skipped,
             "restored": nodes_restored,
@@ -1542,16 +1547,21 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
     thread_count = 1 if import_type == 'single_thread' else nodes_created
 
     profile_update_task_id = None
+    profile_waits = False
     if ai_usage in AI_ALLOWED and nodes_created + nodes_restored > 0:
         profile_update_task_id = _maybe_update_profile_after_import(
             user_id, earliest_ts, total_imported_tokens
         )
+        profile_waits = _profile_waits_for_imports(user_id)
 
     return {
         "message": "Import successful",
         "nodes_created": nodes_created,
         "thread_count": thread_count,
         "profile_update_task_id": profile_update_task_id,
+        "profile_waits_for_imports": profile_waits,
+        "ask_both_providers": _ask_both_providers(
+            user_id, ai_usage, nodes_created + nodes_restored),
         "created": nodes_created,
         "skipped": nodes_skipped,
         "empty": nodes_empty,
@@ -1587,15 +1597,16 @@ def _hand_off_profile_update_after_import(user_obj, earliest_ts, imported_tokens
       than the whole chain: a from-scratch build now.
     - Otherwise (data newer than the tip, or no profile yet) nothing is
       invalidated; the import is new data like any other, and the
-      account's seeding gate is evaluated right away instead of at the
-      next hourly beat — the provisional ladder for a first or
-      provisional profile, the 80k incremental gate for a full one — so
-      an import that tips the account over starts its build immediately
-      and one that does not starts nothing.
+      account's seeding gate decides — the provisional ladder for a first
+      or provisional profile, the 80k incremental gate for a full one.
 
-    Batch users (all of prod with ``PROFILE_USE_BATCH``) are seeded, and
-    never sent to the synchronous full-price task; sync users dispatch it
-    directly. Returns a task id or None.
+    Batch users (all of prod with ``PROFILE_USE_BATCH``) are never sent to
+    the synchronous full-price task, and their build does not start at
+    once (#598, Peter 2026-11-05): the import is marked, and the seed runs
+    once no import has run and no entry has been written for
+    MIN_INACTIVITY (30 minutes), so imports made one after another are
+    read by one build. Sync users dispatch it directly. Returns a task id
+    or None.
 
     The refusal backoff (utils/refusal_backoff.py) does not apply here: a
     build the import triggers runs even if the profile job is waiting or
@@ -1605,7 +1616,7 @@ def _hand_off_profile_update_after_import(user_obj, earliest_ts, imported_tokens
         revert_profile_for_import, maybe_trigger_profile_update,
         maybe_trigger_incremental_profile_update)
     from backend.tasks.profile_batch import (
-        use_batch_for_user, seed_profile_batch_for_user)
+        use_batch_for_user, seed_after_import)
 
     tip = UserProfile.query.filter(
         UserProfile.user_id == user_obj.id,
@@ -1619,17 +1630,51 @@ def _hand_off_profile_update_after_import(user_obj, earliest_ts, imported_tokens
     if use_batch_for_user(user_obj, current_app.config):
         current_app.logger.info(
             f"User {user_obj.id}: import ({imported_tokens} tokens) handed "
-            f"to the batch profile pipeline ({action}); seeding now")
+            f"to the batch profile pipeline ({action}); seeding once the "
+            f"imports stop")
         # An import skips the refusal backoff (wait and stop): it is new
-        # input, so a build it triggers runs now (voice review,
-        # 2026-10-01). The seed's own gates still decide whether it does.
-        seed_profile_batch_for_user.delay(user_obj.id, ignore_backoff=True)
+        # input, so a build it triggers runs (voice review, 2026-10-01).
+        # The seed's own gates still decide whether it does.
+        seed_after_import(user_obj)
         return None
     if action == "none":
         return maybe_trigger_incremental_profile_update(
             user_obj, ignore_backoff=True)
     return maybe_trigger_profile_update(
         user_obj.id, force_full_regen=(action == "full"))
+
+
+def _ask_both_providers(user_id, ai_usage, added):
+    """Whether the import's result asks the both-providers question (#599,
+    profile_providers.ask_after_import): an import that added entries AI
+    may read, for a user who never answered or said no at least 30 days
+    ago. Never a user who said yes."""
+    from backend.utils.profile_providers import ask_after_import
+    if not added:
+        return False
+    return ask_after_import(db.session.get(User, user_id), ai_usage, added)
+
+
+def _profile_waits_for_imports(user_id):
+    """Whether the import's result tells the user that their profile is
+    built once their imports stop (#598): the batch hand-off marked this
+    import, and the seeder's other gates would build. Evaluating them sets
+    the regen flag for a due ladder build, as the seed would. Best-effort:
+    False on any error."""
+    from backend.tasks.profile_batch import _should_seed, use_batch_for_user
+    try:
+        user = db.session.get(User, user_id)
+        if (user is None or user.profile_import_quiet_from is None
+                or (user.plan or "free") not in User.VOICE_MODE_PLANS
+                or not use_batch_for_user(user, current_app.config)):
+            return False
+        return bool(_should_seed(user, ignore_backoff=True))
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.warning(
+            "Profile wait check after import failed: %s",
+            describe_exception(e))
+        return False
 
 
 def _tweet_source_key(tweet_data):
@@ -2523,17 +2568,23 @@ def _run_conversation_import(user_id, token, task_id, options, *,
         raise
 
     profile_update_task_id = None
+    profile_waits = False
     if options.get("ai_usage", "none") in AI_ALLOWED:
         earliest_ts = (datetime.fromisoformat(state["earliest_ts"])
                        if state.get("earliest_ts") else None)
         profile_update_task_id = _maybe_update_profile_after_import(
             user_id, earliest_ts, state["imported_tokens"])
+        profile_waits = _profile_waits_for_imports(user_id)
 
     result = {
         "message": "Import successful",
         "nodes_created": state["created"],
         "thread_count": state["thread_count"],
         "profile_update_task_id": profile_update_task_id,
+        "profile_waits_for_imports": profile_waits,
+        "ask_both_providers": _ask_both_providers(
+            user_id, options.get("ai_usage", "none"),
+            state["created"] + state["restored"]),
         "created": state["created"],
         "skipped": state["skipped"] - state["updated"],
         "restored": state["restored"],
