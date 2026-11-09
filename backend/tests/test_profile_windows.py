@@ -1534,6 +1534,33 @@ def test_a_set_whose_second_slice_never_went_out_continues(app, world):
     assert {i["set"] for i in items} == {first[0].window_set}
 
 
+# ── #613: an advance killed again and again ───────────────────────────────
+
+def test_an_advance_killed_again_and_again_is_a_failed_build(app):
+    """HeavyTask's stop for the advance: recorded as a failed build in the
+    admin's Profile column, the guard cleared, nothing dispatched; the
+    hourly seeder starts the build again."""
+    u = _user(profile_generation_task_id="t-killed",
+              profile_generation_task_dispatched_at=datetime.utcnow(),
+              profile_batch_pending=True)
+    pw.stop_killed_advance(u.id, "t-killed")
+    db.session.refresh(u)
+    assert u.profile_seed_error == "Profile window build failed: HeavyJobKilled"
+    assert u.profile_generation_task_id is None
+    assert u.profile_generation_task_dispatched_at is None
+    assert u.profile_batch_pending is False   # nothing in flight
+    assert not pw.advance_profile_windows.apply_async.called
+
+
+def test_a_killed_copy_leaves_a_newer_builds_guard_alone(app):
+    u = _user(profile_generation_task_id="t-new",
+              profile_generation_task_dispatched_at=datetime.utcnow())
+    pw.stop_killed_advance(u.id, "t-old")
+    db.session.refresh(u)
+    assert u.profile_generation_task_id == "t-new"
+    assert u.profile_seed_error is None
+
+
 # ── 17. progress and holds ────────────────────────────────────────────────
 
 def test_progress_labels_for_the_three_kinds(app):

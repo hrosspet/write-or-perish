@@ -1877,6 +1877,8 @@ def _latest_profile_snapshot(user):
 
 _SYNC_STATUS_MAP = {
     'PENDING': 'pending',
+    # Waiting for the heavy-job slot (#613, utils/heavy_slot): queued again.
+    'RETRY': 'pending',
     'STARTED': 'processing',
     'PROGRESS': 'progress',
     'SUCCESS': 'completed',

@@ -4,6 +4,7 @@ Handles background tasks for long-running operations like transcription, LLM cal
 """
 from celery import Celery, schedules
 from backend import create_app
+from backend.celery_queues import split_queues_enabled, task_routes
 
 # Create Flask app for Celery context
 flask_app = create_app()
@@ -175,6 +176,21 @@ celery.conf.update(
     },
 )
 
+# A pool process whose memory reached this after a task (a heavy job's
+# peak) is replaced once the task ends, so that memory goes back to the
+# server instead of staying with an idle process (#613). In KiB (Celery
+# reads the process's peak resident memory); a pool process at rest uses
+# about half of it. HEURISTIC: about 400 MB.
+WORKER_MAX_MEMORY_PER_CHILD_KIB = 400 * 1024
+celery.conf.worker_max_memory_per_child = WORKER_MAX_MEMORY_PER_CHILD_KIB
+
+# Queue split (#379, backend/celery_queues.py): off unless
+# CELERY_SPLIT_QUEUES is set. Off, no routes are set and every task goes
+# to the default queue, as before; on, each task goes to the interactive
+# or the background queue.
+if split_queues_enabled():
+    celery.conf.task_routes = task_routes(True)
+
 # Keep third-party HTTP/SDK loggers off DEBUG so request bodies (which can
 # contain user content, e.g. profile prompts) never get logged — even when the
 # worker runs at --loglevel=debug (staging). These set their own level, so it
@@ -182,6 +198,15 @@ celery.conf.update(
 import logging  # noqa: E402
 for _noisy_logger in ("anthropic", "openai", "httpx", "httpcore"):
     logging.getLogger(_noisy_logger).setLevel(logging.WARNING)
+
+# When a worker reaches its unit's memory limit, the kernel kills a pool
+# process, not the main process (#613, backend/utils/worker_oom.py).
+# (`from celery import signals`: test files that put a stand-in for the
+# celery package in sys.modules still import this module.)
+from celery import signals as celery_signals  # noqa: E402
+from backend.utils import worker_oom  # noqa: E402
+celery_signals.worker_process_init.connect(
+    worker_oom.on_pool_process_start, weak=False)
 
 # Import tasks to register them with Celery
 # This must be done after celery app is created

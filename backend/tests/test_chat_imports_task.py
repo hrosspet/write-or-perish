@@ -57,9 +57,12 @@ def task(app, monkeypatch):  # noqa: F811
     stand_in.celery = celery_app
     stand_in.flask_app = app
     previous = {k: sys.modules.get(k) for k in (
-        "backend.celery_app", "backend.tasks.chat_imports")}
+        "backend.celery_app", "backend.tasks.chat_imports",
+        "backend.utils.heavy_slot")}
     sys.modules["backend.celery_app"] = stand_in
     sys.modules.pop("backend.tasks.chat_imports", None)
+    # The task's base class (#613) must come from the real package too.
+    sys.modules.pop("backend.utils.heavy_slot", None)
     import importlib
     import backend.tasks as tasks_pkg
     previous_attr = getattr(tasks_pkg, "chat_imports", None)
@@ -191,3 +194,42 @@ def test_a_second_delivery_while_the_task_runs_is_ignored(task):
     assert cs.read_lock(alice.id)["task_id"] == "task-4"
     assert cs.read_state(alice.id, token) is None
     assert _keys(alice.id) == []
+
+
+def test_an_import_killed_again_and_again_shows_as_failed(task, monkeypatch):
+    """#613: a run the worker's memory limit kills goes back to the queue
+    (reject_on_worker_lost); after three kills the next start does not run
+    it. The user sees a failed import with a message, and Confirm can
+    start it again at once (the import lock is released)."""
+    import uuid
+    from celery.app.trace import build_tracer
+    from backend.routes import import_data
+    from backend.utils import heavy_slot as hs
+    from backend.utils.task_owner import failure_text
+    from backend.tests.test_heavy_slot import FakeRedis
+
+    fake = FakeRedis()
+    monkeypatch.setattr(hs, "redis_client", lambda url: fake)
+    imported = []
+    monkeypatch.setattr(import_data, "_add_imported_message_nodes",
+                        lambda *a, **k: imported.append(1))
+    alice = _make_user("alice")
+    _db.session.commit()
+    task_id = f"task-killed-{uuid.uuid4().hex[:8]}"
+    token = _queued(alice.id, _analyzed(2, 2), task_id)
+    fake.set(hs.RUNS_KEY.format(task_id=task_id), str(hs.MAX_KILLED_RUNS),
+             ex=hs.RUNS_TTL_SECONDS)
+
+    t = task.import_conversations
+    trace = build_tracer(t.name, t, app=t.app, eager=False, propagate=False)
+    trace(task_id, [alice.id, token, OPTIONS], {},
+          {"id": task_id, "retries": 0, "hostname": "w@test",
+           "delivery_info": {"exchange": "", "routing_key": "background"}})
+    res = t.app.AsyncResult(task_id)
+    assert res.state == "FAILURE"
+    assert failure_text(res.result, "x") == task.KILLED_MESSAGE
+    assert imported == []
+    assert cs.read_lock(alice.id) is None   # Confirm starts it again
+    assert cs.stash_path(alice.id, token).exists()
+    assert fake.get(hs.SLOT_KEY) is None
+    assert fake.get(hs.RUNS_KEY.format(task_id=task_id)) is None

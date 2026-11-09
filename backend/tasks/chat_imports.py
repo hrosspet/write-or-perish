@@ -24,6 +24,7 @@ ignored.
 from celery.utils.log import get_task_logger
 
 from backend.celery_app import celery, flask_app
+from backend.utils.heavy_slot import HeavyTask
 
 logger = get_task_logger(__name__)
 
@@ -33,10 +34,27 @@ MAX_TIME_LIMIT_RESUMES = 5
 # Seconds before a run stopped by the time limit continues.
 RESUME_COUNTDOWN_SECONDS = 5
 
+KILLED_MESSAGE = (
+    "The import stopped because it ran out of memory. Press Confirm Import "
+    "again to continue where it stopped.")
+
+
+def _stop_killed_import(task, user_id, token, options):
+    """HeavyTask's on_repeated_kill (#613): the import's runs were killed
+    (the worker's memory limit) again and again. It fails with a message
+    for the user, as a stop at the time limit does, and leaves the user's
+    import lock, so that Confirm Import starts it again at once and it
+    continues from its last commit."""
+    from backend.utils import conversation_stash as cs
+    from backend.utils.task_owner import UserFacingTaskError
+    cs.release_lock(user_id, task.request.id)
+    raise UserFacingTaskError(KILLED_MESSAGE)
+
 
 @celery.task(bind=True, name="backend.tasks.chat_imports.import_conversations",
-             acks_late=True, reject_on_worker_lost=True,
-             max_retries=MAX_TIME_LIMIT_RESUMES)
+             base=HeavyTask, acks_late=True, reject_on_worker_lost=True,
+             max_retries=MAX_TIME_LIMIT_RESUMES,
+             on_repeated_kill=_stop_killed_import)
 def import_conversations(self, user_id, token, options):
     """options: privacy_level, ai_usage, on_deleted (already resolved by
     the confirm request)."""
