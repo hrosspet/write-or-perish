@@ -3014,6 +3014,17 @@ Kinds (one per entry and per table row):
 - **Applies to:** #558, #581, #608, #610
 - **Rule:** candidate: before building a fix, search open PRs and unmerged trains for the same files and issue.
 
+### 2026-11-09 · How long the background worker drains at a deploy
+
+- **Kind:** release/ops
+- **Situation:** with the queue split (#579, shipped in #616) switched on, a deploy restarts the background worker. As built, it drained for 90 s like today's single worker, then cut off a running job (an archive import, a profile render). A longer drain lets that job finish; replies don't wait behind this worker, except in a deploy with a migration, where all workers stop first.
+- **Prediction:** keep 90 s (the recommendation in #579's body, 2026-10-21).
+- **Peter:** "5 minutes"
+- **Score:** miss. The background worker now drains for up to 5 minutes, with a SIGKILL backstop at 7 minutes.
+- **Why it missed:** the recommendation carried over the 90 s chosen for a worker that replies wait behind; for a worker nobody waits behind, finishing the job weighs more than a shorter deploy.
+- **Source:** Claude Code session 2026-11-09 (Opus 5.5)
+- **Applies to:** #579, #616, #618
+
 ## Decided by the builder
 
 Choices that agents flagged in PRs and that the builder decided because a rule above already covers them (Peter, 2026-10-02: decide what the log supports, raise only real judgement calls). Each is also recorded on its PR, or in the session where Peter asked. The Decided column holds only the builder's part; a rule or decision of Peter's goes in the Rule column. Questions raised to Peter instead are not listed; his answers become entries. Model is the model that wrote the PR (its Co-Authored-By line). Result is "accepted by merge (PR #N, date)" once the PR has merged and Peter didn't correct the choice, "pending" until it merges, and "corrected → entry <title>" when he overrules it; the entry is then scored as a miss.

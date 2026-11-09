@@ -499,7 +499,9 @@ What `deploy.sh` does:
   and restarts `write-or-perish-celery`).
 - A split unit enabled: copies both unit files from `deploy/systemd/` when
   they changed, restarts both workers in one call (they drain at the same
-  time, 90 s each), also restarts the single worker while it still runs,
+  time: the interactive worker up to 90 s, the background worker up to
+  5 minutes, so a deploy can take that much longer while a long job runs),
+  also restarts the single worker while it still runs,
   and no longer enables it. It never installs or enables a split unit
   itself.
 - `CELERY_SPLIT_QUEUES` on without an enabled split unit: the deploy turns

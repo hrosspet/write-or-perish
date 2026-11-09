@@ -26,11 +26,14 @@ ExecStart=/bin/bash -c 'source ~/miniconda3/etc/profile.d/conda.sh && conda acti
 
 ExecReload=/bin/kill -s HUP $MAINPID
 
-# The same warm shutdown and 90 s drain as the interactive worker (#312).
-# A job still running after the drain is cut off, as before the split.
-ExecStop=/bin/bash /home/hrosspet/write-or-perish/scripts/celery-graceful-stop.sh $MAINPID 90
+# The same warm shutdown as the interactive worker (#312), with a 5-minute
+# drain (maintainer's call, 2026-11-09): replies don't wait behind this
+# worker, so a running import or profile render gets time to finish. A job
+# still running after the drain is cut off. TimeoutStopSec leaves 2 minutes
+# after the drain for the pool processes to stop before systemd's SIGKILL.
+ExecStop=/bin/bash /home/hrosspet/write-or-perish/scripts/celery-graceful-stop.sh $MAINPID 300
 KillMode=mixed
-TimeoutStopSec=300
+TimeoutStopSec=420
 
 # The site and the interactive worker get the CPU first when both need
 # it (the backup service uses the same value).

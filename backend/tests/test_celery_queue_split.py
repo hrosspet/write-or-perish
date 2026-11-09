@@ -252,9 +252,13 @@ def test_unit_reads_the_workers_queues(role):
     assert f"--pidfile=/home/hrosspet/write-or-perish/celery-{role}.pid" in cmd
     assert f"--logfile=/home/hrosspet/write-or-perish/logs/celery-{role}.log" in cmd
     assert f"PIDFile=/home/hrosspet/write-or-perish/celery-{role}.pid" in text
-    # The #312 warm shutdown with the maintainer's 90 s drain.
-    assert re.search(r"^ExecStop=.*celery-graceful-stop\.sh \$MAINPID 90$",
+    # The #312 warm shutdown: the maintainer's 90 s drain for the
+    # interactive worker (2026-09-29), 5 minutes for the background worker
+    # (2026-11-09), each with a SIGKILL backstop after it.
+    grace, backstop = {"interactive": (90, 300), "background": (300, 420)}[role]
+    assert re.search(rf"^ExecStop=.*celery-graceful-stop\.sh \$MAINPID {grace}$",
                      text, re.M)
+    assert f"TimeoutStopSec={backstop}" in text
     assert "KillMode=mixed" in text
 
 
