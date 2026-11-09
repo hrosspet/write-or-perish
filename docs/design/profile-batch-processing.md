@@ -419,8 +419,9 @@ larger than the cap is given up (a `window_skip` row and a Sentry alert).
 (`window_generation_template`; inserted in code, so one-chunk builds, the
 prompts page and the update and merge prompts never carry it). Every
 window of the user goes out in one Batch submission, split into several
-batches only above `PROFILE_BATCH_MAX_BYTES` (100 MB), all submitted in the
-same task run.
+batches above `PROFILE_BATCH_MAX_BYTES` (15 MB; 100 MB before 2026-11-07,
+when a multi-million-unit build ran the server out of memory), all
+submitted in the same task run.
 
 **Models (Peter, 2026-11-05).** Chosen per pass (`pass_models`):
 
@@ -606,8 +607,19 @@ the cap (Peter, 2026-10-22: "send it and let the cap stop it halfway"):
 all of a build's windows go out in one submission, so the cap can only
 hold the merges after them, and while the user is capped it also blocks
 their replies until the 1st. It holds no pipeline lock; past
-`PROFILE_WINDOW_RENDER_SECONDS` it submits what it has and dispatches a
-new task. The poller collects window, group and final items (`collect`) and
+`PROFILE_WINDOW_RENDER_SECONDS` (600 s) it submits what it has and
+dispatches a new task. One advance runs per user at a time
+(`utils/run_locks`, 2026-11-07): the run holds a Redis key with a
+15-minute TTL that it refreshes before every window render, token count
+and slice submission. A second copy (its own message delivered again, a
+second dispatch) exits without rendering; `_is_task_stale` never takes the
+guard for stale while the key lives, whatever the result backend says
+(a killed task's FAILURE); a run that dies leaves the key to expire, and
+the hourly seeder resumes the build. A run whose key expired while it was
+frozen and was taken by another stops at its next beat. The task's soft
+time limit is raised through the token counts and the submission
+(`utils/soft_limit`; the SDKs do not send the request again), so the
+advance's handler runs. The poller collects window, group and final items (`collect`) and
 dispatches the advance; the hourly seeder routes builds to it
 (`wants_window_build`), opens its gate for a set with work due
 (`set_work_due`) and clears a stuck `profile_batch_pending` that no job and

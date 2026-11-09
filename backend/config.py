@@ -220,12 +220,17 @@ class Config:
         os.environ.get("PROFILE_VERSION_PROVIDER_ATTEMPTS") or "3")
     # One submission's request bytes before it is split into another
     # batch (OpenAI's input file limit is 200 MB, Anthropic's 256 MB).
+    # This many prompt bytes are held in the worker before each submit,
+    # so it bounds the build's memory too: 15 MB (100 MB before
+    # 2026-11-07, when a multi-million-unit build ran the server out of
+    # memory). Same default as profile_windows.DEFAULT_BATCH_MAX_BYTES.
     PROFILE_BATCH_MAX_BYTES = int(
-        os.environ.get("PROFILE_BATCH_MAX_BYTES") or "100000000")
+        os.environ.get("PROFILE_BATCH_MAX_BYTES") or "15000000")
     # Rendering time one advance task spends before it submits what it
     # has and hands the rest to a new task (under the 3300 s soft limit).
+    # 600 s (2400 before 2026-11-07); profile_windows.DEFAULT_RENDER_SECONDS.
     PROFILE_WINDOW_RENDER_SECONDS = int(
-        os.environ.get("PROFILE_WINDOW_RENDER_SECONDS") or "2400")
+        os.environ.get("PROFILE_WINDOW_RENDER_SECONDS") or "600")
 
     # --- Agentic semantic search (#155/#208/#329) ---
     # Manual Cmd+K semantic search is always on. Own-archive semantic_search

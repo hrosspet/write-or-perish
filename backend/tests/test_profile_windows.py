@@ -3907,3 +3907,227 @@ def test_a_prefill_signed_into_before_its_final_is_integrated_privately(
     [final] = _all_reqs(world, n)
     assert final[0] == "openai" and final[1]["model_id"] == "gpt-6-astra"
     assert "_f_" in final[1]["custom_id"]
+
+
+# ── one run per user (2026-11-07: a redelivered build and a second dispatch
+# rendered at the same time) ───────────────────────────────────────────────
+
+@pytest.fixture
+def real_is_task_stale():
+    """The real exports._is_task_stale, taken before ``app`` replaces it:
+    list this fixture before ``app`` / ``world``."""
+    import backend.tasks.exports as _ex
+    fn = _ex._is_task_stale
+    assert fn.__name__ == "_is_task_stale", "list this fixture first"
+    return fn
+
+
+@pytest.fixture
+def redis(monkeypatch):
+    from backend.tests.fake_redis import install
+    return install(monkeypatch)
+
+
+def _run_lock(user, token):
+    from backend.utils import run_locks
+    return run_locks.RunLock(run_locks.profile_run_key(user.id), token,
+                             run_locks.PROFILE_RUN_TTL)
+
+
+def _result_state(monkeypatch, state):
+    """What the result backend says of every task id."""
+    import backend.celery_app as ca
+    from types import SimpleNamespace
+    monkeypatch.setattr(ca.celery, "AsyncResult",
+                        lambda task_id: SimpleNamespace(state=state),
+                        raising=False)
+
+
+def test_a_second_copy_of_a_running_advance_renders_nothing(world, redis):
+    """Its own message delivered again while it runs (the same task id):
+    the copy exits at once and leaves the guard to the running copy."""
+    world.corpus = _windows_corpus(3)
+    u = _user(profile_needs_full_regen=True)
+    task_id = pw.dispatch_advance(u)
+    assert _run_lock(u, task_id).acquire()        # the first copy runs
+    assert pw.advance(u.id, task_id) == pw.RUNNING_ELSEWHERE
+    assert world.corpus.renders == [] and world.provider.submits == []
+    db.session.refresh(u)
+    assert u.profile_generation_task_id == task_id
+    assert u.profile_batch_pending is True
+
+
+def test_no_dispatch_while_a_run_holds_the_lock_even_without_a_guard(
+        world, redis):
+    world.corpus = _windows_corpus(3)
+    u = _user(profile_needs_full_regen=True)
+    assert _run_lock(u, "t-running").acquire()
+    assert pw.dispatch_advance(u) is None
+    pw.advance_profile_windows.apply_async.assert_not_called()
+    out = pw.run_advance_inline(u, "t-sync")
+    assert out["message"] == "A build is running"
+    assert world.corpus.renders == []
+
+
+def test_a_dispatch_that_finds_the_lock_held_hands_the_guard_back(
+        world, redis):
+    """A copy started under a new guard while another run held the lock
+    (a path that took the guard for stale): it exits, and the guard names
+    the run that holds the lock again, whose exit then clears it and
+    dispatches what is left."""
+    world.corpus = _windows_corpus(3)
+    u = _user(profile_needs_full_regen=True)
+    assert _run_lock(u, "t-running").acquire()
+    u.profile_generation_task_id = "t-second"
+    db.session.commit()
+    assert pw.advance(u.id, "t-second") == pw.RUNNING_ELSEWHERE
+    db.session.refresh(u)
+    assert u.profile_generation_task_id == "t-running"
+    assert world.corpus.renders == []
+
+
+def test_the_seeder_keeps_a_failed_task_s_guard_while_its_run_beats(
+        real_is_task_stale, world, redis, monkeypatch):
+    """The 2026-11-07 sequence: the hard limit killed the task (FAILURE in
+    the result backend), its message was delivered again and the copy
+    rendered. The hourly seeder must neither clear the guard nor start a
+    second run while the copy's heartbeat is fresh; once a dead run's
+    lock has expired, it resumes the build."""
+    monkeypatch.setattr(pw._exports, "_is_task_stale", real_is_task_stale)
+    _result_state(monkeypatch, "FAILURE")
+    world.corpus = _windows_corpus(3)
+    u = _user(profile_needs_full_regen=True)
+    task_id = pw.dispatch_advance(u)
+    assert _run_lock(u, task_id).acquire()        # the copy renders
+    pw.advance_profile_windows.apply_async.reset_mock()
+
+    assert pw._exports._is_task_stale(u) is False
+    pb._seed_profile_batches()
+    db.session.refresh(u)
+    assert u.profile_generation_task_id == task_id
+    assert u.profile_batch_pending is True
+    pw.advance_profile_windows.apply_async.assert_not_called()
+
+    # The copy is killed too: no beat, and its lock expires on its own.
+    from backend.utils import run_locks
+    redis.advance(run_locks.PROFILE_RUN_TTL + 1)
+    assert pw._exports._is_task_stale(u) is True
+    pb._seed_profile_batches()
+    db.session.refresh(u)
+    pw.advance_profile_windows.apply_async.assert_called_once()
+    assert u.profile_generation_task_id not in (None, task_id)
+
+
+def test_a_run_beats_before_each_render_and_releases_at_the_end(
+        world, redis):
+    world.corpus = _windows_corpus(4)
+    from backend.utils import run_locks
+    u = _user(profile_needs_full_regen=True)
+    key = run_locks.profile_run_key(u.id)
+    ttls = []
+    real = world.corpus.export
+
+    def export(*a, **k):
+        ttls.append(redis.ttl(key))
+        redis.advance(120)     # each render takes two minutes
+        return real(*a, **k)
+    world.corpus.export = export
+    assert _advance(u) == "submitted"
+    # Ten minutes of rendering under a 15-minute TTL: each render found
+    # the key refreshed just before it.
+    assert len(ttls) >= 4
+    assert all(t == run_locks.PROFILE_RUN_TTL for t in ttls)
+    assert redis.get(key) is None
+
+
+def test_a_run_releases_its_lock_before_it_dispatches_the_rest(
+        app, world, redis):
+    """The render budget used: the rest goes to a new task, which must
+    not find the lock still held and take itself for a second copy."""
+    world.corpus = _windows_corpus(6)
+    app.config["PROFILE_WINDOW_RENDER_SECONDS"] = 0
+    u = _user(profile_needs_full_regen=True)
+    assert _advance(u) == "partial"
+    assert pw.advance_profile_windows.apply_async.call_count == 2
+    db.session.refresh(u)
+    assert pw.advance(u.id, u.profile_generation_task_id) != (
+        pw.RUNNING_ELSEWHERE)
+
+
+def test_a_run_that_lost_its_lock_while_frozen_sends_nothing_more(
+        world, redis):
+    """A run frozen past the lock's TTL finds another run holding the
+    lock at its next beat: it stops, sends nothing of what it built, and
+    leaves the guard and the lock to the other run."""
+    world.corpus = _windows_corpus(4)
+    from backend.utils import run_locks
+    u = _user(profile_needs_full_regen=True)
+    key = run_locks.profile_run_key(u.id)
+    real = world.corpus.export
+    calls = [0]
+
+    def export(*a, **k):
+        calls[0] += 1
+        if calls[0] == 2:
+            # Frozen: the lock expires and another run takes it.
+            redis.advance(run_locks.PROFILE_RUN_TTL + 1)
+            redis.set(key, "t-other", nx=True, ex=run_locks.PROFILE_RUN_TTL)
+        return real(*a, **k)
+    world.corpus.export = export
+    task_id = pw.dispatch_advance(u)
+    assert pw.advance(u.id, task_id) == "superseded"
+    assert world.provider.submits == []
+    assert ProfileBatchJob.query.count() == 0
+    db.session.refresh(u)
+    assert u.profile_generation_task_id == task_id   # not cleared by it
+    assert redis.get(key) == b"t-other"
+
+
+def test_the_soft_time_limit_in_a_token_count_stops_the_run(
+        world, redis, monkeypatch):
+    """A token count lets the task's soft time limit through (it used to
+    come back as None, and the run went on rendering to the hard limit):
+    the run stops before it sends anything, its handler records the stop,
+    clears the guard and releases the lock."""
+    from billiard.exceptions import SoftTimeLimitExceeded
+    from backend.utils import run_locks
+    import backend.llm_providers as lp
+    world.corpus = _windows_corpus(4)
+    counts = [0]
+
+    def count(model_id, messages, keys):
+        counts[0] += 1
+        if counts[0] == 2:
+            raise SoftTimeLimitExceeded()
+        return None
+    monkeypatch.setattr(lp.LLMProvider, "count_tokens", staticmethod(count))
+    u = _user(profile_needs_full_regen=True)
+    assert _advance(u) == "error"
+    assert counts[0] == 2
+    assert world.provider.submits == []
+    db.session.refresh(u)
+    assert u.profile_generation_task_id is None
+    assert "SoftTimeLimitExceeded" in (u.profile_seed_error or "")
+    assert redis.get(run_locks.profile_run_key(u.id)) is None
+    pw.advance_profile_windows.apply_async.assert_called_once()  # no rerun
+
+
+def test_the_byte_and_render_defaults_without_config(app, world,
+                                                     monkeypatch):
+    """15 MB of prompts per slice and 600 s of rendering per task when the
+    config has neither (as config.py's defaults)."""
+    from backend.config import Config
+    app.config.pop("PROFILE_BATCH_MAX_BYTES")
+    app.config.pop("PROFILE_WINDOW_RENDER_SECONDS")
+    assert pw._Submission({}, {"anthropic"}).max_bytes == 15_000_000
+    deadlines = []
+    monkeypatch.setattr(pw.time, "monotonic", lambda: 1000.0)
+    monkeypatch.setattr(pw, "next_work", lambda user, keys, deadline, w: (
+        deadlines.append(deadline) or "idle"))
+    u = _user(profile_needs_full_regen=True)
+    _advance(u)
+    assert deadlines == [1600.0]
+    if not os.environ.get("PROFILE_BATCH_MAX_BYTES"):
+        assert Config.PROFILE_BATCH_MAX_BYTES == 15_000_000
+    if not os.environ.get("PROFILE_WINDOW_RENDER_SECONDS"):
+        assert Config.PROFILE_WINDOW_RENDER_SECONDS == 600

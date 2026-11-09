@@ -1313,6 +1313,45 @@ def test_force_batch_user_never_exhausts_to_sync(app, monkeypatch):
     assert ids == [f"profile_{u.id}_0_chunk"]
 
 
+def test_a_soft_limit_in_the_submit_records_what_went_out_and_stops(
+        app, monkeypatch):
+    """The task's soft time limit during a submission (2026-11-07): the
+    batch created before it is recorded (its requests are at the
+    provider), the requests that did not go out count as nothing (no
+    attempt, no failed job), and the soft limit stops the task."""
+    from billiard.exceptions import SoftTimeLimitExceeded
+    from backend.utils.llm_batch import SubmittedBatches
+    a = _user(profile_force_batch=True)
+    b = _user(profile_force_batch=True)
+    db.session.commit()
+
+    def submit(reqs, keys, kind):
+        e = SoftTimeLimitExceeded()
+        e.submitted = SubmittedBatches({"anthropic": "b-ant"})
+        raise e
+    monkeypatch.setattr(pb, "batch_submit", submit)
+
+    def req(user, provider, model, cid):
+        return {"provider": provider,
+                "request": {"custom_id": cid, "model_id": "test-model",
+                            "api_model": model, "messages": [],
+                            "max_tokens": 10},
+                "meta": {"custom_id": cid, "user_id": user.id,
+                         "kind": "chunk", "prev_profile_id": None,
+                         "model_id": "test-model"}}
+    with pytest.raises(SoftTimeLimitExceeded):
+        pb._submit_requests([req(a, "anthropic", "claude-x", "c_a"),
+                             req(b, "openai", "gpt-x", "c_b")],
+                            {"anthropic": "k", "openai": "k"})
+    jobs = ProfileBatchJob.query.all()
+    assert [(j.batch_id, j.status) for j in jobs] == [("b-ant", "pending")]
+    assert [i["user_id"] for i in jobs[0].items] == [a.id]
+    assert User.query.get(a.id).profile_batch_pending is True
+    other = User.query.get(b.id)
+    assert not other.profile_batch_attempts
+    assert not other.profile_work_held
+
+
 def test_submit_drops_duplicate_users_and_custom_ids(app, monkeypatch):
     u = _user(profile_force_batch=True)
     db.session.commit()
