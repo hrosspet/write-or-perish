@@ -490,7 +490,7 @@ that runs one heavy job at a time ("Heavy-job slot" below). Both are live
 from the first deploy that carries them; only the split itself waits for
 the switch.
 
-It is off until `CELERY_SPLIT_QUEUES=true` is in `.env.production`. Off, no
+The split is off until `CELERY_SPLIT_QUEUES=true` is in `.env.production`. Off, no
 routes are set and every task goes to the default queue `celery`, as before.
 
 What `deploy.sh` does:
