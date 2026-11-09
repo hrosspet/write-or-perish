@@ -167,6 +167,15 @@ import logging  # noqa: E402
 for _noisy_logger in ("anthropic", "openai", "httpx", "httpcore"):
     logging.getLogger(_noisy_logger).setLevel(logging.WARNING)
 
+# When a worker reaches its unit's memory limit, the kernel kills a pool
+# process, not the main process (#613, backend/utils/worker_oom.py).
+# (`from celery import signals`: test files that put a stand-in for the
+# celery package in sys.modules still import this module.)
+from celery import signals as celery_signals  # noqa: E402
+from backend.utils import worker_oom  # noqa: E402
+celery_signals.worker_process_init.connect(
+    worker_oom.on_pool_process_start, weak=False)
+
 # Import tasks to register them with Celery
 # This must be done after celery app is created
 from backend.tasks import transcription  # noqa: F401

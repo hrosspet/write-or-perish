@@ -36,6 +36,25 @@ TimeoutStopSec=300
 # it (the backup service uses the same value).
 Nice=10
 
+# Memory limit (#613). A job that takes this worker past MemoryMax is
+# killed inside it instead of taking memory from the site, Postgres and
+# Redis: the kernel's OOM killer kills a pool process (the one running the
+# job; backend/utils/worker_oom.py), the main process logs the lost task
+# and starts a new pool process, and OOMPolicy=continue keeps systemd from
+# stopping the unit. MemorySwapMax=0: on a server with swap the job is
+# killed too, not moved to swap. No MemoryHigh: without swap it does not
+# free memory, it only holds a job that grows past it in a slow crawl for
+# minutes before the kill, with every process of the unit slowed down
+# (docs/RUNBOOKS.md → "Memory limits"). Room for the main process, the
+# pool processes and one heavy job (backend/utils/heavy_slot.py runs them
+# one at a time). Sized for the production host; adjust with a systemd
+# drop-in (docs/RUNBOOKS.md → "Celery queue split" → "Memory limits"),
+# which deploys do not overwrite.
+MemoryAccounting=yes
+MemoryMax=1152M
+MemorySwapMax=0
+OOMPolicy=continue
+
 Restart=on-failure
 RestartSec=10s
 

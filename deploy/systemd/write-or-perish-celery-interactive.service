@@ -31,6 +31,13 @@ ExecStop=/bin/bash /home/hrosspet/write-or-perish/scripts/celery-graceful-stop.s
 KillMode=mixed
 TimeoutStopSec=300
 
+# No memory limit (#613): its tasks are short and small, and a limit here
+# would cut off replies. The heavy jobs run on the background worker,
+# under its limit. If the server runs out of memory and the kernel kills
+# one of this worker's pool processes, OOMPolicy=continue keeps systemd
+# from stopping the whole unit; the main process starts a new one.
+OOMPolicy=continue
+
 Restart=on-failure
 RestartSec=10s
 
