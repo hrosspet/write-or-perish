@@ -223,9 +223,24 @@ def delete_item(item_id):
         db.session.commit()
         return jsonify({"deleted": True, "id": item_id,
                         "kept_as_pick": True}), 200
+    owner_id = item.user_id
     TTSChunk.query.filter_by(item_id=item.id).delete()
     db.session.delete(item)
     db.session.commit()
+    # Its generated speech goes with it (a reference has no grace
+    # period), except a file a merged copy still plays. A file left here
+    # is logged by id; the nightly audio sweep deletes it.
+    from backend.utils.audio_sweep import delete_row_speech
+    try:
+        result = delete_row_speech("item", owner_id, item_id)
+        if result.failed:
+            current_app.logger.warning(
+                "delete_item: %d speech file(s) of item %s not deleted (%s)",
+                result.failed, item_id, ", ".join(result.errors))
+    except Exception as e:
+        current_app.logger.warning(
+            "delete_item: speech of item %s not deleted (%s)",
+            item_id, type(e).__name__)
     return jsonify({"deleted": True, "id": item_id}), 200
 
 

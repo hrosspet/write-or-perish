@@ -1,6 +1,22 @@
 import os
 from datetime import timedelta
 
+
+def float_from_env(name, default):
+    """A float setting that never stops the app at import: a missing,
+    empty or non-numeric value falls back to *default* (with a warning)."""
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        import logging
+        logging.getLogger(__name__).warning(
+            "%s=%r is not a number; using %s", name, raw, default)
+        return default
+
+
 class Config:
     SECRET_KEY = os.environ.get("SECRET_KEY", "this-should-be-changed")
     # Make sure your DATABASE_URL looks something like
@@ -91,6 +107,14 @@ class Config:
         or "21600"
     )
 
+    # Disk-full alert (backend/utils/disk_alert.py): an hourly beat task
+    # emails SPEND_ALERT_EMAIL when the filesystem holding the audio
+    # storage root is at DISK_ALERT_PERCENT or more used (at most once per
+    # 24 h; again at 95 %). Ships dark: set DISK_ALERT_ENABLED=true in prod.
+    DISK_ALERT_ENABLED = os.environ.get(
+        "DISK_ALERT_ENABLED", "false").lower() in ("1", "true", "yes")
+    DISK_ALERT_PERCENT = float_from_env("DISK_ALERT_PERCENT", 90.0)
+
     # Per-user monthly spend hard cap in USD, summed across ALL providers
     # (issue #85 follow-up; free-alpha guardrail). 0 (default) disables the
     # cap. When a user's month-to-date spend reaches this, they are
@@ -118,6 +142,90 @@ class Config:
     # hand-seed one user and canary them in isolation (issue #173).
     PROFILE_UPDATES_PAUSED = os.environ.get(
         "PROFILE_UPDATES_PAUSED", "false").lower() in ("1", "true", "yes")
+
+    # --- Independent profile versions for large builds (#545) ---
+    # A build whose remainder plans into two or more chunks on the user's
+    # chat model reads each window on its own (generation prompt plus the
+    # events paragraph), all windows in one Batch submission, and a merge
+    # model integrates the versions (backend/tasks/profile_windows.py,
+    # docs/design/profile-batch-processing.md). Off: every build takes
+    # the chained path, as before.
+    PROFILE_INDEPENDENT_VERSIONS = (
+        os.environ.get("PROFILE_INDEPENDENT_VERSIONS") or "true"
+    ).lower() in ("1", "true", "yes")
+    # The version and merge models, one pair per provider of the user's
+    # chat model. Each must be an active model of THAT provider (checked
+    # at boot, validate_default_model): a user's writing never reaches
+    # another provider's model.
+    PROFILE_VERSION_MODEL_ANTHROPIC = (
+        os.environ.get("PROFILE_VERSION_MODEL_ANTHROPIC") or "claude-haiku-5.5")
+    PROFILE_VERSION_MODEL_OPENAI = (
+        os.environ.get("PROFILE_VERSION_MODEL_OPENAI") or "gpt-6-luna")
+    PROFILE_MERGE_MODEL_ANTHROPIC = (
+        os.environ.get("PROFILE_MERGE_MODEL_ANTHROPIC") or "claude-opus-5.5")
+    PROFILE_MERGE_MODEL_OPENAI = (
+        os.environ.get("PROFILE_MERGE_MODEL_OPENAI") or "gpt-6.1-sol")
+    # The pair for a build whose writing may reach either provider: every
+    # entry is public (a pre-fill from the Community Archive or the X API,
+    # the lab), or the user agreed to both providers
+    # (User.profile_both_providers). Peter, 2026-11-05: "luna for versions,
+    # opus 5.5 for merges is preferred". Checked at boot as active models.
+    PROFILE_VERSION_MODEL_CROSS_PROVIDER = (
+        os.environ.get("PROFILE_VERSION_MODEL_CROSS_PROVIDER")
+        or "gpt-6-luna")
+    PROFILE_MERGE_MODEL_CROSS_PROVIDER = (
+        os.environ.get("PROFILE_MERGE_MODEL_CROSS_PROVIDER")
+        or "claude-opus-5.5")
+    # A from-scratch build that fits ONE chunk on the user's chat model,
+    # per provider of that chat model (Peter, 2026-11-03): on, it is read
+    # as a window version with the events paragraph and then rewritten as
+    # the profile with the single-version prompt
+    # (profile_single_integration.txt), two Batch rounds; off, it is one
+    # call on the chat model with the plain generation prompt, as before.
+    # Both on (Peter, 2026-11-03: "yes, we should do the same for Ant").
+    # The switch decides the path only; the models come from the rules of
+    # 2026-11-05 (profile_windows.pass_models): the user's chat model for
+    # both steps, or, when every entry is public or the user agreed to
+    # both providers, the cross-provider pair above. Updates of a chained
+    # profile are not affected.
+    PROFILE_ONE_CHUNK_WINDOW_OPENAI = (
+        os.environ.get("PROFILE_ONE_CHUNK_WINDOW_OPENAI") or "true"
+    ).lower() in ("1", "true", "yes")
+    PROFILE_ONE_CHUNK_WINDOW_ANTHROPIC = (
+        os.environ.get("PROFILE_ONE_CHUNK_WINDOW_ANTHROPIC") or "true"
+    ).lower() in ("1", "true", "yes")
+    # Reasoning effort sent with an OpenAI merge request (a Responses
+    # batch request's "reasoning.effort"). One of PROFILE_REASONING_EFFORTS
+    # (checked at boot). "high" (2026-10-22): on identical input Sol kept
+    # 27 of 41 core facts at high effort against 25 at its default.
+    PROFILE_MERGE_REASONING_EFFORT_OPENAI = (
+        os.environ.get("PROFILE_MERGE_REASONING_EFFORT_OPENAI")
+        or "high").lower()
+    # "flat" (default): one merge over every window while it fits the
+    # merge model's input cap, else fixed groups of
+    # PROFILE_MERGE_GROUP_SIZE, then the groups; "grouped": always the
+    # groups above PROFILE_MERGE_GROUP_SIZE windows. Flat on 2026-10-22's
+    # 149-version test: fewer errors, every template sub-heading kept.
+    PROFILE_MERGE_STRUCTURE = (
+        os.environ.get("PROFILE_MERGE_STRUCTURE") or "flat").lower()
+    PROFILE_MERGE_GROUP_SIZE = int(
+        os.environ.get("PROFILE_MERGE_GROUP_SIZE") or "30")
+    # Submissions of one window before it is given up: a refused, cut-off
+    # or invalid output is retried once unchanged, then skipped; a
+    # provider failure (no result) is retried until the third, then the
+    # window waits a day (refusal_backoff.UNBILLED_STOP_EXPIRY).
+    PROFILE_VERSION_CONTENT_ATTEMPTS = int(
+        os.environ.get("PROFILE_VERSION_CONTENT_ATTEMPTS") or "2")
+    PROFILE_VERSION_PROVIDER_ATTEMPTS = int(
+        os.environ.get("PROFILE_VERSION_PROVIDER_ATTEMPTS") or "3")
+    # One submission's request bytes before it is split into another
+    # batch (OpenAI's input file limit is 200 MB, Anthropic's 256 MB).
+    PROFILE_BATCH_MAX_BYTES = int(
+        os.environ.get("PROFILE_BATCH_MAX_BYTES") or "100000000")
+    # Rendering time one advance task spends before it submits what it
+    # has and hands the rest to a new task (under the 3300 s soft limit).
+    PROFILE_WINDOW_RENDER_SECONDS = int(
+        os.environ.get("PROFILE_WINDOW_RENDER_SECONDS") or "2400")
 
     # --- Agentic semantic search (#155/#208/#329) ---
     # Manual Cmd+K semantic search is always on. Own-archive semantic_search

@@ -301,7 +301,9 @@ def test_someone_elses_reply_adds_no_line_from_its_record(thread):
     assert "[Mode: Text." in payload
 
     payload, _ = _ask(alice_reply, t["alice"])
-    assert "[update_artifact: artifact 'alice-kind' updated.]" in payload
+    # Her write is replayed as the system's answer to it (#604); this
+    # record names no version, so the answer says so.
+    assert "'alice-kind' was saved" in payload
     assert f"[todo-proposal:{alice_reply.id}]" in payload
     # alice was in Text mode already.
     assert "[Mode: Text." not in payload

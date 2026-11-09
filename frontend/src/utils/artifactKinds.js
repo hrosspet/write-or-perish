@@ -28,3 +28,13 @@ export function compareArtifacts(a, b) {
   if (ra !== rb) return ra - rb;
   return (a.title || a.kind).localeCompare(b.title || b.kind);
 }
+
+// The artifact to select after *kind* is deleted (#603): the tab to its
+// right in the row, or the one to its left when it was the last.
+// *ordered* is the list in tab order (sorted by compareArtifacts, the
+// order of the ArtifactsNav bubbles).
+export function neighborAfterDelete(ordered, kind) {
+  const i = ordered.findIndex((a) => a.kind === kind);
+  if (i === -1) return null;
+  return ordered[i + 1] || ordered[i - 1] || null;
+}

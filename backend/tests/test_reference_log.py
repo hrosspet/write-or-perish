@@ -258,6 +258,45 @@ def test_delete_keeps_a_read_pick_and_removes_the_rest(app, client):
     assert ExternalItem.query.get(plain.id) is None
 
 
+def test_delete_removes_the_references_speech_files(app, client, tmp_path,
+                                                    monkeypatch):
+    """The speech of a deleted reference goes with it; a kept pick keeps
+    its own, and a file a merged copy still plays stays."""
+    from backend.utils import audio_storage
+    root = (tmp_path / "audio").resolve()
+    monkeypatch.setattr(audio_storage, "AUDIO_STORAGE_ROOT", root)
+    uid = _user("alice").id
+
+    def speech(item, *names):
+        out = []
+        for name in names:
+            p = root / f"user/{uid}/item/{item.id}/{name}"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(b"audio")
+            out.append(p)
+        return out
+
+    plain = _item("222", source="twitter_bookmark")
+    merged = _item("333", source="twitter_bookmark")
+    picked = _item("111", source="twitter_bookmark")
+    _pick(_read_reply(), picked)
+    gone = speech(plain, "tts.mp3.enc", "tts_chunk_0.mp3.enc", "tts_chunk_1.mp3")
+    shared, unused = speech(merged, "tts.mp3.enc", "tts_chunk_1.mp3.enc")
+    kept = speech(picked, "tts.mp3.enc")
+    # Another reference plays the merged copy's merged file
+    # (scripts/backfill_read_picks.py).
+    picked.audio_tts_url = f"/media/user/{uid}/item/{merged.id}/tts.mp3?v=3"
+    _db.session.commit()
+
+    for item in (plain, merged, picked):
+        assert client.delete(f"/api/external/items/{item.id}").status_code == 200
+
+    assert not any(p.exists() for p in gone)
+    assert not (root / f"user/{uid}/item/{plain.id}").exists()
+    assert shared.exists() and not unused.exists()
+    assert all(p.exists() for p in kept)         # kept as a Read pick
+
+
 # ── The action log ───────────────────────────────────────────────────────
 
 def test_marks_and_verdicts_are_logged_with_the_reply(app, client):

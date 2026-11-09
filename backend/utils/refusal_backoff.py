@@ -39,9 +39,25 @@ minutes either. Billed and unbilled failures stop differently:
     nothing to do with the user's input therefore does not stop their
     recent context until their next profile version, which can be weeks
     away; it is retried at most once a day.
+
+A content-policy block (Peter, 2026-11-04) stops the job at once and for
+good: the provider's filter refused the request (an error code in
+llm_batch.OPENAI_POLICY_BLOCK_CODES, e.g. bio_policy), the same request
+would be refused again, and every refused request counts against the
+account. ``record_policy_block`` writes a $0 cost row with
+``request_ref = "policy_block:<code>"`` (the block is not billed) and
+reports it to Sentry. From then on the job is stopped for the user
+(``policy_block_for``): no wait expires it, and neither does a saved
+version, an import, a profile edit or another call of the job that goes
+through (a window build's other windows), since the blocked writing would
+go out again. Only ``lift_policy_block`` lifts it, with a row of its own:
+the admin's confirmed Build profile for a profile, the one action that
+sends a blocked request again. A request blocked again is a new block.
 """
 import logging
 from datetime import datetime, timedelta
+
+from sqlalchemy import or_
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +71,9 @@ STOP_AFTER = 2   # failures in a row
 # per day; short enough that the user's recent context resumes the day
 # after the outage ends.
 UNBILLED_STOP_EXPIRY = timedelta(hours=24)
+
+POLICY_BLOCK_REF_PREFIX = "policy_block:"
+POLICY_BLOCK_LIFTED_REF = "policy_block_lifted"
 
 PROFILE_REQUEST_TYPES = ("profile", "profile_batch")
 RECENT_CONTEXT_REQUEST_TYPES = ("recent_context",)
@@ -90,7 +109,11 @@ def backoff_state(user_id, request_types, since, billed_failures=(),
     until: when the next attempt is allowed. None means now (n == 0) or,
     when stopped, never: at least STOP_AFTER of the failures were billed.
     Otherwise RETRY_WAIT after the newest failure, or UNBILLED_STOP_EXPIRY
-    after it for a stop with fewer billed failures."""
+    after it for a stop with fewer billed failures. A content-policy
+    block (``policy_block_for``) is a stop that never lifts by itself."""
+    if policy_block_for(user_id, request_types):
+        n = len(refusals_since(user_id, request_types, since)) + 1
+        return n, None, True
     billed = (refusals_since(user_id, request_types, since)
               + list(billed_failures))
     times = sorted(billed + list(unbilled_failures), reverse=True)
@@ -108,7 +131,14 @@ def in_backoff(user_id, request_types, since, job, now=None,
                billed_failures=(), unbilled_failures=()):
     """True while the job must not run for this user: waiting after the
     first failure, or stopped after the second (until the stop lifts, for
-    a stop with fewer than STOP_AFTER billed failures)."""
+    a stop with fewer than STOP_AFTER billed failures), and stopped for
+    good after a content-policy block (``policy_block_for``)."""
+    code = policy_block_for(user_id, request_types)
+    if code:
+        logger.info("User %s: %s stopped: the provider's content-policy "
+                    "filter blocked its last request (%s)", user_id, job,
+                    code)
+        return True
     n, until, stopped = backoff_state(user_id, request_types, since,
                                       billed_failures, unbilled_failures)
     if n == 0:
@@ -126,6 +156,90 @@ def in_backoff(user_id, request_types, since, job, now=None,
         logger.info("User %s: %s waiting after a refused output or failed "
                     "run until %s", user_id, job, until)
     return True
+
+
+def policy_block_ref(code):
+    """The request_ref of a policy block's cost row."""
+    return f"{POLICY_BLOCK_REF_PREFIX}{code}"[:64]
+
+
+def policy_block_for(user_id, request_types):
+    """The code of the content-policy block that stops this job for the
+    user: a block row of these request types with no lift row
+    (``lift_policy_block``) after it. None when there is none."""
+    from backend.models import APICostLog
+    row = (APICostLog.query.with_entities(APICostLog.request_ref)
+           .filter(APICostLog.user_id == user_id,
+                   APICostLog.request_type.in_(request_types),
+                   or_(APICostLog.request_ref.like(
+                       POLICY_BLOCK_REF_PREFIX + "%"),
+                       APICostLog.request_ref == POLICY_BLOCK_LIFTED_REF))
+           .order_by(APICostLog.created_at.desc(), APICostLog.id.desc())
+           .first())
+    ref = row[0] if row else None
+    if ref and ref.startswith(POLICY_BLOCK_REF_PREFIX):
+        return ref[len(POLICY_BLOCK_REF_PREFIX):] or "unknown"
+    return None
+
+
+def lift_policy_block(user_id, request_type, request_types):
+    """The admin confirmed sending a blocked job's request again: write a
+    $0 row (``request_ref = POLICY_BLOCK_LIFTED_REF``, no call) newer than
+    the block, so ``policy_block_for`` no longer stops the job. A request
+    blocked again records a new block. Returns the lifted code, or None
+    when nothing was blocked (no row written). Commits."""
+    from backend.extensions import db
+    from backend.models import APICostLog
+    code = policy_block_for(user_id, request_types)
+    if not code:
+        return None
+    db.session.add(APICostLog(
+        user_id=user_id, model_id="admin-override",
+        request_type=request_type, input_tokens=0, output_tokens=0,
+        cache_read_tokens=0, cache_write_tokens=0,
+        request_ref=POLICY_BLOCK_LIFTED_REF, cost_microdollars=0))
+    db.session.commit()
+    logger.warning("User %s: the admin lifted the %s content-policy stop "
+                   "(%s)", user_id, request_type, code)
+    return code
+
+
+def report_policy_block(user_id, code, model_id, job):
+    """Log a content-policy block at ERROR and send a Sentry event with
+    tags only (user id, code, model, job): never the request or the
+    provider's message."""
+    logger.error("Provider content-policy block (%s) for user %s: %s "
+                 "(model %s); not sent again automatically", code, user_id,
+                 job, model_id)
+    try:
+        import sentry_sdk
+        with sentry_sdk.new_scope() as scope:
+            scope.set_tag("user_id", str(user_id))
+            scope.set_tag("policy_code", str(code))
+            scope.set_tag("model_id", str(model_id))
+            scope.set_tag("job_type", str(job))
+            sentry_sdk.capture_message(
+                f"Provider content-policy block ({code}): {job}",
+                level="error")
+    except Exception:  # pragma: no cover — reporting must not mask the block
+        logger.exception("Sentry report of the policy block failed")
+
+
+def record_policy_block(user_id, request_type, model_id, code, job,
+                        report=True):
+    """Record a content-policy block of one of the user's requests: a $0
+    cost row (the block is not billed) whose request_ref names the code,
+    which stops the job (``policy_block_for``), then the report. Commits."""
+    from backend.extensions import db
+    from backend.models import APICostLog
+    db.session.add(APICostLog(
+        user_id=user_id, model_id=model_id or "unknown",
+        request_type=request_type, input_tokens=0, output_tokens=0,
+        cache_read_tokens=0, cache_write_tokens=0,
+        request_ref=policy_block_ref(code), cost_microdollars=0))
+    db.session.commit()
+    if report:
+        report_policy_block(user_id, code, model_id, job)
 
 
 CUT_OFF_CAUSE = "output cut off"

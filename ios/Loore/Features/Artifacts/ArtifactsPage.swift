@@ -10,6 +10,7 @@ struct ArtifactsPage: View {
     let onSelect: (WorkspaceDocument) -> Void
 
     @Environment(AppState.self) private var app
+    @Environment(WorkspaceActions.self) private var actions: WorkspaceActions?
     @State private var versionNumber: Int?
     @State private var editing = false
     @State private var editContent = ""
@@ -32,12 +33,24 @@ struct ArtifactsPage: View {
         "external_digest": "The Saved References Digest is a compact topic map of the tweets and bookmarks you saved elsewhere and imported into Loore — the AI reads it to judge whether your references hold something relevant before searching them, and it rebuilds itself after each import.",
     ]
 
-    /// The active artifact: the listed one, or a synthetic empty one for a kind
-    /// without a row (a deep link to an unknown custom kind).
+    /// The active artifact (nil while creating).
     private var active: ArtifactDoc? {
         guard let kind, !creating else { return nil }
-        return app.artifacts.artifact(kind)
-            ?? ArtifactDoc(kind: kind, title: ArtifactKinds.titleFromKind(kind))
+        return Self.resolve(kind, in: app.artifacts)
+    }
+
+    /// The listed artifact; nil for a kind the user deleted (#603: the page says
+    /// "This artifact was deleted."); else a synthetic empty one, so a deep link
+    /// to an unused name opens an artifact the user can write.
+    static func resolve(_ kind: String, in store: ArtifactsStore) -> ArtifactDoc? {
+        if let listed = store.artifact(kind) { return listed }
+        if store.isDeleted(kind) { return nil }
+        return ArtifactDoc(kind: kind, title: ArtifactKinds.titleFromKind(kind))
+    }
+
+    private var deleted: Bool {
+        guard let kind, !creating else { return false }
+        return app.artifacts.isDeleted(kind)
     }
 
     private var dirty: Bool {
@@ -57,20 +70,38 @@ struct ArtifactsPage: View {
             }
         }
         .task {
-            if creating {
-                editing = true
-            } else if let kind {
+            if creating { editing = true }
+            await app.artifacts.refresh(api: app.api)
+            // After the list (#603): no view ping for a deleted kind, which would
+            // name it again after the cleanup removed its views.
+            if !creating, let kind, app.artifacts.loaded, !app.artifacts.isDeleted(kind) {
                 app.api.fireAndForget(APIRequest(.post, APIPath.artifactViewed(kind)))
             }
-            await app.artifacts.refresh(api: app.api)
+            // Edit from a bubble's menu waits for the list, so the form starts from
+            // the server's current text, not the list cached on an earlier visit.
+            takeEditRequest()
             await fetchVersionCount()
         }
-        .looreDialog(isPresented: Binding(get: { pendingNav != nil }, set: { if !$0 { pendingNav = nil } })) {
+        .onChange(of: actions?.editRequest) { _, _ in takeEditRequest() }
+        .onChange(of: dirty) { _, isDirty in
+            guard let kind, !creating else { return }
+            if isDirty { actions?.unsavedKind = kind } else if actions?.unsavedKind == kind { actions?.unsavedKind = nil }
+        }
+        .onDisappear {
+            if let kind, actions?.unsavedKind == kind { actions?.unsavedKind = nil }
+        }
+        .looreDialog(isPresented: Binding(get: { pendingNav != nil },
+                                          set: { if !$0 { pendingNav = nil; actions?.editRequest = nil } })) {
             LooreDialogCard(title: "Unsaved changes") {
                 DialogBodyText(text: "You have unsaved edits to this artifact. Leave without saving?")
                 HStack(spacing: 8) {
                     Spacer()
-                    Button("Cancel") { pendingNav = nil }.buttonStyle(.looreOutline)
+                    Button("Cancel") {
+                        pendingNav = nil
+                        // Edit chosen for another bubble waits on this answer: it is dropped too.
+                        actions?.editRequest = nil
+                    }
+                    .buttonStyle(.looreOutline)
                     Button("Leave") {
                         let target = pendingNav
                         pendingNav = nil
@@ -113,6 +144,13 @@ struct ArtifactsPage: View {
 
         if editing {
             editForm
+        } else if deleted {
+            Text("This artifact was deleted.")
+                .font(LooreFont.sans(14.4, .light))
+                .foregroundStyle(LooreColor.textMuted)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 40)
+                .accessibilityIdentifier("artifact.deleted")
         } else if let active {
             if !active.content.isEmpty {
                 Group {
@@ -218,6 +256,14 @@ struct ArtifactsPage: View {
         case "agentic_session": return "AI session"
         default: return generatedBy ?? ""
         }
+    }
+
+    /// Edit chosen in this artifact's bubble menu (#603): the form the version
+    /// chip opens, or the empty artifact's "Write …" form; once the list is loaded.
+    private func takeEditRequest() {
+        guard let kind, !creating, app.artifacts.loaded,
+              actions?.takeEditRequest(for: .artifact(kind)) == true else { return }
+        if !editing, let active { startEditing(active) }
     }
 
     private func startEditing(_ active: ArtifactDoc) {

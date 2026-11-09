@@ -7,6 +7,7 @@ struct ProfilePage: View {
     let onSelect: (WorkspaceDocument) -> Void
 
     @Environment(AppState.self) private var app
+    @Environment(WorkspaceActions.self) private var actions: WorkspaceActions?
     @State private var profile: LatestProfile?
     @State private var versionNumber: Int?
     @State private var loading = true
@@ -26,7 +27,11 @@ struct ProfilePage: View {
                 content
             }
         }
-        .task { await fetchProfile() }
+        .task {
+            await fetchProfile()
+            takeEditRequest()
+        }
+        .onChange(of: actions?.editRequest) { _, _ in takeEditRequest() }
         .onAppear { if hasRunningFlag { generating = true } }
         .onChange(of: hasRunningFlag) { _, running in if running { generating = true } }
         .onChange(of: app.profileWatcher.progress) { _, progress in handleProgress(progress) }
@@ -226,6 +231,13 @@ struct ProfilePage: View {
     /// one was generated still sends a `POST`.
     static func saveAsNewTarget(editingBaseId: Int?) -> SaveTarget {
         editingBaseId.map(SaveTarget.update) ?? .create
+    }
+
+    /// Edit chosen in the Profile bubble's menu (#603): the form the version chip
+    /// opens (or "Write Profile"'s), once the profile has loaded.
+    private func takeEditRequest() {
+        guard !loading, actions?.takeEditRequest(for: .profile) == true, !editing else { return }
+        startEditing()
     }
 
     private func startEditing() {

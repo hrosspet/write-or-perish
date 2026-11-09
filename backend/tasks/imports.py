@@ -46,11 +46,15 @@ def import_twitter_archive(self, user_id, token, options):
                 "Import data expired — please upload the archive again.")
 
         total = ta.stash_count(path)
+        from backend.tasks.profile_batch import mark_import_activity
 
         def progress(done):
             self.update_state(state="PROGRESS", meta={
                 "user_id": user_id, "done": done, "total": total,
             })
+            # A running import holds the profile build back (#598): at the
+            # start and after every committed batch.
+            mark_import_activity(user_id)
 
         progress(0)
         try:

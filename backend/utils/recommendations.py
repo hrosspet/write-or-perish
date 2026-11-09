@@ -71,8 +71,8 @@ def compose_recommendation_query(user_id, node):
             sections.append(
                 f"Intentions:\n{text[:INTENTIONS_CHAR_BUDGET]}")
 
-    profile = UserProfile.query.filter_by(user_id=user_id).order_by(
-        UserProfile.created_at.desc()).first()
+    from backend.utils.profile_versions import current_profile_query
+    profile = current_profile_query(user_id).first()
     if profile is not None and profile.ai_usage in AI_ALLOWED:
         text = (profile.get_content() or "").strip()
         if text:

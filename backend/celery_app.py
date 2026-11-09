@@ -46,6 +46,12 @@ celery.conf.update(
             'task': 'backend.tasks.recent_context.collect_recent_context_batches',
             'schedule': 60.0,  # batches typically finish in 1-5 min
         },
+        # Emails the owner when the server disk is nearly full. No-op
+        # unless DISK_ALERT_ENABLED (backend/utils/disk_alert.py).
+        'check-disk-usage': {
+            'task': 'backend.tasks.disk_monitor.check_disk_usage',
+            'schedule': 3600.0,  # every hour
+        },
         'cleanup-deleted-nodes': {
             'task': 'backend.tasks.node_cleanup.cleanup_deleted_nodes',
             'schedule': 86400.0,  # daily
@@ -172,7 +178,9 @@ from backend.tasks import voice_todo_merge  # noqa: F401
 from backend.tasks import recent_context  # noqa: F401
 from backend.tasks import node_cleanup  # noqa: F401
 from backend.tasks import profile_batch  # noqa: F401
+from backend.tasks import profile_windows  # noqa: F401
 from backend.tasks import spend_monitor  # noqa: F401
+from backend.tasks import disk_monitor  # noqa: F401
 from backend.tasks import embeddings  # noqa: F401
 from backend.tasks import poll_draft  # noqa: F401
 from backend.tasks import external_sync  # noqa: F401
