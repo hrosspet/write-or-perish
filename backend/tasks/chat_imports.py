@@ -24,6 +24,7 @@ ignored.
 from celery.utils.log import get_task_logger
 
 from backend.celery_app import celery, flask_app
+from backend.utils.heavy_slot import HeavyTask
 
 logger = get_task_logger(__name__)
 
@@ -35,7 +36,7 @@ RESUME_COUNTDOWN_SECONDS = 5
 
 
 @celery.task(bind=True, name="backend.tasks.chat_imports.import_conversations",
-             acks_late=True, reject_on_worker_lost=True,
+             base=HeavyTask, acks_late=True, reject_on_worker_lost=True,
              max_retries=MAX_TIME_LIMIT_RESUMES)
 def import_conversations(self, user_id, token, options):
     """options: privacy_level, ai_usage, on_deleted (already resolved by

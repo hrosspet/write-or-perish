@@ -57,9 +57,12 @@ def task(app, monkeypatch):  # noqa: F811
     stand_in.celery = celery_app
     stand_in.flask_app = app
     previous = {k: sys.modules.get(k) for k in (
-        "backend.celery_app", "backend.tasks.chat_imports")}
+        "backend.celery_app", "backend.tasks.chat_imports",
+        "backend.utils.heavy_slot")}
     sys.modules["backend.celery_app"] = stand_in
     sys.modules.pop("backend.tasks.chat_imports", None)
+    # The task's base class (#613) must come from the real package too.
+    sys.modules.pop("backend.utils.heavy_slot", None)
     import importlib
     import backend.tasks as tasks_pkg
     previous_attr = getattr(tasks_pkg, "chat_imports", None)

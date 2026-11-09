@@ -93,6 +93,7 @@ from backend.utils.chunk_plan import (
     next_window_budget, plan_chunks)
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.error_privacy import describe_exception
+from backend.utils.heavy_slot import HeavyTask
 from backend.utils.hidden_rows import WritingOnHold, writing_on_hold
 from backend.utils.llm_batch import apply_batch_key_override, blocked_items
 from backend.utils.privacy import AI_ALLOWED, account_allows_ai
@@ -1961,7 +1962,8 @@ def advance(user_id, task_id, wait_for_imports=True):
     return outcome
 
 
-@celery.task(bind=True, acks_late=True, reject_on_worker_lost=True)
+@celery.task(bind=True, base=HeavyTask, acks_late=True,
+             reject_on_worker_lost=True)
 def advance_profile_windows(self, user_id, wait_for_imports=True):
     """Render, check and submit what the user's window set needs now.
     Holds only the per-user guard, never the batch pipeline lock: a render

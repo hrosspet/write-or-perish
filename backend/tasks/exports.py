@@ -2,7 +2,6 @@
 Celery tasks for asynchronous data export operations.
 """
 from datetime import datetime, timedelta
-from celery import Task
 from celery.utils.log import get_task_logger
 import os
 
@@ -23,6 +22,7 @@ from backend.utils.privacy import AI_ALLOWED, account_allows_ai
 from backend.utils.profile_versions import continue_boundary
 from backend.utils import refusal_backoff
 from backend.utils.refusal_backoff import REFUSED_REF
+from backend.utils.heavy_slot import HeavyTask
 
 logger = get_task_logger(__name__)
 
@@ -345,8 +345,11 @@ def _log_profile_failure(user_id, exc):
                  extra=log_extra(exc))
 
 
-class ProfileGenerationTask(Task):
-    """Custom task class with error handling."""
+class ProfileGenerationTask(HeavyTask):
+    """Custom task class with error handling. A heavy job (#613,
+    utils/heavy_slot): a build that plans into windows runs the window
+    advance inside this task (window_hand_off), and an initial build reads
+    the user's whole corpus."""
 
     def on_failure(self, exc, task_id, args, kwargs, einfo):
         """Called when task fails."""
