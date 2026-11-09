@@ -2972,6 +2972,7 @@ Kinds (one per entry and per table row):
 - **Why it missed:** the request was treated as settling the batch size, so the builder's own estimate was never weighed against the host's memory as a question for Peter.
 - **Source:** Claude Code session 2026-11-09 (Opus 5.5)
 - **Applies to:** #589
+- **Rule:** candidate: a request sets the goal, not its consequences. When the builder knows something Peter likely doesn't (the code, its own estimates, the limits of the server and services, past incidents, the largest users) and it shows a risk he hasn't weighed, the builder raises it when he asks, with the numbers and a recommendation, before building the request as stated.
 
 ### 2026-11-09 · Lowering the profile limits on prod before the diagnostics came back
 
