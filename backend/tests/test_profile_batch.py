@@ -3180,8 +3180,38 @@ def test_a_provider_or_account_failure_is_not_a_failed_attempt(
     u = User.query.get(u.id)
     assert (u.profile_batch_attempts or 0) == 0
     assert u.profile_batch_pending is False
+    assert u.profile_work_held is True
     assert ProfileBatchJob.query.get(job.id).status == "collected"
     assert APICostLog.query.filter_by(user_id=u.id).count() == 0
+
+
+def test_a_provider_failure_keeps_a_prefilled_account_in_the_seeder(
+        app, monkeypatch):
+    """A pre-filled account its owner hasn't activated yet (approved
+    False) is outside the hourly cohort; only the work hold brings it
+    back. A 5xx on its step must set the hold, as every other failed or
+    refused step does, or its profile build stops until activation."""
+    u = _user()
+    u.approved = False
+    prev = _prev_profile(u, datetime(2026, 5, 1))
+    job, item = _chunk_job(u, prev)
+    job.provider_key = "openai:gpt-x"
+    db.session.commit()
+    _fake_openai_batch(
+        monkeypatch, {"file-err": [{
+            "custom_id": item["custom_id"], "response": {
+                "status_code": 500, "body": {"error": {
+                    "code": None, "type": "server_error",
+                    "message": "oops"}}},
+            "error": None}]},
+        status="completed", completed_at=1060, error_file_id="file-err",
+        request_counts=_counts(0, 1))
+    monkeypatch.setattr(pb, "batch_submit", MagicMock(return_value={}))
+
+    pb._poll_profile_batches()
+
+    assert (User.query.get(u.id).profile_batch_attempts or 0) == 0
+    assert u.id in {x.id for x in pb._work_held_users(set())}
 
 
 # ── content-policy blocks (2026-11-04) ──────────────────────────────────

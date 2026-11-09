@@ -1422,8 +1422,10 @@ def _poll_profile_batches():
                     # the request. Not an attempt, as an account-refused
                     # submit is not (#406): an outage spanning three
                     # hourly seeds would otherwise move the user to the
-                    # full-price path for good. The seeder resends it.
+                    # full-price path for good. The seeder resends it;
+                    # the hold brings in an account not yet activated.
                     user.profile_batch_pending = False
+                    user.profile_work_held = True
                     db.session.commit()
                     logger.warning(
                         f"Batch item failed for user {user.id} "
