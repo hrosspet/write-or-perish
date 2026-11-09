@@ -15,6 +15,7 @@ jest.mock('./contexts/AudioContext', () => ({
   useAudio: () => ({}),
 }));
 jest.mock('./hooks/useSessionUpdates', () => ({
+  ...jest.requireActual('./hooks/useSessionUpdates'),
   useSessionUpdates: () => [[], () => {}],
 }));
 jest.mock('./hooks/useNodePrefetch', () => () => ({ pending: null, openNode: () => {}, cancel: () => {} }));

@@ -142,7 +142,7 @@ def test_sync_run_calls_and_prices_the_users_openai_model(app, wired, it, monkey
     u = _openai_user("oa_sync")
     stages = []
     saved = it.run_infer_intentions_sync_impl(u.id, progress=stages.append)
-    assert calls == [("gpt-6-astra", {"max_tokens": 32000})]
+    assert calls == [("gpt-6-astra", {"max_tokens": 32000, "user_id": u.id})]
     assert "gpt-6-astra" in stages[0]
     assert saved["model_id"] == "gpt-6-astra" and saved["version"] == 1
     log = APICostLog.query.filter_by(user_id=u.id).one()
@@ -277,7 +277,7 @@ def test_backfill_sync_runs_and_prices_the_users_model(app, wired, script, monke
     u = _openai_user("bf_sync")
     template = "Read this.\n{user_export?keep=newest&max_export_tokens=1000000}"
     script.backfill_user(app, u, template, script._resolve_model(app, u, None))
-    assert calls == [("gpt-6-astra", {"max_tokens": 32000})]
+    assert calls == [("gpt-6-astra", {"max_tokens": 32000, "user_id": u.id})]
     log = APICostLog.query.filter_by(user_id=u.id).one()
     assert log.model_id == "gpt-6-astra" and log.request_type == "intentions_backfill"
     assert log.cost_microdollars == int(100_000 * 10.0 + 1_000 * 50.0)

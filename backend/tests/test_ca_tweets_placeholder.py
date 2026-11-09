@@ -300,7 +300,9 @@ class TestOpenAIBatchOne:
                     output_file_id=output_file_id)
 
         class Client:
-            def __init__(self, api_key=None):
+            # **kw: the submit passes the soft-limit HTTP client
+            # (utils/soft_limit).
+            def __init__(self, api_key=None, **kw):
                 self.files = Files()
                 self.batches = Batches()
         return Client, Batches

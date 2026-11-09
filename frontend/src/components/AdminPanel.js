@@ -1419,7 +1419,15 @@ function AdminPanel() {
                 {(!u.profile || u.profile.state === "none") && (
                   <span style={{ color: "var(--text-muted)" }}>—</span>
                 )}
-                {u.profile_backoff && (
+                {u.profile_backoff && u.profile_backoff.state === "blocked" && (
+                  <div
+                    style={{ color: "var(--error)" }}
+                    title="The provider's content-policy filter blocked a profile request for this user, so the profile job is stopped: the hourly seeder, imports and saved versions do not start it again. Only Build profile (after confirming) lifts the stop and sends it again."
+                  >
+                    ⛔ stopped: provider policy block ({u.profile_backoff.code})
+                  </div>
+                )}
+                {u.profile_backoff && u.profile_backoff.state !== "blocked" && (
                   <div
                     style={{ color: u.profile_backoff.state === "stopped" ? "var(--error)" : "var(--warning)" }}
                     title={u.profile_backoff.state === "stopped"

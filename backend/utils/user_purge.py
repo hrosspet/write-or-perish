@@ -80,7 +80,7 @@ from backend.models import (
     ExternalDigestBatchJob, ExternalItem, ExternalItemEmbedding, FeedPick,
     FeedRender, Node, NodeContextArtifact, NodeEmbedding, NodeTranscriptChunk,
     NodeVersion, PollDraftBatchJob, PollResponse, ProfileBatchJob,
-    RecentContextBatchJob, ReferenceAction, ShareDraft, TTSChunk, Thread,
+    ProfileBlockedRange, RecentContextBatchJob, ReferenceAction, ShareDraft, TTSChunk, Thread,
     User, UserArtifact, UserDataPurge, UserDataPurgeHidden, UserFeedback,
     UserNotification, UserProfile, UserPrompt, UserRecentContext, UserTodo,
 )
@@ -814,6 +814,7 @@ PIPELINE_FLAG_RESETS = {
     "profile_batch_attempts": 0,
     "profile_force_batch": False,
     "profile_cap_held": False,
+    "profile_work_held": False,
     "profile_generation_task_id": None,
     "profile_generation_task_dispatched_at": None,
     "profile_seed_error": None,
@@ -926,6 +927,7 @@ _USER_TABLES = (
     (UserFeedback, "user_feedback"),
     (UserNotification, "user_notification"),
     (PollResponse, "poll_response"),
+    (ProfileBlockedRange, "profile_blocked_range"),
 )
 
 # Columns of other users' rows that point at a deleted node and are set

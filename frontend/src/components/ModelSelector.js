@@ -160,7 +160,10 @@ const ModelSelector = ({
       setActiveId(added ? added.id : selectedModel);
       return;
     }
-    if (id !== selectedModel) onModelChange(id);
+    // The second argument tells a pick from the default the picker fills
+    // in by itself (the Account page asks the both-providers question
+    // only after a pick, #599).
+    if (id !== selectedModel) onModelChange(id, { picked: true });
     closeMenu();
   };
 

@@ -17,6 +17,7 @@ jest.mock('../api', () => ({
 import React from 'react';
 import JSZip from 'jszip';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 import ImportData from './ImportData';
 
 async function zipFile(entries) {
@@ -42,7 +43,7 @@ async function openConfirm(label = /Import ChatGPT/, confirm) {
     return confirm(url);
   });
   const file = await zipFile({ 'conversations.json': '[{"id":"a"}]' });
-  render(<ImportData inline />);
+  render(<MemoryRouter><ImportData inline /></MemoryRouter>);
   fireEvent.change(screen.getByLabelText(label), { target: { files: [file] } });
   return screen.findByRole('button', { name: 'Confirm Import' });
 }
@@ -136,3 +137,16 @@ test('a status poll that fails once does not lose the import', async () => {
   expect(await screen.findByText('Import Finished', {}, { timeout: 4000 })).toBeTruthy();
   expect(screen.queryByRole('alert')).toBeNull();
 });
+
+test.each([[true, true], [false, false]])(
+  'the result asks the both-providers question when the server says so (%s, #599)',
+  async (ask, shown) => {
+    const button = await openConfirm(/Import ChatGPT/, () =>
+      Promise.resolve({ data: { task_id: 'job-5', status: 'queued', total: 6 } }));
+    mockGet.mockResolvedValue({ data: { status: 'completed', done: 6, total: 6,
+      result: { ...result, ask_both_providers: ask } } });
+    fireEvent.click(button);
+    expect(await screen.findByText('Import Finished', {}, { timeout: 4000 })).toBeTruthy();
+    expect(!!screen.queryByRole('button', { name: 'Use both' })).toBe(shown);
+    expect(!!screen.queryByText('Use both Anthropic and OpenAI?')).toBe(shown);
+  });

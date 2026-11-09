@@ -778,3 +778,63 @@ def test_refused_digest_backs_off_and_is_not_billed_every_night(
     for _ in range(3):
         assert _digest.sweep_external_digests()["submitted"] == 0
     assert len(submitted) == 2 and APICostLog.query.count() == 2
+
+
+def test_policy_blocked_digest_is_never_resubmitted_by_the_sweep(
+        app, monkeypatch):
+    """2026-11-04: a digest request the provider's content-policy filter
+    blocked is final. The block is recorded ($0, not billed) and
+    reported, and later nights' sweeps do not send it again."""
+    from backend.utils import refusal_backoff
+    user = User.query.first()
+    user.timezone = _tz_at_hour(_digest.NIGHTLY_DIGEST_LOCAL_HOUR)
+    _db.session.commit()
+    _mk_item(user.id, "a")
+    submitted = _stub_batch_submit(monkeypatch)
+    reports = []
+    monkeypatch.setattr(refusal_backoff, "report_policy_block",
+                        lambda *a: reports.append(a))
+
+    assert _digest.sweep_external_digests()["submitted"] == 1
+    # The request names its user (the OpenAI safety identifier).
+    assert [r["user_id"] for reqs in submitted[0].values()
+            for r in reqs] == [user.id]
+
+    class Collected(dict):
+        blocked = {f"external-digest-{user.id}": "bio_policy"}
+    monkeypatch.setattr(_digest, "batch_check_and_collect",
+                        lambda ids, keys: (Collected(), {}, {}))
+    _digest._collect_digest_batches()
+
+    row = APICostLog.query.one()
+    assert row.request_ref == "policy_block:bio_policy"
+    assert row.cost_microdollars == 0
+    assert [r[:2] for r in reports] == [(user.id, "bio_policy")]
+    APICostLog.query.update({"created_at": datetime.utcnow()
+                             - timedelta(days=3)})
+    _db.session.commit()
+    for _ in range(3):
+        assert _digest.sweep_external_digests()["submitted"] == 0
+    assert len(submitted) == 1
+
+
+def test_rebuild_does_not_retry_a_policy_block(app, monkeypatch):
+    from backend.utils.llm_batch import BatchItemPolicyBlocked
+    uid = User.query.first().id
+    _mk_item(uid, "a")
+    retried = []
+
+    class _RecordingSelf(_FakeSelf):
+        def retry(self, exc=None, **kwargs):
+            retried.append(exc)
+            raise exc
+
+    def block(model_id, messages, api_keys, **kwargs):
+        assert kwargs["user_id"] == uid
+        raise BatchItemPolicyBlocked("blocked", code="bio_policy")
+    monkeypatch.setattr(_digest.LLMProvider, "get_completion",
+                        staticmethod(block))
+    with pytest.raises(BatchItemPolicyBlocked):
+        _digest.rebuild_external_digest(_RecordingSelf(), uid)
+    assert retried == []
+    assert APICostLog.query.one().request_ref == "policy_block:bio_policy"

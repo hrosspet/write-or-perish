@@ -287,7 +287,7 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
     run = MergeRun()
     try:
         run_todo_merge(LLMProvider, model_id, messages, api_keys,
-                       current_todo, run)
+                       current_todo, run, user_id=user_id)
     except Exception as e:
         logger.error("LLM call failed for todo merge: %s",
                      describe_exception(e), exc_info=True)

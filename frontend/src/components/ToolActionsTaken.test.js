@@ -6,10 +6,11 @@ jest.mock('./MarkdownBody', () => ({ children }) => <div>{children}</div>);
 jest.mock('../api', () => ({ __esModule: true, default: { get: jest.fn(), post: jest.fn(), put: jest.fn() } }));
 
 import React from 'react';
-import { render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import ToolActionsTaken from './ToolActionsTaken';
 import ProposalInline from './ProposalInline';
+import api from '../api';
 
 const renderActions = (props) => render(
   <MemoryRouter>
@@ -148,4 +149,63 @@ test('a proposal shows its accept buttons to the owner only', () => {
   expect(other.container.querySelector('button')?.textContent || '').not.toMatch(/Apply|Send|Save/);
   expect(within(other.container).queryByText(/Apply changes|Send feedback|Save to shares|Todo updated/))
     .toBeNull();
+});
+
+// "Show changes" on an artifact write (#604): the owner opens the diff of
+// the version the write saved; the server builds it from the stored ids.
+const WRITE = {
+  name: 'update_artifact', status: 'success', kind: 'memory', created: false,
+  artifact_id: 42, previous_artifact_id: 41, version: 13, previous_version: 12,
+};
+
+test('the owner opens what an artifact write changed', async () => {
+  api.get.mockReset();
+  api.get.mockResolvedValue({ data: {
+    kind: 'memory', title: 'Memory', version_number: 13, previous_version_number: 12,
+    lines: [
+      { type: 'same', text: '## Facts' },
+      { type: 'del', text: '- has a dog' },
+      { type: 'add', text: '- has two dogs' },
+    ],
+  } });
+  const { container } = renderActions({ detailed: true, toolCallsMeta: [WRITE] });
+  expect(container.textContent).toContain('Updated artifact memory to v13');
+  expect(api.get).not.toHaveBeenCalled();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Show changes' }));
+  expect(api.get).toHaveBeenCalledWith('/artifacts/versions/42/changes', { params: { from: 41 } });
+  await waitFor(() => expect(container.querySelector('[data-diff="add"]')).not.toBeNull());
+  expect(container.querySelector('[data-diff="add"]').textContent).toContain('two');
+  expect(container.querySelector('[data-diff="del"]').textContent).toContain('a dog');
+
+  // Closing and opening again reuses what was fetched.
+  fireEvent.click(screen.getByRole('button', { name: 'Hide changes' }));
+  expect(container.querySelector('[data-diff]')).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Show changes' }));
+  expect(container.querySelector('[data-diff="add"]')).not.toBeNull();
+  expect(api.get).toHaveBeenCalledTimes(1);
+});
+
+test('a creation asks for its whole text, and a gone version says so', async () => {
+  api.get.mockReset();
+  api.get.mockRejectedValue({ response: { status: 404 } });
+  renderActions({ detailed: true, toolCallsMeta: [{
+    ...WRITE, created: true, previous_artifact_id: null, version: 1, previous_version: null,
+  }] });
+  expect(screen.getByText(/Created artifact/).closest('div').textContent).toContain('as v1');
+  fireEvent.click(screen.getByRole('button', { name: 'Show changes' }));
+  expect(api.get).toHaveBeenCalledWith('/artifacts/versions/42/changes', { params: undefined });
+  expect(await screen.findByText('This version is no longer available.')).toBeInTheDocument();
+});
+
+test('no changes to open for someone else, or for a write that failed', () => {
+  api.get.mockReset();
+  renderActions({ detailed: false, toolCallsMeta: [{ name: 'update_artifact', status: 'success' }] });
+  expect(screen.queryByRole('button', { name: 'Show changes' })).toBeNull();
+  renderActions({ detailed: true, toolCallsMeta: [{
+    name: 'update_artifact', status: 'error', kind: 'memory',
+    error: "'memory' changed since v12, now v14. Nothing was saved.",
+  }] });
+  expect(screen.queryByRole('button', { name: 'Show changes' })).toBeNull();
+  expect(api.get).not.toHaveBeenCalled();
 });

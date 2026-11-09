@@ -43,6 +43,7 @@ sys.modules["backend.celery_app"] = MagicMock()
 sys.modules.pop("backend.tasks.embeddings", None)
 from backend.tasks.embeddings import (  # noqa: E402
     _candidate_external_items, _candidate_nodes, _embedding_owner_id,
+    sweep as _sweep,
 )
 for _k, _v in _saved_glue.items():
     if _v is None:
@@ -239,6 +240,78 @@ def test_embedding_owner_is_human_not_llm_author(app):
         assert _embedding_owner_id(ai_node) == human.id
         assert _embedding_owner_id(own_node) == human.id
         assert _embedding_owner_id(ai_node) != llm.id
+
+
+# ── Two sweeps at once (2026-11-07) ──────────────────────────────────────
+
+def test_a_row_another_sweep_wrote_meanwhile_does_not_fail_the_sweep(
+        app, monkeypatch):
+    """Two sweeps read the same newest nodes; the other one inserts the
+    rows first. This sweep keeps the other's rows, inserts the rest, and
+    finishes (it used to stop on the unique node_id)."""
+    with app.app_context():
+        uid = User.query.first().id
+        first = _mk_node(uid, "first node")
+        second = _mk_node(uid, "second node")
+        item = ExternalItem(user_id=uid, source="web_clip",
+                            external_id="e" * 64)
+        item.set_content("a clipped page")
+        _db.session.add(item)
+        _db.session.commit()
+        calls = []
+
+        def embed(texts, key, **kw):
+            calls.append(len(texts))
+            if len(calls) == 1:
+                # The other sweep, between this one's read and insert.
+                _mk_embedding(first, [9.0, 9.0])
+                _db.session.add(ExternalItemEmbedding(
+                    item_id=item.id, user_id=uid, model="m",
+                    content_hash="other", vector=pack_vector([9.0, 9.0])))
+                _db.session.commit()
+            return [[0.1, 0.2] for _ in texts]
+        monkeypatch.setitem(_sweep.__globals__, "embed_texts", embed)
+        out = _sweep(50)
+        assert out["status"] == "ok"
+        assert out["embedded"] == 1 and out["external_embedded"] == 0
+        rows = {e.node_id: e for e in NodeEmbedding.query.all()}
+        assert set(rows) == {first.id, second.id}
+        assert list(unpack_vector(rows[first.id].vector)) == [9.0, 9.0]
+        assert rows[second.id].content_hash == content_hash(second.content)
+        assert ExternalItemEmbedding.query.one().content_hash == "other"
+
+
+def test_a_second_sweep_skips_while_one_runs(app, monkeypatch):
+    """The task holds the sweep lock (utils/run_locks): a sweep queued
+    while another runs returns at once, and the next one runs."""
+    import types
+    import backend.tasks
+    from backend.tests.fake_redis import install
+    redis = install(monkeypatch)
+    stub = types.SimpleNamespace(
+        celery=types.SimpleNamespace(task=lambda *a, **k: (lambda f: f)),
+        flask_app=app)
+    monkeypatch.setitem(sys.modules, "backend.celery_app", stub)
+    monkeypatch.delitem(sys.modules, "backend.tasks.embeddings",
+                        raising=False)
+    monkeypatch.setattr(backend.tasks, "embeddings",
+                        getattr(backend.tasks, "embeddings", None),
+                        raising=False)
+    import backend.tasks.embeddings as tasks_embeddings
+    ran = []
+    monkeypatch.setattr(tasks_embeddings, "sweep",
+                        lambda limit: ran.append(limit) or {"status": "ok"})
+    from backend.utils import run_locks
+    held = run_locks.RunLock(tasks_embeddings.SWEEP_LOCK_KEY, "other",
+                             tasks_embeddings.SWEEP_LOCK_TTL)
+    assert held.acquire()
+    assert tasks_embeddings.sweep_embeddings(7) == {
+        "status": "skipped", "reason": "running"}
+    assert ran == []
+    held.release()
+    assert tasks_embeddings.sweep_embeddings(7) == {"status": "ok"}
+    assert ran == [7]
+    assert redis.get(tasks_embeddings.SWEEP_LOCK_KEY) is None
 
 
 # ── Semantic endpoint ────────────────────────────────────────────────────

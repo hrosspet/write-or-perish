@@ -240,7 +240,11 @@ def test_the_pre_selection_passes_a_bounded_number_of_deleted_rows(
     """Deleted rows cost the budget nothing, so a cap keeps the rows
     loaded bounded (every row is deleted while "Delete all my writing"
     waits out its 30 days)."""
-    import backend.routes.export_data as export_data
+    # The module the render imports from (sys.modules), which a sibling
+    # test file's module churn can leave apart from the package attribute
+    # that `import backend.routes.export_data` binds.
+    import importlib
+    export_data = importlib.import_module("backend.routes.export_data")
     _session(alice, "textmode", NOW - timedelta(days=2), [
         ("KEPT", 20, False)])
     _session(alice, "voice", NOW - timedelta(days=1), [

@@ -548,7 +548,7 @@ def rebase_merge(run, previous, newest):
 
 
 def run_todo_merge(provider, model_id, messages, api_keys, current_todo,
-                   run=None):
+                   run=None, user_id=None):
     """Call the model for the edits, apply them to *current_todo* and
     check the result, with one retry after a refused reply. Returns *run*
     (a MergeRun): ``merged`` on success, else ``failure``.
@@ -556,6 +556,7 @@ def run_todo_merge(provider, model_id, messages, api_keys, current_todo,
     *provider* is LLMProvider (or a stand-in with its get_completion). A
     provider error propagates; *run*, passed in, then still holds the
     responses of the calls made before it, whose cost the caller logs.
+    *user_id*: the user whose list it is (the OpenAI safety identifier).
     """
     run = run if run is not None else MergeRun()
     messages = list(messages)
@@ -564,7 +565,7 @@ def run_todo_merge(provider, model_id, messages, api_keys, current_todo,
             run.retries += 1
         response = provider.get_completion(
             model_id, messages, api_keys, output_schema=TODO_EDITS_SCHEMA,
-            output_schema_name=SCHEMA_NAME)
+            output_schema_name=SCHEMA_NAME, user_id=user_id)
         run.responses.append(response)
         content = response.get("content") or ""
         run.replies.append(content)

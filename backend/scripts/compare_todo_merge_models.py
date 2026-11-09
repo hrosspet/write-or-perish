@@ -557,13 +557,14 @@ def file_default_prompt(check_hash=True):
     return text
 
 
-def run_model(provider, model_id, messages, api_keys):
+def run_model(provider, model_id, messages, api_keys, user_id=None):
     """One live call, timed. Cost from the app's calculator; no
     api_cost_log row is written."""
     from backend.utils.cost import llm_cost_log_fields
     started = time.monotonic()
     try:
-        response = provider.get_completion(model_id, messages, api_keys)
+        response = provider.get_completion(model_id, messages, api_keys,
+                                           user_id=user_id)
     except ReadOnlyViolation:
         raise
     except Exception as e:  # recorded, the run goes on
@@ -588,7 +589,8 @@ def run_model(provider, model_id, messages, api_keys):
     }
 
 
-def run_model_edits(provider, model_id, messages, api_keys, previous_text):
+def run_model_edits(provider, model_id, messages, api_keys, previous_text,
+                    user_id=None):
     """One merge as the task runs it now (--current-prompt): the model's
     edits applied to *previous_text* by the task's own function, with its
     retry and checks; timed over all its calls. Cost from the app's
@@ -600,7 +602,8 @@ def run_model_edits(provider, model_id, messages, api_keys, previous_text):
     raised = None
     try:
         todo_merge_edits.run_todo_merge(provider, model_id, messages,
-                                        api_keys, previous_text, merge)
+                                        api_keys, previous_text, merge,
+                                        user_id=user_id)
     except ReadOnlyViolation:
         raise
     except Exception as e:  # recorded with the calls made before it
@@ -1002,7 +1005,7 @@ def rebuild_inputs(rec, uid, default_prompt, prompt_cache,
 
 
 def run_models(provider, models, original_model, messages, api_keys,
-               supported, previous_text=None):
+               supported, previous_text=None, user_id=None):
     """Candidates in order, then the stored model when *original_model*
     is given (--rerun-original). With *previous_text* (--current-prompt)
     each is a merge by edits applied to it, else one call that rewrites
@@ -1010,8 +1013,9 @@ def run_models(provider, models, original_model, messages, api_keys,
     def one(model_id):
         if previous_text is not None:
             return run_model_edits(provider, model_id, messages, api_keys,
-                                   previous_text)
-        return run_model(provider, model_id, messages, api_keys)
+                                   previous_text, user_id=user_id)
+        return run_model(provider, model_id, messages, api_keys,
+                         user_id=user_id)
 
     runs = []
     for model_id in models:
@@ -1126,7 +1130,8 @@ def compare_chosen(chosen, window, uid, models, rerun_original, provider,
                           stored_model if rerun_original else None,
                           messages, api_keys, supported,
                           previous_text=(inputs["previous_text"]
-                                         if current_prompt else None))
+                                         if current_prompt else None),
+                          user_id=uid)
         score_runs(runs, inputs["stored_text"], inputs["previous_text"])
         for result in runs:
             label = (result["model"] if result["role"] == "candidate"

@@ -1,27 +1,29 @@
-"""Daily Celery task that finalizes soft-deleted nodes.
+"""Daily Celery task that finalizes soft-deleted nodes, and since #603
+soft-deleted artifacts (backend/utils/artifact_deletion.py).
 
 Runs once per day. Two distinct actions per soft-deleted candidate:
 
-1. **Full purge** when the row has zero children in DB. Deletes
-   NodeVersion / NodeTranscriptChunk / TTSChunk / Draft references and the
-   row itself. Same body as the legacy `delete_node()` cleanup minus the
-   orphan-children step (which is unnecessary by the predicate).
+1. **Full purge** when the row has zero children in DB. Deletes the
+   node's audio files, then NodeVersion / NodeTranscriptChunk / TTSChunk /
+   Draft references and the row itself. Same body as the legacy
+   `delete_node()` cleanup minus the orphan-children step (which is
+   unnecessary by the predicate).
 
 2. **Content wipe** when the row still has children but content hasn't yet
-   been cleared. Sets `content = None`, removes versions and audio
-   artifacts. Row stays as a tombstone shell until its descendants
-   eventually purge.
+   been cleared. Deletes the node's audio files, sets `content = None`,
+   removes versions and audio rows. Row stays as a tombstone shell until
+   its descendants eventually purge.
 
-Both delete the node's audio files (#541): its folders under the node's
-user_id and human_owner_id (an AI reply's speech is under the model
-account's folder), and the folders of the recording sessions its rows
-name, once no row names them any more. The files go after the node's
-commit, so a rolled-back cleanup never leaves a row whose audio is gone.
-When a crash or a failed delete comes between the two,
-``backend/scripts/sweep_orphan_audio.py`` finds the node's own folders
-and a wiped node's streaming session folder (the tombstone still names
-it). A purged node's session folders are no longer named by any row, so
-the sweep keeps and counts those.
+Audio files go first, in both actions (backend/utils/audio_storage.py,
+`delete_node_audio`: the node's ``user/<author>/node/<id>/``,
+``nodes/<author>/<id>/`` and streaming-session folders). A file that
+cannot be deleted never holds the rows back: it is logged by node id and
+the purge or wipe goes on, so deleted text is gone after the grace
+period whatever the disk does. The audio sweep at the end of each run
+(backend/utils/audio_sweep.py) retries such files on a later day, and
+deletes what earlier code left behind, a deleted reference's speech and
+superseded speech (#66); an error in it is logged and never stops the
+node cleanup.
 
 The predicate "no child rows in DB" (rather than "no alive descendants")
 matches Postgres' default FK behavior — `Node.parent_id` has no
@@ -32,12 +34,16 @@ cascade is therefore eventual, one tree-level per daily run.
 The needs-action SQL filter (`content IS NOT NULL OR no children`)
 excludes long-stable tombstones from per-day re-scan; one bad row's
 exception is caught and logged without poisoning the batch (per-node
-commits). The candidates' ids are read in full first and each node is
-loaded by id, so no cursor is open across those commits.
+commits). The candidates' ids are read into a list before the first
+node is touched: a streamed query (``yield_per``) reads through a
+Postgres server-side cursor, which the first per-node commit closes, so
+the next fetch raised ``ProgrammingError: named cursor isn't valid
+anymore`` and the run stopped after its first batch, before the
+artifact purge and the audio sweep. sqlite has no such cursor.
 """
 
-from datetime import datetime, timedelta
-from typing import NamedTuple
+import time
+from datetime import datetime, timedelta, timezone
 
 from celery.utils.log import get_task_logger
 from sqlalchemy import exists, or_
@@ -47,70 +53,41 @@ from backend.constants import SOFT_DELETE_GRACE_DAYS
 from backend.extensions import db
 from backend.models import (
     Node, NodeVersion, NodeTranscriptChunk, TTSChunk, Draft,
-    NodeContextArtifact, ReferenceAction, Thread,
+    NodeContextArtifact, ReferenceAction, ShareDraft, Thread,
 )
-from backend.utils import audio_storage
 
 logger = get_task_logger(__name__)
 
 
-class NodeAudio(NamedTuple):
-    """Where a node's audio is on disk, read before its rows change."""
-    node_id: int
-    owner_ids: frozenset    # the node's user_id and human_owner_id
-    session_ids: frozenset  # the recording sessions its rows name
-
-
-def _audio_of(node):
-    """*node*'s audio on disk: its own folders, and the recording sessions
-    its rows name (the older streaming upload's session, and the voice
-    session its transcript chunks came from, whose folder stays behind
-    when moving it onto the node failed)."""
-    sessions = {s for (s,) in db.session.query(
-        NodeTranscriptChunk.session_id).filter(
-        NodeTranscriptChunk.node_id == node.id,
-        NodeTranscriptChunk.session_id.isnot(None))}
-    if node.streaming_session_id:
-        sessions.add(node.streaming_session_id)
-    return NodeAudio(node.id,
-                     frozenset({node.user_id, node.human_owner_id} - {None}),
-                     frozenset(sessions))
-
-
-def remove_node_audio(audio):
-    """Delete the folders of *audio* (a NodeAudio) once the node's rows
-    are committed: the node's own folders, and a session's folders when
-    no row names the session any more. Returns how many folders were
-    deleted. Never raises: a failure is logged (ids only) and the folders
-    stay for the sweep script."""
-    root = audio_storage.AUDIO_STORAGE_ROOT
-    try:
-        dirs = audio_storage.node_audio_dirs(
-            root, audio.node_id, audio.owner_ids)
-        for sid in sorted(audio.session_ids):
-            if (audio_storage.is_storage_id(sid)
-                    and not audio_storage.session_has_row(sid)):
-                dirs += audio_storage.session_audio_dirs(
-                    root, sid, audio.owner_ids)
-    except Exception:
-        db.session.rollback()
-        logger.exception(
-            "cleanup_deleted_nodes: audio of node_id=%s not deleted",
-            audio.node_id)
-        return 0
-    return audio_storage.remove_audio_dirs(dirs, logger)
+def _delete_audio(node):
+    """Delete the node's audio files before any of its rows change, and
+    return the FolderDeletion. A file left behind is logged by node id
+    and never stops the purge or the wipe: the audio sweep retries it
+    on a later run."""
+    from backend.utils.audio_storage import delete_node_audio
+    result = delete_node_audio(node)
+    if result.skipped:
+        # A symlink or a folder outside the storage root: never followed
+        # or deleted.
+        logger.warning(
+            "cleanup_deleted_nodes: node_id=%s: %d audio folder(s) left "
+            "alone (symlink or outside the storage root)",
+            node.id, result.skipped)
+    if result.failed:
+        logger.error(
+            "cleanup_deleted_nodes: node_id=%s: %d audio file(s) not "
+            "deleted (%s); the audio sweep retries them",
+            node.id, result.failed, ", ".join(result.errors))
+    return result
 
 
 def _full_purge(node):
-    """Hard-delete a node + cascading dependents.
+    """Hard-delete a node + cascading dependents, its audio files first.
 
     Same body as the legacy delete_node() cleanup steps, minus the
     orphan-children line: the predicate guarantees zero child rows.
-
-    Returns the node's NodeAudio: the caller commits, then deletes the
-    files with remove_node_audio().
     """
-    audio = _audio_of(node)
+    audio = _delete_audio(node)
     NodeVersion.query.filter_by(node_id=node.id).delete()
     NodeTranscriptChunk.query.filter_by(node_id=node.id).delete()
     TTSChunk.query.filter_by(node_id=node.id).delete()
@@ -140,6 +117,18 @@ def _full_purge(node):
     Node.query.filter_by(continuation_node_id=node.id).update(
         {"continuation_node_id": None}
     )
+    # A share (#228) names the reply it was proposed in and the public
+    # node it published; revoking keeps the public node's pointer, so a
+    # republish can bring the same node back. Both foreign keys block the
+    # DELETE on Postgres (sqlite does not enforce them), so clear them,
+    # as the user data purge does (backend/utils/user_purge.py,
+    # _REF_COLUMNS). The share stays; a republish makes a new node.
+    ShareDraft.query.filter_by(source_node_id=node.id).update(
+        {"source_node_id": None}
+    )
+    ShareDraft.query.filter_by(public_node_id=node.id).update(
+        {"public_node_id": None}
+    )
 
     # No orphan-children: predicate guarantees zero child rows.
     db.session.delete(node)
@@ -147,34 +136,35 @@ def _full_purge(node):
 
 
 def _wipe_content_and_versions(node):
-    """Clear a tombstone's content + edit history + audio artifacts.
+    """Clear a tombstone's content + edit history + audio, its audio
+    files first.
 
     Keeps the row so descendants still have a parent_id anchor; the row
     will become eligible for full purge in a later cleanup run once all
     its child rows have purged.
-
-    Returns the node's NodeAudio: the caller commits, then deletes the
-    files with remove_node_audio().
     """
-    audio = _audio_of(node)
+    audio = _delete_audio(node)
     node.content = None
     NodeVersion.query.filter_by(node_id=node.id).delete()
     NodeTranscriptChunk.query.filter_by(node_id=node.id).delete()
     TTSChunk.query.filter_by(node_id=node.id).delete()
-    # The audio files go after the commit (remove_node_audio); clear the
-    # URL columns too so the frontend doesn't try to fetch what's no
-    # longer there. streaming_session_id stays: should deleting the
-    # session's folder fail, the tombstone still names it, and the sweep
-    # script deletes a session folder only cleaned-up tombstones name.
+    # The files are gone; clear the URL columns too so the frontend
+    # doesn't try to fetch them.
     node.audio_original_url = None
     node.audio_tts_url = None
     return audio
 
 
-def _candidate_filter(cutoff):
-    """The nodes the cleanup acts on: deleted before *cutoff*, not hidden
-    by a waiting "Delete all my writing", and either not yet wiped or with
-    no child rows (purge-eligible)."""
+def finalize_deleted_nodes(now=None):
+    """The cleanup's work, in the caller's app context: wipe content and
+    audio of, or purge, every soft-deleted node past the grace period
+    (deleted SOFT_DELETE_GRACE_DAYS or more before *now*, a POSIX time,
+    default the current time), purge deleted artifacts, then sweep the
+    audio folders left behind."""
+    now = time.time() if now is None else now
+    cutoff = (datetime.fromtimestamp(now, timezone.utc).replace(tzinfo=None)
+              - timedelta(days=SOFT_DELETE_GRACE_DAYS))
+
     # "Has any child row in DB" subquery — true when the node still
     # has children referencing it (alive or soft-deleted, doesn't
     # matter for the FK constraint). When false, full-purge eligible.
@@ -190,91 +180,119 @@ def _candidate_filter(cutoff):
     # A node a "Delete all my writing" hid (#268) is the purge's: it
     # comes back whole on a restore, or the purge deletes it with
     # everything else the request hid.
+    # Ids only, read in full before the loop: the loop commits per node,
+    # and a commit closes the server-side cursor a streamed query reads
+    # through on Postgres (see the module docstring).
     from backend.utils.hidden_rows import hidden_ids
-    return (
-        Node.deleted_at <= cutoff,
-        ~Node.id.in_(hidden_ids("node")),
-        or_(Node.content.isnot(None), ~has_any_child),
+    candidate_ids = [nid for (nid,) in (
+        db.session.query(Node.id)
+        .filter(Node.deleted_at <= cutoff)
+        .filter(~Node.id.in_(hidden_ids("node")))
+        .filter(or_(
+            Node.content.isnot(None),
+            ~has_any_child,
+        ))
+        .order_by(Node.deleted_at.asc(), Node.id.asc())
+    )]
+
+    purged = 0
+    wiped = 0
+    errors = 0
+    audio_files = 0
+    audio_errors = 0
+    for node_id in candidate_ids:
+        try:
+            # Locked until this node's commit or rollback: a restore
+            # (re-import, share republish) still uncommitted when the
+            # node's turn comes is waited for, then seen here, instead
+            # of the DELETE or the wipe landing on the restored row.
+            node = db.session.get(Node, node_id, with_for_update=True,
+                                  populate_existing=True)
+            if (node is None or node.deleted_at is None
+                    or node.deleted_at > cutoff):
+                # Gone, or restored, since the ids were read.
+                db.session.rollback()
+                continue
+            child_count = Node.query.filter_by(parent_id=node.id).count()
+            if child_count == 0:
+                audio = _full_purge(node)
+                purged += 1
+            elif node.content is not None:
+                audio = _wipe_content_and_versions(node)
+                wiped += 1
+            else:
+                # Stable tombstone, content already None, children
+                # still exist — skip until next descendant cleanup pass.
+                db.session.rollback()  # releases the row lock
+                continue
+            db.session.commit()
+            audio_files += audio.files
+            audio_errors += 1 if audio.failed else 0
+        except Exception:
+            db.session.rollback()
+            logger.exception(
+                "cleanup_deleted_nodes failed on node_id=%s", node_id,
+            )
+            errors += 1
+            continue
+
+    # Deleted artifacts (#603) go for good after the same grace
+    # period, with the sessions' pins to their versions.
+    from backend.utils.artifact_deletion import purge_deleted_artifacts
+    artifacts = purge_deleted_artifacts(cutoff)
+
+    sweep = _sweep_orphaned_audio(now)
+
+    logger.info(
+        "cleanup_deleted_nodes: purged=%d wiped=%d errors=%d "
+        "audio_files_deleted=%d audio_errors=%d "
+        "artifact_versions_purged=%d artifact_errors=%d "
+        "orphan_folders_deleted=%d orphan_files_deleted=%d "
+        "orphan_files_failed=%d orphan_sweep_failed=%s",
+        purged, wiped, errors, audio_files, audio_errors,
+        artifacts["purged"], artifacts["errors"],
+        sweep["folders"], sweep["files"], sweep["failed"], sweep["crashed"],
     )
+    return {"purged": purged, "wiped": wiped, "errors": errors,
+            "audio_files_deleted": audio_files,
+            "audio_errors": audio_errors,
+            "artifact_versions_purged": artifacts["purged"],
+            "artifact_errors": artifacts["errors"],
+            "orphan_folders_deleted": sweep["folders"],
+            "orphan_files_deleted": sweep["files"],
+            "orphan_files_failed": sweep["failed"],
+            "orphan_sweep_failed": sweep["crashed"]}
 
 
-# Candidates looked at again, and then processed, per batch.
-CLEANUP_BATCH_SIZE = 100
-
-
-def _candidate_ids(cutoff):
-    """The ids of today's candidates, oldest deletion first. Ids only,
-    fetched in full before anything is committed: the loop commits per
-    node, and on Postgres a commit closes a streaming (yield_per) cursor,
-    which used to end every run after its first 100 rows with "named
-    cursor isn't valid anymore"."""
-    return [nid for (nid,) in db.session.query(Node.id).filter(
-        *_candidate_filter(cutoff)).order_by(
-        Node.deleted_at.asc(), Node.id.asc())]
-
-
-def _still_candidates(ids, cutoff):
-    """The ids of *ids* that are still candidates now, in their order:
-    a node restored or hidden since the first select is left alone."""
-    fresh = {nid for (nid,) in db.session.query(Node.id).filter(
-        Node.id.in_(ids), *_candidate_filter(cutoff))}
-    return [nid for nid in ids if nid in fresh]
+def _sweep_orphaned_audio(now):
+    """Run the audio sweep (backend/utils/audio_sweep.py) for the files
+    left behind, after the nodes are done. Its errors are logged and
+    returned, never raised: the node cleanup has committed and goes on
+    whatever the sweep meets."""
+    out = {"folders": 0, "files": 0, "failed": 0, "crashed": False}
+    try:
+        from backend.utils.audio_sweep import sweep
+        result = sweep(apply=True, now=now, measure_kept=False)
+    except Exception:
+        db.session.rollback()
+        logger.exception("cleanup_deleted_nodes: audio sweep failed")
+        out["crashed"] = True
+        return out
+    out.update(folders=result["done"][0], files=result["done"][1],
+               failed=result["failed"])
+    if result["failed"]:
+        ids = result["failed_ids"]
+        logger.error(
+            "cleanup_deleted_nodes: audio sweep: %d audio file(s) not "
+            "deleted (%s) in %d folder(s), e.g. ids=%s; retried on the "
+            "next run",
+            result["failed"], ", ".join(result["errors"]), len(ids),
+            ids[:20])
+    return out
 
 
 @celery.task(name='backend.tasks.node_cleanup.cleanup_deleted_nodes')
 def cleanup_deleted_nodes():
     """Daily cleanup: wipe content + finalize purge for soft-deleted nodes."""
     with flask_app.app_context():
-        cutoff = datetime.utcnow() - timedelta(days=SOFT_DELETE_GRACE_DAYS)
-        ids = _candidate_ids(cutoff)
-
-        purged = 0
-        wiped = 0
-        errors = 0
-        audio_folders = 0
-        for start in range(0, len(ids), CLEANUP_BATCH_SIZE):
-            for nid in _still_candidates(
-                    ids[start:start + CLEANUP_BATCH_SIZE], cutoff):
-                outcome, audio = _clean_one(nid, cutoff)
-                if outcome == "purged":
-                    purged += 1
-                elif outcome == "wiped":
-                    wiped += 1
-                elif outcome == "error":
-                    errors += 1
-                # The rows are committed; now the files (#541).
-                if audio is not None:
-                    audio_folders += remove_node_audio(audio)
-
-        logger.info(
-            "cleanup_deleted_nodes: purged=%d wiped=%d errors=%d "
-            "audio_folders=%d",
-            purged, wiped, errors, audio_folders,
-        )
-        return {"purged": purged, "wiped": wiped, "errors": errors,
-                "audio_folders": audio_folders}
-
-
-def _clean_one(nid, cutoff):
-    """Purge or wipe node *nid* and commit. Returns (outcome, NodeAudio or
-    None); the outcome is "purged", "wiped", "skipped" or "error". One
-    bad row's exception is logged and rolled back, never raised."""
-    try:
-        node = db.session.get(Node, nid)
-        if node is None or node.deleted_at is None \
-                or node.deleted_at > cutoff:
-            return "skipped", None   # gone, or restored meanwhile
-        audio, outcome = None, "skipped"
-        child_count = Node.query.filter_by(parent_id=node.id).count()
-        if child_count == 0:
-            audio, outcome = _full_purge(node), "purged"
-        elif node.content is not None:
-            audio, outcome = _wipe_content_and_versions(node), "wiped"
-        # Else: stable tombstone, content already None, children
-        # still exist — skip until next descendant cleanup pass.
-        db.session.commit()
-        return outcome, audio
-    except Exception:
-        db.session.rollback()
-        logger.exception("cleanup_deleted_nodes failed on node_id=%s", nid)
-        return "error", None
+        return finalize_deleted_nodes()

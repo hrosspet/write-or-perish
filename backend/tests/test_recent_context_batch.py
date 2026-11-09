@@ -906,10 +906,10 @@ def test_a_check_between_claim_and_save_does_not_resubmit_the_user(
     inner = []
     real_apply = rc._apply_item
 
-    def a_check_runs_meanwhile(item, result, batch_id):
+    def a_check_runs_meanwhile(item, result, batch_id, **kw):
         assert user.id not in rc._users_in_pending_batches()
         inner.append(_check(rc))
-        return real_apply(item, result, batch_id)
+        return real_apply(item, result, batch_id, **kw)
     monkeypatch.setattr(rc, "_apply_item", a_check_runs_meanwhile)
 
     assert _collect_with(rc, monkeypatch, _summary(user))["collected"] == 1
@@ -1062,3 +1062,44 @@ def test_a_refusal_stop_is_reported_as_refused_not_cut_off(
                                  - timedelta(hours=2)})
         _db.session.commit()
     assert stops and stops[-1]["cause"] == "refused by the model"
+
+
+def test_a_policy_blocked_item_stops_the_user_for_good(
+        app, rc, world, monkeypatch):
+    """2026-11-04: an item the provider's content-policy filter blocked
+    is final. Nothing saved or billed, the block is recorded and
+    reported, and no later check sends it again: not after the 24 h an
+    outage waits, not after a new profile version."""
+    from backend.utils import refusal_backoff
+    reports = []
+    monkeypatch.setattr(refusal_backoff, "report_policy_block",
+                        lambda *a: reports.append(a))
+    user = _user("flagged")
+    _previous_summary(user)
+    assert _check(rc)["submitted"] == 1
+    # The request names its user (the OpenAI safety identifier).
+    [requests] = world["submitted"]
+    assert [r["user_id"] for reqs in requests.values() for r in reqs] == [
+        user.id]
+
+    class Collected(dict):
+        blocked = {f"recent_context_{user.id}": "bio_policy"}
+    monkeypatch.setattr(rc, "batch_check_and_collect",
+                        lambda batch_ids, api_keys: (Collected(), {}, {}))
+    rc._collect_recent_context_batches()
+
+    [job] = _job_for(user)
+    assert job.items[0]["outcome"] == "blocked"
+    assert job.items[0]["billed"] is False
+    assert job.items[0]["policy_code"] == "bio_policy"
+    assert _shown_summary(user) == "PREVIOUS CONTEXT"
+    [row] = APICostLog.query.filter_by(user_id=user.id).all()
+    assert row.request_ref == "policy_block:bio_policy"
+    assert row.cost_microdollars == 0
+    assert [r[:2] for r in reports] == [(user.id, "bio_policy")]
+
+    _age_failures(timedelta(hours=25))
+    assert _check(rc)["submitted"] == 0
+    _new_profile(user)
+    assert _check(rc)["submitted"] == 0
+    assert len(world["submitted"]) == 1

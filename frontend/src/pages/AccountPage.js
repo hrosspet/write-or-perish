@@ -9,6 +9,8 @@ import { emailState } from "../utils/emailState";
 import DeleteWritingDialog from "../components/DeleteWritingDialog";
 import DeleteAccountDialog from "../components/DeleteAccountDialog";
 import DisconnectXDialog from "../components/DisconnectXDialog";
+import BothProvidersDialog, { ownProviderName } from "../components/BothProvidersDialog";
+import { noteBothProvidersLater } from "../hooks/useBothProvidersQuestion";
 import {
   formatDeletionDate, reloadUser, restoreWriting, writingRestorable,
   X_REMOVE_ACCESS_STEPS,
@@ -291,6 +293,11 @@ export default function AccountPage() {
   const [gleanSaving, setGleanSaving] = useState(false);
   const [aiUsageSaving, setAiUsageSaving] = useState(false);
   const [craftSaving, setCraftSaving] = useState(false);
+  const [providersSaving, setProvidersSaving] = useState(false);
+  const [providersError, setProvidersError] = useState("");
+  // The both-providers question (#599) after a preferred-model change,
+  // while the user has never answered it (user.ask_both_providers.model).
+  const [askProviders, setAskProviders] = useState(false);
 
   const usernameValid = (val) => {
     const v = val.trim();
@@ -332,17 +339,39 @@ export default function AccountPage() {
   );
 
   const handleModelChange = useCallback(
-    async (model) => {
+    async (model, how) => {
       setSelectedModel(model);
       try {
         const res = await api.put("/dashboard/user", { preferred_model: model });
-        if (res.data.user) setUser(res.data.user);
+        if (res.data.user) {
+          setUser(res.data.user);
+          // Only after the user's own pick, not the default the picker
+          // fills in when the page opens.
+          if (how?.picked && res.data.user.ask_both_providers?.model) {
+            setAskProviders(true);
+          }
+        }
       } catch (e) {
         // Silently fall back to localStorage
       }
     },
     [setUser]
   );
+
+  // The both-providers answer (#599) says when it did not save: a user
+  // who changes yes to no must know if the no did not reach the server.
+  const saveBothProviders = async (value) => {
+    setProvidersSaving(true);
+    setProvidersError("");
+    try {
+      const res = await api.put("/dashboard/user", { profile_both_providers: value });
+      if (res.data.user) setUser(res.data.user);
+    } catch (e) {
+      setProvidersError("Couldn't save your answer. Please try again.");
+    } finally {
+      setProvidersSaving(false);
+    }
+  };
 
   const saveField = async (field, value, setSaving) => {
     setSaving(true);
@@ -698,6 +727,42 @@ export default function AccountPage() {
         </div>
       </div>
 
+      {/* Both providers for background tasks (#599). Anchor for the
+          question's link: /account#background-tasks. Until the user
+          answers, no option is selected: no answer is not a no. */}
+      <div id="background-tasks" style={{ ...rowStyle, scrollMarginTop: "72px" }}>
+        <div style={labelStyle}>Background tasks</div>
+        <select
+          aria-label="Background tasks"
+          value={user.profile_both_providers === true ? "both"
+            : user.profile_both_providers === false ? "one" : ""}
+          disabled={providersSaving}
+          onChange={(e) => saveBothProviders(e.target.value === "both")}
+          style={selectStyle}
+        >
+          {user.profile_both_providers == null && (
+            <option value="" disabled>Not answered yet</option>
+          )}
+          <option value="both">Anthropic and OpenAI</option>
+          <option value="one">{ownProviderName(user)} only</option>
+        </select>
+        {providersError && (
+          <div role="alert" style={{ ...helperStyle, color: "var(--accent)" }}>
+            {providersError}
+          </div>
+        )}
+        <div style={helperStyle}>
+          Loore does some work in the background, such as building your
+          profile from your writing. In our tests, using both gave the best
+          results. With both, your writing can be read by OpenAI's and
+          Anthropic's models.
+          With {ownProviderName(user)} only, all of
+          it stays with {ownProviderName(user)}
+          {user.profile_both_providers == null
+            ? ", as it does until you answer." : "."}
+        </div>
+      </div>
+
       <div style={rowStyle}>
         <div style={labelStyle}>Default privacy</div>
         <select
@@ -869,6 +934,13 @@ export default function AccountPage() {
 
       {/* ─── Delete all my writing (#268). Anchor: /account#delete-data,
           where the reminder banner links. ─── */}
+      {askProviders && (
+        <BothProvidersDialog onClose={(answered) => {
+          if (!answered) noteBothProvidersLater();
+          setAskProviders(false);
+        }} />
+      )}
+
       <DeleteWritingSection
         id="delete-data"
         deletion={user.data_deletion}

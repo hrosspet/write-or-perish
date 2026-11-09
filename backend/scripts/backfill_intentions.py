@@ -288,7 +288,8 @@ def backfill_user(app, user, template, model_id, dry_run=False):
             return
         try:
             response = LLMProvider.get_completion(
-                model_id, messages, api_keys, max_tokens=max_output)
+                model_id, messages, api_keys, max_tokens=max_output,
+                user_id=user.id)
             break
         except PromptTooLongError as e:
             if attempt == MAX_RETRIES:
@@ -353,7 +354,7 @@ def _submit_batch_for(app, user, template, model_id, budget, chronological,
     cfg = app.config["SUPPORTED_MODELS"][model_id]
     req = {"custom_id": f"int-u{user.id}", "model_id": model_id,
            "api_model": cfg["api_model"], "messages": messages,
-           "max_tokens": token_limits(model_id)[1]}
+           "max_tokens": token_limits(model_id)[1], "user_id": user.id}
     batch_ids = batch_submit({cfg["provider"]: [req]}, batch_keys, "intentions")
     if not batch_ids:
         print(f"  ✗ user {user.id}: batch submit failed (see logs)")

@@ -41,7 +41,9 @@ CACHE_TTL_SECONDS = 24 * 3600
 # Entries from before are never read as verdict-less hits; they expire.
 # v3: renders end without trailing whitespace (system_block_text); a v2
 # render ending in a newline would keep the ongoing-thread warm missing.
-_KEY_PREFIX = "wop:sysprompt:v3:"
+# v4: inline artifacts carry their version header (#604); a v3 render
+# would leave an ongoing thread without the versions its writes name.
+_KEY_PREFIX = "wop:sysprompt:v4:"
 
 # *unlicensed* is why the render's own rows keep a payload off the
 # training key (``ContextUsage.reason``), or None when they are all

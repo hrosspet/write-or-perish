@@ -174,6 +174,39 @@ class User(db.Model, UserMixin):
     profile_cap_held = db.Column(
         db.Boolean, nullable=False, default=False,
         server_default=db.text("false"))
+    # True while this user's batch profile work waits because the
+    # provider's batch queue was full (a refused submit, or an OpenAI batch
+    # failed on its enqueued-token limit). The hourly seeder sends it again,
+    # also for a pre-filled account not yet activated, as for the cap hold.
+    profile_work_held = db.Column(
+        db.Boolean, nullable=False, default=False,
+        server_default=db.text("false"))
+    # When the user's last import finished (or a Twitter import last
+    # committed a batch), while the profile build it leads to waits for
+    # the imports to stop (#598): the batch seeder builds only after
+    # MIN_INACTIVITY with no import and no new entry, and clears it then.
+    profile_import_quiet_from = db.Column(db.DateTime, nullable=True)
+    # The user agreed that their writing may reach both providers' models
+    # for a large profile build (Peter, 2026-11-05). Set only by the user's
+    # own answer to the question of #599 (the dialog, or Account), through
+    # PUT /dashboard/user. False: a build reads private writing only with
+    # models of the provider of the user's preferred model.
+    profile_both_providers = db.Column(
+        db.Boolean, nullable=False, default=False,
+        server_default=db.text("false"))
+    # When the user last answered that question (UTC). NULL: never
+    # answered, which is "we don't know", not "no"; the flag above is then
+    # false. The rules for asking read it
+    # (utils/profile_providers.both_providers_ask).
+    profile_both_providers_answered_at = db.Column(db.DateTime, nullable=True)
+    # Set for good once a profile pass read writing of this user that is
+    # not public-only (utils/profile_providers.note_private_read): their
+    # profiles may hold private writing even after those entries are
+    # purged, so the user's builds never count as public-only again.
+    # Nothing clears it automatically.
+    profile_private_read = db.Column(
+        db.Boolean, nullable=False, default=False,
+        server_default=db.text("false"))
     # Measured billed input tokens per stored content unit (Node.token_count)
     # on the user's last profile chunk, tagged with the tokenizer family it
     # was measured on (backend/tasks/exports.TOKENIZER_FAMILIES). The chunk
@@ -360,6 +393,32 @@ class ProfileBatchJob(db.Model):
     submitted_at = db.Column(
         db.DateTime, nullable=False, default=datetime.utcnow)
     collected_at = db.Column(db.DateTime, nullable=True)
+
+
+class ProfileBlockedRange(db.Model):
+    """A stretch of a user's writing that the provider's content-policy
+    filter blocked in a profile window (Peter, 2026-11-04: "skip the
+    flagged windows, but finish their profile"). Every later window plan,
+    in any set and however long after, cuts around it and skips exactly
+    this range without a request (tasks/profile_windows
+    .cut_around_blocked), entries imported into it later included. Only
+    ``lift_blocked_ranges`` (a shell call) lets it be read again. Dates
+    and the provider's code only, no content."""
+    __tablename__ = "profile_blocked_range"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=False, index=True)
+    # The writing created after range_start (None: from the first
+    # writing) up to range_end inclusive: the blocked window's start and
+    # cutoff.
+    range_start = db.Column(db.DateTime, nullable=True)
+    range_end = db.Column(db.DateTime, nullable=False)
+    code = db.Column(db.String(64), nullable=False)
+    model_id = db.Column(db.String(64), nullable=True)
+    created_at = db.Column(db.DateTime, nullable=False,
+                           default=datetime.utcnow)
+    lifted_at = db.Column(db.DateTime, nullable=True)
 
 
 class Node(db.Model):
@@ -584,13 +643,15 @@ class Node(db.Model):
         """Load pinned UserArtifact instances ({kind: artifact}).
 
         Multiple "user_artifact" rows may exist per node (one per kind,
-        pinned at session start — #191).
+        pinned at session start — #191). A version the user deleted
+        (#603) is left out: the session's instructions, exports and
+        quote preambles no longer carry it.
         """
         result = {}
         for a in self.context_artifacts:
             if a.artifact_type != "user_artifact":
                 continue
-            row = UserArtifact.query.get(a.artifact_id)
+            row = UserArtifact.get_live(a.artifact_id)
             if row is not None:
                 result[row.kind] = row
         return result
@@ -911,6 +972,16 @@ class UserProfile(db.Model):
     # user's version through it (tasks/exports.carried_user_version). A
     # plain id, not a foreign key: it only points within one user's rows.
     merged_profile_id = db.Column(db.Integer, nullable=True)
+    # Independent versions of a large build (#545,
+    # backend/tasks/profile_windows.py): the window set a "window",
+    # "window_skip", "group" or final "integration" row belongs to. Every
+    # row of one set carries the same id; a later update adds windows to
+    # the user's current set.
+    window_set = db.Column(db.String(32), nullable=True, index=True)
+    # The exclusive start of the writing a window, skipped window or group
+    # covers: the previous window's cutoff. None on the first window of a
+    # set built from the start of the writing.
+    covers_start = db.Column(db.DateTime, nullable=True)
 
     # --- Voice‑Mode fields ---
     audio_tts_url = db.Column(db.String, nullable=True)
@@ -1033,6 +1104,13 @@ class UserArtifact(db.Model):
     privacy_level = db.Column(db.String(16), nullable=False, default="private")
     # Artifacts are LLM working memory — must be AI-readable to function.
     ai_usage = db.Column(db.String(16), nullable=False, default="chat")
+    # Soft delete (#603), as for nodes: the user's delete stamps every
+    # version of the kind at once, and from then on no reader sees them
+    # (read through live() / get_live() / latest_for()). The daily
+    # cleanup deletes the rows after SOFT_DELETE_GRACE_DAYS
+    # (backend/utils/artifact_deletion.py). A new artifact of the same
+    # kind starts again at v1: version numbers count live rows only.
+    deleted_at = db.Column(db.DateTime, nullable=True, index=True)
 
     user = db.relationship("User", backref="artifacts")
 
@@ -1082,6 +1160,13 @@ class UserArtifact(db.Model):
     # artifact routes.
     RESERVED_KINDS = ("todo", "profile", "recent_context")
 
+    # Kinds the user cannot delete (#603): the built-ins, which the list
+    # would bring back empty at once, and the saved-references digest
+    # (backend/tasks/external_digest.py DIGEST_KIND), which the nightly
+    # job rebuilds. Only custom artifacts (made by the user or the AI)
+    # can be deleted.
+    UNDELETABLE_KINDS = frozenset(DEFAULT_KINDS) | {"external_digest"}
+
     def set_content(self, plaintext):
         self.content = encrypt_content(plaintext)
 
@@ -1089,14 +1174,42 @@ class UserArtifact(db.Model):
         return decrypt_content(self.content)
 
     @classmethod
+    def is_deletable_kind(cls, kind):
+        return kind not in cls.UNDELETABLE_KINDS
+
+    @classmethod
+    def live(cls):
+        """Query of the versions that are not deleted (#603). Every
+        reader of artifacts starts here, so a deleted artifact is gone
+        everywhere from the moment of the delete."""
+        return cls.query.filter(cls.deleted_at.is_(None))
+
+    @classmethod
+    def get_live(cls, artifact_id):
+        """The version with *artifact_id*, or None when there is none or
+        it was deleted (#603). For ids kept elsewhere: session pins
+        (NodeContextArtifact) and the ids in tool_calls_meta."""
+        if artifact_id is None:
+            return None
+        row = cls.query.get(artifact_id)
+        if row is None or row.deleted_at is not None:
+            return None
+        return row
+
+    @classmethod
     def latest_for(cls, user_id, kind):
-        return cls.query.filter_by(user_id=user_id, kind=kind).order_by(
+        return cls.live().filter_by(user_id=user_id, kind=kind).order_by(
             cls.created_at.desc(), cls.id.desc()).first()
+
+    @classmethod
+    def version_count(cls, user_id, kind):
+        """How many live versions the kind has: the latest one's number."""
+        return cls.live().filter_by(user_id=user_id, kind=kind).count()
 
     @classmethod
     def latest_per_kind(cls, user_id):
         """Latest version of every artifact kind the user has, as a dict."""
-        rows = cls.query.filter_by(user_id=user_id).order_by(
+        rows = cls.live().filter_by(user_id=user_id).order_by(
             cls.created_at.asc(), cls.id.asc()).all()
         latest = {}
         for row in rows:

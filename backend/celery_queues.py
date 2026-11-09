@@ -76,6 +76,8 @@ TASK_QUEUES = {
     "backend.tasks.profile_batch.seed_profile_batches": _B,
     "backend.tasks.profile_batch.seed_profile_batch_for_user": _B,
     "backend.tasks.profile_batch.poll_profile_batches": _B,
+    # Large builds: render a window set and submit it (#545).
+    "backend.tasks.profile_windows.advance_profile_windows": _B,
     "backend.tasks.recent_context.check_pending_recent_context_updates": _B,
     "backend.tasks.recent_context.collect_recent_context_batches": _B,
     "backend.tasks.recent_context.generate_recent_context": _B,
@@ -100,7 +102,8 @@ TASK_QUEUES = {
     "backend.tasks.external_sync.sync_all_twitter_bookmarks": _B,
     "backend.tasks.external_sync.verify_public_source_sweep": _B,
 
-    # Sweeps and deletion.
+    # Sweeps, checks and deletion.
+    "backend.tasks.disk_monitor.check_disk_usage": _B,
     "backend.tasks.embeddings.sweep_embeddings": _B,
     "backend.tasks.node_cleanup.cleanup_deleted_nodes": _B,
     "backend.tasks.user_purge.process_user_data_purges": _B,

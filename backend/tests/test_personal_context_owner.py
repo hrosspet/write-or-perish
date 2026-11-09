@@ -194,7 +194,9 @@ def test_the_requesters_own_placeholder_still_resolves_to_their_own_data(app, pe
     _ask(bob_reply, bob)
 
     sent = _sent_text()
-    assert "bob asks about BOB MEMORY" in sent
+    # With its version header (#604).
+    assert ("bob asks about [memory · v1, as of the start of this "
+            "conversation]\nBOB MEMORY") in sent
     for marker in _markers("ALICE"):
         assert marker not in sent, marker
 
@@ -439,8 +441,14 @@ def test_no_form_in_someone_elses_prompt_is_filled(app, people):  # noqa: F811
         assert placeholder not in block, placeholder
     for lookalike in LOOKALIKES:
         assert lookalike in block
-    assert ("bob asks BOB PROFILE BOB MEMORY BOB INTENTIONS BOB SCRATCH"
-            in _sent_text())
+    # Inline artifacts carry their version header (#604).
+    assert ("bob asks BOB PROFILE "
+            "[memory · v1, as of the start of this conversation]\n"
+            "BOB MEMORY "
+            "[intentions · v1, as of the start of this conversation]\n"
+            "BOB INTENTIONS "
+            "[scratchpad · v1, as of the start of this conversation]\n"
+            "BOB SCRATCH" in _sent_text())
 
 
 def test_no_nested_form_in_the_pre_warm_for_someone_else_is_filled(app, people, fake_redis, monkeypatch):  # noqa: F811

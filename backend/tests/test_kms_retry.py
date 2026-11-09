@@ -116,3 +116,50 @@ def test_encrypt_content_round_trips_through_retry(monkeypatch):
     ct = enc.encrypt_content("hello secret")
     assert ct.startswith(enc.ENCRYPTED_PREFIX_V2)
     assert enc.decrypt_content(ct) == "hello secret"
+
+
+def _remote_disconnected():
+    """What the REST transport raised when KMS closed a keep-alive
+    connection the client still held (2026-11-07)."""
+    import http.client
+    import requests
+    import urllib3
+    cause = http.client.RemoteDisconnected(
+        "Remote end closed connection without response")
+    protocol = urllib3.exceptions.ProtocolError("Connection aborted.", cause)
+    return requests.exceptions.ConnectionError(protocol)
+
+
+def test_a_dropped_connection_is_retried_on_a_new_client(monkeypatch):
+    """requests' ConnectionError (RemoteDisconnected inside) is transient:
+    retried with backoff, and each retry gets a new client, so a new
+    session and connection pool."""
+    calls = {"n": 0, "resets": 0}
+
+    class _Resp:
+        plaintext = b"dek"
+
+    def decrypt(request=None):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise _remote_disconnected()
+        return _Resp()
+    client = MagicMock()
+    client.decrypt.side_effect = decrypt
+    monkeypatch.setattr(enc, "_get_kms_client", lambda: client)
+
+    def reset():
+        calls["resets"] += 1
+    monkeypatch.setattr(enc, "_reset_kms_client", reset)
+    resp = enc._kms_decrypt({"name": "k", "ciphertext": b"x"})
+    assert resp.plaintext == b"dek"
+    assert calls == {"n": 3, "resets": 2}
+
+
+def test_connection_errors_count_as_transient():
+    import http.client
+    assert enc._is_transient_kms_error(_remote_disconnected())
+    assert enc._is_transient_kms_error(http.client.RemoteDisconnected("x"))
+    assert enc._is_transient_kms_error(ConnectionResetError(104, "reset"))
+    # A plain bug is still raised at once.
+    assert not enc._is_transient_kms_error(ValueError("bad request shape"))

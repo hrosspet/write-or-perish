@@ -39,7 +39,7 @@ from backend.utils.cost import llm_cost_log_fields
 from backend.utils.chunk_plan import UPDATE_THRESHOLD_UNITS
 from backend.utils.llm_batch import (
     BATCH_JOB_MAX_AGE, apply_batch_key_override, batch_check_and_collect,
-    batch_submit,
+    batch_submit, blocked_items,
 )
 from backend.utils import refusal_backoff
 
@@ -53,12 +53,12 @@ MIN_GENERATION_INTERVAL = timedelta(minutes=5)
 
 
 def _get_latest_chat_profile(user_id):
-    """Return the latest profile with ai_usage in ('chat', 'train'), or None."""
+    """Return the latest profile with ai_usage in ('chat', 'train'), or
+    None. A large build's windows and groups are not profiles (#545)."""
+    from backend.utils.profile_versions import current_profile_query
     return (
-        UserProfile.query
-        .filter_by(user_id=user_id)
+        current_profile_query(user_id)
         .filter(UserProfile.ai_usage.in_(AI_ALLOWED))
-        .order_by(UserProfile.created_at.desc())
         .first()
     )
 
@@ -476,8 +476,9 @@ def _submit_batch(built):
         return 0
     requests_by_provider = {}
     for b in built:
+        # The user the request is for: its OpenAI safety identifier.
         requests_by_provider.setdefault(b["provider"], []).append(
-            b["request"])
+            dict(b["request"], user_id=b["meta"]["user_id"]))
     batch_ids = batch_submit(requests_by_provider, _batch_keys(),
                              "recent_context")
     submitted = 0
@@ -561,13 +562,22 @@ def _submit_due_users():
     return {"status": "ok", "submitted": submitted}
 
 
-def _apply_item(item, result, batch_id):
+def _apply_item(item, result, batch_id, blocked_code=None):
     """Save one collected item's summary. Returns (outcome, billed): the
-    outcome is saved, refused (cut off before any text), failed or
-    skipped; billed is whether its cost row was written. Only billed
-    failures can stop a user until a new version
+    outcome is saved, refused (cut off before any text), failed, blocked
+    (the provider's content-policy filter, ``blocked_code``) or skipped;
+    billed is whether its cost row was written. Only billed failures can
+    stop a user until a new version, and a block stops them for good
     (utils/refusal_backoff.py)."""
     user_id = item["user_id"]
+    if blocked_code:
+        # Final (Peter, 2026-11-04): the block's cost row stops this
+        # user's recent context; nothing sends it again on its own.
+        item["policy_code"] = blocked_code
+        refusal_backoff.record_policy_block(
+            user_id, "recent_context", item.get("model_id"), blocked_code,
+            "recent context batch")
+        return "blocked", False
     if result is None:
         # Errored, expired or missing at the provider: not billed.
         logger.warning(
@@ -782,9 +792,11 @@ def _claim_and_apply(job, results, now):
     # job under the same lock, possibly after this run loaded the job.
     db.session.refresh(job)
     items = [dict(i) for i in job.items]
+    blocked = blocked_items(results)
     for item in items:
         item["outcome"], item["billed"] = _apply_item(
-            item, results.get(item["custom_id"]), batch_id)
+            item, results.get(item["custom_id"]), batch_id,
+            blocked_code=blocked.get(item["custom_id"]))
     job.items = items
     db.session.commit()
     _report_unsaved(items)
@@ -862,7 +874,7 @@ def _generate_recent_context_impl(user_id, profile_id=None,
 
         try:
             response = LLMProvider.get_completion(
-                model_id, messages, api_keys
+                model_id, messages, api_keys, user_id=user_id
             )
             break
         except PromptTooLongError as e:

@@ -2146,6 +2146,225 @@ Kinds (one per entry and per table row):
 - **Applies to:** #453
 - **Rule:** candidate: an issue that lists options without a chosen one is "your call", not "ready to build"
 
+### 2026-10-20 · #414's real-model check: yes, when local Loore is free
+
+- **Kind:** testing
+- **Situation:** before #414 (profile edits survive updates and rebuilds) could go into a train, offered a check with real models on local Loore: a test account with a copy of a long profile as the user's edited version, one update and one full rebuild, about $1–3 on the local key. Local Loore is down for a minute while it switches branches.
+- **Prediction:** yes (85 %).
+- **Peter:** "good, but let's leave it for later when I'm not actively using local Loore. Mark it in my todos" · later the same day: "now is the right time to run it, I'm not using local Loore"
+- **Score:** hit. The check passed ($0.87) and found one wiring gap, fixed in #414 before its merge (a row in "Decided by the builder").
+- **Source:** Claude Code session 2026-10-20 (Opus 5.5)
+- **Applies to:** #414
+
+### 2026-10-20 · Integration designs: tested before choosing
+
+- **Kind:** product scope
+- **Situation:** after Peter ruled out a weighted view of the profile, the builder proposed a balanced core: chunk profiles merged only in equal pairs, the visible profile built from the core by prod's update step over the remaining writing, then weekly updates. Its diagrams listed a merge of unequal pieces as a design Peter had ruled out ("no way to weigh vibes").
+- **Prediction:** accepts the balanced core (45 %); wants a different scheme (40 %); wants to test first (15 %).
+- **Peter:** "I'd like to compare the following approaches for the Luna P_i partial profiles: - A with Luna 6 for integration, and Opus 5.5 for integration - C with Opus 5.5 for integration, and there should be an instruction for weighing the profiles and coverage data in the different versions - a variant of C, that would continue merging pairs of nearest possible weight"
+- **Score:** miss: he chose to test four merges of the same chunk profiles first, among them the merge of unequal pieces with an instruction to weigh coverage, and not the core with an update tail.
+- **Why it missed:** "no way to weigh vibes" was read as ruling out every merge of unequal pieces, so the design that kept them apart was expected to win. With the design open and each run under $5, he tests before he chooses.
+- **Source:** voice review in local Loore 2026-10-20 (Opus 5.5)
+- **Applies to:** #545
+
+### 2026-10-20 · #414 left out of train #548 after its check passed
+
+- **Kind:** process
+- **Situation:** train #548 was built before #414's real-model check had run, so its summary node listed #414 as not in the train. The check passed during the evening, and #414 was reviewed and green, but the plan was still to merge it after the train, in a deploy of its own; it overlapped the train in 9 files.
+- **Decision:** kept #414 out of the train after its check passed.
+- **Peter:** "btw reading 201560, the #414 is still not included there. Is that intentional?"
+- **Score:** miss. #414 was added to the train as its last commit and merged with it.
+- **Why it missed:** what went into the train was decided once, when it was built, and not looked at again when the reason for leaving #414 out had gone. Two deploys of overlapping changes cost more than one.
+- **Source:** Claude Code session 2026-10-20 (Opus 5.5)
+- **Applies to:** #414, #548
+
+### 2026-10-21 · Cc-opus also with the coverage line
+
+- **Kind:** testing
+- **Situation:** Peter asked for one more merge design, Cc-opus: the balanced pieces merged in time order. The builder ran it without C-opus's line that tells the merge to weigh each piece by how much writing it covers, so that the order would be the only difference from Cn-opus. Peter asked why. The answer gave the reason and its catch (the last merge sets 24 chunks against 2) and offered a variant with the line, about $0.30.
+- **Prediction:** yes, run it (60 %).
+- **Peter:** "why's that?" · "Could you now run Cc-opus, but with the coverage-weighing line?" · "only the fixed profiles"
+- **Score:** hit. Ran as Ccw-opus, on the round without the export's preamble only.
+- **Source:** Claude Code session 2026-10-21 (Opus 5.5)
+- **Applies to:** #545
+
+### 2026-10-21 · What runs on the chained versions
+
+- **Kind:** testing
+- **Situation:** a new run built the Luna chunk profiles as a chain, the way prod does, instead of independently. Asked which merges to run on it.
+- **Prediction:** prod's integration with Opus, A-opus (60 %); read only the last version (25 %); a C design (15 %).
+- **Peter:** "I'd like to see A-luna, A-opus, and one of C- designs. Which one do you think is the best based on my comments on the resulting profile versions?"
+- **Score:** partial: A-opus was in his list, with A-luna and one C design beside it. The builder recommended Cc-opus as the C design and ran it; that recommendation is not scored.
+- **Source:** Claude Code session 2026-10-21 (Opus 5.5)
+- **Applies to:** #545
+
+### 2026-10-21 · #545 merges with A-opus
+
+- **Kind:** product scope
+- **Situation:** after the chained run, Peter's own reading put Cc-opus slightly ahead; the blind evaluator put A-opus (prod's flat integration, by Opus 5.5) first and Cc-opus close behind, with Cc-opus making 3 errors and costing about 7 times as much. Asked which design #545 should use.
+- **Prediction:** A-opus (40 %); Cc-opus with labels saying that each chained version covers everything before it (35 %); more runs before deciding (25 %).
+- **Peter:** "I agree A-opus seems best overall. It was close second for me in both evaluations I ran, and when I look at the side by side comparison, plus the price, it seems best."
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-21 (Opus 5.5)
+- **Applies to:** #545, #589
+
+### 2026-10-21 · "Its A-opus did as well as the chained one"
+
+- **Kind:** process
+- **Situation:** a reply on large imports said that round 2's A-opus, merged from independent versions, did as well as the A-opus merged from chained versions. Each had come first in its own evaluation, scored on a different list of facts; nobody had compared the two. Whether versions can be made in parallel depended on the claim.
+- **Decision:** stated the two as equal without a direct comparison.
+- **Peter:** "did it? I think I'll need to re-read the two A-opus profiles"
+- **Score:** miss. The next reply said that the claim was stronger than the evidence and offered the direct comparison.
+- **Why it missed:** two first places in separate evaluations were read as a tie between them.
+- **Source:** voice review in local Loore 2026-10-21 (Opus 5.5)
+- **Applies to:** #545
+
+### 2026-10-21 · The new design's cost set against the chain on Opus
+
+- **Kind:** process
+- **Situation:** the same reply put the cost of merging independent versions in groups for the tester's import, about $2–4, "next to the $72 of the chain": a chain whose versions Opus writes. The experiments had just shown versions by GPT-6 Luna to be viable.
+- **Decision:** compared the new design with the chain on Opus.
+- **Peter:** "why are you counting $72 for the chain? That's for Opus, isn't it? How much is it for Luna that our experiments have just shown to be viable."
+- **Score:** miss. With Luna versions the chain costs about $2 for that import, and the merges become the main cost.
+- **Why it missed:** prod's current setup was taken as the baseline instead of the cheapest option the same day's results allowed, which made the new design look better than it was.
+- **Source:** voice review in local Loore 2026-10-21 (Opus 5.5)
+- **Applies to:** #545
+
+### 2026-10-21 · The two A-opus finals compared directly
+
+- **Kind:** testing
+- **Situation:** after that correction, offered a direct comparison of the two A-opus finals by the evaluator, on one list of facts: about 15 minutes, no model cost.
+- **Prediction:** yes (65 %).
+- **Peter:** "pls compare them"
+- **Score:** hit. The chain did better on recent events and the independent versions on biography and structure; most of the gap came from the prompts the two sets were written with (#544).
+- **Source:** Claude Code session 2026-10-21 (Opus 5.5); asked in local Loore
+- **Applies to:** #545, #544
+
+### 2026-10-21 · The prompt fixes go in before the rerun
+
+- **Kind:** product scope
+- **Situation:** two kinds of fix to the profile prompts were open. #544: update steps had lost the Shadow and Light map instructions since February; on 2026-10-20 the builder proposed fixing it before any model comparison, since a small model may not infer the structure the way the frontier models had. And two merge-prompt fixes: labels that say what each version covers, and the newest value wins for a fact that changes. Asked whether to make them now.
+- **Prediction:** fix #544 before the comparisons (80 %); the merge fixes now (80 %).
+- **Peter:** "yes, I was about to write that we should fix the bugs and then rerun both" · "to fairly compare the chained vs. independent profiles, we'd need to fix the update bug" · "oh and then there are the merge fixes - could we fix these bugs and then re-run both chained and independent luna + A-opus merge experiments?"
+- **Score:** hit + hit. Built as #586, together with #549.
+- **Source:** Claude Code session 2026-10-21 (Opus 5.5); the #544 question was first put on 2026-10-20
+- **Applies to:** #586, #544, #549
+
+### 2026-10-21 · A fair comparison at 26 versions first
+
+- **Kind:** testing
+- **Situation:** the direct comparison showed that the two sets of versions had been written with different prompts. Proposed folding a fair comparison into the scale test: about 150 versions made both ways on one fixed prompt, plus a line asking each version for its window's dated events, and both merge structures, about $10.
+- **Prediction:** yes, fold it into the scale test (70 %).
+- **Peter:** "we should fix the bugs and then rerun both" · "could we fix these bugs and then re-run both chained and independent luna + A-opus merge experiments?"
+- **Score:** partial: a comparison on one prompt, yes; but at the 26 versions already tested, with the fixes alone, no events line, and before the scale test.
+- **Why it missed:** three changes were bundled into one run. Peter kept them apart, so that the rerun shows what the fixes alone change.
+- **Source:** Claude Code session 2026-10-21 (Opus 5.5)
+- **Applies to:** #545, #586
+
+### 2026-10-21 · The rerun started before #586's review was done
+
+- **Kind:** process
+- **Situation:** the plan for #586 (the prompt fixes) was a second agent's review and, in parallel, a rerun of the 26 chained and 26 independent Luna versions with the PR's code, each merged by A-opus (about $1.50). The plan was stated in a reply, not asked; once the run had started, a status line said so.
+- **Decision:** started the rerun while the review was still running.
+- **Peter:** "shouldn't this wait for the review?"
+- **Score:** partial: the review changed only the merge prompt, so the 52 versions stayed valid and were kept; both merges were run again on the reviewed prompt (about $0.75), and the one finished before the review was set aside.
+- **Why it missed:** time was saved at the risk of testing prompts that would not ship. A run that tests a PR's prompts depends on that PR's review.
+- **Source:** Claude Code session 2026-10-21 (Opus 5.5)
+- **Applies to:** #586
+
+### 2026-10-21 · The rerun started before #586's review was done: ask or decide
+
+- **Kind:** escalation
+- **Situation:** a rerun that tests #586's prompts started while the review of #586 was still running.
+- **Decision:** decided without asking Peter
+- **Peter:** "shouldn't this wait for the review?"
+- **Score:** miss. The reply before had stated the order ("In parallel, an agent uses the PR's code to rerun…") instead of putting it to him as a choice.
+- **Source:** Claude Code session 2026-10-21 (Opus 5.5)
+- **Applies to:** #586
+
+### 2026-10-21 · The rerun's results wait for the review
+
+- **Kind:** process
+- **Situation:** offered two ways on: let the run finish but hold its evaluation until the review is done, and run it again if the review changes prompt text (about $1.50); or stop the run now and start it after the review.
+- **Prediction:** the hold (60 %); stop now (40 %).
+- **Peter:** "ok, go ahead as above"
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-21 (Opus 5.5)
+- **Applies to:** #586
+
+### 2026-10-21 · The two earlier A-opus finals scored again with the new ones
+
+- **Kind:** testing
+- **Situation:** after Peter corrected five facts in the scoring list, the evaluation of the two new A-opus finals (fixed prompts, chained and independent) also scored the two earlier A-opus finals on the corrected list: one list for all four, and the two independent runs show how much a result moves from run to run. Added without asking, at no model cost, and said so before it ran.
+- **Decision:** four finals in the evaluation instead of two.
+- **Peter:** "what 4? I thought we'd get 2" · "great, could you pls give me the table summary as before? Just for the 4? In loore"
+- **Score:** hit. Unlike the noise-baseline run of 2026-10-20, the addition cost nothing and was said before it ran.
+- **Source:** Claude Code session 2026-10-21 (Opus 5.5)
+- **Applies to:** #545
+
+### 2026-10-21 · One more test: independent versions that list each window's dated events
+
+- **Kind:** testing
+- **Situation:** after the rerun, the independent versions still missed recent events that the chain carried. Asked whether to run one more test before the scale test: independent Luna versions whose prompt asks for a dated list of each window's events, merged by A-opus and scored on the same list of facts, about $0.70. The section's length, about 300 tokens, was the builder's choice.
+- **Prediction:** yes (75 %).
+- **Peter:** "yes pls"
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-21 (Opus 5.5)
+- **Applies to:** #545, #589
+
+### 2026-10-21 · Version and merge models in pairs, one pair per provider
+
+- **Kind:** provider
+- **Situation:** the pair tested so far, GPT-6 Luna versions with an Opus merge, can't serve any real user, because a user's writing goes only to their own provider's models. Pointed this out and named the pairs to test instead: Haiku 5.5 versions with an Opus merge for Anthropic users, and Luna versions merged by GPT-6.1 Sol or GPT-6 Astra for OpenAI users.
+- **Prediction:** Peter agrees and wants a pair per provider (70 %).
+- **Peter:** "I'd like to see these tests: - A-opus merge over Haiku 5.5 chunks - Sol 6.1 used instead of Opus in the A-opus merge over Luna profiles"
+- **Score:** hit: his next tests were the two pairs.
+- **Source:** Claude Code session 2026-10-21 (Opus 5.5)
+- **Applies to:** #589
+- **Rule:** A user's model is theirs
+
+### 2026-10-21 · The scale test: one merge against two levels
+
+- **Kind:** testing
+- **Situation:** for imports of about 14M units, proposed a scale test: about 150 Luna versions of Peter's history, merged once by Opus and by a two-level merge (groups of at most 30, then one merge of the groups). Also asked whether to make the versions both chained and independent, about $5 more.
+- **Prediction:** run the scale test (75 %); with both chained and independent versions (55 %).
+- **Peter:** "the 150 luna profiles on smaller chunks, merged using the A design done by Sol 6.1 if the experiment above finds it's ~similar or better than Opus 5.5" · "the question is whether to run them chained, or independent. The latency benefit is obvious, so if the test that is currently running brings independent closer in accuracy to chained, that would be preferred. If it doesn't improve much on the test you're running, go with chained pls" · "no, I meant the experiment you proposed earlier - 1 merge, vs. the two level merge"
+- **Score:** hit + miss: the scale test ran as proposed; chained against independent was settled by the events test, not tested at scale.
+- **Source:** Claude Code session 2026-10-21 (Opus 5.5)
+- **Applies to:** #545, #589
+
+### 2026-10-21 · When independent versions count as close enough to the chain
+
+- **Kind:** testing
+- **Situation:** Peter's rule for the three tests: independent versions if the events test brings them close to the chain in accuracy, otherwise chained. The builder set the threshold before the result and flagged it as its own: the events final has at least 3 of the 4 recent events, at least 29 of the 41 core facts (within 3 of the fixed chain's 32, the measured run-to-run variation), and at most 2 wrong core facts.
+- **Decision:** those three conditions.
+- **Peter:** "> it has no more than 2 wrong core facts. - I'd go with 1"
+- **Score:** partial: two of the three conditions stand; at most 1 wrong core fact, not 2.
+- **Why it missed:** the margin for wrong facts was set the same way as the margin for facts present, from the run-to-run variation. Peter allows fewer errors than omissions.
+- **Source:** Claude Code session 2026-10-21 (Opus 5.5)
+- **Applies to:** #545, #589
+
+### 2026-10-21 · When Sol counts as about as good as Opus
+
+- **Kind:** testing
+- **Situation:** Peter asked for GPT-6.1 Sol in place of Opus in the A merge, and for Sol in the scale test if it is about as good. The builder set the bar before the result and flagged it as its own: on the same Luna versions, Sol has at most 3 fewer core facts than Opus, at most one more wrong core fact, all 18 sub-headings, and Shadow and Light maps that the evaluator finds specific rather than generic.
+- **Decision:** that bar.
+- **Peter:** "I like your thresholds"
+- **Score:** hit. Sol failed it at its default and at high effort, so the scale test used Opus.
+- **Source:** Claude Code session 2026-10-21 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-10-21 · "Merged using the A design" read as A only
+
+- **Kind:** testing
+- **Situation:** Peter's third test was "the 150 luna profiles on smaller chunks, merged using the A design". The builder read this as the single merge only, dropped the two-level merge it had proposed for the scale test, and said so in its list of choices.
+- **Decision:** the single A merge only.
+- **Peter:** "no, I meant the experiment you proposed earlier - 1 merge, vs. the two level merge"
+- **Score:** miss
+- **Why it missed:** his wording was read literally. "The A design" chose the A prompt over the C designs for the merge; the test he meant was the builder's own scale test, which compares one merge with two levels.
+- **Source:** Claude Code session 2026-10-21 (Opus 5.5)
+- **Applies to:** #545, #589
+
 ### 2026-10-21 · #216 is not built in the overnight run
 
 - **Kind:** product scope
@@ -2209,6 +2428,678 @@ Kinds (one per entry and per table row):
 - **Score:** hit
 - **Source:** Claude Code session 2026-10-21 (Opus 5.5)
 - **Applies to:** #588, #587
+
+### 2026-10-22 · The tester's import waits for the new build path
+
+- **Kind:** release/ops
+- **Situation:** the tester with the 14M-unit ChatGPT export was on hold. Recommended keeping them on hold until the merge in two levels ships.
+- **Prediction:** yes (80 %).
+- **Peter:** "if the results come out with a cleanly best strategy, pls implement this strategy so that I can review it tomorrow and let the user finally import their 14M+ units of data and generate a profile"
+- **Score:** hit: the import waits for the implementation and his review of it (#589).
+- **Source:** Claude Code session 2026-10-22 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-10-22 · The $10 is on top of the planned tests
+
+- **Kind:** cost
+- **Situation:** Peter: "feel free to run some more experiments if the results of the currently planned ones suggest so. The budget for tonight is $10". The reply counted the $10 as the night's total, the planned tests included (about $7–9 of it).
+- **Decision:** that reading.
+- **Peter:** "no, I meant additional $10 for new experiments if they'll make sense"
+- **Score:** miss. The extra experiments used $2.02 of the $10.
+- **Why it missed:** the budget was read as a cap on all of the night's spending, though the sentence before it was about further experiments. The planned tests were approved already and needed no budget.
+- **Source:** Claude Code session 2026-10-22 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-10-22 · An audit and a dry run before the tester's import
+
+- **Kind:** testing
+- **Situation:** Peter asked what else could be done towards large imports. Proposed three things that didn't depend on the test results: (1) a read-only audit of what else grows with a 14M-unit import (other jobs that read the whole export, memory, encryption and embedding calls per item, the spend cap, a long chain across a deploy); (2) a local dry run of the profile pipeline on a synthetic user of that size with a stand-in model; (3) a setting per provider for the model that writes the versions, inside the implementation PR. At most three Opus agents at a time.
+- **Prediction:** yes to both the audit and the dry run (80 %); the audit only (15 %).
+- **Peter:** "agreed with the 3 tasks and Opus agents"
+- **Score:** hit. The dry run found two windows that would have gone over Haiku's price step and a flat merge over the merge model's input cap; #589 handles both.
+- **Source:** Claude Code session 2026-10-22 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-10-22 · The borderline fact in the events test
+
+- **Kind:** testing
+- **Situation:** the events test's final passed Peter's rule for independent versions (at most 1 wrong core fact) only because the evaluator counted one borderline wording as present; counted as wrong, the rule would have picked the chain. Asked Peter whether that wording was right enough. The first message named the borderline call but not the fact.
+- **Prediction:** wrong, it misstates his position (55 %); the fact itself has changed since (25 %).
+- **Peter:** "I still don't understand what's the borderline fact" · "good enough, especially looking at other statistics, that are quite a lot better than alternatives"
+- **Score:** miss. Independent versions with the events line were chosen; a second sample also passed (32 core facts, 0 wrong).
+- **Why it missed:** the one fact was judged on its own, by the strict reading. Peter judged it against the rest of the table, where the events final did clearly better than the alternatives.
+- **Source:** Claude Code session 2026-10-22 (Opus 5.5)
+- **Applies to:** #545, #589
+
+### 2026-10-22 · #589: a window the model declines twice is skipped
+
+- **Kind:** reliability
+- **Situation:** #589 Needs Peter 1: a window the version model declines twice, or one entry larger than the version model's input cap. As built, the window is skipped: the merge sees a note with the window's dates, and Sentry is alerted. The alternatives were to split the window into halves first, or to stop the build.
+- **Prediction:** skip it, as built (65 %); halves first (25 %); stop the build (10 %).
+- **Peter:** "other defaults are ok" (in the reply that changed item 2)
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-22 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-10-22 · #589: a build over the user's spend headroom
+
+- **Kind:** cost
+- **Situation:** #589 Needs Peter 2: a build whose estimated cost is over what the user has left of their monthly spend limit. As built, such a build was held before any window went out, with a note in the admin column; the per-user cap was also checked before each later submission.
+- **Prediction:** the hold, as built (70 %); submit anyway, or only warn (20 %).
+- **Peter:** "send it and let the cap stop it halfway. It will self-heal the following month, won't it?"
+- **Score:** miss. The windows now go out whatever the estimate, which is only logged, and the per-user cap holds the merges until the month turns or the limit is raised (bc967a9e). A new test shows the build finishing after either, with no further code change.
+- **Why it missed:** the estimate was treated as a second limit next to the per-user cap. Peter relies on the cap alone: the build makes progress now, the cap stops it, and it resumes by itself when the month turns.
+- **Source:** Claude Code session 2026-10-22 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-10-22 · #589's hold on a build's cost estimate
+
+- **Kind:** cost
+- **Situation:** as first built, #589 estimated a build's cost before any window was sent and held the build, with the admin note "Waiting for spend headroom", when the estimate was over what the user had left of their monthly limit. Listed under Needs Peter with the hold as the default.
+- **Decision:** built the hold on the estimate as the default.
+- **Peter:** "send it and let the cap stop it halfway. It will self-heal the following month, won't it?"
+- **Score:** miss. Removed in bc967a9e; the per-user cap before each submission stays.
+- **Why it missed:** as in the entry before: a second limit on an estimate, where Peter relies on the cap.
+- **Source:** Claude Code session 2026-10-22 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-10-22 · #589: no profile until a first build is finished
+
+- **Kind:** UX
+- **Situation:** #589 Needs Peter 3: a first build, for a user with no earlier profile, shows no profile until its final merge is saved; the progress line shows the steps. The alternative was a provisional profile, for example from one quick chunk or the newest window.
+- **Prediction:** as built (60 %); a provisional profile (25 %).
+- **Peter:** "other defaults are ok"
+- **Score:** hit
+- **Source:** Claude Code session 2026-10-22 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-10-22 · #589: how often a large profile is updated
+
+- **Kind:** product scope
+- **Situation:** #589 Needs Peter 4: after a large import, the profile is updated when 80k units of new writing have collected (the existing gate, as built and recommended); the alternative was to rebuild the newest window every week. On 2026-10-20 Peter had required weekly updates (entry "No weighted view of the profile").
+- **Prediction:** a weekly refresh of the newest window, as a follow-up (60 %); keep the gate (35 %).
+- **Peter:** "the week I mentioned is approximate. What's defining for profile chunks is that they amount to approx the same amount of data. Which is the case now, so it should not change"
+- **Score:** miss. The gate stays, and no weekly refresh is built.
+- **Why it missed:** "weekly" was read as a requirement on time. Peter had used it as a rough size: what matters is that the chunks hold about the same amount of writing, which the gate gives.
+- **Source:** Claude Code session 2026-10-22 (Opus 5.5)
+- **Applies to:** #589, #545
+
+### 2026-10-22 · #589 keeps the 80k gate for large profiles
+
+- **Kind:** product scope
+- **Situation:** the same question: updates of a window set by the existing 80k gate, or a weekly rebuild of the newest window.
+- **Decision:** kept the gate and built no weekly refresh; recommended keeping it under Needs Peter.
+- **Peter:** "the week I mentioned is approximate. What's defining for profile chunks is that they amount to approx the same amount of data. Which is the case now, so it should not change"
+- **Score:** hit, although the builder's own prediction in the entry before expected the weekly refresh.
+- **Source:** Claude Code session 2026-10-22 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-10-22 · #589: OpenAI merges by Sol at high effort
+
+- **Kind:** cost
+- **Situation:** #589 Needs Peter 5: no OpenAI merge reached the bar Opus sets (on the same versions, Sol at high effort kept 27 of 41 core facts, GPT-6 Astra 26, Opus 33, none of them with errors; Sol costs a fifth of Astra). As built: GPT-6.1 Sol at high effort. The alternatives were more work on an OpenAI merge prompt first, or Astra.
+- **Prediction:** Sol at high effort for now (55 %); more prompt work first (30 %); Astra (10 %).
+- **Peter:** "other defaults are ok"
+- **Score:** hit. The builder's choice is the row "The merge model for OpenAI users" under "Decided by the builder".
+- **Source:** Claude Code session 2026-10-22 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-10-22 · #589 and train #581: which merges first
+
+- **Kind:** release/ops
+- **Situation:** #589 and train #581 conflict in five files. The morning's root node in local Loore offered two ways: merge #581 first and then update #589 (about 15 minutes), or one PR combining both (branch `merge/589-with-581`, tested), so that prod deploys once. Peter merges.
+- **Prediction:** one combined PR (55 %); #581 first (40 %).
+- **Peter:** "ideally I'd merge 589 first, because I still haven't review the train"
+- **Score:** miss. #589 merges first; the tested resolution for #581 waits on its branch.
+- **Why it missed:** the options were built around the conflict and the number of deploys. Whether Peter had reviewed the train yet was not considered, and the train waits for his review. #589's own ready comment had said that either order works.
+- **Source:** Claude Code session 2026-10-22 (Opus 5.5); asked in local Loore
+- **Applies to:** #589, #581
+
+### 2026-10-22 · #589's refusal check: no minimum length per map
+
+- **Kind:** reliability
+- **Situation:** #589 counts a version as refused when one of the three map headings is missing, so a version that keeps the headings but declines a section under one of them would pass. Offered a minimum length per map as a small change, and recommended it.
+- **Prediction:** yes (65 %); not needed now, or an issue (30 %).
+- **Peter:** "no, this is good"
+- **Score:** miss. No minimum length.
+- **Why it missed:** the check was proposed for a failure the tests had not shown: the two Haiku versions that declined in the tests did so in plain text, which the heading check catches.
+- **Source:** Claude Code session 2026-10-22 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-10-22 · #589's refusal check: ask or decide
+
+- **Kind:** escalation
+- **Situation:** a minimum length per map for #589's refusal check, recommended by the builder as a small change.
+- **Decision:** asked Peter instead of deciding
+- **Peter:** "no, this is good"
+- **Score:** hit, deciding alone would have built a check he declined
+- **Source:** Claude Code session 2026-10-22 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-10-22 · Follow-up issues from #589's large-import audit
+
+- **Kind:** product scope
+- **Situation:** #589's "Left out" list held the findings of the audit and the dry run for a 14M-unit import, as issues to file. Asked about filing them: poll drafts' source of recent writing cannot fit for a user this size, and the recent writing renders nothing right after a large import; keyword search loads every entry of the user on each request, slow at this size; the synchronous "Export data" download times out at this size.
+- **Prediction:** file each of them (proposed; no confidence recorded).
+- **Peter:** poll drafts and recent writing: "ok, no need to file" · keyword search: "I know. That's why keyword search is allowed only for admins" · the export: "file it"
+- **Score:** miss + miss + hit
+- **Why it missed:** keyword search: the audit described its cost at this size without checking who can use it; only admins can, and Peter knew the cost. Poll drafts and recent writing: the list put every finding of the dry run up for filing, without a judgement of which would matter to a user.
+- **Source:** Claude Code session 2026-10-22 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-10-22 · A content deletion held the whole account for 30 days
+
+- **Kind:** product scope
+- **Situation:** #415 (#268) built "Delete all my writing": all of the account's content is hidden at once and deleted after 30 days unless the user restores it. While a request waits, one check on the whole account (`writing_on_hold`) stops the user's background jobs (profile builds, recent context, intentions, digests, external sync, embeddings, Glean), and results that come back for the user are dropped. Filed at Peter's request, #590 replaces this hold.
+- **Decision:** held every background job of the account for the 30 days.
+- **Peter:** "careful, that writing is not on hold during the 30 day period" · "The user can delete all the content in their account, but then start writing from scratch. So new profile builds can be scheduled afterwards. It's just that builds based on data that the user requested to delete, shouldn't finish."
+- **Score:** miss. In #590, only a job that read its input before the request saves nothing; otherwise the account works like a new one.
+- **Why it missed:** the builder could have seen it in #415: the UI let the user write and get replies during the 30 days, and #415 kept what they wrote then, so the account stayed in use while every job that builds on the new writing was held. The hold kept results built from the hidden content from being saved by stopping everything, where only the jobs that had read that content needed to stop.
+- **Source:** issue #590, filed at Peter's request in Claude Code session 2026-10-22; the hold was built in #415 (Opus 5.5)
+- **Applies to:** #268, #415, #590
+
+### 2026-10-22 · "Delete all my writing" named only part of what it deletes
+
+- **Kind:** user-facing text
+- **Situation:** the name came from #268's proposal and shipped in #415 on the Account page's button, the dialog and the banner, with "Restore my writing" to undo it. The action hides and deletes all of the account's content, including what the AI wrote: the profile, intentions and other documents, the todo list, drafts, shares and saved references.
+- **Decision:** kept the name "Delete all my writing" for an action that covers everything in the account.
+- **Peter:** "it should be called Delete all my content"
+- **Score:** miss. #590 renames it.
+- **Why it missed:** the name described the issue's first idea of the action, the user's own writing, and was not checked against #415's own list of what goes, which includes what the AI wrote.
+- **Source:** issue #590, filed at Peter's request in Claude Code session 2026-10-22; the name shipped in #415 (Opus 5.5)
+- **Applies to:** #268, #415, #590
+
+### 2026-10-22 · #590: a restore during the 30 days keeps the new content
+
+- **Kind:** product scope
+- **Situation:** Peter's model for #590: after "Delete all my content" the account works like a new one, and deleting the account is how a user makes Loore stop. Asked how "Restore my content" works during the 30 days when the user has written since the request. Recommended treating the restore like an import of older writing: the old and the new content both stay, the old profile versions come back in the history, and the profile is rebuilt over both through the import path.
+- **Prediction:** as recommended (75 %); the restore drops the new content, or works only when nothing new was written (15 %).
+- **Peter:** on the model: "makes logically sense" · on the old versions in the history: "definitely" · "Redoing the whole profile history would be wasteful. Count the restored tip as the tip and drop the profiles built since then (it's only 30 days, so there won't be many versions). The rest heals automatically, because the new writing just triggers profile update."
+- **Score:** partial: two of the three parts. Both contents stay and the old versions come back; there is no rebuild: the restored profile is the current one again, the versions built since the request are dropped, and the new writing reaches it by the usual update.
+- **Why it missed:** the import path was taken whole, its rebuild included, without setting the cost of redoing the profile history against at most 30 days of versions that the new writing updates anyway.
+- **Source:** Claude Code session 2026-10-22 (Opus 5.5)
+- **Applies to:** #590
+
+### 2026-10-22 · Haiku's versions on sensitive passages: test one prompt line
+
+- **Kind:** testing
+- **Situation:** Haiku 5.5's versions left out Peter's own qualifiers on two sensitive passages that the GPT-6 Luna versions kept, and the Opus merge carried the misreading into the profile. Offered a test: one line in the version prompt asking for the writer's own terms on sensitive subjects, three Haiku windows rebuilt and one Opus merge (about $1.20).
+- **Prediction:** run the test (55 %); accept Haiku as it is (25 %); Sonnet versions for Anthropic users (15 %).
+- **Peter:** "yes, haiku test seems alright"
+- **Score:** hit.
+- **Source:** Claude Code session 2026-10-22 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-10-22 · The qualifiers test's merge: rerun or decide
+
+- **Kind:** testing
+- **Situation:** with the line, the three versions kept the writer's terms, but the one Opus merge left both passages out and wrote "he" instead of "you". Offered two more merges over the same 53 versions (about $2.20): a repeat, and one with a matching line in the merge prompt; or put the version line into #589 now; or leave Haiku as it is.
+- **Prediction:** the two merges (60 %); the line into #589 now (15 %); leave it (10 %); Sonnet versions (15 %).
+- **Peter:** "Yeah, I think it's subject to variation and we should re-run. Pls go with the two more merges."
+- **Score:** hit. Both merges dropped the passages again; the cause was the changed versions, not chance.
+- **Source:** Claude Code session 2026-10-22 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-11-05 · #589's cost estimate: a margin on the spend cap
+
+- **Kind:** cost
+- **Situation:** Peter revised his answer of 2026-10-22 (entries "#589: a build over the user's spend headroom" and "#589's hold on a build's cost estimate"): "we should make at least a rough estimate how much the to-be-submitted job will cost and whether it can reasonably fit into the cap · there should be enough room for estimation error, running a few dollars over the cap is fine for batch profile generation. But this check should prevent really large jobs when the user is at cap, or close to it". Recorded it in Loore as: hold the build when the estimate is more than $5 above the remaining headroom.
+- **Decision:** a $5 margin above the remaining headroom before a build is held.
+- **Peter:** "no, this is wrong. The estimate should fit into the cap. But I said we're fine overshooting the cap little bit, in case the estimate is too crude. Better err on the job going through leading to $2-$3 overshoot, than postponing it for a month"
+- **Score:** miss. Built as: the expected cost (measured mean output per call) must fit the remaining headroom, with no margin.
+- **Why it missed:** the tolerance he gave for a crude estimate was turned into a margin on the gate. His point was where the estimate's error should fall: towards sending.
+- **Source:** Claude Code session 2026-11-05 (Opus 5.5)
+- **Applies to:** #589
+- **Rule:** candidate: an estimate that gates a job is the expected cost, not a padded one; when unsure, let the job through.
+
+### 2026-11-05 · Builds after imports (#598): now, and where
+
+- **Kind:** product scope
+- **Situation:** Peter asked that an import only mark the profile as needing a build and that the build start after a quiet period (filed as #598). Asked whether to build it now, as a PR stacked on #589.
+- **Prediction:** build now, stacked on #589 (55 %); file only and build later (30 %); a different window or trigger (15 %).
+- **Peter:** "could we build it within this PR?"
+- **Score:** hit. Built now, inside #589 rather than stacked on it.
+- **Source:** Claude Code session 2026-11-05 (Opus 5.5)
+- **Applies to:** #589, #598
+
+### 2026-11-05 · #598's quiet period: a new hour or the existing 30 minutes
+
+- **Kind:** UX
+- **Situation:** how long after the last import a profile build waits.
+- **Prediction:** proposed 1 hour since the last import finished, as a new setting.
+- **Peter:** "there is a pre-existing inactivity window in the code. I believe it's 30 minutes. I'd use the same here"
+- **Score:** miss. Built with `MIN_INACTIVITY` (30 minutes), which already gated profile updates.
+- **Why it missed:** proposed a number before searching the code for an existing inactivity window.
+- **Source:** Claude Code session 2026-11-05 (Opus 5.5)
+- **Applies to:** #589, #598
+- **Rule:** candidate: before proposing a new threshold, look for the one the code already uses for the same kind of wait.
+
+### 2026-11-05 · Testing the Opus finals and the merge prompt
+
+- **Kind:** testing
+- **Situation:** after the Opus-versions runs, proposed a free check of the Opus finals on the sensitive passages and the Shadow Map's tone, and a test of two merge-prompt changes (a recency rule and longer sections), four merges each on Batch, about $2–3.
+- **Prediction:** the free check (85 %); the merge-prompt test (65 %).
+- **Peter:** "1 and 2: yes"
+- **Score:** hit + hit.
+- **Source:** Claude Code session 2026-11-05 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-11-05 · Three more merges of the Opus versions
+
+- **Kind:** testing
+- **Situation:** the core-fact gap between prod and the Opus-windows final was within the variation of a single merge. Offered three more merges of the same 26 versions, about $0.75.
+- **Prediction:** yes (60 %).
+- **Peter:** "yes pls, run it"
+- **Score:** hit. The four merges spread over 6 core facts; their mean matched prod.
+- **Source:** Claude Code session 2026-11-05 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-11-05 · The version model for imports when only one provider may be used
+
+- **Kind:** cost
+- **Situation:** Opus 5.5 versions matched prod on facts and had none of Haiku's misreadings, but cost about $50 once for a 14M-unit import against about $7 with Haiku. Recommended Opus versions for Anthropic users.
+- **Prediction:** Opus versions for everything (45 %); Haiku for imports, Opus for writing done in Loore (25 %).
+- **Peter:** "I'd keep haiku 5.5 for users, who didn't allow both providers. It's for imports only anyway. Regular prod updates will get Opus in that case"
+- **Score:** miss.
+- **Why it missed:** weighed facts per window over a one-time cost; Peter's frame is that imports are a one-time background read and regular updates carry the quality.
+- **Source:** Claude Code session 2026-11-05 (Opus 5.5)
+- **Applies to:** #589, #596
+
+### 2026-11-05 · An OpenAI user's preferred model
+
+- **Kind:** provider
+- **Situation:** describing the single-provider path for OpenAI users, stated that "the user's preferred model" would mean GPT-6.1 Sol versions.
+- **Decision:** treated Sol as an OpenAI user's preferred model.
+- **Peter:** "you are getting this repeatedly wrong. Sol is not likely to be set as a user preferred model. Astra is the frontier model and I'm confident it will get it approx similarly well as Opus 5.5"
+- **Score:** miss.
+- **Why it missed:** equated the model #589 uses for OpenAI merges with the model users choose; GPT-6 Astra is the OpenAI counterpart of Opus 5.5.
+- **Source:** Claude Code session 2026-11-05 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-11-05 · The merge of a one-window chained update
+
+- **Kind:** product scope
+- **Situation:** Peter wants one-window updates chained, with the user's preferred model writing the version and the merge. A large profile has too many versions for one integration call. Options: (a) #589's group and final merges with the chained version in place of an independent one; (b) a two-input merge; (c) no merge.
+- **Prediction:** (a), recommended (50 %).
+- **Peter:** "a)"
+- **Score:** hit.
+- **Source:** Claude Code session 2026-11-05 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-11-05 · The merge of a one-window chained update: ask or decide
+
+- **Kind:** escalation
+- **Situation:** as in the entry before.
+- **Decision:** asked Peter instead of deciding.
+- **Peter:** "log this as a miss, I think it was clear and it was also your recommendation, you shouldn't have need to ask me" · "you should also log a hit with your recommendation of (a) to be fair. You predicted it correctly to be the best option, you should just have been more confident and not escalate it to me"
+- **Score:** miss.
+- **Why it missed:** the recommendation followed from his rules; low confidence (50 %) was read as a reason to ask.
+- **Source:** Claude Code session 2026-11-05 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-11-05 · #596 follows the new rules after #589
+
+- **Kind:** process
+- **Situation:** #596 (built in another session, stacked on #589) hardcoded Haiku windows for small Anthropic builds and Luna then Sol for the lab. Recommended building the new rules into #589 first and then updating #596.
+- **Prediction:** update #596 after #589 (55 %).
+- **Peter:** "yes to both"
+- **Score:** hit.
+- **Source:** Claude Code session 2026-11-05 (Opus 5.5)
+- **Applies to:** #589, #596
+
+### 2026-11-05 · Only the newest chained version in the merges
+
+- **Kind:** product scope
+- **Situation:** the #589 builder kept every chained version of the regular updates in later group and final merges. Overrode it: only the newest chained version, to keep the merge input bounded.
+- **Decision:** only the newest chained version takes part in merges (sent to the builder; nothing was pushed).
+- **Peter:** "no, this is wrong. The last version of a chain is heavily biased towards the last window. All chained versions should go to the merge"
+- **Score:** miss. The builder's original choice stands.
+- **Why it missed:** treated a chained version as a summary of all the writing; the integration step was added on 2026-02-24 because the last chained version over-indexes on the most recent chunk.
+- **Source:** Claude Code session 2026-11-05 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-11-05 · Starting the lab during a provider policy review
+
+- **Kind:** release/ops
+- **Situation:** the stopped lab VM had to be started to read batch metadata for a provider support request. Its worker could have run queued tasks that call the provider. Asked whether to start it.
+- **Prediction:** start it (70 %).
+- **Peter:** "the jobs should have already finished on lab and the regular ones should be turned off · start the lab, check this is correct, and then pls proceed"
+- **Score:** hit. The lab's profile driver was still enabled at boot; it ran for 6 seconds and sent nothing. It is now disabled.
+- **Source:** Claude Code session 2026-11-05 (Opus 5.5)
+
+### 2026-11-05 · A Shadow Map tone test in the merge prompt
+
+- **Kind:** testing
+- **Situation:** after the merge-prompt tests, offered four more merges (about $1) with a prompt change for the Shadow Map: claims only on his own words, interpretation labelled as a possibility. He had said the Shadow Map frames good observations harshly.
+- **Prediction:** yes, test it (60 %); file an issue only, for later (20 %); leave it (20 %).
+- **Peter:** "no"
+- **Score:** miss.
+- **Why it missed:** took his dislike of the tone as a wish to test a fix at once. His reason was not recorded; the answer suggests the tone is not for #589's evaluation.
+- **Source:** Claude Code session 2026-11-05 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-11-06 · #599 built inside #589
+
+- **Kind:** product scope
+- **Situation:** #589 had the consent column but no question; asked whether to build the question (#599) now as its own PR on top of #589.
+- **Prediction:** yes, now (70 %); after #589 merges (20 %); other (10 %).
+- **Peter:** "yes, I want to merge these two together"
+- **Score:** hit. Built inside #589's branch (as #598 was) instead of as a stacked PR.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #589, #599
+
+### 2026-11-06 · #599 built inside #589: ask or decide
+
+- **Kind:** escalation
+- **Situation:** as in the entry before.
+- **Decision:** decided without asking Peter: built #599 in #589's branch.
+- **Score:** hit. He wanted the two merged together.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #589, #599
+
+### 2026-11-06 · A no does not cancel batches already sent
+
+- **Kind:** privacy
+- **Situation:** a user who answers "no" to using both providers after a yes: batches already sent to the other provider hold many users' requests, so one user's requests cannot be cancelled alone. Nothing new is sent after the no.
+- **Decision:** no cancel of batches already sent; the answer applies before anything else is sent.
+- **Peter:** "good"
+- **Score:** hit.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #589, #599
+- **Rule:** "A user's model is theirs" in `LOORE-ESSENCE.md`.
+
+### 2026-11-06 · A no does not cancel batches already sent: ask or decide
+
+- **Kind:** escalation
+- **Situation:** as in the entry before.
+- **Decision:** decided without asking Peter.
+- **Peter:** "good"
+- **Score:** hit.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #589, #599
+
+### 2026-11-06 · Where an artifact is deleted
+
+- **Kind:** UX
+- **Situation:** a preview of deleting an artifact. Recommended a ⋮ menu (Edit and Delete) at the end of the meta line, Delete only on custom artifacts, the node-deletion dialog, 30 days silent.
+- **Prediction:** ⋮ menu (70 %); a link beside the history link (15 %); in the edit form (5 %); other (10 %). The dialog does not mention the 30 days (55 %).
+- **Peter:** "Let's go with the kebab menu for web, and long press on the artifact bubble on iPhone"
+- **Score:** hit. The placement was right; the 30 days and the build questions were not answered; the builder decided them under his rules (30 days not shown, as for nodes).
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #603, #605
+
+### 2026-11-06 · The both-providers dialog wording
+
+- **Kind:** user-facing text
+- **Situation:** after Peter asked for the dialog to start with the test result and give fewer details on how the two providers are used, proposed: "In our tests, using both gave the best results. With both, your writing can be read by OpenAI's and Anthropic's models.", and an opening that names the profile as one example of background work.
+- **Prediction:** confirmed as proposed (60 %); small edit (35 %); other (5 %). The opening accepted (70 %).
+- **Peter:** "yes to both"
+- **Score:** hit + hit.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #589, #599
+
+### 2026-11-06 · A sentence in the terms for the both-providers question
+
+- **Kind:** user-facing text
+- **Situation:** the terms already say that content may be sent to either provider. Recommended adding an optional sentence at the next terms update, not now.
+- **Decision:** recommended adding the sentence at the next terms update.
+- **Peter:** "no change pls"
+- **Score:** partial. Not now was agreed; adding it later is not wanted.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #599
+
+### 2026-11-06 · Telling Peter to merge #589, then #596
+
+- **Kind:** release/ops
+- **Situation:** #596 was stacked on #589. Told Peter to merge #589 and then #596, without retargeting #596's base to main first.
+- **Decision:** told him the order without retargeting #596.
+- **Score:** miss. He merged both; #596 landed in #589's branch, not main.
+- **Why it missed:** did not check where the second merge would land. Fixed by cancelling #589's deploy and opening #602 (the branch to main), so one deploy carried both.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #589, #596, #602
+- **Rule:** candidate: before telling Peter to merge a stacked PR, retarget its base to main once the lower PR is in, or say so.
+
+### 2026-11-06 · Profile and Todo in the artifact menu
+
+- **Kind:** UX
+- **Situation:** the preview of the artifact delete menu treated Profile and Todo as not being artifacts and gave them no menu.
+- **Decision:** no menu on Profile and Todo.
+- **Peter:** "profile and todo not being artifacts is only our internal thing, they should behave the same as Predictions which are built in, so can't be deleted, but are editable"
+- **Score:** miss. Both got the menu with Edit only.
+- **Why it missed:** followed the code's split between built-in pages and artifacts, not what the user sees.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #603, #605
+- **Rule:** candidate: a user sees one kind of thing; internal categories do not decide the menu.
+
+### 2026-11-06 · Fixing the stale artifact copies before reproducing them on the current model
+
+- **Kind:** testing
+- **Situation:** an issue about the model editing a stale copy of an artifact in a later turn. Started the builder on fixes without first reproducing it on the model users have now.
+- **Decision:** started the fix builder without a repro on Opus 5.5.
+- **Peter:** "have you replicated the artifact issue with Opus 5.5 locally? Otherwise I wouldn't care fixing it"
+- **Score:** miss. The builder was paused.
+- **Why it missed:** the report came from a run on an older model, and the current model was not checked.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #604
+- **Rule:** candidate: reproduce a model-behaviour bug on the current model before building a fix.
+
+### 2026-11-06 · Fixing the stale artifact copies before reproducing them: ask or decide
+
+- **Kind:** escalation
+- **Situation:** as in the entry before.
+- **Decision:** decided without asking Peter.
+- **Peter:** "have you replicated the artifact issue with Opus 5.5 locally? Otherwise I wouldn't care fixing it"
+- **Score:** miss.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #604
+
+### 2026-11-06 · A local repro of the stale copies on Opus 5.5
+
+- **Kind:** testing
+- **Situation:** offered a local run on Opus 5.5 (about 10 trials of a write followed by an edit in a later turn, inline and custom artifacts, $2 to $4).
+- **Prediction:** yes (65 %); drop the issue (25 %); other (10 %).
+- **Peter:** "yes pls"
+- **Score:** hit. Opus 5.5 failed 0 of 45 writes; the older control model failed 5 of 5 memory trials. Peter then set the design (a diff in the history, a version check on all writes), and #604 was reopened.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #604, #606
+
+### 2026-11-06 · Fixes A, B and C for the stale copies, without asking
+
+- **Kind:** product scope
+- **Situation:** listed fixes A to D for the stale copies. Built A, B and C (root-cause fixes) at once; D (show a failed artifact update to the user) was asked, with a prediction of yes (70 %) and no answer.
+- **Decision:** built A, B and C without asking.
+- **Score:** not scored. Peter later replaced A with his own design (a version check on every write); B stayed.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #604, #606
+
+### 2026-11-06 · Fixes A, B and C for the stale copies: ask or decide
+
+- **Kind:** escalation
+- **Situation:** as in the entry before.
+- **Decision:** decided without asking Peter.
+- **Score:** not scored.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #604, #606
+
+### 2026-11-06 · Replaying the thread's own artifact writes
+
+- **Kind:** product scope
+- **Situation:** Peter's idea for the stale copies was a system node in the thread. Proposed instead a replay at assembly time: each earlier write returns "updated to vN" and the diff through the tool-result channel, built from the two stored version ids.
+- **Decision:** render-time replay instead of a node.
+- **Peter:** "yes pls"
+- **Score:** hit. He also set a version check on all writes, the current text in a refusal, and a diff in the Actions taken row on demand.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #604, #606
+
+### 2026-11-06 · Putting the tool call and its parameters in the history
+
+- **Kind:** product scope
+- **Situation:** listed five fixes for the stale copies and left out replaying the tool calls with their parameters in later turns' history.
+- **Decision:** five options inside the current design.
+- **Peter:** "why didn't you name putting the function call incl. its parameters into the conversation history?"
+- **Score:** miss.
+- **Why it missed:** took the investigator's options inside the current design instead of asking why tool arguments are dropped from history.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #604
+
+### 2026-11-06 · Calling a slow deploy step stuck
+
+- **Kind:** release/ops
+- **Situation:** the deploy's package-install step had run for 30 minutes. Called it stuck, proposed cancelling and rerunning, and did so once with Peter's yes, without seeing the live log.
+- **Decision:** judged "stuck" from the step's status.
+- **Peter:** "I've been watching it from time to time, it's moving, but very slowly. Cancellation wouldn't help"
+- **Score:** miss. The rerun restarted a slow but moving install.
+- **Why it missed:** an in-progress status says nothing about progress.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #605
+- **Rule:** candidate: ask for the live log or wait before cancelling a step.
+
+### 2026-11-06 · Running the 5.5 test before the prompt clause was fixed
+
+- **Kind:** testing
+- **Situation:** Peter removed one sentence from the artifact prompt. Started the Opus 5.5 rerun on exactly his edit while telling him that a remaining clause in the same sentence would likely still block reads.
+- **Decision:** ran the test on the edit as it was.
+- **Peter:** "you shouldn't have run the test when the fix is not expected to work"
+- **Score:** miss. The test was stopped.
+- **Why it missed:** named the clause as a problem and ran anyway, instead of raising it first.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #604
+
+### 2026-11-06 · Running the 5.5 test before the prompt clause was fixed: ask or decide
+
+- **Kind:** escalation
+- **Situation:** as in the entry before.
+- **Decision:** decided without asking Peter.
+- **Peter:** "you shouldn't have run the test when the fix is not expected to work"
+- **Score:** miss. The clause should have been raised first and the test run after his answer.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #604
+
+### 2026-11-06 · No changelog entry for #606
+
+- **Kind:** user-facing text
+- **Situation:** #606 changes how the model edits artifacts across turns. Left out a changelog entry.
+- **Decision:** no changelog entry.
+- **Peter:** "no changelog pls for 606"
+- **Score:** hit.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #606
+
+### 2026-11-06 · Recording for a provider support case
+
+- **Kind:** process
+- **Situation:** a provider support case needed evidence of the batches. Offered (a) a reply first asking whether IDs, timestamps and error lines suffice, or (b) a terminal script fetching the batches and their error files live from the API (no content), recorded with two or three dashboard pages.
+- **Prediction:** script and recording (45 %); reply first (40 %); dashboard and downloaded files (15 %).
+- **Peter:** chose (a), a reply first
+- **Score:** miss.
+- **Why it missed:** chose the stronger evidence over asking whether the cheaper one was enough.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #589
+
+### 2026-11-06 · Fixing leftover audio files of purged nodes
+
+- **Kind:** privacy
+- **Situation:** after checking the audio files left behind by purged nodes, started a fix: node cleanup deletes the node's audio files, plus a one-off script that reports first and deletes on --apply. Peter runs the one-off script himself.
+- **Decision:** started the fix PR; the clean-up of existing files stays his step.
+- **Score:** not scored.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #608
+
+### 2026-11-06 · Fixing leftover audio files of purged nodes: ask or decide
+
+- **Kind:** escalation
+- **Situation:** as in the entry before.
+- **Decision:** decided without asking Peter.
+- **Score:** not scored.
+- **Source:** Claude Code session 2026-11-06 (Opus 5.5)
+- **Applies to:** #608
+
+### 2026-11-09 · Profile batches of up to 100 MB and 40 minutes of rendering in one task
+
+- **Kind:** reliability
+- **Situation:** Peter asked on 2026-10-21 that all of a build's versions go out on Batch at once. #589 built this as one submission per user, split only above 100 MB (half of OpenAI's 200 MB input-file limit), with every prompt held in the worker until the submit and up to 2,400 s of rendering in one task. Its own estimate for the multi-million-unit tester was 60–110 MB of prompts. On 2026-11-07 that build rendered about 161 windows in one task; the production host ran out of memory and the service stopped answering for about 50 minutes. The hard time limit then killed the task, the broker delivered it again and the hourly seeder started a second run beside it.
+- **Decision:** read "all at once" as the largest submission the provider takes, held whole in one worker (builder of #589, accepted by merge on 2026-11-06).
+- **Peter:** "I assume that's the provider limit, which I asked for - I wanted to maximize the provider limit, but in hindsight, it seems like it was very predictable that that the production VM would get swamped by this big number of jobs submitted in one batch."
+- **Score:** miss. #611 lowers the defaults to 15 MB per submission and 600 s per task and adds a run lock; the windows still go out on Batch in the same pass.
+- **Why it missed:** the limit was sized for the provider, not for the memory of the host the task runs on. The builder had its own 60–110 MB estimate, and the project notes recorded an earlier out-of-memory crash from building one large export on that host, but the two were not put together.
+- **Source:** incident 2026-11-07, traced in Claude Code session 2026-11-09 (Opus 5.5)
+- **Applies to:** #589, #611, #612
+- **Rule:** candidate: size anything a task holds in memory for the production host, not for the provider's limit.
+
+### 2026-11-09 · Profile batches of up to 100 MB and 40 minutes of rendering in one task: ask or decide
+
+- **Kind:** escalation
+- **Situation:** as in the entry before. When Peter asked for all versions on Batch at once, the builder knew the size of the largest expected build and the host it would run on, and built it without raising the memory risk.
+- **Decision:** decided without asking Peter.
+- **Peter:** "I think you could have known better than me and raised this to me when I made that request. You should have escalated this."
+- **Score:** miss.
+- **Why it missed:** the request was treated as settling the batch size, so the builder's own estimate was never weighed against the host's memory as a question for Peter.
+- **Source:** Claude Code session 2026-11-09 (Opus 5.5)
+- **Applies to:** #589
+- **Rule:** candidate: a request sets the goal, not its consequences. When the builder knows something Peter likely doesn't (the code, its own estimates, the limits of the server and services, past incidents, the largest users) and it shows a risk he hasn't weighed, the builder raises it when he asks, with the numbers and a recommendation, before building the request as stated.
+
+### 2026-11-09 · Lowering the profile limits on prod before the diagnostics came back
+
+- **Kind:** release/ops
+- **Situation:** while the incident's logs were not yet read, recommended setting the two profile limits to 15 MB and 600 s in the production environment and restarting Celery, as a reversible stop-gap.
+- **Prediction:** Peter sets them now (75 %).
+- **Peter:** (no words; the log output he ran showed both lines set)
+- **Score:** hit.
+- **Source:** Claude Code session 2026-11-09 (Opus 5.5)
+- **Applies to:** #611
+
+### 2026-11-09 · Building fixes for the incident and the failing cleanup
+
+- **Kind:** reliability
+- **Situation:** after the incident's cause was confirmed from the logs, started two PRs: the guards against a frozen server (#611) and the daily cleanup that failed on Postgres (#610), which the same logs had shown.
+- **Decision:** started both PRs; Peter merges.
+- **Peter:** "can you build PRs for these 3 issues and merge them into one merge train together with the 2?"
+- **Score:** hit. He kept both and added the three follow-up issues to the same train.
+- **Source:** Claude Code session 2026-11-09 (Opus 5.5)
+- **Applies to:** #610, #611
+
+### 2026-11-09 · Building fixes for the incident and the failing cleanup: ask or decide
+
+- **Kind:** escalation
+- **Situation:** as in the entry before. Peter had asked only for an investigation.
+- **Decision:** decided without asking Peter.
+- **Peter:** "can you build PRs for these 3 issues and merge them into one merge train together with the 2?"
+- **Score:** hit.
+- **Source:** Claude Code session 2026-11-09 (Opus 5.5)
+- **Applies to:** #610, #611
+
+### 2026-11-09 · Three follow-up issues from the incident
+
+- **Kind:** process
+- **Situation:** proposed filing three issues: one metadata read per profile pass instead of one per window, long jobs in their own worker with a memory limit, and the daily cleanup at a fixed time of day.
+- **Prediction:** yes to filing them (80 %).
+- **Peter:** "yes, file them, but pls explain a) more closely in one paragraph?"
+- **Score:** hit.
+- **Source:** Claude Code session 2026-11-09 (Opus 5.5)
+- **Applies to:** #612, #613, #614
+
+### 2026-11-09 · Building #608 and #610 without checking open PRs
+
+- **Kind:** process
+- **Situation:** #608 (audio of deleted entries, 2026-11-06) and #610 (the cleanup's Postgres failure, 2026-11-09) were built while #558, inside the unmerged train #581, already held the same cursor fix and the deleted-entry audio work.
+- **Decision:** built both fixes after checking main and the board's issues, not the open PRs inside unmerged trains.
+- **Peter:** (none; found by the builder while updating the board)
+- **Score:** miss. Two PRs duplicate parts of #558; the overlap is resolved when #581 is merged with main.
+- **Why it missed:** the check for existing work covered main and the issues, and a reviewed fix that waits in a train is in neither.
+- **Source:** Claude Code session 2026-11-09 (Opus 5.5)
+- **Applies to:** #558, #581, #608, #610
+- **Rule:** candidate: before building a fix, search open PRs and unmerged trains for the same files and issue.
+
+### 2026-11-09 · How long the background worker drains at a deploy
+
+- **Kind:** release/ops
+- **Situation:** with the queue split (#579, shipped in #616) switched on, a deploy restarts the background worker. As built, it drained for 90 s like today's single worker, then cut off a running job (an archive import, a profile render). A longer drain lets that job finish; replies don't wait behind this worker, except in a deploy with a migration, where all workers stop first.
+- **Prediction:** keep 90 s (the recommendation in #579's body, 2026-10-21).
+- **Peter:** "5 minutes"
+- **Score:** miss. The background worker now drains for up to 5 minutes, with a SIGKILL backstop at 7 minutes.
+- **Why it missed:** the recommendation carried over the 90 s chosen for a worker that replies wait behind; for a worker nobody waits behind, finishing the job weighs more than a shorter deploy.
+- **Source:** Claude Code session 2026-11-09 (Opus 5.5)
+- **Applies to:** #579, #616, #618
 
 ## Decided by the builder
 
@@ -2449,18 +3340,20 @@ Choices that agents flagged in PRs and that the builder decided because a rule a
 | 2026-10-20 | #414 | cost | The recent-context summary after a profile edit | Copied to the new version as stored (no model call), not regenerated; whether to regenerate it is left to Peter | Latency counts as quality | Opus 5.5 | accepted by merge (PR #548, 2026-10-21) |
 | 2026-10-20 | #414 | data safety | A profile edit that changes only whitespace (blank lines, trailing spaces, a trailing newline) | Saved in place, no new version | Every added heuristic is named | Opus 5.5 | accepted by merge (PR #548, 2026-10-21) |
 | 2026-10-20 | #414 | product scope | The date a rebuild merges the user's version at | Its cutoff, or the time it was written for a hand-written profile with no cutoff; the merge follows the first step whose cutoff reaches that date | A rebuild merges the user's version at its date (Peter, 2026-10-20); every added heuristic is named | Opus 5.5 | accepted by merge (PR #548, 2026-10-21) |
+| 2026-10-20 | #414 | product scope | The version a user's edit replaced, when a later integration runs | Not an integration input: the integration chain starts at the user's version (found by the real-model check) | An edit is a new version, with the version it changed as its predecessor (Peter, 2026-10-20) | Opus 5.5 | accepted by merge (PR #548, 2026-10-21) |
+| 2026-10-21 | #589 | testing | The window size of the Haiku 5.5 versions in the Haiku test | Prod's chunk planner size for Haiku (46.6k units here), under Haiku's 100k-token price step: 53 versions against the 26 Luna windows, so the test mixes the change of model with the number of versions; said so before the run | Test what would ship; #259 (no request across a price tier) | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
 | 2026-10-21 | #553 | data safety | A Voice recording with stored audio but no transcribed text (failed, timed out or empty) | Saved as an entry with its audio and no reply; the PR's first version made no entry for silence | No recording with content is lost | Opus 5.5 | pending |
 | 2026-10-21 | #553 | UX | Glean under an entry with no transcribed text | Disabled, with its own text | The issue's own request | Opus 5.5 | pending |
 | 2026-10-21 | #565 | product scope | Whether the recent-context job gets the same whole-window rendering | Yes, in the same PR | #551: sibling jobs are fixed in the same PR | Opus 5.5 | pending |
 | 2026-10-21 | #565 | privacy | The quote resolver's cache path skipped the access and deleted checks of its database path | Fixed in the same PR, for every caller | Deleted text never reaches a prompt | Opus 5.5 | pending |
-| 2026-10-21 | #558 | reliability | The daily cleanup's cursor error on Postgres, found in review | Fixed in the same PR, since the PR's file deletion runs in that loop | Fix the root cause | Opus 5.5 | pending |
+| 2026-10-21 | #558 | reliability | The daily cleanup's cursor error on Postgres, found in review | Fixed in the same PR, since the PR's file deletion runs in that loop | Fix the root cause | Opus 5.5 | pending: superseded by #610 on main, and #558's version left out in the merge of #581 with main (2026-11-09); not credited at #581's merge |
 | 2026-10-21 | #570 | data safety | Text typed while the recovery banner shows | Recover keeps it and adds the transcript after it; the box is read-only while recovered audio is transcribed | The user's edit wins | Opus 5.5 | pending |
 | 2026-10-21 | #566 | cost | An all-failed batch whose requests failed for a transient reason (5xx, 429, account) | No attempt is counted, so it can't move the user to the full-price fallback | #406: account-reason refusals are not attempts | Opus 5.5 | pending |
 | 2026-10-21 | #568 | data safety | An in-place edit of intentions after the admin confirmed a replacement | The confirmation covers the version's state, so the edit wins | The user's edit wins | Opus 5.5 | pending |
 | 2026-10-21 | #572 | data safety | A request to file an issue that names no position (iPhone app, old web tabs, voice confirms) | Files only the last issue, as before; filing several needs an explicit choice | Ask when the choice matters | Opus 5.5 | pending |
 | 2026-10-21 | #575 | UX | An audience field with no usable username | Refused, instead of a poll for everyone | Problems show | Opus 5.5 | pending |
 | 2026-10-21 | #555 | provider | OpenAI's replacement for a retired saved model | GPT-6 Astra, the strongest OpenAI chat model | Quality first (early phase; cost is Peter's call) | Opus 5.5 | pending |
-| 2026-10-21 | #579 | release/ops | Whether deploying the Celery split changes anything before Peter's server steps | Built inert: off unless `CELERY_SPLIT_QUEUES` is set, the new units are installed by nothing | Ask only before irreversible actions | Opus 5.5 | pending |
+| 2026-10-21 | #579 | release/ops | Whether deploying the Celery split changes anything before Peter's server steps | Built inert: off unless `CELERY_SPLIT_QUEUES` is set, the new units are installed by nothing | Ask only before irreversible actions | Opus 5.5 | accepted by merge (PR #618, 2026-11-09: #579 shipped inside #616) |
 | 2026-10-21 | #580 | release/ops | Whether deploying pgvector search needs the extension first | Built inert: the copies live in their own schema, which autogenerate doesn't see, and every search takes today's path until Peter's steps | Ask only before irreversible actions | Opus 5.5 | pending |
 | 2026-10-21 | #580 | cost | Exact float32 copies or `halfvec` for the vector copies | Exact float32 (scores within 3.3e-8 of the Python path); the disk size is under Needs Peter | Quality first (early phase; cost is Peter's call) | Opus 5.5 | pending |
 | 2026-10-21 | #578 | data safety | Writing a reserved kind (todo, profile, recent context) through the generic artifact routes | PUT, PATCH and revert are refused, so a todo artifact made before the PR becomes read-only there; the todo page stays the one place to edit the list | candidate: a reserved artifact is written only by its own page | Opus 5.5 | pending |
@@ -2488,6 +3381,73 @@ Choices that agents flagged in PRs and that the builder decided because a rule a
 | 2026-10-21 | #587 | product scope | The reply of an agentic entry above the length cap | One reply, under the last part, reading the whole entry, with the Agentic Reply system prompt kept | Problems show; fix the cause | Opus 5.5 | pending |
 | 2026-10-21 | #587 | UX | Where the page opens after sending a long agentic entry | On its first part, then on to the pending reply, as for a short agentic entry | Autonomy | Opus 5.5 | pending |
 | 2026-10-21 | #587 | product scope | Whether the iPhone app gets the same change | Yes, in the same PR | Profile chapters on the iPhone too (2026-10-16) | Opus 5.5 | pending |
+| 2026-10-22 | #589 | testing | When Haiku 5.5 is good enough to write Anthropic users' versions | Set before the evaluation: the Sol bar applied to Haiku. Against the Luna events final with an Opus merge (33 core facts, 1 wrong): at least 30 core facts, at most 2 wrong, specific maps, at least 15 of 18 sub-headings; refusals noted as a risk. Haiku scored 31, 0 wrong, 18 of 18, and is the default in #589 | "potentially Haiku if accuracy allows" (Peter, 2026-10-22); the Sol thresholds he accepted (2026-10-21); every added heuristic is named | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-10-22 | #589 | product scope | The merge structure of a set of independent versions | `flat`: one merge while all versions fit under the merge model's input cap, groups of 30 above it; switched from `grouped` after the 149-version test. Flat: 32 of 41 core facts, 1 wrong, 18 of 18 sub-headings. Grouped: 34 (4 of them borderline), 0 wrong core facts, 3 other errors, 13 of 18 sub-headings, $0.50 more. Grouped met the bar set before the test (within 3 core facts and 1 wrong core fact of flat); flat was chosen on the other errors, the sub-headings and the cost | Fixed groups with only the newest merged again (Peter, 2026-10-20), now above the cap only; every added heuristic is named | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-10-22 | #589 | cost | The merge model for OpenAI users | GPT-6.1 Sol at high reasoning effort, although no OpenAI merge reached the bar Opus sets: on the same versions Sol at its default effort kept 25 of 41 core facts, at high effort 27, GPT-6 Astra 26 and Opus 33, none of them with errors; Sol costs a fifth of Astra. A prompt asking for about 650 tokens a section was no clear gain (30 and 26 in two runs, against 26 for a repeat without it). Under Needs Peter in #589 | A user's model is theirs (an OpenAI user's merge stays with OpenAI); Quality first, for now | Opus 5.5 | hit: accepted by Peter (2026-10-22), entry "#589: OpenAI merges by Sol at high effort" |
+| 2026-11-05 | #589 | cost | Which passes the estimate gate covers | Every pass with windows to read: a first build, an import on a set, an update's windows, a retried window; windows in flight are not counted again | Peter, 2026-11-05: estimate the to-be-submitted job | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-05 | #589 | cost | The output each call is priced at in the estimate | Measured mean output (Haiku 11k tokens, Luna 2.5k, merges 4k), the last group at its real size | Peter, 2026-11-05: err towards the job going through | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-05 | #589 | UX | How a build held by the estimate is shown | The admin note and Sentry error from before 2026-10-22, cleared when the windows go out | Reuse what the code had | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-05 | #589 | UX | Where #598's quiet period is measured from | The later of the last import's finish and the newest entry written after it; a running import holds the build | Peter, 2026-11-05: reuse the 30-minute window | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-05 | #589 | reliability | An import while the profile job is in the refusal stop | The import's seed still skips the stop once the quiet period is over | An import seeds and skips the refusal stop (Peter, 2026-10-01) | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-05 | #589 | product scope | Which starts skip #598's wait | The admin's Build profile, pre-fills and the synchronous path start at once | Admin actions are explicit | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-05 | #589 | user-facing text | The import dialog's line about the wait | Shown only when the build was deferred and a build is due | Calm over clever | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-05 | #589 | provider | A window, group or final blocked by the content-policy filter | Outcome `blocked`: a $0 cost row, a Sentry event, a note in the admin column, the account's build stops; ported from #596 | A content-policy block is final (#597) | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-05 | #589 | privacy | How "public only" is decided | From metadata: every entry pre-filled and unedited (no `NodeVersion`), no profile row with other sources, no sticky private mark, and an account nobody signed into; anything else is private | A user's writing never reaches the other provider unless public-only or consented; when in doubt, private | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-05 | #589 | privacy | The consent flag | `User.profile_both_providers`, default false, no UI (#599 builds the question) | The user's provider is theirs | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-05 | #589 | privacy | Existing accounts before the private mark exists | A backfill script after deploy marks every account with private data; until then signed-in accounts count as private | When in doubt, private | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-05 | #589 | product scope | What counts as a regular update | A merged set with nothing in flight whose only new range plans into one chunk on the chat model | Peter, 2026-11-05: one-window updates are chained | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-05 | #589 | data safety | The parent of a chained version | The set's base, with the profile it updated kept in its job item, so no earlier final is merged in again | Fix the cause | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-05 | #596 | provider | A one-window build of public-only writing | GPT-6 Luna, then Opus 5.5 | Peter, 2026-11-05: public-only data gets Luna for versions and Opus for merges | Opus 5.5 | accepted by merge (PR #596, 2026-11-06) |
+| 2026-11-05 | #596 | provider | A one-window build of private writing | The user's chat model for the version and the integration | Peter, 2026-11-05: Haiku is for imports; one window uses the preferred model | Opus 5.5 | accepted by merge (PR #596, 2026-11-06) |
+| 2026-11-06 | #599 | privacy | Whether "never answered" is kept apart from "no" | `User.profile_both_providers_answered_at`, NULL until the user answers; the flag stays false meanwhile, so nothing crosses providers | Ask when the choice matters: no answer means "we don't know", not "no" | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #599 | UX | The form of the question | A dialog with two equal buttons, "Use both" and "Keep to <the user's provider>", nothing preselected; closing it records nothing and the next occasion asks again | Ask when the choice matters; a costly choice is a dialog, never a pre-ticked checkbox | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #599 | UX | When opening Loore asks | Once per visit, after the first entry (written or imported), on the first suitable page; never on Voice, Text, Welcome, Account or Import, during a recording or over another dialog; a visit that starts on /welcome does not ask; a close without an answer holds it for the tab; the updates modal waits for it | Peter, 2026-11-05: "after the 1st reflection"; Reflection comes first (the updates modal's rule, #392) | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #599 | UX | A preferred-model change | Asks after the user's own pick on the Account page while never answered, not for the default the picker fills in when the page opens | Peter, 2026-11-05: ask when the user sets their preferred model | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #599 | product scope | Which imports ask | An import that added entries with AI usage chat or train, for a user who never answered or said no at least 30 days ago (a month read as 30 days); never after a yes; a PDF saved as a Reference does not ask | Peter, 2026-11-05: "also after any import", a no asked again after a month; No AI means no AI; every added heuristic is named | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #599 | privacy | Accounts set to AI usage None | Never asked, in any context | No AI means no AI | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #599 | privacy | A no given while a profile pass renders | The consent is read from the database before each slice is sent; the rest of the pass is dropped unsent and a new task plans it for the user's own provider | A user's writing never reaches the other provider without a yes | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #599 | user-facing text | The question's wording | Peter's question nearly verbatim, what goes where, the test result as the reason, a note that replies keep the default model; in #589's Needs Peter with alternatives | Peter's own words where they fit; describe what happens to the user | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #599 | UX | Where the answer is changed | Account page, "Background tasks" right below Default model: "Not answered yet" (not selectable), "Anthropic and OpenAI", "<provider> only"; changing it stamps the time | Show the choices; the user's choice wins | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #599 | product scope | The iPhone app and the privacy text | Web only; the iPhone app is a follow-up. The terms already name both providers for AI chat; an optional sentence is under Needs Peter, nothing changed | Scope set for this build; no change to the terms without Peter | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | product scope | Where the both-providers question (#599) is built | Inside #589's branch, as #598 was, not as a stacked PR | Peter, 2026-11-06: "yes, I want to merge these two together" | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #606 | UX | How earlier artifact writes reach later turns | Replayed through the native tool channel at assembly time ("updated to vN" and the diff), from the two stored version ids; nothing is stored in a new node | Peter's design comment, 2026-11-06; nobody decrypts users' content | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #606 | reliability | The model's copy after a failed edit | The current text is given after a failed edit (text not found, ambiguous or no content) when the base was right, so a retry need not become a full rewrite | Problems show | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #606 | data safety | A write based on a version of an artifact that has no versions | Refused, so a stale copy cannot recreate an artifact that is gone | The user's edit wins | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #606 | UX | What the diff endpoint returns | Line operations built on the server, not the two texts; 404, not 403, for someone else's version | Nobody decrypts users' content | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #606 | reliability | The forms of `base_version` and the labels in the history | `12`, `"12"`, `"v12"` and `12.0` are accepted; booleans and other strings are refused; the inline copy is labelled "[kind · vN, as of the start of this conversation]"; the replayed call keeps its input minus the content | Smallest change | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #606 | UX | Older threads and the cross-turn note | Writes recorded before the previous version was stored replay only "updated to vN"; the "was updated" note for writes without a result round stays, and now duplicates the replay once | Smallest change | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #606 | UX | The "Show changes" box | A maximum height of 320 px with its own scroll; the iPhone version is a follow-up | Scope set for this build | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #606 | cost | The prompt-cache cost of the change | Shipped with a one-time rewrite of every agentic thread's cached prefix at deploy (the tool definitions change) and about 1k tokens of history per earlier write; saving expected from later-turn edits replacing full rewrites | Quality first, for now | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #607 | reliability | How the disk percentage is computed | As `df` shows it (used over used plus free), so it matches what Peter sees on the server | Problems show | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #607 | reliability | Where the alert's sent-state lives | In Redis, as for the provider alerts; no model or migration for a throttle flag | Smallest change | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #607 | reliability | Which disk is measured | The disk holding the recordings (the nearest existing parent if the folder is absent) | Problems show | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #607 | release/ops | Who gets the disk email | The existing cost-alert address | Smallest change | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #607 | reliability | The warning level, the second alert and the cadence | A warning at 90 % (a setting), a second alert at 95 % (a constant), checked hourly, at most one email per 24 h per level. Introduced numbers, flagged in the PR | Every added heuristic is named | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #608 | data safety | A file that cannot be deleted | Never holds back a purge or the text wipe; the nightly sweep retries the file, including a finalized node's recording-session folder | Second-tier check by the coordinating builder (not Peter); candidate: deleted text is gone on schedule, whatever happens to its files | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #608 | data safety | Recordings in a folder whose node row is gone | Kept for 30 days (the deleted-node grace period, no new number) instead of 24 h, because the folder may hold the only copy of a recording whose node never committed; speech files in the same folder keep the 24 h guard | A user's words are never lost | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #608 | data safety | Which folders the sweep leaves alone | Any folder changed (modified or ctime) in the last 24 h (`RECENT_SECONDS`), which also protects a playback in progress; a symlinked or outside-root folder is never followed or deleted | Introduced number, flagged in the PR; a user's words are never lost | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #608 | data safety | Files that rows still point at | Never deleted: speech shared between profile versions and merged reference copies is real today | A user's words are never lost | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #608 | privacy | Rows hidden by "Delete all my writing" | Kept, for nodes, references and profiles alike, as the node cleanup already does | Nobody decrypts users' content | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #608 | privacy | A saved reference's speech | Deleted when the reference is deleted, because references have no grace period today | Deletion means deletion | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #608 | reliability | The sweep's batch size | 500 folders per round of lookups (`BATCH_SIZE`), the same as the user purge's chunk size | Every added heuristic is named | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #608 | testing | Tests and real audio folders | An autouse fixture gives every test a scratch audio root, so no test deletes or marks anything under a real folder | Data safety first | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-09 | #610 | data safety | The backlog on the first run after the fix | No cap: about 30 ms per entry, so the 55-minute limit is reached only past about 100,000 entries | Every added heuristic is named | Opus 5.5 | pending |
+| 2026-11-09 | #610 | privacy | A deleted entry a share points at | The purge clears the share's links to it, as the "Delete all my writing" purge already does, so the entry is purged on time | Deletion | Opus 5.5 | pending |
+| 2026-11-09 | #610 | data safety | A restore that commits while the cleanup reaches the entry | Each entry is loaded with a row lock, so the restore finishes first and the entry keeps its text (review finding, second-tier check by the coordinating builder) | The user's edit wins | Opus 5.5 | pending |
+| 2026-11-09 | #611 | reliability | A profile run that reaches the soft time limit | Stops visibly and holds the work for the hourly seeder instead of rerunning at once; not counted as a provider failure | Problems show | Opus 5.5 | pending |
+| 2026-11-09 | #611 | cost | Batches already created when a run stops | Recorded, so they are collected and not paid for twice | Problems show | Opus 5.5 | pending |
+| 2026-11-09 | #611 | reliability | A second copy of a user's run (redelivered or dispatched again) | Exits without rendering while the first copy's lock is alive; a lock outlives a dead run by at most 15 minutes | Problems show | Opus 5.5 | pending |
+| 2026-11-09 | #611 | reliability | Redis unreachable when a run starts | The run goes ahead without the lock, as the batch pipeline lock already does | Autonomy | Opus 5.5 | pending |
+| 2026-11-09 | #611 | reliability | Introduced constants | Broker visibility timeout 3 × the hard time limit (10,800 s); run and sweep lock TTL 15 minutes; 15 MB per submission; 600 s of rendering per task | Every added heuristic is named | Opus 5.5 | pending |
+| 2026-11-09 | #615 | reliability | Which schedules get a fixed time | Only the daily cleanup, at 03:17 UTC; hourly and shorter intervals are left; no last-run guard, since the job is idempotent and the grace is 30 days | Every added heuristic is named | Sonnet | pending |
+| 2026-11-09 | #616 | reliability | How a worker is kept within memory | A hard limit only, no soft threshold: in a test, a job past a soft threshold slowed the whole worker, replies included, for 96 s before the kill | Problems show | Opus 5.5 | pending |
+| 2026-11-09 | #616 | reliability | A job the memory limit kills | Fails after three kills, shown to the user (chat import) or in the admin's Profile column (profile build), instead of rerunning without end (review finding) | Problems show | Opus 5.5 | pending |
+| 2026-11-09 | #616 | reliability | Which jobs take the one heavy-job slot | Profile window passes, update_user_profile, imports, pre-fills and the Community Archive refresh, for their whole run; a waiting job keeps its retry count; with Redis unreachable it runs without the slot | Autonomy | Opus 5.5 | pending |
+| 2026-11-09 | #616 | reliability | Introduced constants | Memory limit 1408 MB for the single worker and 1152 MB for the background worker; pool processes' out-of-memory score +300; slot TTL 300 s with a 30 s heartbeat; a waiting job is re-sent after 30–40 s; a pool process above about 400 MB is replaced after its job; three kills before a job fails | Every added heuristic is named | Opus 5.5 | pending |
+| 2026-11-09 | #617 | privacy | An entry or reply that changes while a pass runs | Never sent from the pass's metadata read: the pass reads again when the user's rows change (deletions, "Delete all my writing", its restore and account deletions included), and every row and reply a window's text depends on is checked again when the window renders (review finding) | No AI means no AI | Opus 5.5 | pending |
+| 2026-11-09 | #617 | reliability | A window whose rows change under two reads | That window and the rest of the pass read per window, as before, and the pass is reported to Sentry with tags only | Problems show | Opus 5.5 | pending |
+| 2026-11-09 | #617 | reliability | Rows that share a timestamp | A fixed order by id; on SQLite windows are identical to before, on Postgres they can differ from the old order, which depended on the query plan, with no row lost or doubled | Autonomy | Opus 5.5 | pending |
+| 2026-11-09 | #617 | reliability | Introduced constants | Two metadata reads per window before falling back; a change check before each window (row count, newest id, newest update, deleted count); id lists of 900, the existing chunk size | Every added heuristic is named | Opus 5.5 | pending |
 
 ## Backfilled decisions
 
@@ -3257,3 +4217,65 @@ Builder decisions listed in PRs that merged without Peter correcting them, backf
 | 2026-10-21 | #551 | data safety | In these exports the budget resolver charges each node its stored units, as the selection does, so a window's newest entries are no longer dropped from the text while its cursor moves past them | Opus 5.5 | accepted by merge (PR #551, 2026-10-21) |
 | 2026-10-21 | #551 | product scope | The intentions backfill script gets the same input; poll drafts that read the profile, recent summary and intentions (`derived`) are unchanged | Opus 5.5 | accepted by merge (PR #551, 2026-10-21) |
 | 2026-10-21 | #551 | data safety | A `{quote:N}` the user wrote that points at a system node is kept as it renders today, so the user's writing stays whole | Opus 5.5 | accepted by merge (PR #551, 2026-10-21) |
+| 2026-11-06 | #589 | product scope | The independent-version path applies where today's plan on the preferred model has two or more chunks; one-chunk builds and one-chunk chained updates run as before | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | product scope | The events paragraph is inserted in code in the window prompts only; removing it gives the generation prompt back byte for byte | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | provider | Version and merge models are chosen per pass; a provider-pair setting of another provider refuses to boot, and every request is checked before it is queued | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | product scope | Windows and groups are hidden from every reader of the profile, the history and the version numbers; the current profile stays until the final is saved | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | reliability | Every window output must carry the three map headings and exactly one events section; a refusal written as text counts as refused | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | reliability | Window failures have their own bound: a refused, cut-off or invalid output is retried once, then the window is skipped and Sentry alerted; a provider failure is retried up to three submissions, then the window waits 24 h | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | cost | Window-set users are pinned to Batch and never take the full-price synchronous fallback | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | cost | All windows of a user go out in one submission, split only above 100 MB | Opus 5.5 | corrected → entry 2026-11-09 · Profile batches of up to 100 MB and 40 minutes of rendering in one task |
+| 2026-11-06 | #589 | reliability | A window is rendered again smaller while it is over the version model's cap; it is never cut and never sent over it; one entry larger than the cap is skipped with a Sentry alert | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | product scope | A last group of one window is not merged; the window enters the final as it is | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | data safety | The user's version is merged inside the final at its date; a version saved while the final is in the batch discards that final (cost row kept) and the next run merges again | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | product scope | An import older than a set's tip rebuilds the set from scratch; a newer one is read as new windows | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | reliability | The 80k gate counts creation time for every user, because an import's nodes carry the import time as their update time | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | reliability | The hourly seeder clears a pending flag that no pending job and no live task carries | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | reliability | Expired or cancelled OpenAI batches have their finished items collected; a profile job is stale after 25 h | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | cost | The per-user spend cap is checked before every submission; a user over the limit is held and the hourly seeder resumes the set when the month turns or the limit is raised | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | reliability | The tokens-per-unit ratio is read once per advance task, so one build's windows share one ratio | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | cost | OpenAI merges are Batch requests on the Responses endpoint with a reasoning effort (default high); windows stay on chat completions | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | release/ops | The kill switch `PROFILE_INDEPENDENT_VERSIONS` defaults on; off, a user whose profile is a set gets chained updates on its final | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | user-facing text | Progress text for the new steps: "Generating profile: reading all N chunks" and "Integrating profile versions" | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | product scope | Version numbers in an export's reference lines and a reply's artifact panel leave set rows out | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | reliability | A range whose units are counted but which renders nothing counts as covered, with a log line and no alert, so the set can finish | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | product scope | A chained version is saved as a hidden row of the set; each regular update keeps its own place in later merges | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | user-facing text | In a merge a chained version is labelled as covering all the writing from its start to its end, so the merge reads it as a profile of everything | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | reliability | A chained version must carry the three maps; a failed one follows the window rules, not the chained path's user-level refusal backoff | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | cost | Merges after a regular update run on the preferred model without a reasoning-effort parameter, as live replies do | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | product scope | One chained window per pass; a remainder is chained on the new version in the next pass | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | cost | Introduced constants for batch size and rendering: 100 MB per batch, 2,400 s of rendering time, 8 fit rounds at a safety factor of 0.97, 1.5 as the over-cap estimate factor | Opus 5.5 | corrected → entry 2026-11-09 · Profile batches of up to 100 MB and 40 minutes of rendering in one task |
+| 2026-11-06 | #589 | reliability | Introduced constants for failures: 2 content attempts, 3 provider attempts, an attempt history of 7 days | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | cost | Introduced estimate constants: expected output Haiku 11k, Luna 2.5k, Opus 5.5 7k (a chained update), else 6k tokens; 4.7k merge tokens per version for Haiku and others, 2.0k for Luna; prompts 3k, 8k and 4k; 4k merge output | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | product scope | Introduced merge settings: a merge group size of 30 and the flat structure by default | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | data safety | Set ids are 12 hex characters, unique per user and short enough for the batch custom id | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | UX | #599 asks once per visit after a close without an answer (a new tab asks again), counts "at least one entry" as a non-deleted user node that is not a session's prompt node, and treats a recorder in the recording or paused state as a recording in progress | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | UX | #599's close of the dialog by the mark, Escape, the backdrop or leaving the page records nothing; the Account trigger fires only on the user's own pick | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | privacy | #599's consent is read from the database at each check and before anything of a pass goes to the other provider; changing it is a strict true or false (anything else is a 400), and no admin route sets it | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | UX | #599 reuses 30 days for "at least a month old" (`REASK_AFTER_NO`); existing users are asked by the same rules at their next visit, with no email and no backfill | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #596 | provider | #596 names no model pair of its own: `pass_models` chooses per pass from #589's rules; the per-provider switches only decide whether the window path is taken | Opus 5.5 | accepted by merge (PR #596, 2026-11-06) |
+| 2026-11-06 | #596 | product scope | A from-scratch build that fits one window on the preferred model, over private writing, is read and integrated by the preferred model; public-only writing and consent take Luna and Opus at any size | Opus 5.5 | accepted by merge (PR #596, 2026-11-06) |
+| 2026-11-06 | #596 | privacy | The models are chosen again when the final goes out, so a pre-fill whose owner signed in after Luna read the window is integrated by the preferred model, never by the other provider | Opus 5.5 | accepted by merge (PR #596, 2026-11-06) |
+| 2026-11-06 | #596 | product scope | Windows are sized on the preferred model first (the 90k-unit planner target); two or more chunks use the provider's pair | Opus 5.5 | accepted by merge (PR #596, 2026-11-06) |
+| 2026-11-06 | #596 | product scope | A one-chunk build's final has its own prompt, and a final carrying an events section is refused like any non-profile output; the many-version prompt stays byte-identical | Opus 5.5 | accepted by merge (PR #596, 2026-11-06) |
+| 2026-11-06 | #596 | data safety | A build whose only window was given up sends no final; the previous profile stays and the admin column says why | Opus 5.5 | accepted by merge (PR #596, 2026-11-06) |
+| 2026-11-06 | #596 | product scope | A small profile built this way is rebuilt on the early schedule; updates past the ladder are #589's regular updates | Opus 5.5 | accepted by merge (PR #596, 2026-11-06) |
+| 2026-11-06 | #596 | reliability | Profile batches are polled by listing (page sizes 1000 and 100, at most 50 pages, stop one hour before the oldest pending job); a job the listing misses is polled on its own | Opus 5.5 | accepted by merge (PR #596, 2026-11-06) |
+| 2026-11-06 | #596 | reliability | A full provider queue waits and is never a failed attempt, only while another profile batch of ours is pending in the same queue; otherwise it counts as a failed attempt | Opus 5.5 | accepted by merge (PR #596, 2026-11-06) |
+| 2026-11-06 | #596 | reliability | Waiting batch work is resent by the hourly seeder also for accounts not yet activated, through `User.profile_work_held`; deactivated accounts stay paused | Opus 5.5 | accepted by merge (PR #596, 2026-11-06) |
+| 2026-11-06 | #596 | product scope | A first profile takes two Batch turnarounds, and the previous profile stays in use meanwhile | Opus 5.5 | accepted by merge (PR #596, 2026-11-06) |
+| 2026-11-06 | #596 | provider | Policy blocks: a blocked window is skipped and its range remembered in its own table for good; a blocked group or final stops the account until the admin's confirmed Build profile; nothing is resent | Opus 5.5 | accepted by merge (PR #596, 2026-11-06) |
+| 2026-11-06 | #596 | privacy | Policy blocks: a range runs from just before the blocked window's earliest entry; an account whose AI usage does not allow AI gets no skip path, but its range is recorded with dates only; one $0 record and one Sentry event with tags only per blocked item | Opus 5.5 | accepted by merge (PR #596, 2026-11-06) |
+| 2026-11-06 | #596 | release/ops | Where #596 and #589 conflict, #589's model rules and provider checks win; elsewhere each PR's decided behaviour stays (the blocked-window skip over #589's account stop) | Opus 5.5 | accepted by merge (PR #596, 2026-11-06) |
+| 2026-11-06 | #596 | reliability | Introduced numbers: list page sizes 1000 and 100, 50 pages, a one-hour listing slack; the 14-day backfill window of the policy-block script | Opus 5.5 | accepted by merge (PR #596, 2026-11-06) |
+| 2026-11-06 | #605 | data safety | Deleting an artifact is a soft delete of every version at once, removed for good by the daily cleanup after the 30-day grace period, with no restore UI and no new task or schedule | Opus 5.5 | accepted by merge (PR #605, 2026-11-06) |
+| 2026-11-06 | #605 | product scope | Only custom artifacts can be deleted: the built-in kinds and the saved-references digest are refused with a 403, and only the owner can delete; there is no admin path | Opus 5.5 | accepted by merge (PR #605, 2026-11-06) |
+| 2026-11-06 | #605 | UX | After a delete the same name starts at v1, and a link to a deleted artifact says it was deleted (`deleted_kinds`, a 404 with `deleted: true`) | Opus 5.5 | accepted by merge (PR #605, 2026-11-06) |
+| 2026-11-06 | #605 | data safety | The permanent delete removes the sessions' pins on the purged versions first, then the rows with their content | Opus 5.5 | accepted by merge (PR #605, 2026-11-06) |
+| 2026-11-06 | #605 | privacy | The delete, the cache stamp and the purge read only ids and timestamps; a deleted version is never decrypted again, and a read the AI made before the delete is not delivered after it | Opus 5.5 | accepted by merge (PR #605, 2026-11-06) |
+| 2026-11-06 | #605 | user-facing text | The delete dialog does not mention the 30 days, as for nodes | Opus 5.5 | accepted by merge (PR #605, 2026-11-06) |
+| 2026-11-06 | #605 | reliability | The purge deletes in chunks of 500 ids (`PURGE_CHUNK`, introduced) | Opus 5.5 | accepted by merge (PR #605, 2026-11-06) |
+| 2026-11-06 | #605 | reliability | The render-cache key carries the user's last delete, only once the user has deleted an artifact, so the deploy invalidates nothing for others | Opus 5.5 | accepted by merge (PR #605, 2026-11-06) |
+| 2026-11-06 | #605 | UX | The ⋮ is hidden while the edit form is open, so a delete never drops a draft; after a delete the URL is replaced, not pushed | Opus 5.5 | accepted by merge (PR #605, 2026-11-06) |
+| 2026-11-06 | #605 | privacy | No name is kept after the purge, so a link to it opens an empty artifact like any unused name; the purge also deletes the kind's view pings when no live version is left | Opus 5.5 | accepted by merge (PR #605, 2026-11-06) |
+| 2026-11-06 | #605 | reliability | A repeated DELETE answers 404 with `deleted: true`, so a second device can treat it as done; the page's view ping is not sent for a deleted kind | Opus 5.5 | accepted by merge (PR #605, 2026-11-06) |
