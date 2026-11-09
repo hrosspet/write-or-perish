@@ -484,6 +484,12 @@ drains. The split runs two workers instead:
 The full table is `TASK_QUEUES` in `backend/celery_queues.py`; a test fails
 when a task is missing from it. The unit files are in `deploy/systemd/`.
 
+Two protections work with the split off and on (#613): a memory limit on
+the worker that runs the heavy jobs ("Memory limits" below), and a slot
+that runs one heavy job at a time ("Heavy-job slot" below). Both are live
+from the first deploy that carries them; only the split itself waits for
+the switch.
+
 It is off until `CELERY_SPLIT_QUEUES=true` is in `.env.production`. Off, no
 routes are set and every task goes to the default queue `celery`, as before.
 
@@ -500,6 +506,116 @@ What `deploy.sh` does:
   red, because tasks would wait in queues nobody reads. On while the
   single worker still runs: a warning.
 
+### Memory limits
+
+The single worker (`write-or-perish-celery.service`, in the repo root) and
+the background worker (`deploy/systemd/write-or-perish-celery-background.service`)
+have a memory limit; the interactive worker has none (its tasks are short
+and small, and a limit there would cut off replies):
+
+| unit | `MemoryMax` | `MemorySwapMax` | `OOMPolicy` |
+|---|---|---|---|
+| `write-or-perish-celery` | 1408M | 0 | `continue` |
+| `write-or-perish-celery-background` | 1152M | 0 | `continue` |
+| `write-or-perish-celery-interactive` | none | none | `continue` |
+
+Sized for the production host: room for the worker's main process, its
+pool processes and one heavy job (the heavy-job slot keeps it to one).
+
+What happens at the limit: the kernel's OOM killer kills one process of
+the unit, a pool process: each pool process raises its own
+`oom_score_adj` by 300 when it starts (`backend/utils/worker_oom.py`), so
+it is picked before the main process, and the one that grew is the
+largest. The main process logs `Process 'ForkPoolWorker-N' ... exited with
+'signal 9 (SIGKILL)'` and the task's `WorkerLostError`, and starts a new
+pool process. A task with `acks_late` and `reject_on_worker_lost` (the
+profile window advance, ChatGPT/Claude imports) goes back to the queue;
+any other task is lost and reported. `OOMPolicy=continue` matters: with
+systemd's default (`stop`) systemd stops the whole unit after an OOM kill
+in it, with every task it runs. `MemorySwapMax=0` keeps the limit the same
+on a server with swap: the job is killed, not moved to swap.
+
+There is no `MemoryHigh`. Without swap it frees nothing; it holds a job
+that grows past it in a crawl (in a test unit with a 10 % band, about a
+minute and a half at 200 MB, longer at the workers' size) before the
+kill, and slows every process in the unit meanwhile, which in the single
+worker includes replies. Past `MemoryMax` alone, the job is killed at
+once.
+
+`deploy.sh` copies `write-or-perish-celery.service` when it changed, runs
+`daemon-reload` and restarts the worker, so the limit applies from that
+deploy. It copies the split units only once one is enabled (see above);
+the first copy is step 2 of "Switching on".
+
+Check what applies and what the worker uses now:
+
+```bash
+systemctl show -p MemoryMax -p MemorySwapMax -p OOMPolicy -p MemoryCurrent write-or-perish-celery
+stat -fc %T /sys/fs/cgroup   # cgroup2fs: unified hierarchy; tmpfs: cgroup v1
+```
+
+On cgroup v1 systemd applies `MemoryMax` as the v1 memory limit, and
+`MemorySwapMax` has no effect (there is no swap to limit on a server
+without one). `MemoryCurrent` counts the worker's file cache too, which
+the kernel reclaims before it kills anything.
+
+An OOM kill shows in the journal and the worker log:
+
+```bash
+journalctl -u write-or-perish-celery --since "1 hour ago" | grep -i oom
+grep -E "SIGKILL|WorkerLostError" logs/celery-worker.log | tail
+```
+
+Adjust with a drop-in, which deploys do not overwrite (they copy only the
+unit file itself), for example after measuring:
+
+```bash
+sudo systemctl edit write-or-perish-celery   # or write-or-perish-celery-background
+# in the editor:
+#   [Service]
+#   MemoryMax=1536M
+sudo systemctl daemon-reload
+sudo systemctl restart write-or-perish-celery   # 90 s drain, as in a deploy
+```
+
+`sudo systemctl revert write-or-perish-celery` removes the drop-in. A
+lasting change of the default belongs in the repo's unit file.
+
+### Heavy-job slot
+
+The heavy jobs run one at a time, on whichever worker runs them:
+
+- profile window passes (`profile_windows.advance_profile_windows`) and
+  the synchronous profile task (`exports.update_user_profile`), which
+  runs the same window pass inside it for a large build;
+- imports: `chat_imports.import_conversations`,
+  `imports.import_twitter_archive`;
+- pre-fills: `imports.prefill_community_archive`, `imports.prefill_x_api`;
+- the Community Archive snapshot refresh
+  (`imports.refresh_community_archive_snapshot`).
+
+They use `base=HeavyTask` (`backend/utils/heavy_slot.py`); a test lists
+them. A heavy task takes the Redis key `loore:heavy_slot` before it runs.
+When another heavy job holds it, the task is queued again in 30–40 s on
+the queue it came from, with the same task id, arguments and retry count,
+and shows as RETRY (an import's status reads "queued"). It is never
+dropped. The holder refreshes the key's 300 s TTL every 30 s from a
+heartbeat thread and deletes it when the task ends, with success or with
+an error; when the holder is killed (the memory limit, the hard time
+limit), the key expires within 300 s. A heartbeat stops by itself after
+the task's hard time limit. When Redis cannot be reached, a heavy task
+runs without the slot.
+
+```bash
+redis-cli get loore:heavy_slot   # "<task name>[<task id>] <token>", or (nil)
+redis-cli ttl loore:heavy_slot
+grep "waiting for the heavy-job slot" logs/celery-worker.log | tail   # celery-background.log with the split
+```
+
+`redis-cli del loore:heavy_slot` frees it by hand. Only do that when the
+task it names no longer runs (`celery -A backend.celery_app:celery
+inspect active`): otherwise two heavy jobs run at once until it ends.
+
 ### Memory
 
 Before switching on, on the VM:
@@ -514,12 +630,14 @@ pgrep -fc 'backend.celery_app:celery worker'   # 5: the main process and 4 pool 
 The two workers run 7 processes instead of 5 (each a main process, plus 3
 and 2 pool processes), so expect them to use about 7/5 of the figure above
 once they have run for a while. During steps 2–5 below the single worker
-runs beside them. If `available` in `free -m` is not well above that
-estimate, lower `--concurrency` in the unit files first (to 2 and 1), or
-free memory for the switch (for example `docker compose -p wop-staging
-stop`, and `start` afterwards). Change the numbers in `deploy/systemd/` in
-the repo, not in `/etc/systemd/system/`: once a split unit is enabled,
-every deploy copies the repo's files over the installed ones.
+runs beside them; the heavy-job slot keeps it to one heavy job across all
+three. If `available` in `free -m` is not well above that estimate, lower
+`--concurrency` in the unit files first (to 2 and 1), or free memory for
+the switch (for example `docker compose -p wop-staging stop`, and `start`
+afterwards). Change the numbers in `deploy/systemd/` in the repo, not in
+`/etc/systemd/system/`: once a split unit is enabled, every deploy copies
+the repo's files over the installed ones (a drop-in, as in "Memory
+limits", stays).
 
 Concurrency. The interactive worker's 3 pool processes are also how many
 voice turns can end at the same moment: a finishing voice turn holds one
@@ -537,8 +655,12 @@ The order matters: every queue gets a reader before any task is routed to
 it, and the single worker stops only once nothing new reaches its queue
 that the background worker does not also read. Run in `~/write-or-perish`:
 
-1. **Check the code is deployed:** `grep -c celery_queues backend/celery_app.py`
-   prints a number above 0.
+1. **Check the code is deployed and the limits apply:**
+   `grep -c celery_queues backend/celery_app.py` prints a number above 0,
+   and `systemctl show -p MemoryMax -p OOMPolicy write-or-perish-celery`
+   shows the limit and `continue` ("Memory limits"). Start when no heavy
+   job runs (`redis-cli get loore:heavy_slot` prints `(nil)`), so the
+   three workers of steps 2–5 do not run beside a job near its limit.
 2. **Install and start both workers.** Nothing is routed to their queues
    yet; the background worker shares the default queue with the single
    worker.
@@ -548,6 +670,7 @@ that the background worker does not also read. Run in `~/write-or-perish`:
    sudo systemctl daemon-reload
    sudo systemctl enable --now write-or-perish-celery-interactive write-or-perish-celery-background
    systemctl is-active write-or-perish-celery-interactive write-or-perish-celery-background
+   systemctl show -p MemoryMax -p OOMPolicy write-or-perish-celery-background
    ```
 
 3. **Turn the routing on** (check there is no other `CELERY_SPLIT_QUEUES`
@@ -592,6 +715,7 @@ that the background worker does not also read. Run in `~/write-or-perish`:
    grep generate_llm_response logs/celery-interactive.log | tail -3
    tail -5 logs/celery-background.log   # the every-minute batch polls
    free -m
+   systemctl show -p MemoryCurrent write-or-perish-celery-interactive write-or-perish-celery-background
    ```
 
    The next deploy's log lists `Celery workers:
@@ -620,8 +744,11 @@ those are empty, so nothing is left in a queue nobody reads:
    `interactive@…` and `background@…`, except at most a Read's batch poll
    (`generate_llm_response`, see below). A scheduled task is one a worker
    holds until a set time: an import's retry after its time limit, the
-   spaced bookmark syncs, the spend-cap check 15 s after a call. Stopped
-   before that time, it goes back to a queue nobody reads.
+   spaced bookmark syncs, the spend-cap check 15 s after a call, a heavy
+   job waiting for the heavy-job slot. Stopped before that time, it goes
+   back to a queue nobody reads. A heavy job that waits keeps coming back
+   to the background queue until it gets the slot and runs there, so wait
+   for it too.
 
    ```bash
    source ~/miniconda3/etc/profile.d/conda.sh && conda activate write-or-perish

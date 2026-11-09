@@ -372,6 +372,7 @@ Users have a `plan` column (string, max 16 chars) on the User model. The plan co
 
 **Background job prioritization** - Celery queue management with priority levels (urgent: user-triggered vs low: batch processing) and failure retry logic
   - 🔧 Interactive/background queue split (#379, 2026-10-21): built, off until `CELERY_SPLIT_QUEUES` is switched on on prod (docs/RUNBOOKS.md → "Celery queue split").
+  - ✅ Memory limit on the workers that run heavy jobs, and heavy jobs (profile window passes, imports, pre-fills, the Community Archive refresh) one at a time through a Redis slot (#613, 2026-11-09): live from the deploy, with the split off or on (docs/RUNBOOKS.md → "Celery queue split" → "Memory limits", "Heavy-job slot").
 
 ---
 
