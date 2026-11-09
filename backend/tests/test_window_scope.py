@@ -4,7 +4,7 @@ A profile pass cuts its windows from one read of the metadata
 (routes/export_data.WindowScope, tasks/profile_windows._PassScope) where
 each window used to read the metadata of all the writing after its start,
 once for its unit count and once per render. These tests run both on the
-same synthetic corpora, against SQLite:
+same synthetic corpora:
 
 - ``WindowScope.rows`` against ``_select_incremental_rows`` (which every
   count and render of the old path calls) for many date bounds: the same
@@ -14,7 +14,17 @@ same synthetic corpora, against SQLite:
   render reads the database) and once with the one read: the same
   requests byte for byte (prompts, models, custom ids), the same job
   items (window bounds, units, cumulative units, origin stats) and the
-  same saved rows.
+  same saved rows;
+- changes made while a pass runs, the reviewer's cases of #617 among
+  them, and window ends inside runs of rows that share a timestamp.
+
+On SQLite (the default) the old walk returns rows that share a timestamp
+in a fixed order, which the read reproduces. Set
+WINDOW_SCOPE_TEST_DATABASE_URL to a Postgres database to run them there:
+the old walk's order for such rows is its query plan's, so there the
+rows are compared as sets, and the old path of a whole build is given
+the read's order for them (``_canonical``) after its rows are checked
+to be the same.
 
 No model is called (the batch and token-count boundaries are stand-ins)
 and every text is synthetic.
@@ -50,6 +60,9 @@ from backend.models import (  # noqa: E402
 
 pb = pw = ex = ed = None
 REAL = {}
+TEST_DB = os.environ.get("WINDOW_SCOPE_TEST_DATABASE_URL",
+                         "sqlite:///:memory:")
+SQLITE = TEST_DB.startswith("sqlite")
 
 MODEL_IDS = ("claude-opus-5.5", "claude-haiku-5.5", "gpt-6-astra",
              "gpt-6-luna", "gpt-6.1-sol")
@@ -125,12 +138,17 @@ def app(monkeypatch):
     pb, pw, ex, ed = _pb, _pw, _ex, _ed
     REAL.update(select=ed._select_incremental_rows, scope=ex.window_scope,
                 units=pw._PassScope.units)
+    # The old path as the tests run it: the walk itself on SQLite, the
+    # walk in the read's order for tied rows elsewhere (_canonical).
+    REAL["old"] = (REAL["select"] if SQLITE
+                   else _canonical(REAL["select"]))
+    monkeypatch.setattr(ed, "_select_incremental_rows", REAL["old"])
     from backend.config import Config
     from backend.tests.fake_redis import install
     models = {k: dict(Config.SUPPORTED_MODELS[k]) for k in MODEL_IDS}
     app = Flask(__name__)
     app.config.update(
-        SQLALCHEMY_DATABASE_URI="sqlite:///:memory:", SECRET_KEY="t",
+        SQLALCHEMY_DATABASE_URI=TEST_DB, SECRET_KEY="t",
         TESTING=True, DEFAULT_LLM_MODEL="claude-opus-5.5",
         SUPPORTED_MODELS=models,
         PROFILE_USE_BATCH=True, PROFILE_BATCH_USER_IDS=set(),
@@ -161,10 +179,43 @@ def app(monkeypatch):
     monkeypatch.setattr(pb, "list_batches", lambda *a, **k: {})
     install(monkeypatch)
     with app.app_context():
+        db.drop_all()
         db.create_all()
         yield app
         db.session.remove()
         db.drop_all()
+
+
+def _by_id_fields(rows):
+    return {r.id: (r.parent_id, r.created_at, r.token_count, r.deleted_at,
+                   r.origin) for r in rows}
+
+
+def _canonical(select):
+    """``_select_incremental_rows`` with the read's order for rows that
+    share a timestamp, for databases whose order for them is the plan's:
+    the walk's rows, checked to be the read's rows field for field, in
+    the read's order. Everything else of the old path stays the old
+    path's."""
+    def walk(user_id, filter_ai_usage=False, created_before=None,
+             created_after=None):
+        old = select(user_id, filter_ai_usage=filter_ai_usage,
+                     created_before=created_before,
+                     created_after=created_after)
+        scope = ed.WindowScope(user_id, filter_ai_usage=bool(filter_ai_usage),
+                               floor=created_after)
+        new = scope.rows(created_after, created_before)
+        assert _by_id_fields(old) == _by_id_fields(new)
+        return new
+    return walk
+
+
+def _same_rows(new, old):
+    """The read's rows against the walk's: the same rows with the same
+    fields, and on SQLite also in the same order."""
+    assert _by_id_fields(new) == _by_id_fields(old)
+    if SQLITE:
+        assert _key(new) == _key(old)
 
 
 # ── a synthetic corpus ────────────────────────────────────────────────────
@@ -339,8 +390,8 @@ def _bounds(corpus, rng, floor):
 @pytest.mark.parametrize("filter_ai_usage", [True, False])
 def test_scope_rows_are_the_incremental_rows(app, seed, filter_ai_usage):
     """Every date pair a pass can ask for, from the floor on: the rows,
-    their order (which decides ties at a window's edge and the order of
-    entries sharing a timestamp) and their fields."""
+    their fields and, on SQLite, their order (which decides ties at a
+    window's edge and the order of entries sharing a timestamp)."""
     corpus = _Corpus(seed, 60_000)
     uid = corpus.writer.id
     rng = random.Random(seed)
@@ -349,11 +400,10 @@ def test_scope_rows_are_the_incremental_rows(app, seed, filter_ai_usage):
         scope = ed.WindowScope(uid, filter_ai_usage=filter_ai_usage,
                                floor=floor)
         for after, before in _bounds(corpus, rng, floor):
-            old = ed._select_incremental_rows(
+            old = REAL["select"](
                 uid, filter_ai_usage=filter_ai_usage,
                 created_before=before, created_after=after)
-            assert _key(scope.rows(after, before)) == _key(old), (
-                floor, after, before)
+            _same_rows(scope.rows(after, before), old)
             assert scope.units(after, before) == ed.count_remaining_units(
                 uid, after, filter_ai_usage=filter_ai_usage,
                 created_before=before)
@@ -387,8 +437,8 @@ def test_a_reply_under_a_parent_the_climb_up_found(app):
     scope = ed.WindowScope(w.id)
     for after, before in [(None, None), (None, T0 + timedelta(hours=5)),
                           (T0, T0 + timedelta(hours=11))]:
-        old = ed._select_incremental_rows(w.id, True, before, after)
-        assert _key(scope.rows(after, before)) == _key(old)
+        old = REAL["select"](w.id, True, before, after)
+        _same_rows(scope.rows(after, before), old)
     assert other.id not in {r.id for r in scope.rows()}
     assert other.id in {r.id for r in scope.rows(
         None, T0 + timedelta(hours=5))}
@@ -519,7 +569,7 @@ def _run(app, monkeypatch, one_read, build, *, skip=(), clock=False,
     reads = {"select": 0, "scope": 0}
     # The functions as the modules define them (an earlier run of the
     # same test replaced the module attributes with its own counters).
-    real_select = REAL["select"]
+    real_select = REAL["old"]
     real_scope = REAL["scope"]
 
     def counted_select(*a, **k):
@@ -796,7 +846,7 @@ def test_rows_that_keep_changing_read_the_database(app, monkeypatch):
     burst, or a read that differs from the database's walk): that window
     and the rest of the pass read the database per window, as before,
     and the fallback is reported."""
-    def changed(self, ids, created_after=None, created_before=None):
+    def changed(self, ids, created_after=None, created_before=None, **kw):
         raise ed.ScopeChanged("synthetic")
 
     reports = []
@@ -810,3 +860,241 @@ def test_rows_that_keep_changing_read_the_database(app, monkeypatch):
     assert new == old
     fallbacks = [t for t in reports if "two reads" in t]
     assert fallbacks and reads["reloads"] == len(fallbacks)
+
+
+# ── 4. what decides a window beyond its own rows (review of #617) ─────────
+
+def _purge(user):
+    from backend.utils import user_purge
+    user_purge.schedule_purge(user, requested_by_id=user.id, source="self")
+    db.session.commit()
+
+
+def _restore(user):
+    from backend.utils import user_purge
+    assert user_purge.cancel_purge(user.id, user.id)
+    db.session.commit()
+
+
+def _tombstone_thread(own_reply=False):
+    """E: the writer's entry, deleted before the pass, 10 units; C: a
+    5,000-unit reply under it nine hours later (a friend's public one, or
+    the writer's own). A 300-unit window selects E alone, and keeps it as
+    a tombstone because C below it is live (§5a)."""
+    w, f = _user("writer"), _user("friend")
+
+    def node(author, parent, hours, units, privacy):
+        n = Node(user_id=author.id, human_owner_id=author.id,
+                 parent_id=parent.id if parent else None, node_type="user",
+                 privacy_level=privacy, ai_usage="chat")
+        n.set_content("synthetic " * max(1, units // 2))
+        n.token_count = units
+        n.created_at = T0 + timedelta(hours=hours)
+        db.session.add(n)
+        db.session.flush()
+        return n
+
+    e = node(w, None, 1, 10, "private")
+    e.deleted_at = T0 + timedelta(days=2)
+    c = node(w if own_reply else f, e, 10, 5_000,
+             "private" if own_reply else "public")
+    db.session.commit()
+    return w, f, e, c
+
+
+def _change(kind, w, f, c):
+    if kind == "deleted":
+        c.deleted_at = datetime.utcnow()
+    elif kind == "private":
+        c.set_privacy_level("private")
+    elif kind == "ai_none":
+        c.ai_usage = "none"
+    elif kind == "account":
+        f.deleted_at = datetime.utcnow()
+    elif kind == "purge":
+        _purge(w)
+        return
+    db.session.commit()
+
+
+@pytest.mark.parametrize("kind", ["deleted", "private", "ai_none", "account",
+                                  "purge"])
+def test_a_thread_left_without_live_rows_is_left_out(app, kind):
+    """The reviewer's cases: after the pass read the metadata, the only
+    live row under a tombstone entry goes (someone's reply deleted, made
+    private, marked None, gone with its author's account; or the writer's
+    own reply, by "Delete all my writing"). The database walk then sends
+    nothing for the window; from the old read the thread would go out as
+    tombstone lines. The render's check finds the change (ScopeChanged),
+    and the pass's render, read again, sends nothing either."""
+    w, f, e, c = _tombstone_thread(own_reply=(kind == "purge"))
+    stale = ex.window_scope(w.id)
+    pass_scope = pw._PassScope(w, [None])
+    before = ex.render_profile_window(w, 300, None)
+    assert before is not None and before["node_ids"] == {e.id}
+    via = pass_scope.render(300, None, None)
+    assert _normal(via.pop("content")) == _normal(before.pop("content"))
+    assert via == before
+    _change(kind, w, f, c)
+    assert ex.render_profile_window(w, 300, None) is None
+    with pytest.raises(ed.ScopeChanged):
+        ex.render_profile_window(w, 300, None, scope=stale)
+    assert pass_scope.render(300, None, None) is None
+    assert pass_scope.index is not None and pass_scope.index.reads == 2
+
+
+def test_a_reply_made_visible_after_the_read_is_rendered(app):
+    """The other way: a reply under a window's entry that was private when
+    the pass read the metadata is made public, so the database walk
+    takes it in; the read is taken again and the window holds it too."""
+    w, f, e, c = _tombstone_thread()
+    e.deleted_at = None
+    c.set_privacy_level("private")
+    c.token_count = 50
+    db.session.commit()
+    stale = ex.window_scope(w.id)
+    c.set_privacy_level("public")
+    db.session.commit()
+    direct = ex.render_profile_window(w, 5_000, None)
+    assert c.id in direct["node_ids"]
+    with pytest.raises(ed.ScopeChanged):
+        ex.render_profile_window(w, 5_000, None, scope=stale)
+    stale.reload()
+    _render_same(w, stale, 5_000)
+
+
+def test_delete_all_my_writing_and_its_restore_are_seen(app):
+    """Both set or clear deleted_at on every row of the writer and leave
+    updated_at as it was: the deleted count and the newest deletion in
+    fresh() see them."""
+    corpus = _Corpus(20, 8_000)
+    user = corpus.writer
+    scope = ex.window_scope(user.id)
+    assert scope.fresh()
+    _purge(user)
+    assert not scope.fresh()
+    scope.reload()
+    assert scope.fresh()
+    _restore(user)
+    assert not scope.fresh()
+
+
+def test_delete_and_restore_during_the_pass_are_the_same(app, monkeypatch):
+    """"Delete all my writing" before the 5th window count and "Restore my
+    writing" before the 15th: each is seen before the next window, and
+    the build is the one the per-window reads make."""
+    state = {}
+
+    def hook(count):
+        user = db.session.get(User, state["writer"])
+        if count == 5:
+            _purge(user)
+        elif count == 15:
+            _restore(user)
+
+    _same(app, monkeypatch, _changed_build(state), changes=True, hook=hook,
+          config=_small_cap(11_000))
+
+
+# ── 5. window ends inside runs of rows that share a timestamp ─────────────
+
+def _tied_build(drive_phases):
+    """170k units of tweets in bursts that share one second and of the
+    writer's messages and the model's replies stamped alike, at an
+    11k-token cap: many window ends fall inside such runs."""
+    def build(drive):
+        corpus = _Corpus(21, 0)
+        rng = corpus.rng
+        while corpus.total < 170_000:
+            if rng.random() < 0.5:
+                for _ in range(rng.randint(2, 8)):
+                    corpus._node(corpus.writer, None, rng.randint(40, 600),
+                                 origin="twitter")
+            else:
+                mine = corpus._node(corpus.writer, None,
+                                    rng.randint(40, 900))
+                corpus._node(corpus.model, mine, rng.randint(40, 900),
+                             kind="llm")
+            corpus._step(1, 5)
+        user = corpus.writer
+        user.profile_needs_full_regen = True
+        db.session.commit()
+        drive_phases(drive, user)
+        return user
+    return build
+
+
+def _shuffled(select, seed):
+    """The walk with its rows in a shuffled order, as a query plan may
+    return them: rows that share a timestamp come in any order."""
+    rng = random.Random(seed)
+
+    def walk(*a, **k):
+        rows = list(select(*a, **k))
+        rng.shuffle(rows)
+        return rows
+    return walk
+
+
+@pytest.mark.parametrize("phases", ["old", "new", "old_then_new"])
+def test_window_ends_never_split_a_timestamp(app, monkeypatch, phases):
+    """Whatever order rows that share a timestamp come in (the old walk
+    on Postgres; here shuffled), and when a set the old path started is
+    resumed by the new one: every window starts at the previous window's
+    end, no row is in two windows, and every row of the writer is in
+    exactly one."""
+    windows = []
+    real_fit = pw.fit_window
+
+    def fit(*a, **k):
+        fitted = real_fit(*a, **k)
+        if fitted is not None:
+            windows.append((a[4], fitted[0]["latest_node_created_at"],
+                            set(fitted[0]["node_ids"])))
+        return fitted
+
+    monkeypatch.setattr(pw, "fit_window", fit)
+    monkeypatch.setattr(ed, "_select_incremental_rows",
+                        _shuffled(REAL["select"], 7))
+    use_read = {"on": phases == "new"}
+    monkeypatch.setattr(pw._exports, "window_scope",
+                        lambda uid, after=None: (REAL["scope"](uid, after)
+                                                 if use_read["on"] else None))
+    monkeypatch.setattr(pw, "time", SimpleNamespace(
+        monotonic=_Clock().monotonic))
+    monkeypatch.setitem(app.config, "PROFILE_WINDOW_RENDER_SECONDS", 10)
+    for key, value in _small_cap(11_000).items():
+        monkeypatch.setitem(app.config, key, value)
+    provider = Provider()
+    monkeypatch.setattr(pb, "batch_submit", provider.submit)
+    monkeypatch.setattr(pb, "batch_check_and_collect", provider.collect)
+
+    def drive_phases(drive, user):
+        for _ in range(30):
+            task_id = pw.dispatch_advance(user)
+            pw.advance(user.id, task_id)
+            if phases == "old_then_new":
+                use_read["on"] = True       # the next pass resumes the set
+            if ProfileBatchJob.query.filter_by(status="pending").count():
+                pb._poll_profile_batches()
+            elif not pw.set_work_due(user, ex.profile_update_base(user.id)):
+                break
+
+    user = _tied_build(drive_phases)(None)
+    assert len(windows) >= 12
+    ties = {}
+    for n in Node.query.all():
+        ties[n.created_at] = ties.get(n.created_at, 0) + 1
+    ends = [end for _start, end, _ids in windows]
+    assert sum(ties.get(end, 0) > 1 for end in ends) >= 3   # ends in runs
+    seen = {}
+    for i, (start, end, ids) in enumerate(windows):
+        assert start == (windows[i - 1][1] if i else None)
+        for node_id in ids:
+            assert node_id not in seen, (node_id, seen.get(node_id), i)
+            seen[node_id] = i
+    from sqlalchemy import or_
+    mine = {n.id for n in Node.query.filter(
+        or_(Node.user_id == user.id, Node.human_owner_id == user.id),
+        *ed._scope_filter(user.id, True, None, None))}
+    assert mine <= set(seen)

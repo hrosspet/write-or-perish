@@ -797,14 +797,15 @@ class WindowScope:
     ``rows(created_after, created_before)`` returns exactly what
     ``_select_incremental_rows(user_id, filter_ai_usage, created_before,
     created_after)`` returns for a ``created_after`` at or after the
-    floor, in the same order: the anchors (the user's own rows, then the
-    rows addressed to them, each by id, as SQLite returns the anchor
-    query), then the parents the climb up adds and the replies the climb
-    down adds, a layer at a time, by id within a layer. Only the dates of
-    the filter are applied here; the rest of ``_scope_filter`` (access,
-    tombstones, ai_usage) is the database's, read with the rows. Rows
-    that share a date are ordered so; the database's order for them was
-    its plan's.
+    floor: the same rows, in the order SQLite returns them: the anchors
+    (the user's own rows, then the rows addressed to them, each by id),
+    then the parents the climb up adds and the replies the climb down
+    adds, a layer at a time, by id within a layer. Only the dates of the
+    filter are applied here; the rest of ``_scope_filter`` (access,
+    tombstones, ai_usage) is the database's, read with the rows. The
+    order matters only for rows that share a date; on Postgres the old
+    walk gave them its query plan's order, so there a window can end
+    elsewhere in a run of such rows (each run stays whole in one window).
 
     The read covers what any window's walk can reach: the anchors after
     the floor, every ancestor the climb up reaches through rows that pass
@@ -813,9 +814,11 @@ class WindowScope:
     out the anchor below such a parent climbs down through it).
 
     ``fresh()`` says whether the user's rows changed since the read (a
-    row added, removed or updated), ``check`` whether a window's own rows
-    are still as read: a pass reads the scope again rather than render a
-    row the user hid or changed meanwhile."""
+    row added, removed, updated, deleted or restored) or an account was
+    deleted or restored; ``check`` whether the rows a window's text is
+    decided from are still as read: its own rows, the rows that put them
+    in scope, and the replies under them. A pass reads the scope again
+    rather than render from a row someone hid or changed meanwhile."""
 
     def __init__(self, user_id, filter_ai_usage=True, floor=None):
         self.user_id = user_id
@@ -825,11 +828,21 @@ class WindowScope:
         self.reload()
 
     def _fingerprint(self):
+        from backend.models import User
         uid = self.user_id
-        return tuple(db.session.query(
+        # "Delete all my writing" and its restore set and clear deleted_at
+        # without touching updated_at (user_purge.hide_writing): the
+        # deleted count and newest deletion see them. Accounts deleted or
+        # restored change what other people's rows show (#269).
+        own = tuple(db.session.query(
             func.count(Node.id), func.max(Node.id),
-            func.max(Node.updated_at),
+            func.max(Node.updated_at), func.count(Node.deleted_at),
+            func.max(Node.deleted_at),
         ).filter(or_(Node.user_id == uid, Node.human_owner_id == uid)).one())
+        gone = tuple(db.session.query(
+            func.count(User.id), func.max(User.deleted_at),
+        ).filter(User.deleted_at.isnot(None)).one())
+        return own + gone
 
     @staticmethod
     def _fetch(column, ids, clauses):
@@ -897,6 +910,7 @@ class WindowScope:
         for replies in children.values():
             replies.sort(key=_by_id)
         self._rows = rows
+        self._anchor_ids = anchor_ids
         self._children = children
         # Only these anchors can add rows: one whose parent is someone
         # else's row (the climb up), one with someone else's replies (the
@@ -929,30 +943,39 @@ class WindowScope:
             anchors += self._undated
         anchors.sort(key=itemgetter(1))
         out = {row.id: row for _date, _i, row in anchors}
-        self._climb_up(out, test)
-        self._climb_down(out, test)
+        via = {}
+        self._climb_up(out, via, test)
+        self._climb_down(out, via, test)
         result = list(out.values())
-        self._last = (key, result)
+        self._last = (key, result, via, {})
         return result
 
-    def _climb_up(self, out, test):
+    def _climb_up(self, out, via, test):
         """Step 2 of _select_incremental_rows: the parents of the anchors
-        in ``out`` that pass, then theirs, a layer at a time."""
+        in ``out`` that pass, then theirs, a layer at a time. ``via``
+        gets, for each, a child it was reached from."""
         get = self._rows.get
-        pending = {a.parent_id for a in self._up if a.id in out}
+        pending = {}
+        for a in self._up:
+            if a.id in out:
+                pending.setdefault(a.parent_id, a.id)
         while pending:
             layer = [row for row in map(get, sorted(pending))
                      if row is not None and test(row)]
+            nxt = {}
             for row in layer:
                 out[row.id] = row
-            pending = {r.parent_id for r in layer
-                       if r.parent_id is not None} - out.keys()
+                via[row.id] = pending[row.id]
+            for row in layer:
+                if row.parent_id is not None and row.parent_id not in out:
+                    nxt.setdefault(row.parent_id, row.id)
+            pending = nxt
 
-    def _climb_down(self, out, test):
+    def _climb_down(self, out, via, test):
         """Step 3: the replies that pass under the anchors, then under
         the replies added, a layer at a time; a row already in ``out`` is
         neither added nor climbed through (as the database walk skips
-        it)."""
+        it). ``via`` gets each one's parent."""
         children = self._children
         frontier = [a for a in self._down if a.id in out]
         while frontier:
@@ -964,6 +987,7 @@ class WindowScope:
             frontier = sorted(new.values(), key=_by_id)
             for row in frontier:
                 out[row.id] = row
+                via[row.id] = row.parent_id
 
     def units(self, created_after=None, created_before=None):
         """``count_remaining_units`` for these dates, from memory."""
@@ -971,23 +995,68 @@ class WindowScope:
                    for r in self.rows(created_after, created_before))
 
     def fresh(self):
-        """Whether none of the user's rows was added, removed or updated
-        since the read (their count, newest id and newest update)."""
+        """Whether, since the read, none of the user's rows was added,
+        removed, updated, deleted or restored (their count, newest id,
+        newest update, deleted count and newest deletion) and no account
+        was deleted or restored."""
         return self._fingerprint() == self._mark
 
-    def check(self, ids, created_after=None, created_before=None):
-        """Raise ScopeChanged unless every row ``ids`` names still passes
-        the scope's filter with these dates and has the parent, date,
-        units, deleted state and origin the scope read: a window's own
-        rows, before they are loaded and rendered."""
+    def check(self, ids, created_after=None, created_before=None,
+              replies_of=()):
+        """Raise ScopeChanged unless the rows a window's text is decided
+        from are as the scope read them, for these dates:
+
+        - every row ``ids`` names (the window's own rows, before they are
+          loaded; the rows the per-thread skip rule walked), and the rows
+          that put each one in scope (its path to an anchor), still pass
+          the scope's filter with the parent, date, units, deleted state
+          and origin read;
+        - each anchor in ``replies_of`` has exactly the replies that pass
+          the filter which the read gave it: none hidden, deleted, made
+          private or gone with its author's account, and none new. An
+          anchor's replies that pass are all in scope, so the read's
+          replies are the database walk's.
+
+        Someone else's row the window does not show can thus still decide
+        nothing about it from the read: a thread whose only live reply
+        was deleted after the read is left out, as the database walk
+        leaves it out (§5a)."""
+        self.rows(created_after, created_before)
+        _key, result, via, children = self._last
         clauses = _scope_filter(self.user_id, self.filter_ai_usage,
                                 created_before, created_after)
-        live = {row.id: row for row in self._fetch(Node.id, ids, clauses)}
-        for node_id in ids:
+        self._check_rows(ids, via, clauses)
+        parents = {i for i in replies_of if i in self._anchor_ids}
+        if parents:
+            self._check_replies(parents, result, children, clauses)
+
+    def _check_rows(self, ids, via, clauses):
+        want = set(ids)
+        for node_id in list(want):
+            while node_id in via:
+                node_id = via[node_id]
+                want.add(node_id)
+        live = {row.id: row for row in self._fetch(Node.id, want, clauses)}
+        for node_id in want:
             if live.get(node_id) != self._rows.get(node_id):
                 raise ScopeChanged(
                     f"user {self.user_id}: row {node_id} changed since the "
                     f"window scope was read")
+
+    def _check_replies(self, parents, result, children, clauses):
+        if not children:
+            for row in result:
+                if row.parent_id is not None:
+                    children.setdefault(row.parent_id, set()).add(row)
+        replies = {}
+        for row in self._fetch(Node.parent_id, parents, clauses):
+            replies.setdefault(row.parent_id, set()).add(row)
+        for parent_id in parents:
+            read = children.get(parent_id, set())
+            if replies.get(parent_id, set()) != read:
+                raise ScopeChanged(
+                    f"user {self.user_id}: the replies under row "
+                    f"{parent_id} changed since the window scope was read")
 
 
 def _thread_has_alive_node(root_id):
@@ -1294,9 +1363,11 @@ def _build_user_export_incremental(
         if not selected_ids:
             return None
         if scope is not None:
-            # Rows the user hid, deleted or edited since the pass read
-            # its metadata are not rendered from that read (ScopeChanged).
-            scope.check(selected_ids, created_after, created_before)
+            # Rows hidden, deleted or edited since the pass read its
+            # metadata, and replies under them that changed, are not
+            # rendered or decided from that read (ScopeChanged).
+            scope.check(selected_ids, created_after, created_before,
+                        replies_of=selected_ids)
 
         selected_nodes = (
             Node.query
@@ -1375,6 +1446,8 @@ def _build_user_export_incremental(
         if r.parent_id is not None:
             children_by_parent.setdefault(r.parent_id, []).append(r)
 
+    walked, expanded = set(), set()   # what the skip rule read (#612)
+
     def _subtree_has_alive(row):
         # Iterative: recursion depth would equal thread depth, which
         # overflows on very deep reply chains (same class of bug as the
@@ -1382,8 +1455,10 @@ def _build_user_export_incremental(
         pending = [row]
         while pending:
             r = pending.pop()
+            walked.add(r.id)
             if r.deleted_at is None:
                 return True
+            expanded.add(r.id)
             pending.extend(children_by_parent.get(r.id, []))
         return False
 
@@ -1402,6 +1477,16 @@ def _build_user_export_incremental(
         key=lambda r: r.created_at,
         reverse=not chronological_order,
     )
+    if scope is not None:
+        # The skip rule and the compact form below read rows outside the
+        # selection from the pass's read: the rows the skip rule walked
+        # and the replies under the deleted ones and under the tweets
+        # that may render compact must still be as read (#612).
+        checked = set(selected_ids)
+        tweets = {r.id for r in entry_rows
+                  if r.origin == "twitter" and r.parent_id is None}
+        scope.check(walked - checked, created_after, created_before,
+                    replies_of=(expanded | tweets) - checked)
 
     if not entry_rows:
         return None

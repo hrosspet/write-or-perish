@@ -421,18 +421,34 @@ and origin of every row the export's walk can reach after the earliest due
 range's start; no content) and cuts every window from it: the unit count
 the planner sizes the window by, and each render while `fit_window` fits it
 to the cap. `WindowScope.rows` is `_select_incremental_rows` computed in
-memory, the same rows in the same order (`tests/test_window_scope.py`
-compares the two, and whole builds on both paths); only each window's own
-rows are loaded and decrypted. Before, every window read the metadata of
-all the writing after its start again, once for its count and once per
-render, so the work grew with windows × entries (a build of a
-multi-million-unit import took over 20 minutes and about 0.5 GB in one
-worker). The read is taken again before a window when the user's rows
-changed since (their count, newest id or newest update), and when a
-window's own rows no longer match it at render time (`ScopeChanged`): a row
-the user hid, deleted or edited during the pass is not rendered from the
-old read. A window whose rows change again right after a new read, and the
-rest of that pass, read the database as before.
+memory: the same rows, and on SQLite in the same order
+(`tests/test_window_scope.py` compares the two, and whole builds on both
+paths); only each window's own rows are loaded and decrypted. Before,
+every window read the metadata of all the writing after its start again,
+once for its count and once per render, so the work grew with windows ×
+entries (a build of a multi-million-unit import took over 20 minutes and
+about 0.5 GB in one worker).
+
+Rows that share a timestamp come in a fixed order now (the user's own,
+then those addressed to them, by id; parents and replies by id), the order
+SQLite returned them in. On Postgres the old walk gave them its query
+plan's order, so there a window can now end elsewhere in such a run than
+the old code would have ended it: a run is always taken whole by one
+window (the next starts after its timestamp), so no row is lost or read
+twice, also when a set the old code started is resumed.
+
+The read is taken again before a window when the user's rows changed since
+(their count, newest id, newest update, deleted count or newest deletion:
+"Delete all my writing" and its restore leave `updated_at` alone) or an
+account was deleted or restored. At render time (`ScopeChanged`, then a
+new read) the rows a window's text is decided from must still be as read:
+its own rows before they are loaded, the rows that put each one in scope,
+the replies under them, and the rows the per-thread skip rule (§5a) walks
+with the replies under the deleted ones. A row hidden, deleted or edited
+during the pass, or a reply that went (deleted, made private, marked None,
+its author's account deleted), is neither rendered nor decides anything
+from the old read. A window whose rows change again right after a new
+read, and the rest of that pass, read the database as before.
 
 **One version per window.** The prompt is the generation prompt with
 `EVENTS_IN_WINDOW_PARAGRAPH` inserted before `## INPUT`

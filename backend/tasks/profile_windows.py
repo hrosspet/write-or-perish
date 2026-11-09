@@ -194,11 +194,11 @@ FIT_SAFETY = 0.97
 # the next task picks up where it stopped.
 DEFAULT_BATCH_MAX_BYTES = 15_000_000
 DEFAULT_RENDER_SECONDS = 600
-# Reads of the pass's metadata (_PassScope) one window may take when its
-# own rows changed under its render: the read and one more. Rows that
-# change under both are an edit burst (or a read that differs from the
-# database's walk): the window and the rest of the pass read the database
-# per window, as before #612, and it is reported.
+# Reads of the pass's metadata (_PassScope) one window may take when the
+# rows it is decided from changed under its render: the read and one more.
+# Rows that change under both are an edit burst (or a read that differs
+# from the database's walk): the window and the rest of the pass read the
+# database per window, as before #612, and it is reported.
 SCOPE_READS_PER_WINDOW = 2
 
 HOLD_NOTE = "Waiting for spend headroom"
@@ -1215,9 +1215,12 @@ class _PassScope:
     entries.
 
     The read is taken again before a window when the user's rows changed
-    since (an entry written, hidden, deleted or edited while the pass
-    runs), and when a window's own rows changed under its render, so an
-    entry marked None meanwhile is not sent from the old read. When they
+    since (an entry written, hidden, deleted, edited or restored while the
+    pass runs, or an account deleted or restored), and when the rows its
+    text is decided from (its own, the rows that put them in scope, the
+    replies under them, the rows the per-thread skip rule walks) changed
+    under its render, so an entry marked None meanwhile is neither sent
+    nor decides anything from the old read. When they
     changed again right after a new read, that window and the rest of
     the pass are read from the database as before (``index`` None), and
     the fallback is reported."""
