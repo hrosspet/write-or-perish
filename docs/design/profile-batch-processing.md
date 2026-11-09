@@ -614,12 +614,17 @@ dispatches a new task. One advance runs per user at a time
 and slice submission. A second copy (its own message delivered again, a
 second dispatch) exits without rendering; `_is_task_stale` never takes the
 guard for stale while the key lives, whatever the result backend says
-(a killed task's FAILURE); a run that dies leaves the key to expire, and
-the hourly seeder resumes the build. A run whose key expired while it was
-frozen and was taken by another stops at its next beat. The task's soft
-time limit is raised through the token counts and the submission
-(`utils/soft_limit`; the SDKs do not send the request again), so the
-advance's handler runs. The poller collects window, group and final items (`collect`) and
+(a killed task's FAILURE); a run that dies leaves the key to expire. A run
+whose key expired while it was frozen and was taken by another stops at
+its next beat. The task's soft time limit is raised through the token
+counts and the submission (`utils/soft_limit`; the SDKs do not send the
+request again), so the advance's handler runs and the admin column shows
+the stop. A copy that exits for a held key, an advance stopped by the
+soft limit, and requests a soft limit kept from going out all set the
+work hold (`profile_work_held`, no attempt counted): the hourly seeder
+resumes the build after the key expires, also for an account outside its
+cohort (a pre-fill waiting for its owner), which it reaches only through
+the hold. The poller collects window, group and final items (`collect`) and
 dispatches the advance; the hourly seeder routes builds to it
 (`wants_window_build`), opens its gate for a set with work due
 (`set_work_due`) and clears a stuck `profile_batch_pending` that no job and

@@ -1318,11 +1318,15 @@ def test_a_soft_limit_in_the_submit_records_what_went_out_and_stops(
     """The task's soft time limit during a submission (2026-11-07): the
     batch created before it is recorded (its requests are at the
     provider), the requests that did not go out count as nothing (no
-    attempt, no failed job), and the soft limit stops the task."""
+    attempt, no failed job) but their work is held for a later pass, and
+    the soft limit stops the task. The held user here is outside the
+    hourly cohort (a pre-fill waiting for its owner): the hold is how the
+    hourly seeder reaches it again (review of #611)."""
     from billiard.exceptions import SoftTimeLimitExceeded
     from backend.utils.llm_batch import SubmittedBatches
     a = _user(profile_force_batch=True)
-    b = _user(profile_force_batch=True)
+    b = _user(profile_force_batch=True, profile_batch_pending=True)
+    b.approved = False
     db.session.commit()
 
     def submit(reqs, keys, kind):
@@ -1347,9 +1351,13 @@ def test_a_soft_limit_in_the_submit_records_what_went_out_and_stops(
     assert [(j.batch_id, j.status) for j in jobs] == [("b-ant", "pending")]
     assert [i["user_id"] for i in jobs[0].items] == [a.id]
     assert User.query.get(a.id).profile_batch_pending is True
+    assert not User.query.get(a.id).profile_work_held
     other = User.query.get(b.id)
     assert not other.profile_batch_attempts
-    assert not other.profile_work_held
+    assert other.profile_batch_pending is False   # nothing in flight
+    assert other.profile_work_held is True
+    assert b.id not in {u.id for u in User.profile_eligible_query()}
+    assert b.id in {u.id for u in pb._work_held_users(set())}
 
 
 def test_submit_drops_duplicate_users_and_custom_ids(app, monkeypatch):

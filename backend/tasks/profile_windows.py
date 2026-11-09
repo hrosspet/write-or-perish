@@ -103,7 +103,7 @@ from backend.utils.profile_versions import (
 from backend.utils.profile_providers import (  # noqa: F401 (re-exported)
     PUBLIC_PROVENANCES, agreed_to_both, note_private_read,
     writing_is_public_only)
-from backend.utils import refusal_backoff, run_locks
+from backend.utils import refusal_backoff, run_locks, soft_limit
 from backend.utils.tokens import approximate_token_count, format_date_metadata
 # Module references (see profile_batch's note): exports and profile_batch
 # may be half-initialised when this module is imported.
@@ -1942,13 +1942,32 @@ def _leave_to_running(user, task_id, running):
     """A copy that found another run holding the user's lock exits
     without rendering. When the guard names this copy (a dispatch while
     the other run had no guard), it goes back to the run that holds the
-    lock, so that run's exit clears it and dispatches what is left."""
+    lock, so that run's exit clears it and dispatches what is left.
+
+    The work is held for a later pass (profile_batch._hold_work) in every
+    case: the run that holds the lock may be dead (most likely when the
+    lock holds this copy's own id: its first delivery, killed for memory,
+    the message requeued at once). Its lock expires, the hourly seeder
+    clears the stale guard, and an account outside the seeder's cohort (a
+    pre-fill waiting for its owner) is resumed only through the hold. A
+    live run's exit makes the hold harmless: the next pass that finds
+    nothing due releases it."""
     if running and running != task_id and \
             user.profile_generation_task_id == task_id:
         user.profile_generation_task_id = running
         db.session.commit()
-    logger.warning("User %s: profile window advance %s exits: run %s holds "
-                   "the user's lock", user.id, task_id, running or "?")
+    _batch._hold_work([user.id])
+    if running == task_id:
+        # An earlier delivery of this same task holds the lock: it died
+        # (or, unexpectedly, still runs past the visibility timeout).
+        logger.error("User %s: profile window advance %s delivered again "
+                     "while its earlier delivery holds the user's lock "
+                     "(killed?); the build resumes after the lock expires",
+                     user.id, task_id)
+    else:
+        logger.warning("User %s: profile window advance %s exits: run %s "
+                       "holds the user's lock", user.id, task_id,
+                       running or "?")
 
 
 def advance(user_id, task_id, wait_for_imports=True):
@@ -2010,8 +2029,7 @@ def advance(user_id, task_id, wait_for_imports=True):
     except Exception as e:
         # Also the soft time limit (SoftTimeLimitExceeded, which the
         # provider calls let through, utils/soft_limit): the run stops
-        # here, its guard and lock are released below, and the hourly
-        # seeder resumes the build.
+        # here and its guard and lock are released below.
         db.session.rollback()
         outcome = "error"
         user = db.session.get(User, user_id)
@@ -2019,6 +2037,12 @@ def advance(user_id, task_id, wait_for_imports=True):
             user.profile_seed_error = (
                 f"Profile window build failed: {describe_exception(e)}")[:255]
             db.session.commit()
+            if soft_limit.found_in(e) is not None:
+                # The work is held for a later pass: the hourly seeder
+                # resumes it, also for an account outside its cohort (a
+                # pre-fill waiting for its owner), which it reaches only
+                # through the hold.
+                _batch._hold_work([user_id])
         logger.error("Profile window build failed for user %s: %s",
                      user_id, describe_exception(e))
     finally:

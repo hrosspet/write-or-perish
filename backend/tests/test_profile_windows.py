@@ -4131,3 +4131,86 @@ def test_the_byte_and_render_defaults_without_config(app, world,
         assert Config.PROFILE_BATCH_MAX_BYTES == 15_000_000
     if not os.environ.get("PROFILE_WINDOW_RENDER_SECONDS"):
         assert Config.PROFILE_WINDOW_RENDER_SECONDS == 600
+
+
+# ── review of #611: builds of accounts outside the hourly cohort ─────────
+
+def _waiting_prefill(**kw):
+    """An account outside the hourly seeder's cohort: a pre-fill waiting
+    for its owner (not approved, never deactivated)."""
+    u = _user(**kw)
+    u.approved = False
+    db.session.commit()
+    assert u.id not in {x.id for x in User.profile_eligible_query()}
+    return u
+
+
+def test_a_killed_run_s_build_resumes_outside_the_cohort(
+        real_is_task_stale, world, redis, monkeypatch):
+    """The first delivery is killed for memory and its message requeued at
+    once: the copy finds the dead run's lock and exits. Once the lock
+    expires, the hourly seeder resumes the build, also for an account it
+    reaches only through the work hold."""
+    from backend.utils import run_locks
+    monkeypatch.setattr(pw._exports, "_is_task_stale", real_is_task_stale)
+    _result_state(monkeypatch, "SUCCESS")       # the copy's own result
+    world.corpus = _windows_corpus(3)
+    u = _waiting_prefill(profile_needs_full_regen=True)
+    task_id = pw.dispatch_advance(u)
+    assert _run_lock(u, task_id).acquire()        # then killed
+    assert pw.advance(u.id, task_id) == pw.RUNNING_ELSEWHERE
+    db.session.refresh(u)
+    assert u.profile_work_held is True
+    pw.advance_profile_windows.apply_async.reset_mock()
+    pb._seed_profile_batches()                    # the dead lock lives
+    pw.advance_profile_windows.apply_async.assert_not_called()
+    redis.advance(run_locks.PROFILE_RUN_TTL + 1)
+    pb._seed_profile_batches()
+    pw.advance_profile_windows.apply_async.assert_called_once()
+
+
+def test_a_soft_limit_stop_resumes_outside_the_cohort(
+        world, redis, monkeypatch):
+    from billiard.exceptions import SoftTimeLimitExceeded
+    import backend.llm_providers as lp
+    world.corpus = _windows_corpus(4)
+    counts = [0]
+
+    def count(model_id, messages, keys):
+        counts[0] += 1
+        if counts[0] == 2:
+            raise SoftTimeLimitExceeded()
+        return None
+    monkeypatch.setattr(lp.LLMProvider, "count_tokens", staticmethod(count))
+    u = _waiting_prefill(profile_needs_full_regen=True)
+    assert _advance(u) == "error"
+    db.session.refresh(u)
+    assert u.profile_work_held is True
+    assert u.profile_generation_task_id is None
+    pw.advance_profile_windows.apply_async.reset_mock()
+    pb._seed_profile_batches()
+    pw.advance_profile_windows.apply_async.assert_called_once()
+
+
+def test_a_soft_limit_in_a_set_s_submit_resumes_outside_the_cohort(
+        world, redis, monkeypatch):
+    """The soft limit inside the submission of a window set's slice: the
+    advance stops, nothing is counted against the windows, and the hourly
+    seeder resumes the build of an account outside its cohort."""
+    from billiard.exceptions import SoftTimeLimitExceeded
+    world.corpus = _windows_corpus(3)
+
+    def submit(*a, **k):
+        raise SoftTimeLimitExceeded()
+    monkeypatch.setattr(pb, "batch_submit", submit)
+    u = _waiting_prefill(profile_needs_full_regen=True)
+    assert _advance(u) == "error"
+    assert ProfileBatchJob.query.count() == 0      # no "missing" outcome
+    db.session.refresh(u)
+    assert u.profile_work_held is True
+    assert u.profile_batch_pending is False
+    monkeypatch.setattr(pb, "batch_submit",
+                        lambda *a, **k: world.provider.submit(*a, **k))
+    pw.advance_profile_windows.apply_async.reset_mock()
+    pb._seed_profile_batches()
+    pw.advance_profile_windows.apply_async.assert_called_once()

@@ -841,8 +841,8 @@ def _submit_requests(built, keys):
         # The task's soft time limit, during the submission: the batches
         # created before it are recorded below (their items are in
         # flight), the rest are not failures (no attempt, no "missing"
-        # outcome; the next pass builds them again), and then the task
-        # stops.
+        # outcome) and their work is held for the next pass
+        # (_hold_unsent), and then the task stops.
         stopped = e
         batch_ids = getattr(e, "submitted", None) or {}
 
@@ -859,12 +859,14 @@ def _submit_requests(built, keys):
     queue_full = getattr(batch_ids, "queue_full", None) or set()
     now = datetime.utcnow()
     submitted = 0
+    unsent = []      # items the soft limit kept from going out
     for provider_key, items in items_by_key.items():
         batch_id = batch_ids.get(provider_key)
         if not batch_id and stopped is not None:
             logger.warning(f"Batch submit for {provider_key} stopped by the "
                            f"task's soft time limit; {len(items)} item(s) "
                            f"not in flight")
+            unsent += items
             continue
         if not batch_id:
             refused = provider_key in account_refused
@@ -932,8 +934,29 @@ def _submit_requests(built, keys):
         logger.info(f"Profile batch {batch_id} ({provider_key}): "
                     f"{len(items)} item(s) submitted")
     if stopped is not None:
+        _hold_unsent(unsent)
         raise stopped
     return submitted
+
+
+def _hold_unsent(items):
+    """Items a soft time limit kept from going out: their users are not in
+    flight for them (``profile_batch_pending`` stays only for a user some
+    pending job carries), and their work is held for a later pass, as a
+    failed submit's is but with no attempt counted, so the hourly seeder
+    resumes it, also for an account outside its cohort (a pre-fill
+    waiting for its owner)."""
+    if not items:
+        return
+    carried = {item.get("user_id")
+               for job in ProfileBatchJob.query.filter_by(status="pending")
+               for item in job.items or []}
+    for user_id in {i["user_id"] for i in items}:
+        u = User.query.get(user_id)
+        if u is not None and user_id not in carried:
+            u.profile_batch_pending = False
+    db.session.commit()
+    _hold_work(i["user_id"] for i in items if i.get("kind") != "intentions")
 
 
 def _notify_prefill_complete(user):
