@@ -152,6 +152,14 @@ celery.conf.update(
     },
 )
 
+# A pool process whose memory reached this after a task (a heavy job's
+# peak) is replaced once the task ends, so that memory goes back to the
+# server instead of staying with an idle process (#613). In KiB (Celery
+# reads the process's peak resident memory); a pool process at rest uses
+# about half of it. HEURISTIC: about 400 MB.
+WORKER_MAX_MEMORY_PER_CHILD_KIB = 400 * 1024
+celery.conf.worker_max_memory_per_child = WORKER_MAX_MEMORY_PER_CHILD_KIB
+
 # Queue split (#379, backend/celery_queues.py): off unless
 # CELERY_SPLIT_QUEUES is set. Off, no routes are set and every task goes
 # to the default queue, as before; on, each task goes to the interactive

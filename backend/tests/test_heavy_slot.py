@@ -8,6 +8,8 @@
   again with a countdown (same id, arguments, queue and retry count) and
   marks it RETRY, so it is never dropped; Redis unreachable, a direct call
   and an eager apply run the task at once.
+- A task id whose runs were killed MAX_KILLED_RUNS times is not run
+  again: its stop handler runs, it fails, and the slot and the count go.
 - The real app: exactly the heavy jobs use HeavyTask, and all of them are
   on the background queue.
 
@@ -124,7 +126,7 @@ class FakeRedis:
             self.evals.append(script)
             item = self._live(key)
             mine = item is not None and item[0] == value.encode()
-            if script == hs.BEAT_SCRIPT:
+            if "'expire'" in script:   # heavy_slot.BEAT_SCRIPT
                 ttl = int(args[0])
                 if mine:
                     self.data[key] = (item[0], self.clock + ttl)
@@ -133,12 +135,33 @@ class FakeRedis:
                     self.data[key] = (value.encode(), self.clock + ttl)
                     return 2
                 return 0
-            if script == hs.RELEASE_SCRIPT:
+            if "'del'" in script:   # heavy_slot.RELEASE_SCRIPT
                 if mine:
                     del self.data[key]
                     return 1
                 return 0
             raise AssertionError("unknown script")
+
+    def incr(self, key):
+        self._check()
+        with self.lock:
+            item = self._live(key)
+            value = int(item[0]) + 1 if item else 1
+            self.data[key] = (str(value).encode(),
+                              item[1] if item else None)
+            return value
+
+    def expire(self, key, seconds):
+        self._check()
+        with self.lock:
+            item = self._live(key)
+            if item is not None:
+                self.data[key] = (item[0], self.clock + seconds)
+
+    def delete(self, key):
+        self._check()
+        with self.lock:
+            self.data.pop(key, None)
 
     def close(self):
         self.closed = True
@@ -425,6 +448,143 @@ def test_an_unbound_heavy_task_runs(app, fake, sent):
     assert _run_in_worker(app, unbound, f"{RUN}-id-5", (),
                           {"first_copy": True}) == "SUCCESS"
     assert app.AsyncResult(f"{RUN}-id-5").get() == {"first_copy": True}
+
+
+# --- a run killed again and again --------------------------------------------
+
+def _runs(fake, task_id):
+    value = fake.get(hs.RUNS_KEY.format(task_id=task_id))
+    return None if value is None else int(value)
+
+
+def test_a_run_counts_its_start_and_an_ended_run_forgets_it(app, fake, sent):
+    seen = []
+
+    @app.task(bind=True, base=hs.HeavyTask, name="t.counted")
+    def counted(self, fail=False):
+        seen.append(_runs(fake, self.request.id))
+        if fail:
+            raise ValueError("boom")
+
+    ok, bad = f"{RUN}-count-ok", f"{RUN}-count-bad"
+    assert _run_in_worker(app, counted, ok) == "SUCCESS"
+    assert _run_in_worker(app, counted, bad, (), {"fail": True}) == "FAILURE"
+    assert seen == [1, 1]
+    assert _runs(fake, ok) is None and _runs(fake, bad) is None
+    assert fake.ttl(hs.SLOT_KEY) == -2
+
+
+class Killed(Exception):
+    """Stands in for the SIGKILL in a test run (the tracer then stores
+    FAILURE, which a later state may replace; SUCCESS it would keep)."""
+
+
+def _killed(fake, monkeypatch):
+    """Runs end as after a SIGKILL: no finally (the count and the slot
+    stay; the heartbeat dies with the process)."""
+    monkeypatch.setattr(hs, "forget_starts", lambda client, task_id: None)
+    monkeypatch.setattr(hs.Slot, "release", lambda self: self._stop.set())
+
+
+def test_a_task_killed_three_times_fails_on_its_next_start(
+        app, fake, sent, monkeypatch):
+    runs, stopped = [], []
+
+    def stop(task, n):
+        stopped.append((task.request.id, n))
+
+    @app.task(bind=True, base=hs.HeavyTask, name="t.killed",
+              acks_late=True, reject_on_worker_lost=True,
+              on_repeated_kill=stop)
+    def killed(self, n):
+        runs.append(n)
+        raise Killed()
+
+    task_id = f"{RUN}-killed"
+    with monkeypatch.context() as m:
+        _killed(fake, m)
+        for i in range(hs.MAX_KILLED_RUNS):
+            if i:
+                # Delivered again after the kill: it waits for the dead
+                # run's slot to expire, then runs (and is killed again).
+                assert _run_in_worker(app, killed, task_id, (7,)) == "RETRY"
+                fake.clock += hs.SLOT_TTL_SECONDS + 1
+            _run_in_worker(app, killed, task_id, (7,))
+    assert len(runs) == hs.MAX_KILLED_RUNS
+    assert _runs(fake, task_id) == hs.MAX_KILLED_RUNS
+    fake.clock += hs.SLOT_TTL_SECONDS + 1
+
+    # The next start does not run it: the stop is recorded, the task
+    # fails (so the message is acked), the slot and the count are gone.
+    assert _run_in_worker(app, killed, task_id, (7,)) == "FAILURE"
+    assert len(runs) == hs.MAX_KILLED_RUNS
+    assert stopped == [(task_id, 7)]
+    result = app.AsyncResult(task_id)
+    assert type(result.result).__name__ == "HeavyJobKilled"
+    assert _runs(fake, task_id) is None
+    assert fake.get(hs.SLOT_KEY) is None
+
+
+def test_two_kills_still_run_the_task(app, fake, sent):
+    runs = []
+
+    @app.task(bind=True, base=hs.HeavyTask, name="t.twice")
+    def twice(self):
+        runs.append(1)
+
+    task_id = f"{RUN}-twice"
+    fake.set(hs.RUNS_KEY.format(task_id=task_id),
+             str(hs.MAX_KILLED_RUNS - 1), ex=hs.RUNS_TTL_SECONDS)
+    assert _run_in_worker(app, twice, task_id) == "SUCCESS"
+    assert runs == [1]
+    assert _runs(fake, task_id) is None
+
+
+class ForTheUser(Exception):
+    """A stop handler's own error (e.g. a message written for the user)."""
+
+
+def test_the_stop_handler_chooses_the_error(app, fake, sent):
+    def stop(task):
+        raise ForTheUser("written for the user")
+
+    @app.task(bind=True, base=hs.HeavyTask, name="t.handled",
+              on_repeated_kill=stop)
+    def handled(self):
+        raise AssertionError("must not run")
+
+    task_id = f"{RUN}-handled"
+    fake.set(hs.RUNS_KEY.format(task_id=task_id), str(hs.MAX_KILLED_RUNS),
+             ex=hs.RUNS_TTL_SECONDS)
+    assert _run_in_worker(app, handled, task_id) == "FAILURE"
+    result = app.AsyncResult(task_id).result
+    assert type(result).__name__ == "ForTheUser"
+    assert "written for the user" in str(result)
+    assert fake.get(hs.SLOT_KEY) is None
+
+
+def test_the_count_kept_for_a_day(app, fake, sent, monkeypatch):
+    @app.task(bind=True, base=hs.HeavyTask, name="t.ttl")
+    def ttl(self):
+        return fake.ttl(hs.RUNS_KEY.format(task_id=self.request.id))
+
+    task_id = f"{RUN}-ttl"
+    _run_in_worker(app, ttl, task_id)
+    assert app.AsyncResult(task_id).get() == hs.RUNS_TTL_SECONDS
+
+
+def test_a_count_redis_refuses_runs_the_task(app, fake, sent, monkeypatch):
+    runs = []
+
+    @app.task(bind=True, base=hs.HeavyTask, name="t.uncounted")
+    def uncounted(self):
+        runs.append(1)
+
+    def broken(key):
+        raise ConnectionError("redis down")
+    monkeypatch.setattr(fake, "incr", broken)
+    assert _run_in_worker(app, uncounted, f"{RUN}-uncounted") == "SUCCESS"
+    assert runs == [1]
 
 
 # --- the real app ------------------------------------------------------------

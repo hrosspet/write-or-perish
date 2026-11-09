@@ -28,6 +28,20 @@ refreshes its TTL every BEAT_SECONDS while the task runs. It is released:
   SLOT_TTL_SECONDS. A copy of the killed task delivered again (acks_late)
   has a new token, so it waits for that expiry like any other heavy job.
 
+A run that is killed again and again does not run for ever. A task with
+``acks_late`` and ``reject_on_worker_lost`` (the window advance, a chat
+import) goes back to the queue when its pool process is killed, with the
+same id and retry count, and would be killed again by the same work. So
+each start of a task id is counted in Redis (RUNS_KEY), and the
+``finally`` that ends a run deletes the count: on success, on an error, on
+a Retry and on the SystemExit a deploy's SIGTERM causes, but never after
+a SIGKILL. The count therefore holds the runs that were killed. When a
+task id has been killed MAX_KILLED_RUNS times, its next start does not
+run it: the task's ``on_repeated_kill`` handler (a task option) records
+the stop where the user or the admin sees it, and the task fails
+(HeavyJobKilled, or the handler's own error), which acks the message and
+frees the slot.
+
 Only a task a worker runs from the queue takes the slot. A direct call or
 an eager apply (tests, a heavy task calling another's function) runs at
 once. When Redis cannot be reached the task runs without the slot, as
@@ -45,6 +59,8 @@ from celery import Task
 log = logging.getLogger(__name__)
 
 SLOT_KEY = "loore:heavy_slot"
+# The starts of one task id that have not ended (were killed).
+RUNS_KEY = "loore:heavy_runs:{task_id}"
 
 # ── Heuristics (#613, flagged in the PR) ──────────────────────────────────
 # How long the slot outlives its holder's last heartbeat: how long heavy
@@ -58,6 +74,12 @@ BEAT_SECONDS = 30
 # that several waiting tasks do not ask at the same moment.
 WAIT_SECONDS = 30
 WAIT_JITTER_SECONDS = 10
+# A task id killed this many times is not run again: two kills can be
+# bad luck (a deploy's SIGKILL, another job's peak), a third is the job.
+MAX_KILLED_RUNS = 3
+# How long the count of killed runs is kept. Kills further apart start the
+# count again.
+RUNS_TTL_SECONDS = 24 * 3600
 
 # Redis client timeouts: connect as batch_pipeline_lock; the socket timeout
 # keeps a hung Redis from holding a heartbeat or a release for long.
@@ -202,6 +224,35 @@ class Slot:
             pass
 
 
+class HeavyJobKilled(Exception):
+    """A heavy task id whose runs were killed MAX_KILLED_RUNS times; it is
+    not run again. The message names only the task and the count."""
+
+
+def count_start(client, task_id):
+    """Count a start of *task_id*. Returns the number of its starts that
+    have not ended, this one included, or None when Redis cannot be
+    reached (the task then runs)."""
+    key = RUNS_KEY.format(task_id=task_id)
+    try:
+        starts = int(client.incr(key))
+        client.expire(key, RUNS_TTL_SECONDS)
+        return starts
+    except Exception as e:  # noqa: BLE001 - never stop a task on it
+        log.warning("heavy job start of %s not counted (%s)", task_id,
+                    type(e).__name__)
+        return None
+
+
+def forget_starts(client, task_id):
+    """The run ended (not killed): its starts are not counted any more."""
+    try:
+        client.delete(RUNS_KEY.format(task_id=task_id))
+    except Exception as e:  # noqa: BLE001 - the TTL ends it anyway
+        log.warning("heavy job start count of %s not deleted (%s)",
+                    task_id, type(e).__name__)
+
+
 def wait_countdown():
     return WAIT_SECONDS + random.uniform(0, WAIT_JITTER_SECONDS)
 
@@ -236,7 +287,15 @@ class HeavyTask(Task):
     worker (and in an eager apply) the request is already pushed, so this
     calls ``run`` itself, as Celery does for a task without a custom
     ``__call__``; a direct call goes through ``Task.__call__``, which
-    pushes one."""
+    pushes one.
+
+    ``on_repeated_kill``: a task option, ``handler(task, *args, **kwargs)``,
+    called instead of the task once its runs were killed MAX_KILLED_RUNS
+    times. It records the stop for the user or the admin, and may raise
+    the error the task fails with (e.g. a message written for the user);
+    otherwise the task fails with HeavyJobKilled."""
+
+    on_repeated_kill = None
 
     def __call__(self, *args, **kwargs):
         request = self.request
@@ -263,10 +322,24 @@ class HeavyTask(Task):
                 slot.close()
             return self.run(*args, **kwargs)
         try:
+            starts = count_start(slot.client, request.id)
+            if starts is not None and starts > MAX_KILLED_RUNS:
+                return self._stop_killed_job(starts - 1, args, kwargs)
             return self.run(*args, **kwargs)
         finally:
+            forget_starts(slot.client, request.id)
             slot.release()
             slot.close()
+
+    def _stop_killed_job(self, kills, args, kwargs):
+        # Logged at ERROR, so Sentry shows it.
+        log.error("%s[%s] was killed in %d runs (the memory limit or the "
+                  "hard time limit); it is not run again", self.name,
+                  self.request.id, kills)
+        if self.on_repeated_kill is not None:
+            self.on_repeated_kill(*args, **kwargs)
+        raise HeavyJobKilled(f"{self.name} was killed in {kills} runs; "
+                             f"not run again")
 
     def _hard_time_limit(self):
         limits = self.request.timelimit or (None, None)

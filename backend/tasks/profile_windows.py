@@ -1847,6 +1847,32 @@ def _show_policy_stop(user, code):
 
 # ── the advance task ──────────────────────────────────────────────────────
 
+def stop_killed_advance(user_id, task_id):
+    """The advance's runs were killed (the worker's memory limit, the hard
+    time limit) again and again, each delivered again by
+    reject_on_worker_lost (#613). Recorded as a failed build is (the
+    admin's Profile column), with its guard cleared and no re-dispatch;
+    the hourly seeder starts the build again. Runs inside an app
+    context."""
+    from backend.utils.heavy_slot import HeavyJobKilled
+    user = db.session.get(User, user_id)
+    if user is None or user.profile_generation_task_id != task_id:
+        return
+    user.profile_seed_error = (
+        f"Profile window build failed: "
+        f"{describe_exception(HeavyJobKilled())}")[:255]
+    user.profile_generation_task_id = None
+    user.profile_generation_task_dispatched_at = None
+    user.profile_batch_pending = bool(inflight_items(user_id))
+    db.session.commit()
+
+
+def _stop_killed_advance(task, user_id, wait_for_imports=True):
+    """HeavyTask's on_repeated_kill for advance_profile_windows."""
+    with flask_app.app_context():
+        stop_killed_advance(user_id, task.request.id)
+
+
 def _claim(user, task_id):
     user.profile_generation_task_id = task_id
     user.profile_generation_task_dispatched_at = datetime.utcnow()
@@ -1963,7 +1989,7 @@ def advance(user_id, task_id, wait_for_imports=True):
 
 
 @celery.task(bind=True, base=HeavyTask, acks_late=True,
-             reject_on_worker_lost=True)
+             reject_on_worker_lost=True, on_repeated_kill=_stop_killed_advance)
 def advance_profile_windows(self, user_id, wait_for_imports=True):
     """Render, check and submit what the user's window set needs now.
     Holds only the per-user guard, never the batch pipeline lock: a render

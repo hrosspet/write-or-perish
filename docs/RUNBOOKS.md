@@ -530,10 +530,20 @@ largest. The main process logs `Process 'ForkPoolWorker-N' ... exited with
 'signal 9 (SIGKILL)'` and the task's `WorkerLostError`, and starts a new
 pool process. A task with `acks_late` and `reject_on_worker_lost` (the
 profile window advance, ChatGPT/Claude imports) goes back to the queue;
-any other task is lost and reported. `OOMPolicy=continue` matters: with
-systemd's default (`stop`) systemd stops the whole unit after an OOM kill
-in it, with every task it runs. `MemorySwapMax=0` keeps the limit the same
-on a server with swap: the job is killed, not moved to swap.
+any other task is lost and reported. A task id killed 3 times is not run
+again ("Heavy-job slot" below). `OOMPolicy=continue` matters only on
+cgroup v2: there, with systemd's default (`stop`), systemd stops the whole
+unit after an OOM kill in it, with every task it runs. On cgroup v1
+systemd does not see the kill, and the unit stays up whatever the policy.
+`MemorySwapMax=0` keeps the limit the same on a server with swap: the job
+is killed, not moved to swap.
+
+A pool process whose peak memory reached about 400 MB
+(`worker_max_memory_per_child` in `backend/celery_app.py`; a pool process
+at rest uses about half) is replaced once its task ends, so a heavy job's
+peak does not stay with an idle process. The worker log then says
+`child process exiting after exceeding memory limit (...KiB / 409600KiB)`
+at WARNING; that is expected after a heavy job.
 
 There is no `MemoryHigh`. Without swap it frees nothing; it holds a job
 that grows past it in a crawl (in a test unit with a 10 % band, about a
@@ -547,23 +557,32 @@ once.
 deploy. It copies the split units only once one is enabled (see above);
 the first copy is step 2 of "Switching on".
 
-Check what applies and what the worker uses now:
+Check what applies and what the worker uses now. `systemctl show` prints
+the configured values; the cgroup file is what the kernel enforces. Both
+should print `1476395008` for the single worker (1152M, `1207959552`, for
+the background worker):
 
 ```bash
 systemctl show -p MemoryMax -p MemorySwapMax -p OOMPolicy -p MemoryCurrent write-or-perish-celery
-stat -fc %T /sys/fs/cgroup   # cgroup2fs: unified hierarchy; tmpfs: cgroup v1
+stat -fc %T /sys/fs/cgroup   # cgroup2fs: cgroup v2; tmpfs: cgroup v1
+# cgroup v2:
+cat /sys/fs/cgroup/system.slice/write-or-perish-celery.service/memory.max
+# cgroup v1:
+cat /sys/fs/cgroup/memory/system.slice/write-or-perish-celery.service/memory.limit_in_bytes
 ```
 
-On cgroup v1 systemd applies `MemoryMax` as the v1 memory limit, and
+On cgroup v1 systemd writes `MemoryMax` as the v1 memory limit, and
 `MemorySwapMax` has no effect (there is no swap to limit on a server
 without one). `MemoryCurrent` counts the worker's file cache too, which
 the kernel reclaims before it kills anything.
 
-An OOM kill shows in the journal and the worker log:
+An OOM kill shows in the kernel log, under both cgroup versions, and in
+the worker log (`journalctl -u` shows it only on cgroup v2, where systemd
+watches for it):
 
 ```bash
-journalctl -u write-or-perish-celery --since "1 hour ago" | grep -i oom
-grep -E "SIGKILL|WorkerLostError" logs/celery-worker.log | tail
+journalctl -k --since "1 hour ago" | grep -iE "out of memory|oom-kill"
+grep -E "SIGKILL|WorkerLostError" logs/celery-worker.log | tail   # celery-background.log with the split
 ```
 
 Adjust with a drop-in, which deploys do not overwrite (they copy only the
@@ -605,6 +624,22 @@ an error; when the holder is killed (the memory limit, the hard time
 limit), the key expires within 300 s. A heartbeat stops by itself after
 the task's hard time limit. When Redis cannot be reached, a heavy task
 runs without the slot.
+
+A run that is killed (the memory limit, the hard time limit) is not run
+again for ever. Each start of a task id is counted under
+`loore:heavy_runs:<task id>` (kept 24 h), and a run that ends in any
+other way deletes the count. When a task id was killed 3 times, its next
+start does not run it: the task fails (FAILURE), the message is acked,
+the slot is freed and the worker logs `... was killed in 3 runs ...; it
+is not run again` at ERROR (Sentry). A ChatGPT/Claude import then shows
+as failed to the user ("The import stopped because it ran out of memory.
+Press Confirm Import again to continue where it stopped."), and its
+import lock is released so Confirm starts it at once. A profile window
+build shows `Profile window build failed: HeavyJobKilled` in the admin's
+Profile column, its guard is cleared, and the hourly seeder starts it
+again under a new task id. Only tasks with `acks_late` and
+`reject_on_worker_lost` come back after a kill, so only they reach the
+count; any other killed task fails at once, as before.
 
 ```bash
 redis-cli get loore:heavy_slot   # "<task name>[<task id>] <token>", or (nil)
@@ -657,8 +692,8 @@ that the background worker does not also read. Run in `~/write-or-perish`:
 
 1. **Check the code is deployed and the limits apply:**
    `grep -c celery_queues backend/celery_app.py` prints a number above 0,
-   and `systemctl show -p MemoryMax -p OOMPolicy write-or-perish-celery`
-   shows the limit and `continue` ("Memory limits"). Start when no heavy
+   and the limit applies to the single worker (the `systemctl show` and
+   cgroup file checks in "Memory limits"). Start when no heavy
    job runs (`redis-cli get loore:heavy_slot` prints `(nil)`), so the
    three workers of steps 2–5 do not run beside a job near its limit.
 2. **Install and start both workers.** Nothing is routed to their queues
@@ -671,6 +706,7 @@ that the background worker does not also read. Run in `~/write-or-perish`:
    sudo systemctl enable --now write-or-perish-celery-interactive write-or-perish-celery-background
    systemctl is-active write-or-perish-celery-interactive write-or-perish-celery-background
    systemctl show -p MemoryMax -p OOMPolicy write-or-perish-celery-background
+   # and the cgroup file, as in "Memory limits" (1207959552)
    ```
 
 3. **Turn the routing on** (check there is no other `CELERY_SPLIT_QUEUES`
