@@ -15,6 +15,24 @@ celery = Celery(
     backend=flask_app.config.get('CELERY_RESULT_BACKEND', 'redis://localhost:6379/0')
 )
 
+TASK_TIME_LIMIT = 3600  # 1 hour hard limit
+TASK_SOFT_TIME_LIMIT = 3300  # 55 minute soft limit
+# How long Redis waits for a delivered message's ack before it delivers the
+# message again. An acks_late task (the profile window advance, a chat
+# import) is acked only when it ends, and a reserved message is unacked
+# while it waits for a free worker process; with Redis's default of one
+# hour, a task that ran to the hard limit was delivered a second time while
+# it was still running or being killed. HEURISTIC: three hard limits: a
+# reserved message may wait up to one hard limit for a free process, then
+# run for one, and the third covers timers that fire late when the server
+# is short of memory (the hard limit has fired many minutes late). The cost:
+# a message whose worker died without acking it (the whole worker killed,
+# not one process) comes back only after this time. Also above every
+# countdown the code schedules (the longest fixed one is 30 minutes; the
+# nightly bookmark sync staggers 30 s per account, which passes three
+# hours at 360 accounts in one local hour).
+BROKER_VISIBILITY_TIMEOUT = 3 * TASK_TIME_LIMIT
+
 # Celery configuration
 celery.conf.update(
     task_serializer='json',
@@ -23,8 +41,9 @@ celery.conf.update(
     timezone='UTC',
     enable_utc=True,
     task_track_started=True,
-    task_time_limit=3600,  # 1 hour hard limit
-    task_soft_time_limit=3300,  # 55 minute soft limit
+    task_time_limit=TASK_TIME_LIMIT,
+    task_soft_time_limit=TASK_SOFT_TIME_LIMIT,
+    broker_transport_options={'visibility_timeout': BROKER_VISIBILITY_TIMEOUT},
     worker_prefetch_multiplier=1,  # Process one task at a time
     worker_max_tasks_per_child=50,  # Restart worker after 50 tasks (prevent memory leaks)
     result_expires=86400,  # Keep results for 24 hours

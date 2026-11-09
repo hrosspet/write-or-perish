@@ -35,7 +35,7 @@ from backend.utils.chunk_plan import (
     UPDATE_THRESHOLD_UNITS, next_window_budget, max_units_for_cap)
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.privacy import account_allows_ai
-from backend.utils import refusal_backoff
+from backend.utils import refusal_backoff, soft_limit
 from backend.utils.llm_batch import (
     BATCH_JOB_MAX_AGE, batch_submit, batch_check_and_collect,
     apply_batch_key_override, batch_ended, blocked_items, list_batches)
@@ -834,7 +834,17 @@ def _submit_requests(built, keys):
         requests_by_provider.setdefault(b["provider"], []).append(
             dict(b["request"], user_id=b["meta"]["user_id"]))
 
-    batch_ids = batch_submit(requests_by_provider, keys, "profile")
+    stopped = None
+    try:
+        batch_ids = batch_submit(requests_by_provider, keys, "profile")
+    except soft_limit.SoftTimeLimitExceeded as e:
+        # The task's soft time limit, during the submission: the batches
+        # created before it are recorded below (their items are in
+        # flight), the rest are not failures (no attempt, no "missing"
+        # outcome) and their work is held for the next pass
+        # (_hold_unsent), and then the task stops.
+        stopped = e
+        batch_ids = getattr(e, "submitted", None) or {}
 
     items_by_key = {}
     for b in built:
@@ -849,8 +859,15 @@ def _submit_requests(built, keys):
     queue_full = getattr(batch_ids, "queue_full", None) or set()
     now = datetime.utcnow()
     submitted = 0
+    unsent = []      # items the soft limit kept from going out
     for provider_key, items in items_by_key.items():
         batch_id = batch_ids.get(provider_key)
+        if not batch_id and stopped is not None:
+            logger.warning(f"Batch submit for {provider_key} stopped by the "
+                           f"task's soft time limit; {len(items)} item(s) "
+                           f"not in flight")
+            unsent += items
+            continue
         if not batch_id:
             refused = provider_key in account_refused
             # A full provider queue (Peter, 2026-11-03: "as many accounts
@@ -916,7 +933,30 @@ def _submit_requests(built, keys):
         submitted += len(items)
         logger.info(f"Profile batch {batch_id} ({provider_key}): "
                     f"{len(items)} item(s) submitted")
+    if stopped is not None:
+        _hold_unsent(unsent)
+        raise stopped
     return submitted
+
+
+def _hold_unsent(items):
+    """Items a soft time limit kept from going out: their users are not in
+    flight for them (``profile_batch_pending`` stays only for a user some
+    pending job carries), and their work is held for a later pass, as a
+    failed submit's is but with no attempt counted, so the hourly seeder
+    resumes it, also for an account outside its cohort (a pre-fill
+    waiting for its owner)."""
+    if not items:
+        return
+    carried = {item.get("user_id")
+               for job in ProfileBatchJob.query.filter_by(status="pending")
+               for item in job.items or []}
+    for user_id in {i["user_id"] for i in items}:
+        u = User.query.get(user_id)
+        if u is not None and user_id not in carried:
+            u.profile_batch_pending = False
+    db.session.commit()
+    _hold_work(i["user_id"] for i in items if i.get("kind") != "intentions")
 
 
 def _notify_prefill_complete(user):
@@ -1167,6 +1207,10 @@ def _seed_profile_batches(users=None, ignore_backoff=False,
                 user, allow_chunk=not _exports.integration_due(
                     user, _exports.profile_update_base(user.id)))
         except Exception as e:
+            # The task's soft time limit (a token count lets it through,
+            # utils/soft_limit) is not this user's build failure: the
+            # pass stops.
+            soft_limit.reraise(e)
             # Recorded on the row (admin Profile column) and logged at
             # ERROR so Sentry sees it: a build failure never reaches the
             # provider, so nothing else counts or reports it.

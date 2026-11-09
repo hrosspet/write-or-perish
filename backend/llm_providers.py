@@ -17,6 +17,7 @@ from anthropic import Anthropic
 from openai import OpenAI
 from flask import current_app
 
+from backend.utils import soft_limit
 from backend.utils.llm_batch import BatchItemPolicyBlocked, is_policy_block
 from backend.utils.refusal_backoff import report_policy_block
 from backend.utils.safety_identifier import openai_safety_identifier
@@ -1070,16 +1071,21 @@ class LLMProvider:
                 # No SDK retries: this is a sizing aid — better to return
                 # None fast (callers keep their overflow backstops) than
                 # stall a build behind connection-error backoff.
-                client = Anthropic(api_key=api_keys["anthropic"],
-                                   max_retries=0)
-                system_param, anthropic_messages = \
-                    LLMProvider._to_anthropic_params(messages)
-                return client.messages.count_tokens(
-                    model=config["api_model"],
-                    system=system_param,
-                    messages=anthropic_messages,
-                ).input_tokens
-            except Exception:
+                with soft_limit.passes():
+                    client = Anthropic(api_key=api_keys["anthropic"],
+                                       max_retries=0,
+                                       **soft_limit.client_kwargs(anthropic))
+                    system_param, anthropic_messages = \
+                        LLMProvider._to_anthropic_params(messages)
+                    return client.messages.count_tokens(
+                        model=config["api_model"],
+                        system=system_param,
+                        messages=anthropic_messages,
+                    ).input_tokens
+            except Exception as e:
+                # The task's soft time limit is not a failed count: it
+                # stops the task (utils/soft_limit).
+                soft_limit.reraise(e)
                 logger.warning(
                     "count_tokens failed for %s; caller falls back to its "
                     "estimate", model_id, exc_info=True)
@@ -1100,7 +1106,8 @@ class LLMProvider:
                     total += len(enc.encode(text, disallowed_special=()))
                     total += 4  # per-message wrapper overhead (approx.)
                 return total
-            except Exception:
+            except Exception as e:
+                soft_limit.reraise(e)
                 logger.warning(
                     "tiktoken count failed for %s; caller falls back to "
                     "its estimate", model_id, exc_info=True)

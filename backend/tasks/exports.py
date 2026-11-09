@@ -154,6 +154,16 @@ def _is_task_stale(user):
     if not user.profile_generation_task_id:
         return False
 
+    # A profile window advance whose heartbeat is fresh is running,
+    # whatever the result backend says: a killed task's message delivered
+    # again runs under the same id after its FAILURE was stored, and a
+    # frozen run can pass the hour below. The guard is never stale while
+    # the run lock lives (2026-11-07: a cleared guard started a second
+    # run). A run that died stops beating and its lock expires.
+    from backend.utils import run_locks
+    if run_locks.holder(run_locks.profile_run_key(user.id)) is not None:
+        return False
+
     from backend.celery_app import celery as _celery
     task = _celery.AsyncResult(user.profile_generation_task_id)
 
