@@ -34,7 +34,12 @@ cascade is therefore eventual, one tree-level per daily run.
 The needs-action SQL filter (`content IS NOT NULL OR no children`)
 excludes long-stable tombstones from per-day re-scan; one bad row's
 exception is caught and logged without poisoning the batch (per-node
-commits).
+commits). The candidates' ids are read into a list before the first
+node is touched: a streamed query (``yield_per``) reads through a
+Postgres server-side cursor, which the first per-node commit closes, so
+the next fetch raised ``ProgrammingError: named cursor isn't valid
+anymore`` and the run stopped after its first batch, before the
+artifact purge and the audio sweep. sqlite has no such cursor.
 """
 
 import time
@@ -48,7 +53,7 @@ from backend.constants import SOFT_DELETE_GRACE_DAYS
 from backend.extensions import db
 from backend.models import (
     Node, NodeVersion, NodeTranscriptChunk, TTSChunk, Draft,
-    NodeContextArtifact, ReferenceAction, Thread,
+    NodeContextArtifact, ReferenceAction, ShareDraft, Thread,
 )
 
 logger = get_task_logger(__name__)
@@ -112,6 +117,18 @@ def _full_purge(node):
     Node.query.filter_by(continuation_node_id=node.id).update(
         {"continuation_node_id": None}
     )
+    # A share (#228) names the reply it was proposed in and the public
+    # node it published; revoking keeps the public node's pointer, so a
+    # republish can bring the same node back. Both foreign keys block the
+    # DELETE on Postgres (sqlite does not enforce them), so clear them,
+    # as the user data purge does (backend/utils/user_purge.py,
+    # _REF_COLUMNS). The share stays; a republish makes a new node.
+    ShareDraft.query.filter_by(source_node_id=node.id).update(
+        {"source_node_id": None}
+    )
+    ShareDraft.query.filter_by(public_node_id=node.id).update(
+        {"public_node_id": None}
+    )
 
     # No orphan-children: predicate guarantees zero child rows.
     db.session.delete(node)
@@ -163,26 +180,33 @@ def finalize_deleted_nodes(now=None):
     # A node a "Delete all my writing" hid (#268) is the purge's: it
     # comes back whole on a restore, or the purge deletes it with
     # everything else the request hid.
+    # Ids only, read in full before the loop: the loop commits per node,
+    # and a commit closes the server-side cursor a streamed query reads
+    # through on Postgres (see the module docstring).
     from backend.utils.hidden_rows import hidden_ids
-    candidates = (
-        Node.query
+    candidate_ids = [nid for (nid,) in (
+        db.session.query(Node.id)
         .filter(Node.deleted_at <= cutoff)
         .filter(~Node.id.in_(hidden_ids("node")))
         .filter(or_(
             Node.content.isnot(None),
             ~has_any_child,
         ))
-        .order_by(Node.deleted_at.asc())
-        .yield_per(100)
-    )
+        .order_by(Node.deleted_at.asc(), Node.id.asc())
+    )]
 
     purged = 0
     wiped = 0
     errors = 0
     audio_files = 0
     audio_errors = 0
-    for node in candidates:
+    for node_id in candidate_ids:
         try:
+            node = db.session.get(Node, node_id)
+            if (node is None or node.deleted_at is None
+                    or node.deleted_at > cutoff):
+                # Gone, or restored, since the ids were read.
+                continue
             child_count = Node.query.filter_by(parent_id=node.id).count()
             if child_count == 0:
                 audio = _full_purge(node)
@@ -200,7 +224,7 @@ def finalize_deleted_nodes(now=None):
         except Exception:
             db.session.rollback()
             logger.exception(
-                "cleanup_deleted_nodes failed on node_id=%s", node.id,
+                "cleanup_deleted_nodes failed on node_id=%s", node_id,
             )
             errors += 1
             continue
