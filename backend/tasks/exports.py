@@ -1842,7 +1842,15 @@ def _messages_for(prompt_text):
     return [{"role": "user", "content": [{"type": "text", "text": prompt_text}]}]
 
 
-def render_profile_window(user, units, cutoff, until=None):
+def window_scope(user_id, created_after=None):
+    """The metadata of the writing a profile pass's windows read after
+    ``created_after`` (None: all of it), read once (WindowScope, #612),
+    for ``render_profile_window(..., scope=)`` and its unit counts."""
+    from backend.routes.export_data import WindowScope
+    return WindowScope(user_id, filter_ai_usage=True, floor=created_after)
+
+
+def render_profile_window(user, units, cutoff, until=None, scope=None):
     """The export a profile build reads: the window after ``cutoff`` at
     ``units`` stored units, oldest first, in the engaged scope, AI-readable
     rows only. It carries the user's writing and the replies in it, and
@@ -1854,10 +1862,16 @@ def render_profile_window(user, units, cutoff, until=None):
 
     ``until``: the window ends at this moment, inclusive (a window set's
     gap ends where the next window starts, #545), so a re-rendered window
-    cannot spill into the one after it."""
+    cannot spill into the one after it.
+
+    ``scope``: the pass's ``window_scope`` (its floor at or before
+    ``cutoff``): the same window, from the pass's one read of the
+    metadata."""
     kwargs = {}
     if until is not None:
         kwargs["created_before"] = until + timedelta(microseconds=1)
+    if scope is not None:
+        kwargs["scope"] = scope
     return build_user_export_content(
         user, max_tokens=int(units), filter_ai_usage=True,
         created_after=cutoff, chronological_order=True,

@@ -19,7 +19,10 @@ from backend.utils.encryption import prefetch_deks
 from backend.utils.task_owner import failure_text, task_owned_by
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import subqueryload
+from bisect import bisect_left, bisect_right
+from collections import namedtuple
 from datetime import datetime
+from operator import attrgetter, itemgetter
 
 export_bp = Blueprint("export_bp", __name__)
 
@@ -629,6 +632,24 @@ def _collect_all_nodes_in_tree(node, filter_ai_usage=False, created_before=None,
     return result
 
 
+def _scope_filter(user_id, filter_ai_usage, created_before, created_after):
+    """The filter every row of the incremental scope passes, anchor,
+    parent or reply alike.
+
+    _export_visible_filter includes soft-deleted nodes the user owns so
+    the export tree can render them as tombstones (§5a). Fully-deleted
+    threads end up with no rows and are skipped at the entry-point
+    selection step downstream."""
+    clauses = [_export_visible_filter(Node, user_id)]
+    if filter_ai_usage:
+        clauses.append(Node.ai_usage.in_(AI_ALLOWED))
+    if created_before is not None:
+        clauses.append(Node.created_at < created_before)
+    if created_after is not None:
+        clauses.append(Node.created_at > created_after)
+    return clauses
+
+
 def _select_incremental_rows(user_id, filter_ai_usage=False,
                              created_before=None, created_after=None):
     """Return rows for the incremental-export scope.
@@ -657,23 +678,17 @@ def _select_incremental_rows(user_id, filter_ai_usage=False,
     queries. Could be folded into a single recursive CTE if profiling
     ever shows it matters; kept iterative for portability between
     PostgreSQL and the SQLite test database.
+
+    ``WindowScope.rows`` computes the same rows in memory for a profile
+    build's windows (#612); a change here needs the same change there
+    (tests/test_window_scope.py compares the two).
     """
     cols = (Node.id, Node.parent_id, Node.created_at, Node.token_count,
             Node.deleted_at, Node.origin)
 
     def _general_filter():
-        # _export_visible_filter includes soft-deleted nodes the user
-        # owns so the export tree can render them as tombstones (§5a).
-        # Fully-deleted threads end up with no rows and are skipped at
-        # the entry-point selection step downstream.
-        clauses = [_export_visible_filter(Node, user_id)]
-        if filter_ai_usage:
-            clauses.append(Node.ai_usage.in_(AI_ALLOWED))
-        if created_before is not None:
-            clauses.append(Node.created_at < created_before)
-        if created_after is not None:
-            clauses.append(Node.created_at > created_after)
-        return clauses
+        return _scope_filter(user_id, filter_ai_usage, created_before,
+                             created_after)
 
     # 1. Anchors: target-owned/addressed AND pass general filters.
     anchor_rows = db.session.query(*cols).filter(
@@ -736,6 +751,243 @@ def count_remaining_units(user_id, created_after=None, filter_ai_usage=True,
         user_id, filter_ai_usage=filter_ai_usage,
         created_after=created_after, created_before=created_before)
     return sum((r.token_count or 0) for r in rows)
+
+
+# ── One metadata read per profile pass (#612) ─────────────────────────────
+
+ScopeRow = namedtuple(
+    "ScopeRow", "id parent_id created_at token_count deleted_at origin")
+_SCOPE_COLS = (Node.id, Node.parent_id, Node.created_at, Node.token_count,
+               Node.deleted_at, Node.origin)
+_by_id = attrgetter("id")
+
+
+class ScopeChanged(RuntimeError):
+    """A row a window selected from a WindowScope is no longer as the
+    scope read it (hidden, deleted, edited, moved or gone): the caller
+    reads the scope again before it renders the window."""
+
+
+def _date_test(created_after, created_before):
+    """The created_at bounds of _scope_filter as a test of one row, with
+    SQL's NULL semantics: a row without a date passes no bound."""
+    if created_after is None and created_before is None:
+        return lambda row: True
+
+    def test(row):
+        t = row.created_at
+        if t is None:
+            return False
+        if created_after is not None and not t > created_after:
+            return False
+        return created_before is None or t < created_before
+    return test
+
+
+class WindowScope:
+    """The metadata of the writing a profile build's windows read, from
+    one read of the database (#612): every row ``_select_incremental_rows``
+    can return for a window after ``floor``, as id, parent, date, units,
+    deleted state and origin (no content). A profile pass reads it once
+    and cuts each window from it. Before, every window read the metadata
+    of all the writing after its start again, once to plan the window
+    and once per render while it was fitted to the model's cap, so the
+    work grew with windows x entries.
+
+    ``rows(created_after, created_before)`` returns exactly what
+    ``_select_incremental_rows(user_id, filter_ai_usage, created_before,
+    created_after)`` returns for a ``created_after`` at or after the
+    floor, in the same order: the anchors (the user's own rows, then the
+    rows addressed to them, each by id, as SQLite returns the anchor
+    query), then the parents the climb up adds and the replies the climb
+    down adds, a layer at a time, by id within a layer. Only the dates of
+    the filter are applied here; the rest of ``_scope_filter`` (access,
+    tombstones, ai_usage) is the database's, read with the rows. Rows
+    that share a date are ordered so; the database's order for them was
+    its plan's.
+
+    The read covers what any window's walk can reach: the anchors after
+    the floor, every ancestor the climb up reaches through rows that pass
+    the filter, and every reply the climb down reaches from an anchor,
+    also through a parent the climb up found (a window whose dates leave
+    out the anchor below such a parent climbs down through it).
+
+    ``fresh()`` says whether the user's rows changed since the read (a
+    row added, removed or updated), ``check`` whether a window's own rows
+    are still as read: a pass reads the scope again rather than render a
+    row the user hid or changed meanwhile."""
+
+    def __init__(self, user_id, filter_ai_usage=True, floor=None):
+        self.user_id = user_id
+        self.filter_ai_usage = filter_ai_usage
+        self.floor = floor
+        self.reads = 0
+        self.reload()
+
+    def _fingerprint(self):
+        uid = self.user_id
+        return tuple(db.session.query(
+            func.count(Node.id), func.max(Node.id),
+            func.max(Node.updated_at),
+        ).filter(or_(Node.user_id == uid, Node.human_owner_id == uid)).one())
+
+    @staticmethod
+    def _fetch(column, ids, clauses):
+        ids = sorted(ids)
+        for i in range(0, len(ids), _WALK_CHUNK):
+            for r in db.session.query(*_SCOPE_COLS).filter(
+                    column.in_(ids[i:i + _WALK_CHUNK]), *clauses):
+                yield ScopeRow(*r)
+
+    def reload(self):
+        """Read the metadata (again)."""
+        uid = self.user_id
+        # Before the rows: a change during the read shows at the next
+        # fresh().
+        self._mark = self._fingerprint()
+        clauses = _scope_filter(uid, self.filter_ai_usage, None, self.floor)
+        rows, own, addressed = {}, [], []
+        for r in db.session.query(*_SCOPE_COLS, Node.user_id).filter(
+                or_(Node.user_id == uid, Node.human_owner_id == uid),
+                *clauses):
+            row = ScopeRow(*r[:6])
+            rows[row.id] = row
+            (own if r[6] == uid else addressed).append(row)
+        anchors = sorted(own, key=_by_id) + sorted(addressed, key=_by_id)
+        anchor_ids = set(rows)
+
+        # Up: the ancestors any window's climb up can reach.
+        pending = {r.parent_id for r in anchors
+                   if r.parent_id is not None} - rows.keys()
+        while pending:
+            found = [row for row in self._fetch(Node.id, pending, clauses)
+                     if row.id not in rows]
+            for row in found:
+                rows[row.id] = row
+            pending = {r.parent_id for r in found
+                       if r.parent_id is not None} - rows.keys()
+
+        # Down: the replies any window's climb down can reach. A reply
+        # that is an anchor was read above; the others are other people's.
+        others = clauses + [and_(
+            Node.user_id != uid,
+            or_(Node.human_owner_id.is_(None), Node.human_owner_id != uid))]
+        expanded = set(anchor_ids)
+        frontier = anchor_ids
+        while frontier:
+            nxt = set()
+            for row in self._fetch(Node.parent_id, frontier, others):
+                rows.setdefault(row.id, row)
+                if row.id not in expanded:
+                    expanded.add(row.id)
+                    nxt.add(row.id)
+            frontier = nxt
+
+        dated = [(row.created_at, i, row) for i, row in enumerate(anchors)
+                 if row.created_at is not None]
+        dated.sort(key=itemgetter(0, 1))
+        self._dated = dated
+        self._dates = [d[0] for d in dated]
+        self._undated = [(None, i, row) for i, row in enumerate(anchors)
+                         if row.created_at is None]
+        children = {}   # parent id -> its replies that are not anchors
+        for row in rows.values():
+            if row.id not in anchor_ids and row.parent_id is not None:
+                children.setdefault(row.parent_id, []).append(row)
+        for replies in children.values():
+            replies.sort(key=_by_id)
+        self._rows = rows
+        self._children = children
+        # Only these anchors can add rows: one whose parent is someone
+        # else's row (the climb up), one with someone else's replies (the
+        # climb down). An anchor's anchor parent or reply is in a window
+        # by its own date or not at all.
+        self._up = [a for a in anchors if a.parent_id in rows
+                    and a.parent_id not in anchor_ids]
+        self._down = [a for a in anchors if a.id in children]
+        self._last = None
+        self.reads += 1
+
+    def rows(self, created_after=None, created_before=None):
+        """``_select_incremental_rows`` for these dates, from memory. The
+        caller does not change the list (the last one is kept for the
+        next call with the same dates: a window is planned and rendered
+        several times on them)."""
+        key = (created_after, created_before)
+        if self._last is not None and self._last[0] == key:
+            return self._last[1]
+        if self.floor is not None and (created_after is None
+                                       or created_after < self.floor):
+            raise ValueError("a window before the scope's floor")
+        test = _date_test(created_after, created_before)
+        lo = (0 if created_after is None
+              else bisect_right(self._dates, created_after))
+        hi = (len(self._dates) if created_before is None
+              else bisect_left(self._dates, created_before))
+        anchors = self._dated[lo:hi]
+        if created_after is None and created_before is None:
+            anchors += self._undated
+        anchors.sort(key=itemgetter(1))
+        out = {row.id: row for _date, _i, row in anchors}
+        self._climb_up(out, test)
+        self._climb_down(out, test)
+        result = list(out.values())
+        self._last = (key, result)
+        return result
+
+    def _climb_up(self, out, test):
+        """Step 2 of _select_incremental_rows: the parents of the anchors
+        in ``out`` that pass, then theirs, a layer at a time."""
+        get = self._rows.get
+        pending = {a.parent_id for a in self._up if a.id in out}
+        while pending:
+            layer = [row for row in map(get, sorted(pending))
+                     if row is not None and test(row)]
+            for row in layer:
+                out[row.id] = row
+            pending = {r.parent_id for r in layer
+                       if r.parent_id is not None} - out.keys()
+
+    def _climb_down(self, out, test):
+        """Step 3: the replies that pass under the anchors, then under
+        the replies added, a layer at a time; a row already in ``out`` is
+        neither added nor climbed through (as the database walk skips
+        it)."""
+        children = self._children
+        frontier = [a for a in self._down if a.id in out]
+        while frontier:
+            new = {}
+            for parent in frontier:
+                for row in children.get(parent.id, ()):
+                    if row.id not in out and test(row):
+                        new[row.id] = row
+            frontier = sorted(new.values(), key=_by_id)
+            for row in frontier:
+                out[row.id] = row
+
+    def units(self, created_after=None, created_before=None):
+        """``count_remaining_units`` for these dates, from memory."""
+        return sum((r.token_count or 0)
+                   for r in self.rows(created_after, created_before))
+
+    def fresh(self):
+        """Whether none of the user's rows was added, removed or updated
+        since the read (their count, newest id and newest update)."""
+        return self._fingerprint() == self._mark
+
+    def check(self, ids, created_after=None, created_before=None):
+        """Raise ScopeChanged unless every row ``ids`` names still passes
+        the scope's filter with these dates and has the parent, date,
+        units, deleted state and origin the scope read: a window's own
+        rows, before they are loaded and rendered."""
+        clauses = _scope_filter(self.user_id, self.filter_ai_usage,
+                                created_before, created_after)
+        live = {row.id: row for row in self._fetch(Node.id, ids, clauses)}
+        for node_id in ids:
+            if live.get(node_id) != self._rows.get(node_id):
+                raise ScopeChanged(
+                    f"user {self.user_id}: row {node_id} changed since the "
+                    f"window scope was read")
 
 
 def _thread_has_alive_node(root_id):
@@ -966,17 +1218,26 @@ def _format_preamble(top_started_at):
 def _build_user_export_incremental(
     user, max_tokens, filter_ai_usage, created_before, created_after,
     chronological_order, return_metadata, collapse_artifacts,
-    licence=None, omit_artifacts=False,
+    licence=None, omit_artifacts=False, scope=None,
 ):
     """Incremental export path (created_after is set). See
     `build_user_export_content` docstring for behavior. The CTE row
     set defines `included_ids`; entry points are CTE rows whose
     parent is not in scope (preamble emitted if parent exists).
     """
-    cte_rows = _select_incremental_rows(
-        user.id, filter_ai_usage=filter_ai_usage,
-        created_before=created_before, created_after=created_after,
-    )
+    if scope is not None:
+        # The rows from the pass's one read (WindowScope, #612); the
+        # window's own rows are checked against the database below.
+        if (scope.user_id != user.id
+                or scope.filter_ai_usage != bool(filter_ai_usage)
+                or not max_tokens):
+            raise ValueError("the window scope is another export's")
+        cte_rows = scope.rows(created_after, created_before)
+    else:
+        cte_rows = _select_incremental_rows(
+            user.id, filter_ai_usage=filter_ai_usage,
+            created_before=created_before, created_after=created_after,
+        )
     cte_row_ids = {r.id for r in cte_rows}
 
     if not cte_rows:
@@ -1032,6 +1293,10 @@ def _build_user_export_incremental(
 
         if not selected_ids:
             return None
+        if scope is not None:
+            # Rows the user hid, deleted or edited since the pass read
+            # its metadata are not rendered from that read (ScopeChanged).
+            scope.check(selected_ids, created_after, created_before)
 
         selected_nodes = (
             Node.query
@@ -1299,6 +1564,7 @@ def build_user_export_content(
     include_strategy="authored_threads",
     licence=None,
     omit_artifacts=False,
+    scope=None,
 ):
     """
     Core export logic: Build a human-readable text export of threads for a user.
@@ -1384,6 +1650,12 @@ def build_user_export_content(
                        Implies collapse_artifacts. For the jobs that read
                        the user's writing: profile builds, intentions and
                        poll drafts (#550).
+        scope: Optional WindowScope of this user and filter_ai_usage (a
+               profile build's windows, #612): the rows in scope come
+               from its one read of the metadata instead of a read per
+               call, the same rows. Needs max_tokens and the
+               incremental path; the selected rows are checked against
+               the database first (ScopeChanged when one changed).
 
     Returns:
         str or dict: Formatted export content (or None if no threads found).
@@ -1406,7 +1678,12 @@ def build_user_export_content(
             collapse_artifacts=collapse_artifacts,
             licence=licence,
             omit_artifacts=omit_artifacts,
+            scope=scope,
         )
+    if scope is not None:
+        raise ValueError(
+            "a window scope needs the incremental export (created_after "
+            "or include_strategy='engaged_threads')")
 
     # Legacy path: top-level threads owned by the user.
     query = Node.query.filter_by(

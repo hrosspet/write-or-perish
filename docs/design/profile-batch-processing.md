@@ -414,6 +414,26 @@ cap (`fit_window`); a window is never cut and never sent over the cap, and
 the next window starts at the last entry the smaller one holds. One entry
 larger than the cap is given up (a `window_skip` row and a Sentry alert).
 
+**One metadata read per pass (#612).** A pass reads the metadata of the
+writing it renders once (`exports.window_scope`,
+`routes/export_data.WindowScope`: id, parent, date, units, deleted state
+and origin of every row the export's walk can reach after the earliest due
+range's start; no content) and cuts every window from it: the unit count
+the planner sizes the window by, and each render while `fit_window` fits it
+to the cap. `WindowScope.rows` is `_select_incremental_rows` computed in
+memory, the same rows in the same order (`tests/test_window_scope.py`
+compares the two, and whole builds on both paths); only each window's own
+rows are loaded and decrypted. Before, every window read the metadata of
+all the writing after its start again, once for its count and once per
+render, so the work grew with windows × entries (a build of a
+multi-million-unit import took over 20 minutes and about 0.5 GB in one
+worker). The read is taken again before a window when the user's rows
+changed since (their count, newest id or newest update), and when a
+window's own rows no longer match it at render time (`ScopeChanged`): a row
+the user hid, deleted or edited during the pass is not rendered from the
+old read. A window whose rows change again right after a new read, and the
+rest of that pass, read the database as before.
+
 **One version per window.** The prompt is the generation prompt with
 `EVENTS_IN_WINDOW_PARAGRAPH` inserted before `## INPUT`
 (`window_generation_template`; inserted in code, so one-chunk builds, the

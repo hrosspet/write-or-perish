@@ -194,6 +194,12 @@ FIT_SAFETY = 0.97
 # the next task picks up where it stopped.
 DEFAULT_BATCH_MAX_BYTES = 15_000_000
 DEFAULT_RENDER_SECONDS = 600
+# Reads of the pass's metadata (_PassScope) one window may take when its
+# own rows changed under its render: the read and one more. Rows that
+# change under both are an edit burst (or a read that differs from the
+# database's walk): the window and the rest of the pass read the database
+# per window, as before #612, and it is reported.
+SCOPE_READS_PER_WINDOW = 2
 
 HOLD_NOTE = "Waiting for spend headroom"
 STOP_NOTE = "Stopped: a profile chunk failed at the provider"
@@ -1198,8 +1204,73 @@ class _Submission:
         self.built, self.size = [], 0
 
 
+class _PassScope:
+    """The writing one pass cuts its windows from (#612): the metadata of
+    every row after the start of the earliest due range, read once
+    (exports.window_scope). Each window's unit count and each of its
+    renders while it is fitted to the cap come from that read; only the
+    window's own rows are loaded and decrypted. Before, every window read
+    the metadata of all the writing after its start again, once for its
+    count and once per render, and a build's work grew with windows x
+    entries.
+
+    The read is taken again before a window when the user's rows changed
+    since (an entry written, hidden, deleted or edited while the pass
+    runs), and when a window's own rows changed under its render, so an
+    entry marked None meanwhile is not sent from the old read. When they
+    changed again right after a new read, that window and the rest of
+    the pass are read from the database as before (``index`` None), and
+    the fallback is reported."""
+
+    def __init__(self, user, starts):
+        self.user = user
+        floor = None if any(s is None for s in starts) else min(starts)
+        self.index = _exports.window_scope(user.id, floor)
+
+    def units(self, start, end):
+        """Stored units of the writing after ``start`` up to ``end``
+        inclusive (None: to the newest), from a read that is current."""
+        before = _after(end)
+        if self.index is None:
+            if end is not None:
+                return _exports.count_remaining_units(
+                    self.user.id, start, created_before=before)
+            return _exports.count_remaining_units(self.user.id, start)
+        if not self.index.fresh():
+            logger.info("User %s: writing changed during the profile pass; "
+                        "its metadata is read again", self.user.id)
+            self.index.reload()
+        return self.index.units(start, before)
+
+    def render(self, budget, cur, end):
+        """exports.render_profile_window from the read."""
+        if self.index is None:
+            return _exports.render_profile_window(self.user, budget, cur,
+                                                  until=end)
+        from backend.routes.export_data import ScopeChanged
+        for attempt in range(1, SCOPE_READS_PER_WINDOW + 1):
+            try:
+                return _exports.render_profile_window(
+                    self.user, budget, cur, until=end, scope=self.index)
+            except ScopeChanged:
+                if attempt == SCOPE_READS_PER_WINDOW:
+                    break
+                logger.info("User %s: a row of the window after %s changed "
+                            "during the profile pass; its metadata is read "
+                            "again", self.user.id, _iso(cur))
+                self.index.reload()
+        # Rows that change under every read are edits in a burst, or a
+        # read that differs from the database's walk (a bug): it shows.
+        _report("Profile window rows changed under two reads; the pass "
+                "reads the database", level="warning", user_id=self.user.id,
+                start=_iso(cur), reads=self.index.reads)
+        self.index = None
+        return _exports.render_profile_window(self.user, budget, cur,
+                                              until=end)
+
+
 def fit_window(user, model_id, keys, cap, cur, budget, end, prompt_fn,
-               rho):
+               rho, scope=None):
     """Render the window after ``cur`` at ``budget`` units and count its
     prompt; while it is over ``cap`` tokens, render it again smaller by
     the counted overshoot. A window is never cut and never sent over the
@@ -1208,13 +1279,16 @@ def fit_window(user, model_id, keys, cap, cur, budget, end, prompt_fn,
     when nothing renders after ``cur``. ``fits`` is False only for a
     window that cannot shrink below the cap (one entry larger than it).
     When counting is unavailable, the tokens are estimated from the
-    planner's ratio."""
+    planner's ratio. ``scope``: the pass's _PassScope, which every render
+    is cut from."""
     last = None
     for _ in range(FIT_ROUNDS):
         # The run is alive (run_locks): before each render, which can take
         # long on a large corpus.
         run_locks.beat()
-        chunk = _exports.render_profile_window(user, budget, cur, until=end)
+        chunk = (scope.render(budget, cur, end) if scope is not None
+                 else _exports.render_profile_window(user, budget, cur,
+                                                     until=end))
         if not chunk or not chunk.get("content"):
             return last
         prompt = prompt_fn(chunk)
@@ -1266,6 +1340,8 @@ def _render_windows(user, state, models, sub, history, deadline,
                   for _s, _e, units in state.due)
     total = len(state.windows) + len(state.windows_in_flight) + planned
     blocked = blocked_ranges(user.id)
+    # Every window of the pass is cut from one read of the metadata.
+    scope = _PassScope(user, [s for s, _e, _u in state.due])
     n = 0
     for rng in list(state.due):
         start, end, _units = rng
@@ -1274,7 +1350,7 @@ def _render_windows(user, state, models, sub, history, deadline,
         for is_blocked, piece_start, piece_end in cut_around_blocked(
                 start, end, blocked):
             if is_blocked:
-                units = _units_in(user, piece_start, piece_end)
+                units = scope.units(piece_start, piece_end)
                 if units <= 0:
                     continue
                 cumulative += units
@@ -1300,7 +1376,7 @@ def _render_windows(user, state, models, sub, history, deadline,
                 continue
             cur, end_ = piece_start, piece_end
             while True:
-                remaining = _units_in(user, cur, end_)
+                remaining = scope.units(cur, end_)
                 if remaining <= 0:
                     break
                 _k, _size, budget = next_window_budget(
@@ -1322,7 +1398,7 @@ def _render_windows(user, state, models, sub, history, deadline,
                     # the window's token count goes to the other provider.
                     return None
                 fitted = fit_window(user, models.version, keys, cap, cur,
-                                    budget, end_, _prompt, rho)
+                                    budget, end_, _prompt, rho, scope=scope)
                 if fitted is None:
                     break
                 rendered = True
@@ -1413,15 +1489,6 @@ def _render_windows(user, state, models, sub, history, deadline,
                         _iso(end) or "end")
             state.due.remove(rng)
     return None
-
-
-def _units_in(user, start, end):
-    """Stored units of the writing after ``start`` up to ``end``
-    inclusive (None: to the newest)."""
-    if end is not None:
-        return _exports.count_remaining_units(
-            user.id, start, created_before=_after(end))
-    return _exports.count_remaining_units(user.id, start)
 
 
 def _merge_config_tag():

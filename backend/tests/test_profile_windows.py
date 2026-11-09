@@ -204,6 +204,9 @@ def world(app, monkeypatch):
                         w.corpus.count(uid, created_after, created_before))
     monkeypatch.setattr(pw._exports, "build_user_export_content",
                         lambda *a, **k: w.corpus.export(*a, **k))
+    # No read of the (empty) node table: the pass counts and renders
+    # through the two stand-ins above (test_window_scope runs the read).
+    monkeypatch.setattr(pw._exports, "window_scope", lambda *a, **k: None)
     monkeypatch.setattr(pb, "batch_submit",
                         lambda *a, **k: w.provider.submit(*a, **k))
     monkeypatch.setattr(pb, "batch_check_and_collect",
