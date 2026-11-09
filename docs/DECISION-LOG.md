@@ -2953,14 +2953,25 @@ Kinds (one per entry and per table row):
 ### 2026-11-09 · Profile batches of up to 100 MB and 40 minutes of rendering in one task
 
 - **Kind:** reliability
-- **Situation:** #589 set how much a profile build holds and how long one task renders: prompts are submitted once they reach 100 MB, and a task renders windows for up to 2,400 s before handing the rest to a new task. On 2026-11-07 the build for a multi-million-unit import rendered about 161 windows in one task; the production host ran out of memory and the service stopped answering for about 50 minutes. The hard time limit then killed the task, the broker delivered it again and the hourly seeder started a second run beside it.
-- **Decision:** 100 MB per submission and 2,400 s of rendering per task, chosen for the provider's batch size limit (builder of #589, accepted by merge on 2026-11-06).
-- **Peter:** "I believe may be caused by generating user profile for 14M units user, which probably swamped the VM"
-- **Score:** miss. Traced from the 2026-11-07 incident; #611 lowers the defaults to 15 MB and 600 s and adds a run lock.
-- **Why it missed:** the limits were sized for the provider's cap, not for the memory of the host the task runs on. The project notes already recorded an earlier out-of-memory crash from building one large export on that host, and a tester with a multi-million-unit import was about to import.
+- **Situation:** Peter asked on 2026-10-21 that all of a build's versions go out on Batch at once. #589 built this as one submission per user, split only above 100 MB (half of OpenAI's 200 MB input-file limit), with every prompt held in the worker until the submit and up to 2,400 s of rendering in one task. Its own estimate for the multi-million-unit tester was 60–110 MB of prompts. On 2026-11-07 that build rendered about 161 windows in one task; the production host ran out of memory and the service stopped answering for about 50 minutes. The hard time limit then killed the task, the broker delivered it again and the hourly seeder started a second run beside it.
+- **Decision:** read "all at once" as the largest submission the provider takes, held whole in one worker (builder of #589, accepted by merge on 2026-11-06).
+- **Peter:** "I assume that's the provider limit, which I asked for - I wanted to maximize the provider limit, but in hindsight, it seems like it was very predictable that that the production VM would get swamped by this big number of jobs submitted in one batch."
+- **Score:** miss. #611 lowers the defaults to 15 MB per submission and 600 s per task and adds a run lock; the windows still go out on Batch in the same pass.
+- **Why it missed:** the limit was sized for the provider, not for the memory of the host the task runs on. The builder had its own 60–110 MB estimate, and the project notes recorded an earlier out-of-memory crash from building one large export on that host, but the two were not put together.
 - **Source:** incident 2026-11-07, traced in Claude Code session 2026-11-09 (Opus 5.5)
 - **Applies to:** #589, #611, #612
 - **Rule:** candidate: size anything a task holds in memory for the production host, not for the provider's limit.
+
+### 2026-11-09 · Profile batches of up to 100 MB and 40 minutes of rendering in one task: ask or decide
+
+- **Kind:** escalation
+- **Situation:** as in the entry before. When Peter asked for all versions on Batch at once, the builder knew the size of the largest expected build and the host it would run on, and built it without raising the memory risk.
+- **Decision:** decided without asking Peter.
+- **Peter:** "I think you could have known better than me and raised this to me when I made that request. You should have escalated this."
+- **Score:** miss.
+- **Why it missed:** the request was treated as settling the batch size, so the builder's own estimate was never weighed against the host's memory as a question for Peter.
+- **Source:** Claude Code session 2026-11-09 (Opus 5.5)
+- **Applies to:** #589
 
 ### 2026-11-09 · Lowering the profile limits on prod before the diagnostics came back
 
