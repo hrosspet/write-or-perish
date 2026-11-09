@@ -25,6 +25,8 @@ import os
 import tempfile
 from datetime import datetime, timedelta, timezone
 
+from backend.utils import soft_limit
+
 log = logging.getLogger(__name__)
 
 # Backstop for a batch we can no longer READ (lost batch id, revoked
@@ -325,7 +327,14 @@ def batch_submit(requests_by_provider, api_keys, phase=None):
     Returns a SubmittedBatches: the dict of batch IDs keyed by provider
     (+ model for OpenAI), whose ``account_refused`` names the provider
     keys refused for an account reason.
+
+    The task's soft time limit is not a failed submission: it is raised
+    (utils/soft_limit; the SDK does not send the request again), with the
+    batches created before it as its ``submitted`` (a SubmittedBatches),
+    so a caller can record those before it stops.
     """
+    import anthropic as anthropic_sdk
+    import openai as openai_sdk
     from anthropic import Anthropic
     from openai import OpenAI
 
@@ -335,28 +344,31 @@ def batch_submit(requests_by_provider, api_keys, phase=None):
     anthropic_reqs = requests_by_provider.get("anthropic", [])
     if anthropic_reqs:
         try:
-            client = Anthropic(api_key=api_keys["anthropic"])
-            batch_requests = []
-            for req in anthropic_reqs:
-                system_param, ant_messages = (
-                    _convert_messages_for_anthropic(req["messages"]))
-                params = {
-                    "model": req["api_model"],
-                    "max_tokens": req.get("max_tokens", 10000),
-                    "messages": ant_messages,
-                }
-                if system_param:
-                    params["system"] = system_param
-                batch_requests.append({
-                    "custom_id": req["custom_id"],
-                    "params": params,
-                })
-            batch = client.messages.batches.create(
-                requests=batch_requests)
+            with soft_limit.passes():
+                client = Anthropic(api_key=api_keys["anthropic"],
+                                   **soft_limit.client_kwargs(anthropic_sdk))
+                batch_requests = []
+                for req in anthropic_reqs:
+                    system_param, ant_messages = (
+                        _convert_messages_for_anthropic(req["messages"]))
+                    params = {
+                        "model": req["api_model"],
+                        "max_tokens": req.get("max_tokens", 10000),
+                        "messages": ant_messages,
+                    }
+                    if system_param:
+                        params["system"] = system_param
+                    batch_requests.append({
+                        "custom_id": req["custom_id"],
+                        "params": params,
+                    })
+                batch = client.messages.batches.create(
+                    requests=batch_requests)
             batch_ids["anthropic"] = batch.id
             log.info(f"Anthropic batch submitted: {batch.id} "
                      f"({len(batch_requests)} requests)")
         except Exception as e:
+            _stop_on_soft_limit(e, batch_ids)
             if _note_account_failure(e, "Anthropic",
                                      api_key=api_keys.get("anthropic")):
                 batch_ids.account_refused.add("anthropic")
@@ -377,7 +389,8 @@ def batch_submit(requests_by_provider, api_keys, phase=None):
     openai_reqs = requests_by_provider.get("openai", [])
     if openai_reqs:
         from backend.utils.safety_identifier import openai_safety_identifier
-        client = OpenAI(api_key=api_keys["openai"])
+        client = OpenAI(api_key=api_keys["openai"],
+                        **soft_limit.client_kwargs(openai_sdk))
         without_user = sum(1 for r in openai_reqs if r.get("user_id") is None)
         if without_user:
             log.warning(f"{without_user} OpenAI batch request(s) without a "
@@ -393,65 +406,75 @@ def batch_submit(requests_by_provider, api_keys, phase=None):
         for (oai_model, endpoint), reqs in by_model.items():
             tmp_path = None
             try:
-                # Write JSONL to a temp file
-                # UTF-8 as is, not \\u escapes: a Czech letter is 2 bytes
-                # instead of 6 and an emoji 4 instead of 12, against the
-                # 200 MB input file limit (a large build sends its whole
-                # corpus in one submission, #545).
-                with tempfile.NamedTemporaryFile(
-                    mode="w", suffix=".jsonl", delete=False,
-                    encoding="utf-8",
-                ) as tmp:
-                    for req in reqs:
-                        effort = req.get("reasoning_effort")
-                        if endpoint == RESPONSES_ENDPOINT:
-                            # The live call's body (_call_openai).
-                            body = {
-                                "model": oai_model,
-                                "input": _responses_input(req["messages"]),
-                                "max_output_tokens": req.get(
-                                    "max_tokens", 10000),
-                                "store": False,
+                with soft_limit.passes():
+                    # Write JSONL to a temp file
+                    # UTF-8 as is, not \\u escapes: a Czech letter is 2
+                    # bytes instead of 6 and an emoji 4 instead of 12,
+                    # against the 200 MB input file limit (a large build
+                    # sends its whole corpus in one submission, #545).
+                    with tempfile.NamedTemporaryFile(
+                        mode="w", suffix=".jsonl", delete=False,
+                        encoding="utf-8",
+                    ) as tmp:
+                        # Named first: a failure while writing still
+                        # removes the file below.
+                        tmp_path = tmp.name
+                        for req in reqs:
+                            effort = req.get("reasoning_effort")
+                            if endpoint == RESPONSES_ENDPOINT:
+                                # The live call's body (_call_openai).
+                                body = {
+                                    "model": oai_model,
+                                    "input": _responses_input(
+                                        req["messages"]),
+                                    "max_output_tokens": req.get(
+                                        "max_tokens", 10000),
+                                    "store": False,
+                                }
+                                if effort:
+                                    body["reasoning"] = {"effort": effort}
+                            else:
+                                body = {
+                                    "model": oai_model,
+                                    "messages": req["messages"],
+                                    "max_completion_tokens": req.get(
+                                        "max_tokens", 10000),
+                                    "temperature": 1,
+                                }
+                                if effort:
+                                    body["reasoning_effort"] = effort
+                            # Both endpoints: which Loore user the request
+                            # is for (Peter, 2026-11-04).
+                            body["safety_identifier"] = (
+                                openai_safety_identifier(req.get("user_id")))
+                            line = {
+                                "custom_id": req["custom_id"],
+                                "method": "POST",
+                                "url": endpoint,
+                                "body": body,
                             }
-                            if effort:
-                                body["reasoning"] = {"effort": effort}
-                        else:
-                            body = {
-                                "model": oai_model,
-                                "messages": req["messages"],
-                                "max_completion_tokens": req.get(
-                                    "max_tokens", 10000),
-                                "temperature": 1,
-                            }
-                            if effort:
-                                body["reasoning_effort"] = effort
-                        # Both endpoints: which Loore user the request is
-                        # for (Peter, 2026-11-04).
-                        body["safety_identifier"] = openai_safety_identifier(
-                            req.get("user_id"))
-                        line = {
-                            "custom_id": req["custom_id"],
-                            "method": "POST",
-                            "url": endpoint,
-                            "body": body,
-                        }
-                        tmp.write(json.dumps(line, ensure_ascii=False) + "\n")
-                    tmp_path = tmp.name
+                            tmp.write(json.dumps(line, ensure_ascii=False)
+                                      + "\n")
 
-                with open(tmp_path, "rb") as f:
-                    uploaded = client.files.create(file=f, purpose="batch")
-                os.unlink(tmp_path)
+                    with open(tmp_path, "rb") as f:
+                        uploaded = client.files.create(file=f,
+                                                       purpose="batch")
+                    os.unlink(tmp_path)
+                    tmp_path = None
 
-                batch = client.batches.create(
-                    input_file_id=uploaded.id,
-                    endpoint=endpoint,
-                    completion_window="24h",
-                )
+                    batch = client.batches.create(
+                        input_file_id=uploaded.id,
+                        endpoint=endpoint,
+                        completion_window="24h",
+                    )
                 key = openai_batch_key(oai_model, endpoint)
                 batch_ids[key] = batch.id
                 log.info(f"OpenAI batch submitted for {oai_model}: "
                          f"{batch.id} ({len(reqs)} requests)")
             except Exception as e:
+                if tmp_path and os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+                _stop_on_soft_limit(e, batch_ids)
                 if _note_account_failure(e, "OpenAI", oai_model,
                                          api_key=api_keys.get("openai")):
                     batch_ids.account_refused.add(
@@ -469,10 +492,17 @@ def batch_submit(requests_by_provider, api_keys, phase=None):
                 else:
                     log.error(f"OpenAI batch submission failed for "
                               f"{oai_model}: {e}")
-                if tmp_path and os.path.exists(tmp_path):
-                    os.unlink(tmp_path)
 
     return batch_ids
+
+
+def _stop_on_soft_limit(exc, batch_ids):
+    """Raise the task's soft time limit when ``exc`` is or was raised from
+    it, with the batches created before it as its ``submitted``."""
+    found = soft_limit.found_in(exc)
+    if found is not None:
+        found.submitted = batch_ids
+        raise found
 
 
 # ── Batch statuses by listing (Peter, 2026-11-03) ───────────────────────
@@ -830,7 +860,9 @@ def anthropic_batch_submit_one(api_key, custom_id, api_model, messages,
     """Submit ONE conversation as a one-item Anthropic batch. ``messages``
     are OpenAI-style (system messages collapse into the system param).
     ``output_schema`` (a JSON schema) constrains the reply to that shape
-    via structured outputs. Returns the batch id."""
+    via structured outputs. Returns the batch id. The task's soft time
+    limit is raised, not sent again (utils/soft_limit)."""
+    import anthropic as anthropic_sdk
     from anthropic import Anthropic
     system_param, ant_messages = _convert_messages_for_anthropic(messages)
     params = {"model": api_model, "max_tokens": max_tokens,
@@ -840,9 +872,11 @@ def anthropic_batch_submit_one(api_key, custom_id, api_model, messages,
     if output_schema:
         params["output_config"] = {
             "format": {"type": "json_schema", "schema": output_schema}}
-    client = Anthropic(api_key=api_key)
-    batch = client.messages.batches.create(
-        requests=[{"custom_id": custom_id, "params": params}])
+    with soft_limit.passes():
+        client = Anthropic(api_key=api_key,
+                           **soft_limit.client_kwargs(anthropic_sdk))
+        batch = client.messages.batches.create(
+            requests=[{"custom_id": custom_id, "params": params}])
     log.info("Anthropic one-item batch submitted: %s (%s)", batch.id,
              custom_id)
     return batch.id
@@ -931,7 +965,9 @@ def openai_batch_submit_one(api_key, custom_id, api_model, messages,
     Responses endpoint (the live path uses Responses too, so the input
     shape and model support match). ``output_schema`` becomes a strict
     JSON-schema text format. ``user_id``: the Loore user the request is
-    for (its safety identifier). Returns the batch id."""
+    for (its safety identifier). Returns the batch id. The task's soft
+    time limit is raised, not sent again (utils/soft_limit)."""
+    import openai as openai_sdk
     from openai import OpenAI
     from backend.utils.safety_identifier import openai_safety_identifier
     body = {
@@ -947,19 +983,20 @@ def openai_batch_submit_one(api_key, custom_id, api_model, messages,
             "schema": output_schema, "strict": True}}
     line = {"custom_id": custom_id, "method": "POST",
             "url": "/v1/responses", "body": body}
-    client = OpenAI(api_key=api_key)
+    client = OpenAI(api_key=api_key, **soft_limit.client_kwargs(openai_sdk))
     with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl",
                                      delete=False) as tmp:
         tmp.write(json.dumps(line) + "\n")
         tmp_path = tmp.name
-    try:
-        with open(tmp_path, "rb") as f:
-            uploaded = client.files.create(file=f, purpose="batch")
-    finally:
-        os.unlink(tmp_path)
-    batch = client.batches.create(
-        input_file_id=uploaded.id, endpoint="/v1/responses",
-        completion_window="24h")
+    with soft_limit.passes():
+        try:
+            with open(tmp_path, "rb") as f:
+                uploaded = client.files.create(file=f, purpose="batch")
+        finally:
+            os.unlink(tmp_path)
+        batch = client.batches.create(
+            input_file_id=uploaded.id, endpoint="/v1/responses",
+            completion_window="24h")
     log.info("OpenAI one-item batch submitted: %s (%s)", batch.id, custom_id)
     return batch.id
 

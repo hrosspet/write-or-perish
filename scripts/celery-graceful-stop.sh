@@ -1,5 +1,6 @@
 #!/bin/bash
-# ExecStop for write-or-perish-celery.service (issue #312).
+# ExecStop for write-or-perish-celery.service (issue #312) and for the
+# queue-split workers in deploy/systemd/ (#379).
 #
 #   celery-graceful-stop.sh <main-pid> [grace-seconds]
 #

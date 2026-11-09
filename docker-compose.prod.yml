@@ -57,7 +57,23 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    command: celery -A backend.celery_app.celery worker --loglevel=warning --concurrency=4
+    command: python backend/celery_queues.py interactive --loglevel=warning --concurrency=4
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+
+  # Queue split background worker (#379); waits without a worker while
+  # CELERY_SPLIT_QUEUES is off.
+  celery-background:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: python backend/celery_queues.py background --loglevel=warning --concurrency=2
     deploy:
       resources:
         limits:

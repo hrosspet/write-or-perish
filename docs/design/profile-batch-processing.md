@@ -414,13 +414,50 @@ cap (`fit_window`); a window is never cut and never sent over the cap, and
 the next window starts at the last entry the smaller one holds. One entry
 larger than the cap is given up (a `window_skip` row and a Sentry alert).
 
+**One metadata read per pass (#612).** A pass reads the metadata of the
+writing it renders once (`exports.window_scope`,
+`routes/export_data.WindowScope`: id, parent, date, units, deleted state
+and origin of every row the export's walk can reach after the earliest due
+range's start; no content) and cuts every window from it: the unit count
+the planner sizes the window by, and each render while `fit_window` fits it
+to the cap. `WindowScope.rows` is `_select_incremental_rows` computed in
+memory: the same rows, and on SQLite in the same order
+(`tests/test_window_scope.py` compares the two, and whole builds on both
+paths); only each window's own rows are loaded and decrypted. Before,
+every window read the metadata of all the writing after its start again,
+once for its count and once per render, so the work grew with windows ×
+entries (a build of a multi-million-unit import took over 20 minutes and
+about 0.5 GB in one worker).
+
+Rows that share a timestamp come in a fixed order now (the user's own,
+then those addressed to them, by id; parents and replies by id), the order
+SQLite returned them in. On Postgres the old walk gave them its query
+plan's order, so there a window can now end elsewhere in such a run than
+the old code would have ended it: a run is always taken whole by one
+window (the next starts after its timestamp), so no row is lost or read
+twice, also when a set the old code started is resumed.
+
+The read is taken again before a window when the user's rows changed since
+(their count, newest id, newest update, deleted count or newest deletion:
+"Delete all my writing" and its restore leave `updated_at` alone) or an
+account was deleted or restored. At render time (`ScopeChanged`, then a
+new read) the rows a window's text is decided from must still be as read:
+its own rows before they are loaded, the rows that put each one in scope,
+the replies under them, and the rows the per-thread skip rule (§5a) walks
+with the replies under the deleted ones. A row hidden, deleted or edited
+during the pass, or a reply that went (deleted, made private, marked None,
+its author's account deleted), is neither rendered nor decides anything
+from the old read. A window whose rows change again right after a new
+read, and the rest of that pass, read the database as before.
+
 **One version per window.** The prompt is the generation prompt with
 `EVENTS_IN_WINDOW_PARAGRAPH` inserted before `## INPUT`
 (`window_generation_template`; inserted in code, so one-chunk builds, the
 prompts page and the update and merge prompts never carry it). Every
 window of the user goes out in one Batch submission, split into several
-batches only above `PROFILE_BATCH_MAX_BYTES` (100 MB), all submitted in the
-same task run.
+batches above `PROFILE_BATCH_MAX_BYTES` (15 MB; 100 MB before 2026-11-07,
+when a multi-million-unit build ran the server out of memory), all
+submitted in the same task run.
 
 **Models (Peter, 2026-11-05).** Chosen per pass (`pass_models`):
 
@@ -606,8 +643,24 @@ the cap (Peter, 2026-10-22: "send it and let the cap stop it halfway"):
 all of a build's windows go out in one submission, so the cap can only
 hold the merges after them, and while the user is capped it also blocks
 their replies until the 1st. It holds no pipeline lock; past
-`PROFILE_WINDOW_RENDER_SECONDS` it submits what it has and dispatches a
-new task. The poller collects window, group and final items (`collect`) and
+`PROFILE_WINDOW_RENDER_SECONDS` (600 s) it submits what it has and
+dispatches a new task. One advance runs per user at a time
+(`utils/run_locks`, 2026-11-07): the run holds a Redis key with a
+15-minute TTL that it refreshes before every window render, token count
+and slice submission. A second copy (its own message delivered again, a
+second dispatch) exits without rendering; `_is_task_stale` never takes the
+guard for stale while the key lives, whatever the result backend says
+(a killed task's FAILURE); a run that dies leaves the key to expire. A run
+whose key expired while it was frozen and was taken by another stops at
+its next beat. The task's soft time limit is raised through the token
+counts and the submission (`utils/soft_limit`; the SDKs do not send the
+request again), so the advance's handler runs and the admin column shows
+the stop. A copy that exits for a held key, an advance stopped by the
+soft limit, and requests a soft limit kept from going out all set the
+work hold (`profile_work_held`, no attempt counted): the hourly seeder
+resumes the build after the key expires, also for an account outside its
+cohort (a pre-fill waiting for its owner), which it reaches only through
+the hold. The poller collects window, group and final items (`collect`) and
 dispatches the advance; the hourly seeder routes builds to it
 (`wants_window_build`), opens its gate for a set with work due
 (`set_work_due`) and clears a stuck `profile_batch_pending` that no job and

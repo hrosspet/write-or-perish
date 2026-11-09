@@ -2,7 +2,6 @@
 Celery tasks for asynchronous data export operations.
 """
 from datetime import datetime, timedelta
-from celery import Task
 from celery.utils.log import get_task_logger
 import os
 
@@ -23,6 +22,7 @@ from backend.utils.privacy import AI_ALLOWED, account_allows_ai
 from backend.utils.profile_versions import continue_boundary
 from backend.utils import refusal_backoff
 from backend.utils.refusal_backoff import REFUSED_REF
+from backend.utils.heavy_slot import HeavyTask
 
 logger = get_task_logger(__name__)
 
@@ -152,6 +152,16 @@ def _is_task_stale(user):
     legitimately running.
     """
     if not user.profile_generation_task_id:
+        return False
+
+    # A profile window advance whose heartbeat is fresh is running,
+    # whatever the result backend says: a killed task's message delivered
+    # again runs under the same id after its FAILURE was stored, and a
+    # frozen run can pass the hour below. The guard is never stale while
+    # the run lock lives (2026-11-07: a cleared guard started a second
+    # run). A run that died stops beating and its lock expires.
+    from backend.utils import run_locks
+    if run_locks.holder(run_locks.profile_run_key(user.id)) is not None:
         return False
 
     from backend.celery_app import celery as _celery
@@ -345,8 +355,11 @@ def _log_profile_failure(user_id, exc):
                  extra=log_extra(exc))
 
 
-class ProfileGenerationTask(Task):
-    """Custom task class with error handling."""
+class ProfileGenerationTask(HeavyTask):
+    """Custom task class with error handling. A heavy job (#613,
+    utils/heavy_slot): a build that plans into windows runs the window
+    advance inside this task (window_hand_off), and an initial build reads
+    the user's whole corpus."""
 
     def on_failure(self, exc, task_id, args, kwargs, einfo):
         """Called when task fails."""
@@ -1832,7 +1845,15 @@ def _messages_for(prompt_text):
     return [{"role": "user", "content": [{"type": "text", "text": prompt_text}]}]
 
 
-def render_profile_window(user, units, cutoff, until=None):
+def window_scope(user_id, created_after=None):
+    """The metadata of the writing a profile pass's windows read after
+    ``created_after`` (None: all of it), read once (WindowScope, #612),
+    for ``render_profile_window(..., scope=)`` and its unit counts."""
+    from backend.routes.export_data import WindowScope
+    return WindowScope(user_id, filter_ai_usage=True, floor=created_after)
+
+
+def render_profile_window(user, units, cutoff, until=None, scope=None):
     """The export a profile build reads: the window after ``cutoff`` at
     ``units`` stored units, oldest first, in the engaged scope, AI-readable
     rows only. It carries the user's writing and the replies in it, and
@@ -1844,10 +1865,16 @@ def render_profile_window(user, units, cutoff, until=None):
 
     ``until``: the window ends at this moment, inclusive (a window set's
     gap ends where the next window starts, #545), so a re-rendered window
-    cannot spill into the one after it."""
+    cannot spill into the one after it.
+
+    ``scope``: the pass's ``window_scope`` (its floor at or before
+    ``cutoff``): the same window, from the pass's one read of the
+    metadata."""
     kwargs = {}
     if until is not None:
         kwargs["created_before"] = until + timedelta(microseconds=1)
+    if scope is not None:
+        kwargs["scope"] = scope
     return build_user_export_content(
         user, max_tokens=int(units), filter_ai_usage=True,
         created_after=cutoff, chronological_order=True,

@@ -65,6 +65,8 @@ State lives in the database, as on the chained batch path: the set's rows
 rows (what is in flight), and the outcomes the collector writes back onto
 the items of collected jobs (the attempt history). Nothing else is
 persisted, so the advance task can be killed at any point and re-run.
+One run per user at a time: a Redis lock with a heartbeat
+(utils/run_locks) that a killed run leaves to expire.
 
 See docs/design/profile-batch-processing.md, "Independent versions for
 large builds".
@@ -93,6 +95,7 @@ from backend.utils.chunk_plan import (
     next_window_budget, plan_chunks)
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.error_privacy import describe_exception
+from backend.utils.heavy_slot import HeavyTask
 from backend.utils.hidden_rows import WritingOnHold, writing_on_hold
 from backend.utils.llm_batch import apply_batch_key_override, blocked_items
 from backend.utils.privacy import AI_ALLOWED, account_allows_ai
@@ -101,7 +104,7 @@ from backend.utils.profile_versions import (
 from backend.utils.profile_providers import (  # noqa: F401 (re-exported)
     PUBLIC_PROVENANCES, agreed_to_both, note_private_read,
     writing_is_public_only)
-from backend.utils import refusal_backoff
+from backend.utils import refusal_backoff, run_locks, soft_limit
 from backend.utils.tokens import approximate_token_count, format_date_metadata
 # Module references (see profile_batch's note): exports and profile_batch
 # may be half-initialised when this module is imported.
@@ -180,6 +183,24 @@ SET_ID_HEX = 12
 # render long node headers), so the planner's ratio alone does not fit.
 FIT_ROUNDS = 8
 FIT_SAFETY = 0.97
+# The defaults of PROFILE_BATCH_MAX_BYTES and PROFILE_WINDOW_RENDER_SECONDS
+# (the same in config.py), for an app config without them. A profile build
+# for a multi-million-unit import ran the server out of memory with
+# 100 MB of prompts held before a submit and a 2400 s render per task
+# (2026-11-07). 15 MB is a slice of 15-40 windows (a Haiku window is about
+# 400 kB of prompt, a Luna window about 1 MB), so a build of 160 windows
+# goes out in 5-11 batches instead of one or two. 600 s of
+# rendering per task keeps one task far under the soft time limit, and a
+# task that stops for memory or a deploy loses at most that much work;
+# the next task picks up where it stopped.
+DEFAULT_BATCH_MAX_BYTES = 15_000_000
+DEFAULT_RENDER_SECONDS = 600
+# Reads of the pass's metadata (_PassScope) one window may take when the
+# rows it is decided from changed under its render: the read and one more.
+# Rows that change under both are an edit burst (or a read that differs
+# from the database's walk): the window and the rest of the pass read the
+# database per window, as before #612, and it is reported.
+SCOPE_READS_PER_WINDOW = 2
 
 HOLD_NOTE = "Waiting for spend headroom"
 STOP_NOTE = "Stopped: a profile chunk failed at the provider"
@@ -188,6 +209,9 @@ NOTHING_READ_NOTE = ("Stopped: every window of the profile build was given "
                      "up; no profile from it")
 POLICY_STOP_NOTE = "Stopped: the provider's policy filter blocked"
 POLICY_SKIP_NOTE = "Skipped window"
+# The outcome of an advance that found another run holding the user's lock
+# (run_locks) and exited without rendering.
+RUNNING_ELSEWHERE = "running elsewhere"
 
 
 def enabled():
@@ -874,6 +898,7 @@ def merge_over_cap(model_id, messages, keys):
     estimate = approximate_token_count(text)
     if estimate > cap * OVER_CAP_ESTIMATE_FACTOR:
         return True, estimate
+    run_locks.beat()
     counted = LLMProvider.count_tokens(model_id, messages, keys)
     tokens = counted if isinstance(counted, int) else estimate
     return tokens > cap, tokens
@@ -1108,7 +1133,8 @@ class _Submission:
         # stopped being public only) while the pass rendered: nothing more
         # goes out in this pass, and the next one plans again.
         self.withdrawn = False
-        self.max_bytes = int(_setting("PROFILE_BATCH_MAX_BYTES", 100_000_000))
+        self.max_bytes = int(_setting("PROFILE_BATCH_MAX_BYTES",
+                                      DEFAULT_BATCH_MAX_BYTES))
 
     @property
     def stopped(self):
@@ -1169,6 +1195,9 @@ class _Submission:
             if any(b["provider"] not in allowed for b in self.built):
                 self._withdraw(allowed, self.built[0]["meta"].get("user_id"))
                 return
+        # The run is alive and still holds its user's lock: a run that
+        # lost it while frozen (RunLockLost) sends nothing more.
+        run_locks.beat()
         n = _batch._submit_requests(self.built, self.keys)
         if n < len(self.built):
             self.failed = True
@@ -1176,8 +1205,76 @@ class _Submission:
         self.built, self.size = [], 0
 
 
+class _PassScope:
+    """The writing one pass cuts its windows from (#612): the metadata of
+    every row after the start of the earliest due range, read once
+    (exports.window_scope). Each window's unit count and each of its
+    renders while it is fitted to the cap come from that read; only the
+    window's own rows are loaded and decrypted. Before, every window read
+    the metadata of all the writing after its start again, once for its
+    count and once per render, and a build's work grew with windows x
+    entries.
+
+    The read is taken again before a window when the user's rows changed
+    since (an entry written, hidden, deleted, edited or restored while the
+    pass runs, or an account deleted or restored), and when the rows its
+    text is decided from (its own, the rows that put them in scope, the
+    replies under them, the rows the per-thread skip rule walks) changed
+    under its render, so an entry marked None meanwhile is neither sent
+    nor decides anything from the old read. When they
+    changed again right after a new read, that window and the rest of
+    the pass are read from the database as before (``index`` None), and
+    the fallback is reported."""
+
+    def __init__(self, user, starts):
+        self.user = user
+        floor = None if any(s is None for s in starts) else min(starts)
+        self.index = _exports.window_scope(user.id, floor)
+
+    def units(self, start, end):
+        """Stored units of the writing after ``start`` up to ``end``
+        inclusive (None: to the newest), from a read that is current."""
+        before = _after(end)
+        if self.index is None:
+            if end is not None:
+                return _exports.count_remaining_units(
+                    self.user.id, start, created_before=before)
+            return _exports.count_remaining_units(self.user.id, start)
+        if not self.index.fresh():
+            logger.info("User %s: writing changed during the profile pass; "
+                        "its metadata is read again", self.user.id)
+            self.index.reload()
+        return self.index.units(start, before)
+
+    def render(self, budget, cur, end):
+        """exports.render_profile_window from the read."""
+        if self.index is None:
+            return _exports.render_profile_window(self.user, budget, cur,
+                                                  until=end)
+        from backend.routes.export_data import ScopeChanged
+        for attempt in range(1, SCOPE_READS_PER_WINDOW + 1):
+            try:
+                return _exports.render_profile_window(
+                    self.user, budget, cur, until=end, scope=self.index)
+            except ScopeChanged:
+                if attempt == SCOPE_READS_PER_WINDOW:
+                    break
+                logger.info("User %s: a row of the window after %s changed "
+                            "during the profile pass; its metadata is read "
+                            "again", self.user.id, _iso(cur))
+                self.index.reload()
+        # Rows that change under every read are edits in a burst, or a
+        # read that differs from the database's walk (a bug): it shows.
+        _report("Profile window rows changed under two reads; the pass "
+                "reads the database", level="warning", user_id=self.user.id,
+                start=_iso(cur), reads=self.index.reads)
+        self.index = None
+        return _exports.render_profile_window(self.user, budget, cur,
+                                              until=end)
+
+
 def fit_window(user, model_id, keys, cap, cur, budget, end, prompt_fn,
-               rho):
+               rho, scope=None):
     """Render the window after ``cur`` at ``budget`` units and count its
     prompt; while it is over ``cap`` tokens, render it again smaller by
     the counted overshoot. A window is never cut and never sent over the
@@ -1186,10 +1283,16 @@ def fit_window(user, model_id, keys, cap, cur, budget, end, prompt_fn,
     when nothing renders after ``cur``. ``fits`` is False only for a
     window that cannot shrink below the cap (one entry larger than it).
     When counting is unavailable, the tokens are estimated from the
-    planner's ratio."""
+    planner's ratio. ``scope``: the pass's _PassScope, which every render
+    is cut from."""
     last = None
     for _ in range(FIT_ROUNDS):
-        chunk = _exports.render_profile_window(user, budget, cur, until=end)
+        # The run is alive (run_locks): before each render, which can take
+        # long on a large corpus.
+        run_locks.beat()
+        chunk = (scope.render(budget, cur, end) if scope is not None
+                 else _exports.render_profile_window(user, budget, cur,
+                                                     until=end))
         if not chunk or not chunk.get("content"):
             return last
         prompt = prompt_fn(chunk)
@@ -1241,6 +1344,8 @@ def _render_windows(user, state, models, sub, history, deadline,
                   for _s, _e, units in state.due)
     total = len(state.windows) + len(state.windows_in_flight) + planned
     blocked = blocked_ranges(user.id)
+    # Every window of the pass is cut from one read of the metadata.
+    scope = _PassScope(user, [s for s, _e, _u in state.due])
     n = 0
     for rng in list(state.due):
         start, end, _units = rng
@@ -1249,7 +1354,7 @@ def _render_windows(user, state, models, sub, history, deadline,
         for is_blocked, piece_start, piece_end in cut_around_blocked(
                 start, end, blocked):
             if is_blocked:
-                units = _units_in(user, piece_start, piece_end)
+                units = scope.units(piece_start, piece_end)
                 if units <= 0:
                     continue
                 cumulative += units
@@ -1275,7 +1380,7 @@ def _render_windows(user, state, models, sub, history, deadline,
                 continue
             cur, end_ = piece_start, piece_end
             while True:
-                remaining = _units_in(user, cur, end_)
+                remaining = scope.units(cur, end_)
                 if remaining <= 0:
                     break
                 _k, _size, budget = next_window_budget(
@@ -1297,7 +1402,7 @@ def _render_windows(user, state, models, sub, history, deadline,
                     # the window's token count goes to the other provider.
                     return None
                 fitted = fit_window(user, models.version, keys, cap, cur,
-                                    budget, end_, _prompt, rho)
+                                    budget, end_, _prompt, rho, scope=scope)
                 if fitted is None:
                     break
                 rendered = True
@@ -1388,15 +1493,6 @@ def _render_windows(user, state, models, sub, history, deadline,
                         _iso(end) or "end")
             state.due.remove(rng)
     return None
-
-
-def _units_in(user, start, end):
-    """Stored units of the writing after ``start`` up to ``end``
-    inclusive (None: to the newest)."""
-    if end is not None:
-        return _exports.count_remaining_units(
-            user.id, start, created_before=_after(end))
-    return _exports.count_remaining_units(user.id, start)
 
 
 def _merge_config_tag():
@@ -1517,6 +1613,7 @@ def next_work(user, keys, deadline, wait_for_imports=True):
     the rest to a new task), "idle", "held", "waiting", "blocked" (a
     content-policy block of a group or final stops the account's build) or
     "failed"."""
+    run_locks.beat()
     code = _policy_blocked(user)
     if code:
         # A blocked group or final (a blocked window is skipped instead):
@@ -1846,6 +1943,32 @@ def _show_policy_stop(user, code):
 
 # ── the advance task ──────────────────────────────────────────────────────
 
+def stop_killed_advance(user_id, task_id):
+    """The advance's runs were killed (the worker's memory limit, the hard
+    time limit) again and again, each delivered again by
+    reject_on_worker_lost (#613). Recorded as a failed build is (the
+    admin's Profile column), with its guard cleared and no re-dispatch;
+    the hourly seeder starts the build again. Runs inside an app
+    context."""
+    from backend.utils.heavy_slot import HeavyJobKilled
+    user = db.session.get(User, user_id)
+    if user is None or user.profile_generation_task_id != task_id:
+        return
+    user.profile_seed_error = (
+        f"Profile window build failed: "
+        f"{describe_exception(HeavyJobKilled())}")[:255]
+    user.profile_generation_task_id = None
+    user.profile_generation_task_dispatched_at = None
+    user.profile_batch_pending = bool(inflight_items(user_id))
+    db.session.commit()
+
+
+def _stop_killed_advance(task, user_id, wait_for_imports=True):
+    """HeavyTask's on_repeated_kill for advance_profile_windows."""
+    with flask_app.app_context():
+        stop_killed_advance(user_id, task.request.id)
+
+
 def _claim(user, task_id):
     user.profile_generation_task_id = task_id
     user.profile_generation_task_dispatched_at = datetime.utcnow()
@@ -1866,6 +1989,10 @@ def dispatch_advance(user, wait_for_imports=True):
         return None
     if user.profile_generation_task_id and not _exports._is_task_stale(user):
         return None
+    if _running_run(user.id) is not None:
+        # A run whose heartbeat is fresh holds the user's lock, even with
+        # no guard (run_locks): a second run would only exit again.
+        return None
     task_id = uuid4().hex
     _claim(user, task_id)
     advance_profile_windows.apply_async(
@@ -1879,7 +2006,9 @@ def run_advance_inline(user, task_id):
     under its own task id, so a build that needs windows has one
     implementation also for accounts not on the batch path."""
     guard = user.profile_generation_task_id
-    if guard and guard != task_id and not _exports._is_task_stale(user):
+    running = _running_run(user.id)
+    if (guard and guard != task_id and not _exports._is_task_stale(user)) or (
+            running is not None and running != task_id):
         return {"user_id": user.id, "profile_id": None,
                 "status": "completed", "message": "A build is running"}
     _claim(user, task_id)
@@ -1900,40 +2029,104 @@ def _collected_since(user_id, since):
                for job in jobs for item in job.items or [])
 
 
+def _running_run(user_id):
+    """The task id of the advance whose heartbeat is fresh for this user
+    (run_locks), else None (none, or Redis cannot be reached)."""
+    return run_locks.holder(run_locks.profile_run_key(user_id))
+
+
+def _leave_to_running(user, task_id, running):
+    """A copy that found another run holding the user's lock exits
+    without rendering. When the guard names this copy (a dispatch while
+    the other run had no guard), it goes back to the run that holds the
+    lock, so that run's exit clears it and dispatches what is left.
+
+    The work is held for a later pass (profile_batch._hold_work) in every
+    case: the run that holds the lock may be dead (most likely when the
+    lock holds this copy's own id: its first delivery, killed for memory,
+    the message requeued at once). Its lock expires, the hourly seeder
+    clears the stale guard, and an account outside the seeder's cohort (a
+    pre-fill waiting for its owner) is resumed only through the hold. A
+    live run's exit makes the hold harmless: the next pass that finds
+    nothing due releases it."""
+    if running and running != task_id and \
+            user.profile_generation_task_id == task_id:
+        user.profile_generation_task_id = running
+        db.session.commit()
+    _batch._hold_work([user.id])
+    if running == task_id:
+        # An earlier delivery of this same task holds the lock: it died
+        # (or, unexpectedly, still runs past the visibility timeout).
+        logger.error("User %s: profile window advance %s delivered again "
+                     "while its earlier delivery holds the user's lock "
+                     "(killed?); the build resumes after the lock expires",
+                     user.id, task_id)
+    else:
+        logger.warning("User %s: profile window advance %s exits: run %s "
+                       "holds the user's lock", user.id, task_id,
+                       running or "?")
+
+
 def advance(user_id, task_id, wait_for_imports=True):
     """The advance: derive what the user's set needs from the database and
     submit it, up to twice (work that came due while it ran is not
-    stranded). Idempotent: work in flight is excluded, and a redelivery
-    after a kill renders again (nothing was submitted, or what was is in
-    flight). Clears its guard at the end; re-dispatches itself when the
-    render budget ran out or a job of the user's was collected meanwhile.
-    ``wait_for_imports``: see dispatch_advance."""
+    stranded). Idempotent: work in flight is excluded. One run per user
+    at a time (run_locks, a heartbeat before each window): a copy that
+    finds the user's lock held (its own message delivered again while it
+    runs, or a second dispatch) exits without rendering and leaves the
+    guard to the run that holds it; a run killed before its exit leaves
+    the lock to expire, and the next dispatch renders again (nothing was
+    submitted, or what was is in flight). Clears its guard at the end;
+    re-dispatches itself when the render budget ran out or a job of the
+    user's was collected meanwhile. ``wait_for_imports``: see
+    dispatch_advance."""
     user = db.session.get(User, user_id)
     if user is None or user.profile_generation_task_id != task_id:
         return "superseded"
+    lock = run_locks.RunLock(run_locks.profile_run_key(user_id), task_id,
+                             run_locks.PROFILE_RUN_TTL)
+    if not lock.acquire():
+        _leave_to_running(user, task_id, lock.holder())
+        return RUNNING_ELSEWHERE
     started = datetime.utcnow()
     outcome = "idle"
     redispatch = False
+    lost = False
     try:
-        if not account_allows_ai(user) or writing_on_hold(user_id):
-            outcome = "off"
-        else:
-            cfg = current_app.config
-            keys = apply_batch_key_override(
-                get_api_keys_for_usage(cfg, "chat"), cfg)
-            deadline = time.monotonic() + int(
-                _setting("PROFILE_WINDOW_RENDER_SECONDS", 2400))
-            submitted = False
-            for _ in range(2):
-                outcome = next_work(user, keys, deadline, wait_for_imports)
-                if outcome == "partial":
-                    redispatch = True
-                if outcome != "submitted":
-                    break
-                submitted = True
-            if submitted and outcome == "idle":
-                outcome = "submitted"
+        with run_locks.holding(lock):
+            if not account_allows_ai(user) or writing_on_hold(user_id):
+                outcome = "off"
+            else:
+                cfg = current_app.config
+                keys = apply_batch_key_override(
+                    get_api_keys_for_usage(cfg, "chat"), cfg)
+                deadline = time.monotonic() + int(
+                    _setting("PROFILE_WINDOW_RENDER_SECONDS",
+                             DEFAULT_RENDER_SECONDS))
+                submitted = False
+                for _ in range(2):
+                    outcome = next_work(user, keys, deadline,
+                                        wait_for_imports)
+                    if outcome == "partial":
+                        redispatch = True
+                    if outcome != "submitted":
+                        break
+                    submitted = True
+                if submitted and outcome == "idle":
+                    outcome = "submitted"
+    except run_locks.RunLockLost:
+        # This run did not beat for longer than the lock's TTL (a frozen
+        # server) and another run holds the lock now: what this one built
+        # and did not send is dropped, and the guard is the other run's.
+        db.session.rollback()
+        lost = True
+        outcome = "superseded"
+        logger.warning("User %s: profile window advance %s lost the user's "
+                       "lock to another run; stopped", user_id, task_id)
     except Exception as e:
+        # Also the soft time limit (SoftTimeLimitExceeded, which the
+        # provider calls let through, utils/soft_limit): the run stops
+        # here and its guard and lock are released below.
         db.session.rollback()
         outcome = "error"
         user = db.session.get(User, user_id)
@@ -1941,10 +2134,18 @@ def advance(user_id, task_id, wait_for_imports=True):
             user.profile_seed_error = (
                 f"Profile window build failed: {describe_exception(e)}")[:255]
             db.session.commit()
+            if soft_limit.found_in(e) is not None:
+                # The work is held for a later pass: the hourly seeder
+                # resumes it, also for an account outside its cohort (a
+                # pre-fill waiting for its owner), which it reaches only
+                # through the hold.
+                _batch._hold_work([user_id])
         logger.error("Profile window build failed for user %s: %s",
                      user_id, describe_exception(e))
     finally:
-        user = db.session.get(User, user_id)
+        # Before the re-dispatch below, whose task takes the lock.
+        lock.release()
+        user = None if lost else db.session.get(User, user_id)
         if user is not None and user.profile_generation_task_id == task_id:
             user.profile_generation_task_id = None
             user.profile_generation_task_dispatched_at = None
@@ -1961,11 +2162,13 @@ def advance(user_id, task_id, wait_for_imports=True):
     return outcome
 
 
-@celery.task(bind=True, acks_late=True, reject_on_worker_lost=True)
+@celery.task(bind=True, base=HeavyTask, acks_late=True,
+             reject_on_worker_lost=True, on_repeated_kill=_stop_killed_advance)
 def advance_profile_windows(self, user_id, wait_for_imports=True):
     """Render, check and submit what the user's window set needs now.
-    Holds only the per-user guard, never the batch pipeline lock: a render
-    of a few hundred windows takes minutes."""
+    Holds only the per-user guard and the user's run lock (run_locks),
+    never the batch pipeline lock: a render of a few hundred windows takes
+    minutes."""
     with flask_app.app_context():
         return advance(user_id, self.request.id, wait_for_imports)
 

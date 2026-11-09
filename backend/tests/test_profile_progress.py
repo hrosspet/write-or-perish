@@ -296,6 +296,35 @@ def test_sync_task_failed_with_guard_still_set(client, user, monkeypatch):
     assert User.query.get(user.id).profile_generation_task_id is None
 
 
+def test_a_failed_task_whose_run_still_beats_is_running(
+        client, user, monkeypatch):
+    """A task the hard limit killed has FAILURE stored, but its message
+    delivered again runs under the same id (2026-11-07). While the run's
+    heartbeat is fresh (utils/run_locks) the guard is not stale: the
+    build shows as running and nobody clears the guard. A run over an
+    hour old that still beats counts as running too."""
+    from backend.tests.fake_redis import install
+    from backend.utils import run_locks
+    redis = install(monkeypatch)
+    user.profile_generation_task_id = "t-again"
+    user.profile_generation_task_dispatched_at = (
+        datetime.utcnow() - timedelta(hours=1, minutes=10))
+    _db.session.commit()
+    _fake_celery(monkeypatch, {"t-again": ("FAILURE", RuntimeError("hard"))})
+    assert run_locks.RunLock(run_locks.profile_run_key(user.id), "t-again",
+                             run_locks.PROFILE_RUN_TTL).acquire()
+    from backend.tasks.exports import _is_task_stale
+    assert _is_task_stale(user) is False
+    body = client.get("/api/export/profile-progress").get_json()
+    assert body["running"] is True
+    assert User.query.get(user.id).profile_generation_task_id == "t-again"
+    # The run dies: its lock expires, and the guard is stale again.
+    redis.advance(run_locks.PROFILE_RUN_TTL + 1)
+    body = client.get("/api/export/profile-progress").get_json()
+    assert body["running"] is False and body["status"] == "failed"
+    assert User.query.get(user.id).profile_generation_task_id is None
+
+
 # ── batch chain ──────────────────────────────────────────────────────────
 
 def _pending_job(user, item, status="pending", batch_id="b-1"):

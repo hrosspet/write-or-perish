@@ -408,8 +408,8 @@ def test_cleanup_cascade_processes_tree_leaf_first(app, alice):
     becomes eligible the next time the cleanup logic looks at it.
 
     Whether this happens within one run or across multiple runs
-    depends on iteration order under the cleanup task's `yield_per`
-    stream — both are correct behavior. The test verifies the
+    depends on the order of the cleanup's candidate list (oldest
+    deletion first) — both are correct behavior. The test verifies the
     invariant: a parent NEVER purges before all its children's rows
     are gone.
     """
@@ -902,6 +902,125 @@ def test_full_purge_deletes_the_replys_reference_actions(app, alice):
     assert Node.query.get(rid) is None
     assert [(a.kind, a.node_id) for a in ReferenceAction.query.all()] == [
         ("read", None)]
+
+
+# ── 14c. The whole daily run, with Postgres' rules ──────────────────────
+# Production runs on Postgres, these tests on sqlite, which differs in two
+# ways the cleanup met: sqlite does not check foreign keys unless asked,
+# and it has no server-side cursor for a streamed query to lose.
+
+@pytest.fixture
+def foreign_keys(app):
+    """sqlite checks foreign keys from here on, as Postgres always does:
+    a purge that leaves a row pointing at the node fails here too."""
+    conn = _db.session.connection()
+    conn.exec_driver_sql("PRAGMA foreign_keys=ON")
+    assert conn.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
+    _db.session.commit()
+    yield
+    _db.session.rollback()
+    _db.session.connection().exec_driver_sql("PRAGMA foreign_keys=OFF")
+    _db.session.commit()
+
+
+def _run_cleanup_recording_streams():
+    """Run the daily cleanup; return its result and the statements it ran
+    as a streamed query (yield_per / stream_results). On Postgres a
+    streamed query reads through a server-side cursor, and the cleanup
+    commits once per node, which closes that cursor: the next fetch
+    raised "named cursor isn't valid anymore" (ProgrammingError), so
+    every run with something to do stopped after its first 100 nodes,
+    before the artifact purge and the audio sweep. sqlite streams
+    nothing and never failed, so the test looks for the streams."""
+    from sqlalchemy import event
+    from backend.tasks.node_cleanup import finalize_deleted_nodes
+    streamed = []
+
+    def record(conn, cursor, statement, params, context, executemany):
+        if context.execution_options.get("stream_results"):
+            streamed.append(statement.split("\n", 1)[0])
+
+    event.listen(_db.engine, "before_cursor_execute", record)
+    try:
+        result = finalize_deleted_nodes()
+    finally:
+        event.remove(_db.engine, "before_cursor_execute", record)
+    return result, streamed
+
+
+def test_cleanup_run_finishes_past_the_first_batch(app, alice, foreign_keys):
+    """More deleted nodes past the grace period than the old stream's
+    first batch (100), a tombstone, and a deleted artifact pinned in a
+    session: one run purges them all, then purges the artifact, and
+    never streams a query across its commits."""
+    from backend.models import NodeContextArtifact, UserArtifact
+    old = datetime.utcnow() - timedelta(days=31)
+    leaves = []
+    for i in range(150):
+        n = Node(user_id=alice.id, human_owner_id=alice.id,
+                 node_type="user", privacy_level="private",
+                 ai_usage="none", token_count=1)
+        n.set_content(f"leaf {i}")
+        n.deleted_at = old
+        leaves.append(n)
+    _db.session.add_all(leaves)
+    _db.session.commit()
+    parent = _make_node(alice, content="tombstone")
+    _make_node(alice, parent=parent, content="alive reply")
+    parent.deleted_at = old
+    session_node = _make_node(alice, content="a session")
+    artifact = UserArtifact(user_id=alice.id, kind="reading-list",
+                            title="Reading list", generated_by="ai",
+                            deleted_at=old)
+    artifact.set_content("a list")
+    _db.session.add(artifact)
+    _db.session.flush()
+    _db.session.add(NodeContextArtifact(
+        node_id=session_node.id, artifact_type="user_artifact",
+        artifact_id=artifact.id))
+    _db.session.commit()
+    leaf_ids = [n.id for n in leaves]
+
+    result, streamed = _run_cleanup_recording_streams()
+
+    assert streamed == []
+    assert (result["purged"], result["wiped"], result["errors"]) == (150, 1, 0)
+    assert result["artifact_versions_purged"] == 1
+    assert result["artifact_errors"] == 0
+    assert result["orphan_sweep_failed"] is False
+    assert Node.query.filter(Node.id.in_(leaf_ids)).count() == 0
+    assert Node.query.get(parent.id).content is None
+    assert UserArtifact.query.count() == 0
+    assert NodeContextArtifact.query.filter_by(
+        artifact_type="user_artifact").count() == 0
+
+
+def test_cleanup_purges_nodes_a_share_points_at(app, alice, foreign_keys):
+    """A share (#228) keeps pointers to the reply it was proposed in and,
+    once revoked, to its soft-deleted public node. Both are foreign keys:
+    the purge clears them, or Postgres refuses the DELETE every day and
+    the nodes are never deleted. The share itself stays."""
+    from backend.models import ShareDraft
+    old = datetime.utcnow() - timedelta(days=31)
+    reply = _make_node(alice, content="the proposal", node_type="llm")
+    public = _make_node(alice, content="the published text")
+    reply.deleted_at = old
+    public.deleted_at = old
+    share = ShareDraft(user_id=alice.id, status="revoked",
+                       source_node_id=reply.id, public_node_id=public.id,
+                       revoked_at=old)
+    share.set_content("the published text")
+    _db.session.add(share)
+    _db.session.commit()
+    rid, pid, sid = reply.id, public.id, share.id
+
+    result, _ = _run_cleanup_recording_streams()
+
+    assert (result["purged"], result["errors"]) == (2, 0)
+    assert Node.query.get(rid) is None
+    assert Node.query.get(pid) is None
+    share = ShareDraft.query.get(sid)
+    assert (share.source_node_id, share.public_node_id) == (None, None)
 
 
 # ── Render-set prefetch + slim PUT (perf, 2026-09-02) ───────────────────

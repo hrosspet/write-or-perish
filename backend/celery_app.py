@@ -2,8 +2,9 @@
 Celery application initialization for Write or Perish.
 Handles background tasks for long-running operations like transcription, LLM calls, and exports.
 """
-from celery import Celery
+from celery import Celery, schedules
 from backend import create_app
+from backend.celery_queues import split_queues_enabled, task_routes
 
 # Create Flask app for Celery context
 flask_app = create_app()
@@ -15,6 +16,24 @@ celery = Celery(
     backend=flask_app.config.get('CELERY_RESULT_BACKEND', 'redis://localhost:6379/0')
 )
 
+TASK_TIME_LIMIT = 3600  # 1 hour hard limit
+TASK_SOFT_TIME_LIMIT = 3300  # 55 minute soft limit
+# How long Redis waits for a delivered message's ack before it delivers the
+# message again. An acks_late task (the profile window advance, a chat
+# import) is acked only when it ends, and a reserved message is unacked
+# while it waits for a free worker process; with Redis's default of one
+# hour, a task that ran to the hard limit was delivered a second time while
+# it was still running or being killed. HEURISTIC: three hard limits: a
+# reserved message may wait up to one hard limit for a free process, then
+# run for one, and the third covers timers that fire late when the server
+# is short of memory (the hard limit has fired many minutes late). The cost:
+# a message whose worker died without acking it (the whole worker killed,
+# not one process) comes back only after this time. Also above every
+# countdown the code schedules (the longest fixed one is 30 minutes; the
+# nightly bookmark sync staggers 30 s per account, which passes three
+# hours at 360 accounts in one local hour).
+BROKER_VISIBILITY_TIMEOUT = 3 * TASK_TIME_LIMIT
+
 # Celery configuration
 celery.conf.update(
     task_serializer='json',
@@ -23,8 +42,9 @@ celery.conf.update(
     timezone='UTC',
     enable_utc=True,
     task_track_started=True,
-    task_time_limit=3600,  # 1 hour hard limit
-    task_soft_time_limit=3300,  # 55 minute soft limit
+    task_time_limit=TASK_TIME_LIMIT,
+    task_soft_time_limit=TASK_SOFT_TIME_LIMIT,
+    broker_transport_options={'visibility_timeout': BROKER_VISIBILITY_TIMEOUT},
     worker_prefetch_multiplier=1,  # Process one task at a time
     worker_max_tasks_per_child=50,  # Restart worker after 50 tasks (prevent memory leaks)
     result_expires=86400,  # Keep results for 24 hours
@@ -51,9 +71,14 @@ celery.conf.update(
             'task': 'backend.tasks.disk_monitor.check_disk_usage',
             'schedule': 3600.0,  # every hour
         },
+        # A daily job gets a fixed time, never an interval: deploy.sh
+        # deletes beat's schedule file, so an interval's countdown starts
+        # over on every deploy and the job only runs after 24 h without
+        # one (#614). Beat runs in UTC (timezone/enable_utc above).
+        # 03:17 UTC: away from the :00 hourly jobs and the 05:00 sweep.
         'cleanup-deleted-nodes': {
             'task': 'backend.tasks.node_cleanup.cleanup_deleted_nodes',
-            'schedule': 86400.0,  # daily
+            'schedule': schedules.crontab(hour=3, minute=17),  # daily, 03:17 UTC
         },
         # Backstop for the {ca_tweets} batch poll: a hard worker kill loses
         # the scheduled retry; this re-dispatches nodes whose poll
@@ -151,6 +176,21 @@ celery.conf.update(
     },
 )
 
+# A pool process whose memory reached this after a task (a heavy job's
+# peak) is replaced once the task ends, so that memory goes back to the
+# server instead of staying with an idle process (#613). In KiB (Celery
+# reads the process's peak resident memory); a pool process at rest uses
+# about half of it. HEURISTIC: about 400 MB.
+WORKER_MAX_MEMORY_PER_CHILD_KIB = 400 * 1024
+celery.conf.worker_max_memory_per_child = WORKER_MAX_MEMORY_PER_CHILD_KIB
+
+# Queue split (#379, backend/celery_queues.py): off unless
+# CELERY_SPLIT_QUEUES is set. Off, no routes are set and every task goes
+# to the default queue, as before; on, each task goes to the interactive
+# or the background queue.
+if split_queues_enabled():
+    celery.conf.task_routes = task_routes(True)
+
 # Keep third-party HTTP/SDK loggers off DEBUG so request bodies (which can
 # contain user content, e.g. profile prompts) never get logged — even when the
 # worker runs at --loglevel=debug (staging). These set their own level, so it
@@ -158,6 +198,15 @@ celery.conf.update(
 import logging  # noqa: E402
 for _noisy_logger in ("anthropic", "openai", "httpx", "httpcore"):
     logging.getLogger(_noisy_logger).setLevel(logging.WARNING)
+
+# When a worker reaches its unit's memory limit, the kernel kills a pool
+# process, not the main process (#613, backend/utils/worker_oom.py).
+# (`from celery import signals`: test files that put a stand-in for the
+# celery package in sys.modules still import this module.)
+from celery import signals as celery_signals  # noqa: E402
+from backend.utils import worker_oom  # noqa: E402
+celery_signals.worker_process_init.connect(
+    worker_oom.on_pool_process_start, weak=False)
 
 # Import tasks to register them with Celery
 # This must be done after celery app is created

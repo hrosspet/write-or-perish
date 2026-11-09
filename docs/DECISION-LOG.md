@@ -2950,6 +2950,93 @@ Kinds (one per entry and per table row):
 - **Source:** Claude Code session 2026-11-06 (Opus 5.5)
 - **Applies to:** #608
 
+### 2026-11-09 · Profile batches of up to 100 MB and 40 minutes of rendering in one task
+
+- **Kind:** reliability
+- **Situation:** Peter asked on 2026-10-21 that all of a build's versions go out on Batch at once. #589 built this as one submission per user, split only above 100 MB (half of OpenAI's 200 MB input-file limit), with every prompt held in the worker until the submit and up to 2,400 s of rendering in one task. Its own estimate for the multi-million-unit tester was 60–110 MB of prompts. On 2026-11-07 that build rendered about 161 windows in one task; the production host ran out of memory and the service stopped answering for about 50 minutes. The hard time limit then killed the task, the broker delivered it again and the hourly seeder started a second run beside it.
+- **Decision:** read "all at once" as the largest submission the provider takes, held whole in one worker (builder of #589, accepted by merge on 2026-11-06).
+- **Peter:** "I assume that's the provider limit, which I asked for - I wanted to maximize the provider limit, but in hindsight, it seems like it was very predictable that that the production VM would get swamped by this big number of jobs submitted in one batch."
+- **Score:** miss. #611 lowers the defaults to 15 MB per submission and 600 s per task and adds a run lock; the windows still go out on Batch in the same pass.
+- **Why it missed:** the limit was sized for the provider, not for the memory of the host the task runs on. The builder had its own 60–110 MB estimate, and the project notes recorded an earlier out-of-memory crash from building one large export on that host, but the two were not put together.
+- **Source:** incident 2026-11-07, traced in Claude Code session 2026-11-09 (Opus 5.5)
+- **Applies to:** #589, #611, #612
+- **Rule:** candidate: size anything a task holds in memory for the production host, not for the provider's limit.
+
+### 2026-11-09 · Profile batches of up to 100 MB and 40 minutes of rendering in one task: ask or decide
+
+- **Kind:** escalation
+- **Situation:** as in the entry before. When Peter asked for all versions on Batch at once, the builder knew the size of the largest expected build and the host it would run on, and built it without raising the memory risk.
+- **Decision:** decided without asking Peter.
+- **Peter:** "I think you could have known better than me and raised this to me when I made that request. You should have escalated this."
+- **Score:** miss.
+- **Why it missed:** the request was treated as settling the batch size, so the builder's own estimate was never weighed against the host's memory as a question for Peter.
+- **Source:** Claude Code session 2026-11-09 (Opus 5.5)
+- **Applies to:** #589
+- **Rule:** candidate: a request sets the goal, not its consequences. When the builder knows something Peter likely doesn't (the code, its own estimates, the limits of the server and services, past incidents, the largest users) and it shows a risk he hasn't weighed, the builder raises it when he asks, with the numbers and a recommendation, before building the request as stated.
+
+### 2026-11-09 · Lowering the profile limits on prod before the diagnostics came back
+
+- **Kind:** release/ops
+- **Situation:** while the incident's logs were not yet read, recommended setting the two profile limits to 15 MB and 600 s in the production environment and restarting Celery, as a reversible stop-gap.
+- **Prediction:** Peter sets them now (75 %).
+- **Peter:** (no words; the log output he ran showed both lines set)
+- **Score:** hit.
+- **Source:** Claude Code session 2026-11-09 (Opus 5.5)
+- **Applies to:** #611
+
+### 2026-11-09 · Building fixes for the incident and the failing cleanup
+
+- **Kind:** reliability
+- **Situation:** after the incident's cause was confirmed from the logs, started two PRs: the guards against a frozen server (#611) and the daily cleanup that failed on Postgres (#610), which the same logs had shown.
+- **Decision:** started both PRs; Peter merges.
+- **Peter:** "can you build PRs for these 3 issues and merge them into one merge train together with the 2?"
+- **Score:** hit. He kept both and added the three follow-up issues to the same train.
+- **Source:** Claude Code session 2026-11-09 (Opus 5.5)
+- **Applies to:** #610, #611
+
+### 2026-11-09 · Building fixes for the incident and the failing cleanup: ask or decide
+
+- **Kind:** escalation
+- **Situation:** as in the entry before. Peter had asked only for an investigation.
+- **Decision:** decided without asking Peter.
+- **Peter:** "can you build PRs for these 3 issues and merge them into one merge train together with the 2?"
+- **Score:** hit.
+- **Source:** Claude Code session 2026-11-09 (Opus 5.5)
+- **Applies to:** #610, #611
+
+### 2026-11-09 · Three follow-up issues from the incident
+
+- **Kind:** process
+- **Situation:** proposed filing three issues: one metadata read per profile pass instead of one per window, long jobs in their own worker with a memory limit, and the daily cleanup at a fixed time of day.
+- **Prediction:** yes to filing them (80 %).
+- **Peter:** "yes, file them, but pls explain a) more closely in one paragraph?"
+- **Score:** hit.
+- **Source:** Claude Code session 2026-11-09 (Opus 5.5)
+- **Applies to:** #612, #613, #614
+
+### 2026-11-09 · Building #608 and #610 without checking open PRs
+
+- **Kind:** process
+- **Situation:** #608 (audio of deleted entries, 2026-11-06) and #610 (the cleanup's Postgres failure, 2026-11-09) were built while #558, inside the unmerged train #581, already held the same cursor fix and the deleted-entry audio work.
+- **Decision:** built both fixes after checking main and the board's issues, not the open PRs inside unmerged trains.
+- **Peter:** (none; found by the builder while updating the board)
+- **Score:** miss. Two PRs duplicate parts of #558; the overlap is resolved when #581 is merged with main.
+- **Why it missed:** the check for existing work covered main and the issues, and a reviewed fix that waits in a train is in neither.
+- **Source:** Claude Code session 2026-11-09 (Opus 5.5)
+- **Applies to:** #558, #581, #608, #610
+- **Rule:** candidate: before building a fix, search open PRs and unmerged trains for the same files and issue.
+
+### 2026-11-09 · How long the background worker drains at a deploy
+
+- **Kind:** release/ops
+- **Situation:** with the queue split (#579, shipped in #616) switched on, a deploy restarts the background worker. As built, it drained for 90 s like today's single worker, then cut off a running job (an archive import, a profile render). A longer drain lets that job finish; replies don't wait behind this worker, except in a deploy with a migration, where all workers stop first.
+- **Prediction:** keep 90 s (the recommendation in #579's body, 2026-10-21).
+- **Peter:** "5 minutes"
+- **Score:** miss. The background worker now drains for up to 5 minutes, with a SIGKILL backstop at 7 minutes.
+- **Why it missed:** the recommendation carried over the 90 s chosen for a worker that replies wait behind; for a worker nobody waits behind, finishing the job weighs more than a shorter deploy.
+- **Source:** Claude Code session 2026-11-09 (Opus 5.5)
+- **Applies to:** #579, #616, #618
+
 ## Decided by the builder
 
 Choices that agents flagged in PRs and that the builder decided because a rule above already covers them (Peter, 2026-10-02: decide what the log supports, raise only real judgement calls). Each is also recorded on its PR, or in the session where Peter asked. The Decided column holds only the builder's part; a rule or decision of Peter's goes in the Rule column. Questions raised to Peter instead are not listed; his answers become entries. Model is the model that wrote the PR (its Co-Authored-By line). Result is "accepted by merge (PR #N, date)" once the PR has merged and Peter didn't correct the choice, "pending" until it merges, and "corrected → entry <title>" when he overrules it; the entry is then scored as a miss.
@@ -3220,27 +3307,44 @@ Choices that agents flagged in PRs and that the builder decided because a rule a
 | 2026-11-06 | #599 | UX | Where the answer is changed | Account page, "Background tasks" right below Default model: "Not answered yet" (not selectable), "Anthropic and OpenAI", "<provider> only"; changing it stamps the time | Show the choices; the user's choice wins | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
 | 2026-11-06 | #599 | product scope | The iPhone app and the privacy text | Web only; the iPhone app is a follow-up. The terms already name both providers for AI chat; an optional sentence is under Needs Peter, nothing changed | Scope set for this build; no change to the terms without Peter | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
 | 2026-11-06 | #589 | product scope | Where the both-providers question (#599) is built | Inside #589's branch, as #598 was, not as a stacked PR | Peter, 2026-11-06: "yes, I want to merge these two together" | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
-| 2026-11-06 | #606 | UX | How earlier artifact writes reach later turns | Replayed through the native tool channel at assembly time ("updated to vN" and the diff), from the two stored version ids; nothing is stored in a new node | Peter's design comment, 2026-11-06; nobody decrypts users' content | Opus 5.5 | pending |
-| 2026-11-06 | #606 | reliability | The model's copy after a failed edit | The current text is given after a failed edit (text not found, ambiguous or no content) when the base was right, so a retry need not become a full rewrite | Problems show | Opus 5.5 | pending |
-| 2026-11-06 | #606 | data safety | A write based on a version of an artifact that has no versions | Refused, so a stale copy cannot recreate an artifact that is gone | The user's edit wins | Opus 5.5 | pending |
-| 2026-11-06 | #606 | UX | What the diff endpoint returns | Line operations built on the server, not the two texts; 404, not 403, for someone else's version | Nobody decrypts users' content | Opus 5.5 | pending |
-| 2026-11-06 | #606 | reliability | The forms of `base_version` and the labels in the history | `12`, `"12"`, `"v12"` and `12.0` are accepted; booleans and other strings are refused; the inline copy is labelled "[kind · vN, as of the start of this conversation]"; the replayed call keeps its input minus the content | Smallest change | Opus 5.5 | pending |
-| 2026-11-06 | #606 | UX | Older threads and the cross-turn note | Writes recorded before the previous version was stored replay only "updated to vN"; the "was updated" note for writes without a result round stays, and now duplicates the replay once | Smallest change | Opus 5.5 | pending |
-| 2026-11-06 | #606 | UX | The "Show changes" box | A maximum height of 320 px with its own scroll; the iPhone version is a follow-up | Scope set for this build | Opus 5.5 | pending |
-| 2026-11-06 | #606 | cost | The prompt-cache cost of the change | Shipped with a one-time rewrite of every agentic thread's cached prefix at deploy (the tool definitions change) and about 1k tokens of history per earlier write; saving expected from later-turn edits replacing full rewrites | Quality first, for now | Opus 5.5 | pending |
-| 2026-11-06 | #607 | reliability | How the disk percentage is computed | As `df` shows it (used over used plus free), so it matches what Peter sees on the server | Problems show | Opus 5.5 | pending |
-| 2026-11-06 | #607 | reliability | Where the alert's sent-state lives | In Redis, as for the provider alerts; no model or migration for a throttle flag | Smallest change | Opus 5.5 | pending |
-| 2026-11-06 | #607 | reliability | Which disk is measured | The disk holding the recordings (the nearest existing parent if the folder is absent) | Problems show | Opus 5.5 | pending |
-| 2026-11-06 | #607 | release/ops | Who gets the disk email | The existing cost-alert address | Smallest change | Opus 5.5 | pending |
-| 2026-11-06 | #607 | reliability | The warning level, the second alert and the cadence | A warning at 90 % (a setting), a second alert at 95 % (a constant), checked hourly, at most one email per 24 h per level. Introduced numbers, flagged in the PR | Every added heuristic is named | Opus 5.5 | pending |
-| 2026-11-06 | #608 | data safety | A file that cannot be deleted | Never holds back a purge or the text wipe; the nightly sweep retries the file, including a finalized node's recording-session folder | Second-tier check by the coordinating builder (not Peter); candidate: deleted text is gone on schedule, whatever happens to its files | Opus 5.5 | pending |
-| 2026-11-06 | #608 | data safety | Recordings in a folder whose node row is gone | Kept for 30 days (the deleted-node grace period, no new number) instead of 24 h, because the folder may hold the only copy of a recording whose node never committed; speech files in the same folder keep the 24 h guard | A user's words are never lost | Opus 5.5 | pending |
-| 2026-11-06 | #608 | data safety | Which folders the sweep leaves alone | Any folder changed (modified or ctime) in the last 24 h (`RECENT_SECONDS`), which also protects a playback in progress; a symlinked or outside-root folder is never followed or deleted | Introduced number, flagged in the PR; a user's words are never lost | Opus 5.5 | pending |
-| 2026-11-06 | #608 | data safety | Files that rows still point at | Never deleted: speech shared between profile versions and merged reference copies is real today | A user's words are never lost | Opus 5.5 | pending |
-| 2026-11-06 | #608 | privacy | Rows hidden by "Delete all my writing" | Kept, for nodes, references and profiles alike, as the node cleanup already does | Nobody decrypts users' content | Opus 5.5 | pending |
-| 2026-11-06 | #608 | privacy | A saved reference's speech | Deleted when the reference is deleted, because references have no grace period today | Deletion means deletion | Opus 5.5 | pending |
-| 2026-11-06 | #608 | reliability | The sweep's batch size | 500 folders per round of lookups (`BATCH_SIZE`), the same as the user purge's chunk size | Every added heuristic is named | Opus 5.5 | pending |
-| 2026-11-06 | #608 | testing | Tests and real audio folders | An autouse fixture gives every test a scratch audio root, so no test deletes or marks anything under a real folder | Data safety first | Opus 5.5 | pending |
+| 2026-11-06 | #606 | UX | How earlier artifact writes reach later turns | Replayed through the native tool channel at assembly time ("updated to vN" and the diff), from the two stored version ids; nothing is stored in a new node | Peter's design comment, 2026-11-06; nobody decrypts users' content | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #606 | reliability | The model's copy after a failed edit | The current text is given after a failed edit (text not found, ambiguous or no content) when the base was right, so a retry need not become a full rewrite | Problems show | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #606 | data safety | A write based on a version of an artifact that has no versions | Refused, so a stale copy cannot recreate an artifact that is gone | The user's edit wins | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #606 | UX | What the diff endpoint returns | Line operations built on the server, not the two texts; 404, not 403, for someone else's version | Nobody decrypts users' content | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #606 | reliability | The forms of `base_version` and the labels in the history | `12`, `"12"`, `"v12"` and `12.0` are accepted; booleans and other strings are refused; the inline copy is labelled "[kind · vN, as of the start of this conversation]"; the replayed call keeps its input minus the content | Smallest change | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #606 | UX | Older threads and the cross-turn note | Writes recorded before the previous version was stored replay only "updated to vN"; the "was updated" note for writes without a result round stays, and now duplicates the replay once | Smallest change | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #606 | UX | The "Show changes" box | A maximum height of 320 px with its own scroll; the iPhone version is a follow-up | Scope set for this build | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #606 | cost | The prompt-cache cost of the change | Shipped with a one-time rewrite of every agentic thread's cached prefix at deploy (the tool definitions change) and about 1k tokens of history per earlier write; saving expected from later-turn edits replacing full rewrites | Quality first, for now | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #607 | reliability | How the disk percentage is computed | As `df` shows it (used over used plus free), so it matches what Peter sees on the server | Problems show | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #607 | reliability | Where the alert's sent-state lives | In Redis, as for the provider alerts; no model or migration for a throttle flag | Smallest change | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #607 | reliability | Which disk is measured | The disk holding the recordings (the nearest existing parent if the folder is absent) | Problems show | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #607 | release/ops | Who gets the disk email | The existing cost-alert address | Smallest change | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #607 | reliability | The warning level, the second alert and the cadence | A warning at 90 % (a setting), a second alert at 95 % (a constant), checked hourly, at most one email per 24 h per level. Introduced numbers, flagged in the PR | Every added heuristic is named | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #608 | data safety | A file that cannot be deleted | Never holds back a purge or the text wipe; the nightly sweep retries the file, including a finalized node's recording-session folder | Second-tier check by the coordinating builder (not Peter); candidate: deleted text is gone on schedule, whatever happens to its files | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #608 | data safety | Recordings in a folder whose node row is gone | Kept for 30 days (the deleted-node grace period, no new number) instead of 24 h, because the folder may hold the only copy of a recording whose node never committed; speech files in the same folder keep the 24 h guard | A user's words are never lost | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #608 | data safety | Which folders the sweep leaves alone | Any folder changed (modified or ctime) in the last 24 h (`RECENT_SECONDS`), which also protects a playback in progress; a symlinked or outside-root folder is never followed or deleted | Introduced number, flagged in the PR; a user's words are never lost | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #608 | data safety | Files that rows still point at | Never deleted: speech shared between profile versions and merged reference copies is real today | A user's words are never lost | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #608 | privacy | Rows hidden by "Delete all my writing" | Kept, for nodes, references and profiles alike, as the node cleanup already does | Nobody decrypts users' content | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #608 | privacy | A saved reference's speech | Deleted when the reference is deleted, because references have no grace period today | Deletion means deletion | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #608 | reliability | The sweep's batch size | 500 folders per round of lookups (`BATCH_SIZE`), the same as the user purge's chunk size | Every added heuristic is named | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-06 | #608 | testing | Tests and real audio folders | An autouse fixture gives every test a scratch audio root, so no test deletes or marks anything under a real folder | Data safety first | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-09 | #610 | data safety | The backlog on the first run after the fix | No cap: about 30 ms per entry, so the 55-minute limit is reached only past about 100,000 entries | Every added heuristic is named | Opus 5.5 | pending |
+| 2026-11-09 | #610 | privacy | A deleted entry a share points at | The purge clears the share's links to it, as the "Delete all my writing" purge already does, so the entry is purged on time | Deletion | Opus 5.5 | pending |
+| 2026-11-09 | #610 | data safety | A restore that commits while the cleanup reaches the entry | Each entry is loaded with a row lock, so the restore finishes first and the entry keeps its text (review finding, second-tier check by the coordinating builder) | The user's edit wins | Opus 5.5 | pending |
+| 2026-11-09 | #611 | reliability | A profile run that reaches the soft time limit | Stops visibly and holds the work for the hourly seeder instead of rerunning at once; not counted as a provider failure | Problems show | Opus 5.5 | pending |
+| 2026-11-09 | #611 | cost | Batches already created when a run stops | Recorded, so they are collected and not paid for twice | Problems show | Opus 5.5 | pending |
+| 2026-11-09 | #611 | reliability | A second copy of a user's run (redelivered or dispatched again) | Exits without rendering while the first copy's lock is alive; a lock outlives a dead run by at most 15 minutes | Problems show | Opus 5.5 | pending |
+| 2026-11-09 | #611 | reliability | Redis unreachable when a run starts | The run goes ahead without the lock, as the batch pipeline lock already does | Autonomy | Opus 5.5 | pending |
+| 2026-11-09 | #611 | reliability | Introduced constants | Broker visibility timeout 3 × the hard time limit (10,800 s); run and sweep lock TTL 15 minutes; 15 MB per submission; 600 s of rendering per task | Every added heuristic is named | Opus 5.5 | pending |
+| 2026-11-09 | #615 | reliability | Which schedules get a fixed time | Only the daily cleanup, at 03:17 UTC; hourly and shorter intervals are left; no last-run guard, since the job is idempotent and the grace is 30 days | Every added heuristic is named | Sonnet | pending |
+| 2026-11-09 | #616 | reliability | How a worker is kept within memory | A hard limit only, no soft threshold: in a test, a job past a soft threshold slowed the whole worker, replies included, for 96 s before the kill | Problems show | Opus 5.5 | pending |
+| 2026-11-09 | #616 | reliability | A job the memory limit kills | Fails after three kills, shown to the user (chat import) or in the admin's Profile column (profile build), instead of rerunning without end (review finding) | Problems show | Opus 5.5 | pending |
+| 2026-11-09 | #616 | reliability | Which jobs take the one heavy-job slot | Profile window passes, update_user_profile, imports, pre-fills and the Community Archive refresh, for their whole run; a waiting job keeps its retry count; with Redis unreachable it runs without the slot | Autonomy | Opus 5.5 | pending |
+| 2026-11-09 | #616 | reliability | Introduced constants | Memory limit 1408 MB for the single worker and 1152 MB for the background worker; pool processes' out-of-memory score +300; slot TTL 300 s with a 30 s heartbeat; a waiting job is re-sent after 30–40 s; a pool process above about 400 MB is replaced after its job; three kills before a job fails | Every added heuristic is named | Opus 5.5 | pending |
+| 2026-11-09 | #617 | privacy | An entry or reply that changes while a pass runs | Never sent from the pass's metadata read: the pass reads again when the user's rows change (deletions, "Delete all my writing", its restore and account deletions included), and every row and reply a window's text depends on is checked again when the window renders (review finding) | No AI means no AI | Opus 5.5 | pending |
+| 2026-11-09 | #617 | reliability | A window whose rows change under two reads | That window and the rest of the pass read per window, as before, and the pass is reported to Sentry with tags only | Problems show | Opus 5.5 | pending |
+| 2026-11-09 | #617 | reliability | Rows that share a timestamp | A fixed order by id; on SQLite windows are identical to before, on Postgres they can differ from the old order, which depended on the query plan, with no row lost or doubled | Autonomy | Opus 5.5 | pending |
+| 2026-11-09 | #617 | reliability | Introduced constants | Two metadata reads per window before falling back; a change check before each window (row count, newest id, newest update, deleted count); id lists of 900, the existing chunk size | Every added heuristic is named | Opus 5.5 | pending |
 
 ## Backfilled decisions
 
@@ -4011,7 +4115,7 @@ Builder decisions listed in PRs that merged without Peter correcting them, backf
 | 2026-11-06 | #589 | reliability | Every window output must carry the three map headings and exactly one events section; a refusal written as text counts as refused | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
 | 2026-11-06 | #589 | reliability | Window failures have their own bound: a refused, cut-off or invalid output is retried once, then the window is skipped and Sentry alerted; a provider failure is retried up to three submissions, then the window waits 24 h | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
 | 2026-11-06 | #589 | cost | Window-set users are pinned to Batch and never take the full-price synchronous fallback | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
-| 2026-11-06 | #589 | cost | All windows of a user go out in one submission, split only above 100 MB | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | cost | All windows of a user go out in one submission, split only above 100 MB | Opus 5.5 | corrected → entry 2026-11-09 · Profile batches of up to 100 MB and 40 minutes of rendering in one task |
 | 2026-11-06 | #589 | reliability | A window is rendered again smaller while it is over the version model's cap; it is never cut and never sent over it; one entry larger than the cap is skipped with a Sentry alert | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
 | 2026-11-06 | #589 | product scope | A last group of one window is not merged; the window enters the final as it is | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
 | 2026-11-06 | #589 | data safety | The user's version is merged inside the final at its date; a version saved while the final is in the batch discards that final (cost row kept) and the next run merges again | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
@@ -4031,7 +4135,7 @@ Builder decisions listed in PRs that merged without Peter correcting them, backf
 | 2026-11-06 | #589 | reliability | A chained version must carry the three maps; a failed one follows the window rules, not the chained path's user-level refusal backoff | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
 | 2026-11-06 | #589 | cost | Merges after a regular update run on the preferred model without a reasoning-effort parameter, as live replies do | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
 | 2026-11-06 | #589 | product scope | One chained window per pass; a remainder is chained on the new version in the next pass | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
-| 2026-11-06 | #589 | cost | Introduced constants for batch size and rendering: 100 MB per batch, 2,400 s of rendering time, 8 fit rounds at a safety factor of 0.97, 1.5 as the over-cap estimate factor | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
+| 2026-11-06 | #589 | cost | Introduced constants for batch size and rendering: 100 MB per batch, 2,400 s of rendering time, 8 fit rounds at a safety factor of 0.97, 1.5 as the over-cap estimate factor | Opus 5.5 | corrected → entry 2026-11-09 · Profile batches of up to 100 MB and 40 minutes of rendering in one task |
 | 2026-11-06 | #589 | reliability | Introduced constants for failures: 2 content attempts, 3 provider attempts, an attempt history of 7 days | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
 | 2026-11-06 | #589 | cost | Introduced estimate constants: expected output Haiku 11k, Luna 2.5k, Opus 5.5 7k (a chained update), else 6k tokens; 4.7k merge tokens per version for Haiku and others, 2.0k for Luna; prompts 3k, 8k and 4k; 4k merge output | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
 | 2026-11-06 | #589 | product scope | Introduced merge settings: a merge group size of 30 and the flat structure by default | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
