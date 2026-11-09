@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { formatDate as formatDateShared } from '../utils/date';
 import { computeLineDiff, refineWordDiffs, collapseUnchanged } from '../utils/diff';
+import DiffRows from './DiffRows';
 
 /**
  * VersionHistoryDrawer — Slides in from the right.
@@ -66,55 +67,6 @@ export default function VersionHistoryDrawer({
     return collapseUnchanged(diffOps, 2);
   }, [diffOps, viewMode]);
 
-  // hasSegments: word-refined lines carry the strikethrough / stronger
-  // tint on the changed WORDS instead of the whole line (GitHub-style).
-  const diffLineStyle = (type, hasSegments = false) => ({
-    fontFamily: 'var(--sans)',
-    fontSize: '0.8rem',
-    fontWeight: 300,
-    lineHeight: 1.6,
-    whiteSpace: 'pre-wrap',
-    wordBreak: 'break-word',
-    padding: '0 6px',
-    borderRadius: '2px',
-    ...(type === 'add' && {
-      color: 'var(--text-primary)',
-      background: 'color-mix(in srgb, var(--success) 12%, transparent)',
-    }),
-    ...(type === 'del' && {
-      color: 'var(--text-muted)',
-      background: 'color-mix(in srgb, var(--error) 10%, transparent)',
-      ...(!hasSegments && {
-        textDecoration: 'line-through',
-        textDecorationColor: 'color-mix(in srgb, var(--error) 45%, transparent)',
-      }),
-    }),
-    ...(type === 'same' && {
-      color: 'var(--text-muted)',
-    }),
-  });
-
-  const segmentStyle = (type, changed) => (changed ? {
-    borderRadius: '2px',
-    ...(type === 'add' && {
-      background: 'color-mix(in srgb, var(--success) 32%, transparent)',
-    }),
-    ...(type === 'del' && {
-      background: 'color-mix(in srgb, var(--error) 28%, transparent)',
-      textDecoration: 'line-through',
-      textDecorationColor: 'color-mix(in srgb, var(--error) 55%, transparent)',
-    }),
-  } : {});
-
-  const renderDiffLine = (row) => (
-    row.segments
-      ? row.segments.map((seg, j) => (
-          <span key={j} style={segmentStyle(row.type, seg.changed)}>
-            {seg.text}
-          </span>
-        ))
-      : (row.text || ' ')
-  );
   // Close on Escape
   useEffect(() => {
     if (!isOpen) return;
@@ -318,31 +270,7 @@ export default function VersionHistoryDrawer({
               {versionContent == null ? (
                 <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>Loading...</p>
               ) : diffRows ? (
-                <div style={{ margin: 0 }}>
-                  {diffRows.length === 0 || diffRows.every(r => r.type === 'same' || r.type === 'skip') ? (
-                    <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>
-                      No changes from the previous version.
-                    </p>
-                  ) : diffRows.map((row, i) => (
-                    row.type === 'skip' ? (
-                      <div
-                        key={i}
-                        style={{
-                          fontFamily: 'var(--sans)', fontSize: '0.7rem',
-                          color: 'var(--text-muted)', opacity: 0.7,
-                          textAlign: 'center', padding: '6px 0',
-                          userSelect: 'none',
-                        }}
-                      >
-                        ⋯ {row.count} unchanged {row.count === 1 ? 'line' : 'lines'} ⋯
-                      </div>
-                    ) : (
-                      <div key={i} style={diffLineStyle(row.type, !!row.segments)}>
-                        {renderDiffLine(row)}
-                      </div>
-                    )
-                  ))}
-                </div>
+                <DiffRows rows={diffRows} />
               ) : (
                 <pre style={{
                   fontFamily: 'var(--sans)',

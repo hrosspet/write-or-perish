@@ -435,8 +435,9 @@ def _user_saved_a_version(version):
 def _copy_audio(source, target):
     """Point ``target`` at ``source``'s finished speech: the scalar URL and
     the per-chunk rows the streaming player reads. The files are shared;
-    they belong to the same user, and clearing audio never deletes files
-    (utils/audio_storage.clear_tts_artifacts)."""
+    they belong to the same user, and the nightly audio sweep
+    (utils/audio_sweep.py) deletes a speech file only when no row of the
+    user's points at it."""
     from backend.models import TTSChunk
     if not source.audio_tts_url or source.tts_task_status != "completed":
         return

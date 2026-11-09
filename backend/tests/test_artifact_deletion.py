@@ -53,7 +53,7 @@ sys.modules["backend.llm_providers"] = MagicMock()
 sys.modules.pop("backend.tasks.llm_completion", None)
 
 from backend.tasks.llm_completion import (  # noqa: E402
-    _artifact_update_echo, _execute_tool_calls, _retrieval_injection_text,
+    _artifact_write_report, _execute_tool_calls, _retrieval_injection_text,
     _scan_proposal_statuses, get_user_artifacts_context,
 )
 
@@ -398,15 +398,19 @@ def test_read_artifact_tool_cannot_read_it(app):
 
 
 def test_update_echo_of_a_deleted_version_is_empty(app):
+    """The answer to a write (#604, which replaced the echo) shows no text
+    of a deleted version, in its turn or replayed later."""
     alice = _user("alice")
     rows = _landlord(alice.id)
     tr = {"name": "update_artifact", "status": "success",
           "kind": "landlord-case", "artifact_id": rows[-1].id,
           "previous_artifact_id": rows[-2].id}
-    assert _artifact_update_echo(tr) is not None
+    assert "landlord v3" in _artifact_write_report(tr, alice.id)
     soft_delete_artifact(alice.id, "landlord-case")
     _db.session.commit()
-    assert _artifact_update_echo(tr) is None
+    for known in (None, set()):
+        assert _artifact_write_report(tr, alice.id, known=known) == (
+            "'landlord-case' was saved, but that version no longer exists.")
 
 
 def test_update_echo_never_diffs_against_a_deleted_previous_version(app):
@@ -424,9 +428,9 @@ def test_update_echo_never_diffs_against_a_deleted_previous_version(app):
     tr = {"name": "update_artifact", "status": "success",
           "kind": "landlord-case", "artifact_id": written.id,
           "previous_artifact_id": rows[-1].id}
-    echo = _artifact_update_echo(tr)
-    assert echo is not None
-    assert "+the AI's new line" in echo
+    echo = _artifact_write_report(tr, alice.id)
+    assert echo == ("'landlord-case' updated to v1. Its full new text:\n"
+                    "the AI's new line")
     # A diff against the deleted v3 would carry "-landlord v3".
     assert "landlord v3" not in echo
 
