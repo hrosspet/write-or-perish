@@ -202,10 +202,16 @@ def finalize_deleted_nodes(now=None):
     audio_errors = 0
     for node_id in candidate_ids:
         try:
-            node = db.session.get(Node, node_id)
+            # Locked until this node's commit or rollback: a restore
+            # (re-import, share republish) still uncommitted when the
+            # node's turn comes is waited for, then seen here, instead
+            # of the DELETE or the wipe landing on the restored row.
+            node = db.session.get(Node, node_id, with_for_update=True,
+                                  populate_existing=True)
             if (node is None or node.deleted_at is None
                     or node.deleted_at > cutoff):
                 # Gone, or restored, since the ids were read.
+                db.session.rollback()
                 continue
             child_count = Node.query.filter_by(parent_id=node.id).count()
             if child_count == 0:
@@ -217,6 +223,7 @@ def finalize_deleted_nodes(now=None):
             else:
                 # Stable tombstone, content already None, children
                 # still exist — skip until next descendant cleanup pass.
+                db.session.rollback()  # releases the row lock
                 continue
             db.session.commit()
             audio_files += audio.files
