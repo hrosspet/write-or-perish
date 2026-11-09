@@ -2,7 +2,7 @@
 Celery application initialization for Write or Perish.
 Handles background tasks for long-running operations like transcription, LLM calls, and exports.
 """
-from celery import Celery
+from celery import Celery, schedules
 from backend import create_app
 
 # Create Flask app for Celery context
@@ -70,9 +70,14 @@ celery.conf.update(
             'task': 'backend.tasks.disk_monitor.check_disk_usage',
             'schedule': 3600.0,  # every hour
         },
+        # A daily job gets a fixed time, never an interval: deploy.sh
+        # deletes beat's schedule file, so an interval's countdown starts
+        # over on every deploy and the job only runs after 24 h without
+        # one (#614). Beat runs in UTC (timezone/enable_utc above).
+        # 03:17 UTC: away from the :00 hourly jobs and the 05:00 sweep.
         'cleanup-deleted-nodes': {
             'task': 'backend.tasks.node_cleanup.cleanup_deleted_nodes',
-            'schedule': 86400.0,  # daily
+            'schedule': schedules.crontab(hour=3, minute=17),  # daily, 03:17 UTC
         },
         # Backstop for the {ca_tweets} batch poll: a hard worker kill loses
         # the scheduled retry; this re-dispatches nodes whose poll
