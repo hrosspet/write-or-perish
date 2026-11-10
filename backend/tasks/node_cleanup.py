@@ -46,7 +46,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from celery.utils.log import get_task_logger
-from sqlalchemy import exists, or_
+from sqlalchemy import and_, exists, or_
 
 from backend.celery_app import celery, flask_app
 from backend.constants import SOFT_DELETE_GRACE_DAYS
@@ -121,12 +121,6 @@ def _full_purge(node):
     Node.query.filter_by(continuation_node_id=node.id).update(
         {"continuation_node_id": None}
     )
-    # Circles: a reply that pointed at this node as its thread's shared
-    # entry (the purge reaches a node only after its replies, so this is
-    # a backstop for the foreign key).
-    Node.query.filter(Node.audience_root_id == node.id,
-                      Node.id != node.id).update(
-        {"audience_root_id": None}, synchronize_session=False)
     # A share (#228) names the reply it was proposed in and the public
     # node it published; revoking keeps the public node's pointer, so a
     # republish can bring the same node back. Both foreign keys block the
@@ -165,6 +159,36 @@ def _wipe_content_and_versions(node):
     return audio
 
 
+def sweep_answers_of_deleted_entries(cutoff):
+    """Mark as deleted, as of *cutoff*, every "Ask my AI" answer whose
+    source entry is gone: the row no longer exists, its content was
+    wiped (a tombstone of the author's purge), or it was deleted before
+    *cutoff* (its own grace period is over). The run that follows wipes
+    or purges them like any deleted node. Until then they are already
+    closed to everyone, their owner included
+    (privacy.answer_source_open). Ids and timestamps only. Returns how
+    many were marked; commits."""
+    from sqlalchemy.orm import aliased
+    from backend.utils.privacy import others_thread_answer_filter
+    entry = aliased(Node)
+    ids = [nid for (nid,) in (
+        db.session.query(Node.id)
+        .outerjoin(entry, entry.id == Node.audience_root_id)
+        .filter(Node.deleted_at.is_(None),
+                Node.audience_root_id.isnot(None),
+                others_thread_answer_filter(Node),
+                or_(entry.id.is_(None),
+                    and_(entry.deleted_at.isnot(None),
+                         or_(entry.deleted_at <= cutoff,
+                             entry.content.is_(None))))))]
+    for start in range(0, len(ids), 500):
+        Node.query.filter(Node.id.in_(ids[start:start + 500])).update(
+            {Node.deleted_at: cutoff, Node.updated_at: Node.updated_at},
+            synchronize_session=False)
+    db.session.commit()
+    return len(ids)
+
+
 def finalize_deleted_nodes(now=None):
     """The cleanup's work, in the caller's app context: wipe content and
     audio of, or purge, every soft-deleted node past the grace period
@@ -174,6 +198,13 @@ def finalize_deleted_nodes(now=None):
     now = time.time() if now is None else now
     cutoff = (datetime.fromtimestamp(now, timezone.utc).replace(tzinfo=None)
               - timedelta(days=SOFT_DELETE_GRACE_DAYS))
+
+    # Circles: an "Ask my AI" answer goes with the entry it was written
+    # from (it holds that entry's content in derived form).
+    swept = sweep_answers_of_deleted_entries(cutoff)
+    if swept:
+        logger.info("cleanup_deleted_nodes: %d Ask-my-AI answer(s) of "
+                    "deleted entries marked for deletion", swept)
 
     # "Has any child row in DB" subquery — true when the node still
     # has children referencing it (alive or soft-deleted, doesn't

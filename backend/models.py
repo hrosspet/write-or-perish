@@ -560,8 +560,11 @@ class Node(db.Model):
     # reply in a shared thread points at that entry, so the whole thread
     # has one audience. NULL = not shared with anyone: a "circles" node
     # without it behaves as private (old rows, old clients, #588).
-    audience_root_id = db.Column(
-        db.Integer, db.ForeignKey("node.id"), nullable=True, index=True)
+    # No foreign key on purpose: on a reply or an "Ask my AI" answer it
+    # is also the lasting record of whose thread the node was written
+    # into, and it must outlive the entry. A pointer whose entry is gone
+    # reads as "someone else's, closed" (privacy.py, circles.py).
+    audience_root_id = db.Column(db.Integer, nullable=True, index=True)
 
     # Soft-delete: non-NULL means scheduled for cleanup after SOFT_DELETE_GRACE_DAYS.
     deleted_at = db.Column(db.DateTime, nullable=True, index=True)

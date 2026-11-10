@@ -183,3 +183,82 @@ def test_the_daily_cleanup_deletes_a_shared_entrys_rows(
     # The circle and its people are not the entry's to delete.
     assert CircleMember.query.filter_by(
         circle_id=circles.ids["alices"]).count() == 2
+
+
+# ── A reader's Ask-my-AI answer goes with the author's entry ────────────
+
+@pytest.fixture
+def answer(app, world, circles):
+    """bob's Ask-my-AI answer under alice's shared entry, and where it
+    came from."""
+    import json as _json
+    llm = world.llm
+    a = _node(llm, circles.entry, owner=world.bob.id, node_type="llm",
+              privacy="circles", text="derived from alice's entry",
+              llm_model="claude-opus",
+              tool_calls_meta=_json.dumps(
+                  [{"name": "_circle_ask", "entry_id": circles.entry.id}]))
+    a.audience_root_id = circles.entry.id
+    _db.session.commit()
+    return a.id
+
+
+def _hidden_from_its_owner(world, answer_id):
+    from backend.utils.privacy import (
+        can_ai_access_node, can_user_access_node)
+    _db.session.expire_all()
+    node = _db.session.get(Node, answer_id)
+    return (not can_user_access_node(node, world.bob.id)
+            and not can_ai_access_node(node, world.bob.id))
+
+
+def test_delete_all_my_writing_hides_and_removes_readers_answers(
+        app, world, stubs, circles, answer):
+    from backend.tasks.node_cleanup import finalize_deleted_nodes
+    from backend.utils.privacy import can_user_access_node
+    a, b = world.alice, world.bob
+    assert can_user_access_node(_db.session.get(Node, answer), b.id)
+    job, _ = up.schedule_purge(a, requested_by_id=a.id, source="self")
+    _db.session.commit()
+    assert _hidden_from_its_owner(world, answer)
+    # bob's own typed reply stays his.
+    assert can_user_access_node(
+        _db.session.get(Node, circles.ids["bobs_reply"]), b.id)
+    # A restore opens it again.
+    up.cancel_purge(a.id, a.id)
+    _db.session.commit()
+    _db.session.expire_all()
+    assert can_user_access_node(_db.session.get(Node, answer), b.id)
+
+    job, _ = up.schedule_purge(a, requested_by_id=a.id, source="self")
+    _db.session.commit()
+    tokens = []
+    after = datetime.utcnow() + timedelta(days=30, minutes=1)
+    assert up.dispatch_due_jobs(
+        lambda j, t: tokens.append(t), now=after) == [job.id]
+    assert up.run_purge_job(job.id, tokens[0]) == "done"
+    assert _hidden_from_its_owner(world, answer)
+    # The daily cleanup removes the answer with the entry it came from.
+    finalize_deleted_nodes()
+    _db.session.expire_all()
+    node = _db.session.get(Node, answer)
+    assert node is None or node.content is None
+    assert _db.session.get(Node, circles.ids["bobs_reply"]).content is not None
+
+
+def test_account_deletion_hides_and_removes_readers_answers(
+        app, world, stubs, circles, answer):
+    from backend.tasks.node_cleanup import finalize_deleted_nodes
+    a = world.alice
+    job = acc.schedule_account_deletion(a, requested_by_id=a.id, source="self")
+    assert _hidden_from_its_owner(world, answer)
+    tokens = []
+    up.dispatch_due_jobs(lambda j, t: tokens.append(t),
+                         now=datetime.utcnow() + timedelta(days=31))
+    assert up.run_purge_job(job.id, tokens[-1]) == "done"
+    assert _hidden_from_its_owner(world, answer)
+    finalize_deleted_nodes()
+    _db.session.expire_all()
+    node = _db.session.get(Node, answer)
+    assert node is None or node.content is None
+    assert _db.session.get(Node, circles.ids["bobs_reply"]).content is not None

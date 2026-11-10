@@ -1008,8 +1008,7 @@ def _count_user_data(user_id, plan, scope):
     for model, col, key in _REF_COLUMNS:
         c[key] = _count(model, col.in_(deleted_ids), scope.other_rows(model))
     for col, key in ((Node.linked_node_id, "node.linked_node_id"),
-                     (Node.continuation_node_id, "node.continuation_node_id"),
-                     (Node.audience_root_id, "node.audience_root_id")):
+                     (Node.continuation_node_id, "node.continuation_node_id")):
         c[key] = _count(Node, col.in_(deleted_ids), plan.not_owned(U))
     for model, key in _USER_TABLES:
         c[key] = _count(model, scope.rows(model))
@@ -1092,8 +1091,7 @@ def _clear_references_to(ids, plan, counts):
         table_key = "draft" if model is Draft else "share_draft"
         counts[table_key] += _delete(model, col.in_(ids), scope.rows(model))
     for col, key in ((Node.linked_node_id, "node.linked_node_id"),
-                     (Node.continuation_node_id, "node.continuation_node_id"),
-                     (Node.audience_root_id, "node.audience_root_id")):
+                     (Node.continuation_node_id, "node.continuation_node_id")):
         counts[key] += Node.query.filter(
             col.in_(ids), scope.not_nodes(plan.extras),
         ).update({col: None, Node.updated_at: Node.updated_at},

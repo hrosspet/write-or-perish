@@ -29,16 +29,16 @@ def apply_settings_to_descendants(root, user_id, *, privacy_level=None,
     """
     if privacy_level is None and ai_usage is None:
         return []
-    # Circles: where each reply came from (circles.thread_source_entry),
+    # Circles: where each reply came from (circles.thread_source),
     # carried down the walk instead of asked per node: a reply's own
     # pointer or marker, else what its parent hands down. `below` is the
     # entry a node's replies come from: its own pointer (an entry points
     # at itself), else what it inherited.
-    from backend.utils.circles import entry_owner_id, thread_source_entry
-    from backend.utils.llm_nodes import circle_ask_entry_id
-    root_source = thread_source_entry(root)
+    from backend.utils.circles import entry_owner_id, thread_source
+    from backend.utils.llm_nodes import circle_ask_entry_id, is_circle_ask
+    root_source = thread_source(root)
     below = {root.id: root.audience_root_id
-             or (root_source.id if root_source is not None else None)}
+             or (root_source.entry_id if root_source is not None else None)}
     source_of = {}
     editable = []
     seen = {root.id}
@@ -53,14 +53,17 @@ def apply_settings_to_descendants(root, user_id, *, privacy_level=None,
             if own is not None and own != n.id:
                 source_of[n.id] = own
             else:
-                source_of[n.id] = circle_ask_entry_id(n) or inherited
+                # 0: an answer whose marker names no entry is still one.
+                source_of[n.id] = (circle_ask_entry_id(n)
+                                   or (0 if is_circle_ask(n) else inherited))
             below[n.id] = own if own is not None else inherited
         editable.extend(
             n for n in level
             if n.deleted_at is None and can_user_edit_node(n, user_id))
     owners = {}
     for entry_id in {source_of.get(n.id) for n in editable} - {None}:
-        entry = Node.query.get(entry_id)
+        entry = Node.query.get(entry_id) if entry_id else None
+        # None: an entry that is gone is nobody's, so nobody widens.
         owners[entry_id] = entry_owner_id(entry) if entry is not None else None
 
     def written_into_someone_elses_thread(n, uid):

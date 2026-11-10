@@ -1181,3 +1181,144 @@ def test_a_shared_entry_is_not_told_apart_from_a_missing_one(app):
                             json={"circle_usernames": ["ben"]}))
     same(lambda i: dana.get(f"/api/nodes/{i}"))
     same(lambda i: dana.get(f"/api/nodes/{i}/audio"))
+
+
+# ── An answer goes with the entry it was written from ───────────────────
+
+def _corpus_ids(user):
+    from backend.routes.export_data import _export_visible_filter
+    return {i for (i,) in _db.session.query(Node.id).filter(
+        _export_visible_filter(Node, user.id))}
+
+
+def test_an_answer_is_hidden_while_its_entry_is_deleted(app):
+    """The author deletes the entry: the reader's Ask-my-AI answer is
+    closed at once, to the reader too, and opens again on a restore. The
+    reader's own typed reply stays the reader's."""
+    from backend.utils.privacy import can_user_access_node
+    entry, r, a, n = _thread_with_answer(app)
+    ben = _user("ben")
+    assert _can_read(app, "ben", a)
+    node = _db.session.get(Node, entry)
+    node.deleted_at = datetime.utcnow()
+    _db.session.commit()
+    assert not _can_read(app, "ben", a)
+    assert not _can_read(app, "chidi", a)
+    # The author still reads what was written into her own thread, as
+    # she reads the typed replies under her deleted entry.
+    assert _can_read(app, "anna", a)
+    assert _can_read(app, "ben", r)                 # his own words
+    assert r in _corpus_ids(ben) and a not in _corpus_ids(ben)
+    assert "ANSWER-FROM-ANNAS-ENTRY" not in _export(ben, filter_ai_usage=False)
+    thread = _client(app, "ben").get(f"/api/nodes/{r}").get_json()
+    assert "ANSWER-FROM-ANNAS-ENTRY" not in json.dumps(thread)
+    # Still not his to widen.
+    assert _put(app, "ben", a, privacy_level="public").status_code == 403
+    node.deleted_at = None
+    _db.session.commit()
+    assert can_user_access_node(_db.session.get(Node, a), ben.id)
+    assert _can_read(app, "ben", a)
+
+
+def test_an_answer_whose_entry_is_gone_stays_someone_elses(app):
+    """The record of where an answer came from no longer resolves (the
+    entry's row is gone): nothing opens. Not public, no new audience,
+    not in the owner's corpus, not readable."""
+    from backend.utils.circles import thread_source
+    from backend.utils.privacy import (
+        can_ai_access_node, is_others_thread_answer)
+    entry, r, a, n = _thread_with_answer(app)
+    ben = _user("ben")
+    NodeReader.query.filter_by(node_id=entry).delete()
+    Node.query.filter_by(id=entry).delete()
+    _db.session.commit()
+    _db.session.expire_all()
+    answer = _db.session.get(Node, a)
+    assert answer.audience_root_id == entry        # the record stays
+    source = thread_source(answer)
+    assert source is not None and source.is_someone_elses(ben.id)
+    assert is_others_thread_answer(answer)
+    assert not can_ai_access_node(answer, ben.id)
+    assert not _can_read(app, "ben", a)
+    assert a not in _corpus_ids(ben)
+    for node_id in (a, r):
+        assert _put(app, "ben", node_id,
+                    privacy_level="public").status_code == 403
+        assert _put(app, "ben", node_id, privacy_level="circles",
+                    circle_usernames=["dana"]).status_code == 400
+        assert _client(app, "ben").put(
+            f"/api/nodes/{node_id}/audience",
+            json={"circle_usernames": ["dana"]}).status_code == 400
+    assert _put(app, "ben", r, privacy_level="private",
+                apply_to_descendants=True).status_code == 200
+    assert _put(app, "ben", a, privacy_level="public").status_code == 403
+    assert not _can_read(app, "dana", a) and not _can_read(app, "dana", r)
+
+
+def test_the_marker_alone_keeps_an_answer_someone_elses(app):
+    from backend.utils.privacy import (
+        can_ai_access_node, is_others_thread_answer,
+        others_thread_answer_filter)
+    entry, r, a, n = _thread_with_answer(app)
+    ben = _user("ben")
+    answer = _db.session.get(Node, a)
+    answer.audience_root_id = None           # the pointer lost, by any path
+    answer.privacy_level = "private"
+    _db.session.commit()
+    assert is_others_thread_answer(answer)
+    assert {i for (i,) in _db.session.query(Node.id).filter(
+        others_thread_answer_filter(Node))} == {a}
+    assert not can_ai_access_node(answer, ben.id)
+    assert a not in _corpus_ids(ben)
+    assert "ANSWER-FROM-ANNAS-ENTRY" not in _export(ben, filter_ai_usage=False)
+    assert _put(app, "ben", a, privacy_level="public").status_code == 403
+    assert _put(app, "ben", a, privacy_level="circles",
+                circle_usernames=["dana"]).status_code == 400
+    # The embedding sweep's clause leaves it out too.
+    from backend.utils.privacy import answers_may_exist
+    assert answers_may_exist()
+
+
+def test_the_cleanup_deletes_answers_of_deleted_entries(app):
+    from backend.tasks.node_cleanup import sweep_answers_of_deleted_entries
+    entry, r, a, n = _thread_with_answer(app)
+    cutoff = datetime.utcnow() - timedelta(days=30)
+    # Deleted yesterday: inside the grace period, nothing is marked.
+    node = _db.session.get(Node, entry)
+    node.deleted_at = datetime.utcnow() - timedelta(days=1)
+    _db.session.commit()
+    assert sweep_answers_of_deleted_entries(cutoff) == 0
+    # Past it: the answer is marked, replies people typed are not.
+    node.deleted_at = cutoff - timedelta(days=1)
+    _db.session.commit()
+    assert sweep_answers_of_deleted_entries(cutoff) == 1
+    _db.session.expire_all()
+    assert _db.session.get(Node, a).deleted_at == cutoff
+    assert _db.session.get(Node, r).deleted_at is None
+    assert _db.session.get(Node, n).deleted_at is None
+    assert sweep_answers_of_deleted_entries(cutoff) == 0
+    # anna's own AI reply in her own thread is not an answer of this kind.
+    other = _share(app, names=["ben"], content="another")
+    own = _client(app, "anna").post(f"/api/nodes/{other}/llm", json={})
+    _db.session.get(Node, other).deleted_at = cutoff - timedelta(days=1)
+    _db.session.commit()
+    assert sweep_answers_of_deleted_entries(cutoff) == 0
+    assert _db.session.get(Node, own.get_json()["node_id"]).deleted_at is None
+
+
+def test_an_answer_of_a_wiped_or_missing_entry_is_swept_at_once(app):
+    from backend.tasks.node_cleanup import sweep_answers_of_deleted_entries
+    entry, r, a, n = _thread_with_answer(app)
+    cutoff = datetime.utcnow() - timedelta(days=30)
+    node = _db.session.get(Node, entry)
+    node.deleted_at = datetime.utcnow()     # a tombstone left by a purge
+    node.content = None
+    _db.session.commit()
+    assert sweep_answers_of_deleted_entries(cutoff) == 1
+    entry2, r2, a2, n2 = _thread_with_answer(app)
+    NodeReader.query.filter_by(node_id=entry2).delete()
+    Node.query.filter_by(id=entry2).delete()
+    _db.session.commit()
+    assert sweep_answers_of_deleted_entries(cutoff) == 1
+    _db.session.expire_all()
+    assert _db.session.get(Node, a2).deleted_at == cutoff

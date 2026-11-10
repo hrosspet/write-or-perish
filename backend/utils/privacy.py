@@ -309,10 +309,51 @@ def is_others_thread_answer(node) -> bool:
     if getattr(node, 'node_type', None) != "llm":
         return False
     # Whatever its level now: taken back to Only me it is still written
-    # from that entry (its pointer is never cleared).
+    # from that entry. Two records say so, and either is enough: the
+    # answer's marker, and its pointer at an entry that is not its
+    # owner's. A pointer whose entry no longer exists counts (the owner
+    # of a missing entry is nobody).
+    if _has_ask_marker(node):
+        return True
     entry_id = getattr(node, 'audience_root_id', None)
     return (entry_id is not None and entry_id != node.id
             and audience_entry_owner(entry_id) != _node_owner_id(node))
+
+
+_ASK_MARKER = "_circle_ask"     # llm_nodes.CIRCLE_ASK_MARKER
+
+
+def _has_ask_marker(node) -> bool:
+    meta = getattr(node, 'tool_calls_meta', None)
+    return isinstance(meta, str) and f'"{_ASK_MARKER}"' in meta
+
+
+def answer_source_open(node) -> bool:
+    """The entry an "Ask my AI" answer was written from is still there
+    to read: it exists, is not deleted, and its author's account is not
+    hidden (#269). When it is not, the answer is closed to everyone, its
+    owner included: it holds that entry's content in derived form, and
+    goes when the entry goes (node_cleanup sweeps it). It opens again if
+    the author restores the entry."""
+    from backend.extensions import db
+    from backend.models import Node
+    entry_id = getattr(node, 'audience_root_id', None)
+    if entry_id is None or entry_id == node.id:
+        return False
+    entry = db.session.get(Node, entry_id)
+    return (entry is not None and entry.deleted_at is None
+            and not owner_hidden(entry))
+
+
+def answer_source_open_filter(node_model):
+    """Query form of answer_source_open."""
+    entry = _node_alias("source")
+    return select(entry.id).where(
+        entry.id == node_model.audience_root_id,
+        entry.id != node_model.id,
+        entry.deleted_at.is_(None),
+        hidden_owner_filter(entry),
+    ).exists()
 
 
 def others_thread_answer_filter(node_model):
@@ -321,12 +362,19 @@ def others_thread_answer_filter(node_model):
     owner = func.coalesce(node_model.human_owner_id, node_model.user_id)
     return and_(
         node_model.node_type == "llm",
-        node_model.audience_root_id.isnot(None),
-        node_model.audience_root_id != node_model.id,
-        ~select(entry.id).where(
-            entry.id == node_model.audience_root_id,
-            func.coalesce(entry.human_owner_id, entry.user_id) == owner,
-        ).exists())
+        or_(
+            # The marker (JSON text; the quotes keep the match exact).
+            func.coalesce(node_model.tool_calls_meta, "").contains(
+                f'"{_ASK_MARKER}"', autoescape=True),
+            and_(
+                node_model.audience_root_id.isnot(None),
+                node_model.audience_root_id != node_model.id,
+                # Not EXISTS: an entry that is gone is nobody's.
+                ~select(entry.id).where(
+                    entry.id == node_model.audience_root_id,
+                    func.coalesce(entry.human_owner_id, entry.user_id)
+                    == owner,
+                ).exists())))
 
 
 def _can_user_access_ignoring_deleted(node, user_id: int,
@@ -342,9 +390,13 @@ def _can_user_access_ignoring_deleted(node, user_id: int,
         getattr(node, 'human_owner_id', None)
         and node.human_owner_id == user_id)
     if owned:
-        # The user's own, except for a model: the answer their "Ask my
-        # AI" wrote in someone else's shared thread stays in that thread.
-        return not (as_ai and is_others_thread_answer(node))
+        # The user's own. The exception is the answer their "Ask my AI"
+        # wrote in someone else's shared thread: never for a model (it
+        # stays in that thread), and for the user only while the entry
+        # it was written from is there to read.
+        if is_others_thread_answer(node):
+            return not as_ai and answer_source_open(node)
+        return True
 
     privacy_level = getattr(node, 'privacy_level', PrivacyLevel.PRIVATE)
 
@@ -616,8 +668,10 @@ def accessible_nodes_filter_ignoring_deleted(node_model, user_id: int,
     """
     own = or_(node_model.user_id == user_id,
               node_model.human_owner_id == user_id)
-    if as_ai and answers_may_exist():
-        own = and_(own, ~others_thread_answer_filter(node_model))
+    if answers_may_exist():
+        answer = others_thread_answer_filter(node_model)
+        own = and_(own, ~answer if as_ai else or_(
+            ~answer, answer_source_open_filter(node_model)))
     return or_(
         own,
         node_model.privacy_level == PrivacyLevel.PUBLIC,
