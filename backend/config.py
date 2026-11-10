@@ -657,6 +657,19 @@ class Config:
             # not the 0.1x every other Anthropic model uses.
             "cache_read_multiplier": 0.025,
         },
+        "claude-fable-5.2": {
+            "tokenizer_family": "claude_new",
+            "provider": "anthropic",
+            "api_model": "claude-fable-5-2",
+            "display_name": "Fable 5.2",
+            "context_window": 1000000,
+            # Verified 2026-11-10 on the Anthropic pricing page.
+            "input_price_per_mtok": 8.00,
+            "output_price_per_mtok": 40.00,
+            # Cache hits on Fable 5.2 bill at 0.025x base input ($0.20/MTok),
+            # not the 0.1x every other Anthropic model uses.
+            "cache_read_multiplier": 0.025,
+        },
         "claude-opus-5": {
             "tokenizer_family": "claude_new",
             "provider": "anthropic",
