@@ -157,7 +157,7 @@ def _fail_response(resp):
 
 
 def _hidden_for_deletion(response_id):
-    """A waiting "Delete all my writing" hid this answer (#268). Asked of
+    """A waiting "Delete all my content" hid this answer (#268). Asked of
     the records, not of a lookup, so an answer already loaded in this
     session counts too."""
     from backend.models import UserDataPurgeHidden
@@ -170,7 +170,7 @@ def _submit_poll_draft(response_id, task_id=None):
     """Core of submit (plain function so tests can call it without the
     Celery machinery)."""
     if _hidden_for_deletion(response_id):
-        # Hidden by "Delete all my writing" after the click (#268): no
+        # Hidden by "Delete all my content" after the click (#268): no
         # draft is asked for; a restore makes the answer answerable.
         logger.info("Poll draft %s skipped: hidden for deletion",
                     response_id)
@@ -239,7 +239,7 @@ def _save_draft_result(item, result):
         ))
 
     if _hidden_for_deletion(item["response_id"]):
-        # "Delete all my writing" hid the answer while its draft was in
+        # "Delete all my content" hid the answer while its draft was in
         # the batch (#268): the provider billed it, so the cost row is
         # written, and nothing is saved. A restore finds the answer where
         # the user can write it or ask for a draft again.

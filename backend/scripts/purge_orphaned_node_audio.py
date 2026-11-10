@@ -17,7 +17,7 @@ the audio storage root:
   grace period.
 
 Never a file a row points at, a live node's recording, a node within the
-grace period, a row a waiting "Delete all my writing" hid, a folder with
+grace period, a row a waiting "Delete all my content" hid, a folder with
 anything changed in the last 24 hours, a recording in a folder whose node
 row is gone until it is unchanged for the grace period, or anything
 outside those folders; symlinks are never followed. Reads folder names, file sizes and

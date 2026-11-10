@@ -382,7 +382,7 @@ def _save_pdf_reference(file_data):
     the user's entries, so it never feeds their profile. Mirrors clip():
     the text is capped at one entry's worth, it is encrypted at rest, a
     second save of the same text is a no-op, and a copy hidden by a
-    waiting "Delete all my writing" becomes the user's again. Unlike a
+    waiting "Delete all my content" becomes the user's again. Unlike a
     clip, the title and author go inside the encrypted text
     (utils/document_reference), not into the plaintext columns. The
     periodic sweeps pick it up like any new reference (embedding,

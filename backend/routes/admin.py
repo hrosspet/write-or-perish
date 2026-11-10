@@ -577,7 +577,7 @@ def purge_data_route(user_id):
     """Delete all of a user's writing (#268): mistaken pre-fills, opt-outs,
     erasure requests. The account itself stays.
 
-    It works exactly like the user's own "Delete all my writing" (Peter,
+    It works exactly like the user's own "Delete all my content" (Peter,
     2026-10-13: "it should definitely work the same as user doing
     themselves"): everything is hidden at once, the user sees the
     "Writing deleted" status bar and can restore it, the admin can undo
@@ -628,12 +628,12 @@ def purge_data_route(user_id):
         # writing is hidden and its date stays. A second request would
         # change nothing the admin can see now.
         who = "an admin" if job.source == "admin" else "the user"
-        return jsonify({"error": f"The writing was already deleted by {who}. "
+        return jsonify({"error": f"The content was already deleted by {who}. "
                                  "It is deleted forever on "
                                  f"{job.scheduled_for:%Y-%m-%d}.",
                         "code": "already_scheduled",
                         "job": _purge_job_json(job)}), 409
-    logger.warning("Admin %s deleted the writing of user %s (job %s, "
+    logger.warning("Admin %s deleted the content of user %s (job %s, "
                    "restorable until %s)", current_user.id, user.id, job.id,
                    job.scheduled_for)
     return jsonify({"job": _purge_job_json(job)}), 202

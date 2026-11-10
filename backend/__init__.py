@@ -394,7 +394,7 @@ def create_app():
     from backend.routes.dashboard import dashboard_bp
     app.register_blueprint(dashboard_bp, url_prefix="/api/dashboard")
 
-    # "Delete all my writing" (#268).
+    # "Delete all my content" (#268).
     from backend.routes.account_data import account_data_bp
     app.register_blueprint(account_data_bp, url_prefix="/api/account")
 

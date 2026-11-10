@@ -100,7 +100,7 @@ TOMBSTONE_TEXT = "[Node deleted by author]"
 TOMBSTONE_UNITS = approximate_token_count(TOMBSTONE_TEXT)
 # The most deleted rows the raw window's pre-selection passes (#525).
 # They cost its budget nothing, but each one is a row loaded; while a
-# "Delete all my writing" waits out its 30 days, every row of the
+# "Delete all my content" waits out its 30 days, every row of the
 # account is deleted. INTRODUCED CONSTANT.
 MAX_WINDOW_DELETED_ROWS = 2000
 
@@ -934,7 +934,7 @@ class WindowScope:
     def _fingerprint(self):
         from backend.models import User
         uid = self.user_id
-        # "Delete all my writing" and its restore set and clear deleted_at
+        # "Delete all my content" and its restore set and clear deleted_at
         # without touching updated_at (user_purge.hide_writing): the
         # deleted count and newest deletion see them. Accounts deleted or
         # restored change what other people's rows show (#269).
@@ -2723,5 +2723,5 @@ def get_profile_progress():
 
 # DELETE /api/delete_my_data was removed (#268): it deleted only the
 # user's own node rows, missed imports, AI replies and every dependent
-# table, and failed on Postgres's foreign keys. "Delete all my writing"
+# table, and failed on Postgres's foreign keys. "Delete all my content"
 # is DELETE /api/account/data (backend/routes/account_data.py).
