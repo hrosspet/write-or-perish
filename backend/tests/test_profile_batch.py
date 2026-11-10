@@ -2600,8 +2600,11 @@ def test_421_batch_full_rebuild_merges_every_edit_at_its_date(
     assert [steps[2]["meta"]["merged_profile_id"],
             steps[4]["meta"]["merged_profile_id"]] == [first.id, second.id]
     note = pb._exports.USER_WRITTEN_PROFILE_NOTE
-    assert _texts183(steps[2])[1] == ("Profile No. 2\n- start to 2026-02-01\n\n"
-                                      f"{note}\n\nFIRST CORRECTION")
+    written = first.created_at.strftime("%Y-%m-%d")
+    assert _texts183(steps[2])[1] == (
+        "Profile No. 2\n- Covers all the writing from the start to "
+        f"2026-02-01\n- Written by the user on {written}\n\n"
+        f"{note}\n\nFIRST CORRECTION")
     assert _texts183(steps[4])[1].endswith(
         f"{note}\n\n{wording}\nSECOND CORRECTION")
     assert len({s["request"]["custom_id"] for s in steps}) == len(steps)

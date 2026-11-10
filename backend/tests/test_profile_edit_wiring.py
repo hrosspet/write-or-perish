@@ -1049,12 +1049,15 @@ def test_421_a_full_rebuild_merges_every_edit_at_its_date(app, monkeypatch):
     assert "CORRECTION" not in seen[0][1] + seen[1][1]
     first_merge, second_merge = _texts(seen[2][1]), _texts(seen[4][1])
     assert "REBUILT WINTER" in first_merge[0]
-    assert first_merge[1] == ("Profile No. 2\n- start to 2026-02-01\n\n"
-                              f"{MAIN_NOTE}\n\nFIRST CORRECTION")
+    assert first_merge[1] == (
+        "Profile No. 2\n- Covers all the writing from the start to "
+        f"2026-02-01\n- Written by the user on {_day(first)}\n\n"
+        f"{MAIN_NOTE}\n\nFIRST CORRECTION")
     assert _existing_profile(seen[3][1]) == "MERGED FIRST"
     assert "REBUILT SPRING" in second_merge[0]
     assert second_merge[1] == (
-        "Profile No. 2\n- start to 2026-05-01\n\n"
+        "Profile No. 2\n- Covers all the writing from the start to "
+        f"2026-05-01\n- Written by the user on {_day(second)}\n\n"
         f"{MAIN_NOTE}\n\n{SECOND_EDIT}")
     assert _existing_profile(seen[5][1]) == "MERGED SECOND"
     assert pending_at_merge == [second.id, second.id]
