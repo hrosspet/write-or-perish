@@ -187,6 +187,8 @@ final class CirclesWordingTests: XCTestCase {
                        "The list of people is deleted. Nothing was shared with this circle.")
         XCTAssertEqual(CirclesWording.deleteCircleBody(name: "Family", sharedCount: 2),
                        "The 2 entries you shared with Family are closed to its people from this moment, unless you also shared them another way. The entries stay yours.")
+        XCTAssertEqual(CirclesWording.removeMemberBody(name: "ben", circleName: "Close friends"),
+                       "From this moment ben no longer reads your entries through Close friends. An entry you also shared with ben another way (another circle ben is in, or by name) stays open to ben. ben is not told.")
     }
 
     func testSharedWithYouDatesAndLines() throws {

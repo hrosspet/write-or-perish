@@ -5,6 +5,7 @@ import { useUser } from '../contexts/UserContext';
 import {
   AddCircleMemberDialog, CircleConfirmDialog, accentButton, plainButton,
 } from '../components/CircleDialogs';
+import { removeMemberBody } from '../utils/circles';
 
 // "Your circles": the lists of people the user shares entries with.
 // Create, rename and delete a circle; add a person by their exact Loore
@@ -273,7 +274,7 @@ function CircleCard({ circle, open, onToggle, onChanged, onDeleted }) {
       <CircleConfirmDialog
         open={!!removing}
         title={`Remove ${removing} from ${circle.name}?`}
-        body={`The entries you shared with ${circle.name} are closed to ${removing} from this moment. ${removing} is not told.`}
+        body={removeMemberBody(removing, circle.name)}
         confirmLabel={`Remove ${removing}`}
         busy={busy}
         onClose={() => setRemoving(null)}

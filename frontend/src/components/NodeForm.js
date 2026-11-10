@@ -11,7 +11,8 @@ import SplitContentDialog, { NODE_CHAR_CAP } from "./SplitContentDialog";
 import PublicReplyDialog, { PUBLIC_REPLY_ACK_KEY } from "./PublicReplyDialog";
 import { CircleReplyDialog } from "./CircleDialogs";
 import {
-  replyAckKey, replyAudienceNames, shareButtonLabel, splitNames,
+  NO_READERS_MESSAGE, replyAckKey, replyAudienceNames, shareButtonLabel,
+  splitNames,
 } from "../utils/circles";
 import { useOnlineStatus } from "../hooks/useOnlineStatus";
 import { useToast } from "../contexts/ToastContext";
@@ -257,6 +258,15 @@ const NodeForm = forwardRef(
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [editMode, nodeId, circlesOn]);
 
+    // The "nobody could read this" refusal goes as soon as somebody can
+    // (or the entry is no longer for circles): it must not stand beside
+    // a button that says "Share with 3 people".
+    const hasReaders = (audienceInfo.readers || []).length > 0;
+    useEffect(() => {
+      if (hasReaders || privacyLevel !== "circles") {
+        setError((current) => (current === NO_READERS_MESSAGE ? "" : current));
+      }
+    }, [hasReaders, privacyLevel]);
     // Auto-populate form with draft when loaded
     useEffect(() => {
       if (isDraftLoaded && draft && draft.content) {
@@ -538,8 +548,7 @@ const NodeForm = forwardRef(
             usernames: splitNames(audience.namesText),
           });
           if (!(res.data.readers || []).length) {
-            setError("Nobody could read this entry yet. Choose a circle "
-              + "with people in it, or name a person.");
+            setError(NO_READERS_MESSAGE);
             return;
           }
         } catch (err) {

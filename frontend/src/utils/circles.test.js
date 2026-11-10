@@ -1,7 +1,14 @@
 import {
   countWord, joinNames, splitNames, readersSentence, shareButtonLabel,
-  replyAudienceNames, sharedBannerText, replyAckKey,
+  replyAudienceNames, sharedBannerText, replyAckKey, removeMemberBody,
 } from './circles';
+
+test('removing a person says what stays open', () => {
+  expect(removeMemberBody('ben', 'Close friends')).toBe(
+    'From this moment ben no longer reads your entries through Close friends. '
+    + 'An entry you also shared with ben another way (another circle ben is in, '
+    + 'or by name) stays open to ben. ben is not told.');
+});
 
 test('names are joined the way the mockups write them', () => {
   expect(joinNames([])).toBe('');

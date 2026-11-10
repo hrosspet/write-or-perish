@@ -325,7 +325,7 @@ private struct CircleCard: View {
             case .remove(let username)?:
                 CircleConfirmDialog(
                     title: "Remove \(username) from \(circle.name)?",
-                    message: "The entries you shared with \(circle.name) are closed to \(username) from this moment. \(username) is not told.",
+                    message: CirclesWording.removeMemberBody(name: username, circleName: circle.name),
                     confirmLabel: "Remove \(username)", busy: model.busy,
                     onConfirm: {
                         Task {

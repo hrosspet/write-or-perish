@@ -77,6 +77,19 @@ export function replyAckKey(entryId, userId) {
   return `loore_circle_reply_ack_${userId}_${entryId}`;
 }
 
+// The "Remove <name>" dialog. A person reads an entry through any of
+// its circles or by being named for it, so the dialog says what removing
+// them from this one circle does, and what it does not.
+export function removeMemberBody(name, circleName) {
+  return `From this moment ${name} no longer reads your entries through `
+    + `${circleName}. An entry you also shared with ${name} another way `
+    + `(another circle ${name} is in, or by name) stays open to ${name}. `
+    + `${name} is not told.`;
+}
+
+export const NO_READERS_MESSAGE = "Nobody could read this entry yet. Choose "
+  + "a circle with people in it, or name a person.";
+
 export function possessive(name) {
   return `${name}'s`;
 }

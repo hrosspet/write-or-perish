@@ -137,4 +137,11 @@ enum CirclesWording {
         guard let by = entry.lastReplyBy, !by.isEmpty else { return when }
         return "\(when). \(entry.lastReplyByMe ? "You" : by) replied."
     }
+
+    /// The "Remove <name>" dialog. A person reads an entry through any of
+    /// its circles or by being named for it, so the dialog says what
+    /// removing them from this one circle does, and what it does not.
+    static func removeMemberBody(name: String, circleName: String) -> String {
+        "From this moment \(name) no longer reads your entries through \(circleName). An entry you also shared with \(name) another way (another circle \(name) is in, or by name) stays open to \(name). \(name) is not told."
+    }
 }
