@@ -1226,9 +1226,10 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // auto-generate can't know whether the user wants to talk about it
   // (LLM Response) or get more picks (Read further) (#387).
   // A top-level audio upload is a placeholder until transcription
-  // finishes: no reply is offered to it before then.
+  // finishes: no reply is offered to it before then, nor after its
+  // transcription failed (the placeholder would go to the model).
   const awaitsReply = !isLlmNode
-    && !['pending', 'processing'].includes(node.transcription_status)
+    && !['pending', 'processing', 'failed'].includes(node.transcription_status)
     && !(entryEnd.children || []).some(c => !c.deleted
       && !['failed', 'cancelled'].includes(c.llm_task_status));
   const showCraftBar = isOwner && (craftMode || isPublicThread)
@@ -1266,17 +1267,25 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // its model picker.
   const showLlmResponse = showCraftBar && !(inReadThread && !readReplyAbove);
   // Without craft mode there is no LLM Response, so an entry whose
-  // automatic reply failed or never started left the user no way to ask
-  // again. Everyone gets a plain Try again there (Peter, 2026-11-10): the
-  // same request LLM Response sends, without a model picker, so it asks
-  // with the model the automatic reply used (selectedModel, the user's
-  // own). It shows where craft mode's LLM Response shows for the same
-  // entry with auto-generate on (awaitsReply: not while an upload is
-  // still transcribing, and only when no reply stands under the entry),
-  // with the same guards. A public thread already shows the owner LLM
-  // Response, and with auto-generate off no automatic reply was asked
-  // for, so neither gets Try again.
-  const showTryAgain = isOwner && !craftMode && autoGenerateActive && awaitsReply
+  // automatic reply failed left the user no way to ask again. Everyone
+  // gets a plain Try again there (Peter, 2026-11-10): the same request
+  // LLM Response sends, without a model picker, so it asks with the model
+  // the automatic reply used (selectedModel, the user's own). Only where
+  // a reply was attempted and did not succeed: a failed or cancelled
+  // reply stands under the entry (or its last part) and no other reply
+  // does (awaitsReply, which also keeps it away from an upload whose
+  // transcription is unfinished or failed). A reply whose job could not
+  // be queued is saved as a failed reply too (#554). An entry with no
+  // reply at all (an import, an old entry, one written with auto-generate
+  // off, a recording in which no words were heard) had no attempt, so
+  // "Try again" would not be true there. A public thread already shows
+  // the owner LLM Response, and with auto-generate off no automatic reply
+  // was asked for, so neither gets Try again.
+  const replyAttemptFailed = (entryEnd.children || []).some(c => !c.deleted
+    && (c.node_type === 'llm' || !!c.llm_model)
+    && ['failed', 'cancelled'].includes(c.llm_task_status));
+  const showTryAgain = isOwner && !craftMode && autoGenerateActive
+    && awaitsReply && replyAttemptFailed
     && node.ai_usage !== 'none' && !isLlmPending
     && !(inReadThread && !readReplyAbove);
   // While the reply is being requested or written, both buttons say so.
