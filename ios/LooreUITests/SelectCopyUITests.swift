@@ -10,8 +10,9 @@ import UIKit
 /// end handle into the next paragraph widens the selection across paragraphs;
 /// Copy puts exactly that text on the pasteboard; the text is not editable (no
 /// keyboard); a link in the text still opens on a tap; a tap outside the text
-/// clears the selection; a tap on an expanded reply card's text still opens
-/// the reply; the profile's text can be selected too (skipped without a profile).
+/// clears the selection; in an expanded reply card a 0.7 s press selects and a
+/// 0.4 s press on the text still opens the reply; the profile's text can be
+/// selected too (skipped without a profile).
 ///
 /// Inputs: `TEST_RUNNER_LOORE_SESSION_COOKIE`, `TEST_RUNNER_LOORE_BACKEND_URL`
 /// (default `http://localhost:5010`), `TEST_RUNNER_LOORE_SCREENSHOT_DIR`. The
@@ -208,23 +209,26 @@ final class SelectCopyUITests: XCTestCase {
         sleep(1)
         snapshot("select-06a-card-expanded")
 
-        // A long press selects in the card too.
-        at(card, 46, 12).press(forDuration: 1.0)
-        XCTAssertTrue(app.menuItems["Copy"].waitForExistence(timeout: 5), "no Copy in the expanded card")
+        // A long press selects in the card too, after its usual delay: a 0.7 s hold
+        // is enough although the card's own tap waits up to 0.45 s.
+        at(card, 46, 12).press(forDuration: 0.7)
+        XCTAssertTrue(app.menuItems["Copy"].waitForExistence(timeout: 5), "no Copy after a 0.7 s press in the card")
         snapshot("select-06-card-selection")
-        // The first tap only clears the selection; the next opens the reply.
+        // A tap only clears the selection.
         at(card, 150, 12).tap()
         sleep(1)
         XCTAssertTrue(app.buttons["Collapse preview"].exists, "the tap that cleared the selection opened the card")
         XCTAssertFalse(app.menuItems["Copy"].exists, "the tap did not clear the selection")
-        at(card, 150, 12).tap()
+        // A slow press (0.4 s, under the long press) opens the reply, as on the card's padding.
+        at(card, 150, 12).press(forDuration: 0.4)
         // The reply's own page: its text is the focal card, no longer an expanded card.
         let collapse = app.buttons["Collapse preview"]
         let deadline = Date().addingTimeInterval(10)
         while Date() < deadline && collapse.exists { usleep(200_000) }
         sleep(1)
         snapshot("select-07-card-opened")
-        XCTAssertFalse(collapse.exists, "the tap on the card's text did not open the reply")
+        XCTAssertFalse(collapse.exists, "a 0.4 s press on the card's text did not open the reply")
+        XCTAssertFalse(app.menuItems["Copy"].exists, "a 0.4 s press selected text")
         XCTAssertTrue(text(app, startingWith: "The first paragraph").exists, "the reply's page shows no reply")
     }
 

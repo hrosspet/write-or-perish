@@ -119,9 +119,11 @@ struct SelectableText: UIViewRepresentable {
 /// moving, failed as soon as it is held longer. The text view's long press (which
 /// selects) waits for a tap recognizer on the same view to fail; a
 /// `UITapGestureRecognizer` fails only after about a second, so the long press
-/// would need twice its usual hold.
+/// would need twice its usual hold. The limit sits just under the long press's
+/// own delay (about 0.5 s), so a slow press on a card's text still opens the
+/// card instead of doing nothing (#624 review: 0.3 s left 0.3–0.5 s dead).
 final class QuickTapRecognizer: UIGestureRecognizer {
-    static let maximumDuration: TimeInterval = 0.3
+    static let maximumDuration: TimeInterval = 0.45
     static let allowableMovement: CGFloat = 10
     private var start: CGPoint = .zero
     private var touchID: ObjectIdentifier?
