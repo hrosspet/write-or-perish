@@ -3163,6 +3163,16 @@ Kinds (one per entry and per table row):
 - **Source:** Loore voice review, node 201651, 2026-11-10; questions from the train #581 summary (node 201566), Claude Code session 2026-10-21 (Opus 5.5)
 - **Applies to:** #558, #581, #621
 
+### 2026-11-10 · pgvector waits for the server move
+
+- **Kind:** release/ops
+- **Situation:** #580's pgvector ranking needs the extension installed on the server. The server's Postgres is an old major version that pgvector no longer packages; the alternative is compiling an older pgvector release on a server due to be replaced. Recommended: leave it off and install it on the new server during the move.
+- **Prediction:** wait for the move (75 %).
+- **Peter:** "yes, leave it off until the move"
+- **Score:** hit. Search keeps ranking in Python until then.
+- **Source:** Claude Code session 2026-11-10 (Opus 5.5)
+- **Applies to:** #580, #331
+
 ## Decided by the builder
 
 Choices that agents flagged in PRs and that the builder decided because a rule above already covers them (Peter, 2026-10-02: decide what the log supports, raise only real judgement calls). Each is also recorded on its PR, or in the session where Peter asked. The Decided column holds only the builder's part; a rule or decision of Peter's goes in the Rule column. Questions raised to Peter instead are not listed; his answers become entries. Model is the model that wrote the PR (its Co-Authored-By line). Result is "accepted by merge (PR #N, date)" once the PR has merged and Peter didn't correct the choice, "pending" until it merges, and "corrected → entry <title>" when he overrules it; the entry is then scored as a miss.
