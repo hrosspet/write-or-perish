@@ -175,17 +175,17 @@ def _start(prompt_key, parent, model_id, auto_generate=True, read_live=True):
     }), 202
 
 
-# "Delete all my writing" waits or runs (#268): no Read starts, like the
-# other jobs that read the user's writing. Users know the read as Glean
-# (#435); the web and the iPhone app show this text as it comes.
-READ_ON_HOLD_MESSAGE = ("Glean is off while your writing is deleted. "
-                        "Restore your writing on the Account page to glean "
-                        "again.")
+# The account is being deleted (#269): no Read starts, like the other
+# jobs that read the user's writing. A waiting "Delete all my content"
+# does not stop Glean (#590): it reads only what was written since. Users
+# know the read as Glean (#435); the web and the iPhone app show this
+# text as it comes.
+READ_ON_HOLD_MESSAGE = "Glean is off while your account is being deleted."
 
 
 def _on_hold_response():
-    from backend.utils.hidden_rows import writing_on_hold
-    if writing_on_hold(current_user.id):
+    from backend.utils.hidden_rows import account_on_hold
+    if account_on_hold(current_user.id):
         return jsonify({"error": READ_ON_HOLD_MESSAGE,
                         "code": "writing_on_hold"}), 409
     return None
@@ -219,8 +219,9 @@ def start_read_from_node(node_id):
     under that, so the archive is read against the whole conversation
     above. For users who glean (the rollout gate and their own switch).
     The click is the request: the reply is always created, as a live
-    call (create_llm_placeholder marks it). No glean while "Delete all
-    my writing" waits or runs (#268): 409 writing_on_hold."""
+    call (create_llm_placeholder marks it). No glean while the account
+    is being deleted: 409 writing_on_hold (#269; a waiting "Delete all my
+    content" does not stop it, #590)."""
     from backend.utils.glean import glean_enabled
     held = _on_hold_response()
     if held is not None:

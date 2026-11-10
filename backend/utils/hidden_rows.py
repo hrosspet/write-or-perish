@@ -1,4 +1,5 @@
-"""Rows hidden by a waiting "Delete all my writing" (#268).
+"""Rows hidden by a waiting "Delete all my content" (#268, renamed from
+"Delete all my writing" in #590).
 
 Peter, 2026-10-09: "I was expecting a soft-delete of everything
 immediately + real deletion after 30 days. The Cancel deletion button
@@ -112,34 +113,113 @@ def install():
 
 
 # ── Background jobs ─────────────────────────────────────────────────────
+#
+# "Delete all my content" is a fresh start (#590; Peter, 2026-10-22: "The
+# user can delete all the content in their account, but then start
+# writing from scratch. So new profile builds can be scheduled
+# afterwards. It's just that builds based on data that the user requested
+# to delete, shouldn't finish."). The account is not on hold while the
+# request waits: a job that reads after the request sees only the new
+# content (the hidden rows are left out of every ORM query, the old nodes
+# are soft-deleted) and runs as for a new account. A job that read its
+# input before the request saves nothing from it
+# (``read_before_deletion``); a billed result it drops still gets its
+# cost row.
+#
+# An account deletion (#269) and a ``scope="all"`` purge stop everything
+# of the account instead (``account_on_hold``): deleting the account is
+# how a user makes Loore stop.
 
-def on_hold_user_ids():
-    """SELECT of the users whose writing is on hold: a "Delete all my
-    writing" is waiting (the writing is hidden) or a purge is running.
-    No background job builds anything from their writing meanwhile
-    (profile, recent context, digests, Reads, embeddings, TTS, bookmark
-    sync): it would read writing the user asked to delete, or save
-    something new from it that outlives the purge."""
+def _active_purges():
     from backend.models import UserDataPurge
-    return select(UserDataPurge.user_id).where(
+    return UserDataPurge.query.filter(
         UserDataPurge.status.in_(UserDataPurge.ACTIVE_STATUSES))
 
 
-class WritingOnHold(Exception):
-    """A job that read the user's writing before a "Delete all my
-    writing" hid it tries to save something from it: nothing is saved."""
-
-
-def writing_on_hold(user_id):
-    """True when *user_id*'s writing is on hold (see on_hold_user_ids)."""
-    from backend.extensions import db
+def _holds_account():
+    """The jobs that stop everything of the account: an account deletion,
+    or a purge of everything (scope "all")."""
+    from sqlalchemy import or_
     from backend.models import UserDataPurge
+    return or_(UserDataPurge.delete_account.is_(True),
+               UserDataPurge.scope != "hidden")
+
+
+def account_on_hold_user_ids():
+    """SELECT of the users whose whole account is on hold: an account
+    deletion (#269) waits or runs, or a purge of everything runs. No
+    background job runs for them."""
+    from backend.models import UserDataPurge
+    return select(UserDataPurge.user_id).where(
+        UserDataPurge.status.in_(UserDataPurge.ACTIVE_STATUSES),
+        _holds_account())
+
+
+def account_on_hold(user_id):
+    """True when no job may run for *user_id* (account_on_hold_user_ids).
+    A waiting "Delete all my content" does not hold the account."""
     if user_id is None:
         return False
-    return db.session.query(UserDataPurge.id).filter(
-        UserDataPurge.user_id == user_id,
-        UserDataPurge.status.in_(UserDataPurge.ACTIVE_STATUSES),
-    ).first() is not None
+    return _active_purges().filter(
+        _holds_account(), _user_is(user_id)).first() is not None
+
+
+def _user_is(user_id):
+    from backend.models import UserDataPurge
+    return UserDataPurge.user_id == user_id
+
+
+def content_deletion_cutoff(user_id):
+    """When the user's waiting or running "Delete all my content" was
+    last requested (``requested_at``, which a second request moves), or
+    None. What was read before it may hold the deleted content."""
+    from backend.models import UserDataPurge
+    if user_id is None:
+        return None
+    job = _active_purges().filter(
+        _user_is(user_id), UserDataPurge.scope == "hidden",
+        UserDataPurge.delete_account.is_(False),
+    ).order_by(UserDataPurge.requested_at.desc()).first()
+    return job.requested_at if job is not None else None
+
+
+class ReadBeforeDeletion(Exception):
+    """A job that read the user's content before a "Delete all my
+    content" hid it (or whose account is now being deleted) tries to save
+    something from it: nothing is saved. The caller has written the cost
+    row of a billed call."""
+
+
+def read_before_deletion(user_id, read_at):
+    """True when a job that read *user_id*'s content at *read_at* must
+    not save what it built from it: the account is on hold
+    (account_on_hold), or a "Delete all my content" was requested at or
+    after *read_at* while it waits or runs. *read_at* None (unknown)
+    counts as before."""
+    if user_id is None:
+        return False
+    if account_on_hold(user_id):
+        return True
+    cutoff = content_deletion_cutoff(user_id)
+    if cutoff is None:
+        return False
+    return read_at is None or read_at <= cutoff
+
+
+def item_read_at(item, submitted_at=None):
+    """When a batch item read its input: its ``read_at``, ``rendered_at``
+    or ``built_at`` (ISO), else the job's submission, which follows the
+    render."""
+    from datetime import datetime
+    if isinstance(item, dict):
+        for key in ("read_at", "rendered_at", "built_at"):
+            raw = item.get(key)
+            if raw:
+                try:
+                    return datetime.fromisoformat(raw)
+                except (TypeError, ValueError):
+                    pass
+    return submitted_at
 
 
 # ── The user saves the same thing again during the grace period ─────────
@@ -158,7 +238,7 @@ def _unhide(kind, ids):
 def reclaim_external_items(user_id, external_ids, sources=None):
     """Saved references (#208) have a unique key per user, source and
     external id. Saving or importing a reference that a waiting "Delete
-    all my writing" hid makes it the user's again (as re-importing an
+    all my content" hid makes it the user's again (as re-importing an
     entry brings back a deleted node), instead of failing on the hidden
     row. Call before looking the rows up."""
     from backend.models import ExternalItem
@@ -178,7 +258,7 @@ def reclaim_external_items(user_id, external_ids, sources=None):
 
 def drop_hidden_poll_response(poll_id, user_id):
     """A poll answer has a unique key per poll and user. Answering a poll
-    again after "Delete all my writing" hid the old answer replaces it:
+    again after "Delete all my content" hid the old answer replaces it:
     the hidden answer is deleted now (the purge would delete it anyway),
     so the old text never comes back over the new one. Returns True when
     one went."""

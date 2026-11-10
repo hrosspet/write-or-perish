@@ -192,14 +192,14 @@ def _refuse_empty_truncated(user, model_id, response, batch):
 
 
 def _save(user, model_id, content, input_tokens, output_tokens, total_tokens,
-          batch, confirmed=None):
+          batch, confirmed=None, read_at=None):
     from backend.extensions import db
     from backend.models import UserArtifact
-    from backend.utils.hidden_rows import writing_on_hold
+    from backend.utils.hidden_rows import read_before_deletion
     from backend.utils.intentions_versions import may_replace
-    if writing_on_hold(user.id):
-        # "Delete all my writing" hid the writing these intentions were
-        # read from (#268): the cost is logged, nothing saved.
+    if read_before_deletion(user.id, read_at):
+        # "Delete all my content" hid the writing these intentions were
+        # read from (#590): the cost is logged, nothing saved.
         cost = _add_cost_log(user, model_id, input_tokens, output_tokens,
                              batch)
         db.session.commit()
@@ -292,9 +292,9 @@ def _prepare(user_id, confirmed=None):
     user = User.query.get(user_id)
     if not user:
         raise RuntimeError(f"User {user_id} not found")
-    from backend.utils.hidden_rows import writing_on_hold
-    if writing_on_hold(user_id):
-        raise RuntimeError("This user's writing is waiting to be deleted.")
+    from backend.utils.hidden_rows import account_on_hold
+    if account_on_hold(user_id):
+        raise RuntimeError("This user's account is being deleted.")
     refusal = prefill_refusal(user)
     if refusal:
         # Opted out of AI usage, or declined the tweet seed (#346).
@@ -361,6 +361,8 @@ def run_infer_intentions_sync_impl(user_id, progress=None,
     version (#412)."""
     from backend.llm_providers import LLMProvider, PromptTooLongError
     from backend.utils.tokens import reduce_export_tokens
+    from datetime import datetime
+    read_at = datetime.utcnow()
     prep = _prepare(user_id, confirmed)
     user, template, chronological = prep["user"], prep["template"], prep["chronological"]
     built, budget = prep["built"], prep["budget"]
@@ -395,7 +397,7 @@ def run_infer_intentions_sync_impl(user_id, progress=None,
     total = response.get("total_tokens") or (in_t + out_t)
     _refuse_empty_truncated(user, model_id, response, batch=False)
     saved = _save(user, model_id, response["content"], in_t, out_t, total,
-                  batch=False, confirmed=confirmed)
+                  batch=False, confirmed=confirmed, read_at=read_at)
     if saved["version"] is not None:
         logger.info("intentions user %s: saved v%s from sync run (%s llm tokens, $%.4f)",
                     user.id, saved["version"], saved["llm_tokens"], saved["cost_usd"])
@@ -466,7 +468,7 @@ def cancel_pending_intentions(user_id):
     return {"cancelled": len(jobs), "errors": errors}
 
 
-def apply_intentions_item(user, item, result):
+def apply_intentions_item(user, item, result, read_at=None):
     """Called by poll_profile_batches for a collected kind="intentions"
     item. Saves the artifact at batch price. Idempotent enough for poll
     overlap: a second apply would add a version, so the poller marks the
@@ -480,7 +482,8 @@ def apply_intentions_item(user, item, result):
                   result.get("output_tokens", 0),
                   result.get("input_tokens", 0) + result.get("output_tokens", 0),
                   batch=True,
-                  confirmed=item.get("confirmed"))
+                  confirmed=item.get("confirmed"),
+                  read_at=read_at)
     if saved["version"] is not None:
         logger.info("intentions user %s: saved v%s from batch (%s llm tokens, $%.4f)",
                     user.id, saved["version"], saved["llm_tokens"], saved["cost_usd"])

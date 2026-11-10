@@ -707,10 +707,11 @@ def save_feed_picks(user_id, node, picks, picked_by=None):
     the model could know of the reader's marks then. Adds to the session;
     the caller commits. Returns the FeedPick rows in rank order.
 
-    Refused (WritingOnHold) while the reader's "Delete all my writing"
-    waits or runs (#268): a pick would save tweets and marks the user
-    asked to delete. The Read paths drop such a result before they get
-    here (llm_completion); this is the last guard.
+    Refused (ReadBeforeDeletion) when the reader's "Delete all my
+    content" came after the Read was asked for (#590), or the account is
+    being deleted: a pick would save tweets and marks the user asked to
+    delete. The Read paths drop such a result before they get here
+    (llm_completion); this is the last guard.
 
     Surfacing history is not bumped here: the rendered reply quotes each
     tweet with {quote_ext:ID}, and the finalize path records a surfacing
@@ -719,9 +720,12 @@ def save_feed_picks(user_id, node, picks, picked_by=None):
     from backend.models import ExternalItem, FeedPick, READ_PICK_SOURCE
     from backend.utils.reference_log import KIND_READ, stamp_prior
     from backend.utils.reference_rows import find_tweet_row
-    from backend.utils.hidden_rows import WritingOnHold, writing_on_hold
-    if writing_on_hold(user_id):
-        raise WritingOnHold(f"user {user_id}: writing on hold for deletion")
+    from backend.utils.hidden_rows import (
+        ReadBeforeDeletion, read_before_deletion,
+    )
+    if read_before_deletion(user_id, getattr(node, "created_at", None)):
+        raise ReadBeforeDeletion(f"user {user_id}: content deleted since "
+                                 "the Read was asked for")
 
     # Idempotent per reply: a redelivered collect (or a retry that re-ran
     # inline) must not insert the picks twice.

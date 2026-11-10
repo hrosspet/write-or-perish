@@ -44,7 +44,7 @@ from backend.utils.llm_batch import (
 )
 from backend.utils.timefmt import user_local_hour
 
-from backend.utils.hidden_rows import writing_on_hold
+from backend.utils.hidden_rows import account_on_hold, read_before_deletion
 
 logger = get_task_logger(__name__)
 
@@ -234,11 +234,11 @@ def _save_digest(user, model_id, digest_text, response, corpus_at, batch):
         request_type="external_digest",
         **fields,
     ))
-    if writing_on_hold(user.id):
-        # "Delete all my writing" hid the references this digest reads
-        # while it was built (#268): the cost is logged, nothing saved.
-        logger.info("External digest for user %s not saved: writing on "
-                    "hold for deletion", user.id)
+    if read_before_deletion(user.id, corpus_at):
+        # "Delete all my content" hid the references this digest read
+        # after it was rendered (#590): the cost is logged, nothing saved.
+        logger.info("External digest for user %s not saved: content "
+                    "deleted after it was read", user.id)
         return None
     previous = UserArtifact.latest_for(user.id, DIGEST_KIND)
     artifact = UserArtifact(
@@ -374,8 +374,10 @@ def sweep_external_digests():
             if user_local_hour(user) == NIGHTLY_DIGEST_LOCAL_HOUR
             and account_allows_ai(user)   # #346
             and user.deleted_at is None   # hidden: account deleted (#269)
-            # Writing hidden for deletion, or being deleted (#268).
-            and not writing_on_hold(user.id)
+            # Account being deleted (#269). A waiting "Delete all my
+            # content" does not hold the digest of what is saved since
+            # (#590): the hidden references are left out of it.
+            and not account_on_hold(user.id)
             # After a refused or cut-off digest: wait an hour, then one
             # more try, then stop until a digest is saved (#368/#470).
             and not refusal_backoff.digest_in_backoff(user.id)
@@ -489,7 +491,7 @@ def rebuild_external_digest(self, user_id, force=False):
             return {"status": "no_user"}
         if not account_allows_ai(user):   # #346
             return {"status": "ai_opt_out"}
-        if writing_on_hold(user_id):   # "Delete all my writing" (#268)
+        if account_on_hold(user_id):   # account being deleted (#269)
             return {"status": "on_hold"}
         if not force and not digest_is_stale(user_id):
             return {"status": "not_stale"}
