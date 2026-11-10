@@ -175,6 +175,7 @@ struct ShareView: View {
             }
             .padding(.bottom, 8)
             MarkdownView(markdown: share.content, style: .share)
+                .readingTextTap(linksToThread ? { openThread(share) } : nil)
             actions(share)
                 .padding(.top, 14)
         }
@@ -185,17 +186,17 @@ struct ShareView: View {
         .overlay(RoundedRectangle(cornerRadius: LooreRadius.large).strokeBorder(LooreColor.border))
         .opacity(share.status == "revoked" ? 0.7 : 1)
         .contentShape(Rectangle())
-        .onTapGesture {
-            guard linksToThread, let nodeId = share.publicNodeId else { return }
-            NodePrefetch.shared.openThread(nodeId, app: app)  // opens once the node is in
-        }
+        .onTapGesture { openThread(share) }
         .padding(.bottom, 16)
         .accessibilityElement(children: .contain)
-        .accessibilityAction(named: "Open public thread") {
-            guard linksToThread, let nodeId = share.publicNodeId else { return }
-            NodePrefetch.shared.openThread(nodeId, app: app)  // opens once the node is in
-        }
+        .accessibilityAction(named: "Open public thread") { openThread(share) }
             .accessibilityIdentifier("share.card.\(share.id)")
+    }
+
+    /// A published share's card opens its public thread.
+    private func openThread(_ share: ShareItem) {
+        guard share.status == "published", let nodeId = share.publicNodeId else { return }
+        NodePrefetch.shared.openThread(nodeId, app: app)  // opens once the node is in
     }
 
     @ViewBuilder private func actions(_ share: ShareItem) -> some View {

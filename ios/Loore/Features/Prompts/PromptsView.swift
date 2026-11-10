@@ -174,11 +174,7 @@ struct PromptDetailView: View {
             }
             if let newDefaultContent {
                 ScrollView {
-                    Text(newDefaultContent)
-                        .font(LooreFont.mono(12.8))
-                        .foregroundStyle(LooreColor.textSecondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
+                    ReadingText(text: newDefaultContent, font: LooreUIFont.mono(12.8), color: LooreColor.textSecondaryUI)
                 }
                 .frame(maxHeight: 300)
             }
