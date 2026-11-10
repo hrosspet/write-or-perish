@@ -445,16 +445,20 @@ def _build_next_profile_request(user, allow_chunk=True, chunk_num=1):
     # #183, option 2: a from-scratch build merges the user's versions the
     # current chain carries into the new chain, each at its date and the
     # oldest first (#421); a chain that has reached the next one's date
-    # merges it before anything else, one merge per request.
+    # merges it before anything else, one merge per request. An older one
+    # is merged without the lines a newer one changed, and not at all when
+    # none of its own changes is left (#421, option (c)).
     if prev is None and _exports.plan_user_version_merge(
             user, _exports.profile_update_base(user.id)) is not None:
         db.session.commit()
-    pending = _exports.settled_pending_merge(user, prev)
-    if pending is not None and _exports.merge_due(
-            user, prev, pending, more_to_read=(
-                allow_chunk and _exports.should_continue_chain(user, prev))):
-        return _merge_request(user, prev, pending, provider, api_model,
+    merge = _exports.next_user_merge(
+        user, prev, lambda: (allow_chunk
+                             and _exports.should_continue_chain(user, prev)))
+    if merge is not None:
+        return _merge_request(user, prev, merge, provider, api_model,
                               model_id, chunk_num)
+    pending = _exports.pending_merge_version(user) if prev is not None \
+        else None
 
     # The remainder after the cutoff, summed in the export window's own
     # scope, is planned into equal chunks (docs/design/chunk-planner.md):
@@ -569,8 +573,10 @@ def _build_next_profile_request(user, allow_chunk=True, chunk_num=1):
     # it must merge (they are newer than all of the writing): the merges
     # are the run's last steps, oldest first, one per request (#183, #421).
     if pending is not None:
-        return _merge_request(user, prev, pending, provider, api_model,
-                              model_id, chunk_num)
+        merge = _exports.next_user_merge(user, prev, lambda: False)
+        if merge is not None:
+            return _merge_request(user, prev, merge, provider, api_model,
+                                  model_id, chunk_num)
 
     # No (full-size) new data → integrate the chain if there are ≥2 versions
     # and we haven't already integrated this tip.
@@ -608,7 +614,9 @@ def _merge_request(user, prev, version, provider, api_model, model_id,
                    chunk_num):
     """The batch request of a rebuild's merge step (#183): the rebuilt
     chain's version ``prev`` and the user's ``version``, merged with the
-    integration prompt (exports.build_merge_messages)."""
+    integration prompt (exports.build_merge_messages). ``version`` is what
+    the merge reads (exports.user_merge_input): an older round without the
+    lines a newer one changed (#421); the meta keeps its id."""
     messages = _exports.build_merge_messages(user.id, prev, version)
     cid = f"profile_{user.id}_{prev.id}_merge"
     return {

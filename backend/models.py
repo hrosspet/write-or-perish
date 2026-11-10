@@ -142,7 +142,8 @@ class User(db.Model, UserMixin):
     # progress still has to merge into the new chain at its date (#183;
     # tasks/exports.plan_user_version_merge): the newest one the old chain
     # carried. The older ones it carries are merged before it, each at its
-    # date (#421; tasks/exports.user_versions_to_merge). Cleared by the
+    # date, only for the lines no newer one changed (#421;
+    # tasks/exports.user_versions_to_merge, user_merge_input). Cleared by the
     # merge of this version and by any version the user saves. A plain id,
     # not a foreign key.
     profile_pending_merge_id = db.Column(db.Integer, nullable=True)

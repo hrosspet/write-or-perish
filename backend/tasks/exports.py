@@ -636,7 +636,11 @@ def discard_step_output(user, model_id, response, job, batch=False):
 # #421: every version of the user's the old chain carried is merged, oldest
 # first, each at its date, not only the newest. The pending merge
 # (User.profile_pending_merge_id) stays the newest one; the older ones are
-# read from its lineage (``user_versions_to_merge``).
+# read from its lineage (``user_versions_to_merge``). Peter (voice review,
+# 2026-11-10), option (c): the newest is merged whole, an older one only
+# for the lines no newer one changed, and not at all when none of its own
+# changes is left (``user_merge_input``, utils/profile_edit_diff). The
+# window path's final does the same (profile_windows.final_user_versions).
 
 def carried_user_version(profile):
     """The newest version the user wrote that ``profile`` carries: the
@@ -704,6 +708,31 @@ def _users_by_writing(row):
     return row.generated_by == "user" and row.ai_usage in AI_ALLOWED
 
 
+def _user_rounds(profile):
+    """The rounds of the user's edits ``profile`` carries, oldest first:
+    [(id, folded ids)]. A round is the version ``carried_user_versions``
+    keeps; its folded ids are the versions a merge step merged that the
+    round's own version replaced (an edit of the version the merge saved),
+    whose changes the round's own diff does not show (#421 (c)). Saves of
+    the user's in a row are not listed: the round's diff, measured from the
+    version the first of them edited (``_round_base_id``), holds them."""
+    found, ids = [], set()
+    child = None
+    for row in _lineage_rows(profile.id if profile else None, set()):
+        if row.ai_usage in AI_ALLOWED:
+            carried = (row if row.generated_by == "user"
+                       else _merged_version_row(row))
+            if carried is not None and carried.id not in ids:
+                ids.add(carried.id)
+                if child is None or not _users_by_writing(child):
+                    found.append((carried.id, []))
+                elif carried is not row and found:
+                    found[-1][1].append(carried.id)
+        child = row
+    found.reverse()
+    return found
+
+
 def carried_user_versions(profile):
     """Every version the user wrote that ``profile`` carries, oldest first,
     the newest (``carried_user_version``) last: walking its lineage, each
@@ -715,19 +744,7 @@ def carried_user_versions(profile):
     own edit, or of the merge that merged it), is left out: the later save
     holds that text as the user left it (#421). Reads metadata only;
     nothing is decrypted. Returns ids."""
-    found, ids = [], set()
-    child = None
-    for row in _lineage_rows(profile.id if profile else None, set()):
-        if row.ai_usage in AI_ALLOWED:
-            carried = (row if row.generated_by == "user"
-                       else _merged_version_row(row))
-            if carried is not None and carried.id not in ids:
-                ids.add(carried.id)
-                if child is None or not _users_by_writing(child):
-                    found.append(carried.id)
-        child = row
-    found.reverse()
-    return found
+    return [vid for vid, _folded in _user_rounds(profile)]
 
 
 def held_user_versions(base):
@@ -760,6 +777,88 @@ def user_versions_to_merge(pending, base):
     held = held_user_versions(base)
     return [UserProfile.query.get(vid)
             for vid in carried_user_versions(pending) if vid not in held]
+
+
+def _round_base_id(version_id):
+    """The version a round of the user's saves edited: the first version
+    in ``version_id``'s lineage, after it, that the user did not write
+    (saves in a row are one round). None for a profile written by hand.
+    Metadata only."""
+    seen = set()
+    row = _lineage_row(version_id) if version_id else None
+    while row is not None and row.parent_profile_id and row.id not in seen:
+        seen.add(row.id)
+        row = _lineage_row(row.parent_profile_id)
+        if row is not None and row.generated_by != "user":
+            return row.id
+    return None
+
+
+def _diff_text(user_id, version_id, texts):
+    """A version's text for #421 (c)'s line diff, read once per call
+    (``texts``): "" for none, a missing version, another user's, or one no
+    model may read. Only the older round's own text is ever sent."""
+    if version_id not in texts:
+        version = (db.session.get(UserProfile, version_id)
+                   if version_id else None)
+        readable = (version is not None and version.user_id == user_id
+                    and version.ai_usage in AI_ALLOWED)
+        texts[version_id] = (version.get_content() or "") if readable else ""
+    return texts[version_id]
+
+
+class ReducedUserVersion:
+    """A version of the user's as an older round's merge reads it (#421
+    (c)): the version, with ``content`` (its text without the lines a
+    newer round of the user's changed) in place of its text. Everything
+    else, the id and the dates the labels give included, is the version's."""
+
+    def __init__(self, version, content):
+        self._version = version
+        self._content = content
+
+    def get_content(self):
+        return self._content
+
+    def __getattr__(self, name):
+        return getattr(self._version, name)
+
+
+def user_merge_input(version, newest):
+    """What a rebuild's merge reads for ``version``, one of the user's
+    rounds of edits that ``newest`` carries (#421, Peter 2026-11-10: option
+    (c)). ``newest`` itself is read whole. An older round is read without
+    every line a newer round of the user's changed
+    (utils/profile_edit_diff), a ReducedUserVersion, or as itself when no
+    line was; None when none of its own changes is left: it is not merged.
+    The newer rounds are those after it in ``newest``'s lineage, with the
+    merged versions they replaced (``_user_rounds``). Decrypts the round,
+    the newer ones and the versions each edited, never anything else."""
+    if newest is None or version.id == newest.id:
+        return version
+    rounds = _user_rounds(newest)
+    ids = [vid for vid, _folded in rounds]
+    if version.id not in ids:
+        return version
+    newer = [vid for vid, folded in rounds[ids.index(version.id) + 1:]
+             for vid in [vid] + folded]
+    from backend.utils.profile_edit_diff import older_edit
+    texts = {}
+    uid = version.user_id
+    result = older_edit(
+        _diff_text(uid, _round_base_id(version.id), texts),
+        _diff_text(uid, version.id, texts),
+        [(_diff_text(uid, _round_base_id(vid), texts),
+          _diff_text(uid, vid, texts)) for vid in newer])
+    logger.info("User %s: the user's version %s against %d newer saves: "
+                "%d of its %d changed lines left, %d lines left out (#421)",
+                uid, version.id, len(newer), result.kept, result.changes,
+                result.removed)
+    if result.text is None:
+        return None
+    if result.removed == 0:
+        return version
+    return ReducedUserVersion(version, result.text)
 
 
 def pending_merge_version(user):
@@ -818,6 +917,32 @@ def settled_pending_merge(user, base):
                     "%s; no merge", user.id, base.id, pending.id)
         return None
     return to_merge[0]
+
+
+def next_user_merge(user, base, more_to_read):
+    """The merge step due on the rebuilt chain's version ``base`` (#183,
+    #421), as what the merge reads (``user_merge_input``), or None. The
+    user's rounds still to merge are taken oldest first; the first one not
+    due (``merge_due``) ends the search. An older round with none of its
+    own changes left is passed over without a call (Peter, 2026-11-10:
+    option (c)); the pending version, the newest, is always merged.
+    ``more_to_read``: a callable, asked only when a merge is pending,
+    saying whether the run has older writing left to read. The caller
+    commits (``settled_pending_merge``)."""
+    if settled_pending_merge(user, base) is None:
+        return None
+    pending = pending_merge_version(user)
+    more = more_to_read()
+    for version in user_versions_to_merge(pending, base):
+        if not merge_due(user, base, version, more):
+            return None
+        merged = user_merge_input(version, pending)
+        if merged is not None:
+            return merged
+        logger.info("User %s: every change of the user's version %s was "
+                    "changed again by a newer one; not merged (#421)",
+                    user.id, version.id)
+    return None
 
 
 def merge_date(version):
@@ -935,14 +1060,12 @@ def _merge_if_due(self, user, model_id, base_id, api_keys, run_ends=False):
     ``base_id`` (``merge_due``; always when the run ends). Returns (text,
     saved version), or None."""
     base = UserProfile.query.get(base_id) if base_id is not None else None
-    pending = settled_pending_merge(user, base)
-    if pending is None:
+    version = next_user_merge(
+        user, base, lambda: (not run_ends
+                             and should_continue_chain(user, base)))
+    if version is None:
         return None
-    if not run_ends and not merge_due(
-            user, base, pending,
-            more_to_read=should_continue_chain(user, base)):
-        return None
-    return _do_merge(self, user, model_id, base, pending, api_keys)
+    return _do_merge(self, user, model_id, base, version, api_keys)
 
 
 def retip_profile_chain(user_id, version):

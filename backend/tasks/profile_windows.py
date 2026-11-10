@@ -721,6 +721,8 @@ class MergePlan:
     user_version: object = None
     waiting: bool = False                            # something in flight
     nothing_read: bool = False                       # every input skipped
+    older_versions: list = field(default_factory=list)  # #421: ids
+    _sent: list = None                               # final_inputs_to_send
 
 
 def _group_size():
@@ -742,7 +744,8 @@ def user_version_for(user, set_id, windows):
     the newest AI-readable version the user wrote (or reverted to) after
     the set started, else the version a rebuild still has to merge
     (User.profile_pending_merge_id, #183), else the one the set's last
-    final merged. None when there is none."""
+    final merged. None when there is none. The older rounds of edits it
+    carries are merged before it (``final_user_versions``, #421)."""
     started = _set_started_at(windows)
     if started is not None:
         newest = UserProfile.query.filter(
@@ -786,16 +789,58 @@ def set_superseded(user, set_id, final=None):
         user, final.created_at) is not None
 
 
-def _with_user_version(inputs, version, base):
-    """``inputs`` (by cutoff) with the user's version placed at its date
-    (exports.merge_date): after every input whose cutoff is not later."""
+def final_user_versions(version, base):
+    """The versions of the user's a set's final merges, oldest first:
+    the rounds of the user's edits ``version`` carries that the set's
+    ``base`` does not already hold (exports.user_versions_to_merge, #421),
+    then ``version`` (``user_version_for``) itself, unless it is the base.
+    Metadata only."""
     if version is None or (base is not None and version.id == base.id):
-        return list(inputs)
-    key = _exports.merge_date(version)
-    at = sum(1 for p in inputs
-             if p.source_data_cutoff is not None and key is not None
-             and p.source_data_cutoff <= key)
-    return list(inputs[:at]) + [version] + list(inputs[at:])
+        return []
+    older = [v for v in _exports.user_versions_to_merge(version, base)
+             if v.id != version.id]
+    return older + [version]
+
+
+def _with_user_versions(inputs, versions):
+    """``inputs`` (by cutoff) with each of the user's ``versions`` (oldest
+    first) placed at its date (exports.merge_date): after every input
+    whose cutoff is not later, and never before an older one of them."""
+    at, places = 0, []
+    for version in versions:
+        key = _exports.merge_date(version)
+        at = max(at, sum(1 for p in inputs
+                         if p.source_data_cutoff is not None
+                         and key is not None and p.source_data_cutoff <= key))
+        places.append(at)
+    out = []
+    for i, p in enumerate(list(inputs) + [None]):
+        out += [v for v, place in zip(versions, places) if place == i]
+        if p is not None:
+            out.append(p)
+    return out
+
+
+def final_inputs_to_send(plan):
+    """The final's inputs as the merge reads them: each older round of the
+    user's edits without the lines a newer round changed, and left out when
+    none of its own changes is left (exports.user_merge_input; Peter,
+    2026-11-10: option (c)). Decrypts those rounds, so it runs only when
+    the final goes out, not when ``merge_plan`` is asked whether it is
+    due. Once per plan."""
+    if plan.final_inputs is None:
+        return None
+    if plan._sent is None:
+        older = set(plan.older_versions)
+        sent = []
+        for p in plan.final_inputs:
+            if p.id in older:
+                p = _exports.user_merge_input(p, plan.user_version)
+                if p is None:
+                    continue
+            sent.append(p)
+        plan._sent = sent
+    return plan._sent
 
 
 def merge_plan(user, state, grouped=None):
@@ -864,17 +909,26 @@ def merge_plan(user, state, grouped=None):
                           and state.base.ai_usage in AI_ALLOWED) else None
     version = user_version_for(user, state.set_id, windows)
     inputs = ([base] if base is not None else []) + mid
-    inputs = _with_user_version(inputs, version, base)
-    if all(p.generation_type == "window_skip" for p in inputs):
+    newest = ([] if version is None
+              or (base is not None and version.id == base.id) else [version])
+    if all(p.generation_type == "window_skip" for p in inputs + newest):
         plan.nothing_read = True
         return plan
     tip = windows[-1]
+    # The older rounds of the user's edits are older than ``version``, so
+    # the version alone tells whether the final is current.
     if (final is not None and final.parent_profile_id == tip.id
             and final.merged_profile_id == (version.id if version else None)
-            and all(final.created_at > p.created_at for p in inputs)):
+            and all(final.created_at > p.created_at
+                    for p in inputs + newest)):
         return plan
-    plan.final_inputs = inputs
+    # #421: every round of the user's edits the version carries, each at its
+    # date; the older ones are read reduced when the final goes out
+    # (final_inputs_to_send).
+    users = final_user_versions(version, base)
+    plan.final_inputs = _with_user_versions(inputs, users)
     plan.user_version = version
+    plan.older_versions = [v.id for v in users[:-1]]
     return plan
 
 
@@ -1531,12 +1585,13 @@ def _merge_requests(user, state, models, sub, keys, history):
     if plan.final_inputs is not None and _structure() == "flat":
         if not sub.may_reach(provider, user.id):
             return False
-        messages = _merge_messages(user, plan.final_inputs)
+        messages = _merge_messages(user, final_inputs_to_send(plan))
         over, tokens = merge_over_cap(models.merge, messages, keys)
         if over:
             logger.info("User %s: a flat merge of %d versions is %s tokens, "
                         "over %s's cap; merging in groups", user.id,
-                        len(plan.final_inputs), tokens, models.merge)
+                        len(final_inputs_to_send(plan)), tokens,
+                        models.merge)
             plan = merge_plan(user, state, grouped=True)
     base_id = state.base.id if state.base is not None else None
     windows = state.windows
@@ -1583,7 +1638,8 @@ def _merge_requests(user, state, models, sub, keys, history):
         return False
     if not sub.may_reach(provider, user.id):
         return False
-    messages = _merge_messages(user, plan.final_inputs)
+    inputs = final_inputs_to_send(plan)
+    messages = _merge_messages(user, inputs)
     over, tokens = merge_over_cap(models.merge, messages, keys)
     if over:
         _stop_merge(user, "final", state.set_id, tokens, models.merge)
@@ -1595,7 +1651,7 @@ def _merge_requests(user, state, models, sub, keys, history):
         "custom_id": cid, "user_id": user.id, "kind": "final",
         "set": state.set_id, "base_id": base_id, "attempt": attempt,
         "start": None, "cutoff": _iso(tip.source_data_cutoff),
-        "tip_id": tip.id, "inputs": [p.id for p in plan.final_inputs],
+        "tip_id": tip.id, "inputs": [p.id for p in inputs],
         "user_version_id": (plan.user_version.id
                             if plan.user_version is not None else None),
         "built_at": _iso(datetime.utcnow()),
