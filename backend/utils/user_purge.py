@@ -1632,7 +1632,8 @@ def _after_hiding(user, job):
     * the cached public pages are dropped;
     * the provider batches that carry only this user's work read before
       the request are cancelled at the provider
-      (``cancel_batches_read_before``). Their job rows stay pending, so
+      (``cancel_batches_read_before``, in a Celery task so a slow
+      provider never holds the request). Their job rows stay pending, so
       the collectors still collect what ran before the cancel landed:
       each such result is dropped and its cost logged
       (hidden_rows.read_before_deletion);
@@ -1648,17 +1649,23 @@ def _after_hiding(user, job):
     soft-deleted discards its text (the completion task's own check)."""
     _drop_public_pages(user)
     try:
-        cancel_batches_read_before(user.id, job.id, job.requested_at)
+        _dispatch_batch_cancel(user.id, job.id, job.requested_at)
     except Exception as e:  # noqa: BLE001 - the collectors drop the rest
-        db.session.rollback()
-        logger.warning("content deletion of user %s: cancelling batches "
-                       "failed (%s)", user.id, type(e).__name__)
+        logger.warning("content deletion of user %s: the batch cancel was "
+                       "not dispatched (%s)", user.id, type(e).__name__)
     try:
         end_x_bookmark_sync(user.id, during="Delete all my content")
     except Exception as e:  # noqa: BLE001 - logged; the request stands
         db.session.rollback()
         logger.error("content deletion of user %s: the X connection was "
                      "not ended (%s)", user.id, type(e).__name__)
+
+
+def _dispatch_batch_cancel(user_id, job_id, cutoff):
+    """The provider calls run in a Celery task
+    (tasks.user_purge.cancel_batches_read_before), not in the request."""
+    from backend.tasks.user_purge import cancel_batches_read_before as task
+    task.delay(user_id, job_id, cutoff.isoformat())
 
 
 def cancel_batches_read_before(user_id, job_id, cutoff):
@@ -1673,7 +1680,11 @@ def cancel_batches_read_before(user_id, job_id, cutoff):
     the job and drops each result with its cost row. The Reads (Glean)
     on the user's nodes that wait in a provider batch are cancelled the
     same way; their nodes were hidden, so the collect drops them too.
-    Returns how many provider batches were asked to cancel."""
+    Nothing is cancelled once the request was restored. Returns how many
+    provider batches were asked to cancel."""
+    job = db.session.get(UserDataPurge, job_id)
+    if job is None or job.status not in UserDataPurge.ACTIVE_STATUSES:
+        return 0
     with including_hidden_rows():
         response_ids = {r for (r,) in db.session.query(
             PollResponse.id).filter(PollResponse.user_id == user_id)}
