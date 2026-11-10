@@ -157,6 +157,13 @@ def get_log():
         # pages and skip another.
         Node.id.desc(),
     )
+    # Circles: an "Ask my AI" answer in someone else's thread is no part
+    # of its owner's Log (it cannot be pinned; one pinned earlier is
+    # left out).
+    from backend.utils.privacy import own_answers_filter
+    not_answers = own_answers_filter(Node, current_user.id)
+    if not_answers is not None:
+        query = query.filter(not_answers)
     if cursor is not None:
         query = query.filter(or_(
             _SORT_KEY < cursor_ts,

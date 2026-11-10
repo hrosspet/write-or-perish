@@ -84,14 +84,19 @@ def attach_agentic_prompt_under(node, user_id, prompt_key, privacy_level,
     from backend.utils.prompts import get_user_prompt_record
     from backend.utils.context_artifacts import attach_context_artifacts
     prompt_record = get_user_prompt_record(user_id, prompt_key)
+    # Circles: a prompt node is never shared (it carries its writer's
+    # prompt and guidance). Under a shared node it is its writer's alone
+    # and does not join the thread's audience (models._inherit_...).
     prompt_node = Node(
         user_id=user_id,
         human_owner_id=user_id,
         parent_id=node.id,
         node_type="user",
-        privacy_level=privacy_level,
+        privacy_level=("private" if privacy_level == "circles"
+                       else privacy_level),
         ai_usage=ai_usage,
     )
+    prompt_node._circles_exempt = True
     db.session.add(prompt_node)
     db.session.flush()
     attach_context_artifacts(

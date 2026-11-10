@@ -4,7 +4,7 @@ A circle is a named list of people owned by one user (Circle,
 CircleMember). An entry is shared with circles (NodeCircle) and/or with
 people named for that entry only (NodeReader). Who reads a shared entry
 is worked out from those rows every time it is opened
-(privacy.readable_shared_entries), so removing a person, deleting a
+(privacy.CircleSets), so removing a person, deleting a
 circle or taking the entry back closes it at once.
 
 Replies written into a shared thread point at the shared entry
@@ -511,13 +511,13 @@ def join_thread_audience(node, entry):
 
 def leave_audience(node):
     """*node* is no longer "circles". An entry of the author's own stops
-    being shared: its audience rows and its pointer go. A reply keeps
-    pointing at the entry it was written under: the pointer is read for
-    access only while the reply is "circles", and it stays as the record
-    of where the reply came from (thread_source)."""
+    being shared: its audience rows go. Every pointer stays: it is read
+    for access only while the node is "circles", an entry's pointer at
+    itself is how its author keeps reading the replies written into it,
+    and a reply's pointer is the record of where it came from
+    (thread_source)."""
     if node.audience_root_id is not None and node.audience_root_id == node.id:
         clear_audience(node)
-        node.audience_root_id = None
     forget_circle_access()
 
 
@@ -547,7 +547,8 @@ def apply_requested_sharing(node, user, data, *, old_privacy=None,
     # reply, an "Ask my AI" answer) is read by that thread's audience or
     # by its writer alone, whatever its parent is now and whether or not
     # Circles is on for the writer: never public, never another audience.
-    source = thread_source(node)
+    from backend.utils.privacy import pointers_may_exist
+    source = thread_source(node) if pointers_may_exist() else None
     if source is not None and source.is_someone_elses(user.id):
         if node.privacy_level == PrivacyLevel.PUBLIC.value:
             raise AudienceError(
@@ -563,13 +564,15 @@ def apply_requested_sharing(node, user, data, *, old_privacy=None,
             node.audience_root_id = source.entry_id
         forget_circle_access()
         return None
-    if not circles_enabled(user):
-        return None
-    thread_entry = parent_shared_entry(node)
     if node.privacy_level != CIRCLES:
+        # Also with Circles off for the user: an entry taken back stops
+        # being shared.
         if old_privacy == CIRCLES or node.audience_root_id is not None:
             leave_audience(node)
         return None
+    if not circles_enabled(user):
+        return None
+    thread_entry = parent_shared_entry(node)
     if thread_entry is not None:
         if wants and (data.get("circle_ids")
                       or split_names(data.get("circle_usernames"))):
@@ -577,7 +580,10 @@ def apply_requested_sharing(node, user, data, *, old_privacy=None,
         join_thread_audience(node, thread_entry)
         return None
     if not wants:
-        if is_shared_entry(node) or creating or old_privacy == CIRCLES:
+        # A text-only edit keeps what the entry is shared with; a new
+        # node waits for its second step. Becoming "circles" on an edit
+        # needs an audience.
+        if creating or old_privacy == CIRCLES:
             return None
         raise AudienceError(NO_READERS, code="circle_no_readers")
     if (node.human_owner_id or node.user_id) != user.id:

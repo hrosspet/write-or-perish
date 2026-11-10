@@ -218,6 +218,12 @@ def search():
         # the prompt_key stamp: still prompt text, not the user's writing.
         Node.prompt_key.is_(None),
     )
+    # Circles: an "Ask my AI" answer in someone else's thread is no part
+    # of its owner's search.
+    from backend.utils.privacy import own_answers_filter
+    not_answers = own_answers_filter(Node, current_user.id)
+    if not_answers is not None:
+        query = query.filter(not_answers)
 
     # Date filters (SQL-level, fast)
     if dt_from is not None:

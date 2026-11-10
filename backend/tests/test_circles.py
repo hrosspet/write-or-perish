@@ -144,8 +144,12 @@ def app():
 
 @pytest.fixture(autouse=True)
 def _no_redis(monkeypatch):
-    """The lookup limit lives in Redis; tests never touch one."""
+    """The lookup limit lives in Redis; tests never touch one. And each
+    test starts without the process-wide memory of whether any thread
+    pointer exists (tests change the flag mid-process)."""
     from backend.utils import circles as cz
+    from backend.utils import privacy
+    privacy._pointers_seen["at"] = 0.0
     monkeypatch.setattr(cz, "lookup_blocked", lambda uid: False)
     monkeypatch.setattr(cz, "record_lookup_miss", lambda uid: None)
 
@@ -361,7 +365,10 @@ def test_deleting_the_circle_or_taking_the_entry_back_closes_it(app):
     assert r.status_code == 200
     assert not _can_read(app, "ben", other)
     assert NodeReader.query.filter_by(node_id=other).count() == 0
-    assert _db.session.get(Node, other).audience_root_id is None
+    # The entry keeps pointing at itself (its author keeps reading the
+    # replies written into it); nobody is in its audience.
+    assert _db.session.get(Node, other).audience_root_id == other
+    assert _db.session.get(Node, other).privacy_level == "private"
 
 
 def test_only_new_entries_cut_off(app):
@@ -1262,13 +1269,31 @@ def test_the_marker_alone_keeps_an_answer_someone_elses(app):
     entry, r, a, n = _thread_with_answer(app)
     ben = _user("ben")
     answer = _db.session.get(Node, a)
-    answer.audience_root_id = None           # the pointer lost, by any path
+    answer.audience_root_id = None           # an update drops the pointer
     answer.privacy_level = "private"
     _db.session.commit()
+    _db.session.expire_all()
+    answer = _db.session.get(Node, a)
+    # The marker puts it back, so the query filters still know it.
+    assert answer.audience_root_id == entry
     assert is_others_thread_answer(answer)
     assert {i for (i,) in _db.session.query(Node.id).filter(
         others_thread_answer_filter(Node))} == {a}
     assert not can_ai_access_node(answer, ben.id)
+    # Even with the pointer gone behind the model's back, the per-node
+    # rule holds by the marker alone.
+    Node.query.filter_by(id=a).update({"audience_root_id": None})
+    _db.session.commit()
+    _db.session.expire_all()
+    answer = _db.session.get(Node, a)
+    assert answer.audience_root_id is None
+    assert is_others_thread_answer(answer)
+    assert not can_ai_access_node(answer, ben.id)
+    assert not _can_read(app, "ben", a)
+    assert _put(app, "ben", a, privacy_level="public").status_code == 403
+    answer = _db.session.get(Node, a)
+    answer.audience_root_id = entry
+    _db.session.commit()
     assert a not in _corpus_ids(ben)
     assert "ANSWER-FROM-ANNAS-ENTRY" not in _export(ben, filter_ai_usage=False)
     assert _put(app, "ben", a, privacy_level="public").status_code == 403
@@ -1322,3 +1347,69 @@ def test_an_answer_of_a_wiped_or_missing_entry_is_swept_at_once(app):
     assert sweep_answers_of_deleted_entries(cutoff) == 1
     _db.session.expire_all()
     assert _db.session.get(Node, a2).deleted_at == cutoff
+
+
+# ── What the queries look like ──────────────────────────────────────────
+
+def _sql(expr):
+    return str(expr.compile(_db.engine, compile_kwargs={"literal_binds": True}))
+
+
+def _main_filter(user_id):
+    """The access expression from before Circles."""
+    from sqlalchemy import or_
+    from backend.utils.privacy import PrivacyLevel
+    return or_(Node.user_id == user_id, Node.human_owner_id == user_id,
+               Node.privacy_level == PrivacyLevel.PUBLIC)
+
+
+def test_a_user_circles_does_not_concern_gets_the_old_query(app):
+    """With the flag on or off, and whether or not shared entries and
+    Ask-my-AI answers exist in the database, the access expression for a
+    user who shares nothing, reads nothing shared and owns no such
+    answer is the one from before the feature, and it never carries a
+    subquery for anyone."""
+    from backend.utils.privacy import (
+        accessible_nodes_filter_ignoring_deleted as flt, forget_circle_access)
+    entry, r, a, n = _thread_with_answer(app)       # anna, ben, chidi
+    dana, eve, ben, anna = (_user(x) for x in ("dana", "eve", "ben", "anna"))
+    for config in ({"CIRCLES_V1": True},
+                   {"CIRCLES_V1": False},
+                   {"CIRCLES_V1": False, "CIRCLES_USER_IDS": set()}):
+        app.config.update(config)
+        forget_circle_access()
+        for user in (dana, eve):
+            for as_ai in (False, True):
+                assert _sql(flt(Node, user.id, as_ai=as_ai)) == _sql(
+                    _main_filter(user.id)), (config, user.username, as_ai)
+        for user in (ben, anna):
+            for as_ai in (False, True):
+                assert "SELECT" not in _sql(flt(Node, user.id, as_ai=as_ai))
+    # Off for everyone: anna's query is the old one too (nothing is
+    # shared by her then); ben's differs only by leaving his answer out.
+    assert _sql(flt(Node, anna.id)) == _sql(_main_filter(anna.id))
+    assert f"node.id NOT IN ({a})" in _sql(flt(Node, ben.id))
+
+
+def test_the_sets_are_read_once_per_session_and_dropped_on_a_write(app):
+    from sqlalchemy import event
+    from backend.utils.privacy import circle_sets
+    entry = _share(app, names=["ben"])
+    ben = _user("ben")
+    seen = []
+
+    def count(conn, cursor, statement, *_):
+        seen.append(statement)
+    event.listen(_db.engine, "before_cursor_execute", count)
+    try:
+        assert entry in circle_sets(ben.id).readable
+        first = len(seen)
+        assert first > 0
+        for _ in range(5):
+            assert entry in circle_sets(ben.id).readable
+        assert len(seen) == first               # remembered
+        NodeReader.query.filter_by(node_id=entry).delete()
+        _db.session.commit()                    # a write drops it
+        assert entry not in circle_sets(ben.id).readable
+    finally:
+        event.remove(_db.engine, "before_cursor_execute", count)

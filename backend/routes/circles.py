@@ -15,7 +15,7 @@ from sqlalchemy import func
 from backend.extensions import db
 from backend.models import Circle, CircleMember, CircleMute, Node, User
 from backend.utils import circles as cz
-from backend.utils.privacy import readable_shared_entries
+from backend.utils.privacy import readable_entry_ids
 from backend.utils.timefmt import iso_utc
 
 circles_bp = Blueprint("circles_bp", __name__)
@@ -291,13 +291,16 @@ def _last_repliers(entry_ids):
 def shared_with_me():
     """Entries shared with the current user, newest first, grouped by
     person on the page. Reading this records nothing: no read state, no
-    counts. ``?before=<entry id>`` continues below that entry."""
+    counts. ``?before=<entry id>`` continues below that entry; an id
+    that is not an entry shared with the caller is ignored, like one
+    that does not exist."""
     from backend.utils.encryption import prefetch_deks
-    query = Node.query.filter(
-        Node.id.in_(readable_shared_entries(current_user.id)))
+    readable = readable_entry_ids(current_user.id)
+    query = Node.query.filter(Node.id.in_(readable))
     before = request.args.get("before", type=int)
     if before is not None:
-        anchor = db.session.get(Node, before)
+        anchor = (db.session.get(Node, before)
+                  if before in set(readable) else None)
         if anchor is not None:
             query = query.filter(db.or_(
                 Node.created_at < anchor.created_at,
@@ -356,7 +359,7 @@ def add_mute():
         func.lower(User.username) == name.lower()).first() if name else None
     if sender is not None and sender.id != current_user.id:
         shares = db.session.query(Node.id).filter(
-            Node.id.in_(readable_shared_entries(current_user.id)),
+            Node.id.in_(readable_entry_ids(current_user.id)),
             func.coalesce(Node.human_owner_id, Node.user_id) == sender.id,
         ).first() is not None
         noted = db.session.query(cz.UserNotification.id).filter_by(

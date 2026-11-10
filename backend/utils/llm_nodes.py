@@ -104,6 +104,15 @@ def circle_ask_entry_id(node):
     return None
 
 
+def own_chat_model(user):
+    """The model an "Ask my AI" answer runs on: the asking user's own
+    account model (effective_preferred_model), else the server default.
+    Nothing in the thread has a say: not the request, not an earlier
+    reply, not even the asker's own."""
+    return (effective_preferred_model(user)
+            or current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-4.6"))
+
+
 def circle_ask_ai_usage(user):
     """The ai_usage of an "Ask my AI" answer: 'chat', never 'train' (it
     is written from other people's shared entries), and the account's
@@ -402,12 +411,13 @@ def resolve_chat_model(parent_node, user, chain=None):
     for node in chain.llm_replies():
         if node.id in chain.reads:
             continue
-        # In a shared thread (Circles) several people's models answer.
-        # Only the user's own earlier reply sets their default: another
-        # person's would move them to a model, maybe a provider, they
-        # never chose.
-        if (node.privacy_level == "circles" and user_id is not None
-                and (node.human_owner_id or node.user_id) != user_id):
+        # Only a reply made for this user sets their default. Another
+        # person's reply above (in a shared or public thread, or the
+        # author's private one above the entry she shared) would move
+        # them to a model, maybe a provider, they never chose. A reply
+        # with no recorded owner (older rows, imports) counts as before.
+        if (user_id is not None and node.human_owner_id is not None
+                and node.human_owner_id != user_id):
             continue
         if is_chat_model(node.llm_model):
             return node.llm_model, "predecessor"
@@ -875,6 +885,9 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     # before writing.
     turn = reply_read_turn(parent, meta, parent_content, chain=chain)
     is_read_turn = turn in ("read", "read_again")
+    if circle_ask:
+        # Whatever the caller passed.
+        model_id = own_chat_model(owner)
     if is_read_turn:
         model_id = _read_turn_model(parent, owner, model_id, chain)
     elif is_active_model(model_id) and not is_chat_model(model_id):

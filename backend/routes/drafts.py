@@ -644,6 +644,17 @@ def init_streaming():
         return err
     privacy_level = data.get("privacy_level", "private")
     ai_usage = data.get("ai_usage", "none")
+    from backend.utils.privacy import validate_privacy_level
+    if not validate_privacy_level(privacy_level):
+        return jsonify({"error": f"Invalid privacy_level: {privacy_level}"}), 400
+    # A recording under a shared node is read by the thread's audience
+    # (Circles), as a typed reply is.
+    if parent_id:
+        from backend.utils import circles as cz
+        if cz.reply_requires_circles(
+                Node.query.get(int(parent_id)), privacy_level,
+                current_user.id):
+            privacy_level = "circles"
     if label == "Voice":
         parent = Node.query.get(int(parent_id)) if parent_id else None
         refused = voice_turn_refusal(

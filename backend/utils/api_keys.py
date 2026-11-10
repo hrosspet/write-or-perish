@@ -195,6 +195,15 @@ class PayloadLicence:
         self.track_row("node", node_ids)
         if self._key_type == AIUsage.CHAT.value or not node_ids:
             return
+        # Circles: what someone else wrote into a shared thread is never
+        # licensed for training in another person's prompt, whatever its
+        # own ai_usage.
+        from backend.utils.privacy import others_shared_writing_ids
+        others = others_shared_writing_ids(node_ids)
+        if others:
+            self.to_chat(f"{what} {min(others)} is another person's "
+                         "writing in a shared thread")
+            return
         from backend.models import Node
         row = Node.query.with_entities(Node.id, Node.ai_usage).filter(
             Node.id.in_(set(node_ids)),

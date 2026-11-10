@@ -109,12 +109,14 @@ def apply_settings_to_descendants(root, user_id, *, privacy_level=None,
                 and not foreign):
             entry_id = (audience_from.audience_root_id
                         if audience_from.privacy_level == "circles" else None)
-            if n.privacy_level == "circles":
+            if n.privacy_level == "circles" and entry_id is not None:
                 wanted = entry_id
-            elif n.audience_root_id == n.id:
-                wanted = None      # an entry of its own stops being shared
             else:
-                wanted = n.audience_root_id   # a reply keeps its record
+                wanted = n.audience_root_id   # the record stays
+                if n.audience_root_id == n.id:
+                    # An entry of its own stops being shared.
+                    from backend.utils.circles import clear_audience
+                    clear_audience(n)
             if n.audience_root_id != wanted:
                 if n.audience_root_id == n.id:
                     from backend.utils.circles import clear_audience

@@ -9,7 +9,7 @@ the two-column privacy system:
 from enum import Enum
 from typing import Optional
 from flask_login import current_user
-from sqlalchemy import and_, false, func, or_, select
+from sqlalchemy import and_, func, or_, select
 
 
 class PrivacyLevel(str, Enum):
@@ -104,27 +104,17 @@ def is_node_owner(node, user_id: Optional[int]) -> bool:
 #     which passes as_ai=False for the thread chain only
 #     (llm_completion._load_node_chain).
 
-_NODE_ALIASES = {}
-
-
-def _node_alias(role):
-    """One alias of Node per role, made once. An alias copies every
-    column of the table when it is made, and these filters are built for
-    every query of an export or a thread: made per call they cost more
-    than the queries (about 4 ms each, thousands per profile build)."""
-    alias = _NODE_ALIASES.get(role)
-    if alias is None:
-        from sqlalchemy.orm import aliased
-        from backend.models import Node
-        alias = _NODE_ALIASES[role] = aliased(
-            Node, flat=True, name=f"circle_{role}")
-    return alias
-
+# How the rule is evaluated. Everything about Circles that the access
+# rule needs for one user is four small sets of ids, worked out once per
+# database session (CircleSets) and handed to the queries as literal
+# lists. A user who shares nothing, reads nothing shared and has no
+# "Ask my AI" answer gets the same SQL as before the feature, with
+# Circles on or off; nobody's thread or Log walk carries a subquery.
 
 def circles_enabled_for(user_id) -> bool:
     """The Circles flag for one user id: CIRCLES_V1 (everyone) or the
     id listed in CIRCLES_USER_IDS. Off by default. With it off nothing
-    is shared with or by this user: a "circles" node reads as private."""
+    is shared with this user: a "circles" node reads as private."""
     try:
         from flask import current_app
         config = current_app.config
@@ -137,10 +127,7 @@ def circles_enabled_for(user_id) -> bool:
 
 
 def circles_on_anywhere() -> bool:
-    """Circles is on for at least one account. While it is off for
-    everyone (the default) the access rule has no circles part at all:
-    every "circles" node is its owner's alone, and the queries are the
-    ones from before the feature."""
+    """Circles is on for at least one account."""
     try:
         from flask import current_app
         config = current_app.config
@@ -150,143 +137,221 @@ def circles_on_anywhere() -> bool:
                 or config.get("CIRCLES_USER_IDS"))
 
 
-# How long "no Ask my AI answer exists" is believed while Circles is off
-# for everyone (no new one can be made then). INTRODUCED HEURISTIC.
-_ANSWERS_CHECK_SECONDS = 600
-_answers_seen = {"at": 0.0, "any": False}
+# How long "no node points at a shared entry" is believed while Circles
+# is off for everyone (no new pointer can be made then). INTRODUCED
+# HEURISTIC.
+_POINTERS_CHECK_SECONDS = 600
+_pointers_seen = {"at": 0.0, "any": False}
 
 
-def answers_may_exist() -> bool:
-    """Whether the corpus filters need their "Ask my AI" clause: while
-    Circles is on for anyone, and afterwards for as long as a reply of
-    a model that points at an entry exists (an answer made before the
-    flag was switched off must stay out of its owner's corpus). While
-    Circles is off the look is one indexed query, remembered for
-    _ANSWERS_CHECK_SECONDS."""
+def pointers_may_exist() -> bool:
+    """Whether any node may carry a thread pointer (audience_root_id):
+    while Circles is on for anyone, and afterwards for as long as one
+    exists (a reply or an "Ask my AI" answer made before the flag was
+    switched off keeps its rules). While Circles is off the look is one
+    indexed query, remembered for _POINTERS_CHECK_SECONDS. When this is
+    False the access rule runs no Circles query at all."""
     if circles_on_anywhere():
         return True
     import time
     now = time.monotonic()
-    if now - _answers_seen["at"] > _ANSWERS_CHECK_SECONDS or not _answers_seen["at"]:
+    if (not _pointers_seen["at"]
+            or now - _pointers_seen["at"] > _POINTERS_CHECK_SECONDS):
         from backend.extensions import db
         from backend.models import Node
         try:
-            _answers_seen["any"] = db.session.query(Node.id).filter(
-                Node.audience_root_id.isnot(None),
-                Node.audience_root_id != Node.id,
-                Node.node_type == "llm").first() is not None
-        except Exception:  # noqa: BLE001 - no answer is not known: keep the clause
+            _pointers_seen["any"] = db.session.query(Node.id).filter(
+                Node.audience_root_id.isnot(None)).first() is not None
+        except Exception:  # noqa: BLE001 - not known: keep the rules on
             return True
-        _answers_seen["at"] = now
-    return _answers_seen["any"]
+        _pointers_seen["at"] = now
+    return _pointers_seen["any"]
+
+
+# The name the corpus filters knew it by.
+answers_may_exist = pointers_may_exist
 
 
 def _node_owner_id(node):
     return getattr(node, 'human_owner_id', None) or node.user_id
 
 
-def readable_shared_entries(user_id: int):
-    """SELECT of the ids of the shared entries *user_id* reads as part of
-    their audience (not as their author): alive "circles" entries of an
-    author who is not hidden (#269) and whom the user has not muted, shared with the user by name or through a circle the user
-    is in now (and, for a member added with "Only new entries", shared
-    with that circle since). Empty while Circles is off for the user."""
-    from backend.models import (
-        CircleMember, CircleMute, NodeCircle, NodeReader)
-    root = _node_alias("shared")
-    if not circles_enabled_for(user_id):
-        return select(root.id).where(false())
-    owner = func.coalesce(root.human_owner_id, root.user_id)
-    by_name = select(NodeReader.node_id).where(NodeReader.user_id == user_id)
-    by_circle = (
-        select(NodeCircle.node_id)
-        .join(CircleMember, CircleMember.circle_id == NodeCircle.circle_id)
-        .where(CircleMember.user_id == user_id,
-               or_(CircleMember.entries_from.is_(None),
-                   NodeCircle.shared_at >= CircleMember.entries_from)))
-    muted = select(CircleMute.muted_user_id).where(
-        CircleMute.user_id == user_id)
-    return select(root.id).where(
-        root.privacy_level == PrivacyLevel.CIRCLES.value,
-        root.audience_root_id == root.id,
-        root.deleted_at.is_(None),
-        owner != user_id,
-        ~owner.in_(muted),
-        hidden_owner_filter(root),
-        or_(root.id.in_(by_name), root.id.in_(by_circle)),
-    )
+class CircleSets:
+    """What the access rule needs about Circles for one user, as ids:
+
+    * ``readable``: the shared entries the user reads as part of their
+      audience (not as their author): alive "circles" entries of an
+      author who is not hidden (#269) and whom the user has not muted,
+      shared with the user by name or through a circle the user is in
+      now (and, for a member added with "Only new entries", shared with
+      that circle since). Empty while Circles is off for the user.
+    * ``own_entries``: the user's own nodes that are, or once were,
+      shared entries (they point at themselves for good). A reply that
+      points at one of them was written into the user's own thread.
+    * ``answers``: the "Ask my AI" answers the user owns in other
+      people's threads (their pointer is not at an entry of the user's).
+    * ``closed_answers``: those of them whose entry the user cannot read
+      now. An answer restates the entry, so it is open to its owner
+      exactly while the entry is: it closes when the user is removed,
+      hides the author, or the author takes the entry back, changes its
+      audience, deletes the circle, the entry, their writing or their
+      account, and opens again when the entry does.
+    """
+    __slots__ = ("readable", "own_entries", "answers", "closed_answers")
+
+    def __init__(self, readable=(), own_entries=(), answers=(),
+                 closed_answers=()):
+        self.readable = frozenset(readable)
+        self.own_entries = frozenset(own_entries)
+        self.answers = frozenset(answers)
+        self.closed_answers = frozenset(closed_answers)
 
 
-def _circle_cache():
-    """Per-request memo of audience answers (a thread asks once per node;
-    its nodes share one entry). None outside a request: a task asks the
-    database every time."""
+_NO_SETS = CircleSets()
+
+
+def _session_cache():
+    from backend.extensions import db
+    return db.session.info.setdefault("circle_sets", {})
+
+
+def forget_circle_access(session=None, *_):
+    """Drop what this database session remembers about Circles. Called
+    after every flush, commit and rollback of the session (below), and by
+    the code that changes audiences with bulk statements."""
     try:
-        from flask import has_request_context, request
-        if not has_request_context():
-            return None
-        return request.environ.setdefault("loore.circle_access", {})
-    except RuntimeError:
-        return None
+        if session is None:
+            from backend.extensions import db
+            session = db.session
+        session.info.pop("circle_sets", None)
+    except Exception:  # noqa: BLE001 - no session, nothing remembered
+        pass
 
 
-def forget_circle_access():
-    """Drop the request's memo after a change of audience."""
-    cache = _circle_cache()
-    if cache is not None:
-        cache.clear()
+def _install_cache_reset():
+    from sqlalchemy import event
+    from sqlalchemy.orm import Session
+    for name in ("after_flush", "after_commit", "after_rollback"):
+        event.listen(Session, name, forget_circle_access)
+
+
+_install_cache_reset()
+
+
+def _load_circle_sets(user_id) -> CircleSets:
+    from backend.extensions import db
+    from backend.models import (
+        CircleMember, CircleMute, Node, NodeCircle, NodeReader)
+    readable = set()
+    if circles_enabled_for(user_id):
+        # From the user's own rows (indexed), then the entries by key.
+        named = {i for (i,) in db.session.query(NodeReader.node_id).filter(
+            NodeReader.user_id == user_id)}
+        named.update(i for (i,) in db.session.query(NodeCircle.node_id).join(
+            CircleMember, CircleMember.circle_id == NodeCircle.circle_id
+        ).filter(CircleMember.user_id == user_id,
+                 or_(CircleMember.entries_from.is_(None),
+                     NodeCircle.shared_at >= CircleMember.entries_from)))
+        if named:
+            owner = func.coalesce(Node.human_owner_id, Node.user_id)
+            muted = [i for (i,) in db.session.query(
+                CircleMute.muted_user_id).filter(
+                CircleMute.user_id == user_id)]
+            ids = sorted(named)
+            for start in range(0, len(ids), 900):
+                q = db.session.query(Node.id).filter(
+                    Node.id.in_(ids[start:start + 900]),
+                    Node.privacy_level == PrivacyLevel.CIRCLES.value,
+                    Node.audience_root_id == Node.id,
+                    Node.deleted_at.is_(None),
+                    owner != user_id,
+                    hidden_owner_filter(Node))
+                if muted:
+                    q = q.filter(~owner.in_(muted))
+                readable.update(i for (i,) in q)
+    # The user's own nodes that carry a pointer: their shared entries
+    # (pointing at themselves) and what they wrote into threads.
+    own_entries, pointing = set(), []
+    for nid, pointer, node_type in db.session.query(
+            Node.id, Node.audience_root_id, Node.node_type).filter(
+            Node.audience_root_id.isnot(None),
+            or_(Node.user_id == user_id, Node.human_owner_id == user_id)):
+        if pointer == nid:
+            own_entries.add(nid)
+        elif node_type == "llm":
+            pointing.append((nid, pointer))
+    answers = {nid for nid, pointer in pointing if pointer not in own_entries}
+    closed = {nid for nid, pointer in pointing
+              if nid in answers and pointer not in readable}
+    # With Circles off for the user nothing is shared by them either: a
+    # reply in their own thread reads as private, like the rest.
+    if not circles_enabled_for(user_id):
+        own_entries = set()
+    return CircleSets(readable, own_entries, answers, closed)
+
+
+def circle_sets(user_id) -> CircleSets:
+    """The CircleSets of *user_id*, remembered for the database session
+    (a request, or a task between its commits)."""
+    if user_id is None or not pointers_may_exist():
+        return _NO_SETS
+    try:
+        cache = _session_cache()
+    except Exception:  # noqa: BLE001 - no session to remember in
+        return _load_circle_sets(user_id)
+    key = (user_id, circles_enabled_for(user_id))
+    sets = cache.get(key)
+    if sets is None:
+        sets = cache[key] = _load_circle_sets(user_id)
+    return sets
+
+
+def readable_entry_ids(user_id):
+    """Ids of the shared entries *user_id* reads as part of their
+    audience, sorted (CircleSets.readable)."""
+    return sorted(circle_sets(user_id).readable)
 
 
 def in_audience(entry_id, user_id) -> bool:
     """*user_id* reads the shared entry *entry_id* as part of its
-    audience (see readable_shared_entries)."""
-    if entry_id is None or user_id is None:
-        return False
-    cache = _circle_cache()
-    key = ("in", entry_id, user_id)
-    if cache is not None and key in cache:
-        return cache[key]
-    from backend.extensions import db
-    sub = readable_shared_entries(user_id).subquery()
-    found = db.session.execute(
-        select(sub.c.id).where(sub.c.id == entry_id)).first() is not None
-    if cache is not None:
-        cache[key] = found
-    return found
+    audience."""
+    return (entry_id is not None and user_id is not None
+            and entry_id in circle_sets(user_id).readable)
 
 
 def audience_entry_owner(entry_id):
-    """The owner (user id) of the shared entry *entry_id*, or None."""
+    """The owner (user id) of the entry *entry_id*, or None when it no
+    longer exists."""
     if entry_id is None:
         return None
-    cache = _circle_cache()
-    key = ("owner", entry_id)
-    if cache is not None and key in cache:
-        return cache[key]
     from backend.extensions import db
     from backend.models import Node
-    row = db.session.query(Node.user_id, Node.human_owner_id).filter(
-        Node.id == entry_id).first()
-    owner = None if row is None else (row[1] or row[0])
-    if cache is not None:
-        cache[key] = owner
-    return owner
+    try:
+        cache = _session_cache().setdefault("owners", {})
+    except Exception:  # noqa: BLE001
+        cache = {}
+    if entry_id not in cache:
+        row = db.session.query(Node.user_id, Node.human_owner_id).filter(
+            Node.id == entry_id).first()
+        cache[entry_id] = None if row is None else (row[1] or row[0])
+    return cache[entry_id]
 
 
 def _circles_access(node, user_id, as_ai=False) -> bool:
     """The circles branch of the access rule for a node that is not the
     user's own. A node without an audience entry is private."""
     entry_id = getattr(node, 'audience_root_id', None)
-    if entry_id is None or not circles_on_anywhere():
+    if entry_id is None:
         return False
+    sets = circle_sets(user_id)
     # A reply in the user's own shared thread: the thread's author reads
     # every reply written to it (their model too, by each reply's own
     # ai_usage, as in a public thread).
-    if entry_id != node.id and audience_entry_owner(entry_id) == user_id:
+    if entry_id != node.id and entry_id in sets.own_entries:
         return True
     if as_ai:
         return False
-    return in_audience(entry_id, user_id)
+    return entry_id in sets.readable
 
 
 def foreign_shared(node, user_id) -> bool:
@@ -300,26 +365,6 @@ def foreign_shared(node, user_id) -> bool:
     return not _circles_access(node, user_id, as_ai=True)
 
 
-def is_others_thread_answer(node) -> bool:
-    """*node* is an AI answer its owner asked for in someone else's shared
-    thread ("Ask my AI"): written from that person's shared entry, so it
-    stays in the thread. It is the reader's to read there, and no part
-    of the reader's corpus (export, profile builds, recent context,
-    search) or of their other prompts."""
-    if getattr(node, 'node_type', None) != "llm":
-        return False
-    # Whatever its level now: taken back to Only me it is still written
-    # from that entry. Two records say so, and either is enough: the
-    # answer's marker, and its pointer at an entry that is not its
-    # owner's. A pointer whose entry no longer exists counts (the owner
-    # of a missing entry is nobody).
-    if _has_ask_marker(node):
-        return True
-    entry_id = getattr(node, 'audience_root_id', None)
-    return (isinstance(entry_id, int) and entry_id != node.id
-            and audience_entry_owner(entry_id) != _node_owner_id(node))
-
-
 _ASK_MARKER = "_circle_ask"     # llm_nodes.CIRCLE_ASK_MARKER
 
 
@@ -328,53 +373,97 @@ def _has_ask_marker(node) -> bool:
     return isinstance(meta, str) and f'"{_ASK_MARKER}"' in meta
 
 
-def answer_source_open(node) -> bool:
-    """The entry an "Ask my AI" answer was written from is still there
-    to read: it exists, is not deleted, and its author's account is not
-    hidden (#269). When it is not, the answer is closed to everyone, its
-    owner included: it holds that entry's content in derived form, and
-    goes when the entry goes (node_cleanup sweeps it). It opens again if
-    the author restores the entry."""
+def is_others_thread_answer(node) -> bool:
+    """*node* is an AI answer its owner asked for in someone else's shared
+    thread ("Ask my AI"): written from that person's shared entry, so it
+    stays in the thread. It is the reader's to read there, and no part
+    of the reader's corpus (export, profile builds, recent context,
+    search) or of their other prompts.
+
+    Whatever its level now: taken back to Only me it is still written
+    from that entry. Two records say so, and either is enough: its
+    pointer at an entry that is not its owner's (an entry that no longer
+    exists is nobody's), and the answer's marker."""
+    if getattr(node, 'node_type', None) != "llm":
+        return False
+    if _has_ask_marker(node):
+        return True
+    entry_id = getattr(node, 'audience_root_id', None)
+    return (isinstance(entry_id, int) and entry_id != node.id
+            and audience_entry_owner(entry_id) != _node_owner_id(node))
+
+
+def is_others_shared_writing(node) -> bool:
+    """*node* was written into a shared thread by someone other than the
+    thread's author (a reader's reply, a reader's "Ask my AI" answer).
+    In anyone else's prompt such writing is never licensed for training,
+    whatever its own ai_usage: its writer shared it with people."""
+    entry_id = getattr(node, 'audience_root_id', None)
+    return (isinstance(entry_id, int) and entry_id != node.id
+            and audience_entry_owner(entry_id) != _node_owner_id(node))
+
+
+def others_shared_writing_ids(node_ids):
+    """Those of *node_ids* that are is_others_shared_writing, in one
+    query (none while no pointer exists)."""
+    ids = {i for i in (node_ids or ()) if i is not None}
+    if not ids or not pointers_may_exist():
+        return set()
     from backend.extensions import db
     from backend.models import Node
+    out = set()
+    for nid, owner, human_owner, pointer in db.session.query(
+            Node.id, Node.user_id, Node.human_owner_id,
+            Node.audience_root_id).filter(
+            Node.id.in_(sorted(ids)), Node.audience_root_id.isnot(None),
+            Node.audience_root_id != Node.id):
+        if audience_entry_owner(pointer) != (human_owner or owner):
+            out.add(nid)
+    return out
+
+
+def answer_open_to_owner(node, user_id) -> bool:
+    """An "Ask my AI" answer is open to its owner exactly while the
+    entry it was written from is (CircleSets.closed_answers)."""
     entry_id = getattr(node, 'audience_root_id', None)
-    if entry_id is None or entry_id == node.id:
-        return False
-    entry = db.session.get(Node, entry_id)
-    return (entry is not None and entry.deleted_at is None
-            and not owner_hidden(entry))
-
-
-def answer_source_open_filter(node_model):
-    """Query form of answer_source_open."""
-    entry = _node_alias("source")
-    return select(entry.id).where(
-        entry.id == node_model.audience_root_id,
-        entry.id != node_model.id,
-        entry.deleted_at.is_(None),
-        hidden_owner_filter(entry),
-    ).exists()
+    return (isinstance(entry_id, int) and entry_id != node.id
+            and entry_id in circle_sets(user_id).readable)
 
 
 def others_thread_answer_filter(node_model):
-    """Query form of is_others_thread_answer."""
-    entry = _node_alias("thread")
+    """Query form of is_others_thread_answer by the pointer, for the
+    jobs that run over every account (the embedding sweep, the cleanup).
+    The per-user filters use the id lists of CircleSets instead."""
+    from sqlalchemy.orm import aliased
+    from backend.models import Node
+    global _ANSWER_ENTRY
+    if _ANSWER_ENTRY is None:
+        _ANSWER_ENTRY = aliased(Node, flat=True, name="circle_answer_entry")
+    entry = _ANSWER_ENTRY
     owner = func.coalesce(node_model.human_owner_id, node_model.user_id)
     return and_(
         node_model.node_type == "llm",
-        or_(
-            # The marker (JSON text; the quotes keep the match exact).
-            func.coalesce(node_model.tool_calls_meta, "").contains(
-                f'"{_ASK_MARKER}"', autoescape=True),
-            and_(
-                node_model.audience_root_id.isnot(None),
-                node_model.audience_root_id != node_model.id,
-                # Not EXISTS: an entry that is gone is nobody's.
-                ~select(entry.id).where(
-                    entry.id == node_model.audience_root_id,
-                    func.coalesce(entry.human_owner_id, entry.user_id)
-                    == owner,
-                ).exists())))
+        node_model.audience_root_id.isnot(None),
+        node_model.audience_root_id != node_model.id,
+        # Not EXISTS: an entry that is gone is nobody's.
+        ~select(entry.id).where(
+            entry.id == node_model.audience_root_id,
+            func.coalesce(entry.human_owner_id, entry.user_id) == owner,
+        ).exists())
+
+
+_ANSWER_ENTRY = None
+
+
+def own_answers_filter(node_model, user_id, closed_only=False):
+    """For a listing of the user's own nodes that does not go through
+    accessible_nodes_filter (keyword search, the Log, pins): a condition
+    that leaves out the user's "Ask my AI" answers in other people's
+    threads (with *closed_only*, only the ones closed to them now), or
+    None when the user has none."""
+    sets = circle_sets(user_id)
+    ids = sets.closed_answers if closed_only else sets.answers
+    return node_model.id.notin_(sorted(ids)) if ids else None
 
 
 def _can_user_access_ignoring_deleted(node, user_id: int,
@@ -395,7 +484,7 @@ def _can_user_access_ignoring_deleted(node, user_id: int,
         # stays in that thread), and for the user only while the entry
         # it was written from is there to read.
         if is_others_thread_answer(node):
-            return not as_ai and answer_source_open(node)
+            return not as_ai and answer_open_to_owner(node, user_id)
         return True
 
     privacy_level = getattr(node, 'privacy_level', PrivacyLevel.PRIVATE)
@@ -630,28 +719,6 @@ def accessible_nodes_filter(node_model, user_id: int, as_ai: bool = False):
     )
 
 
-def _circles_filter(node_model, user_id, as_ai=False):
-    """Query form of _circles_access."""
-    if not circles_on_anywhere():
-        return false()
-    entry = _node_alias("answer")
-    # A reply in the user's own shared thread.
-    in_own_thread = and_(
-        node_model.audience_root_id != node_model.id,
-        select(entry.id).where(
-            entry.id == node_model.audience_root_id,
-            func.coalesce(entry.human_owner_id, entry.user_id) == user_id,
-        ).exists())
-    reads = [in_own_thread]
-    if not as_ai:
-        reads.append(node_model.audience_root_id.in_(
-            readable_shared_entries(user_id)))
-    return and_(
-        node_model.privacy_level == PrivacyLevel.CIRCLES.value,
-        node_model.audience_root_id.isnot(None),
-        or_(*reads))
-
-
 def accessible_nodes_filter_ignoring_deleted(node_model, user_id: int,
                                              as_ai: bool = False):
     """Same access criteria as accessible_nodes_filter, minus the
@@ -665,18 +732,33 @@ def accessible_nodes_filter_ignoring_deleted(node_model, user_id: int,
     onto C would miss, and G would never appear in the CTE result —
     making G unreachable from Log even though it's alive and
     accessible. The §4a Case 2 feed swap depends on this traversal.
+
+    Circles adds literal id lists only (CircleSets), and only for a user
+    they concern: the entries whose threads the user reads, and the
+    user's "Ask my AI" answers that are closed to them (all of them for
+    a model). Without either the expression is the one from before the
+    feature.
     """
+    sets = circle_sets(user_id)
+    hidden_answers = sets.answers if as_ai else sets.closed_answers
+    entries = sets.own_entries if as_ai else (
+        sets.own_entries | sets.readable)
+    if not hidden_answers and not entries:
+        return or_(
+            node_model.user_id == user_id,
+            node_model.human_owner_id == user_id,
+            node_model.privacy_level == PrivacyLevel.PUBLIC,
+        )
     own = or_(node_model.user_id == user_id,
               node_model.human_owner_id == user_id)
-    if answers_may_exist():
-        answer = others_thread_answer_filter(node_model)
-        own = and_(own, ~answer if as_ai else or_(
-            ~answer, answer_source_open_filter(node_model)))
-    return or_(
-        own,
-        node_model.privacy_level == PrivacyLevel.PUBLIC,
-        _circles_filter(node_model, user_id, as_ai=as_ai),
-    )
+    if hidden_answers:
+        own = and_(own, node_model.id.notin_(sorted(hidden_answers)))
+    clauses = [own, node_model.privacy_level == PrivacyLevel.PUBLIC]
+    if entries:
+        clauses.append(and_(
+            node_model.privacy_level == PrivacyLevel.CIRCLES.value,
+            node_model.audience_root_id.in_(sorted(entries))))
+    return or_(*clauses)
 
 
 def can_user_edit_node(node, user_id: Optional[int] = None) -> bool:

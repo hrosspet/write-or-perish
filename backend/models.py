@@ -756,21 +756,61 @@ def _enforce_node_content_encryption(mapper, connection, node):
 
 @event.listens_for(Node, "before_insert")
 def _inherit_circle_audience(mapper, connection, node):
-    """A reply written into a shared thread joins the thread's audience,
-    whichever path creates it (typed, recorded, an AI reply): a "circles"
-    node under a shared "circles" parent takes the parent's audience
-    entry. Nothing else is touched: a "circles" node under anything else
-    stays without an audience, which reads as private."""
-    if (node.privacy_level != "circles" or node.parent_id is None
-            or node.audience_root_id is not None):
+    """A reply written into a shared thread is read by the thread's
+    audience, whichever path creates it (typed, recorded, uploaded, Text
+    mode, Voice, an AI reply) and whatever level that path asked for: a
+    node under a shared "circles" parent becomes "circles" and takes the
+    parent's audience entry. The routes that take a level from the
+    client refuse another one first; this is the rule for the paths that
+    do not ask. A "circles" node under anything else stays without an
+    audience, which reads as private.
+
+    The one node that never joins is a thread's prompt node
+    (session_helpers marks it): it stays its writer's alone."""
+    if node.parent_id is None or node.audience_root_id is not None:
+        return
+    if getattr(node, "_circles_exempt", False):
+        return
+    from backend.utils.privacy import pointers_may_exist
+    if node.privacy_level != "circles" and not pointers_may_exist():
         return
     table = Node.__table__
     row = connection.execute(
         table.select().with_only_columns(
             table.c.privacy_level, table.c.audience_root_id
         ).where(table.c.id == node.parent_id)).first()
-    if row is not None and row[0] == "circles" and row[1] is not None:
-        node.audience_root_id = row[1]
+    if row is None or row[0] != "circles" or row[1] is None:
+        return
+    node.audience_root_id = row[1]
+    if node.privacy_level != "circles":
+        node.privacy_level = "circles"
+        if (node.content and is_encryption_enabled()
+                and not is_encrypted(node.content)):
+            node.content = encrypt_content(node.content)
+
+
+@event.listens_for(Node, "before_update")
+def _keep_answer_pointer(mapper, connection, node):
+    """An "Ask my AI" answer carries two records of the entry it was
+    written from: its pointer (audience_root_id), which the query
+    filters read, and its marker in tool_calls_meta. If an update would
+    leave the marker without the pointer, the pointer is put back from
+    the marker, so the filters never lose an answer."""
+    if node.audience_root_id is not None or node.node_type != "llm":
+        return
+    meta = node.tool_calls_meta
+    if not isinstance(meta, str) or '"_circle_ask"' not in meta:
+        return
+    import json
+    try:
+        entries = [m.get("entry_id") for m in json.loads(meta)
+                   if isinstance(m, dict) and m.get("name") == "_circle_ask"]
+    except (ValueError, TypeError):
+        return
+    if entries and isinstance(entries[0], int):
+        logger.warning("Node %s: Ask-my-AI answer lost its thread pointer; "
+                       "restored from its marker", node.id)
+        node.audience_root_id = entries[0]
 
 
 class Circle(db.Model):

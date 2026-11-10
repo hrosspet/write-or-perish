@@ -166,7 +166,7 @@ def sweep_answers_of_deleted_entries(cutoff):
     *cutoff* (its own grace period is over). The run that follows wipes
     or purges them like any deleted node. Until then they are already
     closed to everyone, their owner included
-    (privacy.answer_source_open). Ids and timestamps only. Returns how
+    (privacy.CircleSets.closed_answers). Ids and timestamps only. Returns how
     many were marked; commits."""
     from sqlalchemy.orm import aliased
     from backend.utils.privacy import others_thread_answer_filter

@@ -1986,9 +1986,10 @@ def request_llm_response(node_id):
     model_id = data.get("model")
     source_mode = data.get("source_mode")
     if circle_ask:
-        # The reader's own model, whatever the request or the thread's
-        # earlier replies (someone else's) name.
-        model_id = None
+        # The reader's own account model, whatever the request or the
+        # thread's replies name (create_llm_placeholder sets it again).
+        from backend.utils.llm_nodes import own_chat_model
+        model_id = own_chat_model(current_user)
 
     if source_mode is not None and source_mode not in ("voice", "textmode"):
         return jsonify({"error": f"Invalid source_mode: {source_mode}"}), 400
@@ -3397,6 +3398,12 @@ def pin_node(node_id):
 
     if node.privacy_level == "private":
         return jsonify({"error": "Cannot pin a private node"}), 400
+
+    # Circles: an "Ask my AI" answer in someone else's thread stays in
+    # that thread; it is not pinned into its owner's Log.
+    from backend.utils.privacy import is_others_thread_answer
+    if is_others_thread_answer(node):
+        return jsonify({"error": "This answer stays in its thread."}), 400
 
     if node.pinned_at is not None:
         return jsonify({"error": "Node is already pinned"}), 400

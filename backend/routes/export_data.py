@@ -236,6 +236,14 @@ def _note_entry(licence, node):
     case the licence tracks rows for a cached render."""
     if licence is None:
         return
+    # Circles: a reader's reply in the user's shared thread is part of
+    # the export, and never licensed for training in it.
+    from backend.utils.privacy import is_others_shared_writing
+    if is_others_shared_writing(node):
+        licence.track_row(node.__tablename__, (node.id,))
+        licence.to_chat(f"archive entry {node.id} is another person's "
+                        "writing in a shared thread")
+        return
     if node.ai_usage == AIUsage.TRAIN.value:
         licence.track_row(node.__tablename__, (node.id,))
     else:

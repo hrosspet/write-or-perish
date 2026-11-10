@@ -1416,6 +1416,7 @@ def _retrieval_injection_text(tr, user_id, with_labels=False, licence=None):
                    else "")
             if licence is not None:
                 licence.note_usage(node.ai_usage, f"entry {node.id} preview")
+                licence.note_nodes([node.id], what="entry preview")
             lines.append(
                 f"- {tag}entry {node.id} · {stamp}{pct}: {snippet}")
         # Saved external references (imported tweets/bookmarks), with their
