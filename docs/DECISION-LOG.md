@@ -3173,6 +3173,133 @@ Kinds (one per entry and per table row):
 - **Source:** Claude Code session 2026-11-10 (Opus 5.5)
 - **Applies to:** #580, #331
 
+### 2026-11-10 · #593: a re-import with AI usage left as the dialog opened
+
+- **Kind:** data safety
+- **Situation:** #593 makes the import dialog start AI usage at Chat instead of None (Peter, 2026-10-22). On a re-import, the value the dialog sends is applied to the archive's entries already in Loore. Proposed as the default: when the user leaves the setting as it opened, the entries already imported keep their AI usage and only the new ones get Chat; a value the user picks applies to all of them, as before.
+- **Prediction:** the default (65 %); a line in the dialog with a count (20 %); as the issue specified, every entry of the archive takes the value shown (15 %).
+- **Peter:** "no, if chat is selected (even though by default), chat is used on all entries"
+- **Score:** miss. Built in #623: the value the dialog shows applies to the archive's existing entries whether the user picked it or not.
+- **Why it missed:** the builder added a special case to protect the AI usage of entries already imported from a value the user never chose. Peter chose the plain, consistent rule: the value the dialog shows is the value Loore uses.
+- **Source:** Loore voice review, node 201658, 2026-11-10; prediction in the issue triage brief of 2026-10-22 (Opus 5.5)
+- **Applies to:** #593, #623
+
+### 2026-11-10 · #593: the starting AI usage of accounts set to None or Train
+
+- **Kind:** UX
+- **Situation:** with the import dialog no longer starting at None, which value does it start at for accounts whose AI usage setting is not Chat? Proposed as the default: an account set to None starts its imports at None, and accounts set to Chat or Train start them at Chat.
+- **Prediction:** the default (55 %); Train accounts start at Train, so the dialog follows the account's setting fully (30 %); every account starts at Chat (15 %).
+- **Peter:** "it should simply follow the account's setting. I would not complicate it further."
+- **Score:** miss. Built in #623: every import dialog, on the web and the iPhone, starts at the account's AI usage setting.
+- **Why it missed:** the builder added a special case for Train accounts that kept their imports off Train unless picked. Peter chose the plain rule, the account's setting with no exception, which was the second guess.
+- **Source:** Loore voice review, node 201658, 2026-11-10; prediction in the issue triage brief of 2026-10-22 (Opus 5.5)
+- **Applies to:** #593, #623
+
+### 2026-11-10 · The issue triage briefs of 2026-10-22: ask or decide
+
+- **Kind:** escalation
+- **Situation:** the issue triage voice review of 2026-10-22 put one to three questions each about #588 (Circles on the text-mode start), #590 ("Delete all my content"), #591 (the export of large accounts), #592 (entry headers in exports) and #594 (the spend cap's carry) to Peter, each with a default or a recommendation, and asked whether each was ready to build. By 2026-11-10 none of them had been built.
+- **Decision:** asked Peter instead of deciding.
+- **Peter:** "Do they really need me, or could you decide them based on the decision log yourself?"
+- **Score:** miss. On 2026-11-10 the builder (Fable 5.2) decided the questions itself in new briefs; its choices are rows in "Decided by the builder" (#626, #627, #629, #630, #631). The 2026-10-22 predictions for these questions are not scored, since Peter did not answer them.
+- **Why it missed:** each question already came with a default the builder was ready to build, most of the choices could be changed after a merge, and the new briefs settled them from rules and entries already in the log, at 60–90 % confidence. Asking held five issues for nearly three weeks.
+- **Source:** Claude Code session 2026-11-10; the briefs were written in Claude Code session 2026-10-22 (Opus 5.5)
+- **Applies to:** #588, #590, #591, #592, #594
+
+### 2026-11-10 · Circles: one note to a reader the first time only
+
+- **Kind:** UX
+- **Situation:** at Peter's request, instead of #588's question, the builder designed the Circles feature: a design brief in Loore and a mockup of seven screens. A circle is a named list of people that only its owner sees; an entry is shared with chosen circles; readers find it on a page of entries shared with them. Five questions went with the design, and it decided some things without asking, among them how a reader learns of a shared entry: no email per entry, and one in-app note the first time someone shares with them.
+- **Decision:** one in-app note the first time only, no email.
+- **Peter:** "I'd like such notice for every new note shared with me by default" · "Don't show Anna's entries would prevent that for that user"
+- **Score:** miss. #631 sends a note for each shared entry, with "Don't show <name>'s entries" on it.
+- **Why it missed:** fewer notes were chosen to keep Loore calm, although the design already let a reader stop one person's entries, which is the control Peter pointed to.
+- **Source:** Claude Code session 2026-11-10, Circles design (Fable 5.2)
+- **Applies to:** #588, #631
+
+### 2026-11-10 · Circles: readers don't see each other
+
+- **Kind:** product scope
+- **Situation:** as in the entry before. The first question: a circle is the owner's private list, and its members see neither the circle nor each other unless they reply; or a circle is a shared group.
+- **Prediction:** the private list, readers apart (60 %); shared groups (25 %); other (15 %).
+- **Peter:** "there should be an icon in the footer ... showing circles and mouse-over should display a list of people who will see it. Sending a reply should pop up a dialog saying who will see it, with the possibility to don't show this dialog for this thread anymore" · "there should be a freeform input text field which would allow the author to send this to a one off list of usernames"
+- **Score:** miss, for the part that readers don't see each other: an entry shows who can read it, and a reply names its readers before it is sent. Whether a circle is a private list or a shared group was not answered; the builder kept the private list. The one-off list of names for a single entry was in neither the design nor the prediction.
+- **Why it missed:** readers knowing about each other was treated as a cost to their privacy. For Peter, a writer needs to know who will see an entry or a reply before writing it.
+- **Source:** Claude Code session 2026-11-10, Circles design (Fable 5.2)
+- **Applies to:** #588, #631
+
+### 2026-11-10 · Circles: the note's small print
+
+- **Kind:** user-facing text
+- **Situation:** as in the entry before. The mockup's note to a reader came with a line of small print, written by the builder.
+- **Decision:** wrote the note's small print.
+- **Peter:** "this is too long in the dialog. But good decision to couple the two"
+- **Score:** partial: the coupling in it was right, and the text too long for the dialog. Peter then edited the note's wording on the mockup himself.
+- **Source:** Claude Code session 2026-11-10, Circles design (Fable 5.2)
+- **Applies to:** #588, #631
+
+### 2026-11-10 · Circles: when to build it
+
+- **Kind:** product scope
+- **Situation:** as in the entry before. The question of when: build Circles after the Beta blockers (recommended), or for the Beta.
+- **Prediction:** after the Beta blockers (60 %); for the Beta (30 %); other (10 %).
+- **Peter:** "thx I really like this design. Could you create a PR implementing it both for web and iOS app?"
+- **Score:** miss. Built at once for the web and the iPhone in #631, behind a flag that is off by default.
+- **Why it missed:** the recommendation followed the order "Beta blockers first". Peter asked for the PR as soon as he had seen the design, as the pattern on recommendations to defer in `DECISION-PATTERNS.md` describes.
+- **Source:** Claude Code session 2026-11-10, Circles design (Fable 5.2)
+- **Applies to:** #588, #631
+
+### 2026-11-10 · Circles: a reader's AI
+
+- **Kind:** privacy
+- **Situation:** as in the entry before. The question about a reader's AI: no AI answers in a shared thread unless the reader asks; then the reader's own model reads the thread, only if the author's AI usage allows it, never into the reader's profile or context, and never for training.
+- **Prediction:** as proposed (55 %); no AI for readers in the first version (30 %); other (15 %).
+- **Peter:** "I actually like the AI reply design"
+- **Score:** hit. #631 builds "Ask my AI".
+- **Source:** Claude Code session 2026-11-10, Circles design (Fable 5.2)
+- **Applies to:** #588, #631
+
+### 2026-11-10 · Circles: "Ask my AI" left out of the first build brief
+
+- **Kind:** privacy
+- **Situation:** as in the entry before. After Peter's "thx I really like this design" and his request for a PR, the brief for the builder left "Ask my AI" out, because he had not answered the question about a reader's AI.
+- **Decision:** left "Ask my AI" out of the build brief until Peter answered.
+- **Peter:** "I actually like the AI reply design"
+- **Score:** miss. The builder was told to build "Ask my AI".
+- **Why it missed:** "I really like this design" was read as not covering an open question that the mockup showed: its screen for reading a shared entry had the "Ask my AI" button.
+- **Source:** Claude Code session 2026-11-10 (Fable 5.2)
+- **Applies to:** #631
+
+### 2026-11-10 · Circles: no invitations in the first version
+
+- **Kind:** product scope
+- **Situation:** as in the entry before. The question about people not on Loore ("Q2" after Peter's first answers renumbered the questions): only people with a Loore account can be added, found by their exact name; email invitations wait.
+- **Prediction:** as proposed (65 %); invitations now (25 %); other (10 %).
+- **Peter:** "Q2: yes, invitations are out of the first version"
+- **Score:** hit.
+- **Source:** Claude Code session 2026-11-10, Circles design (Fable 5.2)
+- **Applies to:** #631
+
+### 2026-11-10 · Circles: the words
+
+- **Kind:** user-facing text
+- **Situation:** as in the entry before. The question about the words ("Q3" after the renumbering), each with a recommendation: "Only me / Circles / Everyone" for the three choices of who can read an entry (or "Private / Circles / Public"), "Shared with you" for the readers' page, "Your circles" for the owner's page.
+- **Prediction:** he changes at least one of the words (60 %); he takes all of them (40 %).
+- **Peter:** "Q3: 'Shared with you' (recommended)"
+- **Score:** hit, for the readers' page: he took the recommended "Shared with you". He did not answer about the labels of the three choices; #631 uses the recommended "Only me / Circles / Everyone".
+- **Source:** Claude Code session 2026-11-10, Circles design (Fable 5.2)
+- **Applies to:** #631
+
+### 2026-11-10 · Building the triage issues without a "ready to build": ask or decide
+
+- **Kind:** escalation
+- **Situation:** after the briefs for #588, #590, #591, #592 and #594 were decided again by the builder, Peter asked "what about the issues at 201586" (the triage brief's root) without a "ready to build" for any of them. Read it as a request to build and started builders for them, #588 as part of the Circles PR, at most three at a time.
+- **Decision:** decided without asking Peter.
+- **Peter:** "we have 9 minutes until a 5-hour window limit, so you can temporarily run all PRs in parallel"
+- **Score:** hit. He did not object to the builds and let all of them run at once; they became #626, #627, #629, #630 and #631.
+- **Source:** Claude Code session 2026-11-10 (Fable 5.2)
+- **Applies to:** #588, #590, #591, #592, #594, #626, #627, #629, #630, #631
+
 ## Decided by the builder
 
 Choices that agents flagged in PRs and that the builder decided because a rule above already covers them (Peter, 2026-10-02: decide what the log supports, raise only real judgement calls). Each is also recorded on its PR, or in the session where Peter asked. The Decided column holds only the builder's part; a rule or decision of Peter's goes in the Rule column. Questions raised to Peter instead are not listed; his answers become entries. Model is the model that wrote the PR (its Co-Authored-By line). Result is "accepted by merge (PR #N, date)" once the PR has merged and Peter didn't correct the choice, "pending" until it merges, and "corrected → entry <title>" when he overrules it; the entry is then scored as a miss.
@@ -3523,6 +3650,70 @@ Choices that agents flagged in PRs and that the builder decided because a rule a
 | 2026-11-09 | #581 | user-facing text | A Glean reply the provider's content filter blocked, after the merge with main | Shows the plain failure text, like every failed reply; the block's code goes only to the report. Main showed the exception's text there; a message saying the provider blocked it would be new wording for Peter | Owners never read raw exception text (#582) | Opus 5.5 | accepted by merge (PR #581, 2026-11-10) |
 | 2026-11-09 | #581 | reliability | Where #566's batch rules and main's later ones disagree | Main's: an unreadable OpenAI error file gets the batch polled again instead of its results collected, and a job's age is checked before each poll | Main's version is the later decision on the same code | Opus 5.5 | accepted by merge (PR #581, 2026-11-10) |
 | 2026-11-09 | #581 | data safety | #558's audio work, which main's #608 and #610 already do | Dropped whole, including two extras main lacks: removing a voice session's drafts folder when its entry is finalised, and the sweep script's wrong-database guard; #558's helpers would have replaced main's with a different signature | Main's versions win where #558 duplicates them | Opus 5.5 | accepted by merge (PR #581, 2026-11-10) |
+| 2026-11-10 | #631 | privacy | An Agentic Reply entry set to Circles, which the text-mode start refused (#588) | Accepted through the same privacy check as other entries; the value "anonymous" is dropped | none: builder's judgement | Fable 5.2 | pending |
+| 2026-11-10 | #631 | UX | The Circles option in the writing form while Circles is off | Greyed out, on the web and the iPhone | none: builder's judgement | Fable 5.2 | pending |
+| 2026-11-10 | #626 | UX | The header of an entry in exports and prompts | Linear stretches numbered in order and a letter per branch at a branch point ([1.199], [2.2b.2]); the BRANCH line names the entry the branch replies to | Autonomy | Fable 5.2 | pending |
+| 2026-11-10 | #626 | product scope | Which renderings take the new headers | All of them, the user's data download included | Autonomy | Fable 5.2 | pending |
+| 2026-11-10 | #626 | UX | A quote of another entry in the same export | Refers to the quoted entry's label, or to its author and time when it is not shown as an entry | Autonomy | Fable 5.2 | pending |
+| 2026-11-10 | #629 | product scope | How "Export data" reaches the user for a large account | The file is streamed in the same request, on one path for every account size, instead of a background job | Autonomy | Fable 5.2 | pending |
+| 2026-11-10 | #629 | privacy | A copy of the export on the server | None is stored | Peter's answers of 2026-10-22: no extra step where an existing mechanism is enough | Fable 5.2 | pending |
+| 2026-11-10 | #629 | UX | An email when a long export is ready | None: the browser's download list shows when the file is complete | none: builder's judgement | Fable 5.2 | pending |
+| 2026-11-10 | #627 | UX | What users see of a carried overflow | No amounts and no new text; the cap's message names the date it lifts only when that is later than the start of next month | No new user-facing text without Peter (#543) | Fable 5.2 | pending |
+| 2026-11-10 | #627 | cost | Which limit decides a month's carry | The limit in force at the end of the month | none: builder's judgement | Fable 5.2 | pending |
+| 2026-11-10 | #627 | UX | How an admin sees and clears a carry | A Carried column with a clear action that asks first; a limit of 0 also clears it | none: builder's judgement | Fable 5.2 | pending |
+| 2026-11-10 | #630 | UX | The "content deleted" bar during the 30 days | Stays on every page, as before; only its words change | none: builder's judgement | Fable 5.2 | pending |
+| 2026-11-10 | #630 | user-facing text | The words of the bar, the dialog and the button | Peter's sentences kept, with "writing" changed to "content" | Peter, 2026-10-22: "Delete all my content" | Fable 5.2 | pending |
+| 2026-11-10 | #630 | data safety | A profile version the user saved by hand between the request and a restore | Kept, and merged into the restored profile at the next update | The user's edit wins | Fable 5.2 | pending |
+| 2026-11-10 | #630 | data safety | A todo list or document written between the request and a restore | No special handling: the newest stays current, and the restored versions are in the history | Peter's restore model (2026-10-22): no history rebuild | Fable 5.2 | pending |
+| 2026-11-10 | #630 | privacy | The X bookmark connection at "Delete all my content" | Disconnected at once, with access revoked at X; a restore brings back the saved bookmarks, not the connection, and reconnecting is one approval | Peter asked for the revoke (2026-10-09) | Fable 5.2 | pending |
+| 2026-11-10 | #623 | privacy | An import request that sends no AI usage | Gets the account's setting, as a new reply does, instead of None | Peter, 2026-09-29: a new reply falls back to the account setting; No AI means no AI | Opus 5.5 | pending |
+| 2026-11-10 | #623 | UX | An import request that names a value (iPhone builds before the next one send "none") | Keeps the value it names | The brief: a client that sends a value keeps working | Opus 5.5 | pending |
+| 2026-11-10 | #623 | product scope | The iPhone importer | Changed in the same PR, since the app already has the account's setting | The brief: change iOS if the setting is already there | Opus 5.5 | pending |
+| 2026-11-10 | #626 | UX | The heading level of an entry's header | 2 along a thread's first stretch, plus one per branch point above the entry, at most 6 | Autonomy | Opus 5.5 | pending |
+| 2026-11-10 | #626 | privacy | A reply the export leaves out (a deleted reply the user can't see) | Takes no letter and no separator, so the export doesn't show that it exists | The export's access rule: such a reply leaves no trace | Opus 5.5 | pending |
+| 2026-11-10 | #626 | privacy | A quoted entry that is deleted, inaccessible or marked None | Never gets its author and time; keeps the export's existing placeholder texts | No AI means no AI | Opus 5.5 | pending |
+| 2026-11-10 | #626 | privacy | A quote reference by author and time, for the training key | Not reported to the payload licence, since it carries no text of the entry | Training licence | Opus 5.5 | pending |
+| 2026-11-10 | #627 | cost | Overflows from the months before the deploy | Not carried; the first overflow that carries is the one of the deploy's month | Peter, 2026-11-05: err towards the job going through | Opus 5.5 | pending |
+| 2026-11-10 | #627 | UX | An admin email when the carry alone caps a user at the start of a month | None; the admin was emailed when that overflow first reached the cap | One alert per cause | Opus 5.5 | pending |
+| 2026-11-10 | #627 | cost | The start of a month, before the hourly roll | A user can stay uncapped for a few minutes, until the roll or the check after their first new cost row | Peter, 2026-11-05: running a few dollars over the cap is fine | Opus 5.5 | pending |
+| 2026-11-10 | #627 | cost | A month in which the user had no limit at some time | Carries nothing, also when a limit is set later in that month | Follows "a limit of 0 clears the carry" (Peter, 2026-10-22) | Opus 5.5 | pending |
+| 2026-11-10 | #627 | user-facing text | The date the cap lifts | Shown without a year ("January 1"), as the existing toast does | none: builder's judgement | Opus 5.5 | pending |
+| 2026-11-10 | #627 | reliability | Introduced constant | The carry roll runs at minute 7 of every hour (UTC), on the background queue | Every added heuristic is named | Opus 5.5 | pending |
+| 2026-11-10 | #629 | UX | A download cut off part-way | No resume: the browser marks it failed and the user starts it again | Problems show | Opus 5.5 | pending |
+| 2026-11-10 | #629 | reliability | The reverse proxy for the export path | Its own location, HTTP/1.1 to the app server without buffering, so a failure part-way shows as a failed download | Problems show | Opus 5.5 | pending |
+| 2026-11-10 | #629 | UX | A download that can't start (signed out, server down) | A HEAD check first, then a plain message: "The export couldn't start. Please try again." | Problems show | Opus 5.5 | pending |
+| 2026-11-10 | #629 | reliability | Introduced constants | 50 threads loaded at once; 400 data keys unwrapped ahead; a piece sent every 64 KiB or 2 s; a 1 ms pause every 50 ms of the export's work; 500 ids per query | Every added heuristic is named | Opus 5.5 | pending |
+| 2026-11-10 | #630 | privacy | Which jobs save nothing after a content deletion | Those that read at or before the latest request; a second request moves the cut-off; a job with no recorded read time counts as before | Peter, 2026-10-22: builds based on deleted data shouldn't finish | Opus 5.5 | pending |
+| 2026-11-10 | #630 | data safety | What a restore drops after two requests | What Loore built since the first request, which a new column records | Peter's restore model (2026-10-22) | Opus 5.5 | pending |
+| 2026-11-10 | #630 | product scope | A content-policy block or refusal streak recorded before the request | Does not hold builds of the new writing while the deletion waits; a restore brings it back | The account works like a new one (Peter, 2026-10-22) | Opus 5.5 | pending |
+| 2026-11-10 | #630 | user-facing text | Glean during an account deletion | "Glean is off while your account is being deleted." | none: builder's judgement | Opus 5.5 | pending |
+| 2026-11-10 | #630 | privacy | Notifications, artifact views and blocked profile ranges at a content deletion | Not hidden at the request; the day-30 purge deletes those from before it and keeps newer ones | The purge deletes what the request covered (#415, Peter, 2026-10-13) | Opus 5.5 | pending |
+| 2026-11-10 | #630 | privacy | A bookmark sync running when the request lands | Stops before it stores the next page, so the hidden bookmarks stay hidden | none: builder's judgement | Opus 5.5 | pending |
+| 2026-11-10 | #630 | UX | Where the provider's batch cancels run | In a background task, so the request doesn't wait; the X revoke stays in the request | Latency counts as quality | Opus 5.5 | pending |
+| 2026-11-10 | #630 | user-facing text | Other texts that name the action | Renamed too: the account-deletion texts on the web and the iPhone, the restore and confirm pages, the admin dialogs and the server's error messages | none: builder's judgement (the app's words follow its buttons) | Opus 5.5 | pending |
+| 2026-11-10 | #631 | UX | Adding a person to a circle that already has shared entries | The dialog offers both: the entries already shared and new ones, or only new ones | Show the choices | Fable 5.2 | pending |
+| 2026-11-10 | #631 | privacy | Who reads the replies in a shared thread | The entry's whole audience, as in public threads | none: builder's judgement | Fable 5.2 | pending |
+| 2026-11-10 | #631 | UX | Read receipts and counts | None | Offering over performance | Fable 5.2 | pending |
+| 2026-11-10 | #631 | UX | Email about shared entries | None | none: builder's judgement | Fable 5.2 | pending |
+| 2026-11-10 | #631 | UX | Notes about shared entries | One in-app note the first time someone shares with a reader | none: builder's judgement | Fable 5.2 | corrected → entry Circles: one note to a reader the first time only |
+| 2026-11-10 | #631 | UX | A reader who wants no more entries from someone | Can stop that person's entries; the sender is not told | none: builder's judgement | Fable 5.2 | pending |
+| 2026-11-10 | #631 | privacy | Removing a person from a circle | Closes the circle's entries to them at once | Nothing leaves without your say: sharing is revocable | Fable 5.2 | pending |
+| 2026-11-10 | #631 | privacy | Shared content at rest | Encrypted like private content | none: builder's judgement | Fable 5.2 | pending |
+| 2026-11-10 | #631 | privacy | Who reads an Ask-my-AI answer | The thread's audience, as an AI reply takes its parent's privacy in public threads | The approved mockup | Fable 5.2 | pending |
+| 2026-11-10 | #631 | privacy | `{quote:ID}` and read_full of another person's shared entry in the reader's own threads | Closed to the reader's AI; the thread page still shows the reader the quote | No AI means no AI, taken strictly | Fable 5.2 | pending |
+| 2026-11-10 | #631 | privacy | Where an Ask-my-AI answer counts | Only in the thread, saved as Chat; left out of the reader's export, profile builds, recent context and search | The design: shared content never enters the reader's profile | Fable 5.2 | pending |
+| 2026-11-10 | #631 | privacy | The training key for a prompt with another person's shared writing | Never used | Training licence | Fable 5.2 | pending |
+| 2026-11-10 | #631 | UX | Replies generated on their own in a shared thread | None, for the author too: auto-generate off, the LLM Response bar instead, Voice mode hidden | Nothing leaves without your say | Fable 5.2 | pending |
+| 2026-11-10 | #631 | privacy | An AI reply made when a new shared entry is written | Not shared with the entry; the author shares replies through Edit | Nothing leaves without your say | Fable 5.2 | pending |
+| 2026-11-10 | #631 | privacy | A thread's system prompt | Never shared, since it holds the author's profile and notes | none: builder's judgement | Fable 5.2 | pending |
+| 2026-11-10 | #631 | product scope | Changing an entry's audience | Changes who reads the replies under it too | none: builder's judgement | Fable 5.2 | pending |
+| 2026-11-10 | #631 | UX | Notes when a person is added to a circle with entries already shared | One note, not one per entry; a new or newly shared entry sends one note per reader, a reply none | Calm over clever | Fable 5.2 | pending |
+| 2026-11-10 | #631 | user-facing text | The names shown for people | Loore usernames, since accounts have no separate display name | none: builder's judgement | Fable 5.2 | pending |
+| 2026-11-10 | #631 | privacy | Circles, memberships and mutes after "Delete all my writing" | Deleted after the 30 days; the shared entries close at once | The brief | Fable 5.2 | pending |
+| 2026-11-10 | #631 | privacy | An Ask-my-AI answer when the author deletes the entry | Closed at once, also to the reader who asked, and deleted with the entry; the readers' typed replies stay theirs | none: builder's judgement (the answer restates the entry) | Fable 5.2 | pending |
+| 2026-11-10 | #631 | cost | Speech for a shared entry | A reader with Voice mode may generate it when the entry allows AI, billed to the reader | The existing speech rule | Fable 5.2 | pending |
+| 2026-11-10 | #631 | UX | Default privacy on the Account page | Circles is not offered; with Circles on, the greyed option reads "Circles (chosen for each entry)" | none: builder's judgement | Fable 5.2 | pending |
+| 2026-11-10 | #631 | reliability | Introduced limits | 50 circles per user, 150 people per circle, 20 names for one entry, 60 characters per circle name; 30 entries per page of Shared with you, titles up to 80 and previews up to 160 characters | Every added heuristic is named | Fable 5.2 | pending |
 
 ## Backfilled decisions
 
