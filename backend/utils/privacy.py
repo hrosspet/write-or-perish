@@ -104,6 +104,23 @@ def is_node_owner(node, user_id: Optional[int]) -> bool:
 #     which passes as_ai=False for the thread chain only
 #     (llm_completion._load_node_chain).
 
+_NODE_ALIASES = {}
+
+
+def _node_alias(role):
+    """One alias of Node per role, made once. An alias copies every
+    column of the table when it is made, and these filters are built for
+    every query of an export or a thread: made per call they cost more
+    than the queries (about 4 ms each, thousands per profile build)."""
+    alias = _NODE_ALIASES.get(role)
+    if alias is None:
+        from sqlalchemy.orm import aliased
+        from backend.models import Node
+        alias = _NODE_ALIASES[role] = aliased(
+            Node, flat=True, name=f"circle_{role}")
+    return alias
+
+
 def circles_enabled_for(user_id) -> bool:
     """The Circles flag for one user id: CIRCLES_V1 (everyone) or the
     id listed in CIRCLES_USER_IDS. Off by default. With it off nothing
@@ -119,6 +136,20 @@ def circles_enabled_for(user_id) -> bool:
         config.get("CIRCLES_USER_IDS") or set())
 
 
+def circles_on_anywhere() -> bool:
+    """Circles is on for at least one account. While it is off for
+    everyone (the default) the access rule has no circles part at all:
+    every "circles" node is its owner's alone, and the queries are the
+    ones from before the feature."""
+    try:
+        from flask import current_app
+        config = current_app.config
+    except RuntimeError:
+        return False
+    return bool(config.get("CIRCLES_V1", False)
+                or config.get("CIRCLES_USER_IDS"))
+
+
 def _node_owner_id(node):
     return getattr(node, 'human_owner_id', None) or node.user_id
 
@@ -129,10 +160,9 @@ def readable_shared_entries(user_id: int):
     author who is not hidden (#269) and whom the user has not muted, shared with the user by name or through a circle the user
     is in now (and, for a member added with "Only new entries", shared
     with that circle since). Empty while Circles is off for the user."""
-    from sqlalchemy.orm import aliased
     from backend.models import (
-        CircleMember, CircleMute, Node, NodeCircle, NodeReader)
-    root = aliased(Node, flat=True)
+        CircleMember, CircleMute, NodeCircle, NodeReader)
+    root = _node_alias("shared")
     if not circles_enabled_for(user_id):
         return select(root.id).where(false())
     owner = func.coalesce(root.human_owner_id, root.user_id)
@@ -216,7 +246,7 @@ def _circles_access(node, user_id, as_ai=False) -> bool:
     """The circles branch of the access rule for a node that is not the
     user's own. A node without an audience entry is private."""
     entry_id = getattr(node, 'audience_root_id', None)
-    if entry_id is None:
+    if entry_id is None or not circles_on_anywhere():
         return False
     # A reply in the user's own shared thread: the thread's author reads
     # every reply written to it (their model too, by each reply's own
@@ -246,7 +276,8 @@ def is_others_thread_answer(node) -> bool:
     of the reader's corpus (export, profile builds, recent context,
     search) or of their other prompts."""
     if (getattr(node, 'privacy_level', None) != PrivacyLevel.CIRCLES
-            or getattr(node, 'node_type', None) != "llm"):
+            or getattr(node, 'node_type', None) != "llm"
+            or not circles_on_anywhere()):
         return False
     entry_id = getattr(node, 'audience_root_id', None)
     return (entry_id is not None
@@ -255,9 +286,7 @@ def is_others_thread_answer(node) -> bool:
 
 def others_thread_answer_filter(node_model):
     """Query form of is_others_thread_answer."""
-    from sqlalchemy.orm import aliased
-    from backend.models import Node
-    entry = aliased(Node, flat=True)
+    entry = _node_alias("thread")
     owner = func.coalesce(node_model.human_owner_id, node_model.user_id)
     return and_(
         node_model.privacy_level == PrivacyLevel.CIRCLES.value,
@@ -520,9 +549,9 @@ def accessible_nodes_filter(node_model, user_id: int, as_ai: bool = False):
 
 def _circles_filter(node_model, user_id, as_ai=False):
     """Query form of _circles_access."""
-    from sqlalchemy.orm import aliased
-    from backend.models import Node
-    entry = aliased(Node, flat=True)
+    if not circles_on_anywhere():
+        return false()
+    entry = _node_alias("answer")
     # A reply in the user's own shared thread.
     in_own_thread = and_(
         node_model.audience_root_id != node_model.id,
@@ -556,7 +585,7 @@ def accessible_nodes_filter_ignoring_deleted(node_model, user_id: int,
     """
     own = or_(node_model.user_id == user_id,
               node_model.human_owner_id == user_id)
-    if as_ai:
+    if as_ai and circles_on_anywhere():
         own = and_(own, ~others_thread_answer_filter(node_model))
     return or_(
         own,

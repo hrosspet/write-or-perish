@@ -30,7 +30,8 @@ from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.embeddings import (
     EMBEDDING_MODEL, content_hash, embed_texts, pack_vector,
 )
-from backend.utils.privacy import AI_ALLOWED, others_thread_answer_filter
+from backend.utils.privacy import (
+    AI_ALLOWED, circles_on_anywhere, others_thread_answer_filter)
 
 from backend.utils.hidden_rows import hidden_ids, on_hold_user_ids
 
@@ -88,7 +89,8 @@ def _candidate_nodes(limit):
             # Circles: an "Ask my AI" answer in someone else's shared
             # thread is written from their entry; it never enters the
             # reader's search index.
-            ~others_thread_answer_filter(Node),
+            *([~others_thread_answer_filter(Node)]
+              if circles_on_anywhere() else []),
         )
         .filter(or_(
             NodeEmbedding.id.is_(None),
