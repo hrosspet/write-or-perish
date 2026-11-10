@@ -2613,6 +2613,102 @@ def test_421_batch_full_rebuild_merges_every_edit_at_its_date(
     assert User.query.get(u.id).profile_pending_merge_id is None
 
 
+# #421, option (c) (Peter, voice review 2026-11-10): an older round is
+# merged only for the lines no newer round changed. Invented texts.
+BASE421 = ("### SURFACE MAP\nLikes long walks.\nWRONG GUESS\n\n"
+           "### SHADOW MAP\nAvoids crowds.")
+CELLO421 = "Plays the cello on weekends."
+
+
+def _two_rounds_421(u, first_text, update_text, second_text):
+    """An old chain (a February chunk and its integration, BASE421), the
+    first round, an update and its integration (``update_text``, May),
+    and the second round, an edit of that integration. Marks a full
+    rebuild. Returns (first, second)."""
+    now = datetime.utcnow()
+
+    def version(gen_type, cutoff, parent, age, text):
+        p = _prev_profile(u, cutoff, source_tokens=100_000, gen_type=gen_type)
+        p.parent_profile_id = parent.id if parent else None
+        p.created_at = now - age
+        p.set_content(text)
+        db.session.commit()
+        return p
+    feb = datetime(2026, 2, 1)
+    chunk = version("iterative", feb, None, timedelta(days=12), "FEBRUARY")
+    integration = version("integration", feb, chunk, timedelta(days=11),
+                          BASE421)
+    first = _user_edit(u, integration, first_text)
+    first.created_at = now - timedelta(days=10)
+    update = version("update", MAY183, first, timedelta(days=5), update_text)
+    integration2 = version("integration", MAY183, update, timedelta(days=4),
+                           update_text)
+    second = _user_edit(u, integration2, second_text)
+    second.created_at = now - timedelta(days=1)
+    u.profile_needs_full_regen = True
+    db.session.commit()
+    return first, second
+
+
+def _rebuild_421(u, monkeypatch):
+    y2019, march, spring = (datetime(2019, 12, 1), datetime(2026, 3, 1),
+                            datetime(2026, 5, 15))
+    _windows183(monkeypatch,
+                {None: 270_000, y2019: 180_000, march: 90_000, spring: 0}, {
+                    None: _chunk("2019 ARCHIVE", latest=y2019),
+                    y2019: _chunk("WINTER WRITING", latest=march),
+                    march: _chunk("SPRING WRITING", latest=spring)})
+    monkeypatch.setattr(pb._exports, "should_continue_chain",
+                        lambda user, profile: True)
+    return _run_steps(u, monkeypatch, pb._build_next_profile_request(u), {
+        "chunk": "REBUILT", "merge": "MERGED", "integration": "FINAL"})
+
+
+def test_421c_batch_merges_an_older_round_without_what_a_newer_deleted(
+        app, monkeypatch):
+    """Round 1 corrects WRONG GUESS and adds a sentence, the update keeps
+    both, round 2 deletes the sentence: round 1's merge request carries
+    the correction and not the sentence; round 2's carries round 2 whole."""
+    _wide_window(app)
+    u = _user()
+    first_text = BASE421.replace("WRONG GUESS", "RIGHT GUESS") \
+        + f"\n{CELLO421}"
+    update_text = first_text.replace("RIGHT GUESS", "Right guess, reworded.")
+    first, second = _two_rounds_421(u, first_text, update_text,
+                                    update_text.replace(f"\n{CELLO421}", ""))
+
+    steps = _rebuild_421(u, monkeypatch)
+
+    assert [s["meta"]["kind"] for s in steps] == [
+        "chunk", "chunk", "merge", "chunk", "merge", "integration"]
+    assert [steps[2]["meta"]["merged_profile_id"],
+            steps[4]["meta"]["merged_profile_id"]] == [first.id, second.id]
+    note = pb._exports.USER_WRITTEN_PROFILE_NOTE
+    assert _texts183(steps[2])[1].endswith(
+        f"{note}\n\n### SURFACE MAP\nLikes long walks.\nRIGHT GUESS\n\n"
+        "### SHADOW MAP\nAvoids crowds.")
+    assert _texts183(steps[4])[1].endswith(
+        f"{note}\n\n{second.get_content()}")
+    assert all(CELLO421 not in "".join(_texts183(s)) for s in steps)
+    assert User.query.get(u.id).profile_pending_merge_id is None
+
+
+def test_421c_batch_an_older_round_with_nothing_left_sends_no_request(
+        app, monkeypatch):
+    _wide_window(app)
+    u = _user()
+    with_cello = f"{BASE421}\n{CELLO421}"
+    first, second = _two_rounds_421(u, with_cello, with_cello, BASE421)
+
+    steps = _rebuild_421(u, monkeypatch)
+
+    assert [s["meta"]["kind"] for s in steps] == [
+        "chunk", "chunk", "chunk", "merge", "integration"]
+    assert steps[3]["meta"]["merged_profile_id"] == second.id
+    assert UserProfile.query.filter_by(merged_profile_id=first.id).count() == 0
+    assert User.query.get(u.id).profile_pending_merge_id is None
+
+
 def test_profile_refusal_stop_is_reported_as_refused(app, monkeypatch):
     """#470: the second refusal stops the job and the report says
     "refused by the model", not "output cut off"."""

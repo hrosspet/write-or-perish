@@ -1220,6 +1220,117 @@ def test_a_set_in_flight_after_an_edit_on_its_final_sends_nothing_more(
     assert len(world.provider.submits) == n
 
 
+# #421, option (c) (Peter, voice review 2026-11-10): a rebuild's final
+# merges every round of the user's edits at its date, an older round only
+# for the lines no newer round changed. Invented texts.
+BASE421 = ("### SURFACE MAP\nLikes long walks.\nWRONG GUESS\n\n"
+           "### SHADOW MAP\nAvoids crowds.")
+CELLO421 = "Plays the cello on weekends."
+
+
+def _rebuild_with_two_rounds(world, first_text, update_text, second_text):
+    """An old chain built before the set: an integration (BASE421, day 3),
+    the first round (an edit of it), an update and its integration
+    (``update_text``, day 6), and the second round (an edit of that). Then
+    a from-scratch set of ten windows (days 1 to 10) whose final is due,
+    with the second round as the merge the rebuild still has to make (as
+    next_work plans it for a fresh full rebuild). Returns (user, first,
+    second)."""
+    u = _user()
+    ago = datetime.utcnow() - timedelta(days=20)
+
+    def version(gen_type, day, parent, text, hours):
+        return _profile(u, gen_type=gen_type, cutoff=T0 + timedelta(days=day),
+                        text=text, parent_profile_id=(
+                            parent.id if parent else None),
+                        created_at=ago + timedelta(hours=hours))
+
+    def edit(of, text, hours):
+        e = _edit(u, of, when=ago + timedelta(hours=hours))
+        e.set_content(text)
+        db.session.commit()
+        return e
+    old = version("integration", 3, None, BASE421, 1)
+    first = edit(old, first_text, 2)
+    update = version("update", 6, first, update_text, 3)
+    again = version("integration", 6, update, update_text, 4)
+    second = edit(again, second_text, 5)
+    u.profile_pending_merge_id = second.id
+    db.session.commit()
+    rows = _set_of(u, 10)
+    _corpus_for(world, rows)
+    return u, first, second
+
+
+def _final_texts(world):
+    msgs = _merge_reqs(world)[0]["messages"]
+    return [m["content"][0]["text"] for m in msgs[:-1]]
+
+
+def test_421c_a_rebuilds_final_merges_an_older_round_reduced(world):
+    """Round 1 corrects WRONG GUESS and adds a sentence, the update keeps
+    both, round 2 deletes the sentence. The final reads round 1 at its
+    date (after day 3) without the sentence and with the correction, and
+    round 2 whole at its date (after day 6)."""
+    first_text = BASE421.replace("WRONG GUESS", "RIGHT GUESS") \
+        + f"\n{CELLO421}"
+    update_text = first_text.replace("RIGHT GUESS", "Right guess, reworded.")
+    u, first, second = _rebuild_with_two_rounds(
+        world, first_text, update_text,
+        update_text.replace(f"\n{CELLO421}", ""))
+
+    _advance(u)
+
+    texts = _final_texts(world)
+    mine = [i for i, t in enumerate(texts) if "Written by the user" in t]
+    assert mine == [3, 7]
+    assert texts[3].endswith(
+        "\n\n### SURFACE MAP\nLikes long walks.\nRIGHT GUESS\n\n"
+        "### SHADOW MAP\nAvoids crowds.")
+    assert texts[7].endswith(f"\n\n{second.get_content()}")
+    assert all(CELLO421 not in t for t in texts)
+    final_item = _items("final")[0]
+    assert final_item["user_version_id"] == second.id
+    assert first.id in final_item["inputs"]
+    _poll()
+    final = _rows(u, "integration")[-1]
+    assert final.window_set == "set1" and final.merged_profile_id == second.id
+    db.session.refresh(u)
+    assert u.profile_pending_merge_id is None
+
+
+def test_421c_a_rebuilds_final_leaves_out_a_round_with_nothing_left(world):
+    with_cello = f"{BASE421}\n{CELLO421}"
+    u, first, second = _rebuild_with_two_rounds(
+        world, with_cello, with_cello, BASE421)
+
+    _advance(u)
+
+    texts = _final_texts(world)
+    assert [i for i, t in enumerate(texts)
+            if "Written by the user" in t] == [6]
+    assert all(CELLO421 not in t for t in texts)
+    assert first.id not in _items("final")[0]["inputs"]
+
+
+def test_421c_the_seeders_check_reads_no_profile_text(world, monkeypatch):
+    """set_work_due runs for every window-set user on the seeder's ticks:
+    it plans the final from metadata, and the older rounds are read only
+    when the final goes out."""
+    first_text = BASE421.replace("WRONG GUESS", "RIGHT GUESS")
+    u, first, second = _rebuild_with_two_rounds(
+        world, first_text, first_text, first_text + "\nA NEW LINE")
+
+    def no_text(*a, **k):
+        raise AssertionError("read a version's text")
+    monkeypatch.setattr(pw._exports, "user_merge_input", no_text)
+    tip = _rows(u, "window")[-1]
+    assert pw.set_work_due(u, tip)
+    plan = pw.merge_plan(u, pw.set_state(u, "set1", None))
+    assert plan.older_versions == [first.id]
+    assert plan.user_version.id == second.id
+
+
 # ── 13. spend ─────────────────────────────────────────────────────────────
 # Peter, 2026-10-22: "send it and let the cap stop it halfway. It will
 # self-heal the following month": the per-user cap holds the next
