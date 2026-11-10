@@ -631,7 +631,8 @@ def test_poll_routes_intentions_items_without_touching_profile_flags(app, monkey
     db.session.commit()
     applied = []
     monkeypatch.setattr(intentions_mod, "apply_intentions_item",
-                        lambda user, itm, res: applied.append((user.id, res["content"])))
+                        lambda user, itm, res, **k: applied.append(
+                            (user.id, res["content"])))
     monkeypatch.setattr(pb, "batch_check_and_collect", lambda bids, keys: (
         {item["custom_id"]: {"content": "# Endorsed", "input_tokens": 1, "output_tokens": 1}},
         {}, {}))
