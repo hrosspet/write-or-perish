@@ -494,7 +494,7 @@ def _save_profile(user, model_id, profile_text, response,
     own units, where source_tokens_used is cumulative)."""
     from backend.utils.privacy import PrivacyLevel
     from backend.utils.hidden_rows import (
-        ReadBeforeDeletion, read_before_deletion,
+        ReadBeforeDeletion, corpus_changed,
     )
 
     total_tokens = response["total_tokens"]
@@ -502,10 +502,13 @@ def _save_profile(user, model_id, profile_text, response,
     _add_profile_cost_log(user, model_id, response, batch=batch)
     if read_at is None:
         read_at = _profile_read_at.get() or source_rendered_at
-    if read_before_deletion(user.id, read_at):
+    if corpus_changed(user.id, read_at):
         # "Delete all my content" hid the content this version was built
-        # from while it was being generated (#590): the cost is logged,
-        # the version is not saved.
+        # from while it was being generated, or the version read during a
+        # deletion that has been restored since (#590): the cost is
+        # logged, the version is not saved. A restore makes the restored
+        # profile the one in use, so a from-scratch step of the new
+        # writing alone must not replace it (review of #630).
         db.session.commit()
         raise ReadBeforeDeletion(
             f"user {user.id}: read content deleted since")

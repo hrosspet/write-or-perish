@@ -408,6 +408,7 @@ def restore_account(user):
         return False
     user.deleted_at = None
     db.session.commit()
+    user_purge.settle_restore(cancelled)
     _drop_public_pages(user)
     logger.warning("Account of user %s restored", user.id)
     return True
@@ -455,12 +456,15 @@ def undo_admin_deletion(job_id, admin_id):
             UserDataPurge.replaced: null(),
         }, synchronize_session=False)
     else:
-        n = len(user_purge.cancel_jobs(*waiting, cancelled_by_id=admin_id))
+        cancelled = user_purge.cancel_jobs(*waiting, cancelled_by_id=admin_id)
+        n = len(cancelled)
     if not n:
         db.session.rollback()
         return False
     user.deleted_at = None
     db.session.commit()
+    if not replaced:
+        user_purge.settle_restore(cancelled)
     _drop_public_pages(user)
     logger.warning("Admin %s undid the deletion of account %s (job %s%s)",
                    admin_id, user.id, job_id,

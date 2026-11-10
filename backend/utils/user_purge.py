@@ -316,14 +316,14 @@ class Scope(NamedTuple):
                        dated > self.requested_at)
         return model.user_id != self.user_id
 
-    def read_before(self, item, submitted_at):
+    def read_before(self, item):
         """Whether a batch item of the user's read its input before the
-        request (``hidden_rows.item_read_at``): the purge of a content
-        deletion takes only those out of the batch tables; an account
-        deletion takes every one."""
+        request (``hidden_rows.item_read_at``; unknown counts as before):
+        the purge of a content deletion takes only those out of the batch
+        tables; an account deletion takes every one."""
         if self.everything:
             return True
-        read_at = item_read_at(item, submitted_at)
+        read_at = item_read_at(item)
         return read_at is None or read_at <= self.requested_at
 
     def nodes(self, extras):
@@ -961,8 +961,7 @@ def _batch_tables(user_id, response_ids, scope=None):
     scope = scope or Scope(user_id)
 
     def users(i, job):
-        return (i.get("user_id") == user_id
-                and scope.read_before(i, job.submitted_at))
+        return i.get("user_id") == user_id and scope.read_before(i)
     return (
         (ProfileBatchJob, users, "profile_batch_job"),
         (PollDraftBatchJob,
@@ -1647,6 +1646,7 @@ def _after_hiding(user, job):
     A job that read before it saves nothing from it (the save guards,
     hidden_rows.read_before_deletion); an AI reply whose node was
     soft-deleted discards its text (the completion task's own check)."""
+    _settle_request(user, job)
     _drop_public_pages(user)
     try:
         _dispatch_batch_cancel(user.id, job.id, job.requested_at)
@@ -1659,6 +1659,45 @@ def _after_hiding(user, job):
         db.session.rollback()
         logger.error("content deletion of user %s: the X connection was "
                      "not ended (%s)", user.id, type(e).__name__)
+
+
+def _settle_request(user, job):
+    """Right after the request's hide has committed (review of #630):
+
+    * ``requested_at``, the cut-off of hidden_rows.read_before_deletion,
+      is taken again now. It was taken before the hide ran, and a job that
+      read while the hide's transaction was open still saw the content as
+      it was: with the cut-off after the commit, its read counts as before
+      the request and nothing built from it is saved. A result dropped
+      too many is preferred to one built from deleted content;
+    * the hide runs once more (it records only what it has not), so a row
+      a job saved from the old content while the transaction was open is
+      hidden and purged with the rest.
+
+    A job that has started or was restored meanwhile is left as it is."""
+    now = _now()
+    hide_writing(user, job, now)
+    UserDataPurge.query.filter(
+        UserDataPurge.id == job.id, UserDataPurge.status == "scheduled",
+    ).update({UserDataPurge.requested_at: now}, synchronize_session=False)
+    db.session.commit()
+    db.session.refresh(job)
+
+
+def settle_restore(job_ids):
+    """Right after a restore has committed: its time (``cancelled_at``)
+    is taken again now, so a job that read while the restore's
+    transaction was open (it still saw the content of the deletion) falls
+    inside the restored deletion (hidden_rows
+    .read_during_restored_deletion) and saves nothing (review of #630)."""
+    job_ids = list(job_ids or ())
+    if not job_ids:
+        return
+    UserDataPurge.query.filter(
+        UserDataPurge.id.in_(job_ids), UserDataPurge.status == "cancelled",
+    ).update({UserDataPurge.cancelled_at: _now()},
+             synchronize_session=False)
+    db.session.commit()
 
 
 def _dispatch_batch_cancel(user_id, job_id, cutoff):
@@ -1791,6 +1830,7 @@ def cancel_purge(user_id, cancelled_by_id):
                             UserDataPurge.delete_account.is_(False),
                             cancelled_by_id=cancelled_by_id)
     db.session.commit()
+    settle_restore(cancelled)
     if cancelled:
         user = db.session.get(User, user_id)
         if user is not None:
@@ -1810,6 +1850,7 @@ def undo_admin_purge(job_id, admin_id):
                             UserDataPurge.delete_account.is_(False),
                             cancelled_by_id=admin_id)
     db.session.commit()
+    settle_restore(cancelled)
     if cancelled:
         job = db.session.get(UserDataPurge, job_id)
         user = db.session.get(User, job.user_id) if job else None

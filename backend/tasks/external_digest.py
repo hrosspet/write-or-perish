@@ -44,7 +44,7 @@ from backend.utils.llm_batch import (
 )
 from backend.utils.timefmt import user_local_hour
 
-from backend.utils.hidden_rows import account_on_hold, read_before_deletion
+from backend.utils.hidden_rows import account_on_hold, corpus_changed
 
 logger = get_task_logger(__name__)
 
@@ -234,7 +234,7 @@ def _save_digest(user, model_id, digest_text, response, corpus_at, batch):
         request_type="external_digest",
         **fields,
     ))
-    if read_before_deletion(user.id, corpus_at):
+    if corpus_changed(user.id, corpus_at):
         # "Delete all my content" hid the references this digest read
         # after it was rendered (#590): the cost is logged, nothing saved.
         logger.info("External digest for user %s not saved: content "

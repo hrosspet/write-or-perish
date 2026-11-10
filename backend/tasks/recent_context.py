@@ -44,7 +44,7 @@ from backend.utils.llm_batch import (
 from backend.utils import refusal_backoff
 
 from backend.utils.hidden_rows import (
-    account_on_hold, item_read_at, read_before_deletion,
+    account_on_hold, corpus_changed, item_read_at,
 )
 
 logger = get_task_logger(__name__)
@@ -636,7 +636,7 @@ def _apply_item(item, result, batch_id, blocked_code=None, read_at=None):
             logger.info("User %s opted out of AI usage while their recent "
                         "context ran; not saved", user_id)
             return "skipped", billed
-        if read_before_deletion(user_id, read_at):
+        if corpus_changed(user_id, read_at):
             # "Delete all my content" hid the writing it summarises after
             # it was read (#590): the cost row is written, nothing saved.
             logger.info("User %s: content deleted after it was read; "
@@ -803,7 +803,7 @@ def _claim_and_apply(job, results, now):
         item["outcome"], item["billed"] = _apply_item(
             item, results.get(item["custom_id"]), batch_id,
             blocked_code=blocked.get(item["custom_id"]),
-            read_at=item_read_at(item, job.submitted_at))
+            read_at=item_read_at(item))
     job.items = items
     db.session.commit()
     _report_unsaved(items)
@@ -936,7 +936,7 @@ def _generate_recent_context_impl(user_id, profile_id=None,
             f"recent context for user {user_id}", model_id,
             response.get("output_tokens"), refused=refused)
 
-    if read_before_deletion(user_id, read_at):
+    if corpus_changed(user_id, read_at):
         # Hidden for deletion while the call ran (#590): cost logged,
         # nothing saved.
         db.session.commit()

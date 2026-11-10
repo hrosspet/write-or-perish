@@ -48,7 +48,7 @@ from backend.utils.llm_batch import (
 from backend.tasks import exports as _exports
 
 from backend.utils.hidden_rows import (
-    ReadBeforeDeletion, account_on_hold, item_read_at, read_before_deletion,
+    ReadBeforeDeletion, account_on_hold, corpus_changed, item_read_at,
 )
 logger = get_task_logger(__name__)
 
@@ -730,7 +730,7 @@ def _apply_result(user, item, result, submitted_at):
                 source_rendered_at=(
                     datetime.fromisoformat(item["rendered_at"])
                     if item.get("rendered_at") else submitted_at),
-                read_at=item_read_at(item, submitted_at))
+                read_at=item_read_at(item))
             # mirror PR #181: a from-scratch full regen is no longer needed
             # once its first chunk is committed. Only a from-scratch chunk
             # (prev_profile_id None) satisfies the flag — a flag set while
@@ -775,7 +775,7 @@ def _apply_result(user, item, result, submitted_at):
             source_data_cutoff=cutoff, generation_type="integration",
             parent_profile_id=item["prev_profile_id"], batch=True,
             source_origin_stats=item.get("prev_origin_stats"),
-            read_at=item_read_at(item, submitted_at))
+            read_at=item_read_at(item))
         logger.info(f"User {user.id}: saved batch integration profile")
         # Integration = the batch rebuild finished for this user (#207).
         from backend.utils.notifications import notify_profile_ready
@@ -807,7 +807,7 @@ def _apply_merge(user, item, response, submitted_at):
         return None
     merged = _exports.save_merge(
         user, item["model_id"], response, base, version, batch=True,
-        read_at=item_read_at(item, submitted_at))
+        read_at=item_read_at(item))
     user.profile_batch_attempts = 0
     return _build_next_profile_request(
         user, allow_chunk=_exports.should_continue_chain(user, merged),
@@ -1021,8 +1021,9 @@ POLICY_BLOCK_NOTE = ("Stopped: the provider's content-policy filter "
 
 def _drop_read_before_deletion(user, item, result):
     """A collected item that read content the user deleted after it went
-    out ("Delete all my content", #590), or whose account is being
-    deleted: nothing is saved from it. A result the provider returned was
+    out ("Delete all my content", #590), or that read during a deletion
+    restored since, or whose account is being deleted: nothing is saved
+    from it (hidden_rows.corpus_changed). A result the provider returned was
     billed (a cancel can land after the request ran), so its cost row is
     written on the user, as for any other call (Peter, 2026-10-22: such
     results are dropped, "but their cost is logged"). The profile flags
@@ -1411,12 +1412,13 @@ def _poll_profile_batches():
             user = User.query.get(item["user_id"])
             if not user:
                 continue
-            if read_before_deletion(
-                    user.id, item_read_at(item, job.submitted_at)):
+            if corpus_changed(user.id, item_read_at(item)):
                 # The request read content the user then deleted ("Delete
-                # all my content", #590), or the account is being
-                # deleted: nothing is saved from it, and a billed result
-                # gets its cost row (Peter, 2026-10-22).
+                # all my content", #590), or read during a deletion she
+                # has restored since (the restored profile is the one in
+                # use), or the account is being deleted: nothing is saved
+                # from it, and a billed result gets its cost row (Peter,
+                # 2026-10-22).
                 _drop_read_before_deletion(user, item,
                                            results.get(item["custom_id"]))
                 if item.get("kind") in SET_ITEM_KINDS:
@@ -1447,7 +1449,7 @@ def _poll_profile_batches():
                     else:
                         intentions_mod.apply_intentions_item(
                             user, item, result,
-                            read_at=item_read_at(item, job.submitted_at))
+                            read_at=item_read_at(item))
                 except EmptyTruncatedOutputError as e:
                     # Refused (cut off before any text, #368): the cost row
                     # is written and nothing saved. Shown as "failed" in the

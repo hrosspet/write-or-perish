@@ -206,20 +206,59 @@ def read_before_deletion(user_id, read_at):
     return read_at is None or read_at <= cutoff
 
 
-def item_read_at(item, submitted_at=None):
-    """When a batch item read its input: its ``read_at``, ``rendered_at``
-    or ``built_at`` (ISO), else the job's submission, which follows the
-    render."""
+def read_during_restored_deletion(user_id, read_at):
+    """True when *read_at* falls inside a "Delete all my content" that was
+    restored since: after its first request (``first_requested_at``) and
+    up to its restore (``cancelled_at``). Such a job read the content as
+    it was during the deletion, the new writing only. After the restore
+    the old content is back and the restored profile is the one in use
+    (Peter, 2026-10-22: "Count the restored tip as the tip and drop the
+    profiles built since then"), so a profile, summary, intentions or
+    digest built from that read is not saved either (review of #630).
+    *read_at* None (unknown) counts as outside: an unknown read time
+    after a restore long ago must not drop everything."""
+    from sqlalchemy import or_
+    from backend.models import UserDataPurge
+    if user_id is None or read_at is None:
+        return False
+    return UserDataPurge.query.filter(
+        _user_is(user_id), UserDataPurge.status == "cancelled",
+        UserDataPurge.first_requested_at.isnot(None),
+        UserDataPurge.first_requested_at < read_at,
+        UserDataPurge.cancelled_at.isnot(None),
+        UserDataPurge.cancelled_at >= read_at,
+        or_(UserDataPurge.scope == "hidden",
+            UserDataPurge.delete_account.is_(True)),
+    ).first() is not None
+
+
+def corpus_changed(user_id, read_at):
+    """True when a document built from the user's whole corpus (profile,
+    recent context, intentions, digest) that read it at *read_at* must not
+    be saved: the content it read was deleted since
+    (``read_before_deletion``), or it read during a deletion that was
+    restored since (``read_during_restored_deletion``). The caller writes
+    the cost row of a billed call."""
+    return (read_before_deletion(user_id, read_at)
+            or read_during_restored_deletion(user_id, read_at))
+
+
+def item_read_at(item):
+    """When a batch item read its input: its ``read_at``, ``rendered_at``,
+    ``built_at`` or ``corpus_at`` (ISO), each taken before the read. None
+    when it has none: the job's submission is no stand-in, as it comes
+    after the read (review of #630), and an unknown read time counts as
+    before a request."""
     from datetime import datetime
     if isinstance(item, dict):
-        for key in ("read_at", "rendered_at", "built_at"):
+        for key in ("read_at", "rendered_at", "built_at", "corpus_at"):
             raw = item.get(key)
             if raw:
                 try:
                     return datetime.fromisoformat(raw)
                 except (TypeError, ValueError):
                     pass
-    return submitted_at
+    return None
 
 
 # ── The user saves the same thing again during the grace period ─────────
