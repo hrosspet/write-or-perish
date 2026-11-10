@@ -2613,18 +2613,44 @@ EXPORT_DEK_WINDOW = 400
 EXPORT_FLUSH_CHARS = 64 * 1024
 EXPORT_FLUSH_SECONDS = 2.0
 
+# Under the gevent worker the download shares its worker with other
+# requests, and it gives them a turn: once this many seconds of its own
+# work have passed, it sleeps EXPORT_PAUSE_SECONDS (#591). The sleep must
+# be longer than 0: a 0 s sleep is a queued loop callback, and the loop
+# polls sockets and timers only every 50 callbacks, so another request on
+# the worker waited up to 1.7 s (4 s in a second measurement) during an
+# export; with these values it waited 44 ms in the median, 56 ms at
+# most, and the export took no longer (local measurement, 2026-11-10).
+# While the export waits for the key service, the loop polls anyway.
+# The database queries block the worker while they run (the driver is
+# not made cooperative); each is one short statement.
+# INTRODUCED CONSTANTS.
+EXPORT_PAUSE_EVERY_SECONDS = 0.05
+EXPORT_PAUSE_SECONDS = 0.001
+
 
 class _Pieces:
-    """Text of the download gathered until it is worth sending."""
+    """Text of the download gathered until it is worth sending. Adding a
+    piece also gives the worker's other requests a turn when one is due
+    (EXPORT_PAUSE_EVERY_SECONDS)."""
 
     def __init__(self):
         self.parts = []
         self.size = 0
-        self.sent_at = time.monotonic()
+        self.sent_at = self.paused_at = time.monotonic()
 
     def add(self, text):
         self.parts.append(text)
         self.size += len(text)
+        self.turn()
+
+    def turn(self):
+        """Sleep EXPORT_PAUSE_SECONDS if EXPORT_PAUSE_EVERY_SECONDS passed
+        since the last pause: under the gevent worker, the worker's other
+        requests run meanwhile."""
+        if time.monotonic() - self.paused_at >= EXPORT_PAUSE_EVERY_SECONDS:
+            time.sleep(EXPORT_PAUSE_SECONDS)
+            self.paused_at = time.monotonic()
 
     def due(self):
         return bool(self.parts) and (
@@ -2731,10 +2757,11 @@ def iter_user_export(user):
     ``build_user_export_content(user, filter_ai_usage=False)``, or to
     NO_THREADS_TEXT where that returns None.
 
-    A piece is yielded once it is due (_Pieces). After each one the
-    generator sleeps 0 s: under the gevent worker that lets the worker's
-    other requests run between two pieces, which they could not while
-    one request built a whole archive."""
+    A piece is yielded once it is due (_Pieces). Every
+    EXPORT_PAUSE_EVERY_SECONDS of work the generator sleeps briefly
+    (_Pieces.turn): under the gevent worker that lets the worker's other
+    requests run during the export, which they could not while one
+    request built a whole archive."""
     roots = _export_roots(user.id)
     alive = _threads_with_alive_node(
         r.id for r in roots if r.deleted_at is not None)
@@ -2751,12 +2778,12 @@ def iter_user_export(user):
     versions = _ArtifactVersions(user, filter_ai_usage=False)
     for n in _pinning_entries(user.id, {r.id for r in kept}):
         versions.add_node(n)
+        out.turn()
     for line in versions.iter_lines(
             before_row=_DekLookahead(versions.rows())):
         out.add(line + "\n")
         if out.due():
             yield out.take()
-            time.sleep(0)
     del versions
 
     # Flat imported tweets render as compact runs (#276); a run's heading
@@ -2771,6 +2798,7 @@ def iter_user_export(user):
             Node.id.in_([r.id for r in batch]))}
         nodes = [loaded[r.id] for r in batch if r.id in loaded]
         prefetch_children(nodes)
+        out.turn()
         lookahead = _DekLookahead(_render_order(nodes, user.id))
         for i, row in enumerate(batch, start):
             node = loaded.get(row.id)
@@ -2803,11 +2831,9 @@ def iter_user_export(user):
                         out.add(piece)
                         if out.due():
                             yield out.take()
-                            time.sleep(0)
                     out.add("\n---\n\n")
             if out.due():
                 yield out.take()
-                time.sleep(0)
     if not rendered_any:
         # Every kept thread starts with an entry of the user's own, so
         # one always renders; the legacy path would return None here,
