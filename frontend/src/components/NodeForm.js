@@ -11,6 +11,7 @@ import SplitContentDialog, { NODE_CHAR_CAP } from "./SplitContentDialog";
 import PublicReplyDialog, { PUBLIC_REPLY_ACK_KEY } from "./PublicReplyDialog";
 import { useOnlineStatus } from "../hooks/useOnlineStatus";
 import { useToast } from "../contexts/ToastContext";
+import RecoveryBanner from './RecoveryBanner';
 import api from "../api";
 import { uploadFileInChunks } from "../utils/chunkedUpload";
 import {
@@ -202,6 +203,9 @@ const NodeForm = forwardRef(
     // Auto-populate form with draft when loaded
     useEffect(() => {
       if (isDraftLoaded && draft && draft.content) {
+        // A left-behind recording is offered in the banner instead (#389);
+        // its text comes into the box only if the user chooses Recover.
+        if (draft.session_id && draft.has_stored_chunks) return;
         // Auto-populate the form with draft content
         setContent(draft.content);
         setHasDraft(true);
@@ -211,19 +215,32 @@ const NodeForm = forwardRef(
     // Recovery: when a draft has stored (untranscribed) audio chunks,
     // trigger server-side transcription and poll for completion.
     //
-    // This still fires on its own, but only for a session nobody is
-    // recording: GET /drafts/ no longer returns a live session (#320), so
-    // what arrives here was left behind (reload, crash, navigating away
-    // mid-recording) and the transcript should come back into this box
-    // without a click. If the session turns out to be live after all (its
-    // tab resumed it), the server refuses (409) or reports `live`, and
-    // this view lets go of it instead of completing it.
+    // Only for a session nobody is recording: GET /drafts/ no longer
+    // returns a live session (#320), so what arrives here was left behind
+    // (reload, crash, navigating away mid-recording). The user is asked
+    // first, with the voice page's banner (#389); Recover starts this and
+    // the transcript comes into the box, Discard removes the recording.
+    // If the session turns out to be live after all (its tab resumed it),
+    // the server refuses (409) or reports `live`, and this view lets go of
+    // it instead of completing it.
+    const [recoveryOffered, setRecoveryOffered] = useState(false);
+    const contentRef = React.useRef(content);
+    contentRef.current = content;
     useEffect(() => {
       if (!isDraftLoaded || !draft) return;
       if (!draft.session_id || !draft.has_stored_chunks) return;
+      setRecoveryOffered(true);
+    }, [isDraftLoaded, draft]);
 
+    const handleRecoverRecording = useCallback(() => {
+      if (!draft) return;
+      setRecoveryOffered(false);
       setIsRecoveringAudio(true);
       setStreamingSessionId(draft.session_id);
+      // Text typed while the banner was up stays: the transcript goes after it.
+      const typedBefore = contentRef.current;
+      const withTyped = (transcript) =>
+        typedBefore.trim() ? `${typedBefore.replace(/\s+$/, '')}\n\n${transcript}` : transcript;
 
       const letGo = () => {
         setIsRecoveringAudio(false);
@@ -256,14 +273,14 @@ const NodeForm = forwardRef(
               }
 
               if (content) {
-                setContent(content);
+                setContent(withTyped(content));
               }
 
               if (streaming_status === 'completed' || streaming_status === 'failed') {
                 clearInterval(pollInterval);
                 setIsRecoveringAudio(false);
                 if (content) {
-                  saveDraft(content);
+                  saveDraft(withTyped(content));
                   setHasDraft(true);
                 }
               }
@@ -286,7 +303,34 @@ const NodeForm = forwardRef(
       };
 
       triggerRecovery();
-    }, [isDraftLoaded, draft]); // eslint-disable-line react-hooks/exhaustive-deps
+    }, [draft]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // Discard goes through the voice banner's path: it deletes the session,
+    // its chunk records and its audio folder. Only this one recording.
+    const handleDiscardRecording = useCallback(async () => {
+      if (!draft || !draft.session_id) return;
+      try {
+        await api.delete(`/drafts/streaming/${draft.session_id}/discard`);
+      } catch (err) {
+        console.error('[NodeForm] Failed to discard recording:', err);
+      }
+      setRecoveryOffered(false);
+      // The recording hid the plain typed draft of this place (GET returns
+      // the newest one): show it, so the next keystroke does not autosave
+      // over it. Text already typed in the box wins.
+      try {
+        const params = new URLSearchParams();
+        if (editMode && nodeId) params.append('node_id', nodeId);
+        if (!editMode && parentId) params.append('parent_id', parentId);
+        const res = await api.get(`/drafts/?${params.toString()}`);
+        if (res.data && res.data.content && !res.data.session_id) {
+          if (!contentRef.current.trim()) {
+            setContent(res.data.content);
+            setHasDraft(true);
+          }
+        }
+      } catch (_) { /* no typed draft */ }
+    }, [draft, editMode, nodeId, parentId]);
 
     // Handle discard draft
     const handleDiscardDraft = useCallback(() => {
@@ -490,10 +534,11 @@ const NodeForm = forwardRef(
         // on the independent Auto-generate toggle — when it's off, the
         // backend skips the LLM and returns only conversation/user IDs,
         // letting the user click LLM Response manually later after any
-        // edits or follow-up nodes they want to add first.
+        // edits or follow-up nodes they want to add first. An entry above
+        // the cap goes here too: the server splits it into parts and puts
+        // the reply under the last one.
         if (useAgenticPrompt && !editMode && !uploadedFile
-            && !streamingSessionId && !parentId && aiUsage !== 'none'
-            && content.length <= NODE_CHAR_CAP) {
+            && !streamingSessionId && !parentId && aiUsage !== 'none') {
           const res = await api.post('/textmode/start', {
             content,
             privacy_level: privacyLevel,
@@ -683,8 +728,10 @@ const NodeForm = forwardRef(
           && response?.data?.id;
         if (shouldAutoGenerate) {
           try {
+            // A long entry is saved as a chain of parts: the reply goes
+            // under the last one (tip_id), so it reads the whole entry.
             const llmRes = await api.post(
-              `/nodes/${response.data.id}/llm`,
+              `/nodes/${response.data.tip_id || response.data.id}/llm`,
               { source_mode: 'textmode' },
             );
             succeed({
@@ -762,6 +809,7 @@ const NodeForm = forwardRef(
         <textarea
           ref={textareaRef}
           value={content}
+          readOnly={isRecoveringAudio}
           onChange={(e) => {
             const newContent = e.target.value;
             setContent(newContent);
@@ -970,6 +1018,26 @@ const NodeForm = forwardRef(
                 ? 'AI will reply automatically after you submit.'
                 : 'No AI reply. You can click LLM Response on the created node later.'}
             </div>
+          </div>
+        )}
+
+        {recoveryOffered && draft && (
+          <div style={{
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            padding: '16px 12px',
+            border: '1px solid var(--border)',
+            borderRadius: '6px',
+            marginBottom: '8px',
+          }}>
+            <RecoveryBanner
+              draft={draft}
+              note="Recover turns the recording into text in this box."
+              continueLabel="Recover"
+              onContinue={handleRecoverRecording}
+              onDiscard={handleDiscardRecording}
+            />
           </div>
         )}
 

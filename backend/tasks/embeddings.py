@@ -24,6 +24,7 @@ from backend.extensions import db
 from backend.models import (
     ExternalItem, ExternalItemEmbedding, Node, NodeEmbedding, User,
 )
+from backend.utils import pgvector
 from backend.utils import run_locks
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.embeddings import (
@@ -139,6 +140,24 @@ def _candidate_external_items(limit):
         .limit(limit)
         .all()
     )
+
+
+def _sync_pgvector_copies():
+    """pgvector copies (#331): what the sweep embedded is ranked in the
+    database from the next search on. Nothing to do until `flask
+    pgvector-enable --apply` has run. A failure (e.g. the copies were
+    dropped, the off switch) is logged once and this process stops using
+    pgvector until it restarts, as after a failed ranking; the rows it
+    embedded stay with the Python path."""
+    if not pgvector.enabled():
+        return
+    try:
+        pgvector.sync_copies(limit=pgvector.SWEEP_SYNC_LIMIT)
+    except Exception:
+        db.session.rollback()
+        logger.exception(
+            "pgvector copy sync failed; this process ranks in Python")
+        pgvector.turn_off()
 
 
 def _insert_absent(model, unique_col, values):
@@ -269,6 +288,8 @@ def sweep(limit=SWEEP_BATCH_SIZE):
                     vector=pack_vector(vector))):
                 ext_embedded += 1
         db.session.commit()
+
+    _sync_pgvector_copies()
 
     logger.info(
         "Embedding sweep: %d nodes embedded, %d external items "

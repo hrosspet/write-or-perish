@@ -95,7 +95,8 @@ final class DictationController {
             do {
                 let body: JSONValue = .object(["parent_id": .optional(parentId),
                                                "privacy_level": .string(privacy),
-                                               "ai_usage": .string(aiUsage)])
+                                               "ai_usage": .string(aiUsage),
+                                               "device_key": .string(RecordingDevice.key)])
                 let answer: StreamingInitResponse = try await app.api.post(APIPath.streamingInit, json: body)
                 sid = answer.sessionId
             } catch {
@@ -170,9 +171,13 @@ final class DictationController {
     private func listen(_ sid: String, _ gen: Int) {
         guard let app else { return }
         let tracker = LastChunkTracker()
+        // The device key (#388): a session another device continued answers
+        // `session_taken_over` and ends the stream.
         let stream = app.sse.subscribe(path: APIPath.sseDraftTranscription(sid),
+                                       query: [URLQueryItem(name: "device_key", value: RecordingDevice.key)],
                                        options: .init(stallTimeout: 45, reconnectDelay: 3, maxReconnects: 20,
-                                                      terminalEvents: ["all_complete", "close"]),
+                                                      terminalEvents: ["all_complete", "close",
+                                                                       RecordingDevice.takenOverCode]),
                                        resumeQuery: { tracker.resumeQuery() })
         sseTask = Task { [weak self] in
             do {
@@ -187,6 +192,11 @@ final class DictationController {
                         if self.state == .finalizing, let content = done.content {
                             self.complete(sid, content: content)
                         }
+                        return
+                    case .other(let name) where name == RecordingDevice.takenOverCode:
+                        // #388: another device continued this recording; the
+                        // phone learns it here even while paused.
+                        self.fatalUpload(RecordingDevice.takenOverMessage)
                         return
                     default:
                         continue
@@ -231,6 +241,7 @@ final class DictationController {
             guard gen == self.generation else { return }
             self.elapsed = recorder.elapsed
             if let fatal = outcome.fatalMessage {
+                if fatal == RecordingDevice.takenOverMessage { recorder.forget(sessionId: sid) }
                 app.audio.sounds.playError()
                 self.fail(fatal)
                 return
@@ -250,11 +261,18 @@ final class DictationController {
             }
             do {
                 var request = APIRequest.json(.post, APIPath.streamingFinalize(sid),
-                                              .object(["total_chunks": .int(outcome.totalForFinalize)]))
+                                              .object(["total_chunks": .int(outcome.totalForFinalize),
+                                                       "device_key": .string(RecordingDevice.key)]))
                 request.timeout = 120
                 _ = try await app.api.data(for: request)
             } catch let error as APIError where VoiceTurnController.isAlreadyFinalizing(error) {
                 // A retried finalize whose first answer was lost.
+            } catch let error as APIError where error.code == RecordingDevice.takenOverCode {
+                // #388: another device continued the session.
+                guard gen == self.generation else { return }
+                app.audio.sounds.playError()
+                self.fail(RecordingDevice.takenOverMessage)
+                return
             } catch {
                 guard gen == self.generation else { return }
                 app.audio.sounds.playError()
@@ -382,6 +400,11 @@ final class DictationController {
         guard state == .recording else { return }
         generation += 1
         recorder?.cancel()
+        // #388: the session is another device's now; its upload state here
+        // would drop the chunks of a later continue on this phone.
+        if message == RecordingDevice.takenOverMessage, let sid = sessionId {
+            recorder?.forget(sessionId: sid)
+        }
         app?.audio.session.deactivate()
         app?.audio.sounds.playError()
         fail(message)

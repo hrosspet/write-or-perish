@@ -7,6 +7,7 @@ sync_twitter_bookmarks: pull the user's X bookmarks via their connected
 OAuth account (pay-per-use X API; env-gated by X_CLIENT_ID). Refreshes
 the access token when expired.
 """
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 import time
 
@@ -209,197 +210,261 @@ def _mark_revoked(account, why):
     return {"status": "revoked"}
 
 
+# One bookmark sync per X connection at a time (#390). A second sync that
+# started while one ran (the nightly beat plus "Sync now", or two workers)
+# read the same last_synced_at / sync_incomplete state and could write
+# last_synced_at / clear sync_incomplete after the first had set it, so the
+# next sync's resume marker no longer matched what was imported.
+BOOKMARK_SYNC_LOCK_PREFIX = "loore:x_bookmark_sync:lock:"
+# Longer than the task's hard time limit (celery_app: 3600 s), so a worker
+# that dies mid-sync cannot block this account's syncs for longer than that.
+BOOKMARK_SYNC_LOCK_TTL = 3900   # seconds
+
+
+def _lock_redis():
+    import redis
+    return redis.Redis.from_url(
+        flask_app.config.get("CELERY_BROKER_URL",
+                             "redis://localhost:6379/0"),
+        socket_connect_timeout=2)
+
+
+@contextmanager
+def bookmark_sync_lock(user_id):
+    """Same pattern as recent_context.recent_context_batch_lock: a
+    non-blocking acquire with a TTL; yields False when another sync of this
+    user's X connection holds it (the caller skips), True when acquired or
+    when Redis is unreachable (tests, local: run unlocked, as before). The
+    release only deletes this sync's own lock, in case the TTL ran out and
+    another sync took it. Keyed by user (one X connection per user), not by
+    the account row, so deleting the row mid-sync (Disconnect X) does not
+    affect the lock."""
+    lock = None
+    try:
+        lock = _lock_redis().lock(
+            f"{BOOKMARK_SYNC_LOCK_PREFIX}{user_id}",
+            timeout=BOOKMARK_SYNC_LOCK_TTL)
+        acquired = bool(lock.acquire(blocking=False))
+    except Exception as e:  # no Redis -> run unlocked
+        logger.warning("X bookmark sync lock unavailable (%s); "
+                       "running unlocked", e)
+        lock, acquired = None, True
+    if not acquired:
+        yield False
+        return
+    try:
+        yield True
+    finally:
+        if lock is not None:
+            try:
+                lock.release()
+            except Exception as e:
+                logger.warning("X bookmark sync lock release failed "
+                               "(%s); it expires after its TTL", e)
+
+
 @celery.task(name='backend.tasks.external_sync.sync_twitter_bookmarks',
              bind=True)
 def sync_twitter_bookmarks(self, user_id, max_items=800):
     with flask_app.app_context():
-        from backend.utils.hidden_rows import writing_on_hold
-        if writing_on_hold(user_id):
-            # "Delete all my writing" is waiting or running (#268): the
-            # sync would bring back the saved references it hid.
-            return {"status": "on_hold"}
-        account = ExternalAccount.query.filter_by(
-            user_id=user_id, provider="twitter").first()
-        if account is None or not account.get_access_token():
-            return {"status": "not_connected"}
-        if account.user is not None and account.user.deleted_at is not None:
-            # A deleted account in its 30 days (#269): a sync queued
-            # before the deletion does not call X for it.
-            return {"status": "account_deleted"}
-        if account.revoked_at is not None:
-            return {"status": "revoked"}
+        with bookmark_sync_lock(user_id) as ok:
+            if not ok:
+                logger.info("X bookmarks sync for user %s skipped: "
+                            "another sync of this account is running",
+                            user_id)
+                return {"status": "already_running"}
+            return _sync_twitter_bookmarks(user_id, max_items)
 
-        client_id = flask_app.config.get("X_CLIENT_ID")
-        # Refresh ahead of expiry when we can
-        if (client_id and account.token_expires_at
-                and account.token_expires_at
-                < datetime.utcnow() + timedelta(minutes=5)
-                and account.get_refresh_token()):
-            try:
-                tokens = x_refresh_access_token(
-                    client_id, account.get_refresh_token(),
-                    flask_app.config.get("X_CLIENT_SECRET"))
-            except requests.HTTPError as exc:
-                code = (exc.response.status_code
-                        if exc.response is not None else None)
-                error, description = _oauth_error(exc)
-                if _grant_is_dead(code, error, description):
-                    return _mark_revoked(
-                        account, f"refresh HTTP {code} {error}")
-                # Not this user's grant — ours, or X's. Fail loudly
-                # rather than disconnecting a user who did nothing and
-                # can fix nothing by reconnecting (#313).
-                logger.error(
-                    "X token refresh for user %s failed with HTTP %s "
-                    "%s: %s — NOT parking the account, this is not the "
-                    "user's grant", account.user_id, code,
-                    error or "(no error body)", description[:200])
-                raise
-            account.set_tokens(
-                tokens["access_token"], tokens.get("refresh_token"))
-            if tokens.get("expires_in"):
-                account.token_expires_at = (
-                    datetime.utcnow()
-                    + timedelta(seconds=int(tokens["expires_in"])))
-            db.session.commit()
 
-        # Early-stop pagination: bookmarks arrive newest-bookmarked-first,
-        # so once a whole page produced nothing new, the rest is already
-        # imported — stop instead of paying for the tail. Page-wise (not
-        # first-known-id) because a re-bookmarked old tweet jumps to the
-        # top and would otherwise mask newer items below it. Pages start
-        # small and grow while all-new (x_fetch_bookmark_pages); the page
-        # that reaches known bookmarks freezes the size (send(False)), so
-        # the page that ends a night is a cheap one.
-        # X bills pay-per-use per RETURNED POST (#271), not per request:
-        # a page of N bookmarks costs N post reads, an empty page nothing.
-        #
-        # Except after a sync that did not finish (#310). The early stop
-        # assumes everything below a known page was imported by a sync
-        # that ran to its end. A sync cut off by a 429, a 5xx or a deploy
-        # killing the worker, while it was still storing new bookmarks,
-        # leaves its head imported and the rest missing; stopping at that
-        # head would skip the rest for good. The sync_incomplete marker
-        # records such a sync. Two cases:
-        #
-        # - No sync has finished yet (last_synced_at is None): a first
-        #   import. It reads to the end or to max_items (X's own cap),
-        #   re-reading the imported head once: at most max_items posts.
-        # - A sync has finished before: a RESUME. Bookmarks saved at or
-        #   before last_synced_at (set only when a sync reaches its end)
-        #   came in through a finished sync, so everything below them is
-        #   imported too. The resume reads past pages of bookmarks saved
-        #   since then, and stops at the first page whose bookmarks were
-        #   all saved at or before last_synced_at. Its cost is the
-        #   nightly ceiling with N = the bookmarks since the last
-        #   finished sync (see X_BOOKMARKS_FIRST_PAGE_SIZE): pages grow
-        #   while they hold no such old bookmark and freeze once one
-        #   appears, so the closing page stays small. A sync that fails
-        #   at the same point every night pays that again each night,
-        #   not a read to the end.
-        #
-        # In all modes, a page on which X returned nothing ends the sync.
-        read_to_end = account.last_synced_at is None
-        resume_cutoff = (account.last_synced_at
-                         if account.sync_incomplete and not read_to_end
-                         else None)
-        created = skipped = requests_made = posts_read = 0
+def _sync_twitter_bookmarks(user_id, max_items):
+    """The sync itself; runs in an app context, under bookmark_sync_lock."""
+    from backend.utils.hidden_rows import writing_on_hold
+    if writing_on_hold(user_id):
+        # "Delete all my writing" is waiting or running (#268): the
+        # sync would bring back the saved references it hid.
+        return {"status": "on_hold"}
+    account = ExternalAccount.query.filter_by(
+        user_id=user_id, provider="twitter").first()
+    if account is None or not account.get_access_token():
+        return {"status": "not_connected"}
+    if account.user is not None and account.user.deleted_at is not None:
+        # A deleted account in its 30 days (#269): a sync queued
+        # before the deletion does not call X for it.
+        return {"status": "account_deleted"}
+    if account.revoked_at is not None:
+        return {"status": "revoked"}
 
-        def _log_cost():
-            """One APICostLog row for the pages X returned — also when the
-            sync then fails (429, 5xx, 401): X billed every page that
-            arrived, and a dropped row under-counts by up to a page of
-            posts. The failing request itself returned nothing, so it
-            costs nothing. Auditable against the developer-portal bill:
-            N posts read over M pages."""
-            if requests_made:
-                db.session.add(APICostLog(
-                    user_id=user_id,
-                    model_id="x-api/bookmarks",
-                    request_type="x_bookmark_sync",
-                    request_ref=f"posts:{posts_read}/pages:{requests_made}",
-                    input_tokens=0,
-                    output_tokens=0,
-                    cost_microdollars=(
-                        posts_read * X_POST_READ_COST_MICRODOLLARS),
-                ))
-
-        pages = x_fetch_bookmark_pages(
-            account.get_access_token(), account.external_user_id,
-            max_items=max_items)
-        grow = None
+    client_id = flask_app.config.get("X_CLIENT_ID")
+    # Refresh ahead of expiry when we can
+    if (client_id and account.token_expires_at
+            and account.token_expires_at
+            < datetime.utcnow() + timedelta(minutes=5)
+            and account.get_refresh_token()):
         try:
-            while True:
-                try:
-                    page, returned = pages.send(grow)
-                except StopIteration:
-                    break
-                requests_made += 1
-                posts_read += returned
-                if page:
-                    # Rides _upsert_items' commit, so it is stored with
-                    # the page's rows: an exception or a killed worker
-                    # after this point leaves it set for the next sync.
-                    # Cleared below only when the sync reaches its end.
-                    account.sync_incomplete = True
-                page_created, page_skipped = _upsert_items(
-                    user_id, "twitter_bookmark", page)
-                created += page_created
-                skipped += page_skipped
-                if returned == 0:
-                    break
-                if read_to_end:
-                    grow = True
-                elif resume_cutoff is not None:
-                    ids = {item["external_id"] for item in page}
-                    old = _saved_by(user_id, ids, resume_cutoff)
-                    if ids and old == len(ids):
-                        break
-                    grow = old == 0
-                else:
-                    if page_created == 0:
-                        break
-                    grow = page_skipped == 0
-        except Exception as exc:
-            # Pages already upserted are committed (_upsert_items commits
-            # per page); this only discards a half-applied page from a DB
-            # failure, so the cost row can be written on a clean session.
-            # If the database itself is what failed, the cost row cannot
-            # be written either: log that and let the ORIGINAL error
-            # propagate rather than replacing it with the commit's.
-            try:
-                db.session.rollback()
-                _log_cost()
-                db.session.commit()
-            except Exception:
-                logger.exception(
-                    "X bookmarks sync for user %s: could not log the cost "
-                    "of %d posts over %d pages after the sync failed",
-                    user_id, posts_read, requests_made)
-                db.session.rollback()
+            tokens = x_refresh_access_token(
+                client_id, account.get_refresh_token(),
+                flask_app.config.get("X_CLIENT_SECRET"))
+        except requests.HTTPError as exc:
             code = (exc.response.status_code
-                    if isinstance(exc, requests.HTTPError)
-                    and exc.response is not None else None)
-            # 401 = token invalidated without a refresh in between. 403 is
-            # NOT revocation (usually an API-tier/permissions problem on
-            # our side) — let it raise so it shows up as an operator error.
-            if code == 401:
-                return _mark_revoked(account, "bookmarks fetch HTTP 401")
+                    if exc.response is not None else None)
+            error, description = _oauth_error(exc)
+            if _grant_is_dead(code, error, description):
+                return _mark_revoked(
+                    account, f"refresh HTTP {code} {error}")
+            # Not this user's grant — ours, or X's. Fail loudly
+            # rather than disconnecting a user who did nothing and
+            # can fix nothing by reconnecting (#313).
+            logger.error(
+                "X token refresh for user %s failed with HTTP %s "
+                "%s: %s — NOT parking the account, this is not the "
+                "user's grant", account.user_id, code,
+                error or "(no error body)", description[:200])
             raise
-        # Only a sync that ran to its end gets here, so this is what
-        # ends the first-import and resume modes above. Every row this
-        # sync stored is committed by now, so a later resume counts all
-        # of them as saved at or before this time.
-        account.last_synced_at = datetime.utcnow()
-        account.sync_incomplete = None
-        account.last_sync_created = created
-        _log_cost()
+        account.set_tokens(
+            tokens["access_token"], tokens.get("refresh_token"))
+        if tokens.get("expires_in"):
+            account.token_expires_at = (
+                datetime.utcnow()
+                + timedelta(seconds=int(tokens["expires_in"])))
         db.session.commit()
-        logger.info("X bookmarks sync for user %s: %d new, %d known, "
-                    "%d posts read over %d API requests", user_id, created,
-                    skipped, posts_read, requests_made)
-        return {"status": "ok", "created": created, "skipped": skipped,
-                "requests": requests_made, "posts_read": posts_read}
+
+    # Early-stop pagination: bookmarks arrive newest-bookmarked-first,
+    # so once a whole page produced nothing new, the rest is already
+    # imported — stop instead of paying for the tail. Page-wise (not
+    # first-known-id) because a re-bookmarked old tweet jumps to the
+    # top and would otherwise mask newer items below it. Pages start
+    # small and grow while all-new (x_fetch_bookmark_pages); the page
+    # that reaches known bookmarks freezes the size (send(False)), so
+    # the page that ends a night is a cheap one.
+    # X bills pay-per-use per RETURNED POST (#271), not per request:
+    # a page of N bookmarks costs N post reads, an empty page nothing.
+    #
+    # Except after a sync that did not finish (#310). The early stop
+    # assumes everything below a known page was imported by a sync
+    # that ran to its end. A sync cut off by a 429, a 5xx or a deploy
+    # killing the worker, while it was still storing new bookmarks,
+    # leaves its head imported and the rest missing; stopping at that
+    # head would skip the rest for good. The sync_incomplete marker
+    # records such a sync. Two cases:
+    #
+    # - No sync has finished yet (last_synced_at is None): a first
+    #   import. It reads to the end or to max_items (X's own cap),
+    #   re-reading the imported head once: at most max_items posts.
+    # - A sync has finished before: a RESUME. Bookmarks saved at or
+    #   before last_synced_at (set only when a sync reaches its end)
+    #   came in through a finished sync, so everything below them is
+    #   imported too. The resume reads past pages of bookmarks saved
+    #   since then, and stops at the first page whose bookmarks were
+    #   all saved at or before last_synced_at. Its cost is the
+    #   nightly ceiling with N = the bookmarks since the last
+    #   finished sync (see X_BOOKMARKS_FIRST_PAGE_SIZE): pages grow
+    #   while they hold no such old bookmark and freeze once one
+    #   appears, so the closing page stays small. A sync that fails
+    #   at the same point every night pays that again each night,
+    #   not a read to the end.
+    #
+    # In all modes, a page on which X returned nothing ends the sync.
+    read_to_end = account.last_synced_at is None
+    resume_cutoff = (account.last_synced_at
+                     if account.sync_incomplete and not read_to_end
+                     else None)
+    created = skipped = requests_made = posts_read = 0
+
+    def _log_cost():
+        """One APICostLog row for the pages X returned — also when the
+        sync then fails (429, 5xx, 401): X billed every page that
+        arrived, and a dropped row under-counts by up to a page of
+        posts. The failing request itself returned nothing, so it
+        costs nothing. Auditable against the developer-portal bill:
+        N posts read over M pages."""
+        if requests_made:
+            db.session.add(APICostLog(
+                user_id=user_id,
+                model_id="x-api/bookmarks",
+                request_type="x_bookmark_sync",
+                request_ref=f"posts:{posts_read}/pages:{requests_made}",
+                input_tokens=0,
+                output_tokens=0,
+                cost_microdollars=(
+                    posts_read * X_POST_READ_COST_MICRODOLLARS),
+            ))
+
+    pages = x_fetch_bookmark_pages(
+        account.get_access_token(), account.external_user_id,
+        max_items=max_items)
+    grow = None
+    try:
+        while True:
+            try:
+                page, returned = pages.send(grow)
+            except StopIteration:
+                break
+            requests_made += 1
+            posts_read += returned
+            if page:
+                # Rides _upsert_items' commit, so it is stored with
+                # the page's rows: an exception or a killed worker
+                # after this point leaves it set for the next sync.
+                # Cleared below only when the sync reaches its end.
+                account.sync_incomplete = True
+            page_created, page_skipped = _upsert_items(
+                user_id, "twitter_bookmark", page)
+            created += page_created
+            skipped += page_skipped
+            if returned == 0:
+                break
+            if read_to_end:
+                grow = True
+            elif resume_cutoff is not None:
+                ids = {item["external_id"] for item in page}
+                old = _saved_by(user_id, ids, resume_cutoff)
+                if ids and old == len(ids):
+                    break
+                grow = old == 0
+            else:
+                if page_created == 0:
+                    break
+                grow = page_skipped == 0
+    except Exception as exc:
+        # Pages already upserted are committed (_upsert_items commits
+        # per page); this only discards a half-applied page from a DB
+        # failure, so the cost row can be written on a clean session.
+        # If the database itself is what failed, the cost row cannot
+        # be written either: log that and let the ORIGINAL error
+        # propagate rather than replacing it with the commit's.
+        try:
+            db.session.rollback()
+            _log_cost()
+            db.session.commit()
+        except Exception:
+            logger.exception(
+                "X bookmarks sync for user %s: could not log the cost "
+                "of %d posts over %d pages after the sync failed",
+                user_id, posts_read, requests_made)
+            db.session.rollback()
+        code = (exc.response.status_code
+                if isinstance(exc, requests.HTTPError)
+                and exc.response is not None else None)
+        # 401 = token invalidated without a refresh in between. 403 is
+        # NOT revocation (usually an API-tier/permissions problem on
+        # our side) — let it raise so it shows up as an operator error.
+        if code == 401:
+            return _mark_revoked(account, "bookmarks fetch HTTP 401")
+        raise
+    # Only a sync that ran to its end gets here, so this is what
+    # ends the first-import and resume modes above. Every row this
+    # sync stored is committed by now, so a later resume counts all
+    # of them as saved at or before this time.
+    account.last_synced_at = datetime.utcnow()
+    account.sync_incomplete = None
+    account.last_sync_created = created
+    _log_cost()
+    db.session.commit()
+    logger.info("X bookmarks sync for user %s: %d new, %d known, "
+                "%d posts read over %d API requests", user_id, created,
+                skipped, posts_read, requests_made)
+    return {"status": "ok", "created": created, "skipped": skipped,
+            "requests": requests_made, "posts_read": posts_read}
 
 
 # The nightly sync fires in each user's OWN night: the hourly beat gate

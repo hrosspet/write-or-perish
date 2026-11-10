@@ -266,9 +266,9 @@ def test_voice_turn_is_spoken_through_a_tool_round(voice):
               "### Completed\n- old task\n### Note\nNice work.\n"
               "## Later\nThe rest.")
     _LiveProvider.reset([
-        (["Let me check your list.", look, _Tool("read_todo")],
+        (["Let me check your list.", look, _Tool("read_artifact")],
          _resp("Let me check your list.", tool_calls=[{
-             "id": "t1", "name": "read_todo", "input": {}}])),
+             "id": "t1", "name": "read_artifact", "input": {"kind": "todo"}}])),
         ([answer[:9], answer[9:40], answer[40:]], _resp(answer)),
     ])
     _run(user_node, llm_node, alice, mode="voice")
@@ -331,8 +331,8 @@ def test_voice_turn_marks_where_the_wait_goes(voice, monkeypatch):
 def test_textless_tool_round_speaks_its_fallback_line(voice):
     alice, _, user_node, llm_node = _build_chain("voice")
     _LiveProvider.reset([
-        ([_Tool("read_todo")], _resp("", tool_calls=[{
-            "id": "t1", "name": "read_todo", "input": {}}])),
+        ([_Tool("read_artifact")], _resp("", tool_calls=[{
+            "id": "t1", "name": "read_artifact", "input": {"kind": "todo"}}])),
         (["Here it is."], _resp("Here it is.")),
     ])
     _run(user_node, llm_node, alice, mode="voice")
@@ -426,4 +426,64 @@ def test_node_deleted_mid_turn_stops_its_tts_with_a_warning(
     records = [r for r in caplog.records if r.name == tts_stream.__name__]
     assert [r.levelno for r in records] == [logging.WARNING]
     assert "deleted mid-generation" in records[0].getMessage()
+    assert _fresh(node.id).tts_task_status == "failed"
+
+
+def test_voice_chunks_are_billed_as_they_are_made(voice):
+    """#526: one cost row per chunk, on the turn's user, and each row
+    records what its audio was made from, as the batch path does."""
+    from backend.tasks.tts import tts_chunk_digest
+    alice, _, user_node, llm_node = _build_chain("voice")
+    answer = "# Plan\nFirst do this. Then that.\n\n## Later\nThe rest."
+    _LiveProvider.reset([([answer], _resp(answer))])
+    _run(user_node, llm_node, alice, mode="voice")
+
+    rows = _chunks(llm_node.id)
+    assert len(rows) == 2
+    costs = APICostLog.query.filter_by(request_type="tts").order_by(
+        APICostLog.id).all()
+    assert [c.audio_duration_seconds for c in costs] == [
+        r.duration for r in rows]
+    assert {c.user_id for c in costs} == {alice.id}
+    assert [r.text_digest for r in rows] == [
+        tts_chunk_digest(text, end) for text, end in _FakeAudio.spoken]
+
+
+@pytest.mark.parametrize("after_first", ["tts_fails", "node_deleted"])
+def test_a_voice_chunk_stays_billed_when_the_node_never_finishes(
+        live, tmp_path, after_first):
+    """#526: the cost used to be logged when the node finished, so a
+    later chunk's failure (whose rollback also took any pending row) or
+    the node's deletion left the audio already made unrecorded."""
+    from datetime import datetime
+    alice, _, user_node, llm_node = _build_chain("voice")
+    node = _fresh(llm_node.id)
+    node.tts_task_status = "processing"
+    _db.session.commit()
+
+    class _Audio(_FakeAudio):
+        def synthesize(self, text, path, section_end, mark=None):
+            if _FakeAudio.spoken and after_first == "tts_fails":
+                raise RuntimeError("every attempt failed")
+            segment = super().synthesize(text, path, section_end, mark)
+            if after_first == "node_deleted":
+                _fresh(node.id).deleted_at = datetime.utcnow()
+                _db.session.commit()
+            return segment
+
+    _FakeAudio.spoken = []
+    turn = tts_stream.VoiceTTSStream(
+        live, alice.id, tmp_path, audio=_Audio(), threaded=False)
+    speech = turn.open_node(node)
+    speech.feed("# Plan\nFirst do this. Then that.\n\n## Later\nThe rest.")
+    speech.release()
+    turn.finish()
+
+    _db.session.expire_all()
+    assert len(_FakeAudio.spoken) == 1
+    first = _chunks(node.id)[0]
+    assert first.status == "completed"
+    (cost,) = APICostLog.query.filter_by(request_type="tts").all()
+    assert cost.user_id == alice.id
+    assert cost.audio_duration_seconds == first.duration
     assert _fresh(node.id).tts_task_status == "failed"

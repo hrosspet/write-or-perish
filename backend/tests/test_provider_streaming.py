@@ -558,13 +558,13 @@ def test_openai_listener_gets_text_and_tool_start(providers, monkeypatch):
         _event("response.output_text.delta", delta="h"),
         _event("response.output_text.delta", delta="i"),
         _event("response.output_item.added",
-               item=_event("function_call", name="read_todo")),
+               item=_event("function_call", name="read_artifact")),
         _event("response.output_item.added", item=_event("reasoning")),
         _event("response.completed", response=_oai_response()),
     ]], []))
     providers.LLMProvider._call_openai("gpt-x", MSGS, "k", listener=listener)
     assert listener.events == [("text", "h"), ("text", "i"),
-                               ("tool", "read_todo")]
+                               ("tool", "read_artifact")]
 
 
 def test_openai_refused_restart_raises(providers, monkeypatch):

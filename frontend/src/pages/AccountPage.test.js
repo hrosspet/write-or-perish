@@ -153,3 +153,67 @@ test('Disconnect X calls the removal route', async () => {
   await screen.findByText(/X disconnected/);
   expect(mockDelete).toHaveBeenCalledWith('/dashboard/x');
 });
+
+// Disconnect X revokes Loore's access at X (#494). Without a bookmark
+// connection it is one click; the outcome says whether X confirmed, and
+// gives the steps to remove Loore on X when it didn't.
+test('Disconnect X says when Loore removed its access on X', async () => {
+  mockDelete.mockResolvedValue({ data: {
+    twitter_login: false, x_access_removed: true, bookmark_sync: null,
+  } });
+  renderPage({ twitter_login: true, twitter_handle: 'alice_on_x' });
+  fireEvent.click(screen.getByRole('button', { name: 'Disconnect X' }));
+  await screen.findByText(/Loore has removed its access on X/);
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(screen.queryByText(/Connected apps/)).toBeNull();
+});
+
+test('Disconnect X gives the steps on X when the revoke was not confirmed', async () => {
+  mockDelete.mockResolvedValue({ data: {
+    twitter_login: false, x_access_removed: false, bookmark_sync: null,
+  } });
+  renderPage({ twitter_login: true, twitter_handle: 'alice_on_x' });
+  fireEvent.click(screen.getByRole('button', { name: 'Disconnect X' }));
+  await screen.findByText(/X may still list Loore.*Connected apps/);
+});
+
+describe('Disconnect X with a bookmark connection', () => {
+  const withBookmarks = { twitter_login: true, twitter_handle: 'alice_on_x',
+    data_deletion: { x_connected: true } };
+
+  test('asks first; stopping the sync too sends the choice', async () => {
+    mockDelete.mockResolvedValue({ data: {
+      twitter_login: false, x_access_removed: true, bookmark_sync: 'ended',
+    } });
+    renderPage(withBookmarks);
+    fireEvent.click(screen.getByRole('button', { name: 'Disconnect X' }));
+    expect(screen.getByRole('dialog')).toBeTruthy();
+    expect(mockDelete).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: /Disconnect X and stop bookmark sync/ }));
+
+    await screen.findByText(/Bookmark sync has stopped.*Loore has removed its access on X/);
+    expect(mockDelete).toHaveBeenCalledWith('/dashboard/x', { data: { end_bookmark_sync: true } });
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  test('keeping the sync sends no choice and says X still lists Loore', async () => {
+    mockDelete.mockResolvedValue({ data: {
+      twitter_login: false, x_access_removed: false, bookmark_sync: 'kept',
+    } });
+    renderPage(withBookmarks);
+    fireEvent.click(screen.getByRole('button', { name: 'Disconnect X' }));
+    fireEvent.click(screen.getByRole('button', { name: /keep bookmark sync/ }));
+
+    await screen.findByText(/bookmarks keep syncing, so X still lists Loore/);
+    expect(mockDelete).toHaveBeenCalledWith('/dashboard/x');
+  });
+
+  test('Cancel changes nothing', () => {
+    renderPage(withBookmarks);
+    fireEvent.click(screen.getByRole('button', { name: 'Disconnect X' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(mockDelete).not.toHaveBeenCalled();
+  });
+});

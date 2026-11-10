@@ -660,17 +660,19 @@ private struct ToolCallsDisclosure: View {
             }
         case "update_ai_preferences":
             Text("Preferences updated")
+        // The todo list is read with read_artifact since #218; read_todo is
+        // the tool before it, still in older replies.
+        case "read_todo", "read_artifact" where kind == "todo":
+            HStack(spacing: 4) {
+                Text("Read")
+                linkButton("todo list") { app.open(.todo) }
+            }
         case "update_artifact", "read_artifact":
             HStack(spacing: 4) {
                 Text(tc.name == "read_artifact" ? "Read artifact" : ((tc["created"]?.boolValue ?? false) ? "Created artifact" : "Updated artifact"))
                 if let kind {
                     linkButton(kind, mono: true) { app.open(.artifacts(kind: kind)) }
                 }
-            }
-        case "read_todo":
-            HStack(spacing: 4) {
-                Text("Read")
-                linkButton("todo list") { app.open(.todo) }
             }
         case "semantic_search":
             Text("Searched archive & references" + (tc["query"]?.stringValue.map { " — “\($0)”" } ?? ""))

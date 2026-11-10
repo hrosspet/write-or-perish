@@ -2,7 +2,7 @@
 turns.
 
 A reply run without a mode (single-shot) leaves its retrieval results
-(read_artifact, read_todo, read_full, semantic_search) on the node for
+(read_artifact, the todo list included, read_full, semantic_search) on the node for
 the next turn to deliver, and its action outcomes (proposals, artifact
 writes) for the next turn to report. The next turn delivers them only
 when that node is the replying user's own: a reply asked for by someone
@@ -110,7 +110,8 @@ def _single_shot_retrievals(t):
         _resp("Looking those up.", tool_calls=[
             {"id": "t1", "name": "read_artifact",
              "input": {"kind": "memory"}},
-            {"id": "t2", "name": "read_todo", "input": {}},
+            {"id": "t2", "name": "read_artifact",
+             "input": {"kind": "todo"}},
             {"id": "t3", "name": "read_full",
              "input": {"ref": str(t["private"].id)}},
             {"id": "t4", "name": "semantic_search",
@@ -123,7 +124,7 @@ def _single_shot_retrievals(t):
     assert reply.llm_task_status == "completed"
     meta = json.loads(reply.tool_calls_meta)
     retrievals = [e for e in meta if e.get("name") in (
-        "read_artifact", "read_todo", "read_full", "semantic_search")]
+        "read_artifact", "read_full", "semantic_search")]
     assert len(retrievals) == 4
     assert all(e["status"] == "success" for e in retrievals)
     assert not any(e.get("status_reported") for e in retrievals)
@@ -241,7 +242,8 @@ def test_injection_resolves_rows_only_for_their_owner(thread):
     entries = {
         "ALICE MEMORY": {"name": "read_artifact", "kind": "memory",
                          "artifact_id": t["memory"].id},
-        "ALICE TODO": {"name": "read_todo", "todo_id": t["todo"].id},
+        "ALICE TODO": {"name": "read_artifact", "kind": "todo",
+                       "todo_id": t["todo"].id},
         "ALICE PRIVATE ENTRY": {
             "name": "read_full", "kind": "node", "ref_id": t["private"].id,
             "ref": str(t["private"].id), "user_id": alice.id},
@@ -260,6 +262,10 @@ def test_injection_resolves_rows_only_for_their_owner(thread):
                   "ext_matches": [{"item_id": t["ref"].id, "score": 0.9}]}
     assert "ALICE SAVED REFERENCE" in inject(ext_search, alice.id)
     assert inject(ext_search, bob.id) is None
+    # A read_todo result from before #218 resolves the same way.
+    legacy_todo = {"name": "read_todo", "todo_id": t["todo"].id}
+    assert "ALICE TODO" in inject(legacy_todo, alice.id)
+    assert inject(legacy_todo, bob.id) is None
 
 
 def test_search_preview_shows_a_node_the_user_may_open(thread):

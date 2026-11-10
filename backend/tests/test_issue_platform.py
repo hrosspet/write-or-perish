@@ -329,10 +329,11 @@ def gh_app(app, monkeypatch):  # noqa: F811
     """The harness app with the GitHub blueprint, and the GitHub call
     replaced by a recorder: no real issue is filed."""
     import backend.routes.github_issues as gh_routes
+    import backend.utils.github as gh_utils
     app.register_blueprint(gh_routes.github_bp, url_prefix="/api/github")
     create = MagicMock(return_value={
         "url": "https://github.com/owner/repo/issues/9", "number": 9})
-    monkeypatch.setattr(gh_routes, "create_github_issue", create)
+    monkeypatch.setattr(gh_utils, "create_github_issue", create)
     app.create_issue_mock = create
     return app
 

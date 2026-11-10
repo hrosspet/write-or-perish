@@ -673,6 +673,80 @@ class TestRerun:
         assert resp.status_code == 403
 
 
+# ── Tests: a job that can't be queued (#385) ───────────────────────────
+
+
+class TestQueueDown:
+    """A glean whose job can't be queued (the broker is down) fails at
+    once, with a message for the user, instead of "Gleaning…" until the
+    page stops polling (llm_nodes.enqueue_reply_job)."""
+
+    BROKER_DOWN = "Error 111 connecting to redis:6379. Connection refused."
+
+    def _assert_failed(self, node_id):
+        from backend.utils.llm_nodes import REPLY_NOT_QUEUED_MESSAGE
+        reply = Node.query.get(node_id)
+        assert reply.llm_task_status == "failed"
+        assert reply.llm_task_error == REPLY_NOT_QUEUED_MESSAGE
+        assert self.BROKER_DOWN not in reply.llm_task_error
+
+    def test_a_glean_fails(self, app, monkeypatch):
+        task = _llm_task(monkeypatch)
+        task.delay.side_effect = ConnectionRefusedError(self.BROKER_DOWN)
+        client = app.test_client()
+        alice = _make_user("alice", is_admin=True)
+        entry = _make_node(alice, content="entry")
+        _db.session.commit()
+
+        _login(client, alice.id)
+        resp = client.post(f"/api/read/from-node/{entry.id}",
+                           json={"model": "gpt-5"})
+
+        # The page polls the reply and shows its failed gleaning.
+        assert resp.status_code == 202, resp.get_json()
+        data = resp.get_json()
+        assert data["task_id"] is None
+        self._assert_failed(data["llm_node_id"])
+
+    def test_glean_again_fails(self, app, monkeypatch):
+        task = _llm_task(monkeypatch)
+        task.delay.side_effect = ConnectionRefusedError(self.BROKER_DOWN)
+        client = app.test_client()
+        alice = _make_user("alice", is_admin=True)
+        prompt = _make_prompt_node(alice, "read")
+        comment = _make_node(alice, parent_id=prompt.id, content="more")
+        _db.session.commit()
+
+        _login(client, alice.id)
+        resp = client.post(f"/api/read/from-node/{comment.id}",
+                           json={"model": "gpt-5"})
+
+        assert resp.status_code == 202, resp.get_json()
+        self._assert_failed(resp.get_json()["llm_node_id"])
+
+    def test_a_rerun_fails_instead_of_staying_processing(self, app,
+                                                         monkeypatch):
+        task = _llm_task(monkeypatch)
+        task.apply_async.side_effect = ConnectionRefusedError(
+            self.BROKER_DOWN)
+        client = app.test_client()
+        alice = _make_user("alice", is_admin=True)
+        _, reply = _make_read_reply(alice, status="failed", batch=False)
+
+        _login(client, alice.id)
+        resp = client.post(f"/api/read/{reply.id}/rerun", json={"live": True})
+
+        # Nothing new was created: the admin's call is answered directly.
+        assert resp.status_code == 503, resp.get_json()
+        from backend.utils.llm_nodes import REPLY_NOT_QUEUED_MESSAGE
+        assert resp.get_json()["error"] == REPLY_NOT_QUEUED_MESSAGE
+        self._assert_failed(reply.id)
+        # Still failed, so it can be rerun once the queue is back.
+        task.apply_async.side_effect = None
+        resp = client.post(f"/api/read/{reply.id}/rerun", json={"live": True})
+        assert resp.status_code == 202, resp.get_json()
+
+
 # ── Tests: the read never runs under the agentic prompt ────────────────
 
 
@@ -772,6 +846,9 @@ def app355(app):
     # A glean stays on the provider of the user's chat model (#435).
     app.config["GLEAN_MODEL_ANTHROPIC"] = "claude-haiku-5.5"
     app.config["GLEAN_MODEL_OPENAI"] = "gpt-6-luna"
+    # Each provider's chat default, for a saved model no longer offered
+    # (#487); Anthropic's is LLM_NAME.
+    app.config["CHAT_MODEL_OPENAI"] = "gpt-6-sol"
     return app
 
 
@@ -948,15 +1025,17 @@ class TestModelEndpoints:
         alice = _make_user("alice", is_admin=True, preferred_model="claude-opus-5")
         t = _read_thread(alice)
         _login(client, alice.id)
-        # The user's replies run on Anthropic (the chat default, Opus 4.6):
-        # a glean does too (#435), not the thread's GPT-6 Sol read.
+        # The user's replies run on Anthropic (Anthropic's default, Opus
+        # 4.6, in place of the deprecated Opus 5, #487): a glean does too
+        # (#435), not the thread's GPT-6 Sol read.
         read = client.get(f"/api/nodes/{t['note2'].id}/suggested-model?purpose=read").get_json()
         assert read == {"suggested_model": "claude-haiku-5.5",
                         "source": "provider_default"}
         fresh = client.get("/api/nodes/default-model?purpose=read").get_json()
         assert fresh["suggested_model"] == "claude-haiku-5.5"
         chat = client.get("/api/nodes/default-model").get_json()
-        assert chat == {"suggested_model": "claude-opus-4.6", "source": "default"}
+        assert chat == {"suggested_model": "claude-opus-4.6",
+                        "source": "user_preference"}
         assert client.get("/api/nodes/default-model?purpose=x").status_code == 400
 
 
@@ -1259,6 +1338,7 @@ def app_ro(app):
     app.config["READ_DEFAULT_MODEL"] = "gpt-6-luna"
     app.config["GLEAN_MODEL_ANTHROPIC"] = "claude-sonnet-5.5"
     app.config["GLEAN_MODEL_OPENAI"] = "gpt-6-luna"
+    app.config["CHAT_MODEL_OPENAI"] = "gpt-6-sol"
     from backend.routes.admin import admin_bp
     from backend.routes.dashboard import dashboard_bp
     app.register_blueprint(admin_bp, url_prefix="/api/admin")
@@ -1377,9 +1457,8 @@ class TestReadOnlyModels:
         assert (Node.query.get(resp.get_json()["node_id"]).llm_model
                 == "claude-sonnet-5.5")
 
-    def test_a_deprecated_model_still_runs_on_the_chat_default(self, app_ro):
-        # Unchanged here (#355): the same rule question applies to it and
-        # gets its own issue.
+    def test_a_deprecated_model_runs_on_its_providers_default(self, app_ro):
+        # #418 / #487: Anthropic's default here is LLM_NAME.
         from backend.utils.llm_nodes import create_llm_placeholder
         alice = _make_user("alice", is_admin=True)
         root = _make_node(alice, content="a thought")
@@ -1387,20 +1466,22 @@ class TestReadOnlyModels:
         node, _ = create_llm_placeholder(root.id, "claude-opus-5", alice.id)
         assert node.llm_model == "claude-opus-4.6"
 
-    def test_a_saved_read_only_preference_falls_back(self, app_ro):
+    def test_a_saved_read_only_preference_keeps_its_provider(self, app_ro):
         # Set directly, as if saved before the flag existed: the Account
-        # page never offers it and PUT /dashboard/user refuses it.
+        # page never offers it and PUT /dashboard/user refuses it. It
+        # stands for OpenAI's chat default, not LLM_NAME (an Anthropic
+        # model, #487).
         from backend.utils.llm_nodes import (
             default_model_for, effective_preferred_model, resolve_chat_model)
         client = app_ro.test_client()
         alice = _make_user("alice", is_admin=True, preferred_model="gpt-6.1-sol")
         _db.session.commit()
-        assert effective_preferred_model(alice) is None
-        assert default_model_for(alice) == "claude-opus-4.6"
-        assert resolve_chat_model(None, alice) == ("claude-opus-4.6", "default")
+        assert effective_preferred_model(alice) == "gpt-6-sol"
+        assert default_model_for(alice) == "gpt-6-sol"
+        assert resolve_chat_model(None, alice) == ("gpt-6-sol", "user_preference")
         _login(client, alice.id)
         assert client.get("/api/nodes/default-model").get_json() == {
-            "suggested_model": "claude-opus-4.6", "source": "default"}
+            "suggested_model": "gpt-6-sol", "source": "user_preference"}
 
     def test_a_chat_reply_on_one_is_not_inherited(self, app_ro):
         from backend.utils.llm_nodes import resolve_chat_model
@@ -1410,7 +1491,9 @@ class TestReadOnlyModels:
                            llm_model="gpt-6.1-sol", content="hi")
         note = _make_node(alice, parent_id=reply.id, content="and?")
         _db.session.commit()
-        assert resolve_chat_model(note, alice) == ("gpt-6-luna", "user_preference")
+        # The thread stays with the reply's provider, on the user's own
+        # model there (#487).
+        assert resolve_chat_model(note, alice) == ("gpt-6-luna", "predecessor")
 
     def test_the_account_default_refuses_one(self, app_ro):
         client = app_ro.test_client()
@@ -2524,3 +2607,195 @@ class TestPickDisplayNames:
         _db.session.commit()
         assert get_ext_quote_data([item.id], ana.id)[item.id]["author_name"] == "Alice Aalto"
         assert _serialize_item(item)["author_name"] == "Alice Aalto"
+
+
+# ── A saved model keeps its provider (#487, #418) ────────────────────────
+
+MODELS_487 = {
+    "gpt-6-astra": {"provider": "openai", "display_name": "GPT-6 Astra",
+                    "featured": True},
+    "gpt-6-sol": {"provider": "openai", "display_name": "GPT-6 Sol",
+                  "read": True},
+    "gpt-6-luna": {"provider": "openai", "display_name": "GPT-6 Luna",
+                   "read": True},
+    "gpt-6.1-sol": {"provider": "openai", "display_name": "GPT-6.1 Sol",
+                    "read": True, "chat": False},
+    "gpt-5.5": {"provider": "openai", "display_name": "GPT-5.5",
+                "deprecated": True},
+    "claude-opus-5.5": {"provider": "anthropic", "display_name": "Opus 5.5",
+                        "featured": True},
+    "claude-opus-4.6": {"provider": "anthropic", "display_name": "Opus 4.6",
+                        "featured": True},
+    "claude-opus-5": {"provider": "anthropic", "display_name": "Opus 5",
+                      "deprecated": True},
+    "claude-haiku-5.5": {"provider": "anthropic", "display_name": "Haiku 5.5",
+                         "read": True, "chat": False},
+}
+
+
+@pytest.fixture
+def app487(app):
+    # Prod's shape: LLM_NAME is an Anthropic model; OpenAI's default is
+    # its own setting.
+    app.config["SUPPORTED_MODELS"] = MODELS_487
+    app.config["DEFAULT_LLM_MODEL"] = "claude-opus-4.6"
+    app.config["READ_DEFAULT_MODEL"] = "gpt-6-luna"
+    app.config["GLEAN_MODEL_ANTHROPIC"] = "claude-haiku-5.5"
+    app.config["GLEAN_MODEL_OPENAI"] = "gpt-6-luna"
+    app.config["CHAT_MODEL_ANTHROPIC"] = "claude-opus-5.5"
+    app.config["CHAT_MODEL_OPENAI"] = "gpt-6-astra"
+    from backend.routes.dashboard import dashboard_bp
+    app.register_blueprint(dashboard_bp, url_prefix="/api/dashboard")
+    return app
+
+
+class TestSavedModelKeepsItsProvider:
+    def test_a_deprecated_openai_preference_stays_on_openai(self, app487):
+        from backend.utils.llm_nodes import (
+            default_model_for, effective_preferred_model, resolve_chat_model)
+        client = app487.test_client()
+        alice = _make_user("alice", preferred_model="gpt-5.5")
+        _db.session.commit()
+        # Replies, background work and the Account page: OpenAI's
+        # default, not LLM_NAME (Anthropic's).
+        assert effective_preferred_model(alice) == "gpt-6-astra"
+        assert default_model_for(alice) == "gpt-6-astra"
+        assert resolve_chat_model(None, alice) == ("gpt-6-astra",
+                                                   "user_preference")
+        _login(client, alice.id)
+        assert client.get("/api/nodes/default-model").get_json() == {
+            "suggested_model": "gpt-6-astra", "source": "user_preference"}
+        user = client.get("/api/dashboard/?profile=0").get_json()["user"]
+        assert user["preferred_model"] == "gpt-6-astra"
+        # The saved value is left as it is.
+        assert User.query.get(alice.id).preferred_model == "gpt-5.5"
+
+    def test_a_deprecated_anthropic_preference_gets_llm_name(self, app487):
+        from backend.utils.llm_nodes import effective_preferred_model
+        alice = _make_user("alice", preferred_model="claude-opus-5")
+        _db.session.commit()
+        # LLM_NAME is Anthropic's default; CHAT_MODEL_ANTHROPIC is not
+        # used while LLM_NAME is an Anthropic model.
+        assert effective_preferred_model(alice) == "claude-opus-4.6"
+
+    def test_the_other_providers_setting_applies_when_llm_name_moves(
+            self, app487):
+        from backend.utils.llm_nodes import (
+            effective_preferred_model, provider_chat_model)
+        app487.config["DEFAULT_LLM_MODEL"] = "gpt-6-sol"
+        alice = _make_user("alice", preferred_model="claude-opus-5")
+        bob = _make_user("bob", preferred_model="gpt-5.5")
+        _db.session.commit()
+        assert provider_chat_model("anthropic") == "claude-opus-5.5"
+        assert provider_chat_model("openai") == "gpt-6-sol"
+        assert effective_preferred_model(alice) == "claude-opus-5.5"
+        assert effective_preferred_model(bob) == "gpt-6-sol"
+
+    def test_a_misconfigured_setting_is_never_another_providers_model(
+            self, app487):
+        from backend.utils.llm_nodes import provider_chat_model
+        app487.config["CHAT_MODEL_OPENAI"] = "claude-opus-5.5"
+        assert provider_chat_model("openai") is None
+        app487.config["CHAT_MODEL_OPENAI"] = "gpt-5.5"
+        assert provider_chat_model("openai") is None
+        assert provider_chat_model(None) is None
+
+    def test_an_id_removed_from_the_list_keeps_its_provider(self, app487):
+        from backend.utils.llm_nodes import (
+            default_model_for, effective_preferred_model)
+        alice = _make_user("alice", preferred_model="gpt-4.1")
+        bob = _make_user("bob", preferred_model="claude-opus-4.1")
+        carol = _make_user("carol", preferred_model="mystery-model")
+        _db.session.commit()
+        assert effective_preferred_model(alice) == "gpt-6-astra"
+        assert effective_preferred_model(bob) == "claude-opus-4.6"
+        # No provider to keep: no preference, as before.
+        assert effective_preferred_model(carol) is None
+        assert default_model_for(carol) == "claude-opus-4.6"
+
+    def test_a_deprecated_thread_model_keeps_the_threads_provider(self, app487):
+        from backend.utils.llm_nodes import resolve_chat_model
+        alice = _make_user("alice", preferred_model="claude-opus-5.5")
+        root = _make_node(alice, content="a thought")
+        reply = _make_node(alice, parent_id=root.id, node_type="llm",
+                           llm_model="gpt-5.5", content="hi")
+        note = _make_node(alice, parent_id=reply.id, content="and?")
+        _db.session.commit()
+        # Not the account's Anthropic model: OpenAI's default.
+        assert resolve_chat_model(note, alice) == ("gpt-6-astra", "predecessor")
+        # The user's own OpenAI model comes before the provider's default.
+        alice.preferred_model = "gpt-6-luna"
+        assert resolve_chat_model(note, alice) == ("gpt-6-luna", "predecessor")
+
+    def test_loores_first_model_on_old_replies_is_openai(self, app487):
+        from backend.utils.llm_nodes import resolve_chat_model
+        alice = _make_user("alice", preferred_model="claude-opus-5.5")
+        root = _make_node(alice, content="a thought")
+        reply = _make_node(alice, parent_id=root.id, node_type="llm",
+                           llm_model="gpt-4.5-preview", content="hi")
+        note = _make_node(alice, parent_id=reply.id, content="and?")
+        _db.session.commit()
+        assert resolve_chat_model(note, alice) == ("gpt-6-astra", "predecessor")
+
+    def test_an_imported_model_name_is_still_walked_past(self, app487):
+        # A ChatGPT import's model names are not a model the user chose
+        # in Loore: the account model decides, as before.
+        from backend.utils.llm_nodes import resolve_chat_model
+        alice = _make_user("alice", preferred_model="claude-opus-5.5")
+        root = _make_node(alice, content="a thought")
+        reply = _make_node(alice, parent_id=root.id, node_type="llm",
+                           llm_model="gpt-4o", content="hi")
+        note = _make_node(alice, parent_id=reply.id, content="and?")
+        _db.session.commit()
+        assert resolve_chat_model(note, alice) == ("claude-opus-5.5",
+                                                   "user_preference")
+
+    def test_a_deprecated_model_sent_by_an_old_page_stays_on_its_provider(
+            self, app487):
+        from backend.utils.llm_nodes import create_llm_placeholder
+        alice = _make_user("alice", preferred_model="claude-opus-5.5")
+        root = _make_node(alice, content="a thought")
+        _db.session.commit()
+        # #418: no OpenAI model of the user's own: OpenAI's default, not
+        # the account's Anthropic model.
+        node, _ = create_llm_placeholder(root.id, "gpt-5.5", alice.id)
+        assert node.llm_model == "gpt-6-astra"
+
+    def test_an_old_page_gets_the_threads_or_the_users_model_of_its_provider(
+            self, app487):
+        from backend.utils.llm_nodes import create_llm_placeholder
+        alice = _make_user("alice", preferred_model="claude-opus-5.5")
+        root = _make_node(alice, content="a thought")
+        reply = _make_node(alice, parent_id=root.id, node_type="llm",
+                           llm_model="gpt-6-sol", content="hi")
+        note = _make_node(alice, parent_id=reply.id, content="and?")
+        _db.session.commit()
+        # The thread's own OpenAI model.
+        node, _ = create_llm_placeholder(note.id, "gpt-5.5", alice.id)
+        assert node.llm_model == "gpt-6-sol"
+        # In an Anthropic thread, the user's own OpenAI model.
+        bob = _make_user("bob", preferred_model="gpt-6-luna")
+        root = _make_node(bob, content="a thought")
+        reply = _make_node(bob, parent_id=root.id, node_type="llm",
+                           llm_model="claude-opus-4.6", content="hi")
+        note = _make_node(bob, parent_id=reply.id, content="and?")
+        _db.session.commit()
+        node, _ = create_llm_placeholder(note.id, "gpt-5.5", bob.id)
+        assert node.llm_model == "gpt-6-luna"
+
+    def test_the_glean_default_follows_the_same_provider(self, app487):
+        from backend.utils.llm_nodes import glean_provider, resolve_read_model
+        alice = _make_user("alice", preferred_model="gpt-5.5")
+        root = _make_node(alice, content="a thought")
+        _db.session.commit()
+        assert glean_provider(root, alice) == "openai"
+        assert resolve_read_model(root, user=alice) == ("gpt-6-luna",
+                                                        "provider_default")
+        # The user's own reply on a model no longer offered: its provider.
+        bob = _make_user("bob", preferred_model="gpt-6-sol")
+        root = _make_node(bob, content="a thought")
+        reply = _make_node(bob, parent_id=root.id, node_type="llm",
+                           llm_model="claude-opus-5", content="hi")
+        note = _make_node(bob, parent_id=reply.id, content="and?")
+        _db.session.commit()
+        assert glean_provider(note, bob) == "anthropic"

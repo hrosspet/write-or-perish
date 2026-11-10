@@ -65,8 +65,9 @@ from backend.models import Node
 from backend.extensions import db
 from backend.utils.prompts import get_user_prompt_record
 from backend.utils.llm_nodes import (
-    AIUsageRefused, ai_usage_refused_response, create_llm_placeholder,
-    is_read_model, reply_refusal, resolve_read_model,
+    REPLY_NOT_QUEUED_MESSAGE, AIUsageRefused, ai_usage_refused_response,
+    create_llm_placeholder, enqueue_reply_job, is_read_model, reply_refusal,
+    resolve_read_model,
 )
 from backend.utils.placeholders import (
     UserExportValidationError, ca_tweets_allowed, ca_tweets_denied_message,
@@ -415,12 +416,19 @@ def rerun_read(node_id):
     node.llm_task_progress = 0
     node.llm_task_error = None
     db.session.commit()
-    generate_llm_response.apply_async(
-        args=(parent.id, node.id, node.llm_model,
-              node.human_owner_id or node.user_id),
-        kwargs={"source_mode": None, "ca_live": live},
-        task_id=task_id,
-    )
+    # A job that can't be queued fails the reply (#385) instead of leaving
+    # it 'processing' with no job behind it.
+    queued = enqueue_reply_job(
+        node, lambda: generate_llm_response.apply_async(
+            args=(parent.id, node.id, node.llm_model,
+                  node.human_owner_id or node.user_id),
+            kwargs={"source_mode": None, "ca_live": live},
+            task_id=task_id,
+        ), record_task_id=False)
+    if queued is None:
+        return jsonify({"error": REPLY_NOT_QUEUED_MESSAGE,
+                        "llm_node_id": node.id,
+                        "cancelled_batches": cancelled}), 503
     return jsonify({
         "llm_node_id": node.id,
         "task_id": task_id,

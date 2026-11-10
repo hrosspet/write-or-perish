@@ -10,7 +10,9 @@ from flask import Blueprint, Response, request, jsonify, current_app
 from flask_login import login_required, current_user
 from backend.models import Node, UserProfile, NodeTranscriptChunk, TTSChunk, Draft
 from backend.extensions import db
-from backend.utils.streaming_session import stamp_session_alive
+from backend.utils.streaming_session import (
+    draft_user_node_id, stamp_session_alive,
+)
 import json
 import time
 
@@ -441,21 +443,31 @@ def draft_transcription_stream(session_id):
     - event: content_update - Draft content has been updated
     - event: error - An error occurred
     - event: heartbeat - Keep-alive ping
+    - event: session_taken_over - Another device continued the recording
+      (#388); the stream ends
 
     Query params:
     - last_chunk: Index of the last chunk the client has received
+    - device_key: the recording device's key (#388), optional
     """
+    from backend.utils.recording_device import (
+        TAKEN_OVER, TAKEN_OVER_ERROR, is_taken_over,
+    )
+
     draft = Draft.query.filter_by(session_id=session_id).first()
     if draft is None or draft.user_id != current_user.id:
         return _not_found("Streaming session")
 
     # Get the last chunk index the client has seen
     last_chunk = request.args.get('last_chunk', -1, type=int)
+    device_key = request.args.get('device_key') or None
 
     # Only the tab recording the session opens this stream, so a
     # (re)connect is a sign of life — also for a resumed session whose
-    # previous tab released it (#320).
-    if draft.streaming_status == 'recording':
+    # previous tab released it (#320). Not from a device whose recording
+    # another device continued (#388).
+    if (draft.streaming_status == 'recording'
+            and not is_taken_over(draft, device_key)):
         stamp_session_alive(session_id)
         db.session.commit()
 
@@ -484,6 +496,17 @@ def draft_transcription_stream(session_id):
                 current_draft = Draft.query.filter_by(session_id=session_id).first()
                 if not current_draft:
                     yield format_sse_message({"error": "Draft not found"}, event="error")
+                    break
+
+                # Another device continued this recording (#388): this
+                # device stops. Checked first, so its stream neither stamps
+                # the session nor takes that device's all_complete (whose
+                # handling deletes the draft).
+                if is_taken_over(current_draft, device_key):
+                    yield format_sse_message({
+                        "error": TAKEN_OVER_ERROR,
+                        "code": TAKEN_OVER,
+                    }, event=TAKEN_OVER)
                     break
 
                 # Get any new completed chunks
@@ -533,6 +556,9 @@ def draft_transcription_stream(session_id):
                         complete_data["warning"] = current_draft.streaming_warning
                     if current_draft.llm_node_id:
                         complete_data["llm_node_id"] = current_draft.llm_node_id
+                        user_node_id = draft_user_node_id(current_draft)
+                        if user_node_id:
+                            complete_data["user_node_id"] = user_node_id
                     if (current_draft.llm_node_id
                             or current_draft.streaming_warning):
                         # Node already exists — draft only lingered for this

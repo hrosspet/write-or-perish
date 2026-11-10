@@ -1324,6 +1324,8 @@ def _poll_profile_batches():
                     known={job.batch_id: batch})
         except Exception as e:
             logger.warning(f"Poll failed for batch {job.batch_id}: {e}")
+            # Unreadable, not merely unfinished: the age check above
+            # fails it once it is older than BATCH_STALE_AFTER.
             continue
         if job.provider_key in still_pending:
             continue  # not ended yet
@@ -1378,9 +1380,13 @@ def _poll_profile_batches():
                     if item["custom_id"] in blocked:
                         # A content-policy block is final: no resubmit.
                         intentions_mod.mark_intentions_item_gave_up(item, job)
+                        # The model the item ran on (#585); an item
+                        # from before carries none.
                         refusal_backoff.report_policy_block(
                             user.id, blocked[item["custom_id"]],
-                            intentions_mod.MODEL_ID, "intentions batch")
+                            item.get("model_id")
+                            or intentions_mod.PINNED_MODEL_ID,
+                            "intentions batch")
                     elif result is None:
                         intentions_mod.handle_failed_intentions_item(user, item, job, keys)
                     else:
@@ -1409,6 +1415,23 @@ def _poll_profile_batches():
                 db.session.commit()
                 continue
             if result is None:
+                if item["custom_id"] in getattr(
+                        results, "transient_failures", ()):
+                    # The provider was down or overloaded, or the account
+                    # could not pay: not billed, and nothing wrong with
+                    # the request. Not an attempt, as an account-refused
+                    # submit is not (#406): an outage spanning three
+                    # hourly seeds would otherwise move the user to the
+                    # full-price path for good. The seeder resends it;
+                    # the hold brings in an account not yet activated.
+                    user.profile_batch_pending = False
+                    user.profile_work_held = True
+                    db.session.commit()
+                    logger.warning(
+                        f"Batch item failed for user {user.id} "
+                        f"({item['custom_id']}) for a provider or account "
+                        f"reason; not counted as an attempt")
+                    continue
                 user.profile_batch_attempts = (
                     user.profile_batch_attempts or 0) + 1
                 user.profile_batch_pending = False

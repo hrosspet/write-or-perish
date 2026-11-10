@@ -75,6 +75,7 @@ extension AudioCenter {
             return
         }
         setLoading(target.source)
+        pendingListenFailure = nil
         listenTask?.cancel()
         listenTask = Task { [weak self] in
             guard let self else { return }
@@ -165,6 +166,7 @@ extension AudioCenter {
                     onTtsGenerated?()
                     return
                 case .error:
+                    reportListenFailure(target, anythingArrived: !first)
                     return
                 default:
                     continue
@@ -172,7 +174,34 @@ extension AudioCenter {
             }
         } catch {
             log.info("listen-aloud stream ended with an error")
+            guard !Task.isCancelled else { return }
+            reportListenFailure(target, anythingArrived: !first)
         }
+    }
+
+    /// Web `SpeakerIcon` (#519): nothing arrived → the error sound and a toast now;
+    /// part arrived → after that audio has played (`finishedQueue`), and only if it
+    /// is still this entry's audio.
+    private func reportListenFailure(_ target: ListenTarget, anythingArrived: Bool) {
+        if anythingArrived {
+            if player.source == target.source { pendingListenFailure = target.source }
+        } else {
+            announceListenFailure(ListenFailure.nothingArrivedMessage)
+        }
+    }
+
+    private func announceListenFailure(_ message: String) {
+        playErrorSound()
+        _ = appState?.toasts.show(message, duration: 6)
+    }
+
+    /// The queue ended (`onFinished`). Returns true when it announced a failed read-aloud,
+    /// so the caller keeps the audio session until the sound has played.
+    func finishedQueue() -> Bool {
+        defer { pendingListenFailure = nil }
+        guard let pending = pendingListenFailure, pending == player.source else { return false }
+        announceListenFailure(ListenFailure.partialMessage)
+        return true
     }
 
     /// A WebM/Opus recording (desktop Chrome), which AVFoundation cannot decode:
@@ -211,6 +240,12 @@ extension AudioCenter {
     func isLoading(_ target: ListenTarget) -> Bool {
         loadingSource == target.source
     }
+}
+
+/// The failed read-aloud messages (same words as the web's `SpeakerIcon`).
+enum ListenFailure {
+    static let nothingArrivedMessage = "Loore couldn't read this aloud. Tap the speaker to try again."
+    static let partialMessage = "Loore couldn't read the rest aloud. Tap the speaker to try again from the start."
 }
 
 /// Recordings made in desktop Chrome are WebM/Opus, which AVFoundation cannot

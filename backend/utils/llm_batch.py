@@ -37,6 +37,9 @@ log = logging.getLogger(__name__)
 # Shared by the external-digest and recent-context collectors.
 BATCH_JOB_MAX_AGE = timedelta(hours=25)
 
+# The OpenAI batch states after which nothing changes any more.
+OPENAI_BATCH_TERMINAL = ("completed", "failed", "expired", "cancelled")
+
 # OpenAI batch endpoints. A request dict may name "endpoint"; the default
 # is chat/completions. The Responses API is the one the live calls use
 # (LLMProvider._call_openai), so a batch request on it runs the model the
@@ -175,12 +178,20 @@ class CollectedResults(dict):
     of the items the provider's content-policy filter blocked
     (OPENAI_POLICY_BLOCK_CODES). A blocked item has no result, and its
     caller must not send it again. A plain dict from a stand-in has
-    neither; read ``blocked`` with ``blocked_items(results)``."""
+    neither; read ``blocked`` with ``blocked_items(results)``.
+
+    And ``transient_failures``: the custom_ids of the requests that
+    failed for a reason outside the request (the provider down or
+    overloaded, a rate limit, or an account reason such as a spend limit,
+    billing or the key; #369). They are not billed, and the same request
+    can succeed later, so a caller that counts failed items against a
+    retry limit leaves these out, as for an account-refused submit."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.queue_full = set()
         self.blocked = {}
+        self.transient_failures = set()
 
 
 def blocked_items(results):
@@ -279,6 +290,38 @@ def batch_queue_full(key, batch):
         if code in OPENAI_QUEUE_FULL_CODES or OPENAI_QUEUE_FULL_TEXT in message:
             return True
     return False
+
+
+# Anthropic error types for a provider that is down or overloaded
+# (Claude API docs, API → Errors): 429 rate_limit_error, 500 api_error,
+# 504 timeout_error, 529 overloaded_error.
+_ANTHROPIC_TRANSIENT_TYPES = {"rate_limit_error", "api_error",
+                              "timeout_error", "overloaded_error"}
+
+
+def _failure_is_transient(provider, status, error):
+    """Whether a batch request's failure says nothing about the request
+    itself: a 5xx or 429 status, a provider-down error type, or an
+    account failure (#369). An unknown model counts against the request:
+    resending it fails the same way."""
+    from backend.llm_providers import account_failure_kind_of_error
+    error = error if isinstance(error, dict) else {}
+    if isinstance(status, int) and (status == 429 or status >= 500):
+        return True
+    if provider == "anthropic" and \
+            error.get("type") in _ANTHROPIC_TRANSIENT_TYPES:
+        return True
+    kind = account_failure_kind_of_error(provider, status, error)
+    return kind is not None and kind != "model_not_found"
+
+
+def _anthropic_item_error(result):
+    """An errored Anthropic batch result's error object as a dict
+    ({type, message, details}); the SDK nests it in an ErrorResponse."""
+    err = getattr(getattr(result, "error", None), "error", None)
+    return {"type": getattr(err, "type", None),
+            "message": getattr(err, "message", None),
+            "details": getattr(err, "details", None)}
 
 
 def apply_batch_key_override(api_keys, config):
@@ -667,12 +710,22 @@ def batch_check_and_collect(batch_ids, api_keys, known=None):
             a batch result exactly like a live one (#286).
         still_pending: dict of batch_ids still processing
         batch_durations: dict mapping provider key -> duration in seconds
+
+    A batch that has ended (Anthropic "ended"; OpenAI completed, failed,
+    expired or cancelled) is not pending, also when none of its requests
+    succeeded: the ones that did are in the results, also when the batch
+    expired or was cancelled partway (the provider bills them), and the
+    callers fail every item that has no result. The one exception is an
+    OpenAI batch that counts succeeded requests but has no output file:
+    it stays pending until the file can be read.
     results_by_custom_id is a CollectedResults: its ``queue_full`` names
     the provider keys whose batch failed only because the provider's
     queue was full (``batch_queue_full``); their items have no result
     and should wait, not count as failed. Its ``blocked`` names the
     OpenAI items the provider's content-policy filter blocked, read from
     the batch's error file (and any non-200 line of its output file).
+    Its ``transient_failures`` names the requests that failed for a
+    reason outside the request (#369).
     """
     from anthropic import Anthropic
     from openai import OpenAI
@@ -701,6 +754,7 @@ def batch_check_and_collect(batch_ids, api_keys, known=None):
                 log.info(f"Anthropic batch duration: {duration:.0f}s "
                          f"({duration/60:.1f}min)")
             # Collect results
+            collected, not_collected = 0, {}
             for entry in client.messages.batches.results(batch_id):
                 cid = entry.custom_id
                 if entry.result.type == "succeeded":
@@ -726,9 +780,26 @@ def batch_check_and_collect(batch_ids, api_keys, known=None):
                         == "refusal",
                         "batch": True,
                     }
+                    collected += 1
                 else:
+                    error = (_anthropic_item_error(entry.result)
+                             if entry.result.type == "errored" else {})
                     log.warning(f"Anthropic batch item {cid}: "
-                                f"type={entry.result.type}")
+                                f"type={entry.result.type}"
+                                + (f" error={error['type']}"
+                                   if error.get("type") else ""))
+                    if error and _failure_is_transient(
+                            "anthropic", None, error):
+                        results.transient_failures.add(cid)
+                    not_collected[entry.result.type] = (
+                        not_collected.get(entry.result.type, 0) + 1)
+            # As loud as an OpenAI batch that did not complete (#419):
+            # nothing collected, or requests that never ran.
+            if not collected or not_collected.keys() & {"expired",
+                                                        "canceled"}:
+                log.error(f"Anthropic batch {batch_id} ended: {collected} "
+                          f"result(s) collected, not collected: "
+                          f"{not_collected}")
 
         elif key.startswith("openai:"):
             client = OpenAI(api_key=api_keys["openai"])
@@ -736,8 +807,7 @@ def batch_check_and_collect(batch_ids, api_keys, known=None):
                      or client.batches.retrieve(batch_id))
             log.info(f"OpenAI batch {batch_id}: status={batch.status}, "
                      f"counts={batch.request_counts}")
-            if batch.status not in ("completed", "failed", "expired",
-                                    "cancelled"):
+            if batch.status not in OPENAI_BATCH_TERMINAL:
                 still_pending[key] = batch_id
                 continue
             if batch_queue_full(key, batch):
@@ -749,42 +819,55 @@ def batch_check_and_collect(batch_ids, api_keys, known=None):
                 log.warning(f"OpenAI batch {batch_id} failed: the "
                             f"enqueued-token limit for its model is full")
                 continue
+            # Every terminal state is read like Anthropic's "ended" (#419).
+            # The output file holds the requests that succeeded, also in
+            # a batch that expired or was cancelled partway: OpenAI bills
+            # those, so they are collected and the callers log their
+            # cost. The rest are in the error file. No output file means
+            # no request succeeded (every one failed, or the batch failed
+            # validation): the batch has ended with no results, and the
+            # callers fail its items now rather than at the age backstop.
+            output_file_id = getattr(batch, "output_file_id", None)
+            succeeded = getattr(getattr(batch, "request_counts", None),
+                                "completed", None)
+            if not output_file_id and isinstance(succeeded, int) \
+                    and succeeded > 0:
+                # Results the provider counts (and bills) but whose file
+                # is not there: not readable yet, so not ended for us.
+                log.warning(f"OpenAI batch {batch_id}: {batch.status} with "
+                            f"{succeeded} succeeded but no output file; "
+                            f"polling again")
+                still_pending[key] = batch_id
+                continue
             # The requests that failed with a non-200 status are in the
-            # error file, whatever the batch's end state.
-            for cid, (_status, code, _etype) in openai_batch_errors(
+            # error file, whatever the batch's end state: a content-policy
+            # block is final (blocked), a provider or account reason is
+            # transient (#369), and neither is billed.
+            for cid, (status, code, etype) in openai_batch_errors(
                     client, batch_id, batch).items():
                 if is_policy_block(code):
                     results.blocked[cid] = code
-            if batch.status != "completed":
-                # An expired or cancelled batch still carries the results
-                # of the requests that finished by then, and those were
-                # billed (#419): they are collected below; the rest are
-                # missing from the results, as failed items are.
-                log.error(f"OpenAI batch {batch_id} ended with "
-                          f"status={batch.status}")
-            # Compute batch duration
-            if batch.created_at and getattr(batch, "completed_at", None):
-                duration = batch.completed_at - batch.created_at
+                elif _failure_is_transient(
+                        "openai", status, {"code": code, "type": etype}):
+                    results.transient_failures.add(cid)
+            # Compute batch duration (completed_at, expired_at, ...)
+            ended_at = getattr(batch, f"{batch.status}_at", None)
+            if batch.created_at and ended_at:
+                duration = ended_at - batch.created_at
                 batch_durations[key] = round(duration, 1)
                 log.info(f"OpenAI batch {key} duration: {duration:.0f}s "
                          f"({duration/60:.1f}min)")
-            output_file_id = getattr(batch, "output_file_id", None)
-            if not output_file_id:
-                # Nothing finished (every request failed, or the batch
-                # ended before any did): no results, at once.
-                continue
-            # Download results
-            content_bytes = client.files.content(output_file_id).content
-            for line in content_bytes.decode().strip().split("\n"):
-                if not line.strip():
-                    continue
-                entry = json.loads(line)
+            entries = (_file_lines(client, output_file_id)
+                       if output_file_id else [])
+            collected = 0
+            for entry in entries:
                 cid = entry["custom_id"]
-                resp = entry.get("response", entry.get("result", {}))
-                body = resp.get("body", {})
+                resp = entry.get("response") or entry.get("result") or {}
+                body = resp.get("body") or {}
                 if (resp.get("status_code") == 200
                         and body.get("object") == "response"):
                     results[cid] = _responses_result(body)
+                    collected += 1
                 elif resp.get("status_code") == 200 and body.get("choices"):
                     usage = body.get("usage")
                     if not usage:
@@ -812,12 +895,24 @@ def batch_check_and_collect(batch_ids, api_keys, known=None):
                         "truncated": choice.get("finish_reason") == "length",
                         "batch": True,
                     }
+                    collected += 1
                 else:
                     err = openai_item_error(entry) or (
                         resp.get("status_code"), None, None)
                     _log_item_error(batch_id, cid, *err)
                     if is_policy_block(err[1]):
                         results.blocked[cid] = err[1]
+                    elif _failure_is_transient(
+                            "openai", err[0],
+                            {"code": err[1], "type": err[2]}):
+                        results.transient_failures.add(cid)
+            if batch.status != "completed" or not collected:
+                errors = getattr(getattr(batch, "errors", None), "data",
+                                 None)
+                log.error(f"OpenAI batch {batch_id} ended with "
+                          f"status={batch.status}: {collected} result(s) "
+                          f"collected, counts={batch.request_counts}"
+                          + (f", errors={errors}" if errors else ""))
 
     return results, still_pending, batch_durations
 
@@ -1010,9 +1105,6 @@ def openai_batch_cancel_one(api_key, batch_id):
     log.info("OpenAI batch %s cancel requested: status=%s", batch_id,
              batch.status)
     return batch.status
-
-
-OPENAI_BATCH_TERMINAL = ("completed", "failed", "expired", "cancelled")
 
 
 def openai_batch_collect_one(api_key, batch_id, custom_id):

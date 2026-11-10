@@ -8,9 +8,12 @@ on:
     # ios/, so a push that only touches it would just restart Celery (draining
     # running tasks, #312) for no change. A push mixing iOS and server files
     # still deploys; the VM picks up skipped iOS commits on the next deploy.
+    # The same holds for docs/: no server code reads it (the user changelog
+    # lives in backend/), so a decision-log or runbook commit needs no deploy.
     paths-ignore:
       - "ios/**"
       - ".github/workflows/ios.yml"
+      - "docs/**"
   workflow_dispatch:  # Allows manual triggering from GitHub UI
 
 concurrency:

@@ -404,3 +404,58 @@ def scrub_sentry_breadcrumb(crumb, hint):
     except Exception:
         crumb["message"] = MESSAGE_REMOVED
     return crumb
+
+
+# ── Texts stored where the owner reads them ──────────────────────────────
+# A failed reply, transcription or merge stores a plain message, never
+# str(exc) (Peter, 2026-10-20: no raw exception text anywhere). The
+# exception itself is logged (describe_exception) and reaches Sentry, whose
+# events are scrubbed above.
+REPLY_FAILED_TEXT = (
+    "Loore couldn't write this reply. The problem has been reported. "
+    "Please try again.")
+REPLY_NOT_STARTED_TEXT = "Loore couldn't start a reply."
+TRANSCRIPTION_FAILED_TEXT = (
+    "Loore couldn't transcribe this recording. The problem has been "
+    "reported. Please try again.")
+TODO_MERGE_FAILED_TEXT = (
+    "Loore couldn't apply these changes. The problem has been reported. "
+    "Please try again.")
+
+
+PROMPT_TOO_LONG_TEXT = (
+    "This thread is longer than the model can read. Start a new thread, "
+    "or choose a model that reads more.")
+TOOL_FAILED_TEXT = "This action didn't work. The problem has been reported."
+
+
+def user_written_text(exc):
+    """The text of *exc* when it is written for the user, else None. One
+    list for every task that stores a failure where the owner reads it:
+    classes with a message written for the user, anything carrying a
+    ``user_text`` of its own, and a prompt over the context window (its
+    own text, which says what to do instead of the numbers)."""
+    own = getattr(exc, "user_text", None)
+    if isinstance(own, str) and own:
+        return own
+    # llm_providers' classes are matched by name: tests stub or reload
+    # the module, and a class from another copy must still count.
+    names = {c.__name__ for c in type(exc).__mro__}
+    if "PromptTooLongError" in names:
+        return PROMPT_TOO_LONG_TEXT
+    from backend.utils.ca_feed import ArchiveNotReady
+    from backend.utils.llm_nodes import AIUsageRefused, ReadOnlyModelRefused
+    from backend.utils.placeholders import UserExportValidationError
+    written = isinstance(exc, (
+        UserMessageError, ArchiveNotReady, AIUsageRefused,
+        ReadOnlyModelRefused, UserExportValidationError))
+    written = written or bool(
+        names & {"ProviderUnavailableError", "ProviderAccountError"})
+    if written and str(exc):
+        return str(exc)
+    return None
+
+
+class UserMessageError(ValueError):
+    """A ValueError whose message is written for the user, so a reply
+    task may store it as the reply's error (reply_error_text)."""
