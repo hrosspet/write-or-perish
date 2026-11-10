@@ -3056,10 +3056,9 @@ def _ca_batch_poll(task, llm_node, parent_node, meta, entry, user_id):
     # key type was stored falls back to the chain (a load, not a render).
     key_type = entry.get("key_type")
     if not key_type:
-        key_type = determine_api_key_type(
-            _load_node_chain(parent_node, user_id), logger=logger)
-        if _carries_others_shared(
-                _load_node_chain(parent_node, user_id), user_id):
+        chain = _load_node_chain(parent_node, user_id)
+        key_type = determine_api_key_type(chain, logger=logger)
+        if _carries_others_shared(chain, user_id):
             key_type = 'chat'
         entry["key_type"] = key_type  # once; written with the heartbeat
     api_keys = llm_batch.apply_batch_key_override(

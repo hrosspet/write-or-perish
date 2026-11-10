@@ -182,7 +182,7 @@ class TestResolveQuotes:
     def test_cycle_detection(self, mock_get_quote_data):
         """Test that circular references are detected and handled."""
         # Node 10 quotes Node 20, Node 20 quotes Node 10 (cycle)
-        def mock_data(ids, user_id):
+        def mock_data(ids, user_id, as_ai=False):
             data = {
                 10: {"id": 10, "content": "A quotes {quote:20}", "username": "alice", "user_id": 1},
                 20: {"id": 20, "content": "B quotes {quote:10}", "username": "bob", "user_id": 2},
@@ -526,7 +526,7 @@ class TestIntegration:
     @patch('backend.utils.quotes.get_quote_data')
     def test_depth_3_chain(self, mock_get_quote_data):
         """Test a chain of 3 nested quotes (A -> B -> C -> D)."""
-        def mock_data(ids, user_id):
+        def mock_data(ids, user_id, as_ai=False):
             data = {
                 1: {"id": 1, "content": "A quotes {quote:2}", "username": "a", "user_id": 1},
                 2: {"id": 2, "content": "B quotes {quote:3}", "username": "b", "user_id": 1},
@@ -551,7 +551,7 @@ class TestIntegration:
     @patch('backend.utils.quotes.get_quote_data')
     def test_depth_4_chain(self, mock_get_quote_data):
         """Test that depth 4 resolves the full chain."""
-        def mock_data(ids, user_id):
+        def mock_data(ids, user_id, as_ai=False):
             data = {
                 1: {"id": 1, "content": "A quotes {quote:2}", "username": "a", "user_id": 1},
                 2: {"id": 2, "content": "B quotes {quote:3}", "username": "b", "user_id": 1},
@@ -638,7 +638,7 @@ class TestAiUsageFiltering:
     @patch('backend.utils.quotes.get_quote_data')
     def test_resolve_quotes_blocks_nested_ai_usage_none(self, mock_get_quote_data):
         """Test that nested quotes with ai_usage='none' are also blocked."""
-        def mock_data(ids, user_id):
+        def mock_data(ids, user_id, as_ai=False):
             data = {
                 10: {
                     "id": 10, "content": "A quotes {quote:20}",
