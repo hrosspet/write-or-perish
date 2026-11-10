@@ -52,6 +52,15 @@ def test_cleanup_deleted_nodes_runs_daily_at_fixed_utc_time():
     assert kwargs == {"hour": 3, "minute": 17}
 
 
+def test_spend_carry_rolls_hourly_at_a_fixed_minute():
+    """#594: a new month's carry caps are set by 00:07 UTC on the 1st, also
+    when a deploy restarted beat shortly before."""
+    expr = _schedule_entries()["roll-spend-carry"]
+    assert isinstance(expr, ast.Call) and expr.func.attr == "crontab"
+    kwargs = {k.arg: ast.literal_eval(k.value) for k in expr.keywords}
+    assert kwargs == {"minute": 7}
+
+
 def test_fresh_schedule_file_neither_skips_nor_doubles_the_day():
     """Beat restarted with no schedule file starts with last_run_at = now."""
     code = textwrap.dedent("""

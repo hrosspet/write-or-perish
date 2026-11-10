@@ -942,6 +942,23 @@ function AdminPanel() {
     }
   };
 
+  // Forgive the overflow of earlier months counted this month (#594). The
+  // carry is not kept anywhere else, so ask first.
+  const clearCarry = async (u) => {
+    const amount = (u.spend_carried_usd || 0).toFixed(2);
+    if (!window.confirm(
+      `Clear the $${amount} carried into this month for @${u.username}? `
+      + "Only this month's own spending will count toward their limit.")) return;
+    try {
+      await api.post(`/admin/users/${u.id}/clear_spend_carry`);
+      setError("");
+      fetchUsers(); // refreshes the row (incl. the blocked icon)
+    } catch (err) {
+      console.error(err);
+      setError(err.response?.data?.error || "Error clearing the carry.");
+    }
+  };
+
   const activateAndWelcome = async (userId) => {
     try {
       const response = await api.post(`/admin/users/${userId}/activate_and_welcome`);
@@ -1300,6 +1317,12 @@ function AdminPanel() {
                 label="This Month"
               />
             </th>
+            <th
+              style={{ border: "1px solid var(--border)", padding: "8px", width: "90px", whiteSpace: "nowrap" }}
+              title="Spending above the limit in earlier months, counted toward this month's limit (#594). This Month shows only this month's own spending. A limit of 0 clears it."
+            >
+              Carried
+            </th>
             <th style={{ border: "1px solid var(--border)", padding: "8px", width: "85px", whiteSpace: "nowrap" }}>Limit ($)</th>
             <th
               style={{ border: "1px solid var(--border)", padding: "8px", width: "150px", whiteSpace: "nowrap" }}
@@ -1355,6 +1378,28 @@ function AdminPanel() {
                     aria-label="Blocked this month"
                     style={{ color: "var(--error)", marginLeft: "6px", verticalAlign: "middle" }}
                   />
+                )}
+              </td>
+              <td style={{ border: "1px solid var(--border)", padding: "8px", width: "90px", whiteSpace: "nowrap" }}>
+                {(u.spend_carried_usd || 0) > 0 ? (
+                  <>
+                    ${u.spend_carried_usd.toFixed(2)}
+                    <button
+                      type="button"
+                      onClick={() => clearCarry(u)}
+                      title="Clear the carry: only this month's own spending counts toward the limit"
+                      aria-label={`Clear the carry of ${u.username}`}
+                      style={{
+                        marginLeft: "6px", padding: 0, background: "none", border: "none",
+                        cursor: "pointer", verticalAlign: "middle", fontSize: "0.85em",
+                        color: "var(--text-muted)",
+                      }}
+                    >
+                      clear
+                    </button>
+                  </>
+                ) : (
+                  <span style={{ color: "var(--text-muted)" }}>—</span>
                 )}
               </td>
               <td style={{ border: "1px solid var(--border)", padding: "8px", width: "85px" }}>

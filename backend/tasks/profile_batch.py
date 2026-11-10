@@ -1129,7 +1129,7 @@ def _seed_profile_batches(users=None, ignore_backoff=False,
     nothing for a user whose imports are still settling (#598,
     import_settling); an immediate seed the admin sends (Build profile,
     pre-fill) does not wait for them."""
-    from backend.utils.spend import user_is_capped
+    from backend.utils.spend import refresh_spend_carry, user_is_capped
     config = current_app.config
     if config.get("PROFILE_UPDATES_PAUSED"):
         logger.info("PROFILE_UPDATES_PAUSED — skipping batch seeder")
@@ -1175,7 +1175,10 @@ def _seed_profile_batches(users=None, ignore_backoff=False,
                 continue
             imports_done = user.profile_import_quiet_from is not None
         # The per-user monthly spend cap, checked as the synchronous task
-        # checks it on entry. The builder below settles it too.
+        # checks it on entry. The builder below settles it too. At a new
+        # month the carry is rolled first (#594): a build held at the cap
+        # stays held while last month's overflow still fills the limit.
+        refresh_spend_carry(user, config)
         if user_is_capped(user):
             _hold_for_cap(user)
             continue
