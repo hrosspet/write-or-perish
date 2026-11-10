@@ -483,3 +483,46 @@ def test_keys_are_unwrapped_a_window_ahead(app, ex, alice, monkeypatch):
     assert batches == [["e0", "e1", "e2"], ["e3", "e4", "e5"],
                        ["e6", "second thread"]]
     assert "e6" in text
+
+
+# ── access in the preamble ─────────────────────────────────────────────
+
+def test_preamble_leaves_out_pins_on_entries_the_user_cannot_access(
+        app, ex, alice, bob):
+    """The preamble query keeps only entries the user can access: a
+    profile pinned only on the user's deleted session entry (in a thread
+    kept for its live replies), and the prompt text pinned on another
+    user's private reply in the user's public thread, stay out of the
+    file (from the review of #629)."""
+    llm = _user("claude-x")
+    prompt = _version(UserPrompt, alice, prompt_key="voice",
+                      title="Voice prompt", content="ALICE PROMPT")
+    profile = _version(UserProfile, alice, content="PROFILE ON DELETED ROOT")
+    bobs_prompt = _version(UserPrompt, bob, prompt_key="voice",
+                           title="Bob prompt", content="BOB PRIVATE PROMPT")
+    root = _session(alice, llm, prompt, [("profile", profile)])
+    root.deleted_at = T0 + timedelta(days=3)
+    _db.session.commit()
+    pub = _node(alice, "public root", privacy="public")
+    _pin(_node(bob, "bob private", parent=pub), "prompt", bobs_prompt)
+    legacy = _legacy(ex, alice)
+    assert "PROFILE ON DELETED ROOT" not in legacy
+    assert "BOB PRIVATE PROMPT" not in legacy
+    assert _same(_streamed(ex, alice), legacy)
+
+
+# ── other requests on the worker get a turn ────────────────────────────
+
+def test_export_pauses_with_a_real_sleep(app, ex, alice, monkeypatch):
+    """Under the gevent worker a 0 s sleep does not let the loop poll
+    sockets, so the export's pause must sleep longer than 0."""
+    for i in range(3):
+        root = _node(alice, f"thread {i}")
+        _node(alice, f"reply {i}", parent=root)
+    sleeps = []
+    monkeypatch.setattr(ex.time, "sleep", sleeps.append)
+    monkeypatch.setattr(ex, "EXPORT_PAUSE_EVERY_SECONDS", 0)
+    text = _streamed(ex, alice)
+    assert text.endswith("*End of Export*")
+    assert len(sleeps) > 6
+    assert all(s == ex.EXPORT_PAUSE_SECONDS > 0 for s in sleeps)
