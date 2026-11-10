@@ -91,6 +91,19 @@ def is_circle_ask(node) -> bool:
                for m in meta)
 
 
+def circle_ask_entry_id(node):
+    """The shared entry an "Ask my AI" answer was written from (its
+    marker's ``entry_id``), or None for any other node."""
+    try:
+        meta = json.loads(getattr(node, "tool_calls_meta", None) or "[]") or []
+    except (json.JSONDecodeError, TypeError):
+        return None
+    for m in meta:
+        if isinstance(m, dict) and m.get("name") == CIRCLE_ASK_MARKER:
+            return m.get("entry_id")
+    return None
+
+
 def circle_ask_ai_usage(user):
     """The ai_usage of an "Ask my AI" answer: 'chat', never 'train' (it
     is written from other people's shared entries), and the account's

@@ -762,7 +762,8 @@ def create_node():
             # A shared thread has one audience, see the text path.
             from backend.utils import circles as cz
             if (cz.circles_enabled(current_user)
-                    and cz.reply_requires_circles(parent, privacy_level)):
+                    and cz.reply_requires_circles(
+                    parent, privacy_level, current_user.id)):
                 return cz.circle_reply_required_response()
 
         agentic, auto_reply_model, err = _upload_reply_options(
@@ -887,7 +888,8 @@ def create_node():
         # entry is shared with. The app names them before sending.
         from backend.utils import circles as cz
         if (cz.circles_enabled(current_user)
-                and cz.reply_requires_circles(parent, privacy_level)):
+                and cz.reply_requires_circles(
+                    parent, privacy_level, current_user.id)):
             return cz.circle_reply_required_response()
 
     # Content above the per-node cap is auto-split into a serial chain
@@ -1934,7 +1936,14 @@ def get_suggested_model(node_id):
 def request_llm_response(node_id):
     from backend.llm_providers import LLMProvider
 
-    parent_node = Node.query.get_or_404(node_id)
+    # An "Ask my AI" request answers a node the caller cannot read the
+    # way it answers one that does not exist (below).
+    if (request.get_json(silent=True) or {}).get("circle_ask"):
+        parent_node = Node.query.get(node_id)
+        if parent_node is None:
+            return _node_not_found()
+    else:
+        parent_node = Node.query.get_or_404(node_id)
 
     # Generation is allowed only on your OWN nodes (#228): on a public
     # thread you respond first (a public reply of yours), then generate on
@@ -2003,7 +2012,11 @@ def request_llm_response(node_id):
         if circle_ask:
             from backend.utils.llm_nodes import (
                 CIRCLE_ASK_MARKER, circle_ask_ai_usage)
-            ask_kwargs = {"meta": [{"name": CIRCLE_ASK_MARKER}]}
+            # The marker stays on the answer for good, with the entry
+            # it was written from (circles.thread_source_entry).
+            ask_kwargs = {"meta": [{
+                "name": CIRCLE_ASK_MARKER,
+                "entry_id": cz.shared_entry_of(parent_node).id}]}
         llm_node, task_id = create_llm_placeholder(
             parent_node.id, model_id, current_user.id,
             privacy_level=parent_node.privacy_level,
@@ -2752,7 +2765,8 @@ def init_chunked_upload():
     if parent_id:
         from backend.utils import circles as cz
         if (cz.circles_enabled(current_user) and cz.reply_requires_circles(
-                Node.query.get(parent_id), privacy_level)):
+                Node.query.get(parent_id), privacy_level,
+                current_user.id)):
             return cz.circle_reply_required_response()
 
     agentic, auto_reply_model, err = _upload_reply_options(
@@ -3091,7 +3105,8 @@ def init_streaming_transcription():
     if parent_id:
         from backend.utils import circles as cz
         if (cz.circles_enabled(current_user) and cz.reply_requires_circles(
-                Node.query.get(parent_id), privacy_level)):
+                Node.query.get(parent_id), privacy_level,
+                current_user.id)):
             return cz.circle_reply_required_response()
 
     # Generate session ID

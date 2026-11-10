@@ -376,6 +376,40 @@ def parent_shared_entry(node):
     return shared_entry_of(db.session.get(Node, node.parent_id))
 
 
+def thread_source_entry(node):
+    """The entry whose thread *node* was written into, whether or not it
+    is shared now, or None: where the node's content came from. A reply
+    in a shared thread and an "Ask my AI" answer keep this for good
+    (Node.audience_root_id is never cleared on them; the answer's marker
+    carries the entry too), and a node written under such a reply is
+    found through its ancestors. The entry itself is not its own source.
+
+    Who may widen a node is decided from this, not from what its direct
+    parent is at the moment."""
+    from backend.utils.llm_nodes import circle_ask_entry_id
+    from backend.utils.thread_tree import ancestor_chain
+    for entry_id in (node.audience_root_id, circle_ask_entry_id(node)):
+        if entry_id is not None and entry_id != node.id:
+            entry = db.session.get(Node, entry_id)
+            if entry is not None:
+                return entry
+    if node.id is None or node.parent_id is None:
+        return None
+    chain = ancestor_chain(
+        node.id, Node.id, Node.parent_id, Node.audience_root_id)
+    for row in chain[1:]:
+        if row.audience_root_id is not None:
+            return db.session.get(Node, row.audience_root_id)
+    return None
+
+
+def written_into_someone_elses_thread(node, user_id) -> bool:
+    """*node* comes from a thread whose entry belongs to someone other
+    than *user_id*: only that entry's author decides who reads it."""
+    source = thread_source_entry(node)
+    return source is not None and entry_owner_id(source) != user_id
+
+
 def clear_audience(node):
     """*node* stops being a shared entry (it was taken back to Only me,
     made public, or joined a thread). Replies that pointed at it keep
@@ -461,10 +495,14 @@ def join_thread_audience(node, entry):
 
 
 def leave_audience(node):
-    """*node* is no longer "circles": drop what made it shared."""
+    """*node* is no longer "circles". An entry of the author's own stops
+    being shared: its audience rows and its pointer go. A reply keeps
+    pointing at the entry it was written under: the pointer is read for
+    access only while the reply is "circles", and it stays as the record
+    of where the reply came from (thread_source_entry)."""
     if node.audience_root_id is not None and node.audience_root_id == node.id:
         clear_audience(node)
-    node.audience_root_id = None
+        node.audience_root_id = None
     forget_circle_access()
 
 
@@ -487,17 +525,30 @@ def apply_requested_sharing(node, user, data, *, old_privacy=None,
       become "circles" on an edit is refused; a new node is left without
       an audience (private) for the client to share in a second step.
     """
-    if not circles_enabled(user):
-        return None
     wants = "circle_ids" in data or "circle_usernames" in data
-    thread_entry = parent_shared_entry(node)
-    if node.privacy_level != CIRCLES:
-        if (node.privacy_level == PrivacyLevel.PUBLIC.value
-                and thread_entry is not None
-                and entry_owner_id(thread_entry) != user.id):
+    names_an_audience = wants and bool(
+        data.get("circle_ids") or split_names(data.get("circle_usernames")))
+    # What was written into someone else's thread (a reply, a reply to a
+    # reply, an "Ask my AI" answer) is read by that thread's audience or
+    # by its writer alone, whatever its parent is now and whether or not
+    # Circles is on for the writer: never public, never another audience.
+    source = thread_source_entry(node)
+    if source is not None and entry_owner_id(source) != user.id:
+        if node.privacy_level == PrivacyLevel.PUBLIC.value:
             raise AudienceError(
                 "Only the author of the entry can make this thread public.",
                 code="circle_thread_public", status=403)
+        if node.privacy_level != CIRCLES:
+            leave_audience(node)
+            return None
+        if names_an_audience:
+            raise AudienceError(REPLY_AUDIENCE, code="circle_reply_audience")
+        join_thread_audience(node, source)
+        return None
+    if not circles_enabled(user):
+        return None
+    thread_entry = parent_shared_entry(node)
+    if node.privacy_level != CIRCLES:
         if old_privacy == CIRCLES or node.audience_root_id is not None:
             leave_audience(node)
         return None
@@ -517,25 +568,14 @@ def apply_requested_sharing(node, user, data, *, old_privacy=None,
                         data.get("circle_usernames"))
 
 
-def cascade_audience(root, changed_nodes):
-    """After an "apply to my replies" cascade of a privacy change from
-    *root*: the replies that became "circles" join root's audience, the
-    ones that left "circles" stop pointing at one."""
-    entry_id = root.audience_root_id if root.privacy_level == CIRCLES else None
-    for n in changed_nodes:
-        if n.privacy_level == CIRCLES and entry_id is not None:
-            if n.audience_root_id == n.id:
-                clear_audience(n)
-            n.audience_root_id = entry_id
-        elif n.privacy_level != CIRCLES and n.audience_root_id is not None:
-            leave_audience(n)
-    forget_circle_access()
-
-
-def reply_requires_circles(parent, privacy_level) -> bool:
+def reply_requires_circles(parent, privacy_level, user_id) -> bool:
     """A reply under a shared node must itself be "circles" (it is then
-    read by the thread's audience), the rule public threads have."""
+    read by the thread's audience), the rule public threads have. Only
+    for a parent *user_id* can read: for any other parent the route's
+    own answer for a parent that does not exist stands."""
+    from backend.utils.privacy import can_user_access_node
     return (privacy_level != CIRCLES and parent is not None
+            and can_user_access_node(parent, user_id)
             and shared_entry_of(parent) is not None)
 
 

@@ -1022,3 +1022,162 @@ def test_a_threads_prompt_is_never_shared(app):
     _db.session.expire_all()
     assert _db.session.get(Node, root.id).privacy_level == "private"
     assert not _can_read(app, "ben", root.id)
+
+
+# ── Where a reply came from decides who may widen it ────────────────────
+
+def _put(app, who, node_id, **body):
+    node = _db.session.get(Node, node_id)
+    body.setdefault("content", node.get_content())
+    return _client(app, who).put(f"/api/nodes/{node_id}", json=body)
+
+
+def _thread_with_answer(app):
+    """anna's entry for ben and chidi; ben's reply R, his Ask-my-AI
+    answer A under R, chidi's reply N under R."""
+    entry = _share(app, names=["ben", "chidi"])
+    r = _reply(app, "ben", entry, "ben replies").get_json()["id"]
+    a = _client(app, "ben").post(
+        f"/api/nodes/{r}/llm", json={"circle_ask": True}).get_json()["node_id"]
+    answer = _db.session.get(Node, a)
+    answer.set_content("ANSWER-FROM-ANNAS-ENTRY")
+    answer.llm_task_status = "completed"
+    _db.session.commit()
+    n = _reply(app, "chidi", r, "chidi under ben").get_json()["id"]
+    return entry, r, a, n
+
+
+def test_an_answer_and_a_nested_reply_are_never_widened(app):
+    from backend.utils.llm_nodes import circle_ask_entry_id
+    entry, r, a, n = _thread_with_answer(app)
+    assert circle_ask_entry_id(_db.session.get(Node, a)) == entry
+    anon = app.test_client()
+
+    def closed(node_id):
+        node = _db.session.get(Node, node_id)
+        _db.session.refresh(node)
+        assert node.privacy_level != "public", node_id
+        assert node.audience_root_id == entry, node_id
+        assert anon.get(f"/api/commons/node/{node_id}").status_code == 404
+        assert not _can_read(app, "dana", node_id)
+
+    # Directly: not public, not another audience (edit and second step).
+    for who, node_id in (("ben", a), ("ben", r), ("chidi", n)):
+        assert _put(app, who, node_id,
+                    privacy_level="public").status_code == 403
+        assert _put(app, who, node_id, privacy_level="circles",
+                    circle_usernames=["dana"]).status_code == 400
+        assert _client(app, who).put(
+            f"/api/nodes/{node_id}/audience",
+            json={"circle_usernames": ["dana"]}).status_code == 400
+        closed(node_id)
+
+    # ben takes his reply back, with his replies below it. The answer and
+    # chidi's nested reply now sit under a private parent: still not
+    # theirs to widen.
+    assert _put(app, "ben", r, privacy_level="private",
+                apply_to_descendants=True).status_code == 200
+    assert _db.session.get(Node, a).privacy_level == "private"
+    for who, node_id in (("ben", a), ("ben", r), ("chidi", n)):
+        assert _put(app, who, node_id,
+                    privacy_level="public").status_code == 403, node_id
+        assert _put(app, who, node_id, privacy_level="circles",
+                    circle_usernames=["dana"]).status_code == 400, node_id
+        closed(node_id)
+    # Nor by a cascade from ben's reply.
+    assert _put(app, "ben", r, privacy_level="public",
+                apply_to_descendants=True).status_code == 403
+    closed(a)
+    # A note ben writes under his private reply comes from the same thread.
+    note = _client(app, "ben").post("/api/nodes/", json={
+        "content": "ben's later note", "privacy_level": "private",
+        "ai_usage": "chat", "parent_id": r}).get_json()["id"]
+    assert _put(app, "ben", note, privacy_level="public").status_code == 403
+    assert _put(app, "ben", note, privacy_level="circles",
+                circle_usernames=["dana"]).status_code == 400
+    # Also with Circles switched off for ben.
+    app.config["CIRCLES_USER_IDS"] = app.config["CIRCLES_USER_IDS"] - {
+        _user("ben").id}
+    assert _put(app, "ben", a, privacy_level="public").status_code == 403
+    closed(a)
+
+
+def test_an_answer_taken_back_stays_out_of_its_owners_corpus(app):
+    from backend.routes.export_data import _export_visible_filter
+    from backend.utils.privacy import can_ai_access_node
+    entry, r, a, n = _thread_with_answer(app)
+    assert _put(app, "ben", a, privacy_level="private").status_code == 200
+    ben = _user("ben")
+    answer = _db.session.get(Node, a)
+    assert answer.privacy_level == "private" and answer.audience_root_id == entry
+    assert not can_ai_access_node(answer, ben.id)
+    visible = {i for (i,) in _db.session.query(Node.id).filter(
+        _export_visible_filter(Node, ben.id))}
+    assert a not in visible and r in visible
+    assert "ANSWER-FROM-ANNAS-ENTRY" not in _export(ben, filter_ai_usage=False)
+    # Back in the thread, it is read by the thread's audience again.
+    assert _put(app, "ben", a, privacy_level="circles").status_code == 200
+    assert _can_read(app, "chidi", a) and _can_read(app, "anna", a)
+
+
+def test_an_answer_is_closed_to_a_removed_or_muted_reader(app):
+    entry, r, a, n = _thread_with_answer(app)
+    assert _can_read(app, "chidi", a)
+    assert _client(app, "chidi").post(
+        "/api/circles/mutes", json={"username": "anna"}).status_code == 200
+    assert not _can_read(app, "chidi", a) and not _can_read(app, "chidi", r)
+    assert _client(app, "chidi").delete(
+        "/api/circles/mutes/anna").status_code == 200
+    assert _can_read(app, "chidi", a)
+    # anna removes chidi (the entry is now for ben only).
+    assert _put(app, "anna", entry, privacy_level="circles",
+                circle_usernames=["ben"]).status_code == 200
+    assert not _can_read(app, "chidi", a) and not _can_read(app, "chidi", r)
+    assert _can_read(app, "chidi", n)          # his own reply stays his
+    assert _can_read(app, "ben", a) and _can_read(app, "anna", a)
+
+
+def test_the_author_may_still_make_her_own_thread_public(app):
+    entry, r, a, n = _thread_with_answer(app)
+    own = _reply(app, "anna", entry, "anna adds").get_json()["id"]
+    assert _put(app, "anna", entry, privacy_level="public",
+                apply_to_descendants=True).status_code == 200
+    assert _db.session.get(Node, own).privacy_level == "public"
+    for node_id in (r, a, n):
+        assert _db.session.get(Node, node_id).privacy_level == "circles"
+
+
+# ── A node the caller cannot read answers like one that does not exist ──
+
+def test_a_shared_entry_is_not_told_apart_from_a_missing_one(app):
+    entry = _share(app, names=["ben"])
+    private = _client(app, "anna").post("/api/nodes/", json={
+        "content": "anna private", "ai_usage": "chat"}).get_json()["id"]
+    missing = 987654
+    dana = _client(app, "dana")
+
+    def same(call):
+        answers = set()
+        for node_id in (entry, private, missing):
+            r = call(node_id)
+            answers.add((r.status_code,
+                         json.dumps(r.get_json(), sort_keys=True)))
+        assert len(answers) == 1, answers
+        assert next(iter(answers))[0] == 404
+
+    for privacy in ("private", "circles", "public"):
+        same(lambda i: dana.post("/api/nodes/", json={
+            "content": "x", "privacy_level": privacy, "ai_usage": "chat",
+            "parent_id": i}))
+        same(lambda i: dana.post("/api/nodes/streaming/init", json={
+            "privacy_level": privacy, "ai_usage": "chat", "parent_id": i}))
+        same(lambda i: dana.post("/api/nodes/upload/init", json={
+            "filename": "a.mp3", "filesize": 10, "total_chunks": 1,
+            "upload_id": "0123456789abcdef0123456789abcdef",
+            "privacy_level": privacy, "ai_usage": "chat", "parent_id": i}))
+    same(lambda i: dana.post(f"/api/nodes/{i}/llm", json={"circle_ask": True}))
+    same(lambda i: dana.get(f"/api/nodes/{i}/audience"))
+    same(lambda i: dana.put(f"/api/nodes/{i}/audience",
+                            json={"circle_usernames": ["ben"]}))
+    same(lambda i: dana.get(f"/api/nodes/{i}"))
+    same(lambda i: dana.get(f"/api/nodes/{i}/audio"))

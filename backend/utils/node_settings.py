@@ -29,6 +29,17 @@ def apply_settings_to_descendants(root, user_id, *, privacy_level=None,
     """
     if privacy_level is None and ai_usage is None:
         return []
+    # Circles: where each reply came from (circles.thread_source_entry),
+    # carried down the walk instead of asked per node: a reply's own
+    # pointer or marker, else what its parent hands down. `below` is the
+    # entry a node's replies come from: its own pointer (an entry points
+    # at itself), else what it inherited.
+    from backend.utils.circles import entry_owner_id, thread_source_entry
+    from backend.utils.llm_nodes import circle_ask_entry_id
+    root_source = thread_source_entry(root)
+    below = {root.id: root.audience_root_id
+             or (root_source.id if root_source is not None else None)}
+    source_of = {}
     editable = []
     seen = {root.id}
     frontier = [root.id]
@@ -36,9 +47,25 @@ def apply_settings_to_descendants(root, user_id, *, privacy_level=None,
         level = Node.query.filter(Node.parent_id.in_(frontier)).all()
         frontier = [n.id for n in level if n.id not in seen]
         seen.update(frontier)
+        for n in level:
+            inherited = below.get(n.parent_id)
+            own = n.audience_root_id
+            if own is not None and own != n.id:
+                source_of[n.id] = own
+            else:
+                source_of[n.id] = circle_ask_entry_id(n) or inherited
+            below[n.id] = own if own is not None else inherited
         editable.extend(
             n for n in level
             if n.deleted_at is None and can_user_edit_node(n, user_id))
+    owners = {}
+    for entry_id in {source_of.get(n.id) for n in editable} - {None}:
+        entry = Node.query.get(entry_id)
+        owners[entry_id] = entry_owner_id(entry) if entry is not None else None
+
+    def written_into_someone_elses_thread(n, uid):
+        entry_id = source_of.get(n.id)
+        return entry_id is not None and owners.get(entry_id) != uid
     if privacy_level is not None:
         # set_privacy_level moves content across the encryption boundary;
         # unwrap the DEKs concurrently first, or the decrypts below issue
@@ -51,9 +78,16 @@ def apply_settings_to_descendants(root, user_id, *, privacy_level=None,
         # shape, so the same batching applies to a cascade that raises
         # usage: unwrap first, then the checks below are cache hits.
         prefetch_deks(n.content for n in editable if n.ai_usage != ai_usage)
+    # Circles: what the user wrote into someone else's thread (a reply,
+    # an "Ask my AI" answer) is never made public and never moved to
+    # another audience by a cascade either; it can be taken back.
     changed = []
     for n in editable:
         touched = False
+        foreign = (privacy_level is not None
+                   and written_into_someone_elses_thread(n, user_id))
+        if foreign and privacy_level == "public":
+            continue
         if privacy_level is not None and n.privacy_level != privacy_level:
             n.set_privacy_level(privacy_level)
             # Same rule as the focal node: a private node can't stay pinned.
@@ -68,10 +102,16 @@ def apply_settings_to_descendants(root, user_id, *, privacy_level=None,
             if not (ai_usage == "train" and is_feed_node(n)):
                 n.ai_usage = ai_usage
                 touched = True
-        if audience_from is not None and privacy_level is not None:
+        if (audience_from is not None and privacy_level is not None
+                and not foreign):
             entry_id = (audience_from.audience_root_id
                         if audience_from.privacy_level == "circles" else None)
-            wanted = entry_id if n.privacy_level == "circles" else None
+            if n.privacy_level == "circles":
+                wanted = entry_id
+            elif n.audience_root_id == n.id:
+                wanted = None      # an entry of its own stops being shared
+            else:
+                wanted = n.audience_root_id   # a reply keeps its record
             if n.audience_root_id != wanted:
                 if n.audience_root_id == n.id:
                     from backend.utils.circles import clear_audience

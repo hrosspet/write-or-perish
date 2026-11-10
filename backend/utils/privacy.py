@@ -150,6 +150,37 @@ def circles_on_anywhere() -> bool:
                 or config.get("CIRCLES_USER_IDS"))
 
 
+# How long "no Ask my AI answer exists" is believed while Circles is off
+# for everyone (no new one can be made then). INTRODUCED HEURISTIC.
+_ANSWERS_CHECK_SECONDS = 600
+_answers_seen = {"at": 0.0, "any": False}
+
+
+def answers_may_exist() -> bool:
+    """Whether the corpus filters need their "Ask my AI" clause: while
+    Circles is on for anyone, and afterwards for as long as a reply of
+    a model that points at an entry exists (an answer made before the
+    flag was switched off must stay out of its owner's corpus). While
+    Circles is off the look is one indexed query, remembered for
+    _ANSWERS_CHECK_SECONDS."""
+    if circles_on_anywhere():
+        return True
+    import time
+    now = time.monotonic()
+    if now - _answers_seen["at"] > _ANSWERS_CHECK_SECONDS or not _answers_seen["at"]:
+        from backend.extensions import db
+        from backend.models import Node
+        try:
+            _answers_seen["any"] = db.session.query(Node.id).filter(
+                Node.audience_root_id.isnot(None),
+                Node.audience_root_id != Node.id,
+                Node.node_type == "llm").first() is not None
+        except Exception:  # noqa: BLE001 - no answer is not known: keep the clause
+            return True
+        _answers_seen["at"] = now
+    return _answers_seen["any"]
+
+
 def _node_owner_id(node):
     return getattr(node, 'human_owner_id', None) or node.user_id
 
@@ -275,12 +306,12 @@ def is_others_thread_answer(node) -> bool:
     stays in the thread. It is the reader's to read there, and no part
     of the reader's corpus (export, profile builds, recent context,
     search) or of their other prompts."""
-    if (getattr(node, 'privacy_level', None) != PrivacyLevel.CIRCLES
-            or getattr(node, 'node_type', None) != "llm"
-            or not circles_on_anywhere()):
+    if getattr(node, 'node_type', None) != "llm":
         return False
+    # Whatever its level now: taken back to Only me it is still written
+    # from that entry (its pointer is never cleared).
     entry_id = getattr(node, 'audience_root_id', None)
-    return (entry_id is not None
+    return (entry_id is not None and entry_id != node.id
             and audience_entry_owner(entry_id) != _node_owner_id(node))
 
 
@@ -289,9 +320,9 @@ def others_thread_answer_filter(node_model):
     entry = _node_alias("thread")
     owner = func.coalesce(node_model.human_owner_id, node_model.user_id)
     return and_(
-        node_model.privacy_level == PrivacyLevel.CIRCLES.value,
         node_model.node_type == "llm",
         node_model.audience_root_id.isnot(None),
+        node_model.audience_root_id != node_model.id,
         ~select(entry.id).where(
             entry.id == node_model.audience_root_id,
             func.coalesce(entry.human_owner_id, entry.user_id) == owner,
@@ -585,7 +616,7 @@ def accessible_nodes_filter_ignoring_deleted(node_model, user_id: int,
     """
     own = or_(node_model.user_id == user_id,
               node_model.human_owner_id == user_id)
-    if as_ai and circles_on_anywhere():
+    if as_ai and answers_may_exist():
         own = and_(own, ~others_thread_answer_filter(node_model))
     return or_(
         own,
