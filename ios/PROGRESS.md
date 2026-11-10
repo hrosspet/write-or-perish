@@ -991,7 +991,12 @@ Peter: "currently it's not possible to select text in the app and copy it. Could
   lists and paragraphs with images keep their own views, and the text inside them is selectable on its
   own (table cells and code blocks offer Copy for the whole cell or block, as SwiftUI does). Plain
   reading text uses `ReadingText`: a version in Version history, the text kept beside the todo list,
-  the new default prompt, and the intentions' lines.
+  and the new default prompt.
+- Short rows in long, non-lazy lists keep SwiftUI `Text` with `.textSelection(.enabled)` (Copy for the
+  whole row, no handles): todo items and the intentions' lines (`MarkdownView` with
+  `.environment(\.readingTextSelectable, false)`). The workspace pages are a `ScrollView` with a plain
+  `VStack`, so every row is built when the page opens; a `UITextView` per row made 100 todo items and
+  60 intentions open several times slower and use tens of MB more (#624 review; numbers in the PR).
 - The text looks as before: the same faces, sizes, colours (dynamic, so both themes), Dynamic Type
   scaling, line spacing, paragraph margins, list markers and indents. TextKit puts a paragraph's line
   spacing under its last line too, so the builder takes it off the next paragraph's gap; where the gap
@@ -1007,9 +1012,10 @@ Peter: "currently it's not possible to select text in the app and copy it. Could
   owner, a Commons card, a published share): the text view takes the touches, so the card's
   `onTapGesture` never saw a tap on its text. `.readingTextTap(action)` passes the card's action to the
   text: a short tap on the text opens the card, a tap on a link opens the link, and a tap that clears a
-  selection only clears it. The tap recognizer fails after 0.3 s (`QuickTapRecognizer`), because the
+  selection only clears it. The tap recognizer fails after 0.45 s (`QuickTapRecognizer`), because the
   text view's long press waits for it to fail; a `UITapGestureRecognizer` would make the long press take
-  about twice as long.
+  about twice as long. 0.45 s sits just under the long press's own delay (about 0.5 s): with 0.3 s, a
+  press of 0.3–0.5 s on a card's text did nothing (#624 review).
 - A tap anywhere outside the text clears the selection (`OutsideTapClearer`, a tap recognizer on the
   window that does not take the tap); a selection in one text view clears the one in another.
 - Not selectable, as before: collapsed reply cards (a preview; a tap opens the full text), titles,
@@ -1021,5 +1027,5 @@ Peter: "currently it's not possible to select text in the app and copy it. Could
 - Tests: `SelectableTextTests` (which blocks share a text view, the text and its attributes, Copy, link
   hit-testing, height, a 13,000-word reply, the hosted view is selectable and not editable);
   `SelectCopyUITests` (local backend): a selection across two paragraphs copied and pasted back, no
-  keyboard, a tap outside clears it, a link still opens, an expanded reply card still opens on a tap,
-  the profile.
+  keyboard, a tap outside clears it, a link still opens, in an expanded reply card a 0.7 s press
+  selects and a 0.4 s press opens the reply, the profile.
