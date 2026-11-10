@@ -1,7 +1,9 @@
-from flask import Blueprint, jsonify, Response, request, current_app
+from flask import (
+    Blueprint, jsonify, Response, request, current_app, stream_with_context,
+)
 from flask_login import login_required, current_user
 from backend.models import (
-    Node, UserProfile, UserPrompt, UserTodo,
+    Node, NodeContextArtifact, UserProfile, UserPrompt, UserTodo,
     UserArtifact,
 )
 from backend.extensions import db
@@ -15,15 +17,16 @@ from backend.utils.quotes import (
     ai_blocked_artifact, AI_BLOCKED_ARTIFACT_TEXT,
 )
 from backend.utils.timefmt import iso_utc
-from backend.utils.encryption import prefetch_deks
+from backend.utils.encryption import dek_cached, prefetch_deks
 from backend.utils.task_owner import failure_text, task_owned_by
 from backend.utils.thread_tree import ancestor_chains
-from sqlalchemy import and_, case, func, or_
+from sqlalchemy import and_, case, exists, func, or_
 from sqlalchemy.orm import subqueryload
 from bisect import bisect_left, bisect_right
 from collections import namedtuple
 from datetime import datetime
 from operator import attrgetter, itemgetter
+import time
 
 export_bp = Blueprint("export_bp", __name__)
 
@@ -284,19 +287,27 @@ class _CompactTweetRun:
     def flush(self):
         if not self.run:
             return
-        self.lines.append(
-            f"# Tweets by {self.username} (imported from Twitter/X) — "
-            f"{len(self.run)} tweets"
-        )
+        self.lines.append(_tweet_run_heading(self.username, len(self.run)))
         self.lines.append("")
         for tweet in self.run:
             _note_entry(self.licence, tweet)
-            ts = tweet.created_at.strftime("%Y-%m-%d %H:%M")
-            self.lines.append(f"[{ts}] {tweet.get_content()}")
+            self.lines.append(_tweet_line(tweet))
             self.lines.append("")
         self.lines.append("---")
         self.lines.append("")
         self.run.clear()
+
+
+def _tweet_run_heading(username, count):
+    """The heading line of a run of *count* flat imported tweets (#276)."""
+    return (f"# Tweets by {username} (imported from Twitter/X) — "
+            f"{count} tweets")
+
+
+def _tweet_line(tweet):
+    """One flat imported tweet in its run's section (#276)."""
+    ts = tweet.created_at.strftime("%Y-%m-%d %H:%M")
+    return f"[{ts}] {tweet.get_content()}"
 
 
 def _is_flat_tweet_root(node, filter_ai_usage, created_before):
@@ -488,6 +499,42 @@ def format_node_tree(
     """
     Format a node and its descendants into a human-readable tree structure
     using Markdown headers. Depth-first traversal for maximum readability.
+    The text is the pieces ``iter_node_tree`` yields, joined; see there.
+    """
+    return "".join(iter_node_tree(
+        node, index_path=index_path, processed_nodes=processed_nodes,
+        filter_ai_usage=filter_ai_usage, user_id=user_id,
+        created_before=created_before, embedded_quotes=embedded_quotes,
+        included_ids=included_ids, ai_blocked_ids=ai_blocked_ids,
+        licence=licence, artifact_refs=artifact_refs,
+        prune_tombstones=prune_tombstones))
+
+
+def iter_node_tree(
+    node,
+    index_path="1",
+    processed_nodes=None,
+    filter_ai_usage=False,
+    user_id=None,
+    created_before=None,
+    embedded_quotes=None,
+    included_ids=None,
+    ai_blocked_ids=None,
+    licence=None,
+    artifact_refs=True,
+    prune_tombstones=False,
+    before_entry=None,
+):
+    """
+    Yield the text of a node and its descendants piece by piece, in
+    order: each entry's block, each placeholder, each branch separator.
+    ``format_node_tree`` joins them; the streamed data download (#591)
+    sends them as they come, so a very large thread starts going out
+    before it is all rendered.
+
+    before_entry: Optional callable, called with each node whose text is
+        about to be rendered (the download unwraps the data keys of the
+        entries ahead there, #591). Changes nothing in the text.
 
     Iterative (explicit work stack) rather than recursive: the renderer
     used one Python frame per reply-depth (plus the frames SQLAlchemy
@@ -530,8 +577,9 @@ def format_node_tree(
                  holds the place of a reply below it (§5a). A tree with
                  no entry rendered in it is "".
 
-    Returns:
-        str: Formatted text representation of the node tree
+    Yields:
+        str: pieces of the formatted text of the node tree, nothing for
+        a tree that renders as "".
     """
     from backend.utils.privacy import can_user_view_tombstone, shown_as_deleted
 
@@ -588,14 +636,13 @@ def format_node_tree(
         processed_nodes = set()
     dead = _dead_tombstones() if prune_tombstones else set()
     if node.id in dead:
-        return ""
+        return
 
-    parts = []
     stack = [("node", node, index_path)]
     while stack:
         frame = stack.pop()
         if frame[0] == "text":
-            parts.append(frame[1])
+            yield frame[1]
             continue
         kind, current, path = frame
 
@@ -619,10 +666,12 @@ def format_node_tree(
 
         if kind == "node":
             processed_nodes.add(current.id)
-            parts.append(_format_node_text(
+            if before_entry is not None:
+                before_entry(current)
+            yield _format_node_text(
                 current, path, user_id, embedded_quotes, ai_blocked_ids,
                 licence=licence, filter_ai_usage=filter_ai_usage,
-                artifact_refs=artifact_refs))
+                artifact_refs=artifact_refs)
             children = [c for c in _children(current, True)
                         if c.id not in dead]
             child_frames = []
@@ -668,7 +717,7 @@ def format_node_tree(
             keep_tombstones = False
         header = (_node_header_line(current, path) if kind == "tombstone"
                   else _index_heading(path) + "\n")
-        parts.append(header + placeholder)
+        yield header + placeholder
         processed_nodes.add(current.id)
         processed_nodes.add(last.id)
         children = [c for c in _children(last, keep_tombstones)
@@ -677,8 +726,6 @@ def format_node_tree(
             ("node", gc, f"{path}.{j+1}")
             for j, gc in enumerate(children)
         ]))
-
-    return "".join(parts)
 
 
 def _collect_all_nodes_in_tree(node, filter_ai_usage=False, created_before=None,
@@ -1172,22 +1219,48 @@ def _thread_has_alive_node(root_id):
     omitted entirely so the AI doesn't see ghost-tombstone breadcrumbs
     of content the user wanted gone.
 
+    One thread's answer of ``_threads_with_alive_node``.
+    """
+    return root_id in _threads_with_alive_node([root_id])
+
+
+# Ids per IN list of the export's batched queries (#591): the threads
+# per query of the deleted-thread check (a query per thread was 84 of
+# the 120 s a 42k-entry export took), and the entries per query the
+# download loads by id. INTRODUCED CONSTANT.
+IDS_PER_QUERY = 500
+
+
+def _threads_with_alive_node(root_ids, batch=None):
+    """The ids among *root_ids* whose subtree holds a node with
+    deleted_at IS NULL: the per-thread skip rule (§5a) of
+    ``_thread_has_alive_node``, in one recursive query per *batch*
+    threads (default IDS_PER_QUERY, #591).
+
+    Every node of a thread is visited, so a caller with many threads
+    passes only those whose root is deleted: a thread with a live root is
+    kept without a query.
+
     Recursive CTE for portability across PostgreSQL and SQLite.
     """
-    base = db.session.query(Node.id).filter(
-        Node.id == root_id
-    ).cte(name="thread_alive_check", recursive=True)
-    desc = db.aliased(Node, flat=True)
-    recursive = db.session.query(desc.id).join(
-        base, desc.parent_id == base.c.id
-    )
-    cte = base.union_all(recursive)
-    return db.session.query(
-        db.session.query(Node.id).filter(
-            Node.id.in_(db.session.query(cte.c.id)),
-            Node.deleted_at.is_(None),
-        ).exists()
-    ).scalar()
+    batch = batch or IDS_PER_QUERY
+    ids = list(root_ids)
+    alive = set()
+    for start in range(0, len(ids), batch):
+        chunk = ids[start:start + batch]
+        base = db.session.query(
+            Node.id.label("root_id"), Node.id.label("id"),
+        ).filter(Node.id.in_(chunk)).cte(
+            name="thread_alive_batch", recursive=True)
+        desc = db.aliased(Node, flat=True)
+        recursive = db.session.query(base.c.root_id, desc.id).join(
+            base, desc.parent_id == base.c.id)
+        cte = base.union_all(recursive)
+        rows = db.session.query(cte.c.root_id).join(
+            Node, Node.id == cte.c.id,
+        ).filter(Node.deleted_at.is_(None)).distinct()
+        alive.update(root_id for (root_id,) in rows)
+    return alive
 
 
 def _window_places(rows, user_id, filter_ai_usage):
@@ -1895,6 +1968,180 @@ def _build_user_export_incremental(
     return content
 
 
+def _export_header_lines(user, total_threads, included_threads=None,
+                         max_tokens=None):
+    """The opening lines of a thread export (legacy path and the streamed
+    download, #591)."""
+    lines = [
+        "# Loore - Thread Export",
+        "",
+        f"**User:** {user.username}",
+        f"**Export Date:** {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}",
+        f"**Total Threads:** {total_threads}",
+    ]
+    if max_tokens and included_threads < total_threads:
+        lines.append(f"**Included Threads (most recent):** {included_threads}")
+        lines.append(f"*(Limited to ~{max_tokens:,} tokens)*")
+    lines += ["", "---", ""]
+    return lines
+
+
+class _ArtifactVersions:
+    """The context-artifact versions a full (unbudgeted) export prints in
+    its preamble: every prompt, profile, todo list and artifact version
+    pinned on an entry of the exported threads, the user's own only (see
+    _artifact_ref_lines). Each reports to *licence* (#326) when it is
+    added.
+
+    add_node() takes the entries in any order, and an entry that pins
+    nothing adds nothing: the streamed download (#591) passes only the
+    entries that pin something, the legacy path every entry. A version's
+    number and text are read when iter_lines() reaches it, so the
+    download can send the preamble while it reads it."""
+
+    def __init__(self, user, filter_ai_usage, licence=None):
+        self.user = user
+        self.filter_ai_usage = filter_ai_usage
+        self.licence = licence
+        self.prompts = {}
+        self.profiles = {}
+        self.todos = {}
+        self.artifacts = {}
+
+    def add_node(self, n):
+        # Prompt artifacts. The entry's text is the prompt version's.
+        prompt = n.get_artifact("prompt")
+        if prompt is not None and prompt.id not in self.prompts:
+            _note_entry(self.licence, n)
+            self.prompts[prompt.id] = prompt
+        # Pinned versions of the user's own only (see
+        # _artifact_ref_lines): another author's node in these
+        # threads pins theirs.
+        # Profile artifacts
+        profile = n.get_artifact("profile")
+        if (profile is not None and profile.user_id == self.user.id
+                and profile.id not in self.profiles):
+            if self.licence is not None:
+                self.licence.note_usage(profile.ai_usage,
+                                        f"archive profile {profile.id}",
+                                        row=profile)
+            self.profiles[profile.id] = profile
+        # Todo artifacts
+        todo = n.get_artifact("todo")
+        if (todo is not None and todo.user_id == self.user.id
+                and todo.id not in self.todos):
+            if self.licence is not None:
+                self.licence.note_usage(todo.ai_usage,
+                                        f"archive todo list {todo.id}",
+                                        row=todo)
+            self.todos[todo.id] = todo
+        # User artifacts (memory, scratchpad, predictions,
+        # ai_preferences, custom):
+        # one entry per referenced version, full content.
+        for kind, artifact in sorted(n.get_user_artifacts().items()):
+            if (artifact.id in self.artifacts
+                    or artifact.user_id != self.user.id):
+                continue
+            if self.licence is not None:
+                self.licence.note_usage(
+                    artifact.ai_usage,
+                    f"archive {kind} artifact {artifact.id}",
+                    row=artifact)
+            self.artifacts[artifact.id] = artifact
+
+    def rows(self):
+        """Every version the preamble prints, in the order it prints
+        them."""
+        return [group[key] for group in (
+            self.prompts, self.profiles, self.todos, self.artifacts)
+            for key in sorted(group)]
+
+    def iter_lines(self, before_row=None):
+        """The preamble's lines, none when nothing is pinned.
+        *before_row*, when given, is called with each version before its
+        text is read (the download unwraps data keys there, #591)."""
+        from backend.utils.profile_versions import not_set_internal
+
+        def text(row, read):
+            if before_row is not None:
+                before_row(row)
+            return read()
+
+        if self.prompts:
+            yield "## System Prompts Referenced\n"
+            sorted_pids = sorted(self.prompts)
+            for i, pid in enumerate(sorted_pids):
+                prompt = self.prompts[pid]
+                vnum = UserPrompt.query.filter(
+                    UserPrompt.user_id == prompt.user_id,
+                    UserPrompt.prompt_key == prompt.prompt_key,
+                    UserPrompt.created_at <= prompt.created_at,
+                ).count()
+                yield f"### {prompt.title} v{vnum} (ref #{pid})\n"
+                yield text(prompt, prompt.get_content)
+                yield ""
+                if i < len(sorted_pids) - 1:
+                    yield "===\n"
+        if self.profiles:
+            if self.prompts:
+                yield "===\n"
+            yield "## User Profiles Referenced\n"
+            sorted_pids = sorted(self.profiles)
+            for i, pid in enumerate(sorted_pids):
+                profile = self.profiles[pid]
+                pver = UserProfile.query.filter(
+                    UserProfile.user_id == profile.user_id,
+                    UserProfile.created_at <= profile.created_at,
+                    not_set_internal(),
+                ).count()
+                yield f"### User Profile v{pver} (ref #{pid})\n"
+                yield text(profile, lambda: _preamble_content(
+                    profile, self.filter_ai_usage))
+                yield ""
+                if i < len(sorted_pids) - 1:
+                    yield "===\n"
+        if self.todos:
+            if self.prompts or self.profiles:
+                yield "===\n"
+            yield "## User TODOs Referenced\n"
+            sorted_tids = sorted(self.todos)
+            for i, tid in enumerate(sorted_tids):
+                todo = self.todos[tid]
+                tver = UserTodo.query.filter(
+                    UserTodo.user_id == todo.user_id,
+                    UserTodo.created_at <= todo.created_at,
+                ).count()
+                yield f"### User TODO v{tver} (ref #{tid})\n"
+                yield text(todo, lambda: _preamble_content(
+                    todo, self.filter_ai_usage))
+                yield ""
+                if i < len(sorted_tids) - 1:
+                    yield "===\n"
+        if self.artifacts:
+            if self.prompts or self.profiles or self.todos:
+                yield "===\n"
+            yield "## Artifacts Referenced\n"
+            sorted_artids = sorted(self.artifacts)
+            for i, artid in enumerate(sorted_artids):
+                artifact = self.artifacts[artid]
+                # Live versions only (#603), as get_user_artifacts.
+                art_ver = UserArtifact.live().filter(
+                    UserArtifact.user_id == artifact.user_id,
+                    UserArtifact.kind == artifact.kind,
+                    UserArtifact.created_at <= artifact.created_at,
+                ).count()
+                yield (f"### {artifact.title} ('{artifact.kind}') "
+                       f"v{art_ver} (ref #{artid})\n")
+                yield text(artifact, lambda: _preamble_content(
+                    artifact, self.filter_ai_usage))
+                yield ""
+                if i < len(sorted_artids) - 1:
+                    yield "===\n"
+        if self.prompts or self.profiles or self.todos or self.artifacts:
+            yield "==="
+            yield ""
+
+
 def build_user_export_content(
     user, max_tokens=None, *, filter_ai_usage,
     created_before=None, created_after=None,
@@ -2198,28 +2445,21 @@ def build_user_export_content(
         # for content the user explicitly removed. Mixed threads (some
         # alive, some deleted) still show through with tombstones rendered
         # by format_node_tree's tombstone shell. All threads, in
-        # chronological order.
-        top_level_nodes = [
-            n for n in reversed(query.order_by(Node.created_at.desc()).all())
-            if _thread_has_alive_node(n.id)
-        ]
+        # chronological order. A thread with a live root is kept; the
+        # others are checked in one query per batch (#591).
+        roots = list(reversed(query.order_by(Node.created_at.desc()).all()))
+        alive = _threads_with_alive_node(
+            n.id for n in roots if n.deleted_at is not None)
+        top_level_nodes = [n for n in roots
+                           if n.deleted_at is None or n.id in alive]
 
     if not top_level_nodes:
         return None
 
     # Build the export content using Markdown format
-    export_lines = []
-    export_lines.append("# Loore - Thread Export")
-    export_lines.append("")
-    export_lines.append(f"**User:** {user.username}")
-    export_lines.append(f"**Export Date:** {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")
-    export_lines.append(f"**Total Threads:** {total_threads}")
-    if max_tokens and len(top_level_nodes) < total_threads:
-        export_lines.append(f"**Included Threads (most recent):** {len(top_level_nodes)}")
-        export_lines.append(f"*(Limited to ~{max_tokens:,} tokens)*")
-    export_lines.append("")
-    export_lines.append("---")
-    export_lines.append("")
+    export_lines = _export_header_lines(
+        user, total_threads, included_threads=len(top_level_nodes),
+        max_tokens=max_tokens)
 
     # Emit artifact preambles (prompts, profiles, todos) if any are referenced
     if collapse_artifacts:
@@ -2233,157 +2473,13 @@ def build_user_export_content(
             export_lines.append("")
     elif not max_tokens:
         # Full export: collect all unique artifact versions
-        prompt_versions = {}
-        profile_versions = {}
-        todo_versions = {}
-        artifact_versions = {}
+        versions = _ArtifactVersions(user, filter_ai_usage, licence)
         for top_node in top_level_nodes:
-            tree_nodes = _collect_all_nodes_in_tree(
-                top_node, filter_ai_usage, created_before,
-                user_id=user.id,
-            )
-            for n in tree_nodes:
-                # Prompt artifacts
-                prompt = n.get_artifact("prompt")
-                if prompt is not None and prompt.id not in prompt_versions:
-                    _note_entry(licence, n)
-                    vnum = UserPrompt.query.filter(
-                        UserPrompt.user_id == prompt.user_id,
-                        UserPrompt.prompt_key == prompt.prompt_key,
-                        UserPrompt.created_at <= prompt.created_at,
-                    ).count()
-                    prompt_versions[prompt.id] = {
-                        "title": prompt.title,
-                        "version": vnum,
-                        "content": n.get_content(),
-                    }
-                # Pinned versions of the user's own only (see
-                # _artifact_ref_lines): another author's node in these
-                # threads pins theirs.
-                # Profile artifacts
-                profile = n.get_artifact("profile")
-                if (profile is not None and profile.user_id == user.id
-                        and profile.id not in profile_versions):
-                    if licence is not None:
-                        licence.note_usage(profile.ai_usage,
-                                           f"archive profile {profile.id}",
-                                           row=profile)
-                    from backend.utils.profile_versions import (
-                        not_set_internal)
-                    pver = UserProfile.query.filter(
-                        UserProfile.user_id == profile.user_id,
-                        UserProfile.created_at <= profile.created_at,
-                        not_set_internal(),
-                    ).count()
-                    profile_versions[profile.id] = {
-                        "version": pver,
-                        "content": _preamble_content(
-                            profile, filter_ai_usage),
-                    }
-                # Todo artifacts
-                todo = n.get_artifact("todo")
-                if (todo is not None and todo.user_id == user.id
-                        and todo.id not in todo_versions):
-                    if licence is not None:
-                        licence.note_usage(todo.ai_usage,
-                                           f"archive todo list {todo.id}",
-                                           row=todo)
-                    tver = UserTodo.query.filter(
-                        UserTodo.user_id == todo.user_id,
-                        UserTodo.created_at <= todo.created_at,
-                    ).count()
-                    todo_versions[todo.id] = {
-                        "version": tver,
-                        "content": _preamble_content(todo, filter_ai_usage),
-                    }
-                # User artifacts (memory, scratchpad, predictions,
-                # ai_preferences, custom):
-                # one entry per referenced version, full content.
-                for kind, artifact in sorted(n.get_user_artifacts().items()):
-                    if (artifact.id in artifact_versions
-                            or artifact.user_id != user.id):
-                        continue
-                    if licence is not None:
-                        licence.note_usage(
-                            artifact.ai_usage,
-                            f"archive {kind} artifact {artifact.id}",
-                            row=artifact)
-                    # Live versions only (#603), as get_user_artifacts.
-                    art_ver = UserArtifact.live().filter(
-                        UserArtifact.user_id == artifact.user_id,
-                        UserArtifact.kind == kind,
-                        UserArtifact.created_at <= artifact.created_at,
-                    ).count()
-                    artifact_versions[artifact.id] = {
-                        "kind": kind,
-                        "title": artifact.title,
-                        "version": art_ver,
-                        "content": _preamble_content(
-                            artifact, filter_ai_usage),
-                    }
-
-        has_any_preamble = (
-            prompt_versions or profile_versions or todo_versions
-            or artifact_versions
-        )
-        if prompt_versions:
-            export_lines.append("## System Prompts Referenced\n")
-            sorted_pids = sorted(prompt_versions)
-            for i, pid in enumerate(sorted_pids):
-                pv = prompt_versions[pid]
-                export_lines.append(
-                    f"### {pv['title']} v{pv['version']} (ref #{pid})\n"
-                )
-                export_lines.append(pv["content"])
-                export_lines.append("")
-                if i < len(sorted_pids) - 1:
-                    export_lines.append("===\n")
-        if profile_versions:
-            if prompt_versions:
-                export_lines.append("===\n")
-            export_lines.append("## User Profiles Referenced\n")
-            sorted_pids = sorted(profile_versions)
-            for i, pid in enumerate(sorted_pids):
-                pv = profile_versions[pid]
-                export_lines.append(
-                    f"### User Profile v{pv['version']} (ref #{pid})\n"
-                )
-                export_lines.append(pv["content"])
-                export_lines.append("")
-                if i < len(sorted_pids) - 1:
-                    export_lines.append("===\n")
-        if todo_versions:
-            if prompt_versions or profile_versions:
-                export_lines.append("===\n")
-            export_lines.append("## User TODOs Referenced\n")
-            sorted_tids = sorted(todo_versions)
-            for i, tid in enumerate(sorted_tids):
-                tv = todo_versions[tid]
-                export_lines.append(
-                    f"### User TODO v{tv['version']} (ref #{tid})\n"
-                )
-                export_lines.append(tv["content"])
-                export_lines.append("")
-                if i < len(sorted_tids) - 1:
-                    export_lines.append("===\n")
-        if artifact_versions:
-            if prompt_versions or profile_versions or todo_versions:
-                export_lines.append("===\n")
-            export_lines.append("## Artifacts Referenced\n")
-            sorted_artids = sorted(artifact_versions)
-            for i, artid in enumerate(sorted_artids):
-                arv = artifact_versions[artid]
-                export_lines.append(
-                    f"### {arv['title']} ('{arv['kind']}') "
-                    f"v{arv['version']} (ref #{artid})\n"
-                )
-                export_lines.append(arv["content"])
-                export_lines.append("")
-                if i < len(sorted_artids) - 1:
-                    export_lines.append("===\n")
-        if has_any_preamble:
-            export_lines.append("===")
-            export_lines.append("")
+            for n in _collect_all_nodes_in_tree(
+                    top_node, filter_ai_usage, created_before,
+                    user_id=user.id):
+                versions.add_node(n)
+        export_lines.extend(versions.iter_lines())
 
     # Process each thread. Flat imported tweets render as compact runs
     # (#276), same as the incremental path; threaded content keeps the
@@ -2478,6 +2574,270 @@ def build_user_export_content(
 
     return content
 
+
+# ── The user's data download, sent while it is built (#591) ──────────
+#
+# The download built the whole file in memory before its first byte: a
+# 42k-entry account took two minutes and ~360 MB, a large ChatGPT import
+# ~700 MB, and the proxy in front of the app (and the web client) gave
+# up after 60 s without a byte. iter_user_export sends the same text a
+# few threads at a time instead. Every wait between two pieces stays far
+# below that limit: the first piece (the header) goes out after a few
+# metadata queries; the preamble's artifact versions come from one query
+# over the pins instead of a walk of every entry; the deleted-thread
+# check is one query per batch of threads; data keys are unwrapped a
+# window of entries at a time, also inside one very large thread; and a
+# thread is sent piece by piece as it renders.
+
+# What the download holds when the user has no thread to export.
+NO_THREADS_TEXT = "No threads found to export."
+
+# Threads the download loads at once, with every entry below them
+# (#591): it holds one batch in memory, never the account. 50 threads of
+# a large ChatGPT import peaked at ~110 MB, 100 at ~130 MB, 25 at ~80 MB
+# (local measurement, 2026-11-10). INTRODUCED CONSTANT.
+EXPORT_STREAM_BATCH = 50
+
+# Entries whose data keys the download unwraps in one concurrent batch
+# when it reaches an entry whose key is not cached (#591). Each entry
+# written in Loore has its own key, so a cold export makes one KMS call
+# per entry (~80 ms, 8 in flight): 400 entries are about 4 s of waiting,
+# far below the 60 s the proxy allows between two reads, also inside one
+# very large thread. Imports share a key per chunk, so they cost a few
+# calls. INTRODUCED CONSTANT.
+EXPORT_DEK_WINDOW = 400
+
+# The download sends what it has gathered once it holds this many
+# characters, or once this many seconds passed since it last sent
+# something (#591). INTRODUCED CONSTANTS.
+EXPORT_FLUSH_CHARS = 64 * 1024
+EXPORT_FLUSH_SECONDS = 2.0
+
+
+class _Pieces:
+    """Text of the download gathered until it is worth sending."""
+
+    def __init__(self):
+        self.parts = []
+        self.size = 0
+        self.sent_at = time.monotonic()
+
+    def add(self, text):
+        self.parts.append(text)
+        self.size += len(text)
+
+    def due(self):
+        return bool(self.parts) and (
+            self.size >= EXPORT_FLUSH_CHARS
+            or time.monotonic() - self.sent_at >= EXPORT_FLUSH_SECONDS)
+
+    def take(self):
+        text = "".join(self.parts)
+        self.parts, self.size = [], 0
+        self.sent_at = time.monotonic()
+        return text
+
+
+def _export_roots(user_id):
+    """The user's threads in the full export's order (the legacy path's
+    query: oldest first, equal start times in the database's order), as
+    rows of id, created_at, origin, deleted_at and has_reply. Metadata
+    only: no entry is loaded or decrypted."""
+    child = db.aliased(Node, flat=True)
+    has_reply = exists().where(child.parent_id == Node.id)
+    rows = (
+        db.session.query(Node.id, Node.created_at, Node.origin,
+                         Node.deleted_at, has_reply.label("has_reply"))
+        .filter(Node.user_id == user_id, Node.parent_id.is_(None))
+        .order_by(Node.created_at.desc())
+        .all()
+    )
+    rows.reverse()
+    return rows
+
+
+def _pinning_entries(user_id, thread_ids):
+    """The entries of the threads *thread_ids* (roots of the user's) that
+    pin a context artifact and that the user can access: the only ones
+    that add to the full export's preamble (_ArtifactVersions, which
+    the legacy path feeds every entry _collect_all_nodes_in_tree
+    returns). One recursive query over the user's threads finds them
+    (#591)."""
+    base = db.session.query(
+        Node.id.label("root_id"), Node.id.label("id"),
+    ).filter(
+        Node.user_id == user_id, Node.parent_id.is_(None),
+    ).cte(name="export_threads", recursive=True)
+    desc = db.aliased(Node, flat=True)
+    cte = base.union_all(db.session.query(base.c.root_id, desc.id).join(
+        base, desc.parent_id == base.c.id))
+    rows = db.session.query(cte.c.root_id, cte.c.id).join(
+        NodeContextArtifact, NodeContextArtifact.node_id == cte.c.id,
+    ).distinct()
+    ids = sorted({node_id for root_id, node_id in rows
+                  if root_id in thread_ids})
+    entries = []
+    for start in range(0, len(ids), IDS_PER_QUERY):
+        entries.extend(Node.query.filter(
+            Node.id.in_(ids[start:start + IDS_PER_QUERY])))
+    return [n for n in entries if can_user_access_node(n, user_id)]
+
+
+def _render_order(roots, user_id):
+    """The entries below *roots* (their children loaded) whose text the
+    export renders, in the order it renders them: depth first, replies
+    oldest first. Leaves out deleted entries and those the user cannot
+    access, whose text is never read."""
+    order, seen = [], set()
+    for root in roots:
+        stack = [root]
+        while stack:
+            n = stack.pop()
+            if n.id in seen:
+                continue
+            seen.add(n.id)
+            if can_user_access_node(n, user_id):
+                order.append(n)
+            stack.extend(reversed(sorted(
+                n.children, key=attrgetter("created_at"))))
+    return order
+
+
+class _DekLookahead:
+    """The download's hook before it reads a row's text (#591): at a row
+    (an entry, or an artifact version of the preamble) whose data key is
+    not cached, unwrap the keys of the next EXPORT_DEK_WINDOW rows of
+    *order*, the order the download reads them in, in one concurrent
+    batch. The rows are then decrypted from the cache, and no wait is
+    longer than one window's, also inside a thread larger than the
+    window (iter_with_dek_prefetch unwraps a whole thread at once)."""
+
+    def __init__(self, order):
+        self.order = order
+        self.window = EXPORT_DEK_WINDOW
+        self.position = {(type(r), r.id): i for i, r in enumerate(order)}
+
+    def __call__(self, row):
+        if dek_cached(row.content):
+            return
+        i = self.position.get((type(row), row.id))
+        ahead = [row] if i is None else self.order[i:i + self.window]
+        prefetch_deks(r.content for r in ahead)
+
+
+def iter_user_export(user):
+    """The user's own data download (/export/threads), piece by piece,
+    built while it is sent (#591). The pieces join to the text of
+    ``build_user_export_content(user, filter_ai_usage=False)``, or to
+    NO_THREADS_TEXT where that returns None.
+
+    A piece is yielded once it is due (_Pieces). After each one the
+    generator sleeps 0 s: under the gevent worker that lets the worker's
+    other requests run between two pieces, which they could not while
+    one request built a whole archive."""
+    roots = _export_roots(user.id)
+    alive = _threads_with_alive_node(
+        r.id for r in roots if r.deleted_at is not None)
+    kept = [r for r in roots if r.deleted_at is None or r.id in alive]
+    if not kept:
+        yield NO_THREADS_TEXT
+        return
+
+    out = _Pieces()
+    for line in _export_header_lines(user, len(roots)):
+        out.add(line + "\n")
+    yield out.take()
+
+    versions = _ArtifactVersions(user, filter_ai_usage=False)
+    for n in _pinning_entries(user.id, {r.id for r in kept}):
+        versions.add_node(n)
+    for line in versions.iter_lines(
+            before_row=_DekLookahead(versions.rows())):
+        out.add(line + "\n")
+        if out.due():
+            yield out.take()
+            time.sleep(0)
+    del versions
+
+    # Flat imported tweets render as compact runs (#276); a run's heading
+    # counts its tweets, so the runs are measured on the metadata first.
+    flat = [r.origin == "twitter" and r.deleted_at is None
+            and not r.has_reply for r in kept]
+    thread_num = 0
+    rendered_any = False
+    for start in range(0, len(kept), EXPORT_STREAM_BATCH):
+        batch = kept[start:start + EXPORT_STREAM_BATCH]
+        loaded = {n.id: n for n in Node.query.filter(
+            Node.id.in_([r.id for r in batch]))}
+        nodes = [loaded[r.id] for r in batch if r.id in loaded]
+        prefetch_children(nodes)
+        lookahead = _DekLookahead(_render_order(nodes, user.id))
+        for i, row in enumerate(batch, start):
+            node = loaded.get(row.id)
+            if flat[i]:
+                if i == 0 or not flat[i - 1]:
+                    run = 1
+                    while i + run < len(kept) and flat[i + run]:
+                        run += 1
+                    out.add(_tweet_run_heading(user.username, run) + "\n\n")
+                if node is not None:
+                    lookahead(node)
+                    out.add(_tweet_line(node) + "\n\n")
+                    rendered_any = True
+                if i + 1 == len(kept) or not flat[i + 1]:
+                    out.add("---\n\n")
+            elif node is not None:
+                pieces = iter_node_tree(
+                    node, index_path=str(thread_num + 1),
+                    filter_ai_usage=False, user_id=user.id,
+                    before_entry=lookahead)
+                first = next((p for p in pieces if p), None)
+                if first is not None:
+                    rendered_any = True
+                    thread_num += 1
+                    started = node.created_at.strftime('%Y-%m-%d %H:%M:%S UTC')
+                    out.add(f"# Thread {thread_num}\n"
+                            f"**Started:** {started}\n\n")
+                    out.add(first)
+                    for piece in pieces:
+                        out.add(piece)
+                        if out.due():
+                            yield out.take()
+                            time.sleep(0)
+                    out.add("\n---\n\n")
+            if out.due():
+                yield out.take()
+                time.sleep(0)
+    if not rendered_any:
+        # Every kept thread starts with an entry of the user's own, so
+        # one always renders; the legacy path would return None here,
+        # after the header went out. Fail loudly rather than send a
+        # different file.
+        raise RuntimeError(f"export of user {user.id}: no thread rendered")
+    out.add("*End of Export*")
+    yield out.take()
+
+
+def _send_user_export(user):
+    """iter_user_export, logging a failure before it ends the response.
+
+    A failure after the first piece cannot become an error status: the
+    exception propagates, the app server closes the connection without
+    the response's last chunk, and the browser (or the iPhone app) marks
+    the download failed. The file never ends as if it were complete."""
+    sent = 0
+    try:
+        for piece in iter_user_export(user):
+            sent += len(piece)
+            yield piece
+    except Exception:
+        current_app.logger.exception(
+            "Data download of user %s failed after %d characters; "
+            "the connection is cut so the download shows as failed",
+            user.id, sent)
+        raise
+
+
 @export_bp.route("/export/threads", methods=["GET"])
 @login_required
 def export_threads():
@@ -2488,30 +2848,26 @@ def export_threads():
     - All top-level nodes created by the user
     - All descendants of those nodes (including AI replies)
     - Properly formatted with hierarchical structure showing branches
+
+    The file is sent while it is built (#591), so the download starts at
+    once whatever the account's size, and no copy is stored on the
+    server. A HEAD request (the web app's check before it starts the
+    download) builds nothing.
     """
-    # Use the core export logic
     # The user's own download: rows marked 'none' are included.
-    export_content = build_user_export_content(
-        current_user, filter_ai_usage=False)
-
-    if not export_content:
-        return Response(
-            "No threads found to export.",
-            mimetype="text/plain",
-            headers={
-                "Content-Disposition": f'attachment; filename="write-or-perish-export-{datetime.utcnow().strftime("%Y%m%d-%H%M%S")}.txt"'
-            }
-        )
-
-    # Return as downloadable text file
-    filename = f"write-or-perish-export-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}.txt"
+    user = current_user._get_current_object()
+    filename = f"loore-export-{datetime.utcnow().strftime('%Y-%m-%d')}.txt"
     return Response(
-        export_content,
+        stream_with_context(_send_user_export(user)),
         mimetype="text/plain",
         headers={
-            "Content-Disposition": f'attachment; filename="{filename}"'
-        }
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+            # Pass each piece on as it comes (see sse.py).
+            "X-Accel-Buffering": "no",
+        },
     )
+
 
 def _latest_profile_snapshot(user):
     """id / created_at of the newest saved version. The client detects a
