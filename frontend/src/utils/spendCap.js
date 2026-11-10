@@ -41,8 +41,11 @@ export function isSpendBlocked() {
 
 // Re-surface the banner (and mark blocked) — call this when a capped user
 // attempts a cost action that we're refusing client-side.
-export function notifySpendBlocked() {
+// A response that saved the writing but skipped the reply for the cap
+// (`spend_capped`) passes its `spend_cap_lifts_on`.
+export function notifySpendBlocked(liftsOn) {
   _capped = true;
+  rememberLiftDate(liftsOn);
   try {
     window.dispatchEvent(new CustomEvent('loore:spend-capped', {}));
   } catch (e) {

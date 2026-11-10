@@ -512,9 +512,18 @@ def spend_cap_payload(user=None, now=None):
 
 
 def spend_cap_response(user=None):
-    """The standard 402 for a capped user (see spend_cap_payload)."""
+    """The standard 402 for a capped user (see spend_cap_payload). Pass the
+    user: without one the body has no lift date and the usual text."""
     from flask import jsonify
     return jsonify(spend_cap_payload(user)), 402
+
+
+def spend_capped_fields(user):
+    """For a 2xx that saved the writing but skipped the reply because the
+    user is capped: the flag the clients key the banner on, and the date
+    the cap lifts (as the 402's ``lifts_on``)."""
+    return {"spend_capped": True,
+            "spend_cap_lifts_on": spend_cap_payload(user)["lifts_on"]}
 
 
 def require_spend_headroom(fn):

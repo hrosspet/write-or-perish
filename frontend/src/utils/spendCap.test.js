@@ -1,6 +1,7 @@
 import {
   spendCapResetDate, spendCapToastMessage, isSpendCapError,
-  markSpendBlocked, spendCapBannerMessage, resetSpendCapForTests,
+  markSpendBlocked, notifySpendBlocked, spendCapBannerMessage,
+  resetSpendCapForTests,
   SPEND_CAP_DEFAULT_MESSAGE,
 } from './spendCap';
 
@@ -34,6 +35,11 @@ test('without a date from the server the cap resets next month', () => {
 test('a lift date already past is ignored', () => {
   markSpendBlocked('2026-12-01');
   expect(spendCapResetDate(new Date(Date.UTC(2027, 0, 5)))).toMatch(/February/);
+});
+
+test('a saved entry whose reply the cap skipped passes its lift date', () => {
+  notifySpendBlocked('2027-01-01');
+  expect(spendCapBannerMessage(NOV_20)).toMatch(/It resets on January 1\./);
 });
 
 test("a 402's lift date reaches the toasts", () => {
