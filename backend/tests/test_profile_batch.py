@@ -762,6 +762,145 @@ def test_an_integration_built_before_the_request_is_dropped(app, monkeypatch):
     assert APICostLog.query.filter_by(user_id=u.id).count() == 1
 
 
+def _hidden_by_a_content_deletion(user, at):
+    """A waiting "Delete all my content" requested at *at* that hid every
+    profile version of *user* (as hide_writing records them)."""
+    from backend.models import UserDataPurge, UserDataPurgeHidden
+    job = UserDataPurge(user_id=user.id, source="self", scope="hidden",
+                        status="scheduled", requested_at=at,
+                        first_requested_at=at,
+                        scheduled_for=at + timedelta(days=30))
+    db.session.add(job)
+    db.session.flush()
+    for p in UserProfile.query.filter_by(user_id=user.id):
+        db.session.add(UserDataPurgeHidden(job_id=job.id, kind="user_profile",
+                                           row_id=p.id))
+    db.session.commit()
+    return job
+
+
+def test_a_fresh_start_chunk_collected_after_a_restore_is_dropped(
+        app, monkeypatch):
+    """Review of #630, finding 1: the fresh start's from-scratch chunk
+    (read after the request, from the new writing only) is still in the
+    batch when she restores. Saved, it would replace the restored profile
+    as the one in use, and the restored writing would never reach the
+    profile again. It is dropped with its cost row, and the next pass
+    updates the restored profile with the new writing."""
+    from backend.utils import user_purge as up
+    from backend.utils.profile_versions import current_profile_query
+    monkeypatch.setattr(up, "_drop_public_pages", lambda user: None)
+    u = _user()
+    old = _prev_profile(u, datetime(2026, 5, 1), source_tokens=500_000)
+    asked = datetime.utcnow() - timedelta(hours=2)
+    old.created_at = asked - timedelta(days=1)
+    _hidden_by_a_content_deletion(u, asked)
+    assert current_profile_query(u.id).first() is None
+    rendered = asked + timedelta(hours=1)
+    item = {"custom_id": f"profile_{u.id}_0_chunk", "user_id": u.id,
+            "kind": "chunk", "prev_profile_id": None,
+            "generation_type": "initial", "prev_cumulative": 0,
+            "source_data_cutoff": rendered.isoformat(),
+            "rendered_at": rendered.isoformat(), "chunk_units": 90_000,
+            "model_id": "test-model"}
+    db.session.add(ProfileBatchJob(provider_key="anthropic",
+                                   batch_id="b-fresh", status="pending",
+                                   items=[item], submitted_at=rendered))
+    u.profile_batch_pending = True
+    db.session.commit()
+
+    assert up.cancel_purge(u.id, u.id) is True
+    db.session.expire_all()
+    assert current_profile_query(u.id).first().id == old.id
+
+    _collect_one(monkeypatch, item)
+
+    db.session.expire_all()
+    assert current_profile_query(u.id).first().id == old.id
+    assert pb._exports.profile_update_base(u.id).id == old.id
+    assert UserProfile.query.filter_by(user_id=u.id).count() == 1
+    rows = APICostLog.query.filter_by(user_id=u.id).all()
+    assert [(r.request_type, r.input_tokens) for r in rows] == [
+        ("profile_batch", 2000)]
+    u2 = User.query.get(u.id)
+    assert u2.profile_batch_pending is False
+    assert (u2.profile_batch_attempts or 0) == 0
+
+
+def test_a_synchronous_run_during_a_restored_deletion_saves_nothing(
+        app, monkeypatch):
+    """The synchronous path of finding 1: a run that started reading during
+    the deletion and saves after the restore saves nothing (cost row
+    written); a run that starts after the restore saves as usual."""
+    from backend.utils import user_purge as up
+    from backend.utils.hidden_rows import ReadBeforeDeletion
+    monkeypatch.setattr(up, "_drop_public_pages", lambda user: None)
+    u = _user()
+    _prev_profile(u, datetime(2026, 5, 1)).created_at = (
+        datetime.utcnow() - timedelta(days=1))
+    _hidden_by_a_content_deletion(u, datetime.utcnow() - timedelta(hours=1))
+    response = {"content": "FROM THE NEW WRITING ONLY", "input_tokens": 10,
+                "output_tokens": 5, "total_tokens": 15}
+
+    def save():
+        return pb._exports._save_profile(
+            u, "test-model", response["content"], response,
+            source_tokens_used=90_000, source_data_cutoff=datetime.utcnow(),
+            generation_type="initial")
+
+    with pb._exports.profile_read_started():
+        assert up.cancel_purge(u.id, u.id) is True
+        with pytest.raises(ReadBeforeDeletion):
+            save()
+    assert UserProfile.query.filter_by(user_id=u.id).count() == 1
+    assert APICostLog.query.filter_by(user_id=u.id).count() == 1
+    with pb._exports.profile_read_started():
+        assert save() is not None
+    assert UserProfile.query.filter_by(user_id=u.id).count() == 2
+
+
+def test_an_old_stop_does_not_hold_the_fresh_start(app):
+    """Review of #630, finding 3: a content-policy block and a refusal
+    streak recorded on the hidden content do not stop the profile of what
+    the account writes after the request; a restore brings them back."""
+    from backend.utils import refusal_backoff as rb
+    from backend.utils import user_purge as up
+    u = _user()
+    _prev_profile(u, datetime(2026, 5, 1)).created_at = (
+        datetime.utcnow() - timedelta(days=4))
+    old = datetime.utcnow() - timedelta(days=3)
+    db.session.add(APICostLog(user_id=u.id, model_id="test-model",
+                              request_type="profile_batch", input_tokens=0,
+                              output_tokens=0, cost_microdollars=0,
+                              request_ref=rb.policy_block_ref("blocked"),
+                              created_at=old))
+    db.session.commit()
+    assert rb.policy_block_for(u.id, rb.PROFILE_REQUEST_TYPES) == "blocked"
+    _hidden_by_a_content_deletion(u, datetime.utcnow() - timedelta(hours=1))
+    assert rb.policy_block_for(u.id, rb.PROFILE_REQUEST_TYPES) is None
+    up.cancel_purge(u.id, u.id)
+    assert rb.policy_block_for(u.id, rb.PROFILE_REQUEST_TYPES) == "blocked"
+
+
+def test_an_old_refusal_streak_does_not_hold_the_fresh_start(app):
+    from backend.utils import refusal_backoff as rb
+    u = _user()
+    old = datetime.utcnow() - timedelta(days=3)
+    _prev_profile(u, datetime(2026, 5, 1)).created_at = old + timedelta(
+        hours=1)
+    for i in range(rb.STOP_AFTER):
+        db.session.add(APICostLog(user_id=u.id, model_id="test-model",
+                                  request_type="profile_batch",
+                                  input_tokens=10, output_tokens=10,
+                                  cost_microdollars=5,
+                                  request_ref=rb.REFUSED_REF,
+                                  created_at=old + timedelta(minutes=i)))
+    db.session.commit()
+    assert rb.profile_in_backoff(u.id) is False
+    _hidden_by_a_content_deletion(u, datetime.utcnow() - timedelta(hours=1))
+    assert rb.profile_in_backoff(u.id) is False
+
+
 def test_the_seeder_builds_for_a_content_deletion_not_an_account_deletion(
         app, monkeypatch):
     """#590: the immediate seed skips an account being deleted (#269),

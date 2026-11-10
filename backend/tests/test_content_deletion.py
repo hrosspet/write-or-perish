@@ -141,6 +141,65 @@ def test_the_request_cancels_a_glean_waiting_in_a_provider_batch(
     assert "read-1" in stubs.cancelled
 
 
+def test_the_cut_off_is_taken_after_the_hide_commits(app, world, stubs,
+                                                     monkeypatch):
+    """Review of #630, finding 2: a job that read while the hide's
+    transaction was open still saw the old content. The cut-off is taken
+    after the commit, so its read counts as before the request; and a row
+    a job saved from the old content during that transaction is hidden
+    too."""
+    a = world.alice.id
+    real = up.hide_writing
+    marks = {}
+
+    def hide_then_a_job_saves(user, job, now):
+        real(user, job, now)
+        if "slipped" not in marks:
+            # A job that read before the commit saves its version while
+            # the hide's transaction is still open.
+            marks["read_at"] = datetime.utcnow()
+            slipped = UserProfile(user_id=a, generated_by="claude-opus",
+                                  generation_type="update")
+            slipped.set_content("built from the old content")
+            _db.session.add(slipped)
+            _db.session.flush()
+            marks["slipped"] = slipped.id
+    monkeypatch.setattr(up, "hide_writing", hide_then_a_job_saves)
+
+    _c, job = _ask(app, world)
+
+    assert job.requested_at > marks["read_at"]
+    assert read_before_deletion(a, marks["read_at"])
+    assert _db.session.get(UserProfile, marks["slipped"]) is None
+    from backend.models import UserDataPurgeHidden
+    assert UserDataPurgeHidden.query.filter_by(
+        job_id=job.id, kind="user_profile",
+        row_id=marks["slipped"]).count() == 1
+
+
+def test_the_restore_time_is_taken_after_the_restore_commits(
+        app, world, stubs, monkeypatch):
+    from backend.utils.hidden_rows import read_during_restored_deletion
+    a = world.alice.id
+    c, job = _ask(app, world)
+    real = up.cancel_jobs
+    marks = {}
+
+    def cancel_then_a_job_reads(*conds, cancelled_by_id):
+        out = real(*conds, cancelled_by_id=cancelled_by_id)
+        marks["read_at"] = datetime.utcnow()   # still sees the deletion
+        return out
+    monkeypatch.setattr(up, "cancel_jobs", cancel_then_a_job_reads)
+    _restore(c)
+    job = _db.session.get(UserDataPurge, job.id)
+    assert job.cancelled_at >= marks["read_at"]
+    assert read_during_restored_deletion(a, marks["read_at"])
+    assert not read_during_restored_deletion(
+        a, job.cancelled_at + timedelta(seconds=1))
+    assert not read_during_restored_deletion(
+        a, job.first_requested_at - timedelta(seconds=1))
+
+
 def test_a_cancel_that_runs_after_a_restore_cancels_nothing(
         app, world, stubs, monkeypatch):
     """The cancel runs in a Celery task; if the user restored first, the
@@ -392,7 +451,7 @@ def test_the_purge_scope_takes_only_items_read_before(app, world, stubs,
     scope = up.scope_of(job)
     item = {"user_id": world.alice.id,
             "rendered_at": (job.requested_at + read_at).isoformat()}
-    assert scope.read_before(item, datetime.utcnow()) is dropped
-    # No render time: the job's submission stands in.
-    assert scope.read_before({"user_id": world.alice.id},
-                             job.requested_at - timedelta(seconds=1))
+    assert scope.read_before(item) is dropped
+    # No read time: it counts as read before (the job's submission is no
+    # stand-in, it comes after the read).
+    assert scope.read_before({"user_id": world.alice.id})

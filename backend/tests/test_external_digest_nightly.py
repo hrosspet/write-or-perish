@@ -408,6 +408,31 @@ def test_no_digest_while_the_account_is_deleted(app, monkeypatch):
     assert len(submitted) == 1
 
 
+def test_a_digest_read_during_a_restored_deletion_is_not_saved(
+        app, monkeypatch):
+    """Review of #630, finding 1: a digest rendered during a deletion (the
+    references saved since only) and collected after the restore is not
+    saved; its cost is logged."""
+    user = User.query.first()
+    _mk_item(user.id, "clip")
+    asked = datetime.utcnow() - timedelta(minutes=10)
+    hold = _hold_writing(user, at=asked)
+    hold.status = "cancelled"
+    hold.cancelled_at = datetime.utcnow()
+    _db.session.commit()
+    job = _pending_job(user, asked + timedelta(minutes=1),
+                       batch_id="batch_restored")
+    monkeypatch.setattr(_digest, "batch_check_and_collect", lambda ids, k: (
+        {f"external-digest-{user.id}": {
+            "content": "# Topics\n- from the new references only",
+            "input_tokens": 10, "output_tokens": 5}}, {}, {}))
+    _digest._collect_digest_batches()
+    _db.session.expire_all()
+    assert ExternalDigestBatchJob.query.get(job.id).status == "collected"
+    assert UserArtifact.latest_for(user.id, _digest.DIGEST_KIND) is None
+    assert APICostLog.query.count() == 1
+
+
 def test_a_content_deletion_drops_only_a_digest_read_before_it(
         app, monkeypatch):
     """#590: "Delete all my content" does not hold the digest (the

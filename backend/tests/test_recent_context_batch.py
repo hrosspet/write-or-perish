@@ -714,6 +714,27 @@ def test_a_summary_read_before_a_content_deletion_is_not_saved(
     assert hold.status == "scheduled"
 
 
+def test_a_summary_read_during_a_restored_deletion_is_not_saved(
+        app, rc, world, monkeypatch):
+    """Review of #630, finding 1: the summary was read during a deletion
+    (the new writing only) and collected after the restore. The restored
+    content is back, so it is not saved; its cost row is written."""
+    from datetime import datetime, timedelta
+    user = _user("restored-meanwhile")
+    _check(rc)
+    hold = _hold_writing(user)
+    hold.first_requested_at = hold.requested_at = (
+        datetime.utcnow() - timedelta(minutes=5))
+    hold.status = "cancelled"
+    hold.cancelled_at = datetime.utcnow() + timedelta(seconds=1)
+    _db.session.commit()
+
+    _collect_with(rc, monkeypatch, _summary(user))
+    assert UserRecentContext.query.count() == 0
+    assert APICostLog.query.count() == 1
+    assert _job_for(user)[0].items[0]["outcome"] == "skipped"
+
+
 def test_no_summary_while_the_account_is_deleted(app, rc, world, monkeypatch):
     """An account deletion (#269) still holds everything: no new request
     goes out, and the direct path builds nothing."""

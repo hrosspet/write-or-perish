@@ -1694,6 +1694,34 @@ def test_progress_labels_for_the_three_kinds(app):
         assert (out["message"], out["progress"]) == (message, progress)
 
 
+def test_groups_and_the_final_carry_a_read_time_taken_before_the_read(
+        world, monkeypatch):
+    """Review of #630: a group's or the final's read time must not come
+    after the read (the job's submission and a stamp after the build both
+    do), or work that read content deleted meanwhile is saved. The pass
+    stamps it before it reads anything."""
+    u = _user()
+    rows = _set_of(u, 65)
+    _corpus_for(world, rows)
+    built = []
+    real = pw._merge_messages
+
+    def merge_messages(*a, **k):
+        built.append(datetime.utcnow())
+        return real(*a, **k)
+    monkeypatch.setattr(pw, "_merge_messages", merge_messages)
+    _advance(u)
+    groups = _items("group")
+    assert len(groups) == 3 and built
+    assert all(datetime.fromisoformat(g["read_at"]) <= min(built)
+               for g in groups)
+    _poll()
+    built.clear()
+    _advance(u)
+    final = _items("final")[0]
+    assert datetime.fromisoformat(final["built_at"]) <= min(built)
+
+
 def test_windows_read_before_a_content_deletion_are_dropped_and_costed(
         world, monkeypatch):
     """#590: the windows were rendered before "Delete all my content": no
