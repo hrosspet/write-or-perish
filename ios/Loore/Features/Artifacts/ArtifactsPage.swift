@@ -377,25 +377,31 @@ private struct IntentionEntryRow: View {
         HStack(alignment: .top, spacing: 12) {
             StatusDot(state: state).padding(.top, 4)
             VStack(alignment: .leading, spacing: 0) {
-                // Selectable (`ReadingText`), as the other artifacts' markdown is.
-                ReadingText(text: entry.name, font: LooreUIFont.serif(18.6, .semibold), relativeTo: .headline,
-                            color: LooreColor.textPrimaryUI)
+                Text(entry.name)
+                    .font(LooreFont.serif(18.6, .semibold, relativeTo: .headline))
+                    .foregroundStyle(LooreColor.textPrimary)
                     .opacity(state == .released ? 0.6 : 1)
                 if !entry.status.isEmpty {
-                    ReadingText(text: entry.status, font: LooreUIFont.sans(11.5, .light),
-                                color: LooreColor.textMutedUI, tracking: 0.35)
+                    Text(entry.status)
+                        .font(LooreFont.sans(11.5, .light))
+                        .tracking(0.35)
+                        .foregroundStyle(LooreColor.textMuted)
                         .padding(.top, 3)
                 }
                 if !entry.body.isEmpty {
-                    ReadingText(text: entry.body.joined(separator: " "), font: LooreUIFont.sans(14.4, .light),
-                                color: LooreColor.textSecondaryUI, lineSpacing: 5)
+                    Text(entry.body.joined(separator: " "))
+                        .font(LooreFont.sans(14.4, .light))
+                        .foregroundStyle(LooreColor.textSecondary)
+                        .lineSpacing(5)
                         .padding(.top, 7)
                 }
                 if !entry.notes.isEmpty {
                     VStack(alignment: .leading, spacing: 3) {
                         ForEach(Array(entry.notes.enumerated()), id: \.offset) { _, note in
-                            ReadingText(text: note, font: LooreUIFont.sans(12.5, .light),
-                                        color: LooreColor.textMutedUI, lineSpacing: 3)
+                            Text(note)
+                                .font(LooreFont.sans(12.5, .light))
+                                .foregroundStyle(LooreColor.textMuted)
+                                .lineSpacing(3)
                         }
                     }
                     .padding(.leading, 12)
@@ -403,6 +409,9 @@ private struct IntentionEntryRow: View {
                     .padding(.top, 8)
                 }
             }
+            // Short lines (the body is one paragraph): Copy for each whole line. A text
+            // view per line made 60 intentions open about ten times slower (#624 review).
+            .textSelection(.enabled)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
         }

@@ -354,8 +354,13 @@ private struct TodoItemRow: View {
                 } else {
                     Color.clear.frame(width: 18, height: 1)
                 }
+                // A one-line item: SwiftUI `Text` with Copy for the whole item. A text
+                // view per item made a 100-item list open about seven times slower
+                // (the page's VStack builds every row, #624 review).
                 MarkdownView(markdown: item.text, style: (item.checked == nil ? MarkdownStyle.todoCategory : .todoItem)
                                 .with { $0.strikethrough = item.checked == true })
+                    .environment(\.readingTextSelectable, false)
+                    .textSelection(.enabled)
                     .opacity(item.checked == true ? 0.4 : 1)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 if !item.children.isEmpty {
