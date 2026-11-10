@@ -1265,6 +1265,28 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // generic LLM Response is not offered at all: the row is "Read" and
   // its model picker.
   const showLlmResponse = showCraftBar && !(inReadThread && !readReplyAbove);
+  // Without craft mode there is no LLM Response, so an entry whose
+  // automatic reply failed or never started left the user no way to ask
+  // again. Everyone gets a plain Try again there (Peter, 2026-11-10): the
+  // same request LLM Response sends, without a model picker, so it asks
+  // with the model the automatic reply used (selectedModel, the user's
+  // own). It shows where craft mode's LLM Response shows for the same
+  // entry with auto-generate on (awaitsReply: not while an upload is
+  // still transcribing, and only when no reply stands under the entry),
+  // with the same guards. A public thread already shows the owner LLM
+  // Response, and with auto-generate off no automatic reply was asked
+  // for, so neither gets Try again.
+  const showTryAgain = isOwner && !craftMode && autoGenerateActive && awaitsReply
+    && node.ai_usage !== 'none' && !isLlmPending
+    && !(inReadThread && !readReplyAbove);
+  // While the reply is being requested or written, both buttons say so.
+  const llmBusyLabel = (llmRequesting || llmTaskNodeId) ? (
+    <>
+      <FaSpinner className="spin" aria-hidden="true" />
+      {llmRequesting ? 'Requesting…'
+        : llmStatus === 'pending' ? 'Waiting for AI…' : 'Generating…'}
+    </>
+  ) : null;
   // Each action carries its own model picker, joined to its right edge:
   // [LLM Response | Opus 4.6 v]  [Read further | GPT-6 Luna v] (#355).
   // Stacked (see actionsStacked), a group lends its button and picker to
@@ -1720,7 +1742,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
           <SpeakerIcon nodeId={node.id} content={node.content} isPublic={node.privacy_level === 'public'} aiUsage={node.ai_usage} onTtsGenerated={() => setNode(prev => prev ? { ...prev, has_tts: true } : prev)} />
           <DownloadAudioIcon nodeId={node.id} isPublic={node.privacy_level === 'public'} aiUsage={node.ai_usage} />
         </NodeFooter>
-        {(showCraftBar || readActions) && (
+        {(showCraftBar || showTryAgain || readActions) && (
           <div
             ref={actionRowRef}
             style={actionsStacked
@@ -1742,13 +1764,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
                   aria-disabled={underReadReply || undefined}
                   style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', ...joinedButtonStyle }}
                 >
-                  {(llmRequesting || llmTaskNodeId) ? (
-                    <>
-                      <FaSpinner className="spin" aria-hidden="true" />
-                      {llmRequesting ? 'Requesting…'
-                        : llmStatus === 'pending' ? 'Waiting for AI…' : 'Generating…'}
-                    </>
-                  ) : 'LLM Response'}
+                  {llmBusyLabel || 'LLM Response'}
                 </button>
                 <ModelSelector
                   nodeId={node.id}
@@ -1759,6 +1775,17 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
                 />
               </span>
             )}
+            {/* A lone button, not an action group: it has no picker, so
+                it takes no part in the stacked two-column grid. */}
+            {showTryAgain && (
+              <button
+                onClick={handleLLMResponse}
+                disabled={llmRequesting || !!llmTaskNodeId || moving}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}
+              >
+                {llmBusyLabel || 'Try again'}
+              </button>
+            )}
             {/* Before the first picks "Read" stands alone, where LLM
                 Response usually is: the response action users know, under
                 its own name. After them "Read further" sits to the right
@@ -1766,7 +1793,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
             {readActions && readButton}
           </div>
         )}
-        {llmTaskNodeId && !showLlmResponse && !isLlmPending && (
+        {llmTaskNodeId && !showLlmResponse && !showTryAgain && !isLlmPending && (
           <div style={{
             marginTop: '8px',
             display: 'flex', alignItems: 'center', gap: '8px',
