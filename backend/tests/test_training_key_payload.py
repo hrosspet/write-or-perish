@@ -150,6 +150,8 @@ def test_every_retrieval_pull_reports_to_the_licence(app):  # noqa: F811
                   "kind": "scratchpad"}) == "train"
     assert after({"name": "read_artifact", "artifact_id": chat_art.id,
                   "kind": "memory"}) == "chat"
+    assert after({"name": "read_artifact", "kind": "todo",
+                  "todo_id": todo.id}) == "chat"
     assert after({"name": "read_todo", "todo_id": todo.id}) == "chat"
     assert after({"name": "read_full", "kind": "node", "ref_id": licensed.id,
                   "user_id": alice.id, "ref": str(licensed.id)}) == "train"

@@ -51,7 +51,7 @@ sys.modules.pop("backend.tasks.llm_completion", None)
 from backend.tasks.llm_completion import (  # noqa: E402
     _execute_tool_calls, _scan_proposal_statuses, _mark_status_reported,
     _auto_create_drafts, _detect_feedback_proposal, _redact_tool_input,
-    _retrieval_injection_text,
+    _retrieval_injection_text, RESERVED_ARTIFACT_KINDS,
     get_user_artifacts_context, get_user_ai_preferences_content,
 )
 
@@ -208,6 +208,40 @@ def test_put_rejects_bad_kind(app, client):
     ).status_code == 400
 
 
+@pytest.mark.parametrize("kind", ["todo", "profile", "recent_context"])
+def test_artifact_writes_refuse_reserved_kinds(app, client, kind):
+    """No artifact route writes under a reserved name (#218): an artifact
+    named 'todo' would be listed next to the real list in the agentic
+    index, and read_artifact on 'todo' reads the list, never it. The
+    refusal is a plain message, and nothing is saved."""
+    uid = User.query.first().id
+    r = client.put(f"/api/artifacts/{kind}",
+                   json={"content": "x", "description": "d"})
+    assert r.status_code == 400
+    assert "can't be saved as an artifact" in r.get_json()["error"]
+    assert UserArtifact.query.filter_by(user_id=uid, kind=kind).count() == 0
+    # A row made before the guard (by hand here) can't be edited or
+    # reverted either.
+    old = _mk_artifact(uid, kind, "made before the guard")
+    assert client.patch(f"/api/artifacts/{kind}",
+                        json={"content": "y"}).status_code == 400
+    assert client.post(
+        f"/api/artifacts/{kind}/revert/{old.id}").status_code == 400
+    assert UserArtifact.query.filter_by(user_id=uid, kind=kind).count() == 1
+
+
+def test_the_todo_refusal_points_at_the_todo_page(app, client):
+    r = client.put("/api/artifacts/todo", json={"content": "- [ ] a"})
+    assert r.get_json()["error"] == (
+        "Your todo list has its own page and can't be saved as an "
+        "artifact. Edit it on the Todo page.")
+
+
+def test_reserved_kinds_match_the_ai_guard(app):
+    """The routes and update_artifact refuse the same names."""
+    assert set(RESERVED_ARTIFACT_KINDS) == set(UserArtifact.RESERVED_KINDS)
+
+
 def test_get_unknown_custom_kind_404(app, client):
     assert client.get("/api/artifacts/nope").status_code == 404
 
@@ -292,9 +326,16 @@ def test_update_artifact_tool_creates_and_versions(app):
         assert r1["status"] == "success"
         assert r1["created"] is True
 
+        assert r1["version"] == 1
+        assert r1["previous_version"] is None
+
+        # A change to an existing artifact names the version it is based
+        # on (#604).
         r2 = _run_tool(app, "update_artifact",
-                       {"kind": "memory", "updated_content": "fact A+B"}, uid)
+                       {"kind": "memory", "updated_content": "fact A+B",
+                        "base_version": 1}, uid)
         assert r2["created"] is False
+        assert (r2["version"], r2["previous_version"]) == (2, 1)
         assert UserArtifact.latest_for(uid, "memory").get_content() == "fact A+B"
         assert UserArtifact.query.filter_by(
             user_id=uid, kind="memory").count() == 2
@@ -407,40 +448,72 @@ def test_read_artifact_tool_unknown_kind(app):
         assert r["status"] == "error"
 
 
-def test_read_todo_tool_returns_ref_not_content(app):
+# The todo list is read with read_artifact on kind 'todo' (#218); read_todo
+# was its own tool before that and stays served for older threads.
+_TODO_READS = [("read_artifact", {"kind": "todo"}),
+               ("read_artifact", {"kind": " Todo "}),
+               ("read_todo", {})]
+
+
+@pytest.mark.parametrize("name, inp", _TODO_READS)
+def test_todo_read_returns_ref_not_content(app, name, inp):
     with app.app_context():
         uid = User.query.first().id
         todo = _mk_todo(uid, "buy milk\nfinish slice 3")
-        r = _run_tool(app, "read_todo", {}, uid)
+        r = _run_tool(app, name, inp, uid)
         assert r["status"] == "success"
+        assert r["name"] == name
         assert r["todo_id"] == todo.id
+        assert r["kind"] == "todo"
+        assert "artifact_id" not in r
         # Content must never sit in tool meta (plaintext column)
         assert "buy milk" not in json.dumps(r)
 
 
-def test_read_todo_tool_no_todo(app):
+def test_todo_read_ignores_an_artifact_named_todo(app):
+    """kind 'todo' is the todo list, never a UserArtifact of that name."""
     with app.app_context():
         uid = User.query.first().id
-        r = _run_tool(app, "read_todo", {}, uid)
+        todo = _mk_todo(uid, "the real list")
+        _mk_artifact(uid, "todo", "a shadow artifact")
+        r = _run_tool(app, "read_artifact", {"kind": "todo"}, uid)
+        assert r["todo_id"] == todo.id
+        assert "artifact_id" not in r
+
+
+@pytest.mark.parametrize("name, inp", _TODO_READS)
+def test_todo_read_no_todo(app, name, inp):
+    with app.app_context():
+        uid = User.query.first().id
+        r = _run_tool(app, name, inp, uid)
         assert r["status"] == "error"
+        assert r["error"] == "The todo list is empty or unavailable."
+        assert r["kind"] == "todo"
 
 
-def test_read_todo_tool_ai_blocked(app):
+@pytest.mark.parametrize("name, inp", _TODO_READS)
+def test_todo_read_ai_blocked(app, name, inp):
     with app.app_context():
         uid = User.query.first().id
         _mk_todo(uid, "private tasks", ai_usage="none")
-        r = _run_tool(app, "read_todo", {}, uid)
+        r = _run_tool(app, name, inp, uid)
         assert r["status"] == "error"
+        assert "todo_id" not in r
 
 
-def test_scan_statuses_delivers_todo_content(app):
-    """Cross-turn (voice/single-shot) read_todo delivery injects the content
+@pytest.mark.parametrize("entry", [
+    {"name": "read_artifact", "kind": "todo"},
+    # A result an older thread's read_todo call left in tool_calls_meta.
+    {"name": "read_todo"},
+])
+def test_scan_statuses_delivers_todo_content(app, entry):
+    """Cross-turn (voice/single-shot) todo delivery injects the content
     once, re-resolved from the row, then stops on the next scan."""
     with app.app_context():
         uid = User.query.first().id
         todo = _mk_todo(uid, "the actual tasks")
         node = _node_with_meta(uid, [
-            {"name": "read_todo", "status": "success", "todo_id": todo.id},
+            {**entry, "status": "success", "todo_id": todo.id},
         ])
         notes, to_mark = _scan_proposal_statuses([node], uid)
         joined = "\n".join(notes)
@@ -1042,16 +1115,20 @@ def test_artifacts_context_resolution_pinned_vs_latest(app):
         _db.session.commit()
 
         # Pinned: only memory v1 (the node binding wins)
+        # Each inline copy starts with its version (#604).
         memory, scratchpad, intentions, index = get_user_artifacts_context(
             uid, pinned_node=node)
-        assert memory == "mem-v1"
+        assert memory == (
+            "[memory · v1, as of the start of this conversation]\nmem-v1")
         assert scratchpad == ""
         assert intentions == ""
 
         # Fallback (no pinned node): latest of everything
         memory, scratchpad, intentions, index = get_user_artifacts_context(uid)
-        assert memory == "mem-v1"
-        assert scratchpad == "pad-v1"
+        assert memory.endswith("]\nmem-v1")
+        assert scratchpad == (
+            "[scratchpad · v1, as of the start of this conversation]\n"
+            "pad-v1")
         assert "reading-list" in index
 
 
@@ -1072,12 +1149,14 @@ def test_index_includes_todo_with_content(app):
         uid = User.query.first().id
         _mk_todo(uid, "task one\ntask two")
         _, _, _, index = get_user_artifacts_context(uid)
-        assert "todo" in index
-        assert "read_todo" in index
+        first = index.split("\n")[0]
+        assert first.startswith("- todo — the user's running task list (~")
+        # One read verb for the whole index (#218): no tool named per line.
+        assert "read_todo" not in index
         # No raw todo content leaks into the index line.
         assert "task one" not in index
         # A non-empty todo reports a token estimate, not "(empty)".
-        assert "tokens)" in index.split("\n")[0]
+        assert first.endswith("tokens)")
 
 
 def test_index_lists_empty_todo(app):
@@ -1095,7 +1174,8 @@ def test_index_omits_ai_blocked_todo(app):
         uid = User.query.first().id
         _mk_todo(uid, "private tasks", ai_usage="none")
         _, _, _, index = get_user_artifacts_context(uid)
-        assert "read_todo" not in index
+        assert "- todo —" not in index
+        assert "running task list" not in index
 
 
 # ── AI preferences folded into the artifact model (#158 Slice 5) ───────────
@@ -1120,7 +1200,9 @@ def test_ai_preferences_content_reads_artifact_only(app):
         # The UserArtifact is the source of truth.
         _mk_artifact(uid, "ai_preferences", "folded prefs",
                      title="AI Interaction Preferences")
-        assert get_user_ai_preferences_content(uid) == "folded prefs"
+        assert get_user_ai_preferences_content(uid) == (
+            "[ai_preferences · v1, as of the start of this conversation]\n"
+            "folded prefs")
 
 
 def test_intentions_ambient_not_in_index(app):
@@ -1282,3 +1364,98 @@ def test_switching_the_account_to_train_changes_no_existing_artifact(
     assert client.post(
         f"/api/artifacts/memory/revert/{old_id}").status_code in (200, 201)
     assert UserArtifact.latest_for(user.id, "memory").ai_usage == "chat"
+
+
+def test_tool_failure_stores_a_fixed_text_not_the_exception(app, monkeypatch):
+    """The result lands in tool_calls_meta (shown under "Actions taken")
+    and goes back to the model: no exception text in it."""
+    from backend.utils.error_privacy import TOOL_FAILED_TEXT
+
+    def boom(*a, **k):
+        raise RuntimeError("Error code: 429 - typed-by-the-user")
+    monkeypatch.setattr(UserArtifact, "latest_for", boom)
+    with app.app_context():
+        uid = User.query.first().id
+        r = _run_tool(app, "update_artifact",
+                      {"kind": "memory", "updated_content": "x"}, uid)
+    assert r["status"] == "error"
+    assert r["error"] == TOOL_FAILED_TEXT
+
+
+# ── "Show changes" on an artifact write (#604) ──────────────────────────
+
+def _changes(client, version_id, **query):
+    qs = "&".join(f"{k}={v}" for k, v in query.items())
+    return client.get(f"/api/artifacts/versions/{version_id}/changes"
+                      + (f"?{qs}" if qs else ""))
+
+
+def test_changes_diff_the_write_against_its_stored_previous(app, client):
+    uid = User.query.first().id
+    v1 = _mk_artifact(uid, "memory", "## Facts\n- has a dog\n- in Prague")
+    v2 = _mk_artifact(uid, "memory", "## Facts\n- has two dogs\n- in Prague")
+
+    r = _changes(client, v2.id, **{"from": v1.id})
+    assert r.status_code == 200
+    data = r.get_json()
+    assert (data["kind"], data["title"]) == ("memory", "Memory")
+    assert (data["version_number"], data["previous_version_number"]) == (2, 1)
+    assert data["lines"] == [
+        {"type": "same", "text": "## Facts"},
+        {"type": "del", "text": "- has a dog"},
+        {"type": "add", "text": "- has two dogs"},
+        {"type": "same", "text": "- in Prague"},
+    ]
+    # Without ?from: the version just before it.
+    assert _changes(client, v2.id).get_json() == data
+
+
+def test_changes_of_a_creation_are_its_whole_text(app, client):
+    uid = User.query.first().id
+    v1 = _mk_artifact(uid, "reading-list", "1. Dune\n2. Solaris")
+    data = _changes(client, v1.id).get_json()
+    assert (data["version_number"], data["previous_version_number"]) == (
+        1, None)
+    assert data["lines"] == [{"type": "add", "text": "1. Dune"},
+                             {"type": "add", "text": "2. Solaris"}]
+
+
+def test_changes_are_the_owners_only_with_no_admin_path(app, client):
+    me = User.query.first()
+    me.is_admin = True
+    other = User(username="other")
+    _db.session.add(other)
+    _db.session.commit()
+    theirs_v1 = _mk_artifact(other.id, "memory", "THEIR OLD TEXT")
+    theirs_v2 = _mk_artifact(other.id, "memory", "THEIR NEW TEXT")
+    mine = _mk_artifact(me.id, "memory", "my text")
+    my_list = _mk_artifact(me.id, "reading-list", "1. Dune")
+
+    for r in (_changes(client, theirs_v2.id),
+              _changes(client, theirs_v2.id, **{"from": theirs_v1.id}),
+              _changes(client, mine.id, **{"from": theirs_v1.id}),
+              _changes(client, mine.id, **{"from": my_list.id}),
+              _changes(client, mine.id, **{"from": mine.id}),
+              _changes(client, 999999)):
+        assert r.status_code == 404
+        assert b"THEIR" not in r.data
+
+
+def test_changes_of_a_deleted_artifact_are_not_served(app, client):
+    """#603: a deleted artifact's versions are not diffed, from either
+    side; a new one of that kind starts at v1 with nothing before it."""
+    from backend.utils.artifact_deletion import soft_delete_artifact
+    uid = User.query.first().id
+    v1 = _mk_artifact(uid, "plans", "OLD PLAN")
+    v2 = _mk_artifact(uid, "plans", "NEWER PLAN")
+    soft_delete_artifact(uid, "plans")
+    _db.session.commit()
+    again = _mk_artifact(uid, "plans", "a new list")
+
+    for r in (_changes(client, v2.id), _changes(client, v2.id, **{"from": v1.id}),
+              _changes(client, again.id, **{"from": v2.id})):
+        assert r.status_code == 404
+        assert b"PLAN" not in r.data
+    data = _changes(client, again.id).get_json()
+    assert (data["version_number"], data["previous_version_number"]) == (1, None)
+    assert data["lines"] == [{"type": "add", "text": "a new list"}]

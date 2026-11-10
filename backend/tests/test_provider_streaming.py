@@ -558,13 +558,13 @@ def test_openai_listener_gets_text_and_tool_start(providers, monkeypatch):
         _event("response.output_text.delta", delta="h"),
         _event("response.output_text.delta", delta="i"),
         _event("response.output_item.added",
-               item=_event("function_call", name="read_todo")),
+               item=_event("function_call", name="read_artifact")),
         _event("response.output_item.added", item=_event("reasoning")),
         _event("response.completed", response=_oai_response()),
     ]], []))
     providers.LLMProvider._call_openai("gpt-x", MSGS, "k", listener=listener)
     assert listener.events == [("text", "h"), ("text", "i"),
-                               ("tool", "read_todo")]
+                               ("tool", "read_artifact")]
 
 
 def test_openai_refused_restart_raises(providers, monkeypatch):
@@ -579,3 +579,49 @@ def test_openai_refused_restart_raises(providers, monkeypatch):
         providers.LLMProvider._call_openai(
             "gpt-x", MSGS, "k", listener=listener)
     assert len(calls) == 1
+
+
+# ── safety identifier and content-policy blocks (2026-11-04) ─────────────
+
+def test_openai_call_sends_the_users_safety_identifier(providers,
+                                                       monkeypatch):
+    from backend.utils.safety_identifier import (
+        SYSTEM_SAFETY_IDENTIFIER, openai_safety_identifier)
+    calls = []
+    monkeypatch.setattr(providers, "OpenAI", _oai_client([
+        [_event("response.completed", response=_oai_response())],
+        [_event("response.completed", response=_oai_response())],
+    ], calls))
+    providers.LLMProvider._call_openai("gpt-x", MSGS, "k", user_id=7)
+    providers.LLMProvider._call_openai("gpt-x", MSGS, "k")
+    assert calls[0]["safety_identifier"] == openai_safety_identifier(7)
+    assert calls[1]["safety_identifier"] == SYSTEM_SAFETY_IDENTIFIER
+
+
+@pytest.mark.parametrize("script", [
+    [_oai_status_error(400, "invalid_request_error", "bio_policy")],
+    [_oai_failed("bio_policy")],
+])
+def test_openai_policy_block_is_reported_and_not_retried(providers,
+                                                         monkeypatch, script):
+    reports = []
+    monkeypatch.setattr(providers, "report_policy_block",
+                        lambda *a: reports.append(a))
+    calls = []
+    monkeypatch.setattr(providers, "OpenAI", _oai_client([
+        script, [_event("response.completed", response=_oai_response())],
+    ], calls))
+    with pytest.raises(Exception) as info:
+        providers.LLMProvider._call_openai("gpt-x", MSGS, "k", user_id=7)
+    assert providers.policy_block_code(info.value) == "bio_policy"
+    assert len(calls) == 1
+    assert reports == [(7, "bio_policy", "gpt-x", "live call")]
+
+
+def test_policy_block_code_ignores_other_errors(providers):
+    from backend.utils.llm_batch import BatchItemFailed, BatchItemPolicyBlocked
+    assert providers.policy_block_code(
+        _oai_status_error(400, "invalid_request_error", "bad_param")) is None
+    assert providers.policy_block_code(BatchItemFailed("x")) is None
+    assert providers.policy_block_code(
+        BatchItemPolicyBlocked("x", code="invalid_prompt")) == "invalid_prompt"

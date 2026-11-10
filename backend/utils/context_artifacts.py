@@ -38,7 +38,10 @@ _ROW_MODELS = {
 
 def pinned_row(artifact_type, artifact_id):
     """The artifact version a pin of *artifact_type* points at, or None.
-    Each has a ``user_id``: whose version it is."""
+    Each has a ``user_id``: whose version it is. A user artifact the
+    user deleted (#603) is None, as if the pin were gone."""
+    if artifact_type == 'user_artifact':
+        return UserArtifact.get_live(artifact_id)
     model = _ROW_MODELS.get(artifact_type)
     return model.query.get(artifact_id) if model is not None else None
 
@@ -50,9 +53,9 @@ def attach_context_artifacts(node_id, user_id, prompt_record=None):
     per artifact type the prompt content actually references via
     placeholders — a pin means "this exact version is embedded in this
     node's context". Types the agent pulls on demand are NOT pinned here:
-    the todo (read_todo, #158 Slice 3) and non-inline artifacts
-    (read_artifact) get pinned by the retrieval loop on the node whose
-    turn fetched them.
+    the todo (#158 Slice 3) and non-inline artifacts, both read with
+    read_artifact (#218), get pinned by the retrieval loop on the node
+    whose turn fetched them.
 
     Should be called right after the system node is flushed (so node_id
     is valid) and before the session is committed.
@@ -133,11 +136,11 @@ def sync_context_artifacts(node_id, user_id, content):
 def _resolve_latest_artifact(artifact_type, user_id):
     """Find the latest artifact ID for a given type and user."""
     if artifact_type == 'profile':
+        # Never a large build's window or group (#545).
+        from backend.utils.profile_versions import current_profile_query
         row = (
-            UserProfile.query
-            .filter_by(user_id=user_id)
+            current_profile_query(user_id)
             .filter(UserProfile.ai_usage.in_(AI_ALLOWED))
-            .order_by(UserProfile.created_at.desc())
             .first()
         )
     elif artifact_type == 'todo':
@@ -149,11 +152,10 @@ def _resolve_latest_artifact(artifact_type, user_id):
             .first()
         )
     elif artifact_type == 'recent_context':
+        from backend.utils.profile_versions import current_profile_query
         profile = (
-            UserProfile.query
-            .filter_by(user_id=user_id)
+            current_profile_query(user_id)
             .filter(UserProfile.ai_usage.in_(AI_ALLOWED))
-            .order_by(UserProfile.created_at.desc())
             .first()
         )
         profile_id = profile.id if profile else None

@@ -150,18 +150,21 @@ FAILED=""
 # --- 1. database -----------------------------------------------------------
 # --no-owner/--no-privileges: restores cleanly into a DB owned by a different
 # role (local restore test, a rebuilt VM, the lab).
+# --exclude-schema=vec: the pgvector copies of the embeddings (#331) are
+# derived data, rebuilt by `flask pgvector-enable --apply`; leaving them out
+# keeps ~8.5 KB per embedding out of every dump. Matches nothing until then.
 # If pg_dump dies midway, gcloud still completes the upload of what it got,
 # and under retention that truncated object can't be deleted. pipefail makes
 # the function fail, so no .ok marker is written for it.
 dump_database() {
   if [ "$MODE" = gcs ]; then
-    run_pg_dump --format=custom --no-owner --no-privileges --dbname="$DB_URL_NO_PASSWORD" \
+    run_pg_dump --format=custom --no-owner --no-privileges --exclude-schema=vec --dbname="$DB_URL_NO_PASSWORD" \
       | gcloud storage cp --quiet - "${DEST}/db/${DUMP_NAME}" || return 1
     SIZE="$(gcloud storage objects describe "${DEST}/db/${DUMP_NAME}" --format='value(size)')" || return 1
     printf '%s\n' "$SIZE" | gcloud storage cp --quiet - "${DEST}/db/${DUMP_NAME}.ok" || return 1
   else
     mkdir -p "${DEST}/db" || return 1
-    run_pg_dump --format=custom --no-owner --no-privileges --dbname="$DB_URL_NO_PASSWORD" \
+    run_pg_dump --format=custom --no-owner --no-privileges --exclude-schema=vec --dbname="$DB_URL_NO_PASSWORD" \
       > "${DEST}/db/${DUMP_NAME}" || return 1
     SIZE="$(wc -c < "${DEST}/db/${DUMP_NAME}" | tr -d ' ')" || return 1
     printf '%s\n' "$SIZE" > "${DEST}/db/${DUMP_NAME}.ok" || return 1

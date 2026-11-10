@@ -81,10 +81,27 @@ struct LooreDialogCard<Content: View>: View {
 
 /// Body text style for dialogs: sans 300, .92rem, secondary, line spacing 1.6.
 struct DialogBodyText: View {
-    let text: String
+    private let content: AttributedString
+
+    init(text: String) {
+        content = AttributedString(text)
+    }
+
+    /// Text with styled runs, e.g. `DialogBodyText.strong(title) + AttributedString(" …")`.
+    init(attributed: AttributedString) {
+        content = attributed
+    }
+
+    /// A run styled like the web dialogs' `<strong>`: weight 400, primary colour.
+    static func strong(_ text: String) -> AttributedString {
+        var run = AttributedString(text)
+        run.font = LooreFont.sans(14.7, .regular, relativeTo: .body)
+        run.foregroundColor = LooreColor.textPrimary
+        return run
+    }
 
     var body: some View {
-        Text(text)
+        Text(content)
             .font(LooreFont.body)
             .foregroundStyle(LooreColor.textSecondary)
             .lineSpacing(5)

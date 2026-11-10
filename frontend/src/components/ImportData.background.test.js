@@ -17,6 +17,7 @@ jest.mock('../api', () => ({
 import React from 'react';
 import JSZip from 'jszip';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 import ImportData from './ImportData';
 
 async function zipFile(entries) {
@@ -42,7 +43,7 @@ async function openConfirm(label = /Import ChatGPT/, confirm) {
     return confirm(url);
   });
   const file = await zipFile({ 'conversations.json': '[{"id":"a"}]' });
-  render(<ImportData inline />);
+  render(<MemoryRouter><ImportData inline /></MemoryRouter>);
   fireEvent.change(screen.getByLabelText(label), { target: { files: [file] } });
   return screen.findByRole('button', { name: 'Confirm Import' });
 }
@@ -83,6 +84,20 @@ test('confirm sends the token, polls the job, shows "N of M messages", then the 
   expect(await screen.findByText(/3 of 6 messages/)).toBeTruthy();
   expect(screen.getByRole('button', { name: /Importing/ }).disabled).toBe(true);
   expect(await screen.findByText('Import Finished', {}, { timeout: 4000 })).toBeTruthy();
+  // The result counts messages and says so, next to the dialog's conversations.
+  expect(screen.getByText('Messages imported')).toBeTruthy();
+  expect(screen.getByText(/These numbers count messages\. Your archive has 2 conversations with 6 messages\./)).toBeTruthy();
+});
+
+test('a re-import result labels the skipped count as messages', async () => {
+  const button = await openConfirm(/Import Claude/, () =>
+    Promise.resolve({ data: { task_id: 'job-4', status: 'queued', total: 6 } }));
+  mockGet.mockResolvedValue({ data: { status: 'completed', done: 6, total: 6,
+    result: { ...result, created: 0, skipped: 6 } } });
+  fireEvent.click(button);
+  expect(await screen.findByText('Import Finished', {}, { timeout: 4000 })).toBeTruthy();
+  expect(screen.getByText('Messages skipped')).toBeTruthy();
+  expect(screen.getByText(/Your archive has 2 conversations/)).toBeTruthy();
 });
 
 test('a failed confirm shows its error inside the dialog and Confirm works again', async () => {
@@ -122,3 +137,16 @@ test('a status poll that fails once does not lose the import', async () => {
   expect(await screen.findByText('Import Finished', {}, { timeout: 4000 })).toBeTruthy();
   expect(screen.queryByRole('alert')).toBeNull();
 });
+
+test.each([[true, true], [false, false]])(
+  'the result asks the both-providers question when the server says so (%s, #599)',
+  async (ask, shown) => {
+    const button = await openConfirm(/Import ChatGPT/, () =>
+      Promise.resolve({ data: { task_id: 'job-5', status: 'queued', total: 6 } }));
+    mockGet.mockResolvedValue({ data: { status: 'completed', done: 6, total: 6,
+      result: { ...result, ask_both_providers: ask } } });
+    fireEvent.click(button);
+    expect(await screen.findByText('Import Finished', {}, { timeout: 4000 })).toBeTruthy();
+    expect(!!screen.queryByRole('button', { name: 'Use both' })).toBe(shown);
+    expect(!!screen.queryByText('Use both Anthropic and OpenAI?')).toBe(shown);
+  });

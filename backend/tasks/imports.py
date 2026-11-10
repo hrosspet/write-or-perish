@@ -22,13 +22,15 @@ from sqlalchemy.exc import IntegrityError
 from celery.utils.log import get_task_logger
 
 from backend.celery_app import celery, flask_app
+from backend.utils.heavy_slot import HeavyTask
 
 logger = get_task_logger(__name__)
 
 BATCH_SIZE = 500
 
 
-@celery.task(bind=True, name="backend.tasks.imports.import_twitter_archive")
+@celery.task(bind=True, base=HeavyTask,
+             name="backend.tasks.imports.import_twitter_archive")
 def import_twitter_archive(self, user_id, token, options):
     """options: import_type, include_replies, privacy_level, ai_usage,
     on_deleted (already resolved by the confirm request)."""
@@ -46,11 +48,15 @@ def import_twitter_archive(self, user_id, token, options):
                 "Import data expired — please upload the archive again.")
 
         total = ta.stash_count(path)
+        from backend.tasks.profile_batch import mark_import_activity
 
         def progress(done):
             self.update_state(state="PROGRESS", meta={
                 "user_id": user_id, "done": done, "total": total,
             })
+            # A running import holds the profile build back (#598): at the
+            # start and after every committed batch.
+            mark_import_activity(user_id)
 
         progress(0)
         try:
@@ -89,7 +95,8 @@ def snapshot_dir_for(config):
     return STASH_ROOT.parent / "community-archive"
 
 
-@celery.task(name="backend.tasks.imports.refresh_community_archive_snapshot")
+@celery.task(base=HeavyTask,
+             name="backend.tasks.imports.refresh_community_archive_snapshot")
 def refresh_community_archive_snapshot(first_copy=False):
     """Beat sweep (every 30 min), and queued by every read before it
     renders (ca_feed.request_snapshot_refresh): keep the cached Community
@@ -530,7 +537,8 @@ def x_api_dump_path(handle):
     return d / f"{handle}-{stamp}.jsonl"
 
 
-@celery.task(bind=True, name="backend.tasks.imports.prefill_community_archive")
+@celery.task(bind=True, base=HeavyTask,
+             name="backend.tasks.imports.prefill_community_archive")
 def prefill_community_archive(self, user_id, handle, options):
     """Admin pre-fill (see prefill_community_archive_impl)."""
     with flask_app.app_context():
@@ -543,7 +551,8 @@ def prefill_community_archive(self, user_id, handle, options):
             raise
 
 
-@celery.task(bind=True, name="backend.tasks.imports.prefill_x_api")
+@celery.task(bind=True, base=HeavyTask,
+             name="backend.tasks.imports.prefill_x_api")
 def prefill_x_api(self, user_id, handle, options):
     """Admin pre-fill via the X API (see prefill_x_api_impl)."""
     with flask_app.app_context():

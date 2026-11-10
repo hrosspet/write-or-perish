@@ -500,9 +500,11 @@ final class ThreadModel {
         return [node.aiUsage] + node.ancestors.map(\.aiUsage)
     }
 
-    /// After the inline form's send (web `handleInlineSuccess`).
+    /// After the inline form's send (web `handleInlineSuccess`). A long entry is saved
+    /// as a chain of parts: the reply is asked under the last one (`tipId`), so it reads
+    /// the whole entry, and the thread opens there.
     func inlineReplySent(_ result: NodeFormResult, autoGenerate: Binding<Bool>) async {
-        guard app != nil, let newId = result.id else { return }
+        guard app != nil, let newId = result.tipId ?? result.id else { return }
         do {
             if let llmId = try await tryAutoGenerate(for: newId, chainAIUsages: chainAIUsages, autoGenerate: autoGenerate) {
                 openThread(newId, awaitLLM: llmId)

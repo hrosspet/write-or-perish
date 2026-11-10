@@ -137,7 +137,7 @@ describe('ModelSelector', () => {
     expect(onChange).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole('option', { name: 'Fable 5.1' }));
-    expect(onChange).toHaveBeenCalledWith('claude-fable-5.1');
+    expect(onChange).toHaveBeenCalledWith('claude-fable-5.1', { picked: true });
     expect(screen.queryByRole('listbox')).toBeNull();
   });
 
@@ -154,7 +154,7 @@ describe('ModelSelector', () => {
     // The keyboard lands on the first model the expansion added.
     expect(list.getAttribute('aria-activedescendant')).toMatch(/claude-fable-5\.1$/);
     fireEvent.keyDown(list, { key: 'Enter' });
-    expect(onChange).toHaveBeenCalledWith('claude-fable-5.1');
+    expect(onChange).toHaveBeenCalledWith('claude-fable-5.1', { picked: true });
     expect(screen.queryByRole('listbox')).toBeNull();
   });
 

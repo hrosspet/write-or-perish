@@ -17,9 +17,13 @@ from backend.utils.quotes import (
 from backend.utils.timefmt import iso_utc
 from backend.utils.encryption import prefetch_deks
 from backend.utils.task_owner import failure_text, task_owned_by
-from sqlalchemy import and_, func, or_
+from backend.utils.thread_tree import ancestor_chains
+from sqlalchemy import and_, case, func, or_
 from sqlalchemy.orm import subqueryload
+from bisect import bisect_left, bisect_right
+from collections import namedtuple
 from datetime import datetime
+from operator import attrgetter, itemgetter
 
 export_bp = Blueprint("export_bp", __name__)
 
@@ -86,13 +90,47 @@ def _export_visible_filter(model, user_id):
     )
 
 
+# What a deleted node renders in place of its text (§5a).
+TOMBSTONE_TEXT = "[Node deleted by author]"
+# What a deleted node costs the budgeted raw window (#525) when it holds
+# the place of an entry below it: its placeholder line, by the same
+# chars/4 measure as an entry's stored token_count (6 units). A deleted
+# node with no entry below it is not shown and costs nothing. Its former
+# size counted until the purge, and could empty the window.
+TOMBSTONE_UNITS = approximate_token_count(TOMBSTONE_TEXT)
+# The most deleted rows the raw window's pre-selection passes (#525).
+# They cost its budget nothing, but each one is a row loaded; while a
+# "Delete all my writing" waits out its 30 days, every row of the
+# account is deleted. INTRODUCED CONSTANT.
+MAX_WINDOW_DELETED_ROWS = 2000
+
+
+def _alive_units(model):
+    """SQL: what *model*'s row costs the raw window's pre-selection: its
+    stored token_count, or 0 once it is deleted (#525)."""
+    return case(
+        (model.deleted_at.is_(None), func.coalesce(model.token_count, 0)),
+        else_=0,
+    )
+
+
 def _node_header_line(node, index_path):
     """Markdown header line shared by all node renderings."""
-    depth = len(index_path.split('.'))
-    header = "#" * min(depth + 1, 6)
     ts = node.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
-    return (f"{header} [{index_path}] {_node_author_label(node)}"
+    return (f"{_index_heading(index_path)} {_node_author_label(node)}"
             f"{_origin_suffix(node)} - {ts}\n")
+
+
+# What a reply the user cannot access renders as, under a heading that
+# holds only its place in the thread: no author, no time.
+INACCESSIBLE_TEXT = "[Reply not accessible]"
+
+
+def _index_heading(index_path):
+    """The Markdown heading of the node at *index_path*, e.g. '### [1.2]':
+    one level deeper per level of the thread."""
+    depth = len(index_path.split('.'))
+    return f"{'#' * min(depth + 1, 6)} [{index_path}]"
 
 
 def prefetch_children(nodes, batch=500):
@@ -139,7 +177,8 @@ def iter_with_dek_prefetch(roots, window=DEK_PREFETCH_WINDOW):
     spent ~7 minutes waiting on KMS in sequence. Windows keep the
     prefetched DEKs inside the LRU cache; a root's subtree is never
     split across windows. Call after prefetch_children(roots) — walking
-    ``children`` here must not lazy-load.
+    ``children`` here must not lazy-load. A deleted node's DEK is not
+    unwrapped: its text is never rendered (#525).
     """
     batch, texts = [], []
     for root in roots:
@@ -147,7 +186,8 @@ def iter_with_dek_prefetch(roots, window=DEK_PREFETCH_WINDOW):
         stack = [root]
         while stack:
             n = stack.pop()
-            texts.append(n.content)
+            if n.deleted_at is None:
+                texts.append(n.content)
             stack.extend(n.children)
         if len(texts) >= window:
             prefetch_deks(texts)
@@ -163,12 +203,12 @@ def _filtered_children(node, filter_ai_usage, created_before, included_ids,
     """Children of *node* that should render, sorted chronologically.
 
     keep_tombstones: when a budget pre-selection (included_ids) is
-    active, tombstones pass through even if not pre-selected — they take
-    no real budget tokens and dropping them creates discontinuities
-    (§5a). A node hidden with its owner's deleted account (#269) counts
-    as a tombstone for *user_id*, as it will after the purge. The
-    inaccessible-placeholder branch does not extend this courtesy,
-    matching the historical behavior.
+    active, tombstones pass through even if not pre-selected — they cost
+    a window no more than their placeholder line (TOMBSTONE_UNITS) and
+    dropping them creates discontinuities (§5a). A node hidden with its
+    owner's deleted account (#269) counts as a tombstone for *user_id*,
+    as it will after the purge. The inaccessible-placeholder branch does
+    not extend this courtesy, matching the historical behavior.
     """
     from backend.utils.privacy import shown_as_deleted
     children = node.children
@@ -306,9 +346,11 @@ def _artifact_ref_lines(node, user_id):
 
     profile = node.get_artifact("profile")
     if profile is not None and profile.user_id == user_id:
+        from backend.utils.profile_versions import not_set_internal
         profile_ver = UserProfile.query.filter(
             UserProfile.user_id == profile.user_id,
             UserProfile.created_at <= profile.created_at,
+            not_set_internal(),
         ).count()
         lines.append(f"[User Profile v{profile_ver} (ref #{profile.id})]")
 
@@ -322,10 +364,11 @@ def _artifact_ref_lines(node, user_id):
 
     # ai_preferences is a UserArtifact (#158 Slice 5) → it flows through the
     # user_artifact loop below as [Artifact 'ai_preferences' vN].
+    # get_user_artifacts() and live() leave deleted versions out (#603).
     for kind, artifact in sorted(node.get_user_artifacts().items()):
         if artifact.user_id != user_id:
             continue
-        artifact_ver = UserArtifact.query.filter(
+        artifact_ver = UserArtifact.live().filter(
             UserArtifact.user_id == artifact.user_id,
             UserArtifact.kind == kind,
             UserArtifact.created_at <= artifact.created_at,
@@ -440,6 +483,7 @@ def format_node_tree(
     ai_blocked_ids=None,
     licence=None,
     artifact_refs=True,
+    prune_tombstones=False,
 ):
     """
     Format a node and its descendants into a human-readable tree structure
@@ -451,8 +495,9 @@ def format_node_tree(
     overflowed the call stack — the same failure
     `_collect_all_nodes_in_tree` had before c556e4d, one stage later in
     the pipeline. Stack frames are (kind, node, index_path), where kind
-    mirrors the old mutual recursion: "node" (cycle-checked; routes
-    soft-deleted nodes to the tombstone shell), "tombstone", and
+    mirrors the old mutual recursion: "node" (cycle-checked; applies the
+    access rule: renders the node, routes it to the tombstone or
+    inaccessible shell, or leaves it out), "tombstone", and
     "inaccessible". Branch separators are pushed as ("text", str)
     frames, so the concatenated output is identical to the recursive
     version's.
@@ -477,6 +522,13 @@ def format_node_tree(
                  render under the same index paths), for an export that
                  omits artifacts (#550). A tree that is only a system
                  prompt then renders as "".
+        prune_tombstones: True leaves out every deleted node with no
+                 entry rendered below it, and renders a chain of deleted
+                 nodes, each the only one shown under the one before, as
+                 one line ("[N nodes deleted by author]"), for the
+                 budgeted raw window (#525). A placeholder then only
+                 holds the place of a reply below it (§5a). A tree with
+                 no entry rendered in it is "".
 
     Returns:
         str: Formatted text representation of the node tree
@@ -490,8 +542,53 @@ def format_node_tree(
             return n.deleted_at is not None
         return shown_as_deleted(n, user_id)
 
+    def _children(n, keep_tombstones):
+        return _filtered_children(
+            n, filter_ai_usage, created_before, included_ids,
+            keep_tombstones=keep_tombstones, user_id=user_id)
+
+    def _dead_tombstones():
+        """The tombstones the walk below would render with no "node"
+        frame (an entry) under them, for prune_tombstones."""
+        dead, live, below, seen = set(), {}, {}, set(processed_nodes)
+        stack = [("tombstone" if _deleted(node) else "node", node, False)]
+        while stack:
+            kind, current, done = stack.pop()
+            if done:
+                live[current.id] = kind == "node" or any(
+                    live.get(c.id, False) for c in below[current.id])
+                if kind == "tombstone" and not live[current.id]:
+                    dead.add(current.id)
+                continue
+            if current.id in seen:
+                continue
+            seen.add(current.id)
+            # The walk's access rule, for every node (see the "node"
+            # frame below). A deleted child the user could not see is
+            # left out with everything below it, so it counts as dead:
+            # it takes no child slot and does not break a run.
+            kids = []
+            for child in _children(current, kind != "inaccessible"):
+                if _deleted(child):
+                    if user_id is None or can_user_view_tombstone(
+                            child, user_id):
+                        kids.append(("tombstone", child))
+                    else:
+                        dead.add(child.id)
+                elif user_id and not can_user_access_node(child, user_id):
+                    kids.append(("inaccessible", child))
+                else:
+                    kids.append(("node", child))
+            below[current.id] = [c for _, c in kids]
+            stack.append((kind, current, True))
+            stack.extend((k, c, False) for k, c in kids)
+        return dead
+
     if processed_nodes is None:
         processed_nodes = set()
+    dead = _dead_tombstones() if prune_tombstones else set()
+    if node.id in dead:
+        return ""
 
     parts = []
     stack = [("node", node, index_path)]
@@ -506,12 +603,19 @@ def format_node_tree(
             # Avoid infinite loops from circular references
             if current.id in processed_nodes:
                 continue
-            # Soft-deleted: render the tombstone shell (no content). The
-            # caller is responsible for the pre-deletion-access check on
-            # the entry node; child tombstones are checked at push time
-            # below via can_user_view_tombstone.
+            # The access rule, the same for every node at any depth,
+            # under a live node or a placeholder shell. Soft-deleted:
+            # the tombstone shell (no content), only for a user who
+            # could see the node before; otherwise it is left out with
+            # everything below it (no structural "something is here").
+            # Not accessible to the user: the inaccessible shell.
             if _deleted(current):
+                if user_id is not None and not can_user_view_tombstone(
+                        current, user_id):
+                    continue
                 kind = "tombstone"
+            elif user_id and not can_user_access_node(current, user_id):
+                kind = "inaccessible"
 
         if kind == "node":
             processed_nodes.add(current.id)
@@ -519,28 +623,14 @@ def format_node_tree(
                 current, path, user_id, embedded_quotes, ai_blocked_ids,
                 licence=licence, filter_ai_usage=filter_ai_usage,
                 artifact_refs=artifact_refs))
-            children = _filtered_children(
-                current, filter_ai_usage, created_before, included_ids,
-                keep_tombstones=True, user_id=user_id)
+            children = [c for c in _children(current, True)
+                        if c.id not in dead]
             child_frames = []
             for i, child in enumerate(children):
                 child_index = f"{path}.{i+1}"
                 # Mark branches (when there are multiple children)
                 if len(children) > 1 and i > 0:
                     child_frames.append(("text", "---\n**BRANCH**\n---\n\n"))
-                if _deleted(child):
-                    # Tombstone: render only with pre-deletion access;
-                    # otherwise skip (don't leak structural "something
-                    # is here").
-                    if user_id is None or can_user_view_tombstone(
-                            child, user_id):
-                        child_frames.append(
-                            ("tombstone", child, child_index))
-                    continue
-                if user_id and not can_user_access_node(child, user_id):
-                    child_frames.append(
-                        ("inaccessible", child, child_index))
-                    continue
                 child_frames.append(("node", child, child_index))
             # LIFO: push reversed so children pop left-to-right,
             # preserving the recursive version's pre-order output.
@@ -549,20 +639,40 @@ def format_node_tree(
 
         # Placeholder shells (tombstone / inaccessible). Children still
         # render — they may be alive, accessible replies. All children
-        # route through the "node" kind (cycle check + deleted routing)
+        # route through the "node" kind (cycle check + the access rule)
         # with no BRANCH markers, matching the old recursive helpers.
+        last = current
         if kind == "tombstone":
-            placeholder = "[Node deleted by author]\n\n"
             keep_tombstones = True
+            run = 1
+            # Pruned: a chain of deleted nodes, each the only one shown
+            # under the one before, is one line (#525).
+            while prune_tombstones:
+                kids = [c for c in _children(last, True)
+                        if c.id not in dead]
+                if (len(kids) != 1 or not _deleted(kids[0])
+                        or kids[0].id in processed_nodes
+                        or (user_id is not None
+                            and not can_user_view_tombstone(
+                                kids[0], user_id))):
+                    break
+                processed_nodes.add(last.id)
+                last = kids[0]
+                run += 1
+            placeholder = (f"{TOMBSTONE_TEXT}\n\n" if run == 1
+                           else f"[{run} nodes deleted by author]\n\n")
         else:
-            placeholder = ("[Content not accessible — private node by "
-                           "another user]\n\n")
+            # Another user's reply the user cannot access leaves no
+            # trace but its place: no author, no time.
+            placeholder = f"{INACCESSIBLE_TEXT}\n\n"
             keep_tombstones = False
-        parts.append(_node_header_line(current, path) + placeholder)
+        header = (_node_header_line(current, path) if kind == "tombstone"
+                  else _index_heading(path) + "\n")
+        parts.append(header + placeholder)
         processed_nodes.add(current.id)
-        children = _filtered_children(
-            current, filter_ai_usage, created_before, included_ids,
-            keep_tombstones=keep_tombstones, user_id=user_id)
+        processed_nodes.add(last.id)
+        children = [c for c in _children(last, keep_tombstones)
+                    if c.id not in dead]
         stack.extend(reversed([
             ("node", gc, f"{path}.{j+1}")
             for j, gc in enumerate(children)
@@ -626,6 +736,24 @@ def _collect_all_nodes_in_tree(node, filter_ai_usage=False, created_before=None,
     return result
 
 
+def _scope_filter(user_id, filter_ai_usage, created_before, created_after):
+    """The filter every row of the incremental scope passes, anchor,
+    parent or reply alike.
+
+    _export_visible_filter includes soft-deleted nodes the user owns so
+    the export tree can render them as tombstones (§5a). Fully-deleted
+    threads end up with no rows and are skipped at the entry-point
+    selection step downstream."""
+    clauses = [_export_visible_filter(Node, user_id)]
+    if filter_ai_usage:
+        clauses.append(Node.ai_usage.in_(AI_ALLOWED))
+    if created_before is not None:
+        clauses.append(Node.created_at < created_before)
+    if created_after is not None:
+        clauses.append(Node.created_at > created_after)
+    return clauses
+
+
 def _select_incremental_rows(user_id, filter_ai_usage=False,
                              created_before=None, created_after=None):
     """Return rows for the incremental-export scope.
@@ -654,23 +782,17 @@ def _select_incremental_rows(user_id, filter_ai_usage=False,
     queries. Could be folded into a single recursive CTE if profiling
     ever shows it matters; kept iterative for portability between
     PostgreSQL and the SQLite test database.
+
+    ``WindowScope.rows`` computes the same rows in memory for a profile
+    build's windows (#612); a change here needs the same change there
+    (tests/test_window_scope.py compares the two).
     """
     cols = (Node.id, Node.parent_id, Node.created_at, Node.token_count,
             Node.deleted_at, Node.origin)
 
     def _general_filter():
-        # _export_visible_filter includes soft-deleted nodes the user
-        # owns so the export tree can render them as tombstones (§5a).
-        # Fully-deleted threads end up with no rows and are skipped at
-        # the entry-point selection step downstream.
-        clauses = [_export_visible_filter(Node, user_id)]
-        if filter_ai_usage:
-            clauses.append(Node.ai_usage.in_(AI_ALLOWED))
-        if created_before is not None:
-            clauses.append(Node.created_at < created_before)
-        if created_after is not None:
-            clauses.append(Node.created_at > created_after)
-        return clauses
+        return _scope_filter(user_id, filter_ai_usage, created_before,
+                             created_after)
 
     # 1. Anchors: target-owned/addressed AND pass general filters.
     anchor_rows = db.session.query(*cols).filter(
@@ -718,7 +840,8 @@ def _select_incremental_rows(user_id, filter_ai_usage=False,
     return list(rows_by_id.values())
 
 
-def count_remaining_units(user_id, created_after=None, filter_ai_usage=True):
+def count_remaining_units(user_id, created_after=None, filter_ai_usage=True,
+                          created_before=None):
     """Stored content units (Node.token_count) still ahead of the profile
     chunk loop after ``created_after``: the sum over exactly the rows the
     incremental export window draws from (anchor scope plus climb-up
@@ -726,11 +849,318 @@ def count_remaining_units(user_id, created_after=None, filter_ai_usage=True):
     filters), so the plan made from this figure and the window it
     produces agree. The chunk planner calls it before every chunk
     (docs/design/chunk-planner.md). No node is loaded or decrypted.
+    ``created_before`` (exclusive) bounds a window set's gap (#545).
     """
     rows = _select_incremental_rows(
         user_id, filter_ai_usage=filter_ai_usage,
-        created_after=created_after)
+        created_after=created_after, created_before=created_before)
     return sum((r.token_count or 0) for r in rows)
+
+
+# ── One metadata read per profile pass (#612) ─────────────────────────────
+
+ScopeRow = namedtuple(
+    "ScopeRow", "id parent_id created_at token_count deleted_at origin")
+_SCOPE_COLS = (Node.id, Node.parent_id, Node.created_at, Node.token_count,
+               Node.deleted_at, Node.origin)
+_by_id = attrgetter("id")
+
+
+class ScopeChanged(RuntimeError):
+    """A row a window selected from a WindowScope is no longer as the
+    scope read it (hidden, deleted, edited, moved or gone): the caller
+    reads the scope again before it renders the window."""
+
+
+def _date_test(created_after, created_before):
+    """The created_at bounds of _scope_filter as a test of one row, with
+    SQL's NULL semantics: a row without a date passes no bound."""
+    if created_after is None and created_before is None:
+        return lambda row: True
+
+    def test(row):
+        t = row.created_at
+        if t is None:
+            return False
+        if created_after is not None and not t > created_after:
+            return False
+        return created_before is None or t < created_before
+    return test
+
+
+class WindowScope:
+    """The metadata of the writing a profile build's windows read, from
+    one read of the database (#612): every row ``_select_incremental_rows``
+    can return for a window after ``floor``, as id, parent, date, units,
+    deleted state and origin (no content). A profile pass reads it once
+    and cuts each window from it. Before, every window read the metadata
+    of all the writing after its start again, once to plan the window
+    and once per render while it was fitted to the model's cap, so the
+    work grew with windows x entries.
+
+    ``rows(created_after, created_before)`` returns exactly what
+    ``_select_incremental_rows(user_id, filter_ai_usage, created_before,
+    created_after)`` returns for a ``created_after`` at or after the
+    floor: the same rows, in the order SQLite returns them: the anchors
+    (the user's own rows, then the rows addressed to them, each by id),
+    then the parents the climb up adds and the replies the climb down
+    adds, a layer at a time, by id within a layer. Only the dates of the
+    filter are applied here; the rest of ``_scope_filter`` (access,
+    tombstones, ai_usage) is the database's, read with the rows. The
+    order matters only for rows that share a date; on Postgres the old
+    walk gave them its query plan's order, so there a window can end
+    elsewhere in a run of such rows (each run stays whole in one window).
+
+    The read covers what any window's walk can reach: the anchors after
+    the floor, every ancestor the climb up reaches through rows that pass
+    the filter, and every reply the climb down reaches from an anchor,
+    also through a parent the climb up found (a window whose dates leave
+    out the anchor below such a parent climbs down through it).
+
+    ``fresh()`` says whether the user's rows changed since the read (a
+    row added, removed, updated, deleted or restored) or an account was
+    deleted or restored; ``check`` whether the rows a window's text is
+    decided from are still as read: its own rows, the rows that put them
+    in scope, and the replies under them. A pass reads the scope again
+    rather than render from a row someone hid or changed meanwhile."""
+
+    def __init__(self, user_id, filter_ai_usage=True, floor=None):
+        self.user_id = user_id
+        self.filter_ai_usage = filter_ai_usage
+        self.floor = floor
+        self.reads = 0
+        self.reload()
+
+    def _fingerprint(self):
+        from backend.models import User
+        uid = self.user_id
+        # "Delete all my writing" and its restore set and clear deleted_at
+        # without touching updated_at (user_purge.hide_writing): the
+        # deleted count and newest deletion see them. Accounts deleted or
+        # restored change what other people's rows show (#269).
+        own = tuple(db.session.query(
+            func.count(Node.id), func.max(Node.id),
+            func.max(Node.updated_at), func.count(Node.deleted_at),
+            func.max(Node.deleted_at),
+        ).filter(or_(Node.user_id == uid, Node.human_owner_id == uid)).one())
+        gone = tuple(db.session.query(
+            func.count(User.id), func.max(User.deleted_at),
+        ).filter(User.deleted_at.isnot(None)).one())
+        return own + gone
+
+    @staticmethod
+    def _fetch(column, ids, clauses):
+        ids = sorted(ids)
+        for i in range(0, len(ids), _WALK_CHUNK):
+            for r in db.session.query(*_SCOPE_COLS).filter(
+                    column.in_(ids[i:i + _WALK_CHUNK]), *clauses):
+                yield ScopeRow(*r)
+
+    def reload(self):
+        """Read the metadata (again)."""
+        uid = self.user_id
+        # Before the rows: a change during the read shows at the next
+        # fresh().
+        self._mark = self._fingerprint()
+        clauses = _scope_filter(uid, self.filter_ai_usage, None, self.floor)
+        rows, own, addressed = {}, [], []
+        for r in db.session.query(*_SCOPE_COLS, Node.user_id).filter(
+                or_(Node.user_id == uid, Node.human_owner_id == uid),
+                *clauses):
+            row = ScopeRow(*r[:6])
+            rows[row.id] = row
+            (own if r[6] == uid else addressed).append(row)
+        anchors = sorted(own, key=_by_id) + sorted(addressed, key=_by_id)
+        anchor_ids = set(rows)
+
+        # Up: the ancestors any window's climb up can reach.
+        pending = {r.parent_id for r in anchors
+                   if r.parent_id is not None} - rows.keys()
+        while pending:
+            found = [row for row in self._fetch(Node.id, pending, clauses)
+                     if row.id not in rows]
+            for row in found:
+                rows[row.id] = row
+            pending = {r.parent_id for r in found
+                       if r.parent_id is not None} - rows.keys()
+
+        # Down: the replies any window's climb down can reach. A reply
+        # that is an anchor was read above; the others are other people's.
+        others = clauses + [and_(
+            Node.user_id != uid,
+            or_(Node.human_owner_id.is_(None), Node.human_owner_id != uid))]
+        expanded = set(anchor_ids)
+        frontier = anchor_ids
+        while frontier:
+            nxt = set()
+            for row in self._fetch(Node.parent_id, frontier, others):
+                rows.setdefault(row.id, row)
+                if row.id not in expanded:
+                    expanded.add(row.id)
+                    nxt.add(row.id)
+            frontier = nxt
+
+        dated = [(row.created_at, i, row) for i, row in enumerate(anchors)
+                 if row.created_at is not None]
+        dated.sort(key=itemgetter(0, 1))
+        self._dated = dated
+        self._dates = [d[0] for d in dated]
+        self._undated = [(None, i, row) for i, row in enumerate(anchors)
+                         if row.created_at is None]
+        children = {}   # parent id -> its replies that are not anchors
+        for row in rows.values():
+            if row.id not in anchor_ids and row.parent_id is not None:
+                children.setdefault(row.parent_id, []).append(row)
+        for replies in children.values():
+            replies.sort(key=_by_id)
+        self._rows = rows
+        self._anchor_ids = anchor_ids
+        self._children = children
+        # Only these anchors can add rows: one whose parent is someone
+        # else's row (the climb up), one with someone else's replies (the
+        # climb down). An anchor's anchor parent or reply is in a window
+        # by its own date or not at all.
+        self._up = [a for a in anchors if a.parent_id in rows
+                    and a.parent_id not in anchor_ids]
+        self._down = [a for a in anchors if a.id in children]
+        self._last = None
+        self.reads += 1
+
+    def rows(self, created_after=None, created_before=None):
+        """``_select_incremental_rows`` for these dates, from memory. The
+        caller does not change the list (the last one is kept for the
+        next call with the same dates: a window is planned and rendered
+        several times on them)."""
+        key = (created_after, created_before)
+        if self._last is not None and self._last[0] == key:
+            return self._last[1]
+        if self.floor is not None and (created_after is None
+                                       or created_after < self.floor):
+            raise ValueError("a window before the scope's floor")
+        test = _date_test(created_after, created_before)
+        lo = (0 if created_after is None
+              else bisect_right(self._dates, created_after))
+        hi = (len(self._dates) if created_before is None
+              else bisect_left(self._dates, created_before))
+        anchors = self._dated[lo:hi]
+        if created_after is None and created_before is None:
+            anchors += self._undated
+        anchors.sort(key=itemgetter(1))
+        out = {row.id: row for _date, _i, row in anchors}
+        via = {}
+        self._climb_up(out, via, test)
+        self._climb_down(out, via, test)
+        result = list(out.values())
+        self._last = (key, result, via, {})
+        return result
+
+    def _climb_up(self, out, via, test):
+        """Step 2 of _select_incremental_rows: the parents of the anchors
+        in ``out`` that pass, then theirs, a layer at a time. ``via``
+        gets, for each, a child it was reached from."""
+        get = self._rows.get
+        pending = {}
+        for a in self._up:
+            if a.id in out:
+                pending.setdefault(a.parent_id, a.id)
+        while pending:
+            layer = [row for row in map(get, sorted(pending))
+                     if row is not None and test(row)]
+            nxt = {}
+            for row in layer:
+                out[row.id] = row
+                via[row.id] = pending[row.id]
+            for row in layer:
+                if row.parent_id is not None and row.parent_id not in out:
+                    nxt.setdefault(row.parent_id, row.id)
+            pending = nxt
+
+    def _climb_down(self, out, via, test):
+        """Step 3: the replies that pass under the anchors, then under
+        the replies added, a layer at a time; a row already in ``out`` is
+        neither added nor climbed through (as the database walk skips
+        it). ``via`` gets each one's parent."""
+        children = self._children
+        frontier = [a for a in self._down if a.id in out]
+        while frontier:
+            new = {}
+            for parent in frontier:
+                for row in children.get(parent.id, ()):
+                    if row.id not in out and test(row):
+                        new[row.id] = row
+            frontier = sorted(new.values(), key=_by_id)
+            for row in frontier:
+                out[row.id] = row
+                via[row.id] = row.parent_id
+
+    def units(self, created_after=None, created_before=None):
+        """``count_remaining_units`` for these dates, from memory."""
+        return sum((r.token_count or 0)
+                   for r in self.rows(created_after, created_before))
+
+    def fresh(self):
+        """Whether, since the read, none of the user's rows was added,
+        removed, updated, deleted or restored (their count, newest id,
+        newest update, deleted count and newest deletion) and no account
+        was deleted or restored."""
+        return self._fingerprint() == self._mark
+
+    def check(self, ids, created_after=None, created_before=None,
+              replies_of=()):
+        """Raise ScopeChanged unless the rows a window's text is decided
+        from are as the scope read them, for these dates:
+
+        - every row ``ids`` names (the window's own rows, before they are
+          loaded; the rows the per-thread skip rule walked), and the rows
+          that put each one in scope (its path to an anchor), still pass
+          the scope's filter with the parent, date, units, deleted state
+          and origin read;
+        - each anchor in ``replies_of`` has exactly the replies that pass
+          the filter which the read gave it: none hidden, deleted, made
+          private or gone with its author's account, and none new. An
+          anchor's replies that pass are all in scope, so the read's
+          replies are the database walk's.
+
+        Someone else's row the window does not show can thus still decide
+        nothing about it from the read: a thread whose only live reply
+        was deleted after the read is left out, as the database walk
+        leaves it out (§5a)."""
+        self.rows(created_after, created_before)
+        _key, result, via, children = self._last
+        clauses = _scope_filter(self.user_id, self.filter_ai_usage,
+                                created_before, created_after)
+        self._check_rows(ids, via, clauses)
+        parents = {i for i in replies_of if i in self._anchor_ids}
+        if parents:
+            self._check_replies(parents, result, children, clauses)
+
+    def _check_rows(self, ids, via, clauses):
+        want = set(ids)
+        for node_id in list(want):
+            while node_id in via:
+                node_id = via[node_id]
+                want.add(node_id)
+        live = {row.id: row for row in self._fetch(Node.id, want, clauses)}
+        for node_id in want:
+            if live.get(node_id) != self._rows.get(node_id):
+                raise ScopeChanged(
+                    f"user {self.user_id}: row {node_id} changed since the "
+                    f"window scope was read")
+
+    def _check_replies(self, parents, result, children, clauses):
+        if not children:
+            for row in result:
+                if row.parent_id is not None:
+                    children.setdefault(row.parent_id, set()).add(row)
+        replies = {}
+        for row in self._fetch(Node.parent_id, parents, clauses):
+            replies.setdefault(row.parent_id, set()).add(row)
+        for parent_id in parents:
+            read = children.get(parent_id, set())
+            if replies.get(parent_id, set()) != read:
+                raise ScopeChanged(
+                    f"user {self.user_id}: the replies under row "
+                    f"{parent_id} changed since the window scope was read")
 
 
 def _thread_has_alive_node(root_id):
@@ -758,6 +1188,129 @@ def _thread_has_alive_node(root_id):
             Node.deleted_at.is_(None),
         ).exists()
     ).scalar()
+
+
+def _window_places(rows, user_id, filter_ai_usage):
+    """Where each selected row of a budgeted window renders (#525):
+    {row id: (the window row it renders under, or None when it starts a
+    block; the created_at of its thread's root)}.
+
+    The window takes the newest rows, so a thread's oldest rows, its
+    root first, are the first to fall outside it. A row renders under
+    its parent when the parent is in the window. A row whose parent is
+    not starts a block of its own: the thread's root, or, when the
+    thread started before the window, its newest part. (Rendering from
+    roots only, a session longer than the window emptied it.)
+
+    A row is left out (absent) where it is when its thread renders
+    whole: when the thread is not the user's own (this export's scope),
+    or, with *filter_ai_usage*, when a node above it is outside
+    AI_ALLOWED (the walk down stops there).
+    """
+    window = {n.id: n for n in rows}
+    loose = [n.id for n in rows
+             if n.parent_id is not None and n.parent_id not in window]
+    chains = ancestor_chains(
+        loose, Node.user_id, Node.ai_usage, Node.created_at)
+    # Row id -> the window row it renders under, None for a block's
+    # start. A row missing here is left out.
+    under = {}
+    root_at = {}   # block start -> its thread root's created_at
+    for n in rows:
+        if n.parent_id is None:
+            if n.user_id == user_id:
+                under[n.id] = None
+                root_at[n.id] = n.created_at
+            continue
+        if n.parent_id in window:
+            under[n.id] = n.parent_id
+            continue
+        for row in chains.get(n.id, ()):
+            if filter_ai_usage and row.ai_usage not in AI_ALLOWED:
+                break
+            if row.id in window:
+                under[n.id] = row.id
+                break
+            if row.parent_id is None:
+                if row.user_id == user_id:
+                    under[n.id] = None
+                    root_at[n.id] = row.created_at
+                break
+
+    # Each row's block start; None when the row is left out.
+    start_of = {}
+    for n in rows:
+        path, seen, cur = [], set(), n.id
+        while (cur not in start_of and under.get(cur) is not None
+               and cur not in seen):
+            path.append(cur)
+            seen.add(cur)
+            cur = under[cur]
+        if cur in start_of:
+            start = start_of[cur]
+        elif cur in under and cur not in seen:
+            start = cur
+        else:
+            start = None   # left out, or a parent cycle
+        for row_id in path + [cur]:
+            start_of.setdefault(row_id, start)
+    return {row_id: (under[row_id], root_at[start])
+            for row_id, start in start_of.items() if start is not None}
+
+
+def _connecting_tombstones(rows, places):
+    """The deleted rows of a budgeted window with an alive row below
+    them: their placeholder holds that row's place in its thread (§5a),
+    so they cost TOMBSTONE_UNITS. A deleted row with nothing alive below
+    is not shown (format_node_tree's prune_tombstones) and costs
+    nothing (#525)."""
+    alive = {n.id for n in rows if n.deleted_at is None and n.id in places}
+    connecting = set()
+    for row_id in alive:
+        above = places[row_id][0]
+        while (above is not None and above not in alive
+               and above not in connecting):
+            connecting.add(above)
+            above = places[above][0]
+    return connecting
+
+
+def _window_blocks(kept, places):
+    """The blocks a budgeted window renders from the rows the resolver
+    kept (#525). A kept row starts a block when the row it renders under
+    is not kept. A block with no alive row is left out (§5a).
+
+    Returns (starts, continued_from, shown): the rows that start a
+    block, oldest first; {start id: the thread root's created_at} for
+    the blocks that continue an earlier thread; and the ids of the rows
+    the blocks show.
+    """
+    kept_by_id = {n.id: n for n in kept if n.id in places}
+    start_of = {}
+    for row_id in kept_by_id:
+        path, cur = [], row_id
+        while cur not in start_of:
+            above = places[cur][0]
+            if above is None or above not in kept_by_id:
+                break
+            path.append(cur)
+            cur = above
+        start = start_of.get(cur, cur)
+        for i in path + [cur]:
+            start_of.setdefault(i, start)
+
+    rows_of = {}
+    for row_id, start in start_of.items():
+        rows_of.setdefault(start, []).append(kept_by_id[row_id])
+    starts = sorted(
+        (kept_by_id[start] for start, rows in rows_of.items()
+         if any(r.deleted_at is None for r in rows)),
+        key=lambda n: (n.created_at, n.id),
+    )
+    continued_from = {s.id: places[s.id][1] for s in starts
+                      if s.parent_id is not None}
+    shown = {r.id for s in starts for r in rows_of[s.id]}
+    return starts, continued_from, shown
 
 
 # Per-query id-list size for the level-batched thread walk. Keeps each
@@ -824,22 +1377,29 @@ def _preselect_node_ids(user_id, budget, filter_ai_usage=False,
     nodes under them (see _foreign_thread_node_ids) — filtered to
     accessible nodes only.  Returns a list of node IDs ordered by
     created_at (direction controlled by chronological_order).  No nodes
-    are loaded or decrypted.
+    are loaded or decrypted. A deleted node costs the budget nothing
+    (_alive_units): the window shows it only where it holds an entry's
+    place, as one placeholder line (#525). The selection passes at most
+    MAX_WINDOW_DELETED_ROWS deleted nodes.
     """
     foreign_ids = sorted(_foreign_thread_node_ids(user_id))
     sort_order = (
         Node.created_at.asc() if chronological_order
         else Node.created_at.desc()
     )
-    cumul = func.sum(Node.token_count).over(
+    cumul = func.sum(_alive_units(Node)).over(
         order_by=sort_order
     ).label("cumul")
+    deleted_cumul = func.sum(
+        case((Node.deleted_at.is_(None), 0), else_=1)
+    ).over(order_by=sort_order).label("deleted_cumul")
 
-    # token_count and created_at ride along in the window subquery so the
-    # budget cut and the final ordering need no second join back to node
-    # (which the planner ran as another full scan).
+    # The row's units and created_at ride along in the window subquery so
+    # the budget cut and the final ordering need no second join back to
+    # node (which the planner ran as another full scan).
     inner = db.session.query(
-        Node.id, Node.token_count, Node.created_at, cumul,
+        Node.id, _alive_units(Node).label("units"), Node.created_at, cumul,
+        deleted_cumul,
     ).filter(
         or_(Node.user_id == user_id, Node.id.in_(foreign_ids)),
         # Includes soft-deleted user-owned nodes so they can render as
@@ -856,7 +1416,8 @@ def _preselect_node_ids(user_id, budget, filter_ai_usage=False,
     inner = inner.subquery()
 
     selected = db.session.query(inner.c.id, inner.c.created_at).filter(
-        inner.c.cumul - func.coalesce(inner.c.token_count, 0) < budget
+        inner.c.cumul - inner.c.units < budget,
+        inner.c.deleted_cumul <= MAX_WINDOW_DELETED_ROWS,
     ).order_by(
         inner.c.created_at.asc() if chronological_order
         else inner.c.created_at.desc()
@@ -898,7 +1459,7 @@ def get_raw_data_date_range(user_id, max_tokens=10000, created_before=None):
 
     row = db.session.query(
         func.min(Node.created_at), func.max(Node.created_at),
-        func.coalesce(func.sum(Node.token_count), 0),
+        func.coalesce(func.sum(_alive_units(Node)), 0),
     ).filter(Node.id.in_(selected_ids)).one()
     return row[0], row[1], row[2]
 
@@ -961,17 +1522,26 @@ def _format_preamble(top_started_at):
 def _build_user_export_incremental(
     user, max_tokens, filter_ai_usage, created_before, created_after,
     chronological_order, return_metadata, collapse_artifacts,
-    licence=None, omit_artifacts=False,
+    licence=None, omit_artifacts=False, whole_window=False, scope=None,
 ):
     """Incremental export path (created_after is set). See
     `build_user_export_content` docstring for behavior. The CTE row
     set defines `included_ids`; entry points are CTE rows whose
     parent is not in scope (preamble emitted if parent exists).
     """
-    cte_rows = _select_incremental_rows(
-        user.id, filter_ai_usage=filter_ai_usage,
-        created_before=created_before, created_after=created_after,
-    )
+    if scope is not None:
+        # The rows from the pass's one read (WindowScope, #612); the
+        # window's own rows are checked against the database below.
+        if (scope.user_id != user.id
+                or scope.filter_ai_usage != bool(filter_ai_usage)
+                or not max_tokens):
+            raise ValueError("the window scope is another export's")
+        cte_rows = scope.rows(created_after, created_before)
+    else:
+        cte_rows = _select_incremental_rows(
+            user.id, filter_ai_usage=filter_ai_usage,
+            created_before=created_before, created_after=created_after,
+        )
     cte_row_ids = {r.id for r in cte_rows}
 
     if not cte_rows:
@@ -1027,6 +1597,12 @@ def _build_user_export_incremental(
 
         if not selected_ids:
             return None
+        if scope is not None:
+            # Rows hidden, deleted or edited since the pass read its
+            # metadata, and replies under them that changed, are not
+            # rendered or decided from that read (ScopeChanged).
+            scope.check(selected_ids, created_after, created_before,
+                        replies_of=selected_ids)
 
         selected_nodes = (
             Node.query
@@ -1043,10 +1619,15 @@ def _build_user_export_incremental(
         # waited ~7 minutes here, then again at render time once the
         # 4k-entry DEK cache had cycled). One concurrent batch up front;
         # the render loop's windowed prefetch then finds them cached.
-        prefetch_deks(n.content for n in selected_nodes)
+        # Deleted rows are never decrypted (#525).
+        prefetch_deks(n.content for n in selected_nodes
+                      if n.deleted_at is None)
 
         resolver = ExportQuoteResolver(
-            user.id, budget,
+            user.id,
+            # A whole window's budget is the selection above: the
+            # resolver only resolves its quotes (#552).
+            None if whole_window else budget,
             filter_ai_usage=filter_ai_usage,
             chronological=chronological_order,
             # A collapsed export emits no preamble, so the budget counts
@@ -1054,6 +1635,11 @@ def _build_user_export_incremental(
             with_preamble=not collapse_artifacts,
         )
         for node in selected_nodes:
+            if node.deleted_at is not None:
+                # Shown as its placeholder line; its text is never read.
+                resolver.add_tombstone(node.id, node.created_at,
+                                       TOMBSTONE_UNITS)
+                continue
             if omit_artifacts:
                 _add_artifact_free_entry(resolver, node)
                 continue
@@ -1093,6 +1679,15 @@ def _build_user_export_incremental(
             resolver.get_resolution_result()
         )
         render_included_ids = included_ids
+        if whole_window:
+            # The window's own rows, each rendered once as an entry. A
+            # node the resolver embedded is also in included_ids; here
+            # it shows only inside its quote. Counted as part of the
+            # window, an embedded older parent hid the reply under it
+            # (the reply was not an entry point, and the parent is not
+            # one either), and an embedded newer row was an entry here
+            # and again in its own window.
+            render_included_ids = set(selected_ids)
 
     # Per-thread skip rule (§5a): exclude entry points whose entire
     # subtree (within the user's accessible/owned set) is soft-deleted.
@@ -1105,6 +1700,8 @@ def _build_user_export_incremental(
         if r.parent_id is not None:
             children_by_parent.setdefault(r.parent_id, []).append(r)
 
+    walked, expanded = set(), set()   # what the skip rule read (#612)
+
     def _subtree_has_alive(row):
         # Iterative: recursion depth would equal thread depth, which
         # overflows on very deep reply chains (same class of bug as the
@@ -1112,8 +1709,10 @@ def _build_user_export_incremental(
         pending = [row]
         while pending:
             r = pending.pop()
+            walked.add(r.id)
             if r.deleted_at is None:
                 return True
+            expanded.add(r.id)
             pending.extend(children_by_parent.get(r.id, []))
         return False
 
@@ -1132,6 +1731,16 @@ def _build_user_export_incremental(
         key=lambda r: r.created_at,
         reverse=not chronological_order,
     )
+    if scope is not None:
+        # The skip rule and the compact form below read rows outside the
+        # selection from the pass's read: the rows the skip rule walked
+        # and the replies under the deleted ones and under the tweets
+        # that may render compact must still be as read (#612).
+        checked = set(selected_ids)
+        tweets = {r.id for r in entry_rows
+                  if r.origin == "twitter" and r.parent_id is None}
+        scope.check(walked - checked, created_after, created_before,
+                    replies_of=(expanded | tweets) - checked)
 
     if not entry_rows:
         return None
@@ -1294,6 +1903,8 @@ def build_user_export_content(
     include_strategy="authored_threads",
     licence=None,
     omit_artifacts=False,
+    whole_window=False,
+    scope=None,
 ):
     """
     Core export logic: Build a human-readable text export of threads for a user.
@@ -1305,7 +1916,10 @@ def build_user_export_content(
         user does not need to author every node — replies from others on
         their threads are included if accessible. Does NOT include foreign
         threads the user replied to. Matches the user-facing `/export/threads`
-        data dump.
+        data dump. With `max_tokens`, a thread whose start is older than
+        the window shows its newest part, under a continuation line, and
+        a deleted node shows (and counts) as a placeholder line only
+        where it holds the place of an entry below it (#525).
       - **`engaged_threads`**: anchored on every node where the user is author
         or `human_owner_id`. From each anchor, climb up through accessible
         parents to the root or first inaccessible node, and climb down
@@ -1379,6 +1993,25 @@ def build_user_export_content(
                        Implies collapse_artifacts. For the jobs that read
                        the user's writing: profile builds, intentions and
                        poll drafts (#550).
+        whole_window: If True (with max_tokens), the text holds every row
+                     the budget window selects, each once as an entry, in
+                     order: the quote resolver embeds quotes but drops no
+                     selected row, and a node it embeds renders only
+                     inside its quote. The text can then run past the
+                     budget by its quote embeds and by a run of rows
+                     sharing the window's last timestamp, which the
+                     selection takes whole. For a caller that resumes
+                     after the window's `latest_node_created_at` (profile
+                     builds), where a row left out of the text is never
+                     read, or records it as covered (recent context's
+                     source_data_cutoff) (#552). Needs the incremental
+                     path (`created_after` or `engaged_threads`).
+        scope: Optional WindowScope of this user and filter_ai_usage (a
+               profile build's windows, #612): the rows in scope come
+               from its one read of the metadata instead of a read per
+               call, the same rows. Needs max_tokens and the
+               incremental path; the selected rows are checked against
+               the database first (ScopeChanged when one changed).
 
     Returns:
         str or dict: Formatted export content (or None if no threads found).
@@ -1401,7 +2034,17 @@ def build_user_export_content(
             collapse_artifacts=collapse_artifacts,
             licence=licence,
             omit_artifacts=omit_artifacts,
+            whole_window=whole_window,
+            scope=scope,
         )
+    if whole_window:
+        raise ValueError(
+            "whole_window needs the incremental export (created_after or "
+            "include_strategy='engaged_threads')")
+    if scope is not None:
+        raise ValueError(
+            "a window scope needs the incremental export (created_after "
+            "or include_strategy='engaged_threads')")
 
     # Legacy path: top-level threads owned by the user.
     query = Node.query.filter_by(
@@ -1433,6 +2076,13 @@ def build_user_export_content(
     selected_ids = None
     budget = None
 
+    # The budgeted window's thread blocks (#525): which blocks continue
+    # a thread that started before the window, the rows they show, and
+    # the deleted rows whose placeholder holds an entry's place.
+    continued_from = {}
+    shown_ids = None
+    connecting = set()
+
     if max_tokens:
         # Budgeted callers ({user_recent_raw} every reply, {user_export}
         # windows) must never materialise the whole corpus: pre-select the
@@ -1447,27 +2097,9 @@ def build_user_export_content(
             created_before=created_before, created_after=created_after,
             chronological_order=chronological_order,
         )
-        all_top_level_nodes = (
-            query.filter(Node.id.in_(selected_ids))
-            .order_by(Node.created_at.desc()).all()
-        ) if selected_ids else []
-    else:
-        all_top_level_nodes = query.order_by(Node.created_at.desc()).all()
+        if not selected_ids:
+            return None
 
-    # §5a per-thread skip: drop fully-deleted threads so the export
-    # doesn't show a chain of `[Node deleted by author]` placeholders
-    # for content the user explicitly removed. Mixed threads (some
-    # alive, some deleted) still show through with tombstones rendered
-    # by format_node_tree's tombstone shell.
-    all_top_level_nodes = [
-        n for n in all_top_level_nodes if _thread_has_alive_node(n.id)
-    ]
-
-    if not all_top_level_nodes:
-        return None
-
-    # If max_tokens is specified, use ExportQuoteResolver for smart quote handling
-    if max_tokens:
         # Load selected Node objects with context_artifacts eager-loaded
         selected_nodes = (
             Node.query
@@ -1475,9 +2107,10 @@ def build_user_export_content(
             .options(subqueryload(Node.context_artifacts))
             .all()
         )
-        # Sort in Python to match the desired order
+        # Sort in Python to match the desired order. The id settles a
+        # tie, so two renders of one window are the same bytes.
         selected_nodes.sort(
-            key=lambda n: n.created_at,
+            key=lambda n: (n.created_at, n.id),
             reverse=not chronological_order,
         )
         # The resolver loop below decrypts every selected node, one KMS
@@ -1485,7 +2118,15 @@ def build_user_export_content(
         # waited ~7 minutes here, then again at render time once the
         # 4k-entry DEK cache had cycled). One concurrent batch up front;
         # the render loop's windowed prefetch then finds them cached.
-        prefetch_deks(n.content for n in selected_nodes)
+        # Deleted rows are never decrypted (#525).
+        prefetch_deks(n.content for n in selected_nodes
+                      if n.deleted_at is None)
+
+        # Where each row renders, also in a thread whose start is older
+        # than the window, and which deleted rows hold an entry's place
+        # (#525).
+        places = _window_places(selected_nodes, user.id, filter_ai_usage)
+        connecting = _connecting_tombstones(selected_nodes, places)
 
         # Create resolver with adjusted token budget. A collapsed export
         # emits no preamble, so the budget counts only the entries it
@@ -1499,6 +2140,13 @@ def build_user_export_content(
 
         # Add only the pre-selected nodes to the resolver (decrypts here)
         for node in selected_nodes:
+            if node.deleted_at is not None:
+                # Its text is never read. Shown as its placeholder line
+                # only where it holds an entry's place.
+                resolver.add_tombstone(
+                    node.id, node.created_at,
+                    TOMBSTONE_UNITS if node.id in connecting else 0)
+                continue
             if omit_artifacts:
                 _add_artifact_free_entry(resolver, node)
                 continue
@@ -1540,13 +2188,21 @@ def build_user_export_content(
         # Get the results
         included_ids, embedded_quotes, ai_blocked_ids = resolver.get_resolution_result()
 
-        # Filter top-level nodes to only those with content in the export
-        top_level_nodes = [n for n in all_top_level_nodes if n.id in included_ids]
-        # Reverse to get chronological order (oldest to newest among selected)
-        top_level_nodes.reverse()
+        # Every row in the window renders, also in a thread whose start
+        # is older than the window (#525), oldest block first.
+        top_level_nodes, continued_from, shown_ids = _window_blocks(
+            [n for n in selected_nodes if n.id in included_ids], places)
     else:
-        # No limit - use all threads in chronological order
-        top_level_nodes = list(reversed(all_top_level_nodes))
+        # §5a per-thread skip: drop fully-deleted threads so the export
+        # doesn't show a chain of `[Node deleted by author]` placeholders
+        # for content the user explicitly removed. Mixed threads (some
+        # alive, some deleted) still show through with tombstones rendered
+        # by format_node_tree's tombstone shell. All threads, in
+        # chronological order.
+        top_level_nodes = [
+            n for n in reversed(query.order_by(Node.created_at.desc()).all())
+            if _thread_has_alive_node(n.id)
+        ]
 
     if not top_level_nodes:
         return None
@@ -1612,9 +2268,12 @@ def build_user_export_content(
                         licence.note_usage(profile.ai_usage,
                                            f"archive profile {profile.id}",
                                            row=profile)
+                    from backend.utils.profile_versions import (
+                        not_set_internal)
                     pver = UserProfile.query.filter(
                         UserProfile.user_id == profile.user_id,
                         UserProfile.created_at <= profile.created_at,
+                        not_set_internal(),
                     ).count()
                     profile_versions[profile.id] = {
                         "version": pver,
@@ -1649,7 +2308,8 @@ def build_user_export_content(
                             artifact.ai_usage,
                             f"archive {kind} artifact {artifact.id}",
                             row=artifact)
-                    art_ver = UserArtifact.query.filter(
+                    # Live versions only (#603), as get_user_artifacts.
+                    art_ver = UserArtifact.live().filter(
                         UserArtifact.user_id == artifact.user_id,
                         UserArtifact.kind == kind,
                         UserArtifact.created_at <= artifact.created_at,
@@ -1751,11 +2411,19 @@ def build_user_export_content(
             ai_blocked_ids=ai_blocked_ids,
             licence=licence,
             artifact_refs=not omit_artifacts,
+            # A budgeted window shows no placeholder without an entry
+            # below it (#525).
+            prune_tombstones=bool(max_tokens),
         )
-        if omit_artifacts and not thread_text:
-            continue   # only a system prompt, left out (#550)
+        if not thread_text:
+            # Only a system prompt (#550), or nothing alive (#525).
+            continue
         rendered_any = True
         thread_num += 1
+        if node.id in continued_from:
+            # The thread started before the window (#525).
+            export_lines.append(_format_preamble(continued_from[node.id]))
+            export_lines.append("")
         export_lines.append(f"# Thread {thread_num}")
         export_lines.append(f"**Started:** {node.created_at.strftime('%Y-%m-%d %H:%M:%S UTC')}")
         export_lines.append("")
@@ -1774,17 +2442,13 @@ def build_user_export_content(
     content = "\n".join(export_lines)
 
     if return_metadata:
-        # Date range from the pre-selected window (not inflated by
-        # quote dependencies the resolver may have pulled in).
-        if selected_ids:
-            row = db.session.query(
-                func.min(Node.created_at), func.max(Node.created_at),
-                func.count(Node.id),
-            ).filter(Node.id.in_(selected_ids)).one()
-            earliest_ts, latest_ts, node_count = row
-            node_ids = set(selected_ids)
-            meta_rows = db.session.query(Node.origin, Node.token_count).filter(
-                Node.id.in_(selected_ids)).all()
+        if shown_ids is not None:
+            # The rows the window shows (#525): not the pre-selection,
+            # whose oldest row the resolver can leave out, nor the quote
+            # dependencies the resolver may have pulled in, nor deleted
+            # rows it shows no placeholder for.
+            meta_nodes = [n for n in selected_nodes if n.id in shown_ids
+                          and (n.deleted_at is None or n.id in connecting)]
         else:
             # No max_tokens path — scan all included nodes
             meta_nodes = []
@@ -1793,15 +2457,15 @@ def build_user_export_content(
                     top_node, filter_ai_usage, created_before,
                     user_id=user.id,
                 ))
-            latest_ts = max(
-                (n.created_at for n in meta_nodes), default=None
-            )
-            earliest_ts = min(
-                (n.created_at for n in meta_nodes), default=None
-            )
-            node_count = len(meta_nodes)
-            node_ids = {n.id for n in meta_nodes}
-            meta_rows = meta_nodes
+        latest_ts = max(
+            (n.created_at for n in meta_nodes), default=None
+        )
+        earliest_ts = min(
+            (n.created_at for n in meta_nodes), default=None
+        )
+        node_count = len(meta_nodes)
+        node_ids = {n.id for n in meta_nodes}
+        meta_rows = meta_nodes
         return {
             "content": content,
             "token_count": approximate_token_count(content),
@@ -1852,9 +2516,11 @@ def export_threads():
 def _latest_profile_snapshot(user):
     """id / created_at of the newest saved version. The client detects a
     chunk landing (and the end of a batch chain) by the id changing;
-    the content is fetched from /dashboard when it needs it."""
-    latest = (UserProfile.query.filter_by(user_id=user.id)
-              .order_by(UserProfile.created_at.desc()).first())
+    the content is fetched from /dashboard when it needs it. A window
+    set's intermediates are not versions (#545): the id changes when the
+    set's final merge is saved."""
+    from backend.utils.profile_versions import current_profile_query
+    latest = current_profile_query(user.id).first()
     if not latest:
         return None
     return {
@@ -1866,6 +2532,8 @@ def _latest_profile_snapshot(user):
 
 _SYNC_STATUS_MAP = {
     'PENDING': 'pending',
+    # Waiting for the heavy-job slot (#613, utils/heavy_slot): queued again.
+    'RETRY': 'pending',
     'STARTED': 'processing',
     'PROGRESS': 'progress',
     'SUCCESS': 'completed',
@@ -1891,7 +2559,8 @@ def _pending_batch_item(user_id):
         for item in job.items or []:
             if (item.get("user_id") == user_id
                     and item.get("kind") in ("chunk", "integration",
-                                             "merge")):
+                                             "merge", "window", "group",
+                                             "final")):
                 return item
     return None
 
@@ -1914,6 +2583,20 @@ def _batch_progress(user):
     elif item.get("kind") == "merge":
         # A rebuild merging the user's own version in (#183).
         message, progress = "Merging your own version", 85
+    elif item.get("kind") == "window":
+        # A large build reading every window at once (#545); a small one
+        # reads one window, then rewrites it as the profile.
+        total = item.get("total")
+        message = (f"Generating profile: reading all {total} chunks"
+                   if total and total > 1 else "Generating profile")
+        progress = 20
+    elif item.get("kind") == "group":
+        message, progress = "Integrating profile versions", 80
+    elif item.get("kind") == "final":
+        message = ("Generating profile"
+                   if len(item.get("inputs") or ()) == 1
+                   else "Integrating profile versions")
+        progress = 95
     elif item.get("chunk_num") and item.get("chunk_total"):
         n, total = int(item["chunk_num"]), int(item["chunk_total"])
         message = f"Generating profile: Chunk {n} of ~{total}"

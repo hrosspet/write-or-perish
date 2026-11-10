@@ -66,12 +66,13 @@ function chapterTitleFromContent(content) {
  * @param {string} options.ttsTitle - Label for the audio player
  * @param {Function} options.onLLMComplete - Called with (nodeId, content) when LLM response is ready
  * @param {Function} [options.onLLMFailed] - Called with (nodeId) once when the turn's reply failed: no reply is coming for this turn
+ * @param {Function} [options.onCancelled] - Called when the user cancels a reply in progress, with the id of their message node (null if unknown): no reply is coming under it
  * @param {Function} [options.onEntrySaved] - Called once the server has confirmed it saved the user's recording as an entry, whether or not a reply follows (the reply can fail or be skipped)
  * @param {number|null} options.initialLlmNodeId - Resume in processing phase, polling this LLM node
  * @param {number|null} options.initialParentId - Resume in ready phase with thread parent pre-set
  * @param {string|null} [options.entry] - 'glean' when the session was opened from the Glean card (#435): the thread the first recording starts is marked as a Glean thread
  */
-export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete, onLLMFailed = null, initialLlmNodeId = null, initialParentId = null, model = null, aiUsage = 'none', onAiUsageRefused = null, onEntrySaved = null, entry = null }) {
+export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete, onLLMFailed = null, initialLlmNodeId = null, initialParentId = null, model = null, aiUsage = 'none', onAiUsageRefused = null, onEntrySaved = null, onCancelled = null, entry = null }) {
   const audio = useAudio();
   const isOnline = useOnlineStatus();
   const [phase, setPhase] = useState(initialLlmNodeId ? 'processing' : 'ready');
@@ -242,6 +243,10 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   useEffect(() => {
     onEntrySavedRef.current = onEntrySaved;
   }, [onEntrySaved]);
+  const onCancelledRef = useRef(onCancelled);
+  useEffect(() => {
+    onCancelledRef.current = onCancelled;
+  }, [onCancelled]);
 
   // A voice turn that fails plays the error sound, so a user who isn't
   // looking at the screen (driving) knows the reply stopped (Peter,
@@ -351,6 +356,9 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     },
     onComplete: async (data) => {
       const turn = turnRef.current;
+      // This turn's message node is not known yet: a cancel must not
+      // anchor on the previous turn's.
+      lastUserNodeIdRef.current = null;
       setIsStopping(false);
       setPhase('processing');
       // Clear any stale audio from previous pages (e.g. SpeakerIcon in Log)
@@ -368,7 +376,11 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       // failed response. Only the reply was skipped: the server saved the
       // recording as an entry before it decided that (_skip_voice_reply).
       if (data.warning) {
-        if (onEntrySavedRef.current) onEntrySavedRef.current();
+        // #513: a recording with no transcribed text is saved as a failure
+        // note only (the server's "*Note: ..." line); Glean has nothing to read.
+        if (onEntrySavedRef.current) {
+          onEntrySavedRef.current({ noText: finalTranscript.trimStart().startsWith('*Note:') });
+        }
         addToast(data.warning, 8000);
         setPhase('ready');
         return;
@@ -379,6 +391,8 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       if (data.llmNodeId) {
         console.log('[VoiceSession] Server-side LLM chain: llmNodeId=', data.llmNodeId);
         // The user's node was created before the reply's placeholder.
+        // Its id is what a cancel anchors on (the reply may never come).
+        lastUserNodeIdRef.current = data.userNodeId || null;
         if (onEntrySavedRef.current) onEntrySavedRef.current();
         voiceTiming.setTurnNode(data.llmNodeId);
         voiceTiming.mark('llm_node_known');
@@ -581,6 +595,21 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   }, [ttsSSE, audio]);
   advanceChainRef.current = advanceChain;
 
+  // Nothing more will join this turn's audio: the reply's text or audio
+  // failed (the iPhone app's finishGenerating). Audio already queued plays
+  // to its end instead of waiting for chunks, and a chain ends where it
+  // is. Left on after a failed continuation (#507), the queue waited once
+  // the interim's audio ran out, the page went back to "Thinking...", the
+  // recovery watchdog asked for the failed audio again, and the next
+  // recording's audio joined this turn's queue.
+  const finishGenerating = useCallback(() => {
+    pendingContinuationRef.current = null;
+    continuingChainRef.current = false;
+    awaitingNextNodeRef.current = false;
+    setTtsGenerating(false);
+    latestAudioRef.current.setGeneratingTTS(false);
+  }, []);
+
   // Deliver a node's fully-generated TTS from its final URL (no SSE).
   // Shared by the POST /tts 200 path and the #242 REST recovery: loads or
   // appends queue-style and advances the chain exactly like the chunked
@@ -759,9 +788,14 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
           ttsTriggeredForNodeRef.current = null;
           return;
         }
+        // A refusal that arrives after the user continued, cancelled or
+        // left belongs to a turn that is over: it must not end the new
+        // turn's recording or chain (the app's replyFailed guards the
+        // same way).
+        if (turn !== turnRef.current) return;
         soundReplyFailure(llmNodeId, turn);
         setHasError(true);
-        setTtsGenerating(false);
+        finishGenerating();
         setPhase('ready');
       });
     } else if (llmStatus === 'failed' && llmData && llmData.node_id === llmNodeId) {
@@ -782,8 +816,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       soundReplyFailure(llmNodeId, turnRef.current);
       // A TTS stream attached while the reply was written (#367) won't
       // complete for a failed node: close it.
-      setTtsGenerating(false);
-      audio.setGeneratingTTS(false);
+      finishGenerating();
       setHasError(true);
       setPhase('ready');
     }
@@ -792,7 +825,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     // (llm-status polling already stopped on 'completed', so no other dep
     // changes).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [llmStatus, llmData, llmNodeId, audio, ttsTitle, stopSilentAudio, advanceChain, deliverFullTts, ttsRetriggerNonce, soundReplyFailure]);
+  }, [llmStatus, llmData, llmNodeId, audio, ttsTitle, stopSilentAudio, advanceChain, deliverFullTts, ttsRetriggerNonce, soundReplyFailure, finishGenerating]);
 
   // Safety net: TTS is being generated (POST /tts returned 202) but no
   // chunk arrived within 60s — SSE is probably dead; transition to
@@ -830,10 +863,10 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   //    safe).
   // Latest values for the reconcile closure. The effect below must depend
   // only on the primitives that define "undelivered turn" (phase,
-  // ttsGenerating, llmNodeId; soundReplyFailure never changes) — llm-status
-  // polling re-renders every 1.5s and ttsSSE/deliverFullTts get fresh
-  // identities each render, which as deps would reset the interval before
-  // it ever fired.
+  // ttsGenerating, llmNodeId; soundReplyFailure and finishGenerating never
+  // change) — llm-status polling re-renders every 1.5s and
+  // ttsSSE/deliverFullTts get fresh identities each render, which as deps
+  // would reset the interval before it ever fired.
   const llmStatusRef = useRef(llmStatus);
   llmStatusRef.current = llmStatus;
   const deliverFullTtsRef = useRef(deliverFullTts);
@@ -903,7 +936,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
           } else if (res.data.status === 'failed') {
             soundReplyFailure(llmNodeId, turn);
             setHasError(true);
-            setTtsGenerating(false);
+            finishGenerating();
             setPhase('ready');
           }
         } catch (_) {
@@ -920,7 +953,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       clearTimeout(catchUpTimer);
       stopListening();
     };
-  }, [phase, ttsGenerating, llmNodeId, soundReplyFailure]);
+  }, [phase, ttsGenerating, llmNodeId, soundReplyFailure, finishGenerating]);
 
   // Clear error indicator after a few seconds
   useEffect(() => {
@@ -1011,6 +1044,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     // The cancelled LLM response completes async as a dead-end sibling.
     if (lastUserNodeIdRef.current) {
       threadParentIdRef.current = lastUserNodeIdRef.current;
+      if (onCancelledRef.current) onCancelledRef.current(lastUserNodeIdRef.current);
     }
     turnRef.current += 1;
     voiceTiming.endTurn();

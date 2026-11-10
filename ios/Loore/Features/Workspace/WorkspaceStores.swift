@@ -9,20 +9,34 @@ import os
 @Observable
 final class ArtifactsStore {
     private(set) var artifacts: [ArtifactDoc] = []
+    /// The user's deleted kinds that were not made again (#603).
+    private(set) var deletedKinds: [String] = []
     /// True once a fetch succeeded (the Artifacts page waits for it).
     private(set) var loaded = false
     private var inFlight: Task<Void, Never>?
+    /// Bumped by every delete, so a list fetched before it is not applied.
+    private var deletes = 0
+
+    static let deleteFailedMessage = "Could not delete the artifact."
 
     /// `GET /api/artifacts/`. Errors keep the cached list (Profile and Todo still show).
     func refresh(api: APIClient) async {
         if let inFlight { await inFlight.value; return }
         let task = Task {
-            do {
-                let list: ArtifactList = try await api.get(APIPath.artifacts)
-                artifacts = list.artifacts
-                loaded = true
-            } catch {
-                Logger(subsystem: "org.loore.app", category: "artifacts").info("artifact list load failed")
+            // A delete that lands while the list is on its way may still be in
+            // it: fetch once more rather than bring the bubble back.
+            for _ in 0..<2 {
+                let deletesBefore = deletes
+                do {
+                    let list: ArtifactList = try await api.get(APIPath.artifacts)
+                    if deletes != deletesBefore { continue }
+                    artifacts = list.artifacts
+                    deletedKinds = list.deletedKinds
+                    loaded = true
+                } catch {
+                    Logger(subsystem: "org.loore.app", category: "artifacts").info("artifact list load failed")
+                }
+                return
             }
         }
         inFlight = task
@@ -34,8 +48,43 @@ final class ArtifactsStore {
         artifacts.first { $0.kind == kind }
     }
 
+    /// The user deleted `kind` and has not made it again: a link to it says so.
+    func isDeleted(_ kind: String) -> Bool {
+        deletedKinds.contains(kind) && artifact(kind) == nil
+    }
+
+    enum DeleteResult: Equatable {
+        case deleted
+        /// Nothing was deleted; the text is for a toast.
+        case failed(String)
+    }
+
+    /// `DELETE /api/artifacts/<kind>`. A 404 saying the kind was already deleted
+    /// (from another device) counts as done. The list is left as it is: the
+    /// caller removes the bubble with `markDeleted`, in the same update as the
+    /// next selection.
+    func delete(_ kind: String, api: APIClient) async -> DeleteResult {
+        do {
+            let _: EmptyResponse = try await api.delete(APIPath.artifact(kind))
+            return .deleted
+        } catch let error as APIError {
+            if error.isNotFound, error.body?.extra["deleted"]?.boolValue == true { return .deleted }
+            return .failed(error.userMessage(fallback: Self.deleteFailedMessage))
+        } catch {
+            return .failed(Self.deleteFailedMessage)
+        }
+    }
+
+    /// Drops `kind` from the list and remembers it as deleted.
+    func markDeleted(_ kind: String) {
+        deletes += 1
+        artifacts.removeAll { $0.kind == kind }
+        if !deletedKinds.contains(kind) { deletedKinds.append(kind) }
+    }
+
     func reset() {
         artifacts = []
+        deletedKinds = []
         loaded = false
     }
 }

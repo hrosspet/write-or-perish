@@ -1,7 +1,6 @@
 """
 Celery task for asynchronous LLM completion.
 """
-import difflib
 import json
 import sys
 import uuid
@@ -51,23 +50,33 @@ from backend.utils.api_keys import (
     PayloadLicence,
 )
 from backend.utils.cost import llm_cost_log_fields
+from backend.utils.error_privacy import UserMessageError
 from backend.utils.cache_diagnostics import (
     ConversationCacheDiagnostics, system_prefix_hash,
 )
-from backend.utils.llm_batch import BatchItemFailed, BatchItemCancelled
+from backend.utils.llm_batch import (
+    BatchItemFailed, BatchItemCancelled, BatchItemPolicyBlocked,
+)
 from backend.utils.ca_feed import (
-    CA_CHAT_TURN_NOTE, CA_READ_AGAIN_TURN, CA_TWEETS_CHAT_STUB,
+    CA_CHAT_TURN_NOTE, CA_READ_AGAIN_TURN, CA_READ_AGAIN_TURN_KEPT,
+    CA_TWEETS_CHAT_STUB,
     FEED_AI_USAGE, READ_FURTHER_MARKER,
     FeedReplyError, count_dropped_picks, read_reply_ids, record_feed_render,
     ca_turn as _ca_turn,
     ArchiveNotReady, refs_from_render, render_read_reply_for_model,
-    request_snapshot_refresh, seen_tweet_ids,
+    request_snapshot_refresh, seen_tweet_ids, list_to_keep, read_numbers,
+    read_since_note,
 )
 from backend.utils.tool_meta import (
-    get_tool_meta_entry, update_tool_meta, parse_github_issue,
+    get_tool_meta_entry, update_tool_meta,
 )
+from backend.utils.issue_proposals import file_issues_for_tool
+from backend.utils.tool_meta import strip_share_fences
 from backend.utils.client_platform import CLIENT_MARKER
 from backend.utils.text_edits import apply_text_edits
+from backend.utils.artifact_versions import (
+    artifact_diff, parse_version, stored_version, version_number,
+)
 from backend.utils.privacy import AI_ALLOWED
 from backend.utils.proposals import is_own_live_proposal
 from backend.utils.placeholders import (
@@ -147,11 +156,22 @@ def _render_variant(user_id):
     would keep serving the archive-search guidance for the TTL, telling
     the model to use a tool that left the list on the same restart.
     The `u` part is the account's AI-usage setting, which licenses the
-    artifacts index (#326): it changes the verdict, not the text."""
+    artifacts index (#326): it changes the verdict, not the text.
+    The `d` part is when the user last deleted an artifact (#603): the
+    artifacts index of a render stored before a delete still lists the
+    artifact, so a delete takes a fresh key and the next turn renders
+    the index without it. Absent until the user's first delete, so the
+    keys of everyone else stay as they were. Both render paths (the
+    generation loop and the pre-warm's render_system_message) compute
+    the variant before they read the artifacts, so a render that still
+    saw the artifact is never stored under a key from after the delete."""
+    from backend.utils.artifact_deletion import deletion_stamp
+    deleted = deletion_stamp(user_id)
     return (f"a{int(archive_search_enabled(flask_app.config))}"
             f"u{_account_ai_usage(user_id)}"
             f"s{int(_share_enabled_for_user(user_id))}"
-            f"e{int(_external_references_for_user(user_id))}")
+            f"e{int(_external_references_for_user(user_id))}"
+            + (f"d{deleted}" if deleted else ""))
 
 
 def _system_render_variant(system_node, user_id):
@@ -235,11 +255,18 @@ def _own_pin(row, user_id):
 # of these tools, the retrieved content is injected back into the message
 # stream and the model is re-called so it answers WITH the content in the same
 # turn — instead of the cross-turn injection done by _scan_proposal_statuses.
-# read_artifact pulls a UserArtifact by kind; read_todo pulls the user's todo
-# list (its own model, no longer shown inline — #158 Slice 3); semantic_search
-# pulls relevant snippets from the user's own archive by meaning (#155).
+# read_artifact pulls a UserArtifact by kind, and the user's todo list (its
+# own model, no longer shown inline — #158 Slice 3) as kind 'todo' (#218);
+# semantic_search pulls relevant snippets from the user's own archive by
+# meaning (#155). read_todo was the todo's own tool before #218: no longer
+# offered, but older threads' prompts still name it, so a call to it is
+# served as read_artifact on 'todo', and the results it left in
+# tool_calls_meta still resolve.
 RETRIEVAL_TOOLS = {"read_artifact", "read_todo", "semantic_search",
                    "read_full"}
+# The read_artifact kind that reads the UserTodo row instead of a
+# UserArtifact (#218).
+TODO_KIND = "todo"
 # Max number of interim tool round-trips before the model must answer.
 # The within-turn loop continues after EVERY tool call (retrieval AND action
 # tools like update_artifact) — models follow the standard tool-use contract
@@ -266,6 +293,8 @@ class EmptyTruncatedReplyError(RuntimeError):
 
     def __init__(self):
         super().__init__(self.USER_MESSAGE)
+
+    user_text = USER_MESSAGE
 
 
 # Retry schedule for the loop's CONTINUATION calls: sleep lengths between
@@ -306,6 +335,17 @@ def _provider_failure(exc):
     return isinstance(exc, tuple(classes))
 
 
+def reply_error_text(exc):
+    """What the reply's owner reads for a failed reply (llm_task_error):
+    the exception's own text only where it is written for the user
+    (error_privacy.user_written_text), otherwise a fixed message. The
+    exception is logged and sent to Sentry, never stored."""
+    from backend.utils.error_privacy import (
+        REPLY_FAILED_TEXT, user_written_text,
+    )
+    return user_written_text(exc) or REPLY_FAILED_TEXT
+
+
 def _account_failure(exc):
     """Whether *exc* is a call refused for an account reason (#369):
     retrying won't help until someone fixes the account, and the error
@@ -315,6 +355,17 @@ def _account_failure(exc):
                   "ProviderAccountError", None)
     return (isinstance(cls, type) and issubclass(cls, BaseException)
             and isinstance(exc, cls))
+
+
+def _policy_block(exc):
+    """The provider's code when *exc* is a request its content-policy
+    filter blocked (llm_providers.policy_block_code), else None. Such a
+    request is never sent again automatically (Peter, 2026-11-04). Looked
+    up at call time, like _provider_failure."""
+    fn = getattr(sys.modules.get("backend.llm_providers"),
+                 "policy_block_code", None)
+    code = fn(exc) if callable(fn) else None
+    return code if isinstance(code, str) else None
 
 
 def _raise_for_account_failure(exc, provider, model=None, model_call=True,
@@ -501,9 +552,13 @@ VOICE_TOOLS = [
     {
         "name": "apply_github_issue",
         "description": (
-            "Create the previously proposed GitHub issue. Call this "
+            "Create the previously proposed GitHub issue(s). Call this "
             "ONLY when the user explicitly confirms they want to create "
             "the issue (e.g. 'yes create it', 'go ahead', 'file that'). "
+            "When the reply proposed several issues, this creates only "
+            "the last one unless you say which: pass issue_numbers for "
+            "some (e.g. 'all except the marketing one': list the "
+            "others), or all=true for every one not created yet. "
             "Do not call proactively. Do not call if the issue was "
             "already created (check the context notes for apply status). "
             "Always produce a text response — the user needs to hear "
@@ -511,7 +566,24 @@ VOICE_TOOLS = [
         ),
         "input_schema": {
             "type": "object",
-            "properties": {},
+            "properties": {
+                "all": {
+                    "type": "boolean",
+                    "description": (
+                        "Optional. true creates every proposed issue "
+                        "that is not created yet."
+                    ),
+                },
+                "issue_numbers": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": (
+                        "Optional. The 1-based positions of the proposed "
+                        "issues to create, in the order the reply lists "
+                        "them."
+                    ),
+                },
+            },
             "required": [],
         },
     },
@@ -533,6 +605,10 @@ VOICE_TOOLS = [
             "faster) for small changes, or `updated_content` (the FULL "
             "new text) when creating or rewriting heavily. Either way a "
             "new version is stored and old versions stay in history. "
+            "Every change to an existing artifact names the version it "
+            "is based on (`base_version`); if the artifact has changed "
+            "since, nothing is saved and the result gives you its "
+            "current text and version to retry against. "
             "Call proactively for memory-worthy facts; no confirmation "
             "is needed. Always produce a text response alongside the "
             "call."
@@ -546,6 +622,16 @@ VOICE_TOOLS = [
                         "Artifact slug: 'memory', 'scratchpad', or a "
                         "short lowercase dash-separated name for a "
                         "custom artifact."
+                    ),
+                },
+                "base_version": {
+                    "type": "integer",
+                    "description": (
+                        "The version your change is based on: the vN "
+                        "shown on the inline copy, in a read_artifact "
+                        "result, or in the result of your last write to "
+                        "it. Required when the artifact exists; leave it "
+                        "out when creating a new one."
                     ),
                 },
                 "updated_content": {
@@ -610,12 +696,14 @@ VOICE_TOOLS = [
         "name": "read_artifact",
         "description": (
             "Request the full content of one of the user's artifacts "
-            "listed in the artifacts index. The content is injected back "
-            "into your context within the same turn and you answer with "
-            "it. Use this only for artifacts in the index — anything "
-            "already shown inline in your context is always present and "
-            "should not be read. Tell the user you're pulling it up. Always "
-            "produce a text response alongside the call."
+            "listed in the artifacts index, the todo list (as 'todo') "
+            "included. The content, with an artifact's version, is "
+            "injected back into your context within the same turn and you "
+            "answer with it. Use this for artifacts in the index: the "
+            "inline ones are in your context already, as they were at the "
+            "start of the conversation, and your own writes since appear "
+            "with their changes. Tell the user you're pulling it up. "
+            "Always produce a text response alongside the call."
         ),
         "input_schema": {
             "type": "object",
@@ -626,25 +714,6 @@ VOICE_TOOLS = [
                 },
             },
             "required": ["kind"],
-        },
-    },
-    {
-        "name": "read_todo",
-        "description": (
-            "Pull the user's current todo list into context. The todo "
-            "list is listed in the artifacts index (as 'todo') rather than "
-            "shown inline, so read it on demand whenever the conversation "
-            "turns to their tasks, plans, or priorities — and before "
-            "proposing todo changes, so your proposal builds on what's "
-            "actually there. Like read_artifact, the content is injected "
-            "back into your context within the same turn and you answer "
-            "with it, so tell the user you're pulling it up. Always produce "
-            "a text response alongside the call."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": [],
         },
     },
     {
@@ -815,6 +884,8 @@ ALWAYS_INLINE_KINDS = UserArtifact.INLINE_KINDS
 # silently diverges from the real UserTodo. Each value is a message pointing
 # the model at the correct path. (ai_preferences is NOT here — Slice 5 folded
 # it into the UserArtifact model, so it's a normal writable artifact now.)
+# The keys are UserArtifact.RESERVED_KINDS, which the artifact routes refuse
+# too (#218).
 RESERVED_ARTIFACT_KINDS = {
     "todo": ("Todo changes go through proposals — put them under the "
              "### Completed / ### New Tasks / ### Priority Order headings in "
@@ -839,10 +910,11 @@ def _todo_index_line(user_id, pinned_node=None):
 
     Todo is its own model (not a UserArtifact) and since #158 Slice 3 is no
     longer shown inline — it appears in the index and is pulled on demand via
-    read_todo, which pins the version it read to the fetching node. System
-    nodes therefore no longer pin a todo at session start; only legacy nodes
-    (or custom prompts embedding {user_todo}) carry one, and it's honored
-    when present, falling back to latest otherwise.
+    read_artifact on kind 'todo' (#218), which pins the version it read to
+    the fetching node. System nodes therefore no longer pin a todo at
+    session start; only legacy nodes (or custom prompts embedding
+    {user_todo}) carry one, and it's honored when present, falling back to
+    latest otherwise.
     A todo the user opted out of AI access is omitted entirely; an
     absent or empty todo is still listed (as ``(empty)``) so the model knows
     the surface exists. No open/priority counts (noise).
@@ -860,19 +932,32 @@ def _todo_index_line(user_id, pinned_node=None):
         suffix = f"(~{approximate_token_count(content)} tokens)"
     else:
         suffix = "(empty)"
-    return (f"- todo — the user's running task list; pull it with "
-            f"read_todo {suffix}")
+    return f"- {TODO_KIND} — the user's running task list {suffix}"
+
+
+def inline_artifact_text(row):
+    """An inline artifact's text in the prompt (memory, scratchpad,
+    intentions, AI preferences): a header naming its version, numbered as
+    the artifacts page numbers it, then the text (#604). The copy is the
+    version pinned when the conversation started, so a write to it names
+    that version as its base_version. Both render paths
+    (render_system_message and the generation loop) take it from the
+    resolvers below, so the cached prefix stays byte-identical."""
+    return (f"[{row.kind} · v{version_number(row)}, as of the start of "
+            f"this conversation]\n{row.get_content() or ''}")
 
 
 def get_user_artifacts_context(user_id, pinned_node=None, usage=None,
                                rendered=None):
     """Resolve user artifacts for the agentic prompt (#158).
 
-    Returns (memory_content, scratchpad_content, index_text). Pinned to the
-    per-session snapshot recorded on *pinned_node* (#191 semantics), falling
-    back to latest for legacy nodes. ai_usage is re-checked on resolved rows.
+    Returns (memory_content, scratchpad_content, intentions_content,
+    index_text). Pinned to the per-session snapshot recorded on
+    *pinned_node* (#191 semantics), falling back to latest for legacy
+    nodes. ai_usage is re-checked on resolved rows. Each inline text
+    starts with its version header (inline_artifact_text, #604).
     The todo list (its own model) is listed in the index too, pulled via
-    read_todo (#158 Slice 3).
+    read_artifact like the rest (#158 Slice 3, #218).
 
     Each row that reaches the text reports to *usage* (a ContextUsage,
     #326) under its placeholder: memory, scratchpad and intentions by
@@ -898,9 +983,11 @@ def get_user_artifacts_context(user_id, pinned_node=None, usage=None,
     memory = artifacts.get("memory")
     scratchpad = artifacts.get("scratchpad")
     intentions = artifacts.get("intentions")
-    memory_content = memory.get_content() if memory else ""
-    scratchpad_content = scratchpad.get_content() if scratchpad else ""
-    intentions_content = intentions.get_content() if intentions else ""
+    memory_content = inline_artifact_text(memory) if memory else ""
+    scratchpad_content = (
+        inline_artifact_text(scratchpad) if scratchpad else "")
+    intentions_content = (
+        inline_artifact_text(intentions) if intentions else "")
 
     def _reports(placeholder):
         return usage is not None and (rendered is None
@@ -958,7 +1045,8 @@ def get_user_ai_preferences_content(user_id, pinned_node=None, usage=None):
     latest. ai_usage is re-checked on the resolved row so a mid-session
     opt-out is honored. (The pre-fold UserAIPreferences fallback was removed
     once the backfill migrates rows + node pins; the table is dropped in
-    #219.) The row reports to *usage* (#326).
+    #219.) The row reports to *usage* (#326). The text starts with its
+    version header (inline_artifact_text, #604).
     """
     art = None
     if pinned_node is not None:
@@ -972,7 +1060,7 @@ def get_user_ai_preferences_content(user_id, pinned_node=None, usage=None):
         if usage is not None:
             usage.note_row(USER_AI_PREFERENCES_PLACEHOLDER, art,
                            "the ai_preferences artifact")
-        return art.get_content()
+        return inline_artifact_text(art)
     return None
 
 
@@ -1133,9 +1221,7 @@ def _strip_share_fences(text):
     """Remove fenced :::share blocks — their bodies may legitimately
     contain ### headings, which must never trigger the other proposal
     detectors (todo/issue/feedback)."""
-    return re.sub(
-        r'^:::share(?:[ \t]+\w+)?[ \t]*\r?\n.*?(?:^:::[ \t]*$\n?|\Z)',
-        '', text, flags=re.MULTILINE | re.DOTALL | re.IGNORECASE)
+    return strip_share_fences(text)
 
 
 def _detect_todo_proposal(text):
@@ -1203,9 +1289,18 @@ def _note_artifact_content(licence, artifact):
     licence.note_usage(artifact.ai_usage, f"the {artifact.kind} artifact")
 
 
+def _reads_todo(tr):
+    """Whether a tool result read the user's todo list: read_artifact on
+    kind 'todo' (#218), or a read_todo result (the tool before #218, still
+    in older threads' tool_calls_meta)."""
+    name = tr.get("name")
+    return name == "read_todo" or (
+        name == "read_artifact" and tr.get("kind") == TODO_KIND)
+
+
 def _retrieval_injection_text(tr, user_id, with_labels=False, licence=None):
     """Build the context-injection string for a successful retrieval tool
-    result (read_artifact / read_todo / semantic_search), re-resolving the
+    result (read_artifact / semantic_search / read_full), re-resolving the
     content fresh from the source row — content is never stored in
     tool_calls_meta. Re-checks ai_usage so a mid-session opt-out is honored.
     Returns None if nothing is (still) available.
@@ -1229,16 +1324,7 @@ def _retrieval_injection_text(tr, user_id, with_labels=False, licence=None):
     falls back to id-based quoting, since the label map died with its turn.
     """
     name = tr.get("name")
-    if name == "read_artifact":
-        artifact = UserArtifact.query.get(tr.get("artifact_id"))
-        if (artifact is None or artifact.user_id != user_id
-                or artifact.ai_usage not in AI_ALLOWED):
-            return None
-        if licence is not None:
-            _note_artifact_content(licence, artifact)
-        return (f"[Contents of artifact '{tr.get('kind', '?')}' you "
-                f"requested:\n{artifact.get_content()}]")
-    if name == "read_todo":
+    if _reads_todo(tr):
         todo = UserTodo.query.get(tr.get("todo_id"))
         if (todo is None or todo.user_id != user_id
                 or todo.ai_usage not in AI_ALLOWED):
@@ -1246,6 +1332,18 @@ def _retrieval_injection_text(tr, user_id, with_labels=False, licence=None):
         if licence is not None:
             licence.note_usage(todo.ai_usage, "the todo list")
         return f"[Your current todo list:\n{todo.get_content()}]"
+    if name == "read_artifact":
+        # Deleted since the call (#603): "no longer available"
+        # (stored_version reads live versions only).
+        artifact = stored_version(tr.get("artifact_id"), user_id)
+        if artifact is None or artifact.ai_usage not in AI_ALLOWED:
+            return None
+        if licence is not None:
+            _note_artifact_content(licence, artifact)
+        # The version, so a write after the read names it (#604).
+        return (f"[Contents of artifact '{tr.get('kind', '?')}' · "
+                f"v{version_number(artifact)}, which you requested:\n"
+                f"{artifact.get_content()}]")
     if name == "read_full":
         # Re-resolve via the quote machinery (permission + ai_usage checks
         # built in; depth 1 — nested {quote:ID} stay as placeholders), as
@@ -1372,10 +1470,10 @@ def _retrieval_pin(tr):
     """(artifact_type, artifact_id) to pin on the interim node for a
     successful retrieval result, so the export references the exact version
     read. Returns (None, None) for unrecognized/unpinnable results."""
+    if _reads_todo(tr):
+        return ("todo", tr.get("todo_id"))
     if tr.get("name") == "read_artifact":
         return ("user_artifact", tr.get("artifact_id"))
-    if tr.get("name") == "read_todo":
-        return ("todo", tr.get("todo_id"))
     return (None, None)
 
 
@@ -1431,76 +1529,276 @@ def _interim_fallback_text(tool_calls):
     return "(" + ", ".join(parts) + "…)"
 
 
-def _artifact_update_echo(tr, licence=None):
-    """Within-turn echo of what an update_artifact call actually WROTE,
-    injected into the continuation call: a unified diff against the
-    previous version (full text for creations). Without it the model has
-    no access to its own write — the tool arguments are dropped from the
-    injected assistant turn and the inline copy in the system context
-    predates the update — so it couldn't build on what it just wrote
-    (e.g. actually ask a question it noted in the artifact).
+def _artifact_write_report(tr, user_id, licence=None, numbers=None,
+                           known=None):
+    """The system's answer to one update_artifact call (#604): what the
+    next round of the same turn sees, and, replayed as the call's tool
+    result, what every later turn of the thread sees. Without it the
+    model has no access to its own write — its call's arguments are not
+    kept and the inline copy predates the write — so it could not build
+    on what it wrote, and a later edit quoting it would not match.
 
-    Content is re-resolved from the encrypted rows via the stored ids and
-    NEVER persisted to plaintext tool_calls_meta. Returns None for
-    non-update or failed entries and for no-op writes. The rows the echo
-    shows — the new version, and the previous one a diff takes its
-    context lines from — report to *licence* (#326). A previous version
-    AI may not read is never diffed against: the echo is the new text."""
-    if tr.get("name") != "update_artifact" or tr.get("status") != "success":
-        return None
-    artifact = UserArtifact.query.get(tr.get("artifact_id"))
-    if artifact is None:
-        return None
-    new_text = artifact.get_content() or ""
-    kind = tr.get("kind")
+    A saved write names its version as the artifacts page numbers it
+    ("'memory' updated to v13 (from v12)") and shows what it wrote: a
+    unified diff against the previous version, or the full new text for
+    a creation, for a rewrite whose diff is past
+    ARTIFACT_ECHO_DIFF_THRESHOLD_CHARS, and when the previous version
+    may not reach a model. A failed write gives its error.
+
+    *known* (the history replay only) is the set of version ids whose
+    full text the prompt already shows before this answer: the inline
+    copies (_pinned_inline_versions) and the versions earlier answers
+    showed. A diff is shown only against one of them; otherwise the
+    answer is the full new text, as a diff against a version the model
+    never saw (changed in another thread, by the user's hand, read in a
+    turn whose read is not replayed, or written in a reply the user
+    deleted) would leave that change out of every later turn while the
+    version check accepts writes based on the new number. For the same
+    reason a refusal that showed the current text in its turn replays it
+    too, unless the prompt shows that version already, and a write
+    recorded before writes kept their previous version names no number.
+    Each answer adds the version it shows to *known*; in the turn's own
+    next round (known=None) everything the model was shown is still in
+    the prompt.
+
+    Built from the stored version ids (content never sits in plaintext
+    tool_calls_meta) and the chain before it, so one write reads the
+    same bytes on every later turn and the cached prompt prefix keeps
+    growing. A version the user has since kept away from AI (AI usage
+    None), or that no longer exists, shows no text. The rows whose text
+    the answer shows report to *licence* (#326). *numbers* caches
+    version numbers within one prompt (artifact_versions.version_number).
+    """
+    def _note(row):
+        if licence is not None:
+            _note_artifact_content(licence, row)
+
+    def _shown(row):
+        if known is not None:
+            known.add(row.id)
+
+    if tr.get("status") != "success":
+        text = f"update_artifact failed — {tr.get('error', 'unknown error')}"
+        if known is None:
+            return text
+        # In its turn the refusal came with the current text
+        # (_artifact_current_text): the reason names that version.
+        current = stored_version(tr.get("current_artifact_id"), user_id)
+        if (current is None or current.ai_usage not in AI_ALLOWED
+                or current.id in known):
+            return text
+        _note(current)
+        _shown(current)
+        return (f"{text}\n\nCurrent text of '{current.kind}' · "
+                f"v{version_number(current, numbers)}:\n"
+                f"{current.get_content() or ''}")
+
+    kind = tr.get("kind") or "?"
     prev_id = tr.get("previous_artifact_id")
+    new = stored_version(tr.get("artifact_id"), user_id)
+    if new is None:
+        return f"'{kind}' was saved, but that version no longer exists."
+    if "previous_artifact_id" not in tr:
+        # Recorded before writes kept their previous version (an older
+        # thread): no number, as there is no text to go with it.
+        return f"'{kind}' was {'created' if tr.get('created') else 'updated'}."
+    number = version_number(new, numbers)
+    verb = "created as" if prev_id is None else "updated to"
+    if new.ai_usage not in AI_ALLOWED:
+        return (f"'{kind}' {verb} v{number}. That version is kept away "
+                "from AI, so its text is not shown.")
+    new_text = new.get_content() or ""
     if prev_id is None:
-        if licence is not None:
-            _note_artifact_content(licence, artifact)
-        return f"[You created '{kind}' with this content:\n{new_text}]"
-    previous = UserArtifact.query.get(prev_id)
-    if previous is not None and previous.ai_usage not in AI_ALLOWED:
+        _note(new)
+        _shown(new)
+        return f"'{kind}' created as v{number}. Its text:\n{new_text}"
+    previous = stored_version(prev_id, user_id)
+    if previous is None or previous.ai_usage not in AI_ALLOWED:
         # A version AI may not read never reaches a diff (update_artifact
-        # refuses to write over one; this keeps the echo safe on its own).
-        if licence is not None:
-            _note_artifact_content(licence, artifact)
-        return (f"[Your write to '{kind}' — its full new content:\n"
-                f"{new_text}]")
-    old_text = (previous.get_content() or "") if previous else ""
-    # Drop the ---/+++ file headers; keep the @@ hunks.
-    diff_lines = list(difflib.unified_diff(
-        old_text.splitlines(), new_text.splitlines(), lineterm="", n=1))[2:]
-    diff = "\n".join(diff_lines)
+        # refuses to write over one; this keeps the answer safe on its
+        # own, also when the user changes the setting later).
+        _note(new)
+        _shown(new)
+        return f"'{kind}' updated to v{number}. Its full new text:\n{new_text}"
+    head = (f"'{kind}' updated to v{number} "
+            f"(from v{version_number(previous, numbers)})")
+    if known is not None and previous.id not in known:
+        # The prompt never showed the version this one was made from.
+        _note(new)
+        _shown(new)
+        return f"{head}. Its full new text:\n{new_text}"
+    diff = artifact_diff(previous.get_content() or "", new_text)
     if not diff:
-        return None
-    if licence is not None:
-        _note_artifact_content(licence, artifact)
+        _shown(new)
+        return f"{head}, with no changes."
+    _note(new)
+    _shown(new)
     if len(diff) > ARTIFACT_ECHO_DIFF_THRESHOLD_CHARS:
         # A rewrite this heavy reads clearer (and usually shorter) in full.
-        return (f"[Your rewrite of '{kind}' was substantial — its full "
-                f"new content:\n{new_text}]")
-    if licence is not None and previous is not None:
-        # The diff's context and removed lines are the previous version.
-        _note_artifact_content(licence, previous)
-    return (f"[Your changes to '{kind}' — the copy shown in your context "
-            f"predates this update:\n{diff}]")
+        return (f"{head}. The changes are large, so here is its full new "
+                f"text:\n{new_text}")
+    # The diff's context and removed lines are the previous version.
+    _note(previous)
+    return f"{head}. Changes:\n{diff}"
+
+
+def _artifact_current_text(tr, user_id, licence=None):
+    """The current text of the artifact a refused update_artifact call was
+    aimed at, for the next round of the same turn (#604): the call named
+    no version, or one that is not the latest (the artifact changed in
+    another thread or by the user's hand), or its edits did not match.
+    The model retries against this text in the same turn.
+
+    Fetched from the row the refusal names by id (current_artifact_id),
+    with the ai_usage check, and reported to *licence* (#326); the text
+    is never stored. Later turns replay it with the refusal, from the
+    same id, unless the prompt shows that version already
+    (_artifact_write_report). Returns (text, row), or (None, None) when
+    there is nothing to show."""
+    if tr.get("name") != "update_artifact" or tr.get("status") == "success":
+        return None, None
+    row = stored_version(tr.get("current_artifact_id"), user_id)
+    if row is None or row.ai_usage not in AI_ALLOWED:
+        return None, None
+    if licence is not None:
+        _note_artifact_content(licence, row)
+    return (f"[Current text of '{row.kind}' · v{version_number(row)} — "
+            f"base your retry on this version:\n{row.get_content() or ''}]",
+            row)
+
+
+def _replayed_write_blocks(node, writes, user_id, licence=None,
+                           numbers=None, known=None):
+    """The update_artifact calls of *node* (the user's own reply), as a
+    later turn's history replays them (#604): one tool_use block per call
+    to append after the reply's text, and one tool_result block per call
+    for the user message that follows it. The result is the system's
+    answer to the call (_artifact_write_report): neither the user's words
+    nor the model's. Both providers take them on their native tool
+    channel (llm_providers.responses_input for OpenAI).
+
+    *writes* is [(index in the node's tool_calls_meta, entry)]. The call
+    shows the input as stored, without the redacted content keys; its id
+    is derived from the node and the index. *known* is the prompt's set
+    of versions shown so far (see _artifact_write_report), updated in
+    chain order. Everything depends only on the chain up to the node,
+    the stored entries and the versions' rows, so the bytes are the same
+    on every later turn and the cached prefix keeps growing. Nothing
+    here reaches node content or speech."""
+    calls, results = [], []
+    for index, entry in writes:
+        call_id = f"loore_{node.id}_{index}"
+        stored_input = entry.get("input")
+        shown = {k: v for k, v in (stored_input.items()
+                                   if isinstance(stored_input, dict) else ())
+                 if k not in _REDACTED_INPUT_KEYS}
+        if "kind" not in shown and entry.get("kind"):
+            shown["kind"] = entry["kind"]
+        calls.append({"type": "tool_use", "id": call_id,
+                      "name": "update_artifact", "input": shown})
+        result = {"type": "tool_result", "tool_use_id": call_id,
+                  "content": _artifact_write_report(
+                      entry, user_id, licence=licence, numbers=numbers,
+                      known=known)}
+        if entry.get("status") != "success":
+            result["is_error"] = True
+        results.append(result)
+    return calls, results
+
+
+# The inline artifact kinds and the placeholder each is shown by.
+_INLINE_PLACEHOLDER_OF = {
+    "memory": USER_MEMORY_PLACEHOLDER,
+    "scratchpad": USER_SCRATCHPAD_PLACEHOLDER,
+    "intentions": USER_INTENTIONS_PLACEHOLDER,
+    "ai_preferences": USER_AI_PREFERENCES_PLACEHOLDER,
+}
+
+
+def _pinned_inline_versions(node, user_id, kinds):
+    """Ids of the inline artifact versions the prompt shows from *node*'s
+    own pins (#604): of *kinds*, each whose placeholder the node's text
+    carries and whose pinned version AI may read. *node* is the one the
+    render takes them from (the system node of a cached render, else the
+    first node carrying the placeholder). A version the render takes
+    otherwise (the latest, for a node without that pin) is not counted:
+    counting too few only turns a replayed diff into the full text."""
+    if node is None or not node_is_users(node, user_id):
+        return set()
+    text = node.get_content() or ""
+    pins = node.get_user_artifacts()
+    ids = set()
+    for kind in kinds:
+        row = _own_pin(pins.get(kind), user_id)
+        if (row is not None and row.ai_usage in AI_ALLOWED
+                and _INLINE_PLACEHOLDER_OF[kind] in text):
+            ids.add(row.id)
+    return ids
+
+
+def _messages_text(messages):
+    """The text of every block of *messages*, for the size log: text
+    blocks, and the tool channel's answers (#604)."""
+    parts = []
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            parts.append(str(content or ""))
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            text = block.get("text")
+            if text is None and isinstance(block.get("content"), str):
+                text = block["content"]
+            parts.append(text or "")
+    return "".join(parts)
+
+
+def _prefetch_replayed_versions(node_chain, user_id):
+    """Unwrap, in one concurrent batch, the keys of the artifact versions
+    the history replays (#604): each earlier write of the user's own
+    shows a diff of two versions, and on a cold worker each one decrypted
+    alone is a KMS call in sequence (as for the chain's nodes,
+    _load_node_chain)."""
+    ids = set()
+    for node in node_chain:
+        if not node.tool_calls_meta or not node_is_users(node, user_id):
+            continue
+        try:
+            meta = json.loads(node.tool_calls_meta)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        for entry in meta if isinstance(meta, list) else ():
+            if (isinstance(entry, dict)
+                    and entry.get("name") == "update_artifact"
+                    and entry.get("status") == "success"):
+                ids.update(i for i in (entry.get("artifact_id"),
+                                       entry.get("previous_artifact_id"))
+                           if i)
+    if not ids:
+        return
+    from backend.utils.encryption import prefetch_deks
+    rows = UserArtifact.live().filter(
+        UserArtifact.id.in_(ids), UserArtifact.user_id == user_id).all()
+    prefetch_deks(row.content for row in rows)
 
 
 def _action_result_text(tr):
     """One-line result string injected back to the model for a NON-retrieval
     tool result, so the loop can continue after action tools too: the model
     sees its side effect land (or fail) before writing the answer the user
-    actually reads/hears."""
+    actually reads/hears. A saved update_artifact write is answered by
+    _artifact_write_report instead (its version and what it wrote)."""
     name = tr.get("name")
     status = tr.get("status")
     if status == "success":
-        if name == "update_artifact":
-            verb = "created" if tr.get("created") else "updated"
-            return f"[update_artifact: artifact '{tr.get('kind')}' {verb}.]"
         if name == "apply_todo_changes":
             return ("[apply_todo_changes: merge started in the background; "
                     "it will finish shortly.]")
         if name == "apply_github_issue":
+            if tr.get("summary"):
+                return f"[apply_github_issue: {tr['summary']}]"
             return (f"[apply_github_issue: issue "
                     f"#{tr.get('issue_number')} created — "
                     f"{tr.get('issue_url')}]")
@@ -1862,10 +2160,50 @@ def _auto_create_drafts(llm_text, llm_node, node_chain, user_id):
 # before the input is persisted to the plaintext ``tool_calls_meta`` column:
 # the content is already stored encrypted in its own row (UserArtifact /
 # UserFeedback / Draft), and a plaintext copy on the node would defeat
-# encryption-at-rest. Nothing reads ``input`` back out of tool_calls_meta
-# (the cross-turn scan, the frontend, and exports all key on other fields),
-# so redaction is lossless for every consumer.
+# encryption-at-rest. The cross-turn scan, the frontend and exports key on
+# other fields; the replay of an update_artifact call in later turns
+# (#604) shows its input without the redacted keys, and the answer to it
+# shows what the write changed, from the stored version ids.
 _REDACTED_INPUT_KEYS = {"content", "updated_content", "edits"}
+_REDACTED = "[redacted]"
+
+
+def _base_version_error(inp, kind, latest_number):
+    """Why an update_artifact call may not save, judged by the version it
+    names, or None (#604). *latest_number* is the number of the kind's
+    latest version, 0 when it has none.
+
+    A change to an existing artifact names the version it is based on
+    (base_version). When that is not the latest one, the artifact changed
+    since the model's copy (in another thread, by the user's hand, or by
+    an earlier write) and saving would drop that change, so nothing is
+    saved: edits are refused too, even ones that would still apply
+    (Peter, 2026-11-06). The next round of the turn gets the current text
+    (_artifact_current_text). Creating an artifact needs no base_version;
+    a call naming a version of an artifact that has none is refused, so a
+    stale copy can't bring back an artifact that is gone."""
+    raw = inp.get("base_version")
+    base = parse_version(raw)
+    if latest_number == 0:
+        if base:
+            return (f"'{kind}' has no versions, so there is no v{base}. "
+                    "Nothing was saved. To create it, send updated_content "
+                    "without base_version.")
+        return None
+    if raw is None or raw == "":
+        return (f"base_version is missing: name the version of '{kind}' "
+                f"your change is based on. '{kind}' is now "
+                f"v{latest_number}. Nothing was saved.")
+    if base is None:
+        return (f"base_version {raw!r} is not a version number. '{kind}' "
+                f"is now v{latest_number}. Nothing was saved.")
+    if base < latest_number:
+        return (f"'{kind}' changed since v{base}, now v{latest_number}. "
+                "Nothing was saved.")
+    if base > latest_number:
+        return (f"'{kind}' has no v{base}; it is at v{latest_number}. "
+                "Nothing was saved.")
+    return None
 
 
 def _resolve_artifact_write(inp, previous):
@@ -1905,7 +2243,7 @@ def _redact_tool_input(inp):
     if not isinstance(inp, dict):
         return inp
     return {
-        k: ("[redacted]" if k in _REDACTED_INPUT_KEYS else v)
+        k: (_REDACTED if k in _REDACTED_INPUT_KEYS else v)
         for k, v in inp.items()
     }
 
@@ -1980,54 +2318,17 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                         result["status"] = "error"
                         result["error"] = "No pending GitHub issue found"
                     else:
-                        issue_data = parse_github_issue(
-                            origin_node.get_content() or ""
+                        user = User.query.get(user_id)
+                        username = (
+                            user.username if user else str(user_id)
                         )
-                        if not issue_data.get("title"):
-                            result["status"] = "error"
-                            result["error"] = (
-                                "Could not parse issue from proposal"
-                            )
-                        else:
-                            from backend.utils.github import (
-                                create_github_issue,
-                            )
-                            user = User.query.get(user_id)
-                            username = (
-                                user.username if user else str(user_id)
-                            )
-                            category = issue_data.get(
-                                "category", "enhancement"
-                            )
-                            if category not in (
-                                "bug", "feature", "enhancement"
-                            ):
-                                category = "enhancement"
-                            gh_result = create_github_issue(
-                                title=issue_data["title"],
-                                description=issue_data.get(
-                                    "description", ""
-                                ),
-                                category=category,
-                                username=username,
-                                platform=client,
-                            )
-                            # Clean up draft
-                            db.session.delete(draft)
-                            db.session.flush()
-                            # Update origin node meta
-                            update_tool_meta(
-                                origin_node,
-                                "propose_github_issue",
-                                {
-                                    "apply_status": "completed",
-                                    "issue_url": gh_result["url"],
-                                    "issue_number": gh_result["number"],
-                                },
-                            )
-                            result["status"] = "success"
-                            result["issue_url"] = gh_result["url"]
-                            result["issue_number"] = gh_result["number"]
+                        # Optional 1-based positions pick some of the
+                        # reply's issues, `all` takes every one not
+                        # created yet; with neither, only the last one.
+                        result.update(file_issues_for_tool(
+                            origin_node, draft, username, client,
+                            numbers=inp.get("issue_numbers"),
+                            all_unfiled=bool(inp.get("all"))))
 
             elif name == "update_artifact":
                 kind = (inp.get("kind") or "").strip().lower()
@@ -2042,17 +2343,32 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                     )
                 else:
                     previous = UserArtifact.latest_for(user_id, kind)
+                    latest_number = 0
+                    current_id = None
+                    new_text = None
                     if (previous is not None
                             and previous.ai_usage not in AI_ALLOWED):
-                        new_text = None
                         write_err = ARTIFACT_KEPT_FROM_AI_ERROR.format(
                             kind=kind)
                     else:
-                        new_text, write_err = _resolve_artifact_write(
-                            inp, previous)
+                        if previous is not None:
+                            latest_number = version_number(previous)
+                        write_err = _base_version_error(
+                            inp, kind, latest_number)
+                        if write_err is None:
+                            new_text, write_err = _resolve_artifact_write(
+                                inp, previous)
+                        if write_err is not None and previous is not None:
+                            # The next round gets the current text to
+                            # retry against (_artifact_current_text). Only
+                            # its id is kept here.
+                            current_id = previous.id
                     if write_err:
                         result["status"] = "error"
                         result["error"] = write_err
+                        if current_id is not None:
+                            result["current_artifact_id"] = current_id
+                            result["current_version"] = latest_number
                     else:
                         title = (inp.get("title") or "").strip()
                         if not title:
@@ -2108,47 +2424,62 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                         result["artifact_id"] = artifact.id
                         result["kind"] = kind
                         result["created"] = previous is None
-                        # Id only (content stays encrypted-at-rest): lets
-                        # the within-turn loop re-resolve both versions and
-                        # echo a diff of this write back to the model.
+                        # Ids only (content stays encrypted-at-rest): the
+                        # answer to this write re-resolves both versions,
+                        # in this turn's next round and replayed in every
+                        # later turn (_artifact_write_report, #604), as
+                        # does the Actions-taken diff.
                         result["previous_artifact_id"] = (
                             previous.id if previous else None)
+                        # The version numbers, for the Actions-taken row.
+                        result["version"] = version_number(artifact)
+                        result["previous_version"] = latest_number or None
 
-            elif name == "read_artifact":
-                # Any readable kind, including 'external_digest' — the
-                # saved-references topic map is NOT gated by the "External
-                # references" toggle, unlike semantic_search's reference
-                # matches and read_full on an external label. It is the
-                # user's own data, so nothing leaks; the guidance only
-                # points users with the toggle on at the digest. Known
-                # asymmetry (#330 review), left as is.
-                kind = (inp.get("kind") or "").strip().lower()
-                artifact = UserArtifact.latest_for(user_id, kind)
-                if artifact is None or artifact.ai_usage not in AI_ALLOWED:
-                    result["status"] = "error"
-                    result["error"] = f"No readable artifact of kind {kind!r}"
-                else:
-                    # Content is NOT stored in tool meta (plaintext column)
-                    # — the retrieval loop / _scan_proposal_statuses
-                    # re-resolves it from the encrypted row and injects it.
-                    result["status"] = "success"
-                    result["artifact_id"] = artifact.id
+            elif name in ("read_artifact", "read_todo"):
+                # read_todo: the todo's own tool before #218, served for
+                # the older threads whose prompts still name it.
+                kind = (TODO_KIND if name == "read_todo"
+                        else (inp.get("kind") or "").strip().lower())
+                if kind == TODO_KIND:
+                    # Todo is its own model (not a UserArtifact), pulled on
+                    # demand since it's no longer shown inline (#158 Slice
+                    # 3), through read_artifact since #218. The kind is kept
+                    # on a failure too: the Actions line names the todo list.
                     result["kind"] = kind
-
-            elif name == "read_todo":
-                # Todo is its own model (not a UserArtifact), pulled on
-                # demand since it's no longer shown inline (#158 Slice 3).
-                todo = UserTodo.query.filter_by(user_id=user_id).order_by(
-                    UserTodo.created_at.desc()
-                ).first()
-                if todo is None or todo.ai_usage not in AI_ALLOWED:
-                    result["status"] = "error"
-                    result["error"] = "The todo list is empty or unavailable."
+                    todo = UserTodo.query.filter_by(
+                        user_id=user_id).order_by(
+                        UserTodo.created_at.desc()).first()
+                    if todo is None or todo.ai_usage not in AI_ALLOWED:
+                        result["status"] = "error"
+                        result["error"] = (
+                            "The todo list is empty or unavailable.")
+                    else:
+                        # Content re-resolved from the encrypted row at
+                        # injection time; only the row id sits in tool meta.
+                        result["status"] = "success"
+                        result["todo_id"] = todo.id
                 else:
-                    # Content re-resolved from the encrypted row at injection
-                    # time; only the row id sits in tool meta.
-                    result["status"] = "success"
-                    result["todo_id"] = todo.id
+                    # Any other readable kind, including 'external_digest'
+                    # — the saved-references topic map is NOT gated by the
+                    # "External references" toggle, unlike semantic_search's
+                    # reference matches and read_full on an external label.
+                    # It is the user's own data, so nothing leaks; the
+                    # guidance only points users with the toggle on at the
+                    # digest. Known asymmetry (#330 review), left as is.
+                    artifact = UserArtifact.latest_for(user_id, kind)
+                    if (artifact is None
+                            or artifact.ai_usage not in AI_ALLOWED):
+                        result["status"] = "error"
+                        result["error"] = (
+                            f"No readable artifact of kind {kind!r}")
+                    else:
+                        # Content is NOT stored in tool meta (plaintext
+                        # column) — the retrieval loop /
+                        # _scan_proposal_statuses re-resolves it from the
+                        # encrypted row and injects it.
+                        result["status"] = "success"
+                        result["artifact_id"] = artifact.id
+                        result["kind"] = kind
 
             elif name == "semantic_search":
                 # Search the user's own archive by meaning (#155). Embeds the
@@ -2358,10 +2689,15 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                 result["error"] = f"Unknown tool: {name}"
 
         except Exception as e:
-            logger.error(f"Tool execution error for {name}: {e}",
-                         exc_info=True)
+            from backend.utils.error_privacy import (
+                TOOL_FAILED_TEXT, describe_exception, user_written_text,
+            )
+            logger.error("Tool execution error for %s: %s", name,
+                         describe_exception(e), exc_info=True)
             result["status"] = "error"
-            result["error"] = str(e)
+            # Stored in tool_calls_meta (shown under "Actions taken") and
+            # sent back to the model: the same fixed text for both.
+            result["error"] = user_written_text(e) or TOOL_FAILED_TEXT
 
         tool_results.append(result)
 
@@ -2398,9 +2734,10 @@ def get_user_profile_content(user_id, pinned_node=None, usage=None):
         pinned_node.get_artifact("profile") if pinned_node else None,
         user_id)
     if profile is None:
-        profile = UserProfile.query.filter_by(user_id=user_id).order_by(
-            UserProfile.created_at.desc()
-        ).first()
+        # A large build's windows and groups are never the profile: the
+        # previous one stays until the build's final merge (#545).
+        from backend.utils.profile_versions import current_profile_query
+        profile = current_profile_query(user_id).first()
 
     if profile and profile.ai_usage in AI_ALLOWED:
         if usage is not None:
@@ -2447,9 +2784,10 @@ def get_user_recent_content(user_id, pinned_node=None, usage=None):
         pinned_node.get_artifact("recent_context") if pinned_node else None,
         user_id)
     if rc is None:
-        profile = UserProfile.query.filter_by(user_id=user_id).filter(
+        from backend.utils.profile_versions import current_profile_query
+        profile = current_profile_query(user_id).filter(
             UserProfile.ai_usage.in_(AI_ALLOWED)
-        ).order_by(UserProfile.created_at.desc()).first()
+        ).first()
         profile_id = profile.id if profile else None
 
         q = UserRecentContext.query.filter_by(user_id=user_id)
@@ -2596,6 +2934,10 @@ READ_ON_HOLD_TEXT = ("Glean did not run: your writing was deleted. You "
 # What a read withdrawn at the provider says in place of its reply, the
 # same for everyone who can see it.
 CA_BATCH_CANCELLED_TEXT = "This read was cancelled."
+# The reply's error when the poll cap ended the wait; the owner's alone.
+CA_BATCH_GAVE_UP_TEXT = (
+    "Loore stopped waiting for the model's answer. The problem has been "
+    "reported. Please try again.")
 # Why it was withdrawn: the reply's error, which goes to its owner only
 # (llm-status, the llm-stream done event). A spend-limit message is the
 # owner's alone.
@@ -2712,6 +3054,14 @@ def _ca_batch_poll(task, llm_node, parent_node, meta, entry, user_id):
             raise
         _withdraw_batch_reply(llm_node, meta, entry)
         return "withdrawn", None
+    except BatchItemPolicyBlocked as e:
+        # The provider's verdict like any BatchItemFailed: the node fails
+        # and nothing submits the turn again on its own. Reported with
+        # tags only (Peter, 2026-11-04).
+        from backend.utils.refusal_backoff import report_policy_block
+        report_policy_block(user_id, e.code, entry.get("model"),
+                            "read batch")
+        raise
     except Exception as e:
         # A poll refused for an account reason (a revoked key, say) is
         # reported (#369) and, like any other failed poll, asked again by
@@ -2760,9 +3110,11 @@ def _ca_batch_poll(task, llm_node, parent_node, meta, entry, user_id):
 
 def _ca_batch_submit(task, llm_node, model_id, api_model, messages,
                      api_key, key_type, model_config, ca_refs=None,
-                     provider="anthropic"):
+                     provider="anthropic", user_id=None):
     """Submit the turn as a one-item batch, record the "_batch" entry on
-    the node and re-queue the task for its first poll. Never returns."""
+    the node and re-queue the task for its first poll. Never returns.
+    ``user_id``: the user the turn is for (an OpenAI request carries its
+    safety identifier)."""
     from backend.utils import llm_batch
     submit_one = {
         "anthropic": llm_batch.anthropic_batch_submit_one,
@@ -2773,10 +3125,12 @@ def _ca_batch_submit(task, llm_node, model_id, api_model, messages,
         DEFAULT_MAX_OUTPUT_TOKENS)
     custom_id = f"node-{llm_node.id}"
     from backend.utils.ca_feed import FEED_SCHEMA
+    extra = {"user_id": user_id} if provider == "openai" else {}
     try:
         batch_id = submit_one(
             api_key, custom_id, api_model, messages, max_tokens,
-            output_schema=FEED_SCHEMA if ca_refs is not None else None)
+            output_schema=FEED_SCHEMA if ca_refs is not None else None,
+            **extra)
     except Exception as e:
         # A spend limit, billing or the key refuses the submit like a
         # live call: the user gets the readable error, the admin an
@@ -2846,23 +3200,33 @@ def _claim_failed_feed_cost(node, resp):
     return True
 
 
-def _collect_feed_reply(llm_node, resp, ca_refs):
+def _collect_feed_reply(llm_node, resp, ca_refs, read_since=()):
     """Turn the feed's JSON answer into the reply: each pick becomes a
     saved reference + FeedPick row (rank, relevance, recommend and the
     quote-tweet text, for judging the model's claims against the user's
     verdicts later), and the node text is the whole rendered feed: the
     verdict, then each quote-tweet over its {quote_ext:ID} marker. The
-    same path serves the batch collect and the admin's live rerun."""
+    same path serves the batch collect and the admin's live rerun.
+
+    *read_since* are the numbers of a kept list (#511) whose tweet the
+    reader has read since it was made: the closing note told the model
+    they are not candidates, and a pick of one is dropped here and
+    counted with the other dropped picks, so a tweet the reader has read
+    is never picked again, as before the list was kept."""
     from backend.utils.ca_feed import (
-        parse_feed_reply, render_feed_reply, save_feed_picks)
+        parse_feed_reply, pick_numbers, render_feed_reply, save_feed_picks)
     # A refusal is the provider's verdict on this request (#454): the text
     # is an apology, not JSON. Say so, naming the model, before parsing.
     # Terminal like a parse failure (the stored batch result is immutable);
     # the same request would likely be refused again, and a user's provider
     # is never switched.
     if resp.get("refused"):
-        raise FeedReplyError(
-            f"the model refused the Read ({llm_node.llm_model or 'unknown model'})")
+        model_name = llm_node.llm_model or "unknown model"
+        err = FeedReplyError(f"the model refused the Glean ({model_name})")
+        err.user_text = (
+            f"The model ({model_name}) refused this Glean. Choose another "
+            "model.")
+        raise err
     # A reply cut off at the output limit is not the promised object even
     # where its prefix happens to parse. Like a parse failure it is a
     # verdict on this reply (FeedReplyError), not a condition a later
@@ -2884,6 +3248,16 @@ def _collect_feed_reply(llm_node, resp, ca_refs):
         # (refs_from_render), so a Read of only such picks is not
         # reported as one where the model picked nothing. (A batch from
         # before renders were pinned has no row: nothing to count on.)
+        if read_since:
+            read_since = set(read_since)
+            picked_read = sorted(set(pick_numbers(resp["content"]))
+                                 & read_since)
+            if picked_read:
+                logger.warning(
+                    "Node %s: dropping picks of tweets the reader has "
+                    "read: %s", llm_node.id, picked_read)
+            ca_refs = {n: ref for n, ref in ca_refs.items()
+                       if n not in read_since}
         from backend.models import FeedRender
         render = FeedRender.query.filter_by(node_id=llm_node.id).first()
         if render is not None:
@@ -3003,9 +3377,12 @@ class LLMCompletionTask(Task):
                     node.llm_task_status = 'failed'
                     # Store error message if not already set
                     if not node.llm_task_error:
-                        node.llm_task_error = str(exc)
+                        node.llm_task_error = reply_error_text(exc)
                     db.session.commit()
-                    logger.error(f"LLM completion failed for node {llm_node_id}: {exc}")
+                    from backend.utils.error_privacy import describe_exception
+                    logger.error(
+                        "LLM completion failed for node %s: %s",
+                        llm_node_id, describe_exception(exc))
 
 
 def _own_system_values(text, system_node, user_id, usage):
@@ -3502,6 +3879,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         [n.id for n in dropped])
             ca_tweets_content = None
             ca_refs = None
+            # The numbers of a kept list (#511) whose tweet the reader has
+            # read since: named in the closing note, never a pick.
+            ca_read_numbers = []
             if needs_ca:
                 from backend.tasks.imports import snapshot_dir_for
                 from backend.utils import community_archive as ca
@@ -3512,7 +3892,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # and only while they glean (#435).
                 from backend.utils.glean import read_turn_allowed
                 if not read_turn_allowed(User.query.get(user_id), ca_node):
-                    raise ValueError(ca_tweets_denied_message())
+                    raise UserMessageError(ca_tweets_denied_message())
                 # Only admins may change the window or scope (Peter,
                 # 2026-10-14): every {ca_tweets} on the prompt must be
                 # the default unless both its owner and the user the
@@ -3535,7 +3915,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         ca_snapshot_dir,
                         ca_owner.username if ca_owner else "")
                     if ca_follows is None:
-                        raise ValueError(
+                        raise UserMessageError(
                             "{ca_tweets} scope=follows needs a saved list "
                             "of the accounts you follow, and there is none "
                             "for your account yet.")
@@ -3546,7 +3926,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     ca_refs = CA_REFS_PINNED
                     ca_tweets_content = CA_TWEETS_STUB
                 else:
-                    ca_seen = ()
+                    ca_seen = set()
+                    ca_keep = frozenset()
                     if batch_resp is None:
                         # A read about to be sent reads the export in the
                         # cache and never waits for a newer one to
@@ -3556,6 +3937,19 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         # the reader has already seen.
                         request_snapshot_refresh(ca_snapshot_dir, log=logger)
                         ca_seen = seen_tweet_ids(user_id)
+                        if ca_live or not _read_batch_requested(llm_node):
+                            # A live read again on the export of the read
+                            # before it keeps that read's list as it was,
+                            # so the request's prefix is read from the
+                            # prompt cache (#511); what the reader has
+                            # read since goes in the closing note. Not
+                            # for the admin's batch experiments: a batch
+                            # comes back long after any cache entry has
+                            # gone, and its collect knows no note.
+                            ca_keep = list_to_keep(
+                                node_chain, ca_node, ca_reply_ids, user_id,
+                                ca.snapshot_export_id(ca_snapshot_dir),
+                                ca_days, ca_scope)
                     # else: a batch submitted before renders were pinned;
                     # re-render the day as it was rendered then (no seen
                     # filter) so its numbers still match.
@@ -3566,7 +3960,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                                ca_owner.prefilled_handle]
                             if ca_owner else (),
                             include_usernames=ca_follows,
-                            exclude_tweet_ids=ca_seen)
+                            exclude_tweet_ids=ca_seen - ca_keep)
                     except ca.CommunityArchiveError as e:
                         # No export cached yet (a fresh machine or data
                         # volume): queue the first fetch, and give the
@@ -3583,6 +3977,12 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         "Rendered %s for node %s: %s (~%d tokens)",
                         ca_placeholder_match, ca_node.id, ca_stats,
                         approximate_token_count(ca_tweets_content))
+                    if ca_keep:
+                        ca_read_numbers = read_numbers(ca_refs, ca_seen)
+                        logger.info(
+                            "Node %s: kept the earlier read's list (%d "
+                            "tweets); %d of them read since",
+                            llm_node_id, len(ca_keep), len(ca_read_numbers))
                     if batch_resp is None:
                         # One run renders into a reply: a run another one
                         # has replaced since it started (the admin's
@@ -3901,11 +4301,25 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # here, so this runs once the licence exists.
             proposal_notes = []
             proposal_to_mark = []
+            inline_shown = set()
             if is_agentic:
                 proposal_notes, proposal_to_mark = (
                     _scan_proposal_statuses(
                         node_chain, user_id, licence=licence)
                 )
+                # The artifact versions the history replays (#604).
+                _prefetch_replayed_versions(node_chain, user_id)
+                # The versions whose text the prompt shows inline: a
+                # replayed write is a diff only against one of them or a
+                # version an earlier answer showed (_artifact_write_report).
+                inline_shown = _pinned_inline_versions(
+                    artifacts_node, user_id,
+                    ("memory", "scratchpad", "intentions"))
+                inline_shown |= _pinned_inline_versions(
+                    ai_prefs_node, user_id, ("ai_preferences",))
+                if cached_system_render is not None:
+                    inline_shown |= _pinned_inline_versions(
+                        system_node, user_id, tuple(_INLINE_PLACEHOLDER_OF))
 
             model_config = flask_app.config["SUPPORTED_MODELS"][model_id]
             provider = model_config["provider"]
@@ -4003,7 +4417,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 finalize writes for a collected reply (_log_api_cost). The
                 task's error handler commits it with the failure."""
                 try:
-                    return _collect_feed_reply(llm_node, resp, ca_refs)
+                    return _collect_feed_reply(llm_node, resp, ca_refs,
+                                               read_since=ca_read_numbers)
                 except FeedReplyError:
                     if (not resp.get("cut_off")
                             and _claim_failed_feed_cost(llm_node, resp)):
@@ -4137,6 +4552,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # The read replies rendered for the model: the user's
                 # verdicts on their intros go in the note too (#502).
                 rendered_read_ids = []
+                # Version numbers of the artifact versions the replayed
+                # writes show, counted once per prompt, and the versions
+                # whose text the prompt has shown so far (#604).
+                replay_numbers = {}
+                replay_known = set(inline_shown)
                 for node in node_chain:
                     author = node.user.username if node.user else "Unknown"
                     is_llm_node = node.node_type == "llm" or (node.llm_model is not None)
@@ -4177,6 +4597,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         continue
 
                     node_content = node.get_content()
+                    # This reply's update_artifact calls, replayed after its
+                    # text as tool calls with the system's answers (#604).
+                    replayed_writes = []
 
                     if is_llm_node:
                         role = "assistant"
@@ -4209,7 +4632,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         if is_agentic and node.tool_calls_meta:
                             try:
                                 tcm = json.loads(node.tool_calls_meta)
-                                for entry in tcm:
+                                for index, entry in enumerate(tcm):
                                     ename = entry.get("name")
                                     if ename == "propose_todo":
                                         message_text += (
@@ -4239,18 +4662,15 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                         # and its artifact are theirs. The
                                         # proposal tags above stay, as the
                                         # proposals are in the reply's text.
-                                        # Durable record of the outcome.
-                                        # The within-turn result round is
+                                        # Durable record of the write: the
+                                        # within-turn result round is
                                         # injected only into that turn's
-                                        # in-flight messages; without this
-                                        # the history shows "(updating your
-                                        # memory…)" and nothing else, and
-                                        # the model can't tell later
-                                        # whether its write landed.
-                                        message_text += (
-                                            "\n\n"
-                                            + _action_result_text(entry)
-                                        )
+                                        # in-flight messages. Replayed
+                                        # with its version and diff, a
+                                        # later edit can quote what the
+                                        # write changed (#604).
+                                        replayed_writes.append(
+                                            (index, entry))
                             except (json.JSONDecodeError, TypeError):
                                 pass
                     else:
@@ -4407,6 +4827,16 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         "role": role,
                         "content": [{"type": "text", "text": message_text}]
                     })
+                    if replayed_writes:
+                        # The reply's artifact writes on the tool channel:
+                        # its calls after its text, then the system's
+                        # answers in a user message of their own (#604).
+                        calls, answers = _replayed_write_blocks(
+                            node, replayed_writes, user_id,
+                            licence=licence, numbers=replay_numbers,
+                            known=replay_known)
+                        messages[-1]["content"].extend(calls)
+                        messages.append({"role": "user", "content": answers})
 
                 # Inject agentic context notes as a final user message
                 agentic_notes = (
@@ -4442,9 +4872,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # loop). Nothing to inject here.
 
                 # The user's read marks / verdicts on references quoted
-                # earlier in the thread (see _reference_marks_note), and
-                # the read thread's turn note: on a read-again the
-                # request itself, on a chat turn the reminder that the
+                # earlier in the thread (see _reference_marks_note), the
+                # tweets of a kept list read since it was made (#511:
+                # here, after the cached prefix, instead of out of the
+                # list), and the read thread's turn note: on a read-again
+                # the request itself, on a chat turn the reminder that the
                 # read prompt above still asks for a verdict and picks
                 # while this turn answers the user's message. A read turn
                 # is never agentic (its agentic prompts were stripped
@@ -4456,15 +4888,21 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     quoted_ext_ids, user_id, labels=pick_labels,
                     intro_verdicts=_intro_verdicts(rendered_read_ids,
                                                    user_id))
+                ca_read_since = read_since_note(ca_read_numbers)
                 ca_note = None
                 if ca_turn == "read_again":
-                    ca_note = CA_READ_AGAIN_TURN
+                    # After the note naming tweets of a kept list read
+                    # since, the request says they are in it (#511).
+                    ca_note = (CA_READ_AGAIN_TURN_KEPT if ca_read_since
+                               else CA_READ_AGAIN_TURN)
                 elif ca_turn == "chat":
                     ca_note = CA_CHAT_TURN_NOTE
                 plain_notes = []
                 notes = agentic_notes if is_agentic else plain_notes
                 if reference_marks:
                     notes.append(reference_marks)
+                if ca_read_since:
+                    notes.append(ca_read_since)
                 if ca_note:
                     notes.append(ca_note)
 
@@ -4538,7 +4976,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         flask_app.config, key_type)
 
                 # Log total context being sent
-                total_content = "".join(m["content"][0]["text"] for m in messages if m.get("content"))
+                total_content = _messages_text(messages)
                 estimated_tokens = approximate_token_count(total_content)
                 logger.info(f"Calling LLM API: model_id={model_id}, api_model={api_model}, provider={provider}, key_type={key_type}, estimated_tokens={estimated_tokens}, total_chars={len(total_content)}")
 
@@ -4557,7 +4995,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # support fails here rather than silently running the
                 # unstructured call.
                 if needs_ca and provider not in CA_BATCH_PROVIDERS:
-                    raise ValueError(
+                    raise UserMessageError(
                         f"{{ca_tweets}} is not supported on {model_id} "
                         f"({provider}); pick an Anthropic or OpenAI "
                         "model.")
@@ -4593,6 +5031,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                 output_schema=feed_schema,
                                 cache_comparison_response_id=baseline_id,
                                 listener=listener,
+                                user_id=user_id,
                             )),
                         stream=feed_schema is None)
                     if needs_ca:
@@ -4816,7 +5255,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
             # ── Within-turn retrieval loop gating (#158) ───────────────────
             # Both agentic modes (text + voice) run the bounded within-turn
-            # retrieval loop so read_artifact/read_todo resolve same-turn. Any
+            # retrieval loop so read_artifact etc. resolve same-turn. Any
             # other (non-agentic) caller — source_mode None — stays single-shot.
             if batch_resp is not None:
                 # The collecting run: the poll above found the batch ended
@@ -4838,7 +5277,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 _ca_batch_submit(
                     self, llm_node, model_id, api_model, messages,
                     batch_keys[provider], key_type, model_config,
-                    ca_refs=ca_refs, provider=provider)
+                    ca_refs=ca_refs, provider=provider, user_id=user_id)
 
             if source_mode not in ("textmode", "voice"):
                 # Single-shot: one model call, one node, no within-turn loop.
@@ -4939,16 +5378,42 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     # won't double-inject. Errors and vanished artifacts are
                     # surfaced too, so the model isn't re-called blind.
                     injection_strings = []
+                    # Each version shown is pinned to the interim node
+                    # once (the pin's key is unique): a read and a
+                    # refused write can show the same one.
+                    pinned_here = set()
+
+                    def _pin_shown(a_type, a_id):
+                        if (a_type, a_id) in pinned_here:
+                            return
+                        pinned_here.add((a_type, a_id))
+                        db.session.add(NodeContextArtifact(
+                            node_id=current_node.id,
+                            artifact_type=a_type,
+                            artifact_id=a_id,
+                        ))
+
                     for tr in tool_results:
                         tr["status_reported"] = True
-                        if tr.get("name") not in RETRIEVAL_TOOLS:
+                        if tr.get("name") == "update_artifact":
+                            # The answer to the write: its version and what
+                            # it changed, so the model can build on its own
+                            # edit, or why nothing was saved (#604).
+                            report = _artifact_write_report(
+                                tr, user_id, licence=licence)
+                            injection_strings.append(
+                                f"[update_artifact: {report}]"
+                                if tr.get("status") == "success"
+                                else f"[{report}]")
+                            # A refused write: the current text to retry
+                            # against, this round only.
+                            current, current_row = _artifact_current_text(
+                                tr, user_id, licence=licence)
+                            if current is not None:
+                                injection_strings.append(current)
+                                _pin_shown("user_artifact", current_row.id)
+                        elif tr.get("name") not in RETRIEVAL_TOOLS:
                             injection_strings.append(_action_result_text(tr))
-                            # Echo what an artifact write actually changed
-                            # (diff vs. the previous version) so the model
-                            # can build on its own edit in the answer.
-                            echo = _artifact_update_echo(tr, licence=licence)
-                            if echo:
-                                injection_strings.append(echo)
                         elif tr.get("status") == "success":
                             text = _retrieval_injection_text(
                                 tr, user_id, with_labels=True,
@@ -4957,11 +5422,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                 injection_strings.append(text)
                                 a_type, a_id = _retrieval_pin(tr)
                                 if a_type and a_id:
-                                    db.session.add(NodeContextArtifact(
-                                        node_id=current_node.id,
-                                        artifact_type=a_type,
-                                        artifact_id=a_id,
-                                    ))
+                                    _pin_shown(a_type, a_id)
                             else:
                                 injection_strings.append(
                                     f"[{tr.get('name')}: the requested item "
@@ -5096,6 +5557,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                 prompt_cache_key=f"loore-t{thread_root_id}",
                                 cache_comparison_response_id=baseline_id,
                                 listener=listener,
+                                user_id=user_id,
                             ))
 
                     def _call_continuation():
@@ -5145,8 +5607,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             response = _call_continuation()
                             break
                         except Exception as cont_exc:
+                            # Nor a content-policy block: the same
+                            # request would be blocked again.
                             if (retry_delay is None
-                                    or _account_failure(cont_exc)):
+                                    or _account_failure(cont_exc)
+                                    or _policy_block(cont_exc)):
                                 raise
                             logger.warning(
                                 "Continuation call failed (%s); retrying "
@@ -5166,7 +5631,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             raise
         except Exception as e:
             error = e
-            error_message = str(e)
+            error_message = reply_error_text(e)
             if batch_entry is not None:
                 # The batch outlives this run. While it is submitted only
                 # the provider's verdict on the item (BatchItemFailed), a
@@ -5179,9 +5644,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # still submitted.
                 batch_id = batch_entry.get("batch_id")
                 if isinstance(e, MaxRetriesExceededError):
-                    error_message = (
-                        f"Batch {batch_id} had not ended after "
-                        f"{CA_BATCH_MAX_POLLS} polls")
+                    error_message = CA_BATCH_GAVE_UP_TEXT
                 elif not isinstance(e, (BatchItemFailed, FeedReplyError,
                                         EmptyTruncatedReplyError)):
                     logger.warning(
@@ -5203,13 +5666,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             # only __context__), Sentry groups this
                             # failure under the account failure's issue.
                             cap.__cause__ = e
-                            error_message = str(e)
+                            error_message = reply_error_text(e)
                         else:
-                            error_message = (
-                                f"Gave up on batch {batch_id} after "
-                                f"{CA_BATCH_MAX_POLLS} polls; last error: "
-                                f"{e}")
-            logger.error(f"LLM completion error for node {llm_node_id}: {error_message}", exc_info=True)
+                            error_message = CA_BATCH_GAVE_UP_TEXT
+            from backend.utils.error_privacy import describe_exception
+            logger.error(
+                "LLM completion error for node %s: %s", llm_node_id,
+                describe_exception(e), exc_info=True)
             # Fail the node in flight: mid-loop that's the continuation
             # placeholder. Failing llm_node here instead used to clobber the
             # completed interim step's status and strand the continuation at

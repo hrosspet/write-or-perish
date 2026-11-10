@@ -4,6 +4,7 @@ LLM Provider Abstraction Layer
 This module provides a unified interface for calling different LLM providers
 (OpenAI and Anthropic) with automatic format conversion.
 """
+import json
 import logging
 import re
 import socket
@@ -15,6 +16,11 @@ import openai
 from anthropic import Anthropic
 from openai import OpenAI
 from flask import current_app
+
+from backend.utils import soft_limit
+from backend.utils.llm_batch import BatchItemPolicyBlocked, is_policy_block
+from backend.utils.refusal_backoff import report_policy_block
+from backend.utils.safety_identifier import openai_safety_identifier
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +36,101 @@ DEFAULT_MAX_OUTPUT_TOKENS = 32000
 # it), which leaves a prompt sized near the window with little output room.
 TRUNCATED_STOP_REASONS = frozenset({"max_tokens",
                                     "model_context_window_exceeded"})
+
+# The tool channel in a conversation's messages (#604). The thread's
+# earlier artifact writes are replayed as the model's call and the
+# system's answer to it: the assistant message carries
+# {"type": "tool_use", "id", "name", "input"} blocks after its text, and
+# the user message after it carries {"type": "tool_result", "tool_use_id",
+# "content", "is_error"?} blocks. Anthropic takes the blocks as they are;
+# the Responses API takes them as function_call / function_call_output
+# items (responses_input). The Batch API path (utils/llm_batch) carries
+# none: only a Read goes through a batch, and a Read is never agentic.
+TOOL_BLOCK_TYPES = frozenset({"tool_use", "tool_result"})
+
+
+def block_text(block):
+    """The text one content block carries, for logs and size estimates:
+    a text block's text, a tool result's content, a tool call's input as
+    JSON."""
+    if not isinstance(block, dict):
+        return str(block)
+    btype = block.get("type")
+    if btype == "tool_result":
+        content = block.get("content")
+        if isinstance(content, list):
+            return "".join(block_text(b) for b in content)
+        return content or ""
+    if btype == "tool_use":
+        return json.dumps(block.get("input") or {})
+    return block.get("text", "")
+
+
+def message_text(msg):
+    """All the text of one message (see block_text)."""
+    content = msg.get("content")
+    if isinstance(content, list):
+        return "".join(block_text(b) for b in content)
+    return content or ""
+
+
+def responses_input(messages):
+    """Messages → Responses API input items. Text blocks become one
+    message item per run (input_text for user/system, output_text for
+    assistant); plain strings pass through as they are. A tool_use block
+    becomes a function_call item and a tool_result block a
+    function_call_output item, in the order they come."""
+    items = []
+    for msg in messages:
+        role = msg["role"]
+        content = msg["content"]
+        if not isinstance(content, list):
+            items.append({"role": role, "content": content})
+            continue
+        block_type = "output_text" if role == "assistant" else "input_text"
+        texts = []
+
+        def _flush():
+            if texts:
+                items.append({"role": role, "content": list(texts)})
+                texts.clear()
+
+        for block in content:
+            btype = block.get("type") if isinstance(block, dict) else None
+            if btype == "tool_use":
+                _flush()
+                items.append({
+                    "type": "function_call",
+                    "call_id": block["id"],
+                    "name": block["name"],
+                    "arguments": json.dumps(block.get("input") or {}),
+                })
+            elif btype == "tool_result":
+                _flush()
+                items.append({
+                    "type": "function_call_output",
+                    "call_id": block["tool_use_id"],
+                    "output": block_text(block),
+                })
+            else:
+                texts.append({
+                    "type": block_type,
+                    "text": (block["text"]
+                             if isinstance(block, dict) and "text" in block
+                             else str(block)),
+                })
+        _flush()
+    return items
+
+
+def _input_item_chars(item):
+    """Characters in one Responses input item (see responses_input)."""
+    content = item.get("content")
+    if isinstance(content, str):
+        return len(content)
+    if isinstance(content, list):
+        return sum(len(b.get("text", "")) for b in content)
+    return len(item.get("output") or item.get("arguments") or "")
 
 
 def is_empty_truncated(response):
@@ -282,6 +383,16 @@ def account_failure_kind(exc, model_call=True):
     return None
 
 
+def account_failure_kind_of_error(provider, status, error):
+    """account_failure_kind for an error that arrives as data rather than
+    as an exception: a batch request's error object ({type, code,
+    message, details}) and its HTTP status (None when there is none)."""
+    error = error if isinstance(error, dict) else {}
+    if provider == "anthropic":
+        return _anthropic_account_kind(status, error, model_call=True)
+    return _openai_account_kind(status, error.get("code"), error.get("type"))
+
+
 def provider_error_detail(exc):
     """What the provider said, for the admin alert: HTTP status, error
     type and code, message, request id. Account errors carry no user
@@ -389,6 +500,21 @@ def _openai_request_error(exc):
     the SDK raised from an event or a ``response.failed`` event."""
     return (isinstance(exc, (openai.BadRequestError, OpenAIStreamError))
             or _openai_mid_stream_error(exc))
+
+
+def policy_block_code(exc):
+    """The provider's code when *exc* is a request its content-policy
+    filter blocked (llm_batch.OPENAI_POLICY_BLOCK_CODES, e.g. bio_policy):
+    a live OpenAI call's 400 or failed stream, or a batch item's
+    BatchItemPolicyBlocked. None for any other error. Such a request is
+    never sent again automatically (Peter, 2026-11-04)."""
+    if isinstance(exc, BatchItemPolicyBlocked):
+        return exc.code
+    if isinstance(exc, (openai.APIError, OpenAIStreamError)):
+        code = getattr(exc, "code", None)
+        if is_policy_block(code):
+            return code
+    return None
 
 
 def _retryable_stream_error(exc):
@@ -528,7 +654,7 @@ def _keepalive_socket_options():
     return options
 
 
-def model_input_cap(model_cfg, max_output_tokens=None):
+def model_input_cap(model_cfg, max_output_tokens=None, price_tier=True):
     """Input tokens one prompt may carry on this model — the tightest of:
 
     - the context window minus the output reserve (both labs count input
@@ -539,12 +665,16 @@ def model_input_cap(model_cfg, max_output_tokens=None):
     - ``long_context_threshold``, the pricing tier above which the whole
       request is repriced (OpenAI: 272k input → ×2 input, ×1.5 output).
       The profile pipeline never plans a prompt across it (#259).
+      ``price_tier=False`` leaves it out, for a job that reads the whole
+      archive in one call (intentions).
     """
     cfg = model_cfg or {}
     out = min(max_output_tokens or DEFAULT_MAX_OUTPUT_TOKENS,
               cfg.get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS))
     cap = cfg.get("context_window", 200_000) - out
-    for key in ("max_input_tokens", "long_context_threshold"):
+    keys = ("max_input_tokens", "long_context_threshold") if price_tier \
+        else ("max_input_tokens",)
+    for key in keys:
         value = cfg.get(key)
         if value:
             cap = min(cap, int(value))
@@ -598,7 +728,8 @@ class LLMProvider:
                        output_schema: dict = None,
                        cache_comparison_response_id: str = None,
                        listener: StreamListener = None,
-                       output_schema_name: str = None) -> dict:
+                       output_schema_name: str = None,
+                       user_id: int = None) -> dict:
         """
         Generate a completion using the specified model.
 
@@ -619,6 +750,9 @@ class LLMProvider:
             listener: Optional StreamListener that gets the reply's text
                 and tool-call starts while it streams (#367). The return
                 value is the same with or without one.
+            user_id: The Loore user the call is made for. OpenAI calls
+                carry its safety identifier (utils/safety_identifier.py);
+                None sends the system one.
 
         Returns:
             Dict with:
@@ -654,7 +788,8 @@ class LLMProvider:
                 context_window=config.get("context_window"),
                 output_schema=output_schema,
                 cache_comparison_response_id=cache_comparison_response_id,
-                listener=listener, output_schema_name=output_schema_name)
+                listener=listener, output_schema_name=output_schema_name,
+                user_id=user_id)
         elif provider == "anthropic":
             return LLMProvider._call_anthropic(
                 api_model, messages, api_keys["anthropic"], max_tokens,
@@ -671,7 +806,8 @@ class LLMProvider:
                      output_schema: dict = None,
                      cache_comparison_response_id: str = None,
                      listener: StreamListener = None,
-                     output_schema_name: str = None) -> dict:
+                     output_schema_name: str = None,
+                     user_id: int = None) -> dict:
         """
         Call OpenAI via the Responses API (/v1/responses).
 
@@ -690,27 +826,16 @@ class LLMProvider:
             cache_comparison_response_id: baseline response id for Prompt
                 Cache Diagnostics (#348); the caller has checked the model
                 supports it
+            user_id: the Loore user the call is for: the request carries
+                its safety identifier, and a content-policy block is
+                reported under it
 
         Returns:
             Dict with content, total_tokens, and tool_calls
         """
-        # Convert chat-format messages to Responses input items: content
-        # block type is role-dependent (input_text for user/system,
-        # output_text for assistant); plain strings pass through as-is.
-        input_items = []
-        for msg in messages:
-            content = msg["content"]
-            if isinstance(content, list):
-                block_type = ("output_text" if msg["role"] == "assistant"
-                              else "input_text")
-                content = [
-                    {"type": block_type,
-                     "text": (block["text"]
-                              if isinstance(block, dict) and "text" in block
-                              else str(block))}
-                    for block in content
-                ]
-            input_items.append({"role": msg["role"], "content": content})
+        # Convert chat-format messages to Responses input items (text by
+        # role, and the tool channel's blocks as function call items).
+        input_items = responses_input(messages)
 
         kwargs = dict(
             model=model,
@@ -719,6 +844,11 @@ class LLMProvider:
             # The Responses API defaults to store=True (response persisted
             # on OpenAI's side); chat completions didn't store — keep that.
             store=False,
+            # Which Loore user the request is for, as a keyed hash, so
+            # OpenAI can act on that user rather than the whole account
+            # (Peter, 2026-11-04). A typed parameter from openai 1.99 on
+            # (the pin is >=2.44).
+            safety_identifier=openai_safety_identifier(user_id),
         )
         # #189: a stable per-conversation key improves OpenAI's automatic
         # prefix-cache routing (best-effort; no behavior change otherwise).
@@ -789,6 +919,11 @@ class LLMProvider:
         except (openai.APIError, OpenAIStreamError) as e:
             if not _openai_request_error(e):
                 raise
+            code = policy_block_code(e)
+            if code:
+                # Final: the callers never send it again on their own.
+                report_policy_block(user_id, code, model, "live call")
+                raise
             mapped = LLMProvider._openai_overflow_error(
                 e, input_items, context_window)
             if mapped is e:
@@ -798,7 +933,6 @@ class LLMProvider:
         content = ""
         refused = False
         tool_calls = []
-        import json
         for item in response.output:
             if item.type == "message":
                 for block in item.content:
@@ -889,11 +1023,7 @@ class LLMProvider:
         overflow = (code == "context_length_exceeded"
                     or "exceeds the context window" in error_msg)
         if overflow and context_window:
-            input_chars = sum(
-                (len(m["content"]) if isinstance(m["content"], str)
-                 else sum(len(b.get("text", "")) for b in m["content"]))
-                for m in input_items
-            )
+            input_chars = sum(_input_item_chars(m) for m in input_items)
             estimated_tokens = max(input_chars // 4, context_window + 1)
             return PromptTooLongError(estimated_tokens, context_window, e)
         return e
@@ -918,8 +1048,12 @@ class LLMProvider:
             if msg["role"] in ["user", "assistant"]:
                 content = msg["content"]
                 if isinstance(content, list) and len(content) > 0:
-                    if not (isinstance(content[0], dict)
-                            and "text" in content[0]):
+                    # Text blocks, and the tool channel's blocks (#604),
+                    # pass through as they are.
+                    first = content[0]
+                    if not (isinstance(first, dict)
+                            and ("text" in first
+                                 or first.get("type") in TOOL_BLOCK_TYPES)):
                         content = str(content)
                 anthropic_messages.append({
                     "role": msg["role"],
@@ -951,16 +1085,21 @@ class LLMProvider:
                 # No SDK retries: this is a sizing aid — better to return
                 # None fast (callers keep their overflow backstops) than
                 # stall a build behind connection-error backoff.
-                client = Anthropic(api_key=api_keys["anthropic"],
-                                   max_retries=0)
-                system_param, anthropic_messages = \
-                    LLMProvider._to_anthropic_params(messages)
-                return client.messages.count_tokens(
-                    model=config["api_model"],
-                    system=system_param,
-                    messages=anthropic_messages,
-                ).input_tokens
-            except Exception:
+                with soft_limit.passes():
+                    client = Anthropic(api_key=api_keys["anthropic"],
+                                       max_retries=0,
+                                       **soft_limit.client_kwargs(anthropic))
+                    system_param, anthropic_messages = \
+                        LLMProvider._to_anthropic_params(messages)
+                    return client.messages.count_tokens(
+                        model=config["api_model"],
+                        system=system_param,
+                        messages=anthropic_messages,
+                    ).input_tokens
+            except Exception as e:
+                # The task's soft time limit is not a failed count: it
+                # stops the task (utils/soft_limit).
+                soft_limit.reraise(e)
                 logger.warning(
                     "count_tokens failed for %s; caller falls back to its "
                     "estimate", model_id, exc_info=True)
@@ -974,20 +1113,15 @@ class LLMProvider:
                     enc = tiktoken.get_encoding("o200k_base")
                 total = 0
                 for m in messages:
-                    content = m.get("content")
-                    if isinstance(content, list):
-                        text = "".join(
-                            b.get("text", "") for b in content
-                            if isinstance(b, dict))
-                    else:
-                        text = content or ""
+                    text = message_text(m)
                     # disallowed_special=(): user corpora may contain
                     # literal special-token strings; count them as text
                     # rather than raising.
                     total += len(enc.encode(text, disallowed_special=()))
                     total += 4  # per-message wrapper overhead (approx.)
                 return total
-            except Exception:
+            except Exception as e:
+                soft_limit.reraise(e)
                 logger.warning(
                     "tiktoken count failed for %s; caller falls back to "
                     "its estimate", model_id, exc_info=True)
@@ -1025,10 +1159,7 @@ class LLMProvider:
 
         # Log the actual API call details
         total_input_chars = sum(
-            (len(m["content"]) if isinstance(m["content"], str)
-             else sum(len(b.get("text", "")) for b in m["content"]))
-            for m in anthropic_messages
-        )
+            len(message_text(m)) for m in anthropic_messages)
         logger.info(f"Anthropic API call: model={model}, num_messages={len(anthropic_messages)}, total_input_chars={total_input_chars}, max_tokens={max_tokens}")
 
         kwargs = dict(

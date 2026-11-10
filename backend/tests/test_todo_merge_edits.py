@@ -42,6 +42,7 @@ from backend.models import (  # noqa: E402
     APICostLog, Node, User, UserPrompt, UserTodo)
 from backend.utils import todo_merge_edits as tme  # noqa: E402
 from backend.utils.text_edits import apply_text_edits  # noqa: E402
+from backend.utils.error_privacy import TODO_MERGE_FAILED_TEXT  # noqa: E402
 
 FAKE_KEYS = {"openai": "fake-openai-key", "anthropic": "fake-anthropic-key"}
 
@@ -487,7 +488,8 @@ def test_one_call_asks_for_structured_output():
     assert call["model_id"] == "claude-opus-5.5"
     assert call["messages"] == MESSAGES
     assert call["kwargs"] == {"output_schema": tme.TODO_EDITS_SCHEMA,
-                              "output_schema_name": "todo_edits"}
+                              "output_schema_name": "todo_edits",
+                              "user_id": None}
     assert run.stats() == {
         "calls": 1, "retries": 0, "edits_applied": 1, "full_write": False,
         "format_errors": 0, "anchor_errors": 0, "rewrite_refusals": 0,
@@ -794,8 +796,23 @@ def test_task_provider_error_on_the_retry_logs_the_first_call(task):
     assert len(_versions(user)) == 1
     entry = _entry(node)
     assert entry["apply_status"] == "failed"
-    assert entry["apply_error"] == "upstream 503"
+    assert entry["apply_error"] == TODO_MERGE_FAILED_TEXT
     assert len(_cost_rows(user)) == 1
+
+
+@pytest.mark.parametrize("cls_name", [
+    "ProviderAccountError", "ModelUnavailableError",
+    "ProviderUnavailableError"])
+def test_task_keeps_the_text_written_for_the_user(task, cls_name):
+    from backend import llm_providers
+    cls = getattr(llm_providers, cls_name)
+    exc = cls("Anthropic") if cls_name == "ProviderUnavailableError" else cls()
+    user, node, _, _ = task.run(reply(("- [ ] swim", "x")), exc)
+
+    entry = _entry(node)
+    assert entry["apply_status"] == "failed"
+    assert entry["apply_error"] == str(exc)
+    assert entry["apply_error"] != TODO_MERGE_FAILED_TEXT
 
 
 def test_task_empty_list_takes_a_full_write(task):

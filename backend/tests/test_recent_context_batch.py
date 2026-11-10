@@ -465,6 +465,61 @@ def test_a_failed_item_stays_stale_and_is_retried_once_then_stops(
     assert _check(rc)["submitted"] == 1
 
 
+def test_an_expired_openai_batch_saves_and_bills_what_finished(
+        app, rc, world, monkeypatch):
+    """#419, through the real collect helper with the OpenAI SDK faked:
+    the batch expired with one request finished. OpenAI bills it and
+    returns it, so it is saved with a cost row on its owner; the request
+    that never ran fails unbilled, at once, like any failed item."""
+    import json
+    import types
+    from types import SimpleNamespace
+    from backend.utils import llm_batch
+    done = _user("done", preferred_model=OPENAI_MODEL)
+    late = _user("late", preferred_model=OPENAI_MODEL)
+    assert _check(rc)["submitted"] == 2
+    [job] = RecentContextBatchJob.query.all()
+    assert job.provider_key == "openai:gpt-6-astra"
+
+    client = MagicMock()
+    client.batches.retrieve.return_value = SimpleNamespace(
+        status="expired", created_at=1000, expired_at=1000 + 86400,
+        output_file_id="file-out", error_file_id="file-err",
+        request_counts=SimpleNamespace(total=2, completed=1, failed=1))
+    files = {
+        "file-out": [{"custom_id": f"recent_context_{done.id}", "response": {
+            "status_code": 200, "body": {
+                "choices": [{"message": {"content": "FINISHED SUMMARY"},
+                             "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1000,
+                          "completion_tokens": 100}}}}],
+        "file-err": [{"custom_id": f"recent_context_{late.id}",
+                      "response": None, "error": {
+                          "code": "batch_expired", "message": "not run"}}],
+    }
+    client.files.content.side_effect = lambda fid: SimpleNamespace(
+        content="".join(json.dumps(e) + "\n" for e in files[fid]).encode())
+    fake = types.ModuleType("openai")
+    fake.OpenAI = MagicMock(return_value=client)
+    monkeypatch.setitem(sys.modules, "openai", fake)
+    monkeypatch.setattr(rc, "batch_check_and_collect",
+                        llm_batch.batch_check_and_collect)
+
+    assert rc._collect_recent_context_batches() == {
+        "collected": 1, "abandoned": 0}
+
+    log = APICostLog.query.one()
+    assert (log.user_id, log.model_id) == (done.id, OPENAI_MODEL)
+    # 1000 in x $10 + 100 out x $50 = 15000 microdollars, halved for batch.
+    assert log.cost_microdollars == 7500
+    assert _shown_summary(done).endswith("FINISHED SUMMARY")
+    assert _shown_summary(late) is None
+    _db.session.expire_all()
+    outcomes = {i["user_id"]: (i["outcome"], i["billed"])
+                for i in RecentContextBatchJob.query.one().items}
+    assert outcomes == {done.id: ("saved", True), late.id: ("failed", False)}
+
+
 def test_an_empty_cut_off_result_is_billed_refused_and_backs_off(
         app, rc, world, monkeypatch):
     from backend.utils.refusal_backoff import REFUSED_REF
@@ -851,10 +906,10 @@ def test_a_check_between_claim_and_save_does_not_resubmit_the_user(
     inner = []
     real_apply = rc._apply_item
 
-    def a_check_runs_meanwhile(item, result, batch_id):
+    def a_check_runs_meanwhile(item, result, batch_id, **kw):
         assert user.id not in rc._users_in_pending_batches()
         inner.append(_check(rc))
-        return real_apply(item, result, batch_id)
+        return real_apply(item, result, batch_id, **kw)
     monkeypatch.setattr(rc, "_apply_item", a_check_runs_meanwhile)
 
     assert _collect_with(rc, monkeypatch, _summary(user))["collected"] == 1
@@ -1007,3 +1062,44 @@ def test_a_refusal_stop_is_reported_as_refused_not_cut_off(
                                  - timedelta(hours=2)})
         _db.session.commit()
     assert stops and stops[-1]["cause"] == "refused by the model"
+
+
+def test_a_policy_blocked_item_stops_the_user_for_good(
+        app, rc, world, monkeypatch):
+    """2026-11-04: an item the provider's content-policy filter blocked
+    is final. Nothing saved or billed, the block is recorded and
+    reported, and no later check sends it again: not after the 24 h an
+    outage waits, not after a new profile version."""
+    from backend.utils import refusal_backoff
+    reports = []
+    monkeypatch.setattr(refusal_backoff, "report_policy_block",
+                        lambda *a: reports.append(a))
+    user = _user("flagged")
+    _previous_summary(user)
+    assert _check(rc)["submitted"] == 1
+    # The request names its user (the OpenAI safety identifier).
+    [requests] = world["submitted"]
+    assert [r["user_id"] for reqs in requests.values() for r in reqs] == [
+        user.id]
+
+    class Collected(dict):
+        blocked = {f"recent_context_{user.id}": "bio_policy"}
+    monkeypatch.setattr(rc, "batch_check_and_collect",
+                        lambda batch_ids, api_keys: (Collected(), {}, {}))
+    rc._collect_recent_context_batches()
+
+    [job] = _job_for(user)
+    assert job.items[0]["outcome"] == "blocked"
+    assert job.items[0]["billed"] is False
+    assert job.items[0]["policy_code"] == "bio_policy"
+    assert _shown_summary(user) == "PREVIOUS CONTEXT"
+    [row] = APICostLog.query.filter_by(user_id=user.id).all()
+    assert row.request_ref == "policy_block:bio_policy"
+    assert row.cost_microdollars == 0
+    assert [r[:2] for r in reports] == [(user.id, "bio_policy")]
+
+    _age_failures(timedelta(hours=25))
+    assert _check(rc)["submitted"] == 0
+    _new_profile(user)
+    assert _check(rc)["submitted"] == 0
+    assert len(world["submitted"]) == 1

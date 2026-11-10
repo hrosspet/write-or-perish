@@ -107,7 +107,8 @@ def _cache_put(wrapped_dek_b64: str, dek: bytes):
 # 503/DEADLINE_EXCEEDED but NOT 502 BadGateway / 500 Internal, so a single
 # 502 crashed a 61k-node import mid-run (2026-08-27). We wrap every KMS
 # call in a bounded exponential backoff over the full transient set. The
-# stale-connection reconnect (DEADLINE_EXCEEDED) is folded in.
+# stale-connection reconnect (DEADLINE_EXCEEDED, and a connection KMS
+# closed: requests' ConnectionError, 2026-11-07) is folded in.
 _KMS_MAX_RETRIES = 6
 _KMS_BACKOFF_BASE = 0.5   # 0.5, 1, 2, 4, 8, 16s — ~30s total before giving up
 _TRANSIENT_MARKERS = (
@@ -122,7 +123,35 @@ _TRANSIENT_MARKERS = (
 _TRANSIENT_STATUS_RE = re.compile(r"^\s*50[0234]\b")
 
 
+def _is_connection_error(e):
+    """A dropped or refused connection under the REST transport: requests'
+    ConnectionError (its ConnectTimeout and SSLError too), which wraps
+    urllib3's ProtocolError around http.client.RemoteDisconnected when
+    KMS closes a keep-alive connection the client still holds
+    ("Connection aborted.", 2026-11-07), and the same errors raised bare.
+    Never Google's answer to the request, so always worth another try on
+    a fresh connection."""
+    import http.client
+    if isinstance(e, (ConnectionError, http.client.RemoteDisconnected)):
+        return True   # ConnectionResetError, BrokenPipeError, ... included
+    try:
+        import requests
+        if isinstance(e, requests.exceptions.ConnectionError):
+            return True
+    except ImportError:  # pragma: no cover — the REST transport needs it
+        pass
+    try:
+        import urllib3
+        if isinstance(e, urllib3.exceptions.ProtocolError):
+            return True
+    except ImportError:  # pragma: no cover
+        pass
+    return False
+
+
 def _is_transient_kms_error(e):
+    if _is_connection_error(e):
+        return True
     try:
         from google.api_core import exceptions as gexc
         if isinstance(e, (gexc.ServiceUnavailable, gexc.BadGateway,
@@ -148,7 +177,10 @@ def _kms_call(op, request):
             last = e
             if not _is_transient_kms_error(e):
                 raise
-            if "Deadline Exceeded" in str(e) or "DEADLINE_EXCEEDED" in str(e):
+            if ("Deadline Exceeded" in str(e) or "DEADLINE_EXCEEDED" in str(e)
+                    or _is_connection_error(e)):
+                # A new client, so a new HTTP session and connection pool:
+                # the stale connection is not tried again.
                 _reset_kms_client()
             if attempt == _KMS_MAX_RETRIES:
                 break
@@ -474,19 +506,37 @@ def encrypt_file_atomically(src, dest) -> str:
     the same *dest* (a chunk uploaded twice at once, #371) then never
     read, encrypt or delete each other's half-written file; the last move
     wins. *src* is gone afterwards either way. Returns the final path."""
+    out, final = stage_encrypted_file(src, dest)
+    try:
+        os.replace(out, final)
+    except Exception:
+        _remove_quietly(out)
+        raise
+    return final
+
+
+def stage_encrypted_file(src, dest):
+    """encrypt_file_atomically without the move: encrypt *src* (a file only
+    this caller writes) beside itself, and return ``(encrypted_path,
+    final_path)``. The caller moves it into place with ``os.replace`` when
+    it is ready, e.g. under a row lock that must not be held across the
+    KMS call (#388). *src* is gone afterwards; on failure nothing is
+    left."""
     src, dest = str(src), str(dest)
     try:
         out = encrypt_file(src)
-        final = dest + ('.enc' if out.endswith('.enc') else '')
-        os.replace(out, final)
-        return final
     except Exception:
         for leftover in (src, src + '.enc'):
-            try:
-                os.remove(leftover)
-            except OSError:
-                pass
+            _remove_quietly(leftover)
         raise
+    return out, dest + ('.enc' if out.endswith('.enc') else '')
+
+
+def _remove_quietly(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 def decrypt_file(filepath: str) -> bytes:

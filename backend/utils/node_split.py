@@ -20,6 +20,11 @@ from datetime import timedelta
 
 NODE_CHAR_CAP = 100_000
 
+# Each part of a split chain is created this long after the part before
+# it (here and in imports). split_chain_tip tells a part from a reply by
+# it: no reply is written 1 ms after the node it answers.
+PART_STEP = timedelta(milliseconds=1)
+
 
 def split_text_at_cap(text, cap=NODE_CHAR_CAP):
     """Split *text* into segments of <= cap chars at newline boundaries.
@@ -85,7 +90,7 @@ def split_node_into_chain(node, segments=None):
             token_count=approximate_token_count(seg),
         )
         part.set_content(seg)
-        part.created_at = node.created_at + timedelta(milliseconds=i)
+        part.created_at = node.created_at + PART_STEP * i
         db.session.add(part)
         db.session.flush()
         parts.append(part)
@@ -95,3 +100,29 @@ def split_node_into_chain(node, segments=None):
         child.parent_id = prev.id
 
     return parts
+
+
+def split_chain_tip(node):
+    """The last part of the split chain that *node* begins or belongs
+    to, or *node* itself when no part follows it.
+
+    A long entry is saved as a serial chain, and its reply belongs under
+    the last part: the reply's context walks up from its parent, so only
+    there does it read the whole entry. A part is a live child by the
+    same author, of the same type, created exactly PART_STEP after its
+    parent. Reads ``children`` (prefetched on the thread view, one query
+    per part elsewhere); no content is read.
+    """
+    current = node
+    while current.created_at is not None:
+        nxt = next(
+            (c for c in current.children
+             if c.deleted_at is None
+             and c.user_id == current.user_id
+             and c.node_type == current.node_type
+             and c.created_at == current.created_at + PART_STEP),
+            None)
+        if nxt is None:
+            break
+        current = nxt
+    return current

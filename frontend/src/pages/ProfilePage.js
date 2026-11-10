@@ -3,6 +3,7 @@ import MarkdownBody from '../components/MarkdownBody';
 import api from '../api';
 import VersionHistoryDrawer from '../components/VersionHistoryDrawer';
 import ArtifactsNav from '../components/ArtifactsNav';
+import BubbleKebabMenu from '../components/BubbleKebabMenu';
 import SpeakerIcon from '../components/SpeakerIcon';
 import RegenerateTtsDialog from '../components/RegenerateTtsDialog';
 import { useUser } from '../contexts/UserContext';
@@ -75,10 +76,26 @@ export default function ProfilePage() {
   const [genProgress, setGenProgress] = useState(0);
   const [genData, setGenData] = useState(null);
 
-  const fetchProfile = useCallback(async () => {
+  // The user's edit wins (#420): while the editor holds text that differs
+  // from the version it started from, a version that lands (a build saves one
+  // per chunk) is held here instead of replacing the editor's text or the
+  // version the edit is based on. Cancel or Save then shows the latest.
+  const [newerProfile, setNewerProfile] = useState(null);
+  const editStateRef = useRef({ editing: false, dirty: false, baseId: null });
+
+  const fetchProfile = useCallback(async ({ force = false } = {}) => {
     try {
       const res = await api.get('/dashboard');
       const latestProfile = res.data.latest_profile;
+      const { editing: isEditing, dirty, baseId } = editStateRef.current;
+      if (!force && isEditing && dirty) {
+        if (latestProfile && latestProfile.id !== baseId) {
+          setNewerProfile(latestProfile);
+        }
+        setLoading(false);
+        return;
+      }
+      setNewerProfile(null);
       setProfile(latestProfile);
       if (latestProfile) {
         setEditContent(latestProfile.content);
@@ -93,9 +110,21 @@ export default function ProfilePage() {
   // Id of the version on screen, for the chunk-landed check below without
   // re-subscribing on every profile change.
   const shownProfileIdRef = useRef(null);
+  const newerIdRef = useRef(null);
+  useEffect(() => {
+    newerIdRef.current = newerProfile?.id ?? null;
+  }, [newerProfile]);
   useEffect(() => {
     shownProfileIdRef.current = profile?.id ?? null;
   }, [profile]);
+
+  useEffect(() => {
+    editStateRef.current = {
+      editing,
+      dirty: editing && editContent !== (profile?.content ?? ''),
+      baseId: profile?.id ?? null,
+    };
+  }, [editing, editContent, profile]);
 
   useEffect(() => {
     const onProgress = (e) => {
@@ -105,7 +134,8 @@ export default function ProfilePage() {
         setGenProgress(d.progress || 0);
         setGenData(d.message ? { message: d.message, source: d.source } : null);
         // A chunked build saves a version per chunk; show each as it lands.
-        if (d.latestProfileId && d.latestProfileId !== shownProfileIdRef.current) {
+        if (d.latestProfileId && d.latestProfileId !== shownProfileIdRef.current
+            && d.latestProfileId !== newerIdRef.current) {
           fetchProfile();
         }
         return;
@@ -169,7 +199,7 @@ export default function ProfilePage() {
         await api.post('/profile', { content: editContent });
       }
       setEditing(false);
-      await fetchProfile();
+      await fetchProfile({ force: true });
     } catch (err) {
       console.error('Failed to save profile:', err);
     }
@@ -209,7 +239,7 @@ export default function ProfilePage() {
   const handleRevert = async (id) => {
     try {
       await api.post(`/profile/revert/${id}`);
-      await fetchProfile();
+      await fetchProfile({ force: true });
       setDrawerOpen(false);
       setSelectedVersionId(null);
       setVersionContent(null);
@@ -219,10 +249,48 @@ export default function ProfilePage() {
     }
   };
 
+  // Cancel leaves the editor and shows the latest version, including one that
+  // landed while the user was editing.
+  const cancelEdit = useCallback(() => {
+    setEditing(false);
+    if (newerProfile) {
+      setProfile(newerProfile);
+      setEditContent(newerProfile.content);
+      setNewerProfile(null);
+    }
+  }, [newerProfile]);
+
   // Cmd+Return / Ctrl+Enter saves the profile while editing (#129).
   useSubmitShortcut(editTextareaRef, () => handleSave(), editing && !saving && !!editContent.trim());
   // Esc cancels the edit (matches the Cancel button).
-  useEscapeKey(() => setEditing(false), editing && !saving);
+  useEscapeKey(cancelEdit, editing && !saving);
+
+  // Edit from the version badge or the ⋮ menu: the same form.
+  const openEditor = () => {
+    if (!profile) return;
+    setEditing(true);
+    setEditContent(profile.content);
+  };
+
+  // Generation progress indicator: in the meta line once a profile
+  // exists, on its own before the first one.
+  const progress = (generating || failMessage) && (
+    <span style={{
+      fontFamily: 'var(--sans)',
+      fontSize: '0.85rem',
+      fontWeight: 300,
+      color: failMessage ? 'var(--text-muted)' : 'var(--accent)',
+      animation: generating ? 'pulse 2s ease-in-out infinite' : 'none',
+    }}>
+      {failMessage || (genData?.message
+        // A batch step has no within-step percentage; its label
+        // already reads "Chunk n of ~N".
+        ? (genData.source === 'batch'
+          ? genData.message
+          : `${genData.message} \u00b7 ${genProgress || 0}%`)
+        : 'Starting generation...')}
+    </span>
+  );
 
   if (loading) {
     return (
@@ -258,10 +326,12 @@ export default function ProfilePage() {
         )}
 
         {profile && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: '12px', flex: '1 1 auto', flexWrap: 'wrap',
+          }}>
             <button
               onClick={() => {
-                if (editing) { handleSave(); } else { setEditing(true); setEditContent(profile.content); }
+                if (editing) { handleSave(); } else { openEditor(); }
               }}
               style={{
                 background: 'none', border: 'none', cursor: 'pointer', padding: 0,
@@ -287,27 +357,23 @@ export default function ProfilePage() {
             >
               history
             </button>
+            {progress}
+            {/* ⋮ with Edit only, like a built-in artifact (#603; Peter:
+                the profile behaves like Predictions, editable, never
+                deleted). */}
+            {!editing && (
+              <BubbleKebabMenu
+                inline
+                visible
+                items={[{ label: 'Edit', action: openEditor, color: 'var(--text-primary)' }]}
+                style={{ marginLeft: 'auto' }}
+              />
+            )}
           </div>
         )}
 
-        {/* Generation progress indicator */}
-        {(generating || failMessage) && (
-          <span style={{
-            fontFamily: 'var(--sans)',
-            fontSize: '0.85rem',
-            fontWeight: 300,
-            color: failMessage ? 'var(--text-muted)' : 'var(--accent)',
-            animation: generating ? 'pulse 2s ease-in-out infinite' : 'none',
-          }}>
-            {failMessage || (genData?.message
-              // A batch step has no within-step percentage; its label
-              // already reads "Chunk n of ~N".
-              ? (genData.source === 'batch'
-                ? genData.message
-                : `${genData.message} \u00b7 ${genProgress || 0}%`)
-              : 'Starting generation...')}
-          </span>
-        )}
+        {/* Before the first profile there is no meta line to sit in. */}
+        {!profile && progress}
       </div>
 
       {/* Meta line */}
@@ -396,6 +462,16 @@ export default function ProfilePage() {
 
       {editing && (
         <div>
+          {newerProfile && (
+            <p role="status" style={{
+              fontFamily: 'var(--sans)', fontSize: '0.8rem', fontWeight: 300,
+              color: 'var(--accent)', margin: '0 0 12px 0',
+            }}>
+              A newer version of your profile was saved while you were editing.
+              Your text is unchanged. Saving keeps it as a new version; cancel
+              to see the newer one.
+            </p>
+          )}
           <textarea
             ref={editTextareaRef}
             value={editContent}
@@ -435,7 +511,7 @@ export default function ProfilePage() {
               {saving ? 'Saving...' : 'Save'}
             </button>
             <button
-              onClick={() => setEditing(false)}
+              onClick={cancelEdit}
               style={{
                 padding: '8px 20px',
                 background: 'none',

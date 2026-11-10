@@ -27,6 +27,7 @@ from backend.models import Node, ExternalItem, FeedPick, APICostLog
 from backend.utils import llm_batch
 from backend.utils.llm_batch import BatchItemFailed, BatchItemCancelled
 from backend.utils.cost import llm_cost_log_fields as _real_cost_fields
+from backend.utils.error_privacy import REPLY_FAILED_TEXT
 
 POLL = _llm_task_mod.CA_BATCH_POLL_SECONDS
 MAX_POLLS = _llm_task_mod.CA_BATCH_MAX_POLLS
@@ -117,7 +118,7 @@ def _script(monkeypatch, tmp_path, collect, render=None, cancel=None):
     # The harness stubs llm_providers, which makes this constant a mock.
     monkeypatch.setattr(_llm_task_mod, "DEFAULT_MAX_OUTPUT_TOKENS", 10000)
     calls = {"collect": [], "submit": [], "cancel": [], "chain": 0,
-             "render": 0}
+             "render": 0, "submit_user_ids": []}
 
     def _cancel(key, batch_id):
         calls["cancel"].append((key, batch_id))
@@ -132,8 +133,9 @@ def _script(monkeypatch, tmp_path, collect, render=None, cancel=None):
     monkeypatch.setattr(llm_batch, "openai_batch_collect_one", _collect)
 
     def _submit(key, custom_id, api_model, messages, max_tokens,
-                output_schema=None):
+                output_schema=None, user_id=None):
         calls["submit"].append(custom_id)
+        calls["submit_user_ids"].append(user_id)
         return "batch_9"
     monkeypatch.setattr(llm_batch, "openai_batch_submit_one", _submit)
 
@@ -214,6 +216,8 @@ def test_submit_records_the_key_type(app, monkeypatch, tmp_path):  # noqa: F811
         _run(task, alice, read, llm_node)
 
     assert calls["submit"] == [f"node-{llm_node.id}"]
+    # The request names the user it is for (OpenAI safety identifier).
+    assert calls["submit_user_ids"] == [alice.id]
     assert calls["collect"] == []
     assert calls["render"] == 1
     assert task.retries == [{"countdown": POLL, "max_retries": MAX_POLLS}]
@@ -268,7 +272,38 @@ def test_provider_verdict_fails_the_node(app, monkeypatch, tmp_path):  # noqa: F
     assert task.retries == []
     node = _reload(llm_node.id)
     assert node.llm_task_status == "failed"
-    assert "expired" in node.llm_task_error
+    assert node.llm_task_error == REPLY_FAILED_TEXT
+
+
+def test_policy_block_fails_the_node_is_reported_and_not_resubmitted(
+        app, monkeypatch, tmp_path):  # noqa: F811
+    """2026-11-04: the provider's content-policy filter blocked the item.
+    The node fails like any verdict, nothing submits the turn again, and
+    the block is reported with tags only."""
+    from backend.utils import refusal_backoff
+    from backend.utils.llm_batch import BatchItemPolicyBlocked
+    reports = []
+    monkeypatch.setattr(refusal_backoff, "report_policy_block",
+                        lambda *a: reports.append(a))
+
+    def blocked():
+        raise BatchItemPolicyBlocked(
+            "The provider's content-policy filter blocked batch item "
+            "node-1 (bio_policy)", code="bio_policy")
+    calls = _script(monkeypatch, tmp_path, collect=blocked)
+    alice, read, llm_node = _read_thread()
+    task = _Task()
+
+    with pytest.raises(BatchItemPolicyBlocked):
+        _run(task, alice, read, llm_node)
+
+    assert task.retries == [] and calls["submit"] == []
+    node = _reload(llm_node.id)
+    assert node.llm_task_status == "failed"
+    # The owner reads the plain failure text, never the exception's (#582);
+    # the block's code goes to the report.
+    assert node.llm_task_error == REPLY_FAILED_TEXT
+    assert [(r[0], r[1]) for r in reports] == [(alice.id, "bio_policy")]
 
 
 def test_poll_cap_fails_the_node(app, monkeypatch, tmp_path):  # noqa: F811
@@ -281,7 +316,7 @@ def test_poll_cap_fails_the_node(app, monkeypatch, tmp_path):  # noqa: F811
 
     node = _reload(llm_node.id)
     assert node.llm_task_status == "failed"
-    assert f"{MAX_POLLS} polls" in node.llm_task_error
+    assert node.llm_task_error == _llm_task_mod.CA_BATCH_GAVE_UP_TEXT
 
 
 def test_poll_error_at_the_cap_fails_the_node_with_the_last_error(app, monkeypatch, tmp_path):  # noqa: F811
@@ -295,8 +330,8 @@ def test_poll_error_at_the_cap_fails_the_node_with_the_last_error(app, monkeypat
 
     node = _reload(llm_node.id)
     assert node.llm_task_status == "failed"
-    assert "provider unreachable" in node.llm_task_error
-    assert f"{MAX_POLLS} polls" in node.llm_task_error
+    assert "provider unreachable" not in node.llm_task_error
+    assert node.llm_task_error == _llm_task_mod.CA_BATCH_GAVE_UP_TEXT
 
 
 def _openai_status_error(status, code):
@@ -399,7 +434,7 @@ def test_error_without_a_batch_still_fails_the_node(app, monkeypatch, tmp_path):
     assert calls["submit"] == []
     node = _reload(llm_node.id)
     assert node.llm_task_status == "failed"
-    assert "snapshot directory missing" in node.llm_task_error
+    assert node.llm_task_error == REPLY_FAILED_TEXT
 
 
 def test_truncated_reply_fails_at_the_first_collect(app, monkeypatch, tmp_path):  # noqa: F811
@@ -422,7 +457,7 @@ def test_truncated_reply_fails_at_the_first_collect(app, monkeypatch, tmp_path):
     assert calls["submit"] == []
     node = _reload(llm_node.id)
     assert node.llm_task_status == "failed"
-    assert "cut off" in node.llm_task_error
+    assert node.llm_task_error == REPLY_FAILED_TEXT
 
 
 def test_unparseable_reply_fails_at_the_first_collect(app, monkeypatch, tmp_path):  # noqa: F811
@@ -440,7 +475,7 @@ def test_unparseable_reply_fails_at_the_first_collect(app, monkeypatch, tmp_path
     assert calls["render"] == 1
     node = _reload(llm_node.id)
     assert node.llm_task_status == "failed"
-    assert "not JSON" in node.llm_task_error
+    assert node.llm_task_error == REPLY_FAILED_TEXT
 
 
 def test_refused_reply_fails_at_the_first_collect_naming_the_model(app, monkeypatch, tmp_path):  # noqa: F811
@@ -462,9 +497,9 @@ def test_refused_reply_fails_at_the_first_collect_naming_the_model(app, monkeypa
     assert calls["submit"] == []
     node = _reload(llm_node.id)
     assert node.llm_task_status == "failed"
-    assert "refused the Read" in node.llm_task_error
     assert "gpt-5" in node.llm_task_error
-    assert "not JSON" not in node.llm_task_error
+    assert "Choose another model" in node.llm_task_error
+    assert "try again" not in node.llm_task_error
 
 
 # ── the collecting run ───────────────────────────────────────────────────
@@ -814,7 +849,7 @@ def test_cancel_nobody_asked_for_fails_the_node(app, monkeypatch, tmp_path):  # 
     assert calls["cancel"] == []
     node = _reload(llm_node.id)
     assert node.llm_task_status == "failed"
-    assert "cancelled" in node.llm_task_error
+    assert node.llm_task_error == REPLY_FAILED_TEXT
     assert _entry(node)["status"] == "submitted"
 
 
@@ -935,7 +970,7 @@ def test_empty_render_still_asks_for_the_feed_shape(app, monkeypatch, tmp_path):
     schemas = []
 
     def _submit(key, custom_id, api_model, messages, max_tokens,
-                output_schema=None):
+                output_schema=None, user_id=None):
         schemas.append(output_schema)
         return "batch_9"
     monkeypatch.setattr(llm_batch, "openai_batch_submit_one", _submit)

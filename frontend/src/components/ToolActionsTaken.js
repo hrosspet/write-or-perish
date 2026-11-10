@@ -1,5 +1,8 @@
-import React from "react";
+import React, { useState } from "react";
 import { Link } from "react-router-dom";
+import api from "../api";
+import { refineWordDiffs, collapseUnchanged } from "../utils/diff";
+import DiffRows from "./DiffRows";
 
 // What an AI reply's actions read as for someone who is not its owner.
 // The server sends them each action's name and outcome only (no search
@@ -64,12 +67,14 @@ function OwnerToolLabel({ tc }) {
       )}
       {tc.name === 'update_ai_preferences' && 'Preferences updated'}
       {tc.name === 'update_artifact' && (
-        <>{tc.created ? 'Created' : 'Updated'} artifact{tc.kind ? <> <Link to={`/artifacts/${tc.kind}`} style={{ color: 'var(--accent)', textDecoration: 'none' }}><code style={{ fontSize: '0.95em' }}>{tc.kind}</code></Link></> : ''}</>
+        <>{tc.created ? 'Created' : 'Updated'} artifact{tc.kind ? <> <Link to={`/artifacts/${tc.kind}`} style={{ color: 'var(--accent)', textDecoration: 'none' }}><code style={{ fontSize: '0.95em' }}>{tc.kind}</code></Link></> : ''}{tc.status === 'success' && tc.version ? ` ${tc.created ? 'as' : 'to'} v${tc.version}` : ''}</>
       )}
-      {tc.name === 'read_artifact' && (
+      {tc.name === 'read_artifact' && tc.kind !== 'todo' && (
         <>Read artifact{tc.kind ? <> <Link to={`/artifacts/${tc.kind}`} style={{ color: 'var(--accent)', textDecoration: 'none' }}><code style={{ fontSize: '0.95em' }}>{tc.kind}</code></Link></> : ''}</>
       )}
-      {tc.name === 'read_todo' && (
+      {/* The todo list is read with read_artifact since #218; read_todo is
+          the tool before it, still in older replies. */}
+      {(tc.name === 'read_todo' || (tc.name === 'read_artifact' && tc.kind === 'todo')) && (
         <>Read <Link to="/todo" style={{ color: 'var(--accent)', textDecoration: 'none' }}>todo list</Link></>
       )}
       {tc.name === 'semantic_search' && (
@@ -91,9 +96,63 @@ function OwnerToolLabel({ tc }) {
   );
 }
 
+const toggleStyle = {
+  background: 'none', border: 'none', cursor: 'pointer', padding: 0,
+  marginLeft: '8px', fontFamily: 'var(--sans)', fontSize: '0.75rem',
+  fontWeight: 300, color: 'var(--accent)',
+};
+
+const noteStyle = { color: 'var(--text-muted)', fontSize: '0.78rem', margin: 0 };
+
+// "Show changes" on an artifact write, for the reply's owner (#604): the
+// diff of the version the write saved against the one before it, built by
+// the server from the ids the write stored (GET
+// /artifacts/versions/<id>/changes) and fetched the first time it opens.
+function ArtifactWriteChanges({ tc }) {
+  const [open, setOpen] = useState(false);
+  const [rows, setRows] = useState(null);
+  const [error, setError] = useState(null);
+
+  const toggle = async () => {
+    const next = !open;
+    setOpen(next);
+    if (!next || rows) return;
+    setError(null);
+    try {
+      const res = await api.get(`/artifacts/versions/${tc.artifact_id}/changes`, {
+        params: tc.previous_artifact_id ? { from: tc.previous_artifact_id } : undefined,
+      });
+      setRows(collapseUnchanged(refineWordDiffs(res.data.lines || []), 2));
+    } catch (e) {
+      setError(e?.response?.status === 404
+        ? 'This version is no longer available.'
+        : "Couldn't load the changes. Try again.");
+    }
+  };
+
+  return (
+    <>
+      <button type="button" onClick={toggle} aria-expanded={open} style={toggleStyle}>
+        {open ? 'Hide changes' : 'Show changes'}
+      </button>
+      {open && (
+        <div style={{
+          marginTop: '6px', paddingTop: '6px', borderTop: '1px solid var(--border)',
+          maxHeight: '320px', overflowY: 'auto',
+        }}>
+          {error ? <p style={noteStyle}>{error}</p>
+            : rows ? <DiffRows rows={rows} />
+            : <p style={noteStyle}>Loading...</p>}
+        </div>
+      )}
+    </>
+  );
+}
+
 // "▸ Actions taken (N)" under an AI reply and, expanded, one line per
 // action. *detailed* is true for the reply's owner, whose payload carries
-// every field; anyone else gets the shared line (sharedToolLabel).
+// every field; anyone else gets the shared line (sharedToolLabel). The
+// owner can open what an artifact write changed (ArtifactWriteChanges).
 export default function ToolActionsTaken({ toolCallsMeta, detailed, expanded, onToggle }) {
   const visibleTools = (Array.isArray(toolCallsMeta) ? toolCallsMeta : [])
     .filter(tc => tc && (!tc.name || !tc.name.startsWith('_')));
@@ -121,6 +180,8 @@ export default function ToolActionsTaken({ toolCallsMeta, detailed, expanded, on
             }}>
               {tc.status === 'success' ? '✓' : '✗'}{' '}
               {detailed ? <OwnerToolLabel tc={tc} /> : sharedToolLabel(tc)}
+              {detailed && tc.name === 'update_artifact' && tc.status === 'success'
+                && tc.artifact_id && <ArtifactWriteChanges tc={tc} />}
             </div>
           ))}
         </div>

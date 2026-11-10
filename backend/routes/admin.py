@@ -64,7 +64,8 @@ def _profile_status_map():
         last = latest.get(user_id)
         u = users_by_id.get(user_id)
         in_flight = bool(u and (u.profile_batch_pending or u.profile_needs_full_regen))
-        at_rest = last is not None and (
+        at_rest = last is not None and last.generation_type not in (
+            "window", "window_skip", "window_update", "group") and (
             last.generation_type == "integration"
             or last.parent_profile_id is None
             # The user's own version is not a pipeline step: an edit would
@@ -114,16 +115,26 @@ def _profile_backoff_map():
     """{user_id: {state, refusals, until}} for users whose profile job is
     held by the refusal backoff (#368, utils/refusal_backoff.py): "waiting"
     after one cut-off output in a row (until = when the next try is
-    allowed), "stopped" after two. Users not held are left out. Two
-    queries: the refused profile cost rows (rare) and each of their
-    users' newest saved version."""
+    allowed), "stopped" after two, "blocked" (with ``code``) after a
+    content-policy block. Users not held are left out. Two queries: the
+    refused profile cost rows (rare) and each of their users' newest
+    saved version; plus one per user with a policy block (rarer)."""
     from backend.models import UserProfile
     from backend.utils import refusal_backoff as rb
+    blocked = {}
+    for (uid,) in db.session.query(APICostLog.user_id).filter(
+            APICostLog.request_type.in_(rb.PROFILE_REQUEST_TYPES),
+            APICostLog.request_ref.like(
+                rb.POLICY_BLOCK_REF_PREFIX + "%")).distinct().all():
+        code = rb.policy_block_for(uid, rb.PROFILE_REQUEST_TYPES)
+        if code:
+            blocked[uid] = {"state": "blocked", "code": code,
+                            "refusals": 0, "until": None}
     refused = db.session.query(APICostLog.user_id, APICostLog.created_at).filter(
         APICostLog.request_type.in_(rb.PROFILE_REQUEST_TYPES),
         APICostLog.request_ref == rb.REFUSED_REF).all()
     if not refused:
-        return {}
+        return blocked
     uids = {uid for uid, _ in refused}
     last_saved = dict(db.session.query(
         UserProfile.user_id, func.max(UserProfile.created_at)).filter(
@@ -144,6 +155,7 @@ def _profile_backoff_map():
         if now < until:
             out[uid] = {"state": "waiting", "refusals": n,
                         "until": iso_utc(until)}
+    out.update(blocked)
     return out
 
 
@@ -153,11 +165,20 @@ def _intentions_status_map():
     pending (persisted ProfileBatchJob — survives restarts); "failed" when
     the latest run gave up (overflow twice / batch error) or its output was
     refused (cut off before any text, batch or sync — its cost row is
-    marked refused, #368) and no artifact version postdates it; else
-    "complete" when at least one intentions artifact version exists."""
+    marked refused, #368) and no artifact version postdates it; "kept"
+    when the latest run's result was dropped because the user's version was
+    current (#412) and no version postdates that; else "complete" when at
+    least one intentions artifact version exists."""
     from backend.models import ProfileBatchJob, UserArtifact
+    from backend.utils.intentions_versions import KEPT_USER_EDIT_REF
     from backend.utils.refusal_backoff import REFUSED_REF
-    pending, gave_up_at = {}, {}
+    pending, ended = {}, {}
+
+    def run_ended(uid, when, state):
+        # The latest run that ended without saving a version decides.
+        if when is not None and (uid not in ended or ended[uid][0] < when):
+            ended[uid] = (when, state)
+
     for job in ProfileBatchJob.query.order_by(ProfileBatchJob.submitted_at).all():
         for item in job.items:
             if item.get("kind") != "intentions":
@@ -168,14 +189,17 @@ def _intentions_status_map():
                     "submitted_at": iso_utc(job.submitted_at),
                     "resubmitted": bool(item.get("resubmitted"))}
             elif item.get("gave_up"):
-                gave_up_at[item["user_id"]] = job.submitted_at
-    for uid, when in db.session.query(
-            APICostLog.user_id, func.max(APICostLog.created_at)).filter(
+                run_ended(item["user_id"], job.submitted_at, "failed")
+            elif item.get("kept_user_edit"):
+                run_ended(item["user_id"],
+                          job.collected_at or job.submitted_at, "kept")
+    for uid, ref, when in db.session.query(
+            APICostLog.user_id, APICostLog.request_ref,
+            func.max(APICostLog.created_at)).filter(
             APICostLog.request_type == "intentions_infer",
-            APICostLog.request_ref == REFUSED_REF).group_by(
-            APICostLog.user_id).all():
-        if uid not in gave_up_at or gave_up_at[uid] < when:
-            gave_up_at[uid] = when
+            APICostLog.request_ref.in_((REFUSED_REF, KEPT_USER_EDIT_REF))
+    ).group_by(APICostLog.user_id, APICostLog.request_ref).all():
+        run_ended(uid, when, "failed" if ref == REFUSED_REF else "kept")
     rows = db.session.query(
         UserArtifact.user_id, func.count(UserArtifact.id),
         func.max(UserArtifact.created_at),
@@ -185,11 +209,11 @@ def _intentions_status_map():
     out = {uid: {"state": "complete", "versions": n,
                  "last_created_at": iso_utc(last)}
            for uid, n, last in rows}
-    for uid, when in gave_up_at.items():
+    for uid, (when, state) in ended.items():
         newer = last_artifact.get(uid)
         if newer is None or newer < when:
             entry = out.setdefault(uid, {"versions": 0, "last_created_at": None})
-            entry["state"] = "failed"
+            entry["state"] = state
     for uid, flight in pending.items():
         entry = out.setdefault(uid, {"versions": 0, "last_created_at": None})
         entry["state"] = "generating"
@@ -377,7 +401,9 @@ def build_profile(user_id):
     output the build waits, after two it is stopped — unless the JSON body
     has ``"force": true``, which the admin sends after confirming the
     dialog the Users tab shows for a held user. A saved version then ends
-    the stop."""
+    the stop. A content-policy block's stop (refusal_backoff.policy_block_for)
+    is lifted by nothing else: only this confirmed override sends the
+    blocked request again."""
     user = User.query.get_or_404(user_id)
     # Same refusal as pre-fill: this button usually follows one (#346).
     # Checked here only: the seeder it dispatches also serves the user's
@@ -393,6 +419,11 @@ def build_profile(user_id):
     db.session.commit()
     from backend.tasks.profile_batch import seed_profile_batch_for_user
     if force:
+        # The one action that sends a content-policy-blocked profile
+        # request again (Peter, 2026-11-04): the admin confirmed it.
+        from backend.utils import refusal_backoff
+        refusal_backoff.lift_policy_block(
+            user.id, "profile_batch", refusal_backoff.PROFILE_REQUEST_TYPES)
         seed_profile_batch_for_user.delay(user.id, ignore_backoff=True)
     else:
         seed_profile_batch_for_user.delay(user.id)
@@ -414,8 +445,19 @@ def infer_intentions_route(user_id):
             saved within minutes — for when the person is waiting).
       cancel_pending: true — cancel this user's in-flight intentions
             batch first (provider-side + job row), then start the run.
+      replace_version_id, replace_changed_at: the version_id and
+            changed_at the 409 below named, sent after the admin confirmed
+            replacing that version in the dialog.
     Returns {"task_id", "mode", "cancelled"} — poll
-    /admin/prefill/status/<task_id>."""
+    /admin/prefill/status/<task_id>.
+
+    The user's edit wins (#412): when the current intentions version was
+    written by the user or a conversation, the run is refused with a 409
+    (code "intentions_edited") naming the version, who made it and when it
+    last changed, never its text, unless the body names that version and
+    that change. The run then carries the version's id and stored state,
+    which the task checks again at start and at save. Checked before
+    cancel_pending, so a refused click cancels nothing."""
     user = User.query.get_or_404(user_id)
     refusal = _prefill_refusal_response(user)
     if refusal:
@@ -424,12 +466,46 @@ def infer_intentions_route(user_id):
     mode = data.get("mode") or "batch"
     if mode not in ("batch", "sync"):
         return jsonify({"error": "mode must be 'batch' or 'sync'."}), 400
+    from backend.utils.intentions_versions import (
+        changed_at, confirmation, protected_version)
+    kept = protected_version(user.id)
+    confirmed = None
+    if kept is not None:
+        replace_id = data.get("replace_version_id")
+        if not (replace_id == kept.id and not isinstance(replace_id, bool)
+                and data.get("replace_changed_at") == iso_utc(changed_at(kept))):
+            return _intentions_edited_response(kept)
+        confirmed = confirmation(kept)
     from backend.tasks.intentions import infer_intentions, cancel_pending_intentions
     cancelled = {"cancelled": 0, "errors": []}
     if data.get("cancel_pending"):
         cancelled = cancel_pending_intentions(user.id)
-    task = infer_intentions.delay(user.id, mode)
+    task = infer_intentions.delay(user.id, mode, confirmed)
     return jsonify({"task_id": task.id, "mode": mode, **cancelled}), 202
+
+
+def _intentions_edited_response(version):
+    """The 409 the admin panel shows as the "Replace their intentions?"
+    dialog (#412): that the user's version exists, how it came about and
+    when it last changed. Metadata only: admins never read the user's
+    text."""
+    from backend.utils.intentions_versions import changed_at, changed_by
+    by = changed_by(version)
+    what = {
+        "user": "edited their intentions",
+        "revert": "restored an earlier version of their intentions",
+        "conversation": "had their intentions updated in a conversation",
+    }[by]
+    last = changed_at(version)
+    when = f" on {last:%Y-%m-%d}" if last else ""
+    return jsonify({
+        "error": (f"This user {what}{when}. Inferring would replace "
+                  "their version."),
+        "code": "intentions_edited",
+        "version_id": version.id,
+        "changed_by": by,
+        "changed_at": iso_utc(last),
+    }), 409
 
 
 @admin_bp.route("/users/<int:user_id>/cancel_intentions", methods=["POST"])
@@ -1210,13 +1286,35 @@ def create_poll():
         return jsonify({"error": f"Invalid data_source. Allowed: "
                                  f"{list(Poll.DATA_SOURCES)}"}), 400
 
+    # Optional audience (#411): usernames; empty or absent = everyone.
+    audience, unknown = [], []
+    usernames = data.get("audience_usernames") or []
+    if not isinstance(usernames, list):
+        return jsonify({"error": "audience_usernames must be a list."}), 400
+    for name in usernames:
+        name = str(name).strip().lstrip("@")
+        if not name:
+            continue
+        user = User.query.filter_by(username=name).first()
+        if user is None:
+            unknown.append(name)
+        elif user.id not in audience:
+            audience.append(user.id)
+    if usernames and not audience and not unknown:
+        # A filled field with no usable name must not become "everyone".
+        return jsonify({"error": "No usernames in the audience field."}), 400
+    if unknown:
+        return jsonify({"error": "No such user: " + ", ".join(unknown)}), 400
+
     poll = Poll(question=question, created_by=current_user.id,
-                model_id=model_id, data_source=data_source)
+                model_id=model_id, data_source=data_source,
+                audience_user_ids=audience or None)
     db.session.add(poll)
     db.session.commit()
     return jsonify({"id": poll.id, "question": poll.question,
                     "model_id": poll.model_id,
                     "data_source": poll.data_source,
+                    "audience_size": len(audience),
                     "created_at": iso_utc(poll.created_at)}), 201
 
 
@@ -1234,6 +1332,11 @@ def list_polls():
     for poll_id, status, n in rows:
         counts.setdefault(poll_id, {})[status] = n
 
+    all_polls = Poll.query.order_by(Poll.created_at.desc()).all()
+    audience_ids = {i for p in all_polls for i in (p.audience_user_ids or [])}
+    names = dict(db.session.query(User.id, User.username).filter(
+        User.id.in_(audience_ids)).all()) if audience_ids else {}
+
     return jsonify({
         # The app-wide default, so the create-poll selector can preselect
         # a CONCRETE model instead of an ambiguous "default" option.
@@ -1244,12 +1347,15 @@ def list_polls():
             "question": p.question,
             "model_id": p.model_id,
             "data_source": p.data_source,
+            # Who it goes to (#411): usernames only, never content.
+            "audience": ([names.get(i) for i in p.audience_user_ids]
+                         if p.audience_user_ids else None),
             "created_at": iso_utc(p.created_at),
             "closed_at": iso_utc(p.closed_at),
             "sent_count": counts.get(p.id, {}).get("sent", 0),
             "declined_count": counts.get(p.id, {}).get("declined", 0),
         }
-        for p in Poll.query.order_by(Poll.created_at.desc()).all()
+        for p in all_polls
     ]}), 200
 
 

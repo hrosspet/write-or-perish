@@ -475,6 +475,39 @@ class TestBuildProfile:
         assert r.status_code == 202 and r.json["force"] is True
         delay.assert_called_once_with(held.id, ignore_backoff=True)
 
+    def test_force_flag_lifts_a_content_policy_block(self, app, users,
+                                                     monkeypatch):
+        """2026-11-04: the confirmed Build profile is the one action that
+        sends a blocked profile request again; without the flag the
+        block stays."""
+        from unittest.mock import MagicMock
+        from backend.tasks import profile_batch as pb
+        from backend.utils import refusal_backoff as rb
+        admin = users["renamed_admin"]
+        held = User(username="blocked", approved=True)
+        _db.session.add(held); _db.session.commit()
+        monkeypatch.setattr(rb, "report_policy_block", lambda *a: None)
+        rb.record_policy_block(held.id, "profile_batch", "m", "bio_policy",
+                               "test")
+        monkeypatch.setattr(pb.seed_profile_batch_for_user, "delay",
+                            MagicMock())
+        client = app.test_client()
+        _login(client, admin.id)
+        rows = {r["username"]: r
+                for r in client.get("/api/admin/users").json["users"]}
+        assert rows["blocked"]["profile_backoff"] == {
+            "state": "blocked", "code": "bio_policy", "refusals": 0,
+            "until": None}
+        client.post(f"/api/admin/users/{held.id}/build_profile")
+        assert rb.policy_block_for(held.id, rb.PROFILE_REQUEST_TYPES) == \
+            "bio_policy"
+        client.post(f"/api/admin/users/{held.id}/build_profile",
+                    json={"force": True})
+        assert rb.policy_block_for(held.id, rb.PROFILE_REQUEST_TYPES) is None
+        rows = {r["username"]: r
+                for r in client.get("/api/admin/users").json["users"]}
+        assert rows["blocked"]["profile_backoff"] is None
+
     def test_users_payload_reports_the_profile_backoff(self, app, users):
         """profile_backoff: null when not held, "waiting" (with until)
         after one refusal in the last hour, "stopped" after two; a saved

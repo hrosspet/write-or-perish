@@ -354,6 +354,28 @@ def send_spend_alert_email(to_email, provider, spend_usd, limit_usd, threshold):
           f"Failed to send spend alert email to {to_email}")
 
 
+def send_disk_alert_email(to_email, percent, used_gb, total_gb, free_gb,
+                          critical=False):
+    """Alert the admin that the server disk is nearly full
+    (backend/utils/disk_alert.py)."""
+    text_body = (
+        f"Server disk usage alert\n\n"
+        f"Used: {percent:.0f}% ({used_gb:,.1f} GB of {total_gb:,.1f} GB)\n"
+        f"Free: {free_gb:,.1f} GB\n\n"
+        f"Free space or grow the disk before it fills; a full disk stops "
+        f"the database and uploads.\n"
+    )
+    html_body = _card(
+        f"Server disk at {percent:.0f}%",
+        [f'<strong style="color: #c4956a;">{used_gb:,.1f} GB</strong> of '
+         f'<strong style="color: #ede8dd;">{total_gb:,.1f} GB</strong> used; '
+         f'{free_gb:,.1f} GB free.'])
+    _send(to_email, f"Loore: server disk at {percent:.0f}%",
+          text_body, html_body,
+          f"Disk alert email sent to {to_email} ({percent:.0f}%)",
+          f"Failed to send disk alert email to {to_email}")
+
+
 def send_provider_account_alert_email(to_email, provider, kind, model,
                                       detail, window_seconds,
                                       key_role="unknown", environment=None,

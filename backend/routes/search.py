@@ -303,16 +303,15 @@ def semantic_search():
     """Semantic search over the user's own archive (#155).
 
     Embeds the query and ranks the user's NodeEmbedding rows by cosine
-    similarity (brute-force scan — fine at alpha scale). Only AI-readable
-    nodes are embedded, so ai_usage='none' content never appears here
-    (keyword search still covers it).
+    similarity (rank_embeddings: in Postgres with pgvector on, otherwise a
+    chunked scan in Python). Only AI-readable nodes are embedded, so
+    ai_usage='none' content never appears here (keyword search still
+    covers it).
     """
     from flask import current_app
     from backend.models import NodeEmbedding
     from backend.utils.api_keys import get_openai_chat_key
-    from backend.utils.embeddings import (
-        EMBEDDING_SCAN_CHUNK, embed_texts, top_k_similar,
-    )
+    from backend.utils.embeddings import embed_texts, rank_embeddings
 
     q = request.args.get("q", "").strip()
     limit = min(request.args.get("limit", 20, type=int), 50)
@@ -358,12 +357,12 @@ def semantic_search():
                 emb_query = emb_query.filter(Node.created_at >= dt_from)
             if dt_to is not None:
                 emb_query = emb_query.filter(Node.created_at <= dt_to)
-        # Streamed in chunks (server-side cursor on Postgres): this runs
-        # inside a gevent worker, so a buffered full-archive scan would
-        # block every request on the hub, not just this one.
-        rows = emb_query.yield_per(EMBEDDING_SCAN_CHUNK)
-        ranked = top_k_similar(
-            query_vector, rows, k=limit, min_score=min_score)
+        # Never a buffered full-archive scan: this runs inside a gevent
+        # worker, where one would block every request on the hub, not just
+        # this one (rank_embeddings streams in chunks or ranks in SQL).
+        ranked = rank_embeddings(
+            query_vector, emb_query, NodeEmbedding, k=limit,
+            min_score=min_score)
 
     # External references (#155 component 2) — included unless opted out
     include_external = external_only or request.args.get(
@@ -382,9 +381,9 @@ def semantic_search():
                 ext_query = ext_query.filter(_EXTERNAL_DATE >= dt_from)
             if dt_to is not None:
                 ext_query = ext_query.filter(_EXTERNAL_DATE <= dt_to)
-        ext_rows = ext_query.yield_per(EMBEDDING_SCAN_CHUNK)
-        ext_ranked = top_k_similar(
-            query_vector, ext_rows, k=limit, min_score=min_score)
+        ext_ranked = rank_embeddings(
+            query_vector, ext_query, ExternalItemEmbedding, k=limit,
+            min_score=min_score)
         items_by_id = {
             i.id: i for i in ExternalItem.query.filter(
                 ExternalItem.id.in_([iid for iid, _ in ext_ranked]),
@@ -455,9 +454,7 @@ def semantic_neighbors():
     sweep hasn't reached it).
     """
     from backend.models import NodeEmbedding
-    from backend.utils.embeddings import (
-        EMBEDDING_SCAN_CHUNK, top_k_similar, unpack_vector,
-    )
+    from backend.utils.embeddings import rank_embeddings, unpack_vector
 
     node_id = request.args.get("node_id", type=int)
     limit = min(request.args.get("limit", 5, type=int), 20)
@@ -482,9 +479,9 @@ def semantic_neighbors():
     ).filter(
         NodeEmbedding.user_id == current_user.id,
         NodeEmbedding.node_id != node_id,
-    ).yield_per(EMBEDDING_SCAN_CHUNK)
-
-    ranked = top_k_similar(query_vector, rows, k=limit, min_score=0.0)
+    )
+    ranked = rank_embeddings(query_vector, rows, NodeEmbedding, k=limit,
+                             min_score=0.0)
     nodes_by_id = {
         n.id: n for n in Node.query.filter(
             Node.id.in_([nid for nid, _ in ranked]),

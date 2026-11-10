@@ -1,17 +1,22 @@
 """
-Audio storage helpers: building paths under the storage root, and moving
-a streaming draft session's audio and transcript rows to the node it
-becomes (so the original recording plays in the Log view).
+Audio storage helpers: building paths under the storage root, finding and
+deleting a node's audio folders, and moving a streaming draft session's
+audio and transcript rows to the node it becomes (so the original
+recording plays in the Log view).
 """
+import logging
 import os
 import pathlib
 import re
 import shutil
+from typing import NamedTuple
 
 from flask import current_app
 
 from backend.extensions import db
 from backend.models import Draft, NodeTranscriptChunk
+
+logger = logging.getLogger(__name__)
 
 AUDIO_STORAGE_ROOT = pathlib.Path(
     os.environ.get("AUDIO_STORAGE_PATH", "data/audio")
@@ -57,6 +62,204 @@ def storage_path(root, *parts) -> pathlib.Path:
     return path
 
 
+# ── A node's audio on disk ──────────────────────────────────────────────
+#
+# A node's audio is kept in folders named by the node's author, which for
+# an AI reply is the model's account (backend/routes/media.py,
+# ``_node_id_in``):
+#
+# - ``user/<author>/node/<node id>/``: an uploaded recording
+#   (``original.*``) and generated speech (``tts.*``, ``tts_chunk_*``,
+#   also a reply spoken while it is written);
+# - ``nodes/<author>/<node id>/``: a recording's chunks, moved there from
+#   its streaming session when the recording became the node;
+# - ``streaming/<author>/<session id>/``: the chunks of a recording made
+#   with the node streaming endpoint, until its transcription finishes.
+#
+# Each file is ``.enc`` when encrypted at rest and plain otherwise.
+
+class FolderDeletion(NamedTuple):
+    """What delete_folders did."""
+    files: int = 0       # files (and symlinks, never followed) deleted
+    bytes: int = 0       # their size on disk
+    failed: int = 0      # files that could not be deleted
+    errors: tuple = ()   # the failures' error types, e.g. ("PermissionError",)
+    skipped: int = 0     # folders left alone: a symlink, or not inside the root
+
+
+def node_audio_dirs(node, root=None) -> list:
+    """The folders that hold *node*'s audio (see above), for the node's
+    author and its human owner (the same pair the user purge uses, so an
+    AI reply's folder under the model account is found). Folders that
+    do not exist are included; delete_folders passes over them."""
+    root = AUDIO_STORAGE_ROOT if root is None else root
+    dirs = []
+    for author in sorted({node.user_id, node.human_owner_id} - {None}):
+        dirs.append(storage_path(root, "user", author, "node", node.id))
+        dirs.append(storage_path(root, "nodes", author, node.id))
+    session_id = getattr(node, "streaming_session_id", None)
+    if node.user_id is not None and is_storage_id(session_id):
+        # A server uuid4 made for this node (nodes.py streaming/init).
+        dirs.append(storage_path(root, "streaming", node.user_id, session_id))
+    return dirs
+
+
+def _inside(real_root, path) -> bool:
+    """True when *path*, with symlinks resolved, is strictly inside
+    *real_root* (itself already resolved)."""
+    try:
+        real = os.path.realpath(path)
+        return (real != real_root
+                and os.path.commonpath([real_root, real]) == real_root)
+    except (OSError, ValueError):
+        return False
+
+
+def delete_folders(dirs, root=None) -> FolderDeletion:
+    """Delete every file under *dirs*, then the emptied folders.
+
+    Reads names and sizes only, never a file's content. Symlinks are
+    never followed: one inside a folder is removed as a link (its target
+    stays), and a folder that is itself a symlink, or that resolves
+    outside the storage *root* (default AUDIO_STORAGE_ROOT), is left
+    alone and counted as skipped. A missing folder or file is not an
+    error. A file that cannot be deleted is counted as failed with its
+    error type, and the rest goes on; the caller decides what to log
+    (paths hold ids only) and when to try again."""
+    root = AUDIO_STORAGE_ROOT if root is None else root
+    real_root = os.path.realpath(root)
+    totals = [0, 0, 0]   # files, bytes, failed
+    errors = set()
+    skipped = 0
+    for d in dirs:
+        d = str(d)
+        if not os.path.lexists(d):
+            continue
+        if (os.path.islink(d) or not os.path.isdir(d)
+                or not _inside(real_root, d)):
+            skipped += 1
+            continue
+        _empty_folder(d, totals, errors)
+        for dirpath, _, _ in os.walk(d, topdown=False, followlinks=False):
+            try:
+                os.rmdir(dirpath)
+            except OSError:
+                pass   # not empty: a file in it failed, and is counted
+    return FolderDeletion(totals[0], totals[1], totals[2],
+                          tuple(sorted(errors)), skipped)
+
+
+def delete_files(paths, root=None) -> FolderDeletion:
+    """Delete the single files *paths*, as delete_folders does for the
+    files under a folder: names and sizes only, a symlink removed as a
+    link. A path that is a folder, or whose folder resolves outside the
+    storage *root*, is left alone and counted as skipped."""
+    root = AUDIO_STORAGE_ROOT if root is None else root
+    real_root = os.path.realpath(root)
+    totals = [0, 0, 0]   # files, bytes, failed
+    errors = set()
+    skipped = 0
+    for p in paths:
+        p = str(p)
+        if not os.path.lexists(p):
+            continue
+        if ((os.path.isdir(p) and not os.path.islink(p))
+                or not _inside(real_root, os.path.dirname(p))):
+            skipped += 1
+            continue
+        _unlink(p, totals, errors)
+    return FolderDeletion(totals[0], totals[1], totals[2],
+                          tuple(sorted(errors)), skipped)
+
+
+def _unlink(path, totals, errors):
+    """Unlink one file or symlink, adding to *totals* (files, bytes,
+    failed) and *errors*. A file already gone is not an error."""
+    try:
+        n_bytes = os.lstat(path).st_size
+        os.unlink(path)
+    except FileNotFoundError:
+        return
+    except OSError as e:
+        totals[2] += 1
+        errors.add(type(e).__name__)
+        return
+    totals[0] += 1
+    totals[1] += n_bytes
+
+
+def _empty_folder(folder, totals, errors):
+    """Unlink every file and symlink under *folder* (never following a
+    symlink), adding to *totals* (files, bytes, failed) and *errors*."""
+    for dirpath, dirnames, filenames in os.walk(folder, followlinks=False):
+        links = [n for n in dirnames
+                 if os.path.islink(os.path.join(dirpath, n))]
+        for name in filenames + links:
+            _unlink(os.path.join(dirpath, name), totals, errors)
+
+
+def speech_folder(entity, root=None) -> pathlib.Path:
+    """The folder that holds a Node's, UserProfile's or ExternalItem's
+    generated speech (tasks/tts.py): ``user/<user id>/node|profile|item/
+    <id>/``, named by the row's user_id (a reply's author is the model
+    account)."""
+    from backend.models import Node, UserProfile, ExternalItem
+    root = AUDIO_STORAGE_ROOT if root is None else root
+    kinds = ((Node, "node"), (UserProfile, "profile"), (ExternalItem, "item"))
+    for model, kind in kinds:
+        if isinstance(entity, model):
+            return storage_path(root, "user", entity.user_id, kind, entity.id)
+    raise TypeError(f"speech_folder: unsupported entity {type(entity)!r}")
+
+
+def media_rel_path(url):
+    """The path under the storage root that a stored ``/media/...`` URL
+    names, without its query (``?v=``) and as stored (URLs never carry
+    the ``.enc`` of an encrypted file); None for anything else."""
+    if not isinstance(url, str) or not url.startswith("/media/"):
+        return None
+    rel = url[len("/media/"):].split("?", 1)[0]
+    return rel or None
+
+
+def mark_speech_superseded(entity, urls=(), root=None) -> None:
+    """Set the modification time of *entity*'s speech folder, and of
+    every folder its old speech *urls* point into (profile versions
+    share files), to now. The nightly sweep (backend/utils/audio_sweep.py)
+    leaves a folder alone for a day after anything in it changed, so the
+    speech this invalidated goes a day later at the earliest, and a
+    playback of it started before is not cut. Best effort: a folder that
+    does not exist is passed over, and an error is logged and never fails
+    the edit."""
+    root = AUDIO_STORAGE_ROOT if root is None else root
+    real_root = os.path.realpath(root)
+    try:
+        folders = {str(speech_folder(entity, root))}
+    except (ValueError, TypeError):
+        folders = set()
+    for url in urls:
+        rel = media_rel_path(url)
+        if rel is not None:
+            folders.add(os.path.dirname(os.path.join(str(root), rel)))
+    for folder in sorted(folders):
+        if (os.path.islink(folder) or not os.path.isdir(folder)
+                or not _inside(real_root, folder)):
+            continue
+        try:
+            os.utime(folder)
+        except OSError as e:
+            logger.warning(
+                "Could not mark the speech of %s %s superseded (%s)",
+                type(entity).__name__, getattr(entity, "id", None),
+                type(e).__name__)
+
+
+def delete_node_audio(node, root=None) -> FolderDeletion:
+    """Delete *node*'s audio folders (node_audio_dirs) and every file in
+    them, encrypted or plain, recordings and generated speech alike."""
+    return delete_folders(node_audio_dirs(node, root), root)
+
+
 def clear_tts_artifacts(entity) -> bool:
     """Invalidate any generated TTS audio for a Node, UserProfile or
     ExternalItem (saved reference).
@@ -68,9 +271,13 @@ def clear_tts_artifacts(entity) -> bool:
     resurfacing the old audio), and resets the async-task tracking
     columns so the UI shows TTS as not-yet-generated.
 
-    DB-only, mirroring the row cleanup in tasks/node_cleanup.py — on-disk
-    audio files are left as orphans (issue #66 "Option 1": require an
-    explicit regenerate; file GC is a separate follow-up).
+    The files stay for now, so a playback that started before the edit
+    plays on: this only marks the speech folder changed
+    (mark_speech_superseded), and the nightly sweep
+    (backend/utils/audio_sweep.py) deletes the speech files no row points
+    at once the folder has been unchanged for a day. A regeneration
+    overwrites the same file names, as before; the chunks it no longer
+    makes go the same way.
 
     Returns True if anything was cleared (caller still owns the commit).
     """
@@ -86,6 +293,8 @@ def clear_tts_artifacts(entity) -> bool:
         raise TypeError(f"clear_tts_artifacts: unsupported entity {type(entity)!r}")
 
     had_audio = bool(entity.audio_tts_url)
+    old_urls = [entity.audio_tts_url] + [
+        u for (u,) in db.session.query(TTSChunk.audio_url).filter_by(**fk)]
     deleted = TTSChunk.query.filter_by(**fk).delete(synchronize_session=False)
 
     entity.audio_tts_url = None
@@ -94,6 +303,7 @@ def clear_tts_artifacts(entity) -> bool:
     entity.tts_task_status = None
     entity.tts_task_progress = 0
 
+    mark_speech_superseded(entity, old_urls)
     return had_audio or bool(deleted)
 
 

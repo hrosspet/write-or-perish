@@ -26,7 +26,9 @@ by its author and text, with no number (render_read_reply_for_model), and
 the user's marks on it come in a note of their own, so the next read knows
 what was already surfaced, read and rated. The numbers of a read's list
 belong to that read alone: the next one, a day later or after the reader
-marked something read, numbers its tweets afresh.
+marked something read, may number its tweets afresh (a live read again
+on the same export keeps the list, see below, but the model is told the
+same either way).
 
 Turns of a read thread (2026-09-19, after the second feedback round):
 the day of tweets is fed to the model only for a READ — the reply that
@@ -40,7 +42,13 @@ read — any tweet row marked read, a pick, a bookmark or a clip — is
 dropped from the render before the model sees it (seen_tweet_ids); a
 bookmark or clip not marked read stays in, and each render's
 numbering is pinned on the reply (FeedRender) so a batch collected hours
-later resolves its numbers against what was actually sent.
+later resolves its numbers against what was actually sent. A live read
+again on the export of the read before it renders that read's list
+unchanged (list_to_keep, #511): the list is the large part of the
+request, and a byte-identical one is read from the provider's prompt
+cache. The tweets in it the reader has read since are named by number
+in a note at the end of the prompt (read_since_note), and a pick of one
+is dropped on collect.
 """
 import json
 import logging
@@ -60,15 +68,26 @@ CA_TWEETS_CHAT_STUB = (
 # The user turn that closes a read-further request (the Read button
 # anywhere in a read thread, or a reply asked for directly under a read
 # reply). It replaces the generic "[continue]".
-CA_READ_AGAIN_TURN = (
+_READ_AGAIN_HEAD = (
     "Read further: go through today's tweets again against everything "
     "above — your earlier picks, my marks on them, and whatever I have "
     "written since. Your earlier picks are quoted above by author and "
     "text; they carry no numbers, as the numbers belong to today's list "
-    "alone. Tweets I have read are out of that list; an unread earlier "
-    "pick is yours to repeat if it still stands and is in today's list, "
-    "by its number there. Beyond that, find what else is worth my time. "
-    "Answer in the same shape, a verdict and the picks.")
+    "alone. ")
+_READ_AGAIN_TAIL = (
+    "an unread earlier pick is yours to repeat if it still stands and is "
+    "in today's list, by its number there. Beyond that, find what else is "
+    "worth my time. Answer in the same shape, a verdict and the picks.")
+CA_READ_AGAIN_TURN = (
+    _READ_AGAIN_HEAD + "Tweets I have read are out of that list; "
+    + _READ_AGAIN_TAIL)
+# The same request after read_since_note (#511): a kept list still holds
+# the tweets read since it was made, so that sentence alone says so. Only
+# in the closing turn, after the cached prefix.
+CA_READ_AGAIN_TURN_KEPT = (
+    _READ_AGAIN_HEAD + "Tweets I had read before that list was made are "
+    "out of it, and the ones named above are in it but are not "
+    "candidates; " + _READ_AGAIN_TAIL)
 
 # tool_calls_meta entry name on a placeholder the Read button created
 # inside a read thread: the task reads it as "this turn is a read", not
@@ -294,6 +313,70 @@ def seen_tweet_ids(user_id):
                     ExternalItem.read_at.isnot(None))
             .all())
     return {r[0] for r in rows if r[0]}
+
+
+def list_to_keep(node_chain, ca_node, reply_ids, user_id, export_id, days,
+                 scope):
+    """The tweet ids of the list a read again keeps (#511): the list
+    pinned on the newest earlier read reply of *user_id*'s in this
+    thread (after *ca_node*, the newest read prompt; *reply_ids* from
+    read_reply_ids) that was rendered from the same export, window and
+    scope. Empty when there is none: the day is rendered afresh, minus
+    everything the reader has read.
+
+    The list sits in the read prompt's message, before every later turn,
+    and is most of the request. Rendering it again minus the tweets the
+    reader read in between (a verdict on a pick marks it read) renumbers
+    every tweet after the first one dropped, so a Glean again after a
+    rating missed the prompt cache from the list on. Kept, it is
+    byte-identical: the render is deterministic for an export and an
+    exclusion set, and with the kept ids taken out of the exclusions the
+    same tweets are left out as before (unless the reader has cleared a
+    read mark since: then that tweet comes back, as it should). The tweets
+    of the list read since go in a note instead (read_since_note)."""
+    from backend.models import FeedRender
+    if not export_id:
+        return frozenset()
+    candidates = []
+    after_prompt = False
+    for n in node_chain:
+        if n is ca_node:
+            after_prompt = True
+            continue
+        if (after_prompt and n.deleted_at is None and n.id in reply_ids
+                and (n.human_owner_id or n.user_id) == user_id):
+            candidates.append(n.id)
+    if not candidates:
+        return frozenset()
+    rows = {r.node_id: r for r in FeedRender.query.filter(
+        FeedRender.node_id.in_(candidates)).all()}
+    for node_id in reversed(candidates):
+        row = rows.get(node_id)
+        if (row is not None and row.export_id == export_id
+                and row.days == int(days) and row.scope == (scope or "all")):
+            return frozenset(i for i in (row.tweet_ids or "").split(",") if i)
+    return frozenset()
+
+
+def read_numbers(refs, seen):
+    """The numbers in a render (*refs*) whose tweet the reader has read
+    (*seen*, seen_tweet_ids): only a kept list (list_to_keep) has any.
+    Never a pick: they go in read_since_note, and the collect drops a
+    pick of one."""
+    return sorted(n for n, ref in refs.items()
+                  if str(ref.get("tweet_id")) in seen)
+
+
+def read_since_note(numbers):
+    """The closing note's line for the tweets of a kept list the reader
+    has read since it was made (#511), or None. They are named by their
+    number in the list, which is how the model names a pick."""
+    if not numbers:
+        return None
+    listed = ", ".join(f"#{n}" for n in numbers)
+    return ("[The user has read these tweets of today's list since it was "
+            f"made: {listed}. Like every tweet the user has read, they are "
+            "not candidates: do not pick them.]")
 
 
 def record_feed_render(node, stats, refs, days=1, scope="all"):

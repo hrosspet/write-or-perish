@@ -63,6 +63,10 @@ def start_conversation():
     """
     Start a new conversation.
     Body: { content: string, model?: string, ai_usage?: string, privacy_level?: string }
+
+    Content above the per-node cap is saved as a chain of parts under the
+    system node. `user_node_id` is the first part and `tip_id` the last,
+    where the reply goes (the same id for an entry that wasn't split).
     """
     data = request.get_json() or {}
     content = data.get("content")
@@ -82,18 +86,6 @@ def start_conversation():
 
     if not content or not content.strip():
         return jsonify({"error": "Content is required"}), 400
-
-    # Agentic conversations don't auto-split; the UI routes oversized
-    # content through the plain entry path (which splits server-side).
-    from backend.utils.node_split import NODE_CHAR_CAP
-    if len(content) > NODE_CHAR_CAP:
-        return jsonify({
-            "error": (
-                f"Content exceeds the {NODE_CHAR_CAP:,}-character "
-                f"per-entry limit."
-            ),
-            "char_cap": NODE_CHAR_CAP,
-        }), 422
 
     if privacy_level not in VALID_PRIVACY_LEVELS:
         return jsonify({"error": f"Invalid privacy_level: {privacy_level}"}), 400
@@ -142,8 +134,15 @@ def start_conversation():
     from backend.utils.glean import stamp_glean_entry
     stamp_glean_entry(system_node, current_user, data.get("entry"))
 
-    # 2. User message node
+    # 2. User message node. Content above the per-node cap is split into
+    # a serial chain of parts (the first keeps this node's id), as
+    # POST /nodes/ and save-as-node do; the reply goes under the last
+    # part, the tip, so its context reads the whole entry.
     from backend.utils.tokens import approximate_token_count
+    from backend.utils.node_split import (
+        split_text_at_cap, split_node_into_chain,
+    )
+    segments = split_text_at_cap(content)
     user_node = Node(
         user_id=current_user.id,
         human_owner_id=current_user.id,
@@ -151,11 +150,13 @@ def start_conversation():
         node_type="user",
         privacy_level=privacy_level,
         ai_usage=ai_usage,
-        token_count=approximate_token_count(content),
+        token_count=approximate_token_count(segments[0]),
     )
-    user_node.set_content(content)
+    user_node.set_content(segments[0])
     db.session.add(user_node)
     db.session.flush()
+    parts = split_node_into_chain(user_node, segments=segments)
+    tip_node = parts[-1] if parts else user_node
 
     # Spend cap: keep the system + user nodes (the user's writing is never
     # blocked), but skip the LLM placeholder and signal the frontend to show
@@ -167,6 +168,7 @@ def start_conversation():
         return jsonify({
             "conversation_id": system_node.id,
             "user_node_id": user_node.id,
+            "tip_id": tip_node.id,
             "spend_capped": True,
         }), 202
 
@@ -180,7 +182,7 @@ def start_conversation():
         # escaped as a 500 and the entry was rolled back.
         try:
             llm_node, task_id = create_llm_placeholder(
-                user_node.id, model_id, current_user.id,
+                tip_node.id, model_id, current_user.id,
                 privacy_level=privacy_level,
                 ai_usage=ai_usage,
                 source_mode='textmode',
@@ -195,12 +197,14 @@ def start_conversation():
             return jsonify({
                 "conversation_id": system_node.id,
                 "user_node_id": user_node.id,
+                "tip_id": tip_node.id,
                 "llm_error": str(e),
             }), 202
         db.session.commit()
         return jsonify({
             "conversation_id": system_node.id,
             "user_node_id": user_node.id,
+            "tip_id": tip_node.id,
             "llm_node_id": llm_node.id,
             "task_id": task_id,
         }), 202
@@ -209,6 +213,7 @@ def start_conversation():
     return jsonify({
         "conversation_id": system_node.id,
         "user_node_id": user_node.id,
+        "tip_id": tip_node.id,
     }), 202
 
 

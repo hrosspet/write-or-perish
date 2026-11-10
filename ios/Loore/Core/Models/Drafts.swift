@@ -102,6 +102,17 @@ struct StreamingInitResponse: Decodable, Sendable {
     }
 }
 
+/// `POST /api/drafts/streaming/<sid>/claim` (200): this phone continues an
+/// interrupted recording and is its writer from now on (#388).
+struct StreamingClaimResponse: Decodable, Sendable {
+    /// One past the highest chunk the server has: the continuation starts here.
+    var nextChunkIndex: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case nextChunkIndex = "next_chunk_index"
+    }
+}
+
 /// `POST /api/drafts/streaming/<sid>/audio-chunk`: 202 stored, or 200 "Chunk already uploaded".
 struct ChunkUploadResponse: Decodable, Sendable {
     var chunkIndex: Int?
@@ -153,6 +164,8 @@ struct StreamingSessionStatus: Decodable, Sendable {
     var content: String
     /// The Voice chain created the reply.
     var llmNodeId: Int?
+    /// The user's message node, which the reply hangs under (#514).
+    var userNodeId: Int?
     /// The reply was skipped (spend cap, bad placeholder, …).
     var warning: String?
 
@@ -166,6 +179,7 @@ struct StreamingSessionStatus: Decodable, Sendable {
         case completedChunks = "completed_chunks"
         case failedChunks = "failed_chunks"
         case llmNodeId = "llm_node_id"
+        case userNodeId = "user_node_id"
     }
 
     init(from decoder: Decoder) throws {
@@ -180,6 +194,7 @@ struct StreamingSessionStatus: Decodable, Sendable {
         chunks = c.tolerant(.chunks, default: [])
         content = c.tolerant(.content, default: "")
         llmNodeId = c.tolerant(.llmNodeId)
+        userNodeId = c.tolerant(.userNodeId)
         warning = c.tolerant(.warning)
     }
 
@@ -259,6 +274,8 @@ struct TextmodeStartResponse: Decodable, Sendable {
     /// from-node only: textmode prompt inserted under the node, or nil inside an agentic thread.
     var promptNodeId: Int?
     var userNodeId: Int
+    /// start only: the entry's last part when it was split into a chain (the reply sits under it).
+    var tipId: Int?
     var llmNodeId: Int?
     var taskId: String?
     var spendCapped: Bool
@@ -268,6 +285,7 @@ struct TextmodeStartResponse: Decodable, Sendable {
         case conversationId = "conversation_id"
         case promptNodeId = "prompt_node_id"
         case userNodeId = "user_node_id"
+        case tipId = "tip_id"
         case llmNodeId = "llm_node_id"
         case taskId = "task_id"
         case spendCapped = "spend_capped"
@@ -279,6 +297,7 @@ struct TextmodeStartResponse: Decodable, Sendable {
         conversationId = c.tolerant(.conversationId)
         promptNodeId = c.tolerant(.promptNodeId)
         userNodeId = try c.decode(Int.self, forKey: .userNodeId)
+        tipId = c.tolerant(.tipId)
         llmNodeId = c.tolerant(.llmNodeId)
         taskId = c.tolerant(.taskId)
         spendCapped = c.tolerant(.spendCapped, default: false)

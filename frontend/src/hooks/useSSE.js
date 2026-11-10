@@ -268,6 +268,9 @@ export function useTranscriptionSSE(nodeId, options = {}) {
  * @param {Function} options.onContentUpdate - Called when draft content is updated
  * @param {Function} options.onAllComplete - Called when all chunks are done
  * @param {Function} options.onError - Called on transcription error
+ * @param {string} options.deviceKey - This page's recording key (#388)
+ * @param {Function} options.onTakenOver - Called when the server says another
+ *   device continued the recording (#388); the server then ends the stream
  */
 export function useDraftTranscriptionSSE(sessionId, options = {}) {
   const {
@@ -276,6 +279,8 @@ export function useDraftTranscriptionSSE(sessionId, options = {}) {
     onContentUpdate = null,
     onAllComplete = null,
     onError = null,
+    deviceKey = null,
+    onTakenOver = null,
   } = options;
 
   const [chunks, setChunks] = useState([]); // Array of { index, text }
@@ -293,6 +298,7 @@ export function useDraftTranscriptionSSE(sessionId, options = {}) {
   const onContentUpdateRef = useRef(onContentUpdate);
   const onAllCompleteRef = useRef(onAllComplete);
   const onErrorRef = useRef(onError);
+  const onTakenOverRef = useRef(onTakenOver);
 
   // Track last event time for stale connection detection
   const lastEventTimeRef = useRef(Date.now());
@@ -303,13 +309,17 @@ export function useDraftTranscriptionSSE(sessionId, options = {}) {
     onContentUpdateRef.current = onContentUpdate;
     onAllCompleteRef.current = onAllComplete;
     onErrorRef.current = onError;
-  }, [onChunkComplete, onContentUpdate, onAllComplete, onError]);
+    onTakenOverRef.current = onTakenOver;
+  }, [onChunkComplete, onContentUpdate, onAllComplete, onError, onTakenOver]);
 
   // Use REACT_APP_BACKEND_URL for SSE since EventSource doesn't go through CRA proxy
   const backendUrl = process.env.REACT_APP_BACKEND_URL || '';
   // Include last_chunk param for reconnection support - only add if we've received chunks
-  const lastChunkParam = reconnectChunkIndex >= 0 ? `?last_chunk=${reconnectChunkIndex}` : '';
-  const url = sessionId ? `${backendUrl}/api/sse/drafts/${sessionId}/transcription-stream${lastChunkParam}` : null;
+  const params = new URLSearchParams();
+  if (deviceKey) params.set('device_key', deviceKey);
+  if (reconnectChunkIndex >= 0) params.set('last_chunk', String(reconnectChunkIndex));
+  const query = params.toString() ? `?${params.toString()}` : '';
+  const url = sessionId ? `${backendUrl}/api/sse/drafts/${sessionId}/transcription-stream${query}` : null;
 
   // Memoize eventHandlers to prevent unnecessary reconnections
   // Handlers use refs internally to always call latest callbacks
@@ -362,6 +372,12 @@ export function useDraftTranscriptionSSE(sessionId, options = {}) {
       lastEventTimeRef.current = Date.now();
       if (onErrorRef.current) {
         onErrorRef.current(data);
+      }
+    },
+    session_taken_over: (data) => {
+      lastEventTimeRef.current = Date.now();
+      if (onTakenOverRef.current) {
+        onTakenOverRef.current(data);
       }
     },
     heartbeat: () => {

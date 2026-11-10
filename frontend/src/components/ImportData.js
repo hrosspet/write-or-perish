@@ -12,6 +12,8 @@ import {
 import { FaSpinner } from "react-icons/fa";
 import api from "../api";
 import PrivacySelector from "./PrivacySelector";
+import { BothProvidersQuestion } from "./BothProvidersDialog";
+import { noteBothProvidersLater } from "../hooks/useBothProvidersQuestion";
 
 const ghostBtnStyle = {
   backgroundColor: "transparent",
@@ -487,12 +489,20 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     event.target.value = "";
   };
 
+  // ChatGPT/Claude results count messages (nodes), while the confirm dialog
+  // counts conversations: carry the dialog's figures so the result names both.
+  const conversationResultExtra = (data) => ({
+    unit: "messages",
+    archive_conversations: data.total_conversations,
+    archive_messages: data.total_messages,
+  });
+
   // A background import (Twitter, ChatGPT, Claude): the confirm request only
   // queues a Celery task (node creation for a large archive takes minutes);
   // progress and the result come from polling /import/status until it
   // completes. `retry` re-runs the confirm after the restore-or-skip prompt;
   // `onFinished` closes the confirm dialog.
-  const runBackgroundImport = ({ path, body, retry, onFinished, fallbackError, lostMessage }) => {
+  const runBackgroundImport = ({ path, body, retry, onFinished, fallbackError, lostMessage, resultExtra }) => {
     if (confirmInFlight.current) return;
     confirmInFlight.current = true;
     setImporting(true);
@@ -510,7 +520,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
       if (result.profile_update_task_id && onProfileUpdateStarted) {
         onProfileUpdateStarted(result.profile_update_task_id);
       }
-      setImportResult(result);
+      setImportResult(resultExtra ? { ...result, ...resultExtra } : result);
     };
     const failWith = (message) => {
       confirmInFlight.current = false;
@@ -642,6 +652,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         ...(onDeleted ? { on_deleted: onDeleted } : {})
       },
       retry: handleConfirmClaudeImport,
+      resultExtra: conversationResultExtra(claudeImportData),
       onFinished: () => {
         setShowClaudeImportDialog(false);
         setClaudeImportData(null);
@@ -740,6 +751,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         ...(onDeleted ? { on_deleted: onDeleted } : {})
       },
       retry: handleConfirmChatGPTImport,
+      resultExtra: conversationResultExtra(chatGPTImportData),
       onFinished: () => {
         setShowChatGPTImportDialog(false);
         setChatGPTImportData(null);
@@ -759,6 +771,13 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
   const messageProgress = importProgress && importProgress.total
     ? `${(importProgress.done || 0).toLocaleString()} of ${importProgress.total.toLocaleString()} messages`
     : null;
+
+  // Closing the import result reloads the page. A both-providers question
+  // left unanswered there is not asked again on that reload (#599).
+  const closeImportResult = () => {
+    if (importResult && importResult.ask_both_providers) noteBothProvidersLater();
+    window.location.reload();
+  };
 
   // While a confirm dialog is open, its errors show inside it (ModalError):
   // the dialog covers the page, so the page's error line would be hidden.
@@ -795,9 +814,9 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
 
       {/* Post-import summary: what was actually imported vs skipped */}
       {importResult && importResult.saved_as !== "reference" && (
-        <ModalShell onDismiss={() => window.location.reload()}>
+        <ModalShell onDismiss={closeImportResult}>
           <ModalTitle>Import Finished</ModalTitle>
-          <div style={{ display: "flex", gap: "2.4rem", marginBottom: "1.3rem" }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "1rem 2.4rem", marginBottom: "1.3rem" }}>
             {[
               { label: "Imported", value: importResult.created, highlight: importResult.created > 0 },
               { label: "Restored", value: importResult.restored || 0, highlight: importResult.restored > 0 },
@@ -821,10 +840,17 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
                   letterSpacing: "0.14em",
                   color: "var(--text-muted)",
                   marginTop: "0.3rem",
-                }}>{s.label}</div>
+                }}>{importResult.unit === "messages" && s.label !== "No text" ? `Messages ${s.label.toLowerCase()}` : s.label}</div>
               </div>
             ))}
           </div>
+          {importResult.unit === "messages" && importResult.archive_conversations > 0 && (
+            <p style={{ fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.88rem", color: "var(--text-secondary)", margin: "0 0 1.4rem" }}>
+              These numbers count messages. Your archive has{" "}
+              {importResult.archive_conversations.toLocaleString()} conversation{importResult.archive_conversations !== 1 ? "s" : ""}
+              {importResult.archive_messages > 0 && <> with {importResult.archive_messages.toLocaleString()} messages</>}.
+            </p>
+          )}
           {importResult.created === 0 && !importResult.restored && !importResult.updated ? (
             <p style={{ fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.92rem", color: "var(--text-secondary)", margin: "0 0 1.4rem" }}>
               Everything in this archive was already imported — nothing new was added.
@@ -848,10 +874,26 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
                   imported. There was nothing to write.
                 </p>
               )}
+              {importResult.profile_waits_for_imports && (
+                <p style={{ fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.88rem", color: "var(--text-secondary)", margin: "0 0 1.4rem" }}>
+                  Your profile will be built from this import once you have
+                  stopped importing for 30 minutes, so anything else you
+                  import now goes into the same build.
+                </p>
+              )}
+              {/* The both-providers question (#599): the server asks after
+                  an import that added entries AI may read, for a user who
+                  never answered or said no at least 30 days ago. OK
+                  without an answer records nothing. */}
+              {importResult.ask_both_providers && (
+                <div style={{ borderTop: "1px solid var(--border)", paddingTop: "1.3rem", margin: "0 0 1.4rem" }}>
+                  <BothProvidersQuestion title />
+                </div>
+              )}
             </>
           )}
           <button
-            onClick={() => window.location.reload()}
+            onClick={closeImportResult}
             style={primaryBtnStyle}
           >
             OK

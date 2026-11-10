@@ -87,7 +87,6 @@ class NodeSpeech:
         self.first_cut_stats = None
         self.cache_bust = None
         self.segments = []
-        self.durations = []
 
     # ── called by the LLM thread ────────────────────────────────────────
     def _mark_first_text(self):
@@ -283,6 +282,7 @@ class VoiceTTSStream:
                 self._mark_failed(speech.node_id)
 
     def _speak(self, speech, index, chunk):
+        from backend.tasks.tts import log_tts_cost, tts_chunk_digest
         # #371: the first chunk of each node is timed (the first node's is
         # the turn's first audio).
         mark = None
@@ -297,6 +297,8 @@ class VoiceTTSStream:
                        section_index=chunk.section_index,
                        section_title=(chunk.section_title or None)
                        and chunk.section_title[:256],
+                       text_digest=tts_chunk_digest(chunk.text,
+                                                    chunk.section_end),
                        status="processing")
         db.session.add(row)
         db.session.commit()
@@ -310,6 +312,10 @@ class VoiceTTSStream:
         segment = self._audio.synthesize(chunk.text, path, chunk.section_end,
                                          mark=mark)
         duration = self._audio.duration(segment)
+        # The chunk is billed now, whatever then happens to the node or
+        # the turn (deleted, failed, a crashed worker): its cost row is
+        # committed before anything else can fail or roll back (#526).
+        log_tts_cost(self._user_id, duration)
         encrypt_file(str(path))
         row.audio_url = self._media_url(speech, path.name)
         row.duration = duration
@@ -321,14 +327,12 @@ class VoiceTTSStream:
                               first_chunk_chars=len(chunk.text),
                               first_chunk_secs=round(duration, 2))
         speech.segments.append(segment)
-        speech.durations.append(duration)
         with self.cv:
             self._schedule.played(duration, self._clock())
         logger.info("Voice TTS node %s chunk %s: %s chars, %.1fs",
                     speech.node_id, index, len(chunk.text), duration)
 
     def _finish_node(self, speech):
-        from backend.tasks.tts import log_tts_cost
         node = db.session.get(Node, speech.node_id)
         if node is None:
             return
@@ -338,7 +342,6 @@ class VoiceTTSStream:
             encrypt_file(str(path))
             node.audio_tts_url = self._media_url(speech, path.name)
             node.audio_mime_type = "audio/mpeg"
-            log_tts_cost(self._user_id, sum(speech.durations))
         node.tts_task_status = "completed"
         node.tts_task_progress = 100
         db.session.commit()

@@ -14,17 +14,9 @@ The project uses GitHub Actions for CI/CD with direct deployment to production:
 
 ### Workflow Overview
 
-1. **CI (`ci.yml`)** - Runs on PRs only (not on push):
-   - Uses `dorny/paths-filter` to skip unchanged areas (backend vs frontend)
-   - Backend: Python linting (flake8), pytest tests
-   - Frontend: npm lint, jest tests, production build
-   - Security: bandit scan, dependency vulnerability check (safety)
+1. **CI (`ci.yml`)** - Runs on PRs only (not on push).
 
-2. **Deploy to Production (`deploy.yml`)** - Runs ONLY on pushes to `main`, except pushes that only change `ios/**` (`paths-ignore`; the iOS app ships via Xcode/TestFlight):
-   - Runs backend + frontend tests first, then deploys
-   - Builds frontend with production URLs (`https://loore.org`)
-   - Deploys to production VM via SSH
-   - Pulls latest backend code on server
+2. **Deploy to Production (`deploy.yml`)** - Runs ONLY on pushes to `main`, except pushes that only change `ios/**` or `docs/**` (`paths-ignore`; the iOS app ships via Xcode/TestFlight, and no server code reads `docs/`):
    - Runs `deploy.sh` to restart systemd services
 
 3. **Deploy to Staging (`deploy-staging.yml`)** - Runs on pushes to `staging` (+ manual dispatch):
@@ -41,15 +33,8 @@ The project uses GitHub Actions for CI/CD with direct deployment to production:
 
 - Develop locally on feature branches
 - Push to GitHub to trigger CI checks
-- **Merge to `staging` = Deploy to staging** (https://staging.loore.org) — Docker Compose on same VM
+- **Merge to `staging` = Deploy to staging** (https://staging.loore.org) — Docker Compose on the same VM as production
 - **Merge to `main` = Deploy to production** (https://loore.org) — systemd services
-
-### Before Pushing to Main
-
-Ensure:
-- All tests pass locally
-- Code lints without errors
-- Changes are production-ready
 
 ### Git Commit Rules
 
@@ -93,51 +78,7 @@ The project uses **Flask-Migrate + Alembic**. Migrations are auto-generated and 
 - When adding/changing columns in `backend/models.py`, just change the model — the migration will be auto-generated on deploy.
 - Auto-generated migrations are committed back to git by the deploy script with `[skip ci]` tag.
 - Migration files live in `migrations/versions/`.
+
 ### Local Docker Development
 
-The project can be run locally via Docker Compose. This mirrors the staging/production stack (PostgreSQL, Redis, Flask, Celery, React) without needing to install dependencies on the host.
-
-**Start dev environment**: `make dev` (or `make dev-build` to force rebuild)
-**Stop**: `make stop`
-**Logs**: `make logs`
-**Shell into backend**: `make shell`
-
-The dev stack runs:
-- Backend on `http://localhost:5010` (Flask dev server with hot reload)
-- Frontend on `http://localhost:3001` (React dev server with HMR)
-- PostgreSQL, Redis, and Celery are internal to the Docker network
-- **No Celery beat by default**: `celery-beat` sits behind the Compose profile `beat` in `docker-compose.override.yml`, so no periodic job (profile updates, recent-context summaries, embedding sweeps, digests, ...) runs locally. The worker still runs, so jobs you trigger (replies, transcription, TTS) work. To run beat, set `COMPOSE_PROFILES=beat` in `.env` (or `docker compose --profile beat up`); to fire one job, `.delay()` it from a flask shell.
-
-Source code is volume-mounted, so edits are reflected immediately without rebuilding.
-
-**Iterative development happens HERE, not on staging** (workflow decision 2026-07-02): staging deploys cost 6–15 min + a DB wipe, local is hot-reload. Use staging only for the final pre-review pass (real TLS/nginx topology, wiped-DB onboarding, deploy pipeline). Practical notes:
-- Dark feature flags (`SHARE_V1`, etc.) go in the local uncommitted `.env` — the compose files pass them through.
-- Schema drift after model changes: sync additively with `db.create_all()` in a container Python shell. Do NOT run `flask db migrate` locally — deploy auto-generates and commits migrations, and local ones collide.
-- Login without SMTP: mint a magic link inside the backend container (`generate_magic_link_token(email)`, set `user.magic_link_token_hash = hash_token(token)` + expiry, commit) and open `http://localhost:5010/auth/magic-link/verify?token=…`.
-- After `package.json` changes: FIRST `docker compose build frontend` (bakes the new deps into the image), THEN `docker compose up -d --force-recreate --renew-anon-volumes frontend`. Renewal without the rebuild resets `node_modules` to the OLD image's state and the dev server fails with "Module not found" (a bare `docker compose exec frontend npm install <pkg>` patches the running container, but the anon volume loses it on the next recreate)..
-- Unset env vars reach containers as EMPTY STRINGS (not absent) — guard numeric parses with `or "default"`, not a `get()` default.
-- Dev API calls are SAME-ORIGIN through the CRA proxy (`src/setupProxy.js`, target `PROXY_TARGET` — `http://backend:5010` in Docker). `frontend/.env.development` keeps `REACT_APP_API_URL`/`BACKEND_URL` EMPTY on purpose; absolute URLs there force CORS requests the backend doesn't serve.
-
-**Important Docker Compose notes**:
-- Ports are NOT defined in the base `docker-compose.yml` — they live only in the override files (`docker-compose.override.yml` for dev, `docker-compose.staging.yml` for staging). This prevents Docker Compose from concatenating port arrays across files.
-- Backend code is mounted at `/app/backend/` inside containers to match the project-root import layout (`from backend.X import Y`).
-- The `migrations/` directory is at the project root, outside the backend Docker build context. For staging, it's volume-mounted into the container.
-
-### Production Environment
-
-- URL: https://loore.org
-- Backend: Flask + Gunicorn (systemd services)
-- Frontend: React (built and served via nginx)
-- Database: PostgreSQL
-- Task queue: Celery + Redis
-
-### Staging Environment
-
-- URL: https://staging.loore.org
-- Runs on the **same VM** as production, isolated via Docker Compose project name `wop-staging`
-- Ports: backend on `127.0.0.1:5011`, frontend on `127.0.0.1:8081` (avoids collision with production)
-- Docker Compose files: `docker-compose.yml` + `docker-compose.prod.yml` + `docker-compose.staging.yml`
-- Env file: `.env.staging` (not committed; `.env.staging.example` is committed)
-- Frontend: pre-built in CI, served by `nginx:alpine` from `frontend/build-staging/` (gitignored)
-- DB: `writeorperish_staging` — ephemeral, reset on each deploy
-- Resource limits are lower than production (512M backend, 128M frontend/redis, 256M db)
+Iterate locally with `make dev` (backend `http://localhost:5010`, frontend `http://localhost:3001`), not on staging: staging is for the final pre-review pass only (workflow decision 2026-07-02). Never run `flask db migrate` locally; sync schema with `db.create_all()` (deploy generates and commits migrations, and local ones collide). Before local Docker work (make targets, celery beat, dark flags, schema sync, login without SMTP, `package.json` changes, env vars, the CRA proxy, compose layout), read `docs/LOCAL-DEV.md`.

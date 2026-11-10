@@ -137,6 +137,12 @@ beforeEach(() => {
     ttsPost: () => Promise.resolve({ status: 202, data: { status: 'pending' } }),
     voicePost: () => Promise.resolve({ data: { llm_node_id: 42, user_node_id: 41 } }),
     llm43: { status: 'processing' },
+    // Reply 42's continuation (#507).
+    llm50: { status: 'completed', content: 'The answer.' },
+    tts50: { status: 'processing' },
+    ttsPost50: () => Promise.resolve({ status: 202, data: { status: 'pending' } }),
+    // The continuation of the next turn's reply 43.
+    llm60: { status: 'processing' },
   };
   mockGet.mockImplementation((url) => {
     if (url === '/nodes/42/llm-status') {
@@ -149,10 +155,22 @@ beforeEach(() => {
     if (url === '/nodes/43/llm-status') {
       return Promise.resolve({ data: { node_id: 43, ...server.llm43 } });
     }
+    if (url === '/nodes/50/llm-status') {
+      return Promise.resolve({ data: { node_id: 50, ...server.llm50 } });
+    }
+    if (url === '/nodes/50/tts-status') {
+      return Promise.resolve({ data: { node_id: 50, ...server.tts50 } });
+    }
+    if (url === '/nodes/60/llm-status') {
+      return Promise.resolve({ data: { node_id: 60, ...server.llm60 } });
+    }
     return Promise.reject(new Error(`unexpected GET ${url}`));
   });
   mockPost.mockImplementation((url) => {
     if (url === '/nodes/42/tts') return server.ttsPost();
+    if (url === '/nodes/43/tts') return Promise.resolve({ status: 202, data: { status: 'pending' } });
+    if (url === '/nodes/50/tts') return server.ttsPost50();
+    if (url === '/nodes/60/tts') return Promise.resolve({ status: 202, data: { status: 'pending' } });
     if (url === '/voice') return server.voicePost();
     return Promise.reject(new Error(`unexpected POST ${url}`));
   });
@@ -440,5 +458,220 @@ test('a refusal that arrives after leaving the page makes no sound', async () =>
   await act(async () => { refuse(err); });
   await flush();
 
+  expect(mockPlayErrorSound).not.toHaveBeenCalled();
+});
+
+// A reply in two parts (#507): reply 42 is an interim part ("let me look
+// that up") whose audio plays while the answer, node 50, is written. When
+// the answer fails, the turn ends there: the first part plays to its end,
+// the error sound follows once, and the page neither goes back to
+// "Thinking..." nor asks for node 50's audio again.
+
+const ttsStreamsOf = (id) => MockEventSource.instances.filter(
+  (es) => es.url === `/api/sse/nodes/${id}/tts-stream`);
+const ttsRequestsFor = (id) => mockPost.mock.calls.filter(
+  ([url]) => url === `/nodes/${id}/tts`).length;
+
+// Reply 42's audio is queued and playing; its stream then says the answer
+// continues in node 50.
+const renderContinuing = async () => {
+  server.llm = {
+    status: 'completed', content: 'Let me look that up.', continuation_node_id: 50,
+  };
+  const hook = renderWaiting();
+  await flush();
+  act(() => ttsStreams()[0].emit('chunk_ready', {
+    chunk_index: 0, audio_url: '/media/42-0.mp3', duration: 4,
+  }));
+  await flush();
+  act(() => ttsStreams()[0].emit('all_complete', {
+    tts_url: '/media/42.mp3', continuation_node_id: 50,
+  }));
+  await flush();
+  return hook;
+};
+
+// The queue plays what it has: then it waits for more while the turn's
+// audio is still being made, and ends otherwise (AudioContext's onended).
+const queuedAudioPlays = (rerender) => {
+  if (mockAudio.generatingTTS) mockAudio.waitingForChunks = true;
+  else mockAudio.queueFinishedCount += 1;
+  rerender();
+};
+
+// Past the point where the recovery watchdog (20 s after the last
+// request, checked every 7 s) would ask for the audio again.
+const waitPastTheWatchdog = async () => {
+  for (let i = 0; i < 5; i += 1) await nextRestCheck();
+};
+
+test("a continuation whose audio failed ends the turn after the first part's audio", async () => {
+  const { result, rerender } = await renderContinuing();
+  expect(ttsRequestsFor(50)).toBe(1);
+  expect(result.current.phase).toBe('playback');
+
+  server.tts50 = { status: 'failed' };
+  await nextRestCheck();
+  expect(result.current.phase).toBe('ready');
+  expect(result.current.hasError).toBe(true);
+  expect(mockPlayErrorSound).not.toHaveBeenCalled();
+
+  queuedAudioPlays(rerender);
+  await flush();
+  expect(mockAudio.generatingTTS).toBe(false);
+  expect(mockPlayErrorSound).toHaveBeenCalledTimes(1);
+  expect(result.current.phase).toBe('ready');
+
+  await waitPastTheWatchdog();
+  expect(ttsRequestsFor(50)).toBe(1);
+  expect(result.current.phase).toBe('ready');
+  expect(mockPlayErrorSound).toHaveBeenCalledTimes(1);
+});
+
+test("a continuation whose audio request is refused ends the turn after the first part's audio", async () => {
+  server.ttsPost50 = () => Promise.reject(httpError(500, { error: 'TTS failed' }));
+  const { result, rerender } = await renderContinuing();
+  expect(ttsRequestsFor(50)).toBe(1);
+  expect(result.current.phase).toBe('ready');
+  expect(mockPlayErrorSound).not.toHaveBeenCalled();
+
+  queuedAudioPlays(rerender);
+  await flush();
+  expect(mockPlayErrorSound).toHaveBeenCalledTimes(1);
+  expect(result.current.phase).toBe('ready');
+
+  await waitPastTheWatchdog();
+  expect(ttsRequestsFor(50)).toBe(1);
+  expect(result.current.phase).toBe('ready');
+});
+
+test('a continuation whose audio failed during "Thinking..." sounds at once and ends the turn', async () => {
+  const { result, rerender } = await renderContinuing();
+  // The first part has played; the answer's audio isn't there yet.
+  queuedAudioPlays(rerender);
+  expect(result.current.phase).toBe('processing');
+
+  server.tts50 = { status: 'failed' };
+  await nextRestCheck();
+  expect(mockPlayErrorSound).toHaveBeenCalledTimes(1);
+  expect(result.current.phase).toBe('ready');
+
+  await waitPastTheWatchdog();
+  expect(ttsRequestsFor(50)).toBe(1);
+  expect(result.current.phase).toBe('ready');
+  expect(mockPlayErrorSound).toHaveBeenCalledTimes(1);
+});
+
+// The next recording's reply starts its own queue: its audio is not
+// appended to the failed turn's.
+const recordAgainAndHearTheReply = async (result) => {
+  act(() => result.current.handleStart());
+  server.llm43 = { status: 'completed', content: 'The next reply.' };
+  await act(async () => {
+    await mockStreamingOptions.onComplete({ sessionId: 's2', content: 'again', llmNodeId: 43 });
+  });
+  await flush();
+  expect(ttsRequestsFor(43)).toBe(1);
+  act(() => ttsStreamsOf(43)[0].emit('chunk_ready', {
+    chunk_index: 0, audio_url: '/media/43-0.mp3', duration: 3,
+  }));
+  await flush();
+};
+
+test('recording again after a continuation whose audio failed starts a new queue', async () => {
+  const { result, rerender } = await renderContinuing();
+  server.tts50 = { status: 'failed' };
+  await nextRestCheck();
+  queuedAudioPlays(rerender);
+  await flush();
+
+  await recordAgainAndHearTheReply(result);
+
+  expect(mockAudio.loadAudioQueue).toHaveBeenLastCalledWith(
+    ['/media/43-0.mp3'], expect.anything(), [3], expect.anything());
+  expect(mockAudio.appendChunkToQueue).not.toHaveBeenCalled();
+  expect(result.current.phase).toBe('playback');
+});
+
+test('recording again after a continuation whose text failed starts a new queue', async () => {
+  server.llm50 = { status: 'processing' };
+  const { result, rerender } = await renderContinuing();
+  server.llm50 = { status: 'failed', error: 'The provider failed.' };
+  await nextPoll();
+  expect(result.current.phase).toBe('ready');
+  queuedAudioPlays(rerender);
+  await flush();
+  expect(mockPlayErrorSound).toHaveBeenCalledTimes(1);
+
+  await recordAgainAndHearTheReply(result);
+
+  expect(mockAudio.loadAudioQueue).toHaveBeenLastCalledWith(
+    ['/media/43-0.mp3'], expect.anything(), [3], expect.anything());
+  expect(mockAudio.appendChunkToQueue).not.toHaveBeenCalled();
+});
+
+// The user presses Continue while node 50's audio is still being
+// requested; the refusal arrives during the next turn and changes nothing
+// there (review of #562).
+
+const continueWhileTheAudioIsRequested = async () => {
+  let refuse;
+  server.ttsPost50 = () => new Promise((resolve, reject) => { refuse = reject; });
+  const hook = await renderContinuing();
+  expect(ttsRequestsFor(50)).toBe(1);
+  act(() => hook.result.current.handleContinue());
+  await flush();
+  const refuse50 = async () => {
+    await act(async () => { refuse(httpError(500, { error: 'TTS failed' })); });
+    await flush();
+  };
+  return { ...hook, refuse50 };
+};
+
+test("a refused audio request from the last turn leaves the recording alone", async () => {
+  const { result, refuse50 } = await continueWhileTheAudioIsRequested();
+  expect(result.current.phase).toBe('recording');
+
+  await refuse50();
+
+  expect(result.current.phase).toBe('recording');
+  expect(result.current.hasError).toBe(false);
+  expect(mockPlayErrorSound).not.toHaveBeenCalled();
+});
+
+test("a refused audio request from the last turn leaves the next reply's continuation in its queue", async () => {
+  const { result, refuse50 } = await continueWhileTheAudioIsRequested();
+  // The next reply, 43, is an interim part too: its audio plays, and its
+  // stream says the answer continues in node 60, still being written.
+  server.llm43 = { status: 'completed', content: 'Let me check.', continuation_node_id: 60 };
+  await act(async () => {
+    await mockStreamingOptions.onComplete({ sessionId: 's2', content: 'and then?', llmNodeId: 43 });
+  });
+  await flush();
+  act(() => ttsStreamsOf(43)[0].emit('chunk_ready', {
+    chunk_index: 0, audio_url: '/media/43-0.mp3', duration: 3,
+  }));
+  await flush();
+  act(() => ttsStreamsOf(43)[0].emit('all_complete', {
+    tts_url: '/media/43.mp3', continuation_node_id: 60,
+  }));
+  await flush();
+
+  await refuse50();
+  expect(result.current.phase).toBe('playback');
+
+  server.llm60 = { status: 'completed', content: 'The answer to that.' };
+  await nextPoll();
+  expect(ttsRequestsFor(60)).toBe(1);
+  act(() => ttsStreamsOf(60)[0].emit('chunk_ready', {
+    chunk_index: 0, audio_url: '/media/60-0.mp3', duration: 2,
+  }));
+  await flush();
+
+  expect(mockAudio.loadAudioQueue).toHaveBeenLastCalledWith(
+    ['/media/43-0.mp3'], expect.anything(), [3], expect.anything());
+  expect(mockAudio.appendChunkToQueue).toHaveBeenCalledWith(
+    '/media/60-0.mp3', 2, expect.anything());
+  expect(result.current.phase).toBe('playback');
   expect(mockPlayErrorSound).not.toHaveBeenCalled();
 });

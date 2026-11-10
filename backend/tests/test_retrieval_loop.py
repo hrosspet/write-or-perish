@@ -15,6 +15,7 @@ Harness notes:
     and a real PromptTooLongError class. The task is imported against these
     stubs, then sys.modules is restored (mirrors test_artifacts.py).
 """
+import copy
 import json
 import os
 import sys
@@ -45,9 +46,21 @@ from backend.models import (  # noqa: E402
     UserTodo, ExternalItem, ExternalItemEmbedding, NodeEmbedding,
 )
 from backend.utils.embeddings import pack_vector  # noqa: E402
+from backend.utils.error_privacy import REPLY_FAILED_TEXT  # noqa: E402
 
 
 # ── Scriptable LLM provider stub ─────────────────────────────────────────
+def _captured_text(block):
+    """A content block's text as the tests read it: a text block's text,
+    a tool result's content (#604); a tool call carries none."""
+    if not isinstance(block, dict):
+        return ""
+    if block.get("type") == "tool_result":
+        content = block.get("content")
+        return content if isinstance(content, str) else ""
+    return block.get("text", "")
+
+
 class _ScriptedProvider:
     """LLMProvider stand-in returning a queued sequence of responses and
     recording the `messages` passed to each call."""
@@ -70,11 +83,14 @@ class _ScriptedProvider:
                 {
                     "role": m["role"],
                     "text": "".join(
-                        b.get("text", "") for b in m["content"]
+                        _captured_text(b) for b in m["content"]
                     ) if isinstance(m["content"], list) else m["content"],
                 }
                 for m in messages
             ],
+            # The messages as sent, blocks and all (the tool channel's
+            # tool_use / tool_result blocks, #604).
+            "raw": copy.deepcopy(messages),
             "tools": tools,
             # The keys this call went out on (#325: the training key
             # never carries content the chain did not license).
@@ -358,8 +374,14 @@ def test_textmode_retrieval_loop_injects_and_continues(app):
     assert len(pins) == 1
 
 
-def test_textmode_retrieval_loop_read_todo(app):
-    """read_todo rides the same within-turn loop: the model's first call
+@pytest.mark.parametrize("name, inp", [
+    ("read_artifact", {"kind": "todo"}),
+    # The todo's own tool before #218: older threads' prompts still name
+    # it, and a call to it is served the same way.
+    ("read_todo", {}),
+])
+def test_textmode_retrieval_loop_read_todo(app, name, inp):
+    """A todo read rides the same within-turn loop: the model's first call
     requests the todo, the loop injects it, and the continuation answers
     with it. The exact todo version read is pinned to the interim node."""
     alice, system, user_node, llm_node = _build_chain("textmode")
@@ -368,7 +390,7 @@ def test_textmode_retrieval_loop_read_todo(app):
 
     _ScriptedProvider.reset([
         _resp("Let me pull up your todo.", tool_calls=[{
-            "id": "t1", "name": "read_todo", "input": {},
+            "id": "t1", "name": name, "input": inp,
         }]),
         _resp("Start with shipping slice 3."),
     ])
@@ -384,7 +406,8 @@ def test_textmode_retrieval_loop_read_todo(app):
     interim = _fresh(llm_node.id)
     assert interim.continuation_node_id is not None
     meta = json.loads(interim.tool_calls_meta)
-    assert any(e.get("name") == "read_todo" for e in meta)
+    assert any(e.get("name") == name and e.get("todo_id") == todo.id
+               for e in meta)
 
     final = Node.query.get(interim.continuation_node_id)
     assert final.get_content() == "Start with shipping slice 3."
@@ -558,10 +581,12 @@ def test_textmode_action_tool_continues(app):
     assert final.llm_task_status == "completed"
     assert result["llm_node_id"] == final.id
 
-    # The result round told the model the update landed.
+    # The result round told the model the update landed, as which
+    # version, and what it wrote (#604).
     second_texts = "\n".join(
         m["text"] for m in _ScriptedProvider.calls[1]["messages"])
-    assert "[update_artifact: artifact 'memory' created.]" in second_texts
+    assert ("[update_artifact: 'memory' created as v1. Its text:\n"
+            "milestone!]") in second_texts
 
     # NEXT turn: the outcome is a durable part of the rendered history, not
     # just that turn's in-flight injection — asked "did that save?", the
@@ -587,15 +612,23 @@ def test_textmode_action_tool_continues(app):
     )
     assert len(_ScriptedProvider.calls) == 1
     history = _ScriptedProvider.calls[0]["messages"]
-    interim_msgs = [m for m in history
-                    if m["role"] == "assistant"
-                    and "Noting this milestone" in m["text"]]
-    assert len(interim_msgs) == 1
-    assert ("[update_artifact: artifact 'memory' created.]"
-            in interim_msgs[0]["text"])
+    raw = _ScriptedProvider.calls[0]["raw"]
+    interim_at = [i for i, m in enumerate(raw)
+                  if m["role"] == "assistant"
+                  and "Noting this milestone" in m["content"][0]["text"]]
+    assert len(interim_at) == 1
+    i = interim_at[0]
+    # The write is replayed on the tool channel (#604): the call after the
+    # reply's text, without its content, and the system's answer to it in
+    # the user message that follows.
+    call = raw[i]["content"][-1]
+    assert call == {"type": "tool_use", "id": f"loore_{interim.id}_0",
+                    "name": "update_artifact", "input": {"kind": "memory"}}
+    assert raw[i + 1] == {"role": "user", "content": [{
+        "type": "tool_result", "tool_use_id": call["id"],
+        "content": "'memory' created as v1. Its text:\nmilestone!"}]}
     # Already reported same-turn: the cross-turn scan adds no second note.
-    assert sum("artifact 'memory'" in m["text"].lower()
-               or "Artifact 'memory'" in m["text"] for m in history) == 1
+    assert not any("[Artifact 'memory' was" in m["text"] for m in history)
 
 
 def test_continuation_terminal_failure_fails_continuation_node(
@@ -628,7 +661,8 @@ def test_continuation_terminal_failure_fails_continuation_node(
     assert interim.continuation_node_id is not None
     cont = Node.query.get(interim.continuation_node_id)
     assert cont.llm_task_status == "failed"
-    assert "provider overloaded" in (cont.llm_task_error or "")
+    assert "provider overloaded" not in (cont.llm_task_error or "")
+    assert cont.llm_task_error == REPLY_FAILED_TEXT
 
 
 def test_continuation_transient_failure_retries(app, monkeypatch):
@@ -745,6 +779,35 @@ def test_continuation_account_failure_is_not_retried(
     assert cont.llm_task_status == "failed"
     assert cont.llm_task_error == \
         real_providers.ProviderAccountError.USER_MESSAGE
+
+
+def test_continuation_policy_block_is_not_retried(
+        app, monkeypatch, real_providers):
+    """2026-11-04: a request the provider's content-policy filter blocked
+    would be blocked again, so the continuation does not resend it."""
+    from backend.utils.llm_batch import BatchItemPolicyBlocked
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    _mk_artifact(alice.id, "reading-list", "books", title="Reading List")
+    monkeypatch.setattr(_llm_task_mod, "CONTINUATION_RETRY_DELAYS", (0, 0))
+
+    _ScriptedProvider.reset([
+        _resp("Let me pull that up.", tool_calls=[{
+            "id": "t1", "name": "read_artifact",
+            "input": {"kind": "reading-list"},
+        }]),
+        BatchItemPolicyBlocked("blocked (bio_policy)", code="bio_policy"),
+        _resp("never sent"),
+    ])
+
+    with pytest.raises(BatchItemPolicyBlocked):
+        generate_llm_response(
+            _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+            source_mode="textmode",
+        )
+
+    assert len(_ScriptedProvider.calls) == 2
+    cont = Node.query.get(_fresh(llm_node.id).continuation_node_id)
+    assert cont.llm_task_status == "failed"
 
 
 def test_read_full_by_entry_id_resolves_and_continues(app):
@@ -1551,7 +1614,8 @@ def test_artifact_update_echo_injects_diff(app):
     _ScriptedProvider.reset([
         _resp("Updating your intentions.", tool_calls=[{
             "id": "t1", "name": "update_artifact",
-            "input": {"kind": "intentions", "updated_content": new_content},
+            "input": {"kind": "intentions", "updated_content": new_content,
+                      "base_version": 1},
         }]),
         _resp("Want me to mark that intention endorsed?"),
     ])
@@ -1564,7 +1628,8 @@ def test_artifact_update_echo_injects_diff(app):
     # The continuation saw a diff of the write: marker + the added line.
     second_texts = "\n".join(
         m["text"] for m in _ScriptedProvider.calls[1]["messages"])
-    assert "Your changes to 'intentions'" in second_texts
+    assert ("[update_artifact: 'intentions' updated to v2 (from v1). "
+            "Changes:\n") in second_texts
     assert ("+- bodhisattva acceptance — asked him whether to endorse"
             in second_texts)
     # Unchanged lines aren't echoed wholesale (diff, not full text).
@@ -1598,8 +1663,8 @@ def test_artifact_creation_echo_injects_content(app):
 
     second_texts = "\n".join(
         m["text"] for m in _ScriptedProvider.calls[1]["messages"])
-    assert "You created 'reading-list' with this content:" in second_texts
-    assert "1. Gravity's Rainbow" in second_texts
+    assert ("'reading-list' created as v1. Its text:\n"
+            "1. Gravity's Rainbow") in second_texts
     interim = _fresh(llm_node.id)
     assert "Gravity" not in interim.tool_calls_meta
 
@@ -1678,7 +1743,7 @@ def test_artifact_edits_mode_applies_and_echoes_diff(app):
     _db.session.commit()
 
     second_texts, entry = _run_update(alice, user_node, llm_node, {
-        "kind": "memory",
+        "kind": "memory", "base_version": 1,
         "edits": [
             {"old_text": "- has a dog", "new_text": "- has two dogs"},
             {"old_text": "- lives in Prague",
@@ -1691,7 +1756,7 @@ def test_artifact_edits_mode_applies_and_echoes_diff(app):
     assert art.get_content() == ("## Facts\n- has two dogs\n"
                                  "- lives in Prague\n- started a garden")
     # Echo shows the diff of what the edits produced.
-    assert "Your changes to 'memory'" in second_texts
+    assert "'memory' updated to v2 (from v1). Changes:" in second_texts
     assert "+- has two dogs" in second_texts
     assert "+- started a garden" in second_texts
     # Edits are free text — redacted from plaintext meta.
@@ -1706,7 +1771,7 @@ def test_artifact_edits_anchor_not_found_fails_cleanly(app):
     original_id = art.id
 
     second_texts, entry = _run_update(alice, user_node, llm_node, {
-        "kind": "memory",
+        "kind": "memory", "base_version": 1,
         "edits": [{"old_text": "- has a cat", "new_text": "- has two"}],
     })
 
@@ -1715,6 +1780,10 @@ def test_artifact_edits_anchor_not_found_fails_cleanly(app):
     # Error round steers to a fix; no new version was written.
     assert "update_artifact failed" in second_texts
     assert "updated_content" in second_texts
+    # The retry gets the current text to fix its anchor against (#604).
+    assert ("[Current text of 'memory' · v1 — base your retry on this "
+            "version:\n- has a dog]") in second_texts
+    assert "has a dog" not in _fresh(llm_node.id).tool_calls_meta
     assert UserArtifact.latest_for(alice.id, "memory").id == original_id
 
 
@@ -1724,7 +1793,7 @@ def test_artifact_edits_ambiguous_anchor_fails(app):
     _db.session.commit()
 
     _, entry = _run_update(alice, user_node, llm_node, {
-        "kind": "memory",
+        "kind": "memory", "base_version": 1,
         "edits": [{"old_text": "note", "new_text": "notes"}],
     })
     assert entry["status"] == "error"
@@ -1748,7 +1817,7 @@ def test_artifact_full_text_wins_over_edits(app):
     _db.session.commit()
 
     _, entry = _run_update(alice, user_node, llm_node, {
-        "kind": "memory",
+        "kind": "memory", "base_version": 1,
         "updated_content": "brand new full text",
         "edits": [{"old_text": "nonexistent", "new_text": "ignored"}],
     })
@@ -1767,11 +1836,12 @@ def test_artifact_substantial_rewrite_echoes_full_text(app):
 
     new = "\n".join(f"- new fact {i}" for i in range(200))
     second_texts, entry = _run_update(alice, user_node, llm_node, {
-        "kind": "memory", "updated_content": new,
+        "kind": "memory", "updated_content": new, "base_version": "v1",
     })
 
     assert entry["status"] == "success"
-    assert "Your rewrite of 'memory' was substantial" in second_texts
+    assert ("'memory' updated to v2 (from v1). The changes are large, so "
+            "here is its full new text:") in second_texts
     # Full new text, not a diff: every line present, un-prefixed.
     assert "- new fact 199" in second_texts
     assert "+- new fact 199" not in second_texts
@@ -1828,14 +1898,14 @@ def test_artifact_write_over_a_chat_version_updates_as_before(app):
     _db.session.commit()
 
     second_texts, entry = _run_update(alice, user_node, llm_node, {
-        "kind": "memory",
+        "kind": "memory", "base_version": 2,
         "edits": [{"old_text": "- has a dog", "new_text": "- has two dogs"}],
     })
 
     assert entry["status"] == "success"
     assert (UserArtifact.latest_for(alice.id, "memory").get_content()
             == "## Facts\n- has two dogs")
-    assert "Your changes to 'memory'" in second_texts
+    assert "'memory' updated to v3 (from v2). Changes:" in second_texts
     assert "+- has two dogs" in second_texts
     assert "SECRET LINE" not in _all_sent_texts()
 
@@ -1848,13 +1918,14 @@ def test_artifact_echo_never_diffs_against_a_none_version(app):
     new = _mk_artifact(alice.id, "memory", "fresh memory from the model")
     _db.session.commit()
 
-    echo = _llm_task_mod._artifact_update_echo({
+    echo = _llm_task_mod._artifact_write_report({
         "name": "update_artifact", "status": "success",
         "artifact_id": new.id, "kind": "memory",
         "previous_artifact_id": prev.id,
-    })
+    }, alice.id)
 
-    assert "fresh memory from the model" in echo
+    assert echo == ("'memory' updated to v2. Its full new text:\n"
+                    "fresh memory from the model")
     assert "SECRET LINE" not in echo
     assert "second line" not in echo
 

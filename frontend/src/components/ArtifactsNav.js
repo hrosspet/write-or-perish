@@ -61,9 +61,18 @@ export default function ArtifactsNav({ activeKind, onNavigate, creating, childre
   useEffect(() => { fetchArtifacts(); }, [fetchArtifacts]);
 
   // Refetch when an artifact is created/updated elsewhere so the bubble row
-  // updates without a reload. Dispatched by ArtifactsPage.handleSave.
+  // updates without a reload. Dispatched by ArtifactsPage.handleSave. A
+  // delete (#603) names the kind, whose bubble goes at once rather than
+  // after the refetch.
   useEffect(() => {
-    const handler = () => fetchArtifacts();
+    const handler = (e) => {
+      const gone = e && e.detail && e.detail.deletedKind;
+      if (gone) {
+        _artifactsCache = _artifactsCache.filter((a) => a.kind !== gone);
+        setArtifacts(_artifactsCache);
+      }
+      fetchArtifacts();
+    };
     window.addEventListener('loore_artifacts_changed', handler);
     return () => window.removeEventListener('loore_artifacts_changed', handler);
   }, [fetchArtifacts]);

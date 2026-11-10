@@ -77,7 +77,8 @@ def stamp_session_alive(session_id, only_if_unreleased=False, now=None):
     after the tab released the session (stamp cleared), a stream that has
     not noticed its client left, or an upload still in flight, must not
     make the session live again. Only init and a new SSE connection (the
-    tab that resumes the session) stamp unconditionally.
+    tab that resumes the session) stamp unconditionally; so does a claim
+    (utils/recording_device, #388), with its own update.
     """
     query = Draft.query.filter(
         Draft.session_id == session_id,
@@ -108,3 +109,18 @@ def release_session(session_id, user_id):
         },
         synchronize_session=False,
     )
+
+
+def draft_user_node_id(draft):
+    """The user's message node of a finished server-side voice turn (#514).
+
+    The turn's reply hangs under the last node of the user's message, so
+    the client can anchor on the message (Glean after a cancel, the next
+    recording) without waiting for the reply. None when the draft has no
+    reply node.
+    """
+    if not draft.llm_node_id:
+        return None
+    from backend.models import Node
+    llm_node = db.session.get(Node, draft.llm_node_id)
+    return llm_node.parent_id if llm_node else None

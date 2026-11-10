@@ -25,6 +25,9 @@ from backend.utils.audio_processing import (
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.encryption import decrypt_file_to_temp
 from backend.utils.cost import calculate_audio_cost_microdollars
+from backend.utils.error_privacy import (
+    REPLY_NOT_STARTED_TEXT, TRANSCRIPTION_FAILED_TEXT, describe_exception,
+)
 
 logger = get_task_logger(__name__)
 
@@ -40,10 +43,12 @@ class TranscriptionTask(Task):
                 node = Node.query.get(node_id)
                 if node:
                     node.transcription_status = 'failed'
-                    node.transcription_error = str(exc)[:500]
+                    node.transcription_error = TRANSCRIPTION_FAILED_TEXT
                     node.transcription_completed_at = datetime.utcnow()
                     db.session.commit()
-                    logger.error(f"Transcription failed for node {node_id}: {exc}")
+                    logger.error(
+                        "Transcription failed for node %s: %s", node_id,
+                        describe_exception(exc))
 
 
 # Warning recorded on an uploaded entry whose reply the cap skipped (#342).
@@ -82,13 +87,14 @@ def _start_upload_reply(node, tip, model_id):
     except Exception as e:  # never fail the transcript over its reply
         db.session.rollback()
         logger.warning(
-            "Upload reply skipped for node %s: %s", node.id, e)
+            "Upload reply skipped for node %s: %s", node.id,
+            describe_exception(e))
         if isinstance(e, AIUsageRefused):
             message = UPLOAD_REPLY_SKIPPED_AI_USAGE
         elif isinstance(e, ReadOnlyModelRefused):
             message = f"Your entry is saved. {e.message}"
         else:
-            message = str(e) or "Loore couldn't start a reply."
+            message = REPLY_NOT_STARTED_TEXT
         record_task_warning(node, message)
         return None
 
@@ -328,9 +334,11 @@ def transcribe_audio(self, node_id: int, audio_file_path: str, filename: str = N
             }
 
         except Exception as e:
-            logger.error(f"Transcription error for node {node_id}: {e}", exc_info=True)
+            logger.error(
+                "Transcription error for node %s: %s", node_id,
+                describe_exception(e), exc_info=True)
             node.transcription_status = 'failed'
-            node.transcription_error = str(e)[:500]
+            node.transcription_error = TRANSCRIPTION_FAILED_TEXT
             node.transcription_completed_at = datetime.utcnow()
             db.session.commit()
             raise

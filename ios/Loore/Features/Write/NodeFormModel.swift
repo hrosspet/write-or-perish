@@ -416,9 +416,10 @@ final class NodeFormModel {
             return result
         }
 
-        // Agentic top-level entry (Write New Entry with Agentic Reply on).
+        // Agentic top-level entry (Write New Entry with Agentic Reply on). An entry above the
+        // cap goes here too: the server splits it into parts and puts the reply under the last one.
         if useAgenticPrompt && !config.isEdit && uploadedFile == nil && streamingSessionId == nil
-            && config.parentId == nil && aiUsage != .off && content.jsLength <= nodeCharCap {
+            && config.parentId == nil && aiUsage != .off {
             let body: JSONValue = .object([
                 "content": .string(content), "privacy_level": .string(privacyLevel.rawString),
                 "ai_usage": .string(aiUsage.rawString), "auto_generate": .bool(useAutoGenerate),
@@ -428,7 +429,8 @@ final class NodeFormModel {
             if answer.spendCapped { app.notifySpendBlocked() }
             if let llmError = answer.llmError { app.toasts.show(llmError, duration: 10) }
             return NodeFormResult(id: answer.userNodeId, awaitLLM: answer.llmNodeId, userNodeId: answer.userNodeId,
-                                  llmNodeId: answer.llmNodeId, spendCapped: answer.spendCapped, llmError: answer.llmError)
+                                  llmNodeId: answer.llmNodeId, tipId: answer.tipId, spendCapped: answer.spendCapped,
+                                  llmError: answer.llmError)
         }
 
         // A recorded transcript: the streaming draft becomes the node.
@@ -475,11 +477,12 @@ final class NodeFormModel {
         await clearAfterSend()
         app.signals.post(.nodeCreated(created.id))
 
-        // Auto-generate without Agentic Reply (Write New Entry only).
+        // Auto-generate without Agentic Reply (Write New Entry only). A long entry is
+        // saved as a chain of parts: the reply goes under the last one so it reads all of it.
         if useAutoGenerate && config.allowAgenticPrompt && config.parentId == nil && aiUsage != .off
             && !useAgenticPrompt {
             if let reply: LLMRequestResponse = try? await api.post(
-                APIPath.nodeLLM(created.id), json: .object(["source_mode": .string("textmode")])) {
+                APIPath.nodeLLM(created.tipId ?? created.id), json: .object(["source_mode": .string("textmode")])) {
                 return NodeFormResult(id: reply.nodeId, awaitLLM: reply.nodeId, tipId: created.tipId)
             }
         }
@@ -579,7 +582,7 @@ final class NodeFormModel {
         if case .finished(let status) = outcome, status.status == .completed {
             await clearAfterSend()
             uploadedFile = nil
-            onSuccess(NodeFormResult(id: status.nodeId ?? nodeId))
+            onSuccess(NodeFormResult(id: status.nodeId ?? nodeId, tipId: status.tipId))
         } else if case .finished(let status) = outcome {
             error = status.error ?? "Transcription failed"
         }

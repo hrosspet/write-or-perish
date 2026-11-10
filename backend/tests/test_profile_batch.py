@@ -64,6 +64,9 @@ def app(monkeypatch):
     # No real keys in the test app — the network boundary is mocked anyway.
     monkeypatch.setattr(pb, "get_api_keys_for_usage",
                         lambda *a, **k: {"anthropic": "k", "openai": "k"})
+    # The poller's listing shows nothing: every job is polled on its own,
+    # through the batch_check_and_collect stand-ins the tests set.
+    monkeypatch.setattr(pb, "list_batches", lambda *a, **k: {})
     # Pre-submit sizing count: default to "unavailable" so existing tests
     # exercise the fall-through (submit at the calibrated budget as before).
     import backend.llm_providers as lp
@@ -776,12 +779,24 @@ def test_poll_is_not_paused(app, monkeypatch):
         user_id=u.id, parent_profile_id=prev.id).first() is not None
 
 
-def test_poll_fails_stale_job(app, monkeypatch):
+def _raise_unreadable(bids, keys):
+    raise RuntimeError("404: no such batch")
+
+
+@pytest.mark.parametrize("check", [
+    lambda bids, keys: ({}, dict(bids), {}),   # the provider says pending
+    _raise_unreadable,                         # we can't read it at all
+])
+def test_poll_fails_stale_job(app, monkeypatch, check):
+    """A job past the age backstop (BATCH_STALE_AFTER, 25 h: after the
+    providers' 24 h window, #419) is failed, whether its batch still
+    reports pending or can't be read."""
     u = _user()
     prev = _prev_profile(u, datetime(2026, 5, 1))
     job, item = _chunk_job(u, prev)
     job.submitted_at = datetime.utcnow() - timedelta(hours=30)  # past SLA
     db.session.commit()
+    monkeypatch.setattr(pb, "batch_check_and_collect", check)
     monkeypatch.setattr(pb, "batch_submit", MagicMock(return_value={}))
 
     pb._poll_profile_batches()
@@ -1005,6 +1020,290 @@ def test_submit_refused_for_an_account_reason_is_not_a_batch_attempt(app, monkey
     assert User.query.get(u.id).profile_batch_pending is True
 
 
+# ── a full provider queue and polling by listing (Peter, 2026-11-03) ──────
+# "I want to have as many accounts in the queue as the provider allows. I
+# just don't want to spam them with querying for results thousands of
+# times per minute."
+
+def _other_pending(provider_key, batch_id="other"):
+    """Another account's batch of ours, pending in the same queue."""
+    other = _user()
+    job = ProfileBatchJob(
+        provider_key=provider_key, batch_id=batch_id, status="pending",
+        items=[{"custom_id": f"profile_{other.id}_x", "user_id": other.id,
+                "kind": "chunk", "prev_profile_id": None,
+                "model_id": "test-model"}],
+        submitted_at=datetime.utcnow())
+    db.session.add(job)
+    db.session.commit()
+    return job
+
+
+def _seed_refused_on_a_full_queue(app, monkeypatch):
+    from backend.utils.llm_batch import SubmittedBatches
+    u = _user(profile_needs_full_regen=True,
+              profile_batch_attempts=pb.MAX_BATCH_ATTEMPTS - 1)
+    app.config["PROFILE_USE_BATCH"] = True
+    db.session.commit()
+    _remaining(monkeypatch, 90000)
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=_chunk("DATA")))
+    monkeypatch.setattr(pb._exports, "_load_prompt",
+                        lambda *a, **k: "G {user_export}")
+
+    def full(reqs, keys, kind):
+        out = SubmittedBatches()
+        out.queue_full.update(reqs)  # "anthropic"
+        return out
+    monkeypatch.setattr(pb, "batch_submit", full)
+    return u
+
+
+def _prefill_not_activated(**kw):
+    """A pre-filled account its owner has not activated yet: outside the
+    hourly seeder's eligible cohort."""
+    u = _user(profile_force_batch=True, profile_needs_full_regen=True,
+              prefilled_handle="someone", **kw)
+    u.approved = False
+    db.session.commit()
+    return u
+
+
+def test_an_unactivated_prefill_sent_back_by_a_full_queue_is_resent_hourly(
+        app, monkeypatch):
+    """Peter, 2026-11-03 ("yes, implement it pls"): work a full queue sent
+    back is remembered (profile_work_held), and the hourly seeder sends it
+    again also for a pre-fill not yet activated, which its cohort leaves
+    out. A successful submit clears the mark."""
+    from backend.utils.llm_batch import SubmittedBatches
+    app.config["PROFILE_USE_BATCH"] = True
+    u = _prefill_not_activated()
+    _other_pending("anthropic")
+    assert u.id not in {x.id for x in User.profile_eligible_query().all()}
+    _remaining(monkeypatch, 90000)
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=_chunk("DATA")))
+    monkeypatch.setattr(pb._exports, "_load_prompt",
+                        lambda *a, **k: "G {user_export}")
+
+    def full(reqs, keys, kind):
+        out = SubmittedBatches()
+        out.queue_full.update(reqs)
+        return out
+    monkeypatch.setattr(pb, "batch_submit", full)
+    assert pb._seed_profile_batches(users=[u]) == 0      # the immediate seed
+    user = User.query.get(u.id)
+    assert user.profile_work_held is True
+    assert (user.profile_batch_attempts or 0) == 0
+    sent = []
+    monkeypatch.setattr(pb, "batch_submit", lambda reqs, keys, kind: (
+        sent.append(reqs) or {k: f"b-{k}" for k in reqs}))
+    assert pb._seed_profile_batches() == 1               # the hourly seed
+    assert [r["custom_id"] for r in sent[0]["anthropic"]][0].startswith(
+        f"profile_{u.id}_")
+    user = User.query.get(u.id)
+    assert user.profile_work_held is False and user.profile_batch_pending
+
+
+def test_a_deactivated_account_held_for_the_queue_stays_paused(
+        app, monkeypatch):
+    """Deactivation is the admin's pause switch: a deactivated account
+    whose work a full queue sent back is not sent again."""
+    app.config["PROFILE_USE_BATCH"] = True
+    u = _prefill_not_activated(profile_work_held=True)
+    u.deactivated_at = datetime.utcnow()
+    db.session.commit()
+    sent = []
+    monkeypatch.setattr(pb, "batch_submit", lambda reqs, keys, kind: (
+        sent.append(reqs) or {k: f"b-{k}" for k in reqs}))
+    pb._seed_profile_batches()
+    assert sent == []
+    assert User.query.get(u.id).profile_work_held is True
+
+
+def test_a_queue_hold_with_nothing_left_to_do_is_released(app, monkeypatch):
+    app.config["PROFILE_USE_BATCH"] = True
+    u = _prefill_not_activated(profile_work_held=True)
+    u.profile_needs_full_regen = False
+    db.session.commit()
+    monkeypatch.setattr(pb, "_should_seed", lambda user, **k: False)
+    pb._seed_profile_batches()
+    assert User.query.get(u.id).profile_work_held is False
+
+
+def test_a_submit_refused_on_a_full_queue_alone_is_a_failed_attempt(
+        app, monkeypatch):
+    """Review of #596: with no other batch of ours in that queue, the
+    limit refuses the submission by itself, and waiting would never end:
+    it counts as a failed attempt, as before the queue rule."""
+    u = _seed_refused_on_a_full_queue(app, monkeypatch)
+    pb._seed_profile_batches(users=[u])
+    assert User.query.get(u.id).profile_batch_attempts == (
+        pb.MAX_BATCH_ATTEMPTS)
+
+
+def test_a_full_provider_queue_at_submit_is_not_a_batch_attempt(
+        app, monkeypatch):
+    """The provider refuses the create because its batch queue is full
+    (other batches of ours wait in it): the items wait for the next seed
+    pass, never counted towards the full-price fallback."""
+    from backend.utils.llm_batch import SubmittedBatches
+    u = _user(profile_needs_full_regen=True,
+              profile_batch_attempts=pb.MAX_BATCH_ATTEMPTS - 1)
+    app.config["PROFILE_USE_BATCH"] = True
+    db.session.commit()
+    _other_pending("anthropic")
+    _remaining(monkeypatch, 90000)
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=_chunk("DATA")))
+    monkeypatch.setattr(pb._exports, "_load_prompt",
+                        lambda *a, **k: "G {user_export}")
+    submits = []
+
+    def full(reqs, keys, kind):
+        submits.append(reqs)
+        out = SubmittedBatches()
+        out.queue_full.update(reqs)  # "anthropic"
+        return out
+    monkeypatch.setattr(pb, "batch_submit", full)
+    for _ in range(pb.MAX_BATCH_ATTEMPTS + 1):
+        assert pb._seed_profile_batches(users=[u]) == 0
+    assert len(submits) == pb.MAX_BATCH_ATTEMPTS + 1
+    user = User.query.get(u.id)
+    assert user.profile_batch_pending is False
+    assert user.profile_batch_attempts == pb.MAX_BATCH_ATTEMPTS - 1
+    from backend.utils import refusal_backoff
+    assert not refusal_backoff.profile_in_backoff(user.id)
+
+
+def test_a_batch_failed_on_a_full_queue_is_not_a_batch_attempt(
+        app, monkeypatch):
+    """OpenAI creates the batch and fails it on its enqueued-token limit:
+    the poller counts no attempt, the job is closed as failed, and the
+    next seed pass builds the step again."""
+    from backend.utils.llm_batch import CollectedResults
+    u = _user(profile_batch_attempts=pb.MAX_BATCH_ATTEMPTS - 1)
+    prev = _prev_profile(u, datetime(2026, 5, 1))
+    job, item = _chunk_job(u, prev)
+    job.provider_key = "openai:gpt-x"
+    db.session.commit()
+    # Another account's batch for the same model, on another endpoint.
+    _other_pending("openai:gpt-x:responses")
+    monkeypatch.setattr(pb, "batch_check_and_collect", _queue_full_except(
+        "other"))
+    pb._poll_profile_batches()
+    user = User.query.get(u.id)
+    assert user.profile_batch_attempts == pb.MAX_BATCH_ATTEMPTS - 1
+    assert user.profile_batch_pending is False
+    assert user.profile_work_held is True      # sent again by the seeder
+    assert ProfileBatchJob.query.get(job.id).status == "failed"
+    assert UserProfile.query.filter_by(user_id=u.id).count() == 1
+
+
+def test_a_refused_chained_step_is_held_for_the_seeder(app, monkeypatch):
+    """Peter, 2026-11-03 ("yes pls"): a refused step waits out the refusal
+    backoff and is re-seeded after it, by the hourly seeder, also for an
+    account not yet activated: the account is held. The backoff and the
+    attempt count are unchanged."""
+    u = _user()
+    prev = _prev_profile(u, datetime(2026, 5, 1))
+    job, item = _chunk_job(u, prev)
+    monkeypatch.setattr(pb, "batch_check_and_collect", lambda bids, keys: (
+        {item["custom_id"]: {"content": "", "input_tokens": 100,
+                             "output_tokens": 32000, "truncated": True}},
+        {}, {}))
+    pb._poll_profile_batches()
+    user = User.query.get(u.id)
+    assert user.profile_batch_attempts == 1
+    assert user.profile_work_held is True
+    from backend.utils import refusal_backoff
+    assert refusal_backoff.profile_in_backoff(u.id)
+
+
+def test_the_seeder_releases_a_hold_when_the_builder_has_nothing(
+        app, monkeypatch):
+    app.config["PROFILE_USE_BATCH"] = True
+    u = _prefill_not_activated(profile_work_held=True)
+    monkeypatch.setattr(pb, "_should_seed", lambda user, **k: True)
+    monkeypatch.setattr(pb, "_build_next_profile_request",
+                        lambda user, **k: None)
+    pb._seed_profile_batches()
+    assert User.query.get(u.id).profile_work_held is False
+
+
+def _queue_full_except(pending_batch_id):
+    """A collect stand-in: every batch failed on a full queue, except
+    ``pending_batch_id``, which is still in progress."""
+    from backend.utils.llm_batch import CollectedResults
+
+    def collect(bids, keys, known=None):
+        out = CollectedResults()
+        if pending_batch_id in bids.values():
+            return out, dict(bids), {}
+        out.queue_full.update(bids)
+        return out, {}, {}
+    return collect
+
+
+def test_a_batch_over_the_limit_by_itself_is_a_failed_attempt(
+        app, monkeypatch):
+    """Review of #596: an OpenAI batch failed on the enqueued-token limit
+    with no other batch of ours queued for that model is larger than the
+    limit by itself. It would fail on every pass, so it counts as a failed
+    attempt and logs an error (a Sentry event), as before the queue rule.
+    Another model's pending batch does not count."""
+    u = _user(profile_batch_attempts=0)
+    prev = _prev_profile(u, datetime(2026, 5, 1))
+    job, _item = _chunk_job(u, prev)
+    job.provider_key = "openai:gpt-x"
+    db.session.commit()
+    _other_pending("openai:gpt-y")
+    monkeypatch.setattr(pb, "batch_check_and_collect", _queue_full_except(
+        "other"))
+    log = MagicMock()
+    monkeypatch.setattr(pb, "logger", log)
+    pb._poll_profile_batches()
+    user = User.query.get(u.id)
+    assert user.profile_batch_attempts == 1
+    assert ProfileBatchJob.query.get(job.id).status == "collected"
+    assert any("larger than the limit" in str(c.args[0])
+               for c in log.error.call_args_list)
+
+
+def test_the_poller_reads_statuses_from_the_listing(app, monkeypatch):
+    """One listing for all pending jobs: a job still in progress costs no
+    call of its own, an ended one is collected from the listed object,
+    and a job the listing does not show is polled on its own."""
+    from types import SimpleNamespace
+    users = [_user() for _ in range(3)]
+    jobs = []
+    for i, u in enumerate(users):
+        prev = _prev_profile(u, datetime(2026, 5, 1))
+        job, _item = _chunk_job(u, prev)
+        job.batch_id = f"b{i}"
+        jobs.append(job)
+    db.session.commit()
+    seen = []
+    monkeypatch.setattr(pb, "list_batches", lambda wanted, keys, oldest=None: (
+        seen.append((sorted(wanted), oldest)) or {
+            "b0": SimpleNamespace(id="b0", processing_status="in_progress"),
+            "b1": SimpleNamespace(id="b1", processing_status="ended")}))
+    calls = []
+
+    def collect(bids, keys, known=None):
+        calls.append((dict(bids), sorted(known or {})))
+        return {}, {}, {}
+    monkeypatch.setattr(pb, "batch_check_and_collect", collect)
+    pb._poll_profile_batches()
+    assert seen == [([("anthropic", "b0"), ("anthropic", "b1"),
+                      ("anthropic", "b2")],
+                     min(j.submitted_at for j in jobs))]
+    assert calls == [({"anthropic": "b1"}, ["b1"]),
+                     ({"anthropic": "b2"}, [])]
+    assert ProfileBatchJob.query.filter_by(batch_id="b0").one().status == (
+        "pending")
+
+
 def test_force_batch_user_never_exhausts_to_sync(app, monkeypatch):
     """Pinned accounts keep being seeded past MAX_BATCH_ATTEMPTS; the
     sync last-resort in exports skips them too."""
@@ -1024,6 +1323,53 @@ def test_force_batch_user_never_exhausts_to_sync(app, monkeypatch):
     assert pb._seed_profile_batches(users=[u, plain]) == 1  # only the pinned one
     ids = [r["custom_id"] for r in list(submitted[0].values())[0]]
     assert ids == [f"profile_{u.id}_0_chunk"]
+
+
+def test_a_soft_limit_in_the_submit_records_what_went_out_and_stops(
+        app, monkeypatch):
+    """The task's soft time limit during a submission (2026-11-07): the
+    batch created before it is recorded (its requests are at the
+    provider), the requests that did not go out count as nothing (no
+    attempt, no failed job) but their work is held for a later pass, and
+    the soft limit stops the task. The held user here is outside the
+    hourly cohort (a pre-fill waiting for its owner): the hold is how the
+    hourly seeder reaches it again (review of #611)."""
+    from billiard.exceptions import SoftTimeLimitExceeded
+    from backend.utils.llm_batch import SubmittedBatches
+    a = _user(profile_force_batch=True)
+    b = _user(profile_force_batch=True, profile_batch_pending=True)
+    b.approved = False
+    db.session.commit()
+
+    def submit(reqs, keys, kind):
+        e = SoftTimeLimitExceeded()
+        e.submitted = SubmittedBatches({"anthropic": "b-ant"})
+        raise e
+    monkeypatch.setattr(pb, "batch_submit", submit)
+
+    def req(user, provider, model, cid):
+        return {"provider": provider,
+                "request": {"custom_id": cid, "model_id": "test-model",
+                            "api_model": model, "messages": [],
+                            "max_tokens": 10},
+                "meta": {"custom_id": cid, "user_id": user.id,
+                         "kind": "chunk", "prev_profile_id": None,
+                         "model_id": "test-model"}}
+    with pytest.raises(SoftTimeLimitExceeded):
+        pb._submit_requests([req(a, "anthropic", "claude-x", "c_a"),
+                             req(b, "openai", "gpt-x", "c_b")],
+                            {"anthropic": "k", "openai": "k"})
+    jobs = ProfileBatchJob.query.all()
+    assert [(j.batch_id, j.status) for j in jobs] == [("b-ant", "pending")]
+    assert [i["user_id"] for i in jobs[0].items] == [a.id]
+    assert User.query.get(a.id).profile_batch_pending is True
+    assert not User.query.get(a.id).profile_work_held
+    other = User.query.get(b.id)
+    assert not other.profile_batch_attempts
+    assert other.profile_batch_pending is False   # nothing in flight
+    assert other.profile_work_held is True
+    assert b.id not in {u.id for u in User.profile_eligible_query()}
+    assert b.id in {u.id for u in pb._work_held_users(set())}
 
 
 def test_submit_drops_duplicate_users_and_custom_ids(app, monkeypatch):
@@ -1164,7 +1510,10 @@ def test_immediate_seed_defers_when_lock_held(app, monkeypatch):
 
     monkeypatch.setattr(pb, "batch_pipeline_lock", lambda: Held())
     seeded = []
-    monkeypatch.setattr(pb, "_seed_profile_batches", lambda users=None, ignore_backoff=False: seeded.append([x.id for x in users]) or 1)
+    monkeypatch.setattr(
+        pb, "_seed_profile_batches",
+        lambda users=None, ignore_backoff=False, after_import=False: (
+            seeded.append([x.id for x in users]) or 1))
     assert pb._seed_profile_batch_for_user_impl(u.id) is None
     assert seeded == []
     monkeypatch.setattr(pb, "batch_pipeline_lock", lambda: Free())
@@ -2045,7 +2394,10 @@ def test_183_batch_full_rebuild_merges_the_users_version(app, monkeypatch):
     assert merge_req["meta"]["merged_profile_id"] == edit.id
     assert CUSTOM_ID_RE.match(merge_req["request"]["custom_id"])
     texts = _texts183(merge_req)
-    assert texts[1] == ("Profile No. 2\n- start to 2026-05-01\n\n"
+    written = edit.created_at.strftime("%Y-%m-%d")
+    assert texts[1] == ("Profile No. 2\n- Covers all the writing from the "
+                        "start to 2026-05-01\n"
+                        f"- Written by the user on {written}\n\n"
                         f"{pb._exports.USER_WRITTEN_PROFILE_NOTE}\n\n"
                         "MY CORRECTION")
     merge = UserProfile.query.filter_by(merged_profile_id=edit.id).one()
@@ -2697,3 +3049,546 @@ def test_rebuild_stops_after_a_merge_step_that_crosses_the_cap(
     assert u.profile_batch_attempts == 0
     assert u.profile_cap_held is True
     assert prefill_sent == []
+
+
+# ── OpenAI batches through the real collect helper (#419) ───────────────
+
+def _fake_openai_batch(monkeypatch, files, **batch):
+    """The real batch_check_and_collect against the OpenAI SDK faked at
+    its import: the batch ends as ``batch`` says, with the given files
+    (file id -> JSONL entries)."""
+    import json
+    import types
+    from types import SimpleNamespace
+    from backend.utils import llm_batch
+    client = MagicMock()
+    batch.setdefault("created_at", 1000)
+    batch.setdefault("output_file_id", None)
+    batch.setdefault("error_file_id", None)
+    client.batches.retrieve.return_value = SimpleNamespace(**batch)
+    client.files.content.side_effect = lambda fid: SimpleNamespace(
+        content="".join(json.dumps(e) + "\n" for e in files[fid]).encode())
+    fake = types.ModuleType("openai")
+    fake.OpenAI = MagicMock(return_value=client)
+    monkeypatch.setitem(sys.modules, "openai", fake)
+    monkeypatch.setattr(pb, "batch_check_and_collect",
+                        llm_batch.batch_check_and_collect)
+    return client
+
+
+def _counts(completed, failed):
+    from types import SimpleNamespace
+    return SimpleNamespace(total=completed + failed, completed=completed,
+                           failed=failed)
+
+
+def test_poll_counts_an_all_failed_openai_batch_as_a_failed_attempt_at_once(
+        app, monkeypatch):
+    """Every request failed (no output file): the first poll after the
+    batch completed counts the failed attempt and frees the user for the
+    seeder, as for any failed item. Before #419 the poll could not read
+    the batch and kept trying until the 24 h stale cutoff."""
+    u = _user()
+    prev = _prev_profile(u, datetime(2026, 5, 1))
+    job, item = _chunk_job(u, prev)
+    job.provider_key = "openai:gpt-x"
+    db.session.commit()
+    _fake_openai_batch(
+        monkeypatch, {"file-err": [{
+            "custom_id": item["custom_id"], "response": {
+                "status_code": 400, "body": {"error": {
+                    "code": "context_length_exceeded",
+                    "message": "too long"}}}, "error": None}]},
+        status="completed", completed_at=1060, error_file_id="file-err",
+        request_counts=_counts(0, 1))
+    submit = MagicMock(return_value={})
+    monkeypatch.setattr(pb, "batch_submit", submit)
+
+    pb._poll_profile_batches()
+
+    u = User.query.get(u.id)
+    assert u.profile_batch_attempts == 1
+    assert u.profile_batch_pending is False
+    assert ProfileBatchJob.query.get(job.id).status == "collected"
+    assert UserProfile.query.filter_by(parent_profile_id=prev.id).count() == 0
+    assert APICostLog.query.filter_by(user_id=u.id).count() == 0
+    submit.assert_not_called()
+
+
+def test_expired_openai_batch_step_is_saved_costed_and_counts_to_the_cap(
+        app, monkeypatch):
+    """The step finished before its batch expired: OpenAI bills it and
+    returns it, so it is saved and its cost logged on the user like any
+    collected step. That cost is what the per-user cap (#543) reads, and
+    here it crosses the cap, so the chain holds."""
+    from backend.utils.spend import current_month
+    block_email = _cap_harness(app, monkeypatch, limit=1.0)
+    u = _user(profile_force_batch=True)
+    db.session.commit()
+    _spent(u, 0.999999)
+    prev, job, submit = _mid_rebuild(monkeypatch, u)
+    job.provider_key = "openai:gpt-x"
+    db.session.commit()
+    _fake_openai_batch(
+        monkeypatch, {"file-out": [{
+            "custom_id": job.items[0]["custom_id"], "response": {
+                "status_code": 200, "body": {
+                    "choices": [{"message": {"content": "CHUNK 2"},
+                                 "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 100_000,
+                              "completion_tokens": 10_000}}}}]},
+        status="expired", expired_at=1000 + 86400, output_file_id="file-out",
+        request_counts=_counts(1, 0))
+
+    pb._poll_profile_batches()
+
+    saved = UserProfile.query.filter_by(
+        user_id=u.id, parent_profile_id=prev.id).one()
+    assert saved.get_content().endswith("CHUNK 2")
+    step_cost = APICostLog.query.filter_by(
+        user_id=u.id, request_type="profile_batch").one()
+    assert step_cost.cost_microdollars > 0
+    u = User.query.get(u.id)
+    assert u.spend_blocked_month == current_month()
+    block_email.assert_called_once()
+    submit.assert_not_called()
+    assert u.profile_batch_attempts == 0
+    assert u.profile_cap_held is True
+    assert ProfileBatchJob.query.get(job.id).status == "collected"
+
+
+def test_an_expired_batch_past_the_stale_age_is_collected_not_failed(
+        app, monkeypatch):
+    """OpenAI reports "expired" only after 24 h, so the job is older than
+    that when the poll sees it. The age backstop is 25 h, so the poll
+    still reads it: the finished step is saved and costed, and no attempt
+    is counted (the #566 review's case)."""
+    u = _user()
+    prev = _prev_profile(u, datetime(2026, 5, 1))
+    job, item = _chunk_job(u, prev)
+    job.provider_key = "openai:gpt-x"
+    job.submitted_at = datetime.utcnow() - timedelta(hours=24, minutes=2)
+    db.session.commit()
+    client = _fake_openai_batch(
+        monkeypatch, {"file-out": [{
+            "custom_id": item["custom_id"], "response": {
+                "status_code": 200, "body": {
+                    "choices": [{"message": {"content": "NEW PROFILE"},
+                                 "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 2000,
+                              "completion_tokens": 500}}}}]},
+        status="expired", expired_at=1000 + 86400, output_file_id="file-out",
+        request_counts=_counts(1, 0))
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=None))
+    monkeypatch.setattr(pb._exports, "build_integration_messages",
+                        lambda uid, pid: (None, None))
+    monkeypatch.setattr(pb, "batch_submit", MagicMock(return_value={}))
+
+    pb._poll_profile_batches()
+
+    client.batches.retrieve.assert_called_once()
+    assert ProfileBatchJob.query.get(job.id).status == "collected"
+    assert UserProfile.query.filter_by(
+        user_id=u.id, parent_profile_id=prev.id).one().get_content() \
+        .endswith("NEW PROFILE")
+    assert APICostLog.query.filter_by(
+        user_id=u.id, request_type="profile_batch").count() == 1
+    assert (User.query.get(u.id).profile_batch_attempts or 0) == 0
+
+
+def test_a_young_unreadable_job_stays_pending(app, monkeypatch):
+    u = _user()
+    prev = _prev_profile(u, datetime(2026, 5, 1))
+    job, item = _chunk_job(u, prev)
+    monkeypatch.setattr(pb, "batch_check_and_collect", _raise_unreadable)
+
+    pb._poll_profile_batches()
+
+    assert ProfileBatchJob.query.get(job.id).status == "pending"
+    assert (User.query.get(u.id).profile_batch_attempts or 0) == 0
+
+
+@pytest.mark.parametrize("status, error", [
+    (500, {"code": None, "type": "server_error", "message": "oops"}),
+    (429, {"code": "rate_limit_exceeded", "message": "slow down"}),
+    (429, {"code": "insufficient_quota", "type": "insufficient_quota"}),
+])
+def test_a_provider_or_account_failure_is_not_a_failed_attempt(
+        app, monkeypatch, status, error):
+    """Every request failed for a reason outside the request (a 5xx, a
+    429, the account's quota): not billed, and not counted as an attempt,
+    as an account-refused submit is not (#406). The user is free for
+    the seeder to resend it, and three such outages in a row do not move
+    them to the full-price path."""
+    u = _user()
+    prev = _prev_profile(u, datetime(2026, 5, 1))
+    job, item = _chunk_job(u, prev)
+    job.provider_key = "openai:gpt-x"
+    db.session.commit()
+    _fake_openai_batch(
+        monkeypatch, {"file-err": [{
+            "custom_id": item["custom_id"], "response": {
+                "status_code": status, "body": {"error": error}},
+            "error": None}]},
+        status="completed", completed_at=1060, error_file_id="file-err",
+        request_counts=_counts(0, 1))
+    monkeypatch.setattr(pb, "batch_submit", MagicMock(return_value={}))
+
+    pb._poll_profile_batches()
+
+    u = User.query.get(u.id)
+    assert (u.profile_batch_attempts or 0) == 0
+    assert u.profile_batch_pending is False
+    assert u.profile_work_held is True
+    assert ProfileBatchJob.query.get(job.id).status == "collected"
+    assert APICostLog.query.filter_by(user_id=u.id).count() == 0
+
+
+def test_a_provider_failure_keeps_a_prefilled_account_in_the_seeder(
+        app, monkeypatch):
+    """A pre-filled account its owner hasn't activated yet (approved
+    False) is outside the hourly cohort; only the work hold brings it
+    back. A 5xx on its step must set the hold, as every other failed or
+    refused step does, or its profile build stops until activation."""
+    u = _user()
+    u.approved = False
+    prev = _prev_profile(u, datetime(2026, 5, 1))
+    job, item = _chunk_job(u, prev)
+    job.provider_key = "openai:gpt-x"
+    db.session.commit()
+    _fake_openai_batch(
+        monkeypatch, {"file-err": [{
+            "custom_id": item["custom_id"], "response": {
+                "status_code": 500, "body": {"error": {
+                    "code": None, "type": "server_error",
+                    "message": "oops"}}},
+            "error": None}]},
+        status="completed", completed_at=1060, error_file_id="file-err",
+        request_counts=_counts(0, 1))
+    monkeypatch.setattr(pb, "batch_submit", MagicMock(return_value={}))
+
+    pb._poll_profile_batches()
+
+    assert (User.query.get(u.id).profile_batch_attempts or 0) == 0
+    assert u.id in {x.id for x in pb._work_held_users(set())}
+
+
+# ── content-policy blocks (2026-11-04) ──────────────────────────────────
+# A step the provider's content-policy filter blocked is final: it is not
+# a batch attempt (attempts lead to the synchronous path, which would send
+# it again), and the job stays stopped through the hourly seeder, imports
+# and saved versions until the admin's confirmed Build profile.
+
+class _Collected(dict):
+    """A collect result with blocked items, as llm_batch returns it."""
+
+    def __init__(self, results=(), blocked=None):
+        super().__init__(results)
+        self.blocked = blocked or {}
+
+
+def _blocked_poll(monkeypatch, item, code="bio_policy"):
+    reports = []
+    from backend.utils import refusal_backoff
+    monkeypatch.setattr(refusal_backoff, "report_policy_block",
+                        lambda *a: reports.append(a))
+    monkeypatch.setattr(pb, "batch_check_and_collect", lambda bids, keys: (
+        _Collected(blocked={item["custom_id"]: code}), {}, {}))
+    submit = MagicMock(return_value={})
+    monkeypatch.setattr(pb, "batch_submit", submit)
+    pb._poll_profile_batches()
+    return reports, submit
+
+
+def test_poll_policy_blocked_step_stops_the_profile_job(app, monkeypatch):
+    u = _user(profile_force_batch=True)
+    prev = _prev_profile(u, datetime(2026, 5, 1))
+    job, item = _chunk_job(u, prev)
+
+    reports, submit = _blocked_poll(monkeypatch, item)
+
+    u = User.query.get(u.id)
+    assert u.profile_batch_pending is False
+    assert (u.profile_batch_attempts or 0) == 0   # never the sync path
+    assert "content-policy" in u.profile_seed_error
+    assert "bio_policy" in u.profile_seed_error
+    row = APICostLog.query.filter_by(user_id=u.id).one()
+    assert row.request_ref == "policy_block:bio_policy"
+    assert row.cost_microdollars == 0 and row.request_type == "profile_batch"
+    assert reports == [(u.id, "bio_policy", "test-model",
+                        "profile batch chunk")]
+    submit.assert_not_called()
+    assert ProfileBatchJob.query.get(job.id).status == "collected"
+
+
+def test_policy_block_holds_the_seeder_until_the_confirmed_override(app):
+    from backend.utils import refusal_backoff
+    u = _user(profile_needs_full_regen=True)
+    db.session.commit()
+    refusal_backoff.record_policy_block(
+        u.id, "profile_batch", "test-model", "bio_policy", "test",
+        report=False)
+    assert pb._should_seed(u) is False
+    # An import's seed skips the refusal backoff, not the block.
+    assert pb._should_seed(u, ignore_backoff=True) is False
+    # A saved version (a user's edit, a revert) does not lift it either.
+    _prev_profile(u, datetime(2026, 6, 1))
+    db.session.commit()
+    assert pb._should_seed(u, ignore_backoff=True) is False
+    # Only the admin's confirmed Build profile lifts it.
+    assert refusal_backoff.lift_policy_block(
+        u.id, "profile_batch",
+        refusal_backoff.PROFILE_REQUEST_TYPES) == "bio_policy"
+    assert pb._should_seed(u, ignore_backoff=True) is True
+    assert refusal_backoff.lift_policy_block(
+        u.id, "profile_batch", refusal_backoff.PROFILE_REQUEST_TYPES) is None
+
+
+def test_only_the_lift_ends_a_policy_block(app):
+    """A billed call of the job saved after the block (another window of
+    the same build, say) does not lift it; the lift does, and a block
+    after the lift stops the job again."""
+    from backend.utils import refusal_backoff as rb
+    u = _user(profile_needs_full_regen=True)
+    db.session.commit()
+    rb.record_policy_block(u.id, "profile_batch", "test-model",
+                           "invalid_prompt", "test", report=False)
+    assert rb.policy_block_for(
+        u.id, rb.PROFILE_REQUEST_TYPES) == "invalid_prompt"
+    assert rb.profile_in_backoff(u.id) is True
+    db.session.add(APICostLog(
+        user_id=u.id, model_id="test-model", request_type="profile_batch",
+        input_tokens=1, output_tokens=1, cost_microdollars=1,
+        created_at=datetime.utcnow() + timedelta(seconds=1)))
+    db.session.commit()
+    assert rb.policy_block_for(
+        u.id, rb.PROFILE_REQUEST_TYPES) == "invalid_prompt"
+    APICostLog.query.update({"created_at": datetime.utcnow()
+                             - timedelta(minutes=5)})
+    db.session.commit()
+    rb.lift_policy_block(u.id, "profile_batch", rb.PROFILE_REQUEST_TYPES)
+    assert rb.policy_block_for(u.id, rb.PROFILE_REQUEST_TYPES) is None
+    assert pb._should_seed(u) is True
+    rb.record_policy_block(u.id, "profile_batch", "test-model",
+                           "bio_policy", "test", report=False)
+    assert rb.policy_block_for(u.id, rb.PROFILE_REQUEST_TYPES) == \
+        "bio_policy"
+
+
+def test_sync_profile_trigger_holds_a_policy_block_import_included(
+        app, monkeypatch):
+    """Off the batch path, an import hands off to
+    maybe_trigger_profile_update directly (routes/import_data): a block
+    of the synchronous profile job stops that dispatch too."""
+    from backend.utils import refusal_backoff
+    u = _user()
+    db.session.commit()
+    refusal_backoff.record_policy_block(
+        u.id, "profile", "test-model", "bio_policy", "profile update",
+        report=False)
+    dispatch = MagicMock()
+    monkeypatch.setattr(pb._exports, "update_user_profile", dispatch)
+
+    assert pb._exports.maybe_trigger_profile_update(u.id) is None
+    assert pb._exports.maybe_trigger_profile_update(
+        u.id, force_full_regen=True) is None
+    assert pb._exports.maybe_trigger_incremental_profile_update(
+        u, ignore_backoff=True) is None
+    dispatch.delay.assert_not_called()
+
+    refusal_backoff.lift_policy_block(
+        u.id, "profile", refusal_backoff.PROFILE_REQUEST_TYPES)
+    dispatch.delay.return_value = MagicMock(id="task-1")
+    assert pb._exports.maybe_trigger_profile_update(
+        u.id, force_full_regen=True) == "task-1"
+
+
+def test_poll_policy_blocked_intentions_item_is_not_resubmitted(
+        app, monkeypatch):
+    from backend.tasks import intentions as intentions_mod
+    u = _user()
+    db.session.commit()
+    item = {"custom_id": f"int-u{u.id}", "user_id": u.id,
+            "kind": "intentions", "budget": 1000, "resubmitted": False}
+    job = ProfileBatchJob(provider_key="openai:gpt-x", batch_id="bi-1",
+                          status="pending", items=[dict(item)],
+                          submitted_at=datetime.utcnow())
+    db.session.add(job)
+    db.session.commit()
+    resubmitted = []
+    monkeypatch.setattr(intentions_mod, "handle_failed_intentions_item",
+                        lambda *a: resubmitted.append(a))
+
+    reports, _ = _blocked_poll(monkeypatch, item)
+
+    assert resubmitted == []
+    assert ProfileBatchJob.query.get(job.id).items[0]["gave_up"] is True
+    assert [r[1] for r in reports] == ["bio_policy"]
+
+
+def test_submit_names_the_user_of_each_request(app, monkeypatch):
+    u = _user()
+    db.session.commit()
+    sent = []
+    monkeypatch.setattr(pb, "batch_submit", lambda reqs, keys, kind: (
+        sent.append(reqs) or {}))
+    pb._submit_requests([{
+        "provider": "openai",
+        "request": {"custom_id": "c1", "model_id": "m", "api_model": "gpt-x",
+                    "messages": [], "max_tokens": 10},
+        "meta": {"custom_id": "c1", "user_id": u.id, "kind": "chunk"},
+    }], {})
+    assert sent[0]["openai"][0]["user_id"] == u.id
+
+
+# ── an import's build waits for the imports to stop (#598) ──────────────
+# Peter, 2026-11-05: an import only marks the account; the build starts
+# after the existing 30-minute inactivity window (MIN_INACTIVITY), so an
+# import that follows within it is read by the same build.
+
+class _Clock(datetime):
+    at = datetime(2026, 11, 5, 12, 0)
+
+    @classmethod
+    def utcnow(cls):
+        return cls.at
+
+
+def _later(minutes):
+    _Clock.at += timedelta(minutes=minutes)
+
+
+def _import_harness(monkeypatch):
+    """A batch account whose import asked for a rebuild, on a clock the
+    test moves: the scheduled seeds are recorded, the submissions too."""
+    monkeypatch.setattr(pb, "datetime", _Clock)
+    _Clock.at = datetime(2026, 11, 5, 12, 0)
+    scheduled = MagicMock()
+    monkeypatch.setattr(pb.seed_profile_batch_for_user, "apply_async",
+                        scheduled)
+    _remaining(monkeypatch, 14_000_000)
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=_chunk("DATA")))
+    monkeypatch.setattr(pb._exports, "_load_prompt",
+                        lambda *a, **k: "G {user_export}")
+    submitted = []
+    monkeypatch.setattr(pb, "batch_submit", lambda reqs, keys, kind: (
+        submitted.append(reqs) or {k: f"b-{k}" for k in reqs}))
+    u = _user(profile_force_batch=True, profile_needs_full_regen=True)
+    db.session.commit()
+    return u, scheduled, submitted
+
+
+def _deferred_seed(user):
+    """The seed an import scheduled, once its countdown has run."""
+    return pb._seed_profile_batches(users=[User.query.get(user.id)],
+                                    ignore_backoff=True, after_import=True)
+
+
+def test_a_second_import_within_30_minutes_gets_one_build_after_it(
+        app, monkeypatch):
+    u, scheduled, submitted = _import_harness(monkeypatch)
+    pb.seed_after_import(u)                   # the first import finishes
+    _later(20)
+    pb.seed_after_import(u)                   # a second one, 20 min later
+    assert [c.args for c in scheduled.call_args_list] == [
+        ((u.id,), {"ignore_backoff": True, "after_import": True})] * 2
+    assert [c.kwargs for c in scheduled.call_args_list] == [
+        {"countdown": 30 * 60}] * 2
+
+    _later(10)                                # the first seed comes due
+    assert _deferred_seed(u) == 0
+    assert pb._seed_profile_batches() == 0    # an hourly pass meanwhile
+    assert submitted == []
+    assert User.query.get(u.id).profile_import_quiet_from is not None
+
+    _later(20)                                # the second seed comes due
+    assert _deferred_seed(u) == 1
+    assert len(submitted) == 1
+    u = User.query.get(u.id)
+    assert u.profile_batch_pending is True
+    assert u.profile_import_quiet_from is None
+
+
+def test_an_import_with_nothing_after_it_is_built_after_30_minutes(
+        app, monkeypatch):
+    u, scheduled, submitted = _import_harness(monkeypatch)
+    pb.seed_after_import(u)
+    _later(29)
+    assert pb._seed_profile_batches() == 0    # inside the quiet period
+    assert submitted == []
+    _later(1)
+    assert pb._seed_profile_batches() == 1    # the hourly pass, or the seed
+    assert len(submitted) == 1
+
+
+def test_a_running_import_holds_the_build(app, monkeypatch, tmp_path):
+    from backend.utils import conversation_stash as cs
+    from backend.utils import twitter_archive
+    monkeypatch.setattr(twitter_archive, "STASH_ROOT", tmp_path / "imports")
+    u, scheduled, submitted = _import_harness(monkeypatch)
+    token = "a" * 20
+    assert cs.acquire_lock(u.id, "task-1", token, "chatgpt")[0] is True
+    _later(120)                     # the import runs for hours
+    assert pb._seed_profile_batches() == 0
+    assert _deferred_seed(u) == 0
+    assert submitted == []
+
+    cs.release_lock(u.id, "task-1")
+    pb.seed_after_import(u)         # it finishes: its hand-off marks it
+    _later(15)
+    assert pb._seed_profile_batches() == 0
+    _later(15)
+    assert pb._seed_profile_batches() == 1
+    assert len(submitted) == 1
+
+
+def test_an_entry_written_after_the_import_extends_the_quiet_period(
+        app, monkeypatch):
+    u, scheduled, submitted = _import_harness(monkeypatch)
+    pb.seed_after_import(u)
+    _later(20)
+    n = Node(user_id=u.id, node_type="user", ai_usage="chat",
+             token_count=10, created_at=_Clock.at)
+    n.set_content("written in Loore")
+    db.session.add(n)
+    db.session.commit()
+    _later(15)                      # 35 min after the import, 15 after it
+    assert _deferred_seed(u) == 0
+    _later(15)
+    assert pb._seed_profile_batches() == 1
+
+
+def test_the_admins_build_does_not_wait_for_the_imports(app, monkeypatch):
+    u, scheduled, submitted = _import_harness(monkeypatch)
+    pb.seed_after_import(u)
+    _later(5)
+    assert pb._seed_profile_batches(users=[u], ignore_backoff=True) == 1
+    assert len(submitted) == 1
+
+
+def test_an_import_after_the_refusal_stop_still_builds_when_an_entry_followed(
+        app, monkeypatch):
+    """The profile job is in the refusal stop (two refusals in a row), which
+    an import's build skips (voice review, 2026-10-01). An entry written
+    10 minutes after the import makes the import's own seed find the
+    imports settling; the first hourly pass after the quiet period builds
+    with the import's override, not the stop."""
+    u, scheduled, submitted = _import_harness(monkeypatch)
+    for days in (30, 29):
+        _refusal(u, timedelta(days=days))
+    assert pb._should_seed(u) is False                # the stop holds
+    pb.seed_after_import(u)
+    _later(10)
+    n = Node(user_id=u.id, node_type="user", ai_usage="chat",
+             token_count=10, created_at=_Clock.at)
+    n.set_content("written in Loore")
+    db.session.add(n)
+    db.session.commit()
+    _later(20)                                        # the import's seed
+    assert _deferred_seed(u) == 0
+    _later(25)                                        # 35 min after the entry
+    assert pb._seed_profile_batches() == 1            # the hourly pass
+    assert len(submitted) == 1
+    assert User.query.get(u.id).profile_import_quiet_from is None
