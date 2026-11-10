@@ -3122,6 +3122,47 @@ Kinds (one per entry and per table row):
 - **Source:** issue #619, 2026-11-10; Claude Code session 2026-11-10 (Opus 5.5)
 - **Applies to:** #414, #548, #619, #569
 
+### 2026-11-10 · Try again for users without craft mode
+
+- **Kind:** UX
+- **Situation:** #561 brings back the LLM Response button after an automatic reply failed or never started, for craft mode only. A user without craft mode has no way to ask for the reply again. Recommended: a plain Try again for everyone.
+- **Prediction:** yes (65 %).
+- **Peter:** "yes"
+- **Score:** hit. Built as its own PR, with the protections #561 has (not while an upload transcribes).
+- **Source:** Loore voice review, node 201651, 2026-11-10; questions from the train #581 summary (node 201566), Claude Code session 2026-10-21 (Opus 5.5)
+- **Applies to:** #561, #416
+
+### 2026-11-10 · Older profile edits merged only where newer edits didn't change the lines
+
+- **Kind:** data safety
+- **Situation:** #569 merges every round of a user's profile edits at a rebuild, oldest first. As built, a sentence the user added in one edit and deleted in a later one can come back. The options: (a) as built, (b) only the newest edit, as main does, (c) merge an older edit only for the lines the newer edits didn't change. Recommended (c).
+- **Prediction:** (c) (50 %).
+- **Peter:** "let's go with c)" · "but if" (the answer ends there; asked for the rest)
+- **Score:** hit.
+- **Source:** Loore voice review, node 201651, 2026-11-10; questions from the train #581 summary (node 201566), Claude Code session 2026-10-21 (Opus 5.5)
+- **Applies to:** #569, #421
+
+### 2026-11-10 · No rebuild of existing profiles after #551 and #565
+
+- **Kind:** cost
+- **Situation:** #551 leaves the export's preamble out of profile builds, and #565 makes every entry a profile window selects reach the model. Existing profiles were built without these fixes. A rebuild would apply them at once, at the cost of a full build per user.
+- **Prediction:** rebuild Peter's own profile first and compare (55 %); rebuild everyone 20 %; no rebuild 25 %.
+- **Peter:** "no rebuild in either PRs"
+- **Score:** miss. Profiles take the fixes at their next regular update.
+- **Why it missed:** the prediction weighed a visible quality check above cost; Peter let the regular updates carry the fixes.
+- **Source:** Loore voice review, node 201651, 2026-11-10; questions from the train #581 summary (node 201566), Claude Code session 2026-10-21 (Opus 5.5)
+- **Applies to:** #551, #565
+
+### 2026-11-10 · One follow-up issue for the two parts of #558 the merge dropped
+
+- **Kind:** process
+- **Situation:** the merge of main into train #581 dropped #558 for #608 and #610, including two parts main lacks: removing a Voice session's drafts folder after its recording moves to the entry, and a wrong-database guard for the audio purge script. Recommended: file one issue for both, not built now.
+- **Prediction:** yes, file both (80 %).
+- **Peter:** "file the recording deletion, but not the guard pls"
+- **Score:** partial. Filed as #621 (the recording); the guard is not filed.
+- **Source:** Loore voice review, node 201651, 2026-11-10; questions from the train #581 summary (node 201566), Claude Code session 2026-10-21 (Opus 5.5)
+- **Applies to:** #558, #581, #621
+
 ## Decided by the builder
 
 Choices that agents flagged in PRs and that the builder decided because a rule above already covers them (Peter, 2026-10-02: decide what the log supports, raise only real judgement calls). Each is also recorded on its PR, or in the session where Peter asked. The Decided column holds only the builder's part; a rule or decision of Peter's goes in the Rule column. Questions raised to Peter instead are not listed; his answers become entries. Model is the model that wrote the PR (its Co-Authored-By line). Result is "accepted by merge (PR #N, date)" once the PR has merged and Peter didn't correct the choice, "pending" until it merges, and "corrected → entry <title>" when he overrules it; the entry is then scored as a miss.
