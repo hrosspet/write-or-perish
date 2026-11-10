@@ -168,14 +168,20 @@ def policy_block_for(user_id, request_types):
     user: a block row of these request types with no lift row
     (``lift_policy_block``) after it. None when there is none."""
     from backend.models import APICostLog
-    row = (APICostLog.query.with_entities(APICostLog.request_ref)
-           .filter(APICostLog.user_id == user_id,
-                   APICostLog.request_type.in_(request_types),
-                   or_(APICostLog.request_ref.like(
-                       POLICY_BLOCK_REF_PREFIX + "%"),
-                       APICostLog.request_ref == POLICY_BLOCK_LIFTED_REF))
-           .order_by(APICostLog.created_at.desc(), APICostLog.id.desc())
-           .first())
+    q = (APICostLog.query.with_entities(APICostLog.request_ref)
+         .filter(APICostLog.user_id == user_id,
+                 APICostLog.request_type.in_(request_types),
+                 or_(APICostLog.request_ref.like(
+                     POLICY_BLOCK_REF_PREFIX + "%"),
+                     APICostLog.request_ref == POLICY_BLOCK_LIFTED_REF)))
+    fresh = _fresh_start(user_id)
+    if fresh is not None:
+        # A block of the content "Delete all my content" hid stops nothing
+        # the account builds from what it writes since (#590); a restore
+        # brings the content and its block back.
+        q = q.filter(APICostLog.created_at > fresh)
+    row = q.order_by(APICostLog.created_at.desc(),
+                     APICostLog.id.desc()).first()
     ref = row[0] if row else None
     if ref and ref.startswith(POLICY_BLOCK_REF_PREFIX):
         return ref[len(POLICY_BLOCK_REF_PREFIX):] or "unknown"
@@ -282,6 +288,25 @@ def report_stop(user_id, job, n, model_id, request_type,
         logger.exception("Sentry report of the stop failed")
 
 
+def _fresh_start(user_id):
+    """When the user's waiting "Delete all my content" was requested, or
+    None (hidden_rows.content_deletion_cutoff). The account starts afresh
+    then (#590): a stop recorded on the hidden content (a content-policy
+    block, a refusal streak) does not hold what it builds since."""
+    from backend.utils.hidden_rows import content_deletion_cutoff
+    return content_deletion_cutoff(user_id)
+
+
+def _since_fresh_start(user_id, since):
+    """A streak boundary, moved to the fresh start when that is later:
+    the versions that ended earlier streaks are hidden, so without it every
+    refusal in the account's history would count again (review of #630)."""
+    fresh = _fresh_start(user_id)
+    if fresh is None:
+        return since
+    return fresh if since is None or fresh > since else since
+
+
 def latest_profile_at(user_id):
     """created_at of the user's newest saved profile version (any kind)."""
     from backend.models import UserProfile
@@ -328,11 +353,12 @@ def recent_context_batch_failures_since(user_id, since):
 
 def profile_backoff_state(user_id):
     return backoff_state(user_id, PROFILE_REQUEST_TYPES,
-                         latest_profile_at(user_id))
+                         _since_fresh_start(user_id,
+                                            latest_profile_at(user_id)))
 
 
 def recent_context_backoff_state(user_id):
-    since = latest_recent_context_at(user_id)
+    since = _since_fresh_start(user_id, latest_recent_context_at(user_id))
     return backoff_state(
         user_id, RECENT_CONTEXT_REQUEST_TYPES, since,
         *recent_context_batch_failures_since(user_id, since))
@@ -351,21 +377,23 @@ def latest_digest_at(user_id):
 
 def digest_backoff_state(user_id):
     return backoff_state(user_id, DIGEST_REQUEST_TYPES,
-                         latest_digest_at(user_id))
+                         _since_fresh_start(user_id, latest_digest_at(user_id)))
 
 
 def digest_in_backoff(user_id, now=None):
     return in_backoff(user_id, DIGEST_REQUEST_TYPES,
-                      latest_digest_at(user_id), "external digest", now=now)
+                      _since_fresh_start(user_id, latest_digest_at(user_id)),
+                      "external digest", now=now)
 
 
 def profile_in_backoff(user_id, now=None):
     return in_backoff(user_id, PROFILE_REQUEST_TYPES,
-                      latest_profile_at(user_id), "profile update", now=now)
+                      _since_fresh_start(user_id, latest_profile_at(user_id)),
+                      "profile update", now=now)
 
 
 def recent_context_in_backoff(user_id, now=None):
-    since = latest_recent_context_at(user_id)
+    since = _since_fresh_start(user_id, latest_recent_context_at(user_id))
     billed, unbilled = recent_context_batch_failures_since(user_id, since)
     return in_backoff(
         user_id, RECENT_CONTEXT_REQUEST_TYPES, since, "recent context",
