@@ -203,8 +203,13 @@ Landed (PR #285):
 
 ## Watch
 
-- The tree header's index path grows with depth (about 300 chars per node
-  at depth 120). Check nothing parses it, then shorten it.
+- ✅ The tree header's index path grew with depth (about 300 chars per
+  node at depth 120). Since #592 (2026-11-10) a linear stretch is
+  numbered in order and a label grows only at a branch point (thread 4:
+  4, 4.1 ... 4.199; replies to 2.2: 2.2a.1, 2.2b.1); nothing parsed the
+  old labels. A 200-message linear thread's headers went from 52,090 to
+  12,188 characters. Stored tokens-per-unit ratios measured on the long
+  headers overestimate until the user's next chunk measures again.
 - Claude-new tweet priors are estimated from o200k counts; the first
   measured chunk replaces them.
 

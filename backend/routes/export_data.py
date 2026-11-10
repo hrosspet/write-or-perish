@@ -24,6 +24,8 @@ from bisect import bisect_left, bisect_right
 from collections import namedtuple
 from datetime import datetime
 from operator import attrgetter, itemgetter
+import re
+import secrets
 
 export_bp = Blueprint("export_bp", __name__)
 
@@ -114,11 +116,15 @@ def _alive_units(model):
     )
 
 
-def _node_header_line(node, index_path):
+def _header_stamp(node):
+    """A node's time as its header shows it."""
+    return node.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _node_header_line(node, label):
     """Markdown header line shared by all node renderings."""
-    ts = node.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
-    return (f"{_index_heading(index_path)} {_node_author_label(node)}"
-            f"{_origin_suffix(node)} - {ts}\n")
+    return (f"{_index_heading(label)} {_node_author_label(node)}"
+            f"{_origin_suffix(node)} - {_header_stamp(node)}\n")
 
 
 # What a reply the user cannot access renders as, under a heading that
@@ -126,11 +132,115 @@ def _node_header_line(node, index_path):
 INACCESSIBLE_TEXT = "[Reply not accessible]"
 
 
-def _index_heading(index_path):
-    """The Markdown heading of the node at *index_path*, e.g. '### [1.2]':
-    one level deeper per level of the thread."""
-    depth = len(index_path.split('.'))
-    return f"{'#' * min(depth + 1, 6)} [{index_path}]"
+# Position labels (#592). An entry's label is its place in its thread:
+# the thread's number, then one number per entry along a linear stretch
+# (thread 4: 4, 4.1, 4.2 ... 4.199), and a letter per branch where an
+# entry has more than one reply shown (the replies to 2.2 are 2.2a.1 and
+# 2.2b.1, the next entry on branch b is 2.2b.2). A label grows with the
+# number of branch points above the entry, not with its depth: the old
+# path added ".1" per level, so the 200th message of an imported chat
+# carried a 400-character label.
+
+def _branch_letters(i):
+    """The letters of the branch with index *i* (from 0) at a branch
+    point: a ... z, then aa, ab, ... (bijective base 26)."""
+    letters = ""
+    i += 1
+    while i:
+        i, rest = divmod(i - 1, 26)
+        letters = chr(ord("a") + rest) + letters
+    return letters
+
+
+def _reply_labels(label, count):
+    """The labels of the *count* replies shown under the entry labelled
+    *label*. One reply continues the linear stretch with the next number
+    (4 -> 4.1, 2.2a.1 -> 2.2a.2); two or more each start a branch,
+    lettered in order (2.2 -> 2.2a.1, 2.2b.1)."""
+    if count == 1:
+        head, dot, tail = label.rpartition(".")
+        if dot and tail.isdigit():
+            return [f"{head}.{int(tail) + 1}"]
+        return [f"{label}.1"]
+    return [f"{label}{_branch_letters(i)}.1" for i in range(count)]
+
+
+def _index_heading(label):
+    """The Markdown heading of the entry labelled *label*, e.g.
+    '## [4.12]': level 2 along the thread's first stretch, one level
+    deeper per branch point above the entry (a segment with a letter),
+    at most 6. A long linear thread stays at level 2."""
+    branches = sum(1 for seg in label.split(".") if not seg.isdigit())
+    return f"{'#' * min(branches + 2, 6)} [{label}]"
+
+
+def _branch_separator(label):
+    """The line before every branch after the first, naming the entry it
+    replies to, so a reader need not work it out from the labels."""
+    return f"---\n**BRANCH: another reply to {label}**\n---\n\n"
+
+
+class _QuoteReferences:
+    """The quote references of one export (#592). A quote the export
+    resolves by reference (the quoted entry is in it elsewhere) names
+    that entry by its position label, "[See entry 2.2b.1]". An entry can
+    quote one rendered further down, so the render leaves a marker and
+    ``fill`` replaces every marker once the document is complete. A
+    quoted entry the document does not show as an entry (only inside
+    another entry's quote, in a compact tweet run, or not at all) is
+    named by its author and time, when the user may see them.
+
+    A marker carries a tag drawn per export, so no stored text can forge
+    one, and none survives ``fill``: the finished text is the same for
+    the same tree and window.
+    """
+
+    def __init__(self):
+        self.labels = {}    # node id -> the label of its rendered entry
+        self._tag = secrets.token_hex(8)
+        self._used = False
+
+    def marker(self, node_id):
+        self._used = True
+        return f"\ue000{self._tag}:{node_id}\ue001"
+
+    def fill(self, text, user_id, filter_ai_usage):
+        """*text* with every marker replaced by its reference."""
+        if not self._used:
+            return text
+        pattern = re.compile(
+            "\ue000" + re.escape(self._tag) + r":(\d+)" + "\ue001")
+        ids = {int(i) for i in pattern.findall(text)}
+        refs = {i: f"[See entry {self.labels[i]}]"
+                for i in ids if i in self.labels}
+        unshown = ids - refs.keys()
+        if unshown:
+            for node in Node.query.filter(Node.id.in_(unshown)):
+                refs[node.id] = _unshown_quote_reference(
+                    node, user_id, filter_ai_usage)
+        return pattern.sub(
+            lambda m: refs.get(int(m.group(1)))
+            or f"[Quoted node inaccessible: node {m.group(1)}]",
+            text)
+
+
+def _unshown_quote_reference(node, user_id, filter_ai_usage):
+    """The reference to a quoted entry the export does not show as an
+    entry (#592): its author and time, as its header would show them.
+    A deleted or inaccessible node, or one kept from models, gets the
+    text the export's inline quotes give it (resolve_quotes), naming no
+    author."""
+    from backend.utils.privacy import can_user_view_tombstone, shown_as_deleted
+    if shown_as_deleted(node, user_id):
+        if can_user_view_tombstone(node, user_id):
+            return f"[Quoted node deleted: node {node.id}]"
+        return f"[Quoted node inaccessible: node {node.id}]"
+    if not can_user_access_node(node, user_id):
+        return f"[Quoted node inaccessible: node {node.id}]"
+    if filter_ai_usage and node.ai_usage not in AI_ALLOWED:
+        return f"[Quote #{node.id}: AI usage not permitted by author]"
+    return (f"[Quoted entry by {_node_author_label(node)}"
+            f"{_origin_suffix(node)} - {_header_stamp(node)}]")
 
 
 def prefetch_children(nodes, batch=500):
@@ -224,7 +334,9 @@ def _filtered_children(node, filter_ai_usage, created_before, included_ids,
             ]
         else:
             children = [c for c in children if c.id in included_ids]
-    return sorted(children, key=lambda c: c.created_at)
+    # The id settles a tie, so replies with one timestamp keep their
+    # order, and their labels (#592), from one render to the next.
+    return sorted(children, key=lambda c: (c.created_at, c.id))
 
 
 def _note_entry(licence, node):
@@ -406,9 +518,9 @@ def _add_artifact_free_entry(resolver, node):
     )
 
 
-def _format_node_text(node, index_path, user_id, embedded_quotes,
+def _format_node_text(node, label, user_id, embedded_quotes,
                       ai_blocked_ids, licence=None, filter_ai_usage=False,
-                      artifact_refs=True):
+                      artifact_refs=True, quote_reference=None):
     """The node's own text block: header, any pinned-artifact refs, then
     content. System-prompt nodes emit refs only (their content IS the
     prompt, shown as a ref). The node, the entries its quotes embed and
@@ -416,10 +528,13 @@ def _format_node_text(node, index_path, user_id, embedded_quotes,
 
     With ``artifact_refs=False`` (an export that omits artifacts, #550)
     no reference line is emitted, and a system-prompt node renders
-    nothing at all ("")."""
+    nothing at all ("").
+
+    *quote_reference* (node id -> text) writes a quote resolved by
+    reference (_QuoteReferences.marker, #592)."""
     if not artifact_refs and _is_system_prompt_node(node):
         return ""
-    result = _node_header_line(node, index_path)
+    result = _node_header_line(node, label)
     _note_entry(licence, node)
 
     ref_lines = _artifact_ref_lines(node, user_id) if artifact_refs else []
@@ -447,7 +562,8 @@ def _format_node_text(node, index_path, user_id, embedded_quotes,
                                    what="archive quoted entry")
             content = resolve_quotes_for_export(
                 content, node.id, embedded_quotes, user_id,
-                ai_blocked_ids=ai_blocked_ids
+                ai_blocked_ids=ai_blocked_ids,
+                reference=quote_reference,
             )
         elif user_id:
             # Fallback to simple resolution (depth 1). The unbudgeted
@@ -484,6 +600,7 @@ def format_node_tree(
     licence=None,
     artifact_refs=True,
     prune_tombstones=False,
+    references=None,
 ):
     """
     Format a node and its descendants into a human-readable tree structure
@@ -494,17 +611,21 @@ def format_node_tree(
     burns lazy-loading children each level), so deep reply chains
     overflowed the call stack — the same failure
     `_collect_all_nodes_in_tree` had before c556e4d, one stage later in
-    the pipeline. Stack frames are (kind, node, index_path), where kind
+    the pipeline. Stack frames are (kind, node, label), where kind
     mirrors the old mutual recursion: "node" (cycle-checked; applies the
     access rule: renders the node, routes it to the tombstone or
     inaccessible shell, or leaves it out), "tombstone", and
     "inaccessible". Branch separators are pushed as ("text", str)
-    frames, so the concatenated output is identical to the recursive
-    version's.
+    frames, in pre-order with the entries.
+
+    Every entry and placeholder carries a position label (#592, see
+    _reply_labels): a reply the access rule leaves out takes no label
+    and no separator, and a pruned run of deleted nodes is one
+    placeholder with one label.
 
     Args:
         node: The Node object to format
-        index_path: The hierarchical index (e.g., "1.1.2")
+        index_path: The label of *node*, the thread's number (e.g., "3")
         processed_nodes: Set of node IDs already processed (to avoid infinite loops)
         filter_ai_usage: If True, only include child nodes where ai_usage is 'chat' or 'train'
         user_id: User ID for resolving {quote:ID} placeholders (for access checks)
@@ -519,7 +640,7 @@ def format_node_tree(
                  reference reports to (#326).
         artifact_refs: False leaves out every artifact reference line and
                  the text of system-prompt nodes (their replies still
-                 render under the same index paths), for an export that
+                 render under the same labels), for an export that
                  omits artifacts (#550). A tree that is only a system
                  prompt then renders as "".
         prune_tombstones: True leaves out every deleted node with no
@@ -529,6 +650,9 @@ def format_node_tree(
                  budgeted raw window (#525). A placeholder then only
                  holds the place of a reply below it (§5a). A tree with
                  no entry rendered in it is "".
+        references: Optional _QuoteReferences of the whole export
+                 (#592): each rendered entry's label is recorded in it,
+                 and quotes resolved by reference leave its markers.
 
     Returns:
         str: Formatted text representation of the node tree
@@ -584,11 +708,33 @@ def format_node_tree(
             stack.extend((k, c, False) for k, c in kids)
         return dead
 
+    def _reply_frames(label, children):
+        """The frames of the replies shown under the entry labelled
+        *label*, ready to push: each reply with its label, and a
+        separator before every branch after the first. A reply the
+        walk leaves out (a deleted node the user could not see, a dead
+        tombstone, a node already rendered) takes no label."""
+        shown = [
+            c for c in children
+            if c.id not in dead and c.id not in processed_nodes
+            and not (user_id is not None and _deleted(c)
+                     and not can_user_view_tombstone(c, user_id))
+        ]
+        frames = []
+        for i, (child, child_label) in enumerate(
+                zip(shown, _reply_labels(label, len(shown)))):
+            if i:
+                frames.append(("text", _branch_separator(label)))
+            frames.append(("node", child, child_label))
+        # LIFO: reversed, so replies pop left-to-right (pre-order).
+        return reversed(frames)
+
     if processed_nodes is None:
         processed_nodes = set()
     dead = _dead_tombstones() if prune_tombstones else set()
     if node.id in dead:
         return ""
+    quote_reference = references.marker if references is not None else None
 
     parts = []
     stack = [("node", node, index_path)]
@@ -619,28 +765,21 @@ def format_node_tree(
 
         if kind == "node":
             processed_nodes.add(current.id)
-            parts.append(_format_node_text(
+            text = _format_node_text(
                 current, path, user_id, embedded_quotes, ai_blocked_ids,
                 licence=licence, filter_ai_usage=filter_ai_usage,
-                artifact_refs=artifact_refs))
-            children = [c for c in _children(current, True)
-                        if c.id not in dead]
-            child_frames = []
-            for i, child in enumerate(children):
-                child_index = f"{path}.{i+1}"
-                # Mark branches (when there are multiple children)
-                if len(children) > 1 and i > 0:
-                    child_frames.append(("text", "---\n**BRANCH**\n---\n\n"))
-                child_frames.append(("node", child, child_index))
-            # LIFO: push reversed so children pop left-to-right,
-            # preserving the recursive version's pre-order output.
-            stack.extend(reversed(child_frames))
+                artifact_refs=artifact_refs,
+                quote_reference=quote_reference)
+            parts.append(text)
+            if text and references is not None:
+                references.labels[current.id] = path
+            stack.extend(_reply_frames(path, _children(current, True)))
             continue
 
         # Placeholder shells (tombstone / inaccessible). Children still
         # render — they may be alive, accessible replies. All children
-        # route through the "node" kind (cycle check + the access rule)
-        # with no BRANCH markers, matching the old recursive helpers.
+        # route through the "node" kind (cycle check + the access rule),
+        # labelled and separated as under an entry.
         last = current
         if kind == "tombstone":
             keep_tombstones = True
@@ -671,12 +810,7 @@ def format_node_tree(
         parts.append(header + placeholder)
         processed_nodes.add(current.id)
         processed_nodes.add(last.id)
-        children = [c for c in _children(last, keep_tombstones)
-                    if c.id not in dead]
-        stack.extend(reversed([
-            ("node", gc, f"{path}.{j+1}")
-            for j, gc in enumerate(children)
-        ]))
+        stack.extend(_reply_frames(path, _children(last, keep_tombstones)))
 
     return "".join(parts)
 
@@ -1807,6 +1941,7 @@ def _build_user_export_incremental(
     prefetch_children(entry_nodes)
 
     compact_run = _CompactTweetRun(export_lines, user.username, licence)
+    references = _QuoteReferences()
     thread_num = 0
     left_out = 0   # threads that are only a system prompt (omit_artifacts)
     for entry in iter_with_dek_prefetch(entry_nodes):
@@ -1826,6 +1961,7 @@ def _build_user_export_incremental(
             ai_blocked_ids=ai_blocked_ids,
             licence=licence,
             artifact_refs=not omit_artifacts,
+            references=references,
         )
         if omit_artifacts and not thread_text:
             # Nothing of this thread in the window but its system
@@ -1858,7 +1994,10 @@ def _build_user_export_incremental(
             f"**Entry Points:** {len(entry_nodes) - left_out}")
 
     export_lines.append("*End of Export*")
-    content = "\n".join(export_lines)
+    # Quote references, once every entry has its label (#592); before
+    # the text is measured.
+    content = references.fill(
+        "\n".join(export_lines), user.id, filter_ai_usage)
 
     if return_metadata:
         # Metadata must come from the budget-selected window, not the
@@ -2390,6 +2529,7 @@ def build_user_export_content(
     # full per-thread rendering.
     prefetch_children(top_level_nodes)
     compact_run = _CompactTweetRun(export_lines, user.username, licence)
+    references = _QuoteReferences()
     thread_num = 0
     rendered_any = False
     for node in iter_with_dek_prefetch(top_level_nodes):
@@ -2414,6 +2554,7 @@ def build_user_export_content(
             # A budgeted window shows no placeholder without an entry
             # below it (#525).
             prune_tombstones=bool(max_tokens),
+            references=references,
         )
         if not thread_text:
             # Only a system prompt (#550), or nothing alive (#525).
@@ -2439,7 +2580,10 @@ def build_user_export_content(
     # Add footer
     export_lines.append("*End of Export*")
 
-    content = "\n".join(export_lines)
+    # Quote references, once every entry has its label (#592); before
+    # the text is measured.
+    content = references.fill(
+        "\n".join(export_lines), user.id, filter_ai_usage)
 
     if return_metadata:
         if shown_ids is not None:

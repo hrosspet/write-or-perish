@@ -308,9 +308,9 @@ def test_not_accessible_placeholder_holds_only_its_place(
     assert "BOBPRIVATE" not in content
     assert "bob" not in content
     assert _ts(reply) not in content
-    assert f"### [1.1]\n{INACCESSIBLE}\n" in content
+    assert f"## [1.1]\n{INACCESSIBLE}\n" in content
     # The user's own reply below keeps its place in the thread.
-    assert "#### [1.1.1] User (alice)" in content
+    assert "## [1.2] User (alice)" in content
     assert "ALICEBELOW" in content
 
 
@@ -407,7 +407,8 @@ def test_live_entry_renders_as_before(app, alice, bob):
     """Under a live entry the walk is unchanged: a private reply is a
     placeholder (with no author or time), a deleted one the user could
     not see is left out, a public one is shown, and branches keep their
-    markers."""
+    markers. The left-out reply takes no branch letter and no separator,
+    so nothing shows that a third reply exists (#592)."""
     root = _node(alice, "ALICEROOT")
     _node(bob, "BOBPRIVATE", parent=root)
     _node(bob, "BOBGONE", parent=root, deleted=True)
@@ -419,4 +420,7 @@ def test_live_entry_renders_as_before(app, alice, bob):
     assert "BOBPRIVATE" not in content
     assert content.count(INACCESSIBLE) == 1
     assert TOMBSTONE not in content
-    assert content.count("**BRANCH**") == 2
+    assert content.count("**BRANCH") == 1
+    assert f"### [1a.1]\n{INACCESSIBLE}\n" in content
+    assert "### [1b.1] User (bob)" in content
+    assert "[1c" not in content
