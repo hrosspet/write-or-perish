@@ -17,6 +17,7 @@ from backend.utils.context_artifacts import attach_context_artifacts
 from backend.utils.session_helpers import attach_agentic_prompt_under
 from backend.utils.privacy import (
     can_user_see_node_or_placeholder, validate_ai_usage,
+    validate_privacy_level,
 )
 
 textmode_bp = Blueprint("textmode", __name__)
@@ -54,9 +55,6 @@ def _serialize_message(node, viewer_id):
     return msg
 
 
-VALID_PRIVACY_LEVELS = {"private", "anonymous", "public"}
-
-
 @textmode_bp.route("/start", methods=["POST"])
 @login_required
 def start_conversation():
@@ -87,7 +85,9 @@ def start_conversation():
     if not content or not content.strip():
         return jsonify({"error": "Content is required"}), 400
 
-    if privacy_level not in VALID_PRIVACY_LEVELS:
+    # The shared list of levels (#588): this route kept its own, which
+    # accepted "anonymous" (not a level) and refused "circles".
+    if not validate_privacy_level(privacy_level):
         return jsonify({"error": f"Invalid privacy_level: {privacy_level}"}), 400
 
     if not validate_ai_usage(ai_usage):

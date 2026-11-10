@@ -14,7 +14,7 @@ from backend.utils.privacy import can_user_edit_node
 
 
 def apply_settings_to_descendants(root, user_id, *, privacy_level=None,
-                                  ai_usage=None):
+                                  ai_usage=None, audience_from=None):
     """Set *privacy_level* and/or *ai_usage* (None = leave as is) on every
     alive descendant of *root* the user may edit. Returns the nodes that
     actually changed; the caller commits.
@@ -22,6 +22,10 @@ def apply_settings_to_descendants(root, user_id, *, privacy_level=None,
     Level-batched walk (one query per depth), no row locks: a reply that
     races in during the walk simply keeps the settings it was created
     with, which is what it would have had anyway.
+
+    *audience_from* (Circles): the edited node, when its privacy level or
+    audience was saved. The user's replies that are "circles" afterwards
+    are read by its audience; the ones that are not stop pointing at one.
     """
     if privacy_level is None and ai_usage is None:
         return []
@@ -64,6 +68,19 @@ def apply_settings_to_descendants(root, user_id, *, privacy_level=None,
             if not (ai_usage == "train" and is_feed_node(n)):
                 n.ai_usage = ai_usage
                 touched = True
+        if audience_from is not None and privacy_level is not None:
+            entry_id = (audience_from.audience_root_id
+                        if audience_from.privacy_level == "circles" else None)
+            wanted = entry_id if n.privacy_level == "circles" else None
+            if n.audience_root_id != wanted:
+                if n.audience_root_id == n.id:
+                    from backend.utils.circles import clear_audience
+                    clear_audience(n)
+                n.audience_root_id = wanted
+                touched = True
         if touched:
             changed.append(n)
+    if audience_from is not None:
+        from backend.utils.privacy import forget_circle_access
+        forget_circle_access()
     return changed

@@ -1008,10 +1008,18 @@ def _count_user_data(user_id, plan, scope):
     for model, col, key in _REF_COLUMNS:
         c[key] = _count(model, col.in_(deleted_ids), scope.other_rows(model))
     for col, key in ((Node.linked_node_id, "node.linked_node_id"),
-                     (Node.continuation_node_id, "node.continuation_node_id")):
+                     (Node.continuation_node_id, "node.continuation_node_id"),
+                     (Node.audience_root_id, "node.audience_root_id")):
         c[key] = _count(Node, col.in_(deleted_ids), plan.not_owned(U))
     for model, key in _USER_TABLES:
         c[key] = _count(model, scope.rows(model))
+    # Circles: the audiences and notes of the user's nodes, and
+    # everything of Circles that is the user's or names them.
+    from backend.utils import circles as cz
+    c["node_audience"] = sum(
+        _count(model, cond) for model, cond in cz.node_rows_filters(owned_ids))
+    for model, cond, key in cz.user_rows_filters(U):
+        c[key] = _count(model, cond)
 
     user = db.session.get(User, U)
     dirs, extra_files = _scope_files(scope, user)
@@ -1062,6 +1070,10 @@ def _delete_node_rows_dependents(ids, counts):
             (ReferenceAction, ReferenceAction.node_id, "reference_action"),
     ):
         counts[key] += _delete(model, col.in_(ids))
+    # Circles: who the entries were shared with, and the notes about them.
+    from backend.utils.circles import node_rows_filters
+    for model, cond in node_rows_filters(ids):
+        counts["node_audience"] += _delete(model, cond)
 
 
 def _clear_references_to(ids, plan, counts):
@@ -1080,7 +1092,8 @@ def _clear_references_to(ids, plan, counts):
         table_key = "draft" if model is Draft else "share_draft"
         counts[table_key] += _delete(model, col.in_(ids), scope.rows(model))
     for col, key in ((Node.linked_node_id, "node.linked_node_id"),
-                     (Node.continuation_node_id, "node.continuation_node_id")):
+                     (Node.continuation_node_id, "node.continuation_node_id"),
+                     (Node.audience_root_id, "node.audience_root_id")):
         counts[key] += Node.query.filter(
             col.in_(ids), scope.not_nodes(plan.extras),
         ).update({col: None, Node.updated_at: Node.updated_at},
@@ -1273,6 +1286,14 @@ def _purge_round(user, plan, counts, heartbeat):
         if model is ExternalAccount:
             continue
         counts[key] += _delete(model, scope.rows(model))
+    # Circles: the user's circles with their members and shares, their
+    # memberships in other people's circles, the entries they were named
+    # for, the mutes by and of them, and the notes other people hold
+    # about their entries. Either scope: like the notifications, these
+    # go with "Delete all my writing" too.
+    from backend.utils.circles import user_rows_filters
+    for model, cond, key in user_rows_filters(U):
+        counts[key] += _delete(model, cond)
     db.session.commit()
     _beat(heartbeat)
 

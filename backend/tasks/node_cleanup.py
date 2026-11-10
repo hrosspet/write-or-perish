@@ -97,6 +97,10 @@ def _full_purge(node):
     Draft.query.filter_by(llm_node_id=node.id).delete()
 
     NodeContextArtifact.query.filter_by(node_id=node.id).delete()
+    # Circles: who the entry was shared with, and the notes about it.
+    from backend.utils.circles import node_rows_filters
+    for model, cond in node_rows_filters([node.id]):
+        model.query.filter(cond).delete(synchronize_session=False)
     # What the reader did with the reply's recommendations (#352). Its
     # FeedPick rows go with the node (ORM cascade); the actions are
     # deleted rather than set to NULL, which would read as done outside
@@ -117,6 +121,12 @@ def _full_purge(node):
     Node.query.filter_by(continuation_node_id=node.id).update(
         {"continuation_node_id": None}
     )
+    # Circles: a reply that pointed at this node as its thread's shared
+    # entry (the purge reaches a node only after its replies, so this is
+    # a backstop for the foreign key).
+    Node.query.filter(Node.audience_root_id == node.id,
+                      Node.id != node.id).update(
+        {"audience_root_id": None}, synchronize_session=False)
     # A share (#228) names the reply it was proposed in and the public
     # node it published; revoking keeps the public node's pointer, so a
     # republish can bring the same node back. Both foreign keys block the

@@ -58,6 +58,47 @@ class AIUsageRefused(Exception):
         self.scope = scope
 
 
+# ── Circles: a reader's model in someone else's shared thread ───────────
+# No model answers there on its own. The reader's explicit "Ask my AI"
+# (POST /nodes/<id>/llm with circle_ask) stamps the reply with this
+# marker; reply_refusal and the completion task read it. Only then does
+# the reader's model read the thread: the nodes whose own ai_usage lets
+# AI read, on the chat key, never the training key.
+CIRCLE_ASK_MARKER = "_circle_ask"
+CIRCLE_AI_CODE = "circle_ai_not_asked"
+CIRCLE_AI_MESSAGE = "No AI answers here unless you ask for it."
+CIRCLE_ENTRY_NONE_MESSAGE = (
+    "The author set this entry's AI usage to None, so no AI can read it.")
+
+
+class CircleAIRefused(AIUsageRefused):
+    """A reply in someone else's shared thread that the reader did not
+    ask for with "Ask my AI"."""
+
+    code = CIRCLE_AI_CODE
+
+    def __init__(self, message=CIRCLE_AI_MESSAGE):
+        super().__init__(message, scope="thread")
+
+
+def is_circle_ask(node) -> bool:
+    """*node* is an "Ask my AI" reply (it carries CIRCLE_ASK_MARKER)."""
+    try:
+        meta = json.loads(getattr(node, "tool_calls_meta", None) or "[]") or []
+    except (json.JSONDecodeError, TypeError):
+        return False
+    return any(isinstance(m, dict) and m.get("name") == CIRCLE_ASK_MARKER
+               for m in meta)
+
+
+def circle_ask_ai_usage(user):
+    """The ai_usage of an "Ask my AI" answer: 'chat', never 'train' (it
+    is written from other people's shared entries), and the account's
+    'none' when the reader keeps AI out altogether (then refused)."""
+    default = getattr(user, "default_ai_usage", None) or "none"
+    return "chat" if default in AI_ALLOWED else default
+
+
 def ai_usage_refused_response(exc=None):
     """The 403 answer for a refused reply or voice turn."""
     from flask import jsonify
@@ -254,7 +295,8 @@ class _Chain:
             node.id, Node.id, Node.parent_id, Node.node_type, Node.llm_model,
             Node.deleted_at, Node.prompt_key, Node.tool_calls_meta,
             Node.ai_usage, Node.user_id, Node.human_owner_id,
-            Node.privacy_level, max_depth=_MAX_ANCESTRY_HOPS)
+            Node.privacy_level, Node.audience_root_id,
+            max_depth=_MAX_ANCESTRY_HOPS)
         self.keys = {n.id: n.prompt_key for n in self.nodes if n.prompt_key}
         linked = [n.id for n in self.nodes if not n.prompt_key]
         if linked:
@@ -276,7 +318,21 @@ class _Chain:
                         and self.keys.get(parent.id) in READ_PROMPT_KEYS)):
                 self.reads.add(n.id)
 
-    def unreadable(self, user_id):
+    def foreign_shared(self, user_id):
+        """The nearest node of the chain that is another person's
+        circle-shared content for *user_id* (privacy.foreign_shared) and
+        that *user_id* can read, else None: a reply for the user there
+        needs their "Ask my AI"."""
+        from backend.utils.privacy import (
+            can_user_see_node_or_placeholder, foreign_shared)
+        for n in self.nodes:
+            if not can_user_see_node_or_placeholder(n, user_id):
+                return None
+            if n.deleted_at is None and foreign_shared(n, user_id):
+                return n
+        return None
+
+    def unreadable(self, user_id, as_ai=True):
         """The nearest node a reply for *user_id* would send to the model
         whose ai_usage keeps AI out, else None. The walk is the completion
         task's (_load_node_chain): up from the node while *user_id* can
@@ -290,7 +346,7 @@ class _Chain:
         for i, n in enumerate(self.nodes):
             seen = (can_user_see_node_or_tombstone if i == 0
                     else can_user_see_node_or_placeholder)
-            if not seen(n, user_id):
+            if not seen(n, user_id, as_ai=as_ai):
                 return None
             if (not shown_as_deleted(n, user_id)
                     and n.ai_usage not in AI_ALLOWED):
@@ -329,8 +385,16 @@ def resolve_chat_model(parent_node, user, chain=None):
     """
     supported = current_app.config.get("SUPPORTED_MODELS", {})
     chain = chain or _Chain(parent_node)
+    user_id = getattr(user, "id", None)
     for node in chain.llm_replies():
         if node.id in chain.reads:
+            continue
+        # In a shared thread (Circles) several people's models answer.
+        # Only the user's own earlier reply sets their default: another
+        # person's would move them to a model, maybe a provider, they
+        # never chose.
+        if (node.privacy_level == "circles" and user_id is not None
+                and (node.human_owner_id or node.user_id) != user_id):
             continue
         if is_chat_model(node.llm_model):
             return node.llm_model, "predecessor"
@@ -522,18 +586,36 @@ def reply_ai_usage(parent_node, user, chain=None, parent_content=None):
     return default
 
 
-def reply_refusal(parent_node, user_id, ai_usage=None, chain=None):
+def reply_refusal(parent_node, user_id, ai_usage=None, chain=None,
+                  circle_ask=False):
     """Why no reply may be generated under *parent_node* for *user_id*
     (an AIUsageRefused), or None when it may: a node the reply would send
     to the model is not AI-readable, or *ai_usage*, the setting the reply
     (or the entry a turn adds above it) would carry, is not. Every path
     that starts a reply asks here or goes through create_llm_placeholder,
-    which does."""
+    which does.
+
+    Circles: in someone else's shared thread no reply is generated for a
+    reader (CircleAIRefused) unless *circle_ask* says they pressed "Ask
+    my AI". Then the rule is the reader's: the shared entry itself must
+    let AI read it (else refused); any other node set to None is left
+    out of the prompt by the task instead of refusing the reply."""
     if ai_usage is not None and ai_usage not in AI_ALLOWED:
         return AIUsageRefused()
     if parent_node is None:
         return None
     chain = chain or _Chain(parent_node)
+    foreign = chain.foreign_shared(user_id)
+    if foreign is not None:
+        if not circle_ask:
+            return CircleAIRefused()
+        from backend.utils.privacy import can_user_access_node
+        entry = db.session.get(Node, foreign.audience_root_id)
+        if entry is None or not can_user_access_node(entry, user_id):
+            return CircleAIRefused()
+        if entry.ai_usage not in AI_ALLOWED:
+            return AIUsageRefused(CIRCLE_ENTRY_NONE_MESSAGE)
+        return None
     if chain.unreadable(user_id) is not None:
         return AIUsageRefused()
     return None
@@ -559,6 +641,10 @@ def voice_turn_refusal(user, parent_node=None, ai_usage=None):
             return AIUsageRefused(VOICE_REFUSED_ACCOUNT_MESSAGE, "account")
         return None
     chain = _Chain(parent_node)
+    # Someone else's shared thread (Circles): no Voice turn there, a
+    # reply would be a model answering without "Ask my AI".
+    if chain.foreign_shared(user.id) is not None:
+        return AIUsageRefused(CIRCLE_AI_MESSAGE, "thread")
     if chain.unreadable(user.id) is not None:
         return AIUsageRefused(VOICE_REFUSED_THREAD_MESSAGE, "thread")
     if reply_ai_usage(parent_node, user, chain=chain) not in AI_ALLOWED:
@@ -712,7 +798,11 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     # parent and what is above it) and the reply itself. Before anything
     # is decrypted or written.
     chain = _Chain(parent)
-    refused = reply_refusal(parent, human_owner_id, ai_usage, chain=chain)
+    circle_ask = any(isinstance(m, dict)
+                     and m.get("name") == CIRCLE_ASK_MARKER
+                     for m in (meta or []))
+    refused = reply_refusal(parent, human_owner_id, ai_usage, chain=chain,
+                            circle_ask=circle_ask)
     if refused is not None:
         raise refused
 

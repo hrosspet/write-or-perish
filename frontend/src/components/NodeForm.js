@@ -9,6 +9,10 @@ import RegenerateTtsDialog from "./RegenerateTtsDialog";
 import ApplyToRepliesDialog from "./ApplyToRepliesDialog";
 import SplitContentDialog, { NODE_CHAR_CAP } from "./SplitContentDialog";
 import PublicReplyDialog, { PUBLIC_REPLY_ACK_KEY } from "./PublicReplyDialog";
+import { CircleReplyDialog } from "./CircleDialogs";
+import {
+  replyAckKey, replyAudienceNames, shareButtonLabel, splitNames,
+} from "../utils/circles";
 import { useOnlineStatus } from "../hooks/useOnlineStatus";
 import { useToast } from "../contexts/ToastContext";
 import RecoveryBanner from './RecoveryBanner';
@@ -55,6 +59,22 @@ const NodeForm = forwardRef(
     const [parentPrivacy, setParentPrivacy] = useState(null);
     const [pendingPaste, setPendingPaste] = useState(null);
     const [splitAcknowledged, setSplitAcknowledged] = useState(false);
+
+    // Circles. `audience` is what the author picked for an entry of
+    // their own (circles + names for this entry only); `audienceInfo`
+    // is who that resolves to (CircleAudiencePicker reports it).
+    // `threadAudience` is set instead when the node is a reply in a
+    // shared thread: its readers are the thread's, named before sending.
+    const circlesOn = !!user?.circles_enabled;
+    const [audience, setAudience] = useState({ circleIds: [], namesText: '' });
+    const [savedAudienceKey, setSavedAudienceKey] = useState(null);
+    const [audienceInfo, setAudienceInfo] = useState(
+      { readers: [], error: '', pending: false, circles: [] });
+    const [threadAudience, setThreadAudience] = useState(null);
+    const [pickerKey, setPickerKey] = useState(0);
+    const [showCircleReplyDialog, setShowCircleReplyDialog] = useState(false);
+    const audienceKey = (a) =>
+      `${[...(a.circleIds || [])].sort().join(',')}|${splitNames(a.namesText).map((n) => n.toLowerCase()).sort().join(',')}`;
 
     // Remember the user's last privacy / AI-usage choices for fresh
     // top-level entries (#63), so they don't have to re-pick every time.
@@ -174,6 +194,8 @@ const NodeForm = forwardRef(
           .then((response) => {
             const parent = response.data;
             setParentPrivacy(parent.privacy_level || "private");
+            // A shared thread (Circles): the reply is read by its people.
+            setThreadAudience(parent.audience || null);
             if (!initialPrivacyLevel && !initialAiUsage) {
               // Set privacy settings to match parent's settings. AI usage
               // is the backend's reply default (#362): the parent's, but
@@ -199,6 +221,41 @@ const NodeForm = forwardRef(
         setPrivacyLevel("public");
       }
     }, [parentPrivacy, privacyLevel, editMode]);
+
+    // A reply in a shared thread is "circles", read by the thread's
+    // people (enforced server-side too): pin the state like the public
+    // case above.
+    useEffect(() => {
+      if (!editMode && threadAudience && privacyLevel !== "circles") {
+        setPrivacyLevel("circles");
+      }
+    }, [threadAudience, privacyLevel, editMode]);
+
+    // Editing: what the entry is shared with now, to seed the picker; or,
+    // for a reply in a shared thread, the thread's people.
+    useEffect(() => {
+      if (!editMode || !nodeId || !circlesOn) return;
+      let alive = true;
+      api.get(`/nodes/${nodeId}/audience`)
+        .then((res) => {
+          if (!alive) return;
+          const own = res.data.audience;
+          if (own && own.is_entry && own.is_author) {
+            const seeded = {
+              circleIds: own.circle_ids || [],
+              namesText: (own.usernames || []).map((n) => `@${n}`).join(', '),
+            };
+            setAudience(seeded);
+            setSavedAudienceKey(audienceKey(seeded));
+            setPickerKey((k) => k + 1);
+          } else {
+            setThreadAudience(res.data.thread_audience || (own && !own.is_entry ? own : null));
+          }
+        })
+        .catch(() => { /* the picker starts empty */ });
+      return () => { alive = false; };
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [editMode, nodeId, circlesOn]);
 
     // Auto-populate form with draft when loaded
     useEffect(() => {
@@ -419,7 +476,35 @@ const NodeForm = forwardRef(
       setContent("");
     };
 
-    const handleSubmit = async (event, regenerateTts, splitConfirmed, publicConfirmed, applyToReplies) => {
+    // An entry of the author's own that is being shared with circles /
+    // named people (not a reply in a shared thread, whose readers are
+    // the thread's).
+    const sharesEntry = circlesOn && privacyLevel === "circles" && !threadAudience;
+    const audienceFields = () => ({
+      circle_ids: audience.circleIds || [],
+      circle_usernames: splitNames(audience.namesText),
+    });
+    const audienceChanged = sharesEntry
+      && savedAudienceKey !== audienceKey(audience);
+
+    // The second step for entries created on a path that carries no
+    // audience (a recording, an upload, a Text-mode start): until this
+    // lands the entry is "circles" with nobody chosen, which only its
+    // author reads. A failure leaves it that way and says so.
+    const shareCreated = async (createdId) => {
+      if (!sharesEntry || !createdId) return;
+      try {
+        await api.put(`/nodes/${createdId}/audience`, {
+          ...audienceFields(), apply_to_descendants: true,
+        });
+      } catch (err) {
+        addToast(
+          'The entry is saved and only you can read it. Sharing it did '
+          + `not work: ${err.response?.data?.error || err.message}`, 12000);
+      }
+    };
+
+    const handleSubmit = async (event, regenerateTts, splitConfirmed, publicConfirmed, applyToReplies, circleConfirmed) => {
       event && event.preventDefault();
       // Validate: require content or audio
       if (!editMode && uploadedFile) {
@@ -441,6 +526,29 @@ const NodeForm = forwardRef(
         return;
       }
 
+      // Circles: the readers are checked before anything is saved. A
+      // name nobody has, or nobody in the audience, is refused with a
+      // plain message (the server refuses it too).
+      if (sharesEntry && !(editMode && !audienceChanged
+                           && initialPrivacyLevel === "circles"
+                           && savedAudienceKey !== null)) {
+        try {
+          const res = await api.post('/circles/audience-preview', {
+            circle_ids: audience.circleIds || [],
+            usernames: splitNames(audience.namesText),
+          });
+          if (!(res.data.readers || []).length) {
+            setError("Nobody could read this entry yet. Choose a circle "
+              + "with people in it, or name a person.");
+            return;
+          }
+        } catch (err) {
+          setError(err.response?.data?.error
+            || "The readers could not be worked out. Try again.");
+          return;
+        }
+      }
+
       // Changing privacy / AI usage on a node that has replies: ask whether
       // the change is for this node only or also for the user's replies.
       // `applyToReplies` is undefined on the initial submit (→ open the
@@ -450,6 +558,7 @@ const NodeForm = forwardRef(
         && (
           (initialPrivacyLevel != null && privacyLevel !== initialPrivacyLevel)
           || (initialAiUsage != null && aiUsage !== initialAiUsage)
+          || audienceChanged
         )
       ) {
         pendingResumeRef.current = { regenerateTts };
@@ -490,6 +599,17 @@ const NodeForm = forwardRef(
         return;
       }
 
+      // Replying in a shared thread (Circles): name the people who will
+      // see the reply, once per thread unless "Don't ask again".
+      if (
+        !editMode && threadAudience && !circleConfirmed
+        && localStorage.getItem(
+          replyAckKey(threadAudience.entry_id, user?.id)) !== "true"
+      ) {
+        setShowCircleReplyDialog(true);
+        return;
+      }
+
       setLoading(true);
       setError("");
       try {
@@ -510,6 +630,7 @@ const NodeForm = forwardRef(
             ai_usage: aiUsage,
             streaming_session_id: streamingSessionId || undefined,
           });
+          await shareCreated(data && (data.user_node_id || data.id));
           deleteDraft();
           setHasDraft(false);
           setStreamingSessionId(null);
@@ -545,6 +666,7 @@ const NodeForm = forwardRef(
             ai_usage: aiUsage,
             auto_generate: useAutoGenerate,
           });
+          await shareCreated(res.data.user_node_id);
           deleteDraft();
           setHasDraft(false);
           // Spend cap: backend kept the system + user nodes but skipped the
@@ -590,6 +712,7 @@ const NodeForm = forwardRef(
             ...(topLevelWithAi && useAutoGenerate && allowAgenticPrompt
               && { auto_generate: true }),
           });
+          await shareCreated(response.data.id);
           deleteDraft();
           setHasDraft(false);
           setStreamingSessionId(null);
@@ -613,6 +736,9 @@ const NodeForm = forwardRef(
             content,
             privacy_level: privacyLevel,
             ai_usage: aiUsage,
+            // Circles: who reads the entry (only when it is the author's
+            // to choose; a reply in a shared thread sends none).
+            ...(sharesEntry && audienceFields()),
             // Detaching the pinned prompt only makes sense when the text was
             // actually edited; a privacy/AI-usage-only save keeps it.
             ...(detachPrompt && content !== initialContent && { detach_prompt: true }),
@@ -668,6 +794,7 @@ const NodeForm = forwardRef(
 
               // uploadFileInChunks returns data directly (not axios response)
               const nodeId = uploadResult.id;
+              await shareCreated(nodeId);
               setUploadedNodeId(nodeId);
               // Keep loading state active while transcription is in progress
               // Polling will start automatically via useEffect
@@ -695,6 +822,7 @@ const NodeForm = forwardRef(
 
             // Set the node ID to trigger polling via useEffect
             const nodeId = response.data.id;
+            await shareCreated(nodeId);
             setUploadedNodeId(nodeId);
             // Keep loading state active while transcription is in progress
             // Polling will start automatically via useEffect
@@ -706,8 +834,12 @@ const NodeForm = forwardRef(
             content,
             parent_id: parentId,
             privacy_level: privacyLevel,
-            ai_usage: aiUsage
+            ai_usage: aiUsage,
+            ...(sharesEntry && audienceFields()),
           });
+          if (sharesEntry && !response.data.audience_set) {
+            await shareCreated(response.data.id);
+          }
         }
         // Delete draft after successful save
         deleteDraft();
@@ -877,7 +1009,15 @@ const NodeForm = forwardRef(
             onPrivacyChange={setPrivacyLevel}
             onAIUsageChange={setAiUsage}
             disabled={loading}
-            lockPrivacy={parentPrivacy === "public" && !editMode}
+            lockPrivacy={(parentPrivacy === "public" || !!threadAudience)
+              && !editMode}
+            audience={audience}
+            onAudienceChange={setAudience}
+            onAudienceResolved={setAudienceInfo}
+            threadAudience={threadAudience
+              ? replyAudienceNames(threadAudience, user?.username) : null}
+            lockPublic={editMode && !!threadAudience && !threadAudience.is_author}
+            pickerKey={pickerKey}
           />
         )}
 
@@ -1133,6 +1273,13 @@ const NodeForm = forwardRef(
                 ? "Waiting to transcribe..."
                 : loading
                 ? "Sending..."
+                : sharesEntry && !hidePowerFeatures
+                ? shareButtonLabel({
+                  circles: audienceInfo.circles,
+                  circleIds: audience.circleIds,
+                  names: splitNames(audience.namesText),
+                  readers: audienceInfo.readers,
+                })
                 : "Send"}
             </button>
             {hasDraft && (
@@ -1242,7 +1389,7 @@ const NodeForm = forwardRef(
       />
       <ApplyToRepliesDialog
         open={showScopeDialog}
-        privacyChanged={initialPrivacyLevel != null && privacyLevel !== initialPrivacyLevel}
+        privacyChanged={(initialPrivacyLevel != null && privacyLevel !== initialPrivacyLevel) || audienceChanged}
         aiUsageChanged={initialAiUsage != null && aiUsage !== initialAiUsage}
         onClose={() => setShowScopeDialog(false)}
         onChoice={(applyToReplies) => {
@@ -1262,6 +1409,20 @@ const NodeForm = forwardRef(
           setShowPublicReplyDialog(false);
           // Resume the send with public consent given (no event object).
           handleSubmit(null, undefined, undefined, true);
+        }}
+      />
+      <CircleReplyDialog
+        open={showCircleReplyDialog}
+        names={replyAudienceNames(threadAudience, user?.username)}
+        onClose={() => setShowCircleReplyDialog(false)}
+        onConfirm={(dontAskAgain) => {
+          setShowCircleReplyDialog(false);
+          if (dontAskAgain && threadAudience) {
+            localStorage.setItem(
+              replyAckKey(threadAudience.entry_id, user?.id), "true");
+          }
+          // Resume the send with the readers named (no event object).
+          handleSubmit(null, undefined, undefined, undefined, undefined, true);
         }}
       />
       <SplitContentDialog

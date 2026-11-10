@@ -1227,6 +1227,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
           </div>
 
           <PrivacySelector
+            allowCircles={false}
             privacyLevel={importPrivacy}
             aiUsage={importAiUsage}
             onPrivacyChange={setImportPrivacy}
@@ -1287,6 +1288,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
           </p>
 
           <PrivacySelector
+            allowCircles={false}
             privacyLevel={importPrivacy}
             aiUsage={importAiUsage}
             onPrivacyChange={setImportPrivacy}
@@ -1345,6 +1347,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
           ))}
 
           <PrivacySelector
+            allowCircles={false}
             privacyLevel={importPrivacy}
             aiUsage={importAiUsage}
             onPrivacyChange={setImportPrivacy}
@@ -1453,6 +1456,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
           </div>
 
           <PrivacySelector
+            allowCircles={false}
             privacyLevel={importPrivacy}
             aiUsage={importAiUsage}
             onPrivacyChange={setImportPrivacy}

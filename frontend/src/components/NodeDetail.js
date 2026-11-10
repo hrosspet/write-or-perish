@@ -26,6 +26,11 @@ import ToolActionsTaken from "./ToolActionsTaken";
 import { ReadWindowLine, ReadReplyTail, ReadCancelledLine } from "./ReadReply";
 
 import DeleteConfirmDialog from "./DeleteConfirmDialog";
+import { SharedMark } from "./CircleReaders";
+import { CircleReplyDialog } from "./CircleDialogs";
+import {
+  replyAckKey, replyAudienceNames, sharedBannerText,
+} from "../utils/circles";
 
 
 // Glean (#435) is the Community Archive read under its user-facing name.
@@ -208,7 +213,15 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // deliberate act — auto-generate is forced off (and its toggle hidden),
   // and the explicit LLM Response bar shows for the node's owner instead.
   const isPublicThread = node?.privacy_level === 'public';
-  const autoGenerateActive = isPublicThread ? false : autoGenerate;
+  // SHARED threads (Circles) follow the same rule: other people read
+  // what is written there, so a model answers only when asked. For the
+  // author that is the LLM Response bar; for a reader, "Ask my AI".
+  const audience = node?.audience || null;
+  const isSharedThread = !!audience;
+  const isForeignShared = isSharedThread && !audience.is_author;
+  const [showAskAiDialog, setShowAskAiDialog] = useState(false);
+  const autoGenerateActive = (isPublicThread || isSharedThread)
+    ? false : autoGenerate;
 
   // LLM completion polling - enabled automatically when llmTaskNodeId is set
   // Batch stage ({ca_tweets}): the synchronous part is done and the turn
@@ -801,10 +814,11 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   };
 
   const requestLlmFor = async (parentNodeId, { sourceMode = 'textmode' } = {}) => {
-    const response = await api.post(`/nodes/${parentNodeId}/llm`, {
-      model: selectedModel,
-      source_mode: sourceMode,
-    });
+    // In someone else's shared thread the request is "Ask my AI": the
+    // reader's own model (the server picks it; none is sent).
+    const response = await api.post(`/nodes/${parentNodeId}/llm`, isForeignShared
+      ? { circle_ask: true, source_mode: sourceMode }
+      : { model: selectedModel, source_mode: sourceMode });
     const newNodeId = response.data.node_id;
     if (!newNodeId) throw new Error("Failed to get a task ID for the new LLM node.");
     return newNodeId;
@@ -835,6 +849,18 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
                                     { state: FROM_PARENT }))
       .catch(handleLlmRequestError)
       .finally(() => setLlmRequesting(false));
+  };
+
+  // "Ask my AI" (Circles): the answer is a reply in the thread, so the
+  // people who will see it are named first, unless "Don't ask again in
+  // this thread" was ticked (the same memory as the reply dialog).
+  const askMyAi = () => {
+    if (localStorage.getItem(
+      replyAckKey(audience.entry_id, currentUser?.id)) === "true") {
+      handleLLMResponse();
+    } else {
+      setShowAskAiDialog(true);
+    }
   };
 
   // Gate + fire a child LLM generation under `parentNodeId`. Returns the
@@ -1231,7 +1257,8 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     && !['pending', 'processing'].includes(node.transcription_status)
     && !(entryEnd.children || []).some(c => !c.deleted
       && !['failed', 'cancelled'].includes(c.llm_task_status));
-  const showCraftBar = isOwner && (craftMode || isPublicThread)
+  const showCraftBar = isOwner && !isForeignShared
+    && (craftMode || isPublicThread || isSharedThread)
     && (!autoGenerateActive || awaitsReply)
     && node.ai_usage !== 'none' && !isLlmPending;
   // In a thread started from the Glean card (#435) the action row under
@@ -1397,7 +1424,14 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     </span>
   );
   const nodeAllowsAi = node.ai_usage !== 'none';
-  const topRightControls = isOwner && !isPublicThread && (
+  // Why "Ask my AI" is off, in a sentence, or null when it can be asked.
+  const askAiOffReason = !isForeignShared ? null
+    : audience.entry_ai_usage === 'none'
+      ? `${audience.author} set this entry's AI usage to None, so no AI can read it.`
+      : currentUser?.default_ai_usage === 'none'
+        ? 'Your own AI usage is set to None in Account settings.'
+        : null;
+  const topRightControls = isOwner && !isPublicThread && !isSharedThread && (
     <div style={{
       display: 'flex',
       flexDirection: 'column',
@@ -1694,6 +1728,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
           llmModel={node.llm_model}
           origin={node.origin}
           publicPage={node.privacy_level === 'public'}
+          audience={audience}
         >
           <button
             onClick={canPin ? handlePin : undefined}
@@ -1778,6 +1813,45 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
           </div>
         )}
       </div>
+      {isForeignShared && !isLlmPending && (
+        <div style={{
+          width: '95%', maxWidth: '1500px', marginLeft: '20px',
+          marginTop: '10px', display: 'flex', justifyContent: 'space-between',
+          alignItems: 'center', gap: '16px', flexWrap: 'wrap',
+        }}>
+          <div style={{
+            fontFamily: 'var(--sans)', fontWeight: 300, fontSize: '0.8rem',
+            lineHeight: 1.5, color: 'var(--text-secondary)', maxWidth: '430px',
+          }}>
+            Before your reply is sent, Loore names the people who will see
+            it. No AI answers here unless you ask for it.
+            {askAiOffReason && (
+              <span style={{ display: 'block', marginTop: '4px' }}>
+                {askAiOffReason}
+              </span>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={askMyAi}
+            disabled={!!askAiOffReason || llmRequesting || !!llmTaskNodeId || moving}
+            style={{
+              minHeight: '46px', padding: '0 18px', borderRadius: '6px',
+              border: '1px solid var(--border-hover)', background: 'transparent',
+              color: 'var(--text-primary)', fontFamily: 'var(--sans)',
+              fontWeight: 300, fontSize: '0.94rem',
+              cursor: askAiOffReason ? 'not-allowed' : 'pointer',
+              opacity: askAiOffReason ? 0.4 : 1,
+              display: 'inline-flex', alignItems: 'center', gap: '8px',
+            }}
+          >
+            {(llmRequesting || llmTaskNodeId) && (
+              <FaSpinner className="spin" aria-hidden="true" />
+            )}
+            Ask my AI
+          </button>
+        </div>
+      )}
       {showInlineInput && (
         <div style={{
           width: '95%',
@@ -1839,11 +1913,41 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
         }}>Thread</h2>
         {topRightControls}
       </div>
+      {isForeignShared && (
+        <div role="note" style={{
+          display: 'flex', gap: '12px', alignItems: 'flex-start',
+          border: '1px solid var(--border-hover)', borderRadius: '8px',
+          padding: '14px 16px', background: 'var(--bg-surface)',
+          marginBottom: '14px',
+        }}>
+          <SharedMark />
+          <div style={{
+            fontFamily: 'var(--sans)', fontWeight: 300, fontSize: '0.875rem',
+            lineHeight: 1.55, color: 'var(--text-primary)',
+          }}>
+            {sharedBannerText(audience)}
+          </div>
+        </div>
+      )}
       <SemanticNeighbors nodeId={node.id} openNode={openNode} />
       {ancestorsSection}
       {highlightedNodeSection}
       {childrenSection}
 
+      <CircleReplyDialog
+        open={showAskAiDialog}
+        askAi
+        names={replyAudienceNames(audience, currentUser?.username)}
+        onClose={() => setShowAskAiDialog(false)}
+        onConfirm={(dontAskAgain) => {
+          setShowAskAiDialog(false);
+          if (dontAskAgain && audience) {
+            localStorage.setItem(
+              replyAckKey(audience.entry_id, currentUser?.id), "true");
+          }
+          handleLLMResponse();
+        }}
+      />
       {showPromptEditConfirm && (
         <div
           onClick={() => { setShowPromptEditConfirm(false); setEditTarget(null); }}

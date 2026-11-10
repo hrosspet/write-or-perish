@@ -774,8 +774,10 @@ export default function AccountPage() {
           style={selectStyle}
         >
           <option value="private">Private</option>
+          {/* Circles has no default audience: it is chosen per entry. */}
           <option value="circles" disabled>
-            Circles (coming soon)
+            {user.circles_enabled
+              ? "Circles (chosen for each entry)" : "Circles (coming soon)"}
           </option>
           <option value="public">Public</option>
         </select>
@@ -783,6 +785,26 @@ export default function AccountPage() {
           Default visibility for new entries.
         </div>
       </div>
+
+      {/* Circles: the user's lists of people, and what others share
+          with them. Shown only where Circles is on for the account. */}
+      {user.circles_enabled && (
+        <div id="circles" style={{ ...rowStyle, scrollMarginTop: "72px" }}>
+          <div style={labelStyle}>Circles</div>
+          <div style={{ display: "flex", gap: "18px", flexWrap: "wrap" }}>
+            <Link to="/circles" style={{ color: "var(--accent)", fontFamily: "var(--sans)", fontSize: "0.9rem" }}>
+              Your circles
+            </Link>
+            <Link to="/shared" style={{ color: "var(--accent)", fontFamily: "var(--sans)", fontSize: "0.9rem" }}>
+              Shared with you
+            </Link>
+          </div>
+          <div style={helperStyle}>
+            Share an entry with people you choose, under "Who can read
+            this" when you write or edit it.
+          </div>
+        </div>
+      )}
 
       {/* Glean (#435): the user's own switch, shown inside the rollout
           gate. Without a choice it is on for accounts with Community

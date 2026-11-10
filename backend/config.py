@@ -270,6 +270,21 @@ class Config:
     SHARE_V1 = os.environ.get(
         "SHARE_V1", "true").lower() in ("1", "true", "yes")
 
+    # --- Circles: entries shared with people the author chose ---
+    # Ships dark, the GLEAN_FOR_ALL / GLEAN_USER_IDS pattern: everyone
+    # when CIRCLES_V1 is on, else the user ids in CIRCLES_USER_IDS
+    # (comma-separated). Both default off. With the flag off for a user
+    # they see no Circles screens, cannot be added to a circle, and read
+    # nothing shared (a "circles" entry is private, as before the
+    # feature), so switching both off closes every shared entry at once.
+    CIRCLES_V1 = os.environ.get(
+        "CIRCLES_V1", "false").lower() in ("1", "true", "yes")
+    CIRCLES_USER_IDS = {
+        int(x) for x in
+        os.environ.get("CIRCLES_USER_IDS", "").replace(" ", "").split(",")
+        if x
+    }
+
     # --- Replies while they are written (#367) ---
     # STREAMING_REPLIES: an LLM reply's text shows on its node as it
     # arrives (Node.streaming_content + the llm-stream SSE). On by

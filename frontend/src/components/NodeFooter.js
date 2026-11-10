@@ -3,8 +3,9 @@ import { Link } from 'react-router-dom';
 import { FaRegCommentDots } from 'react-icons/fa';
 import { useUser } from '../contexts/UserContext';
 import { formatDateTime } from '../utils/date';
+import CircleReaders from './CircleReaders';
 
-const NodeFooter = ({ username, createdAt, childrenCount, humanOwnerUsername, llmModel, origin, onReplyClick, publicPage = false, children }) => {
+const NodeFooter = ({ username, createdAt, childrenCount, humanOwnerUsername, llmModel, origin, onReplyClick, publicPage = false, audience = null, children }) => {
   const { user } = useUser();
 
   // LLM nodes: private threads show just the model — whose thread it is
@@ -52,6 +53,10 @@ const NodeFooter = ({ username, createdAt, childrenCount, humanOwnerUsername, ll
       )}
       {(displayUsername || origin) && <span style={{ color: "var(--border)" }}>&middot;</span>}
       <span>{formattedDateTime}</span>
+      {/* A shared entry (Circles): who can read it and its replies. */}
+      {audience && (
+        <CircleReaders audience={audience} myUsername={user?.username} />
+      )}
       <span style={{ color: "var(--border)" }}>&middot;</span>
       {onReplyClick ? (
         <button

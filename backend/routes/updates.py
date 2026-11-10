@@ -25,6 +25,8 @@ logger = logging.getLogger(__name__)
 
 updates_bp = Blueprint("updates_bp", __name__)
 
+CIRCLE_NOTE_TYPE = "circle_share"
+
 
 def _updates_enabled():
     return current_app.config.get("DEV_UPDATES_V1", True)
@@ -69,6 +71,40 @@ def _profile_meta(user):
     if version is None:
         return None
     return {"version": version, "created_at": iso_utc(created_at)}
+
+
+def _circle_notes(rows):
+    """The notes about shared entries (Circles), each with the name of
+    the person who shared and the entry's id for the note's two actions.
+    A note is shown only while the entry is open to the user: one whose
+    entry was taken back or deleted, whose author removed or was hidden
+    by the user, or that arrives while Circles is off, is left out (it
+    stays unread, and shows again if the entry opens again)."""
+    from backend.models import Node, User
+    from backend.utils.circles import circles_enabled
+    from backend.utils.privacy import can_user_access_node
+    if not rows or not circles_enabled(current_user):
+        return []
+    out = []
+    for n in rows:
+        node = db.session.get(Node, n.node_id) if n.node_id else None
+        actor = db.session.get(User, n.actor_user_id) \
+            if n.actor_user_id else None
+        if (node is None or actor is None
+                or not can_user_access_node(node, current_user.id)):
+            continue
+        out.append({
+            "id": n.id,
+            "type": n.type,
+            "title": f"{actor.username} shared an entry with you.",
+            "body": n.body,
+            "link": n.link,
+            "created_at": iso_utc(n.created_at),
+            "meta": None,
+            "node_id": node.id,
+            "actor_username": actor.username,
+        })
+    return out
 
 
 def _pending_polls_for(user):
@@ -144,8 +180,11 @@ def get_updates():
             "created_at": iso_utc(n.created_at),
             "meta": profile_meta if n.type == "profile_ready" else None,
         }
-        for n in unread
+        for n in unread if n.type != CIRCLE_NOTE_TYPE
     ]
+    notifications.extend(_circle_notes(
+        [n for n in unread if n.type == CIRCLE_NOTE_TYPE]))
+    notifications.sort(key=lambda n: n["created_at"] or "", reverse=True)
 
     return jsonify({
         "changelog": changelog,

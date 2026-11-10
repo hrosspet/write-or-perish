@@ -1064,7 +1064,17 @@ def get_user_ai_preferences_content(user_id, pinned_node=None, usage=None):
     return None
 
 
-def _load_node_chain(parent_node, user_id):
+def _carries_others_shared(node_chain, user_id):
+    """The chain holds circle-shared writing that is not *user_id*'s own
+    (Circles): such a prompt stays off the training key."""
+    return any(
+        n.privacy_level == "circles"
+        and n.user_id != user_id
+        and (n.human_owner_id or n.user_id) != user_id
+        for n in node_chain)
+
+
+def _load_node_chain(parent_node, user_id, circle_ask=False):
     """Root-first ancestor chain ending at *parent_node*, with every
     node's DEK unwrapped in one concurrent batch. The message builder
     decrypts each node of the chain; on a cold Celery worker a 120-deep
@@ -1084,7 +1094,12 @@ def _load_node_chain(parent_node, user_id):
     task refuse a reply under one before this runs (llm_nodes
     .reply_refusal); this is the last line, so a path that misses the
     rule still sends nothing marked 'none'. With nothing left the reply
-    is refused (AIUsageRefused)."""
+    is refused (AIUsageRefused).
+
+    Circles: the walk reads as a model acting for the user, so it stops
+    below another person's circle-shared node. Only *circle_ask*, the
+    reader's "Ask my AI" in that thread, lets it read what the reader
+    reads there (still without the nodes marked 'none')."""
     from backend.utils.encryption import prefetch_deks
     from backend.utils.privacy import (
         can_user_see_node_or_placeholder, can_user_see_node_or_tombstone,
@@ -1094,10 +1109,12 @@ def _load_node_chain(parent_node, user_id):
         raise ValueError("_load_node_chain needs the requesting user's id")
     visible = []
     current = parent_node
+    as_ai = not circle_ask
     if current is not None and not can_user_see_node_or_tombstone(
-            current, user_id):
+            current, user_id, as_ai=as_ai):
         current = None
-    while current and can_user_see_node_or_placeholder(current, user_id):
+    while current and can_user_see_node_or_placeholder(
+            current, user_id, as_ai=as_ai):
         visible.insert(0, current)
         current = current.parent
     if not visible:
@@ -1384,7 +1401,7 @@ def _retrieval_injection_text(tr, user_id, with_labels=False, licence=None):
             node = Node.query.get(m.get("node_id"))
             # can_user_access_node also refuses a soft-deleted node.
             if (node is None or node.ai_usage not in AI_ALLOWED
-                    or not can_user_access_node(node, user_id)):
+                    or not can_user_access_node(node, user_id, as_ai=True)):
                 continue
             text = (node.get_content() or "").strip()
             if not text:
@@ -3041,6 +3058,9 @@ def _ca_batch_poll(task, llm_node, parent_node, meta, entry, user_id):
     if not key_type:
         key_type = determine_api_key_type(
             _load_node_chain(parent_node, user_id), logger=logger)
+        if _carries_others_shared(
+                _load_node_chain(parent_node, user_id), user_id):
+            key_type = 'chat'
         entry["key_type"] = key_type  # once; written with the heartbeat
     api_keys = llm_batch.apply_batch_key_override(
         get_api_keys_for_usage(flask_app.config, key_type),
@@ -3540,7 +3560,7 @@ def _prewarm_anthropic_cache(system_node_id, user_id, model_id,
             if system_node is None:
                 return {"status": "skipped", "reason": "no_system_node"}
             from backend.utils.privacy import can_user_access_node
-            if not can_user_access_node(system_node, user_id):
+            if not can_user_access_node(system_node, user_id, as_ai=True):
                 return {"status": "skipped", "reason": "no_system_node"}
             # The warm sends the prompt (and a fresh thread's transcript,
             # which shares its ai_usage) to the model.
@@ -3738,9 +3758,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # re-dispatch (read rerun, resumed batch) does not pass through
             # create_llm_placeholder. A batch already sent is collected.
             if batch_entry is None:
-                from backend.utils.llm_nodes import reply_refusal
+                from backend.utils.llm_nodes import (
+                    is_circle_ask, reply_refusal)
                 refused = reply_refusal(parent_node, user_id,
-                                        llm_node.ai_usage)
+                                        llm_node.ai_usage,
+                                        circle_ask=is_circle_ask(llm_node))
                 if refused is not None:
                     logger.warning(
                         "Node %s: reply refused, AI usage keeps the thread "
@@ -3768,7 +3790,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             llm_node.llm_task_progress = 20
             db.session.commit()
 
-            node_chain = _load_node_chain(parent_node, user_id)
+            from backend.utils.llm_nodes import is_circle_ask
+            node_chain = _load_node_chain(
+                parent_node, user_id, circle_ask=is_circle_ask(llm_node))
 
             # Step 2: Build messages array
             self.update_state(state='PROGRESS', meta={'progress': 30, 'status': 'Preparing messages'})
@@ -4266,6 +4290,18 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 logger.info(
                     "Node %s: read thread (turn %r); forcing chat keys "
                     "over the chain's %r", llm_node_id, ca_turn, key_type)
+                key_type = 'chat'
+            if key_type != 'chat' and _carries_others_shared(
+                    node_chain, user_id):
+                # Circles: a prompt that carries another person's
+                # circle-shared writing (a reader's "Ask my AI", or a
+                # reader's reply in the author's own thread) never goes
+                # out on the training key, whatever the nodes' ai_usage:
+                # that person shared it with people, not with training.
+                logger.info(
+                    "Node %s: thread carries another person's shared "
+                    "writing; forcing chat keys over the chain's %r",
+                    llm_node_id, key_type)
                 key_type = 'chat'
             if (ca_turn in ("read", "read_again")
                     and llm_node.ai_usage == 'train'):

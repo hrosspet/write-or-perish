@@ -9,13 +9,13 @@ the two-column privacy system:
 from enum import Enum
 from typing import Optional
 from flask_login import current_user
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, false, func, or_, select
 
 
 class PrivacyLevel(str, Enum):
     """Privacy level controlling who can access a node."""
     PRIVATE = "private"  # Only the owner can read
-    CIRCLES = "circles"  # Shared with specific user-defined groups (future)
+    CIRCLES = "circles"  # Shared with the author's circles / named people
     PUBLIC = "public"    # Visible to all users
 
 
@@ -88,7 +88,189 @@ def is_node_owner(node, user_id: Optional[int]) -> bool:
         and (node.human_owner_id or node.user_id) == user_id
 
 
-def _can_user_access_ignoring_deleted(node, user_id: int) -> bool:
+# ── Circles ──────────────────────────────────────────────────────────────
+# A "circles" node is read by its owner and by the audience of the entry
+# it belongs to (Node.audience_root_id: the shared entry itself, or the
+# shared entry a reply was written under). The audience is read from the
+# circles' current members every time, so removing a person, deleting a
+# circle or taking an entry back closes it at once. Two readers of the
+# rule:
+#   * a person (as_ai=False): the API routes.
+#   * a model acting for a person (as_ai=True): everything that builds a
+#     prompt or a corpus for that person (the thread chain, {quote:ID},
+#     read_full, search previews, the export behind profile builds and
+#     recent context). It never reads another person's shared entry; the
+#     one exception is the reader's explicit "Ask my AI" in that thread,
+#     which passes as_ai=False for the thread chain only
+#     (llm_completion._load_node_chain).
+
+def circles_enabled_for(user_id) -> bool:
+    """The Circles flag for one user id: CIRCLES_V1 (everyone) or the
+    id listed in CIRCLES_USER_IDS. Off by default. With it off nothing
+    is shared with or by this user: a "circles" node reads as private."""
+    try:
+        from flask import current_app
+        config = current_app.config
+    except RuntimeError:
+        return False
+    if config.get("CIRCLES_V1", False):
+        return True
+    return user_id is not None and user_id in (
+        config.get("CIRCLES_USER_IDS") or set())
+
+
+def _node_owner_id(node):
+    return getattr(node, 'human_owner_id', None) or node.user_id
+
+
+def readable_shared_entries(user_id: int):
+    """SELECT of the ids of the shared entries *user_id* reads as part of
+    their audience (not as their author): alive "circles" entries of an
+    author who is not hidden (#269) and whom the user has not muted, shared with the user by name or through a circle the user
+    is in now (and, for a member added with "Only new entries", shared
+    with that circle since). Empty while Circles is off for the user."""
+    from sqlalchemy.orm import aliased
+    from backend.models import (
+        CircleMember, CircleMute, Node, NodeCircle, NodeReader)
+    root = aliased(Node, flat=True)
+    if not circles_enabled_for(user_id):
+        return select(root.id).where(false())
+    owner = func.coalesce(root.human_owner_id, root.user_id)
+    by_name = select(NodeReader.node_id).where(NodeReader.user_id == user_id)
+    by_circle = (
+        select(NodeCircle.node_id)
+        .join(CircleMember, CircleMember.circle_id == NodeCircle.circle_id)
+        .where(CircleMember.user_id == user_id,
+               or_(CircleMember.entries_from.is_(None),
+                   NodeCircle.shared_at >= CircleMember.entries_from)))
+    muted = select(CircleMute.muted_user_id).where(
+        CircleMute.user_id == user_id)
+    return select(root.id).where(
+        root.privacy_level == PrivacyLevel.CIRCLES.value,
+        root.audience_root_id == root.id,
+        root.deleted_at.is_(None),
+        owner != user_id,
+        ~owner.in_(muted),
+        hidden_owner_filter(root),
+        or_(root.id.in_(by_name), root.id.in_(by_circle)),
+    )
+
+
+def _circle_cache():
+    """Per-request memo of audience answers (a thread asks once per node;
+    its nodes share one entry). None outside a request: a task asks the
+    database every time."""
+    try:
+        from flask import has_request_context, request
+        if not has_request_context():
+            return None
+        return request.environ.setdefault("loore.circle_access", {})
+    except RuntimeError:
+        return None
+
+
+def forget_circle_access():
+    """Drop the request's memo after a change of audience."""
+    cache = _circle_cache()
+    if cache is not None:
+        cache.clear()
+
+
+def in_audience(entry_id, user_id) -> bool:
+    """*user_id* reads the shared entry *entry_id* as part of its
+    audience (see readable_shared_entries)."""
+    if entry_id is None or user_id is None:
+        return False
+    cache = _circle_cache()
+    key = ("in", entry_id, user_id)
+    if cache is not None and key in cache:
+        return cache[key]
+    from backend.extensions import db
+    sub = readable_shared_entries(user_id).subquery()
+    found = db.session.execute(
+        select(sub.c.id).where(sub.c.id == entry_id)).first() is not None
+    if cache is not None:
+        cache[key] = found
+    return found
+
+
+def audience_entry_owner(entry_id):
+    """The owner (user id) of the shared entry *entry_id*, or None."""
+    if entry_id is None:
+        return None
+    cache = _circle_cache()
+    key = ("owner", entry_id)
+    if cache is not None and key in cache:
+        return cache[key]
+    from backend.extensions import db
+    from backend.models import Node
+    row = db.session.query(Node.user_id, Node.human_owner_id).filter(
+        Node.id == entry_id).first()
+    owner = None if row is None else (row[1] or row[0])
+    if cache is not None:
+        cache[key] = owner
+    return owner
+
+
+def _circles_access(node, user_id, as_ai=False) -> bool:
+    """The circles branch of the access rule for a node that is not the
+    user's own. A node without an audience entry is private."""
+    entry_id = getattr(node, 'audience_root_id', None)
+    if entry_id is None:
+        return False
+    # A reply in the user's own shared thread: the thread's author reads
+    # every reply written to it (their model too, by each reply's own
+    # ai_usage, as in a public thread).
+    if entry_id != node.id and audience_entry_owner(entry_id) == user_id:
+        return True
+    if as_ai:
+        return False
+    return in_audience(entry_id, user_id)
+
+
+def foreign_shared(node, user_id) -> bool:
+    """*node* is circle-shared content that is not *user_id*'s and not
+    written into *user_id*'s own shared thread: what a model acting for
+    the user reads only when the user asks it to in that thread."""
+    if getattr(node, 'privacy_level', None) != PrivacyLevel.CIRCLES:
+        return False
+    if _node_owner_id(node) == user_id or node.user_id == user_id:
+        return False
+    return not _circles_access(node, user_id, as_ai=True)
+
+
+def is_others_thread_answer(node) -> bool:
+    """*node* is an AI answer its owner asked for in someone else's shared
+    thread ("Ask my AI"): written from that person's shared entry, so it
+    stays in the thread. It is the reader's to read there, and no part
+    of the reader's corpus (export, profile builds, recent context,
+    search) or of their other prompts."""
+    if (getattr(node, 'privacy_level', None) != PrivacyLevel.CIRCLES
+            or getattr(node, 'node_type', None) != "llm"):
+        return False
+    entry_id = getattr(node, 'audience_root_id', None)
+    return (entry_id is not None
+            and audience_entry_owner(entry_id) != _node_owner_id(node))
+
+
+def others_thread_answer_filter(node_model):
+    """Query form of is_others_thread_answer."""
+    from sqlalchemy.orm import aliased
+    from backend.models import Node
+    entry = aliased(Node, flat=True)
+    owner = func.coalesce(node_model.human_owner_id, node_model.user_id)
+    return and_(
+        node_model.privacy_level == PrivacyLevel.CIRCLES.value,
+        node_model.node_type == "llm",
+        node_model.audience_root_id.isnot(None),
+        ~select(entry.id).where(
+            entry.id == node_model.audience_root_id,
+            func.coalesce(entry.human_owner_id, entry.user_id) == owner,
+        ).exists())
+
+
+def _can_user_access_ignoring_deleted(node, user_id: int,
+                                      as_ai: bool = False) -> bool:
     """Same body as can_user_access_node, minus the deleted_at short-circuit.
 
     Internal helper used by can_user_view_tombstone to check whether a viewer
@@ -96,11 +278,13 @@ def _can_user_access_ignoring_deleted(node, user_id: int) -> bool:
     should never call this directly — they'd bypass the leak protection in
     serialize_node.
     """
-    if node.user_id == user_id:
-        return True
-
-    if getattr(node, 'human_owner_id', None) and node.human_owner_id == user_id:
-        return True
+    owned = node.user_id == user_id or (
+        getattr(node, 'human_owner_id', None)
+        and node.human_owner_id == user_id)
+    if owned:
+        # The user's own, except for a model: the answer their "Ask my
+        # AI" wrote in someone else's shared thread stays in that thread.
+        return not (as_ai and is_others_thread_answer(node))
 
     privacy_level = getattr(node, 'privacy_level', PrivacyLevel.PRIVATE)
 
@@ -109,8 +293,7 @@ def _can_user_access_ignoring_deleted(node, user_id: int) -> bool:
     elif privacy_level == PrivacyLevel.PUBLIC:
         return True
     elif privacy_level == PrivacyLevel.CIRCLES:
-        # TODO: Implement circles membership check when circles feature is built
-        return False
+        return _circles_access(node, user_id, as_ai=as_ai)
 
     return False
 
@@ -162,7 +345,8 @@ def hidden_owner_filter(node_model):
         node_model.human_owner_id, node_model.user_id).in_(hidden)
 
 
-def can_user_access_node(node, user_id: Optional[int] = None) -> bool:
+def can_user_access_node(node, user_id: Optional[int] = None,
+                         as_ai: bool = False) -> bool:
     """Check if a user can currently access a node (alive + privacy passes).
 
     Soft-deleted nodes are treated as inaccessible regardless of ownership;
@@ -172,6 +356,8 @@ def can_user_access_node(node, user_id: Optional[int] = None) -> bool:
     Args:
         node: The Node object to check access for
         user_id: The user ID to check (defaults to current_user.id)
+        as_ai: the reader is a model acting for the user (see Circles
+            above): another person's shared entry is closed to it.
 
     Returns:
         True if user can access, False otherwise
@@ -185,7 +371,7 @@ def can_user_access_node(node, user_id: Optional[int] = None) -> bool:
     # serialize_node, which uses can_user_view_tombstone.
     if getattr(node, 'deleted_at', None) is not None:
         return False
-    if not _can_user_access_ignoring_deleted(node, user_id):
+    if not _can_user_access_ignoring_deleted(node, user_id, as_ai=as_ai):
         return False
     # Someone else's node whose author deleted the account and is in the
     # grace period (#269). Checked last: the viewer's own nodes and nodes
@@ -197,7 +383,8 @@ def can_user_access_node(node, user_id: Optional[int] = None) -> bool:
     return not owner_hidden(node)
 
 
-def can_user_view_tombstone(node, user_id: Optional[int] = None) -> bool:
+def can_user_view_tombstone(node, user_id: Optional[int] = None,
+                            as_ai: bool = False) -> bool:
     """Check if a viewer should see a tombstone placeholder for a soft-deleted node.
 
     Returns True only when the viewer *would have* had access pre-deletion
@@ -228,10 +415,11 @@ def can_user_view_tombstone(node, user_id: Optional[int] = None) -> bool:
             return False
         user_id = current_user.id
 
-    return _can_user_access_ignoring_deleted(node, user_id)
+    return _can_user_access_ignoring_deleted(node, user_id, as_ai=as_ai)
 
 
-def can_user_see_node_or_tombstone(node, user_id: Optional[int] = None) -> bool:
+def can_user_see_node_or_tombstone(node, user_id: Optional[int] = None,
+                                   as_ai: bool = False) -> bool:
     """True when the viewer can see *node* now, or could see it before it
     was soft-deleted (the case where they see its tombstone).
 
@@ -255,8 +443,8 @@ def can_user_see_node_or_tombstone(node, user_id: Optional[int] = None) -> bool:
         user_id = current_user.id
     if hidden_from(node, user_id):
         return False
-    return (can_user_access_node(node, user_id)
-            or can_user_view_tombstone(node, user_id))
+    return (can_user_access_node(node, user_id, as_ai=as_ai)
+            or can_user_view_tombstone(node, user_id, as_ai=as_ai))
 
 
 def hidden_from(node, user_id) -> bool:
@@ -276,17 +464,35 @@ def shown_as_deleted(node, user_id) -> bool:
             or hidden_from(node, user_id))
 
 
-def can_user_see_node_or_placeholder(node, user_id) -> bool:
+def can_user_see_node_or_placeholder(node, user_id,
+                                     as_ai: bool = False) -> bool:
     """For walks that show a deleted node as a placeholder in its place
     (the context of an AI reply): True when *user_id* can see *node*, or
     its placeholder, where a node hidden with its owner's deleted account
     (#269) counts as deleted. The walk then passes through it as it does
     after the purge; its text is never read."""
-    return (can_user_access_node(node, user_id)
-            or can_user_view_tombstone(node, user_id))
+    return (can_user_access_node(node, user_id, as_ai=as_ai)
+            or can_user_view_tombstone(node, user_id, as_ai=as_ai))
 
 
-def accessible_nodes_filter(node_model, user_id: int):
+def can_ai_access_node(node, user_id) -> bool:
+    """can_user_access_node for a model acting for *user_id*."""
+    return can_user_access_node(node, user_id, as_ai=True)
+
+
+def can_ai_view_tombstone(node, user_id) -> bool:
+    return can_user_view_tombstone(node, user_id, as_ai=True)
+
+
+def can_ai_see_node_or_tombstone(node, user_id) -> bool:
+    return can_user_see_node_or_tombstone(node, user_id, as_ai=True)
+
+
+def can_ai_see_node_or_placeholder(node, user_id) -> bool:
+    return can_user_see_node_or_placeholder(node, user_id, as_ai=True)
+
+
+def accessible_nodes_filter(node_model, user_id: int, as_ai: bool = False):
     """Return a SQLAlchemy filter clause for nodes accessible by the given user.
 
     This is the query-level counterpart of can_user_access_node().
@@ -294,12 +500,15 @@ def accessible_nodes_filter(node_model, user_id: int):
     accessible nodes are returned from the database. Soft-deleted nodes are
     excluded.
 
-    Currently allows: owner's own nodes + public nodes (alive only).
-    When circles are implemented, update this alongside can_user_access_node().
+    Allows: the owner's own nodes, public nodes and circle-shared nodes
+    the user reads (alive only). With *as_ai* (a model acting for the
+    user, or the user's own corpus: export, profile builds) another
+    person's shared entry is left out; see Circles above.
     """
     return and_(
         node_model.deleted_at.is_(None),
-        accessible_nodes_filter_ignoring_deleted(node_model, user_id),
+        accessible_nodes_filter_ignoring_deleted(
+            node_model, user_id, as_ai=as_ai),
         # Not by an account deleted and in its grace period (#269). The
         # ignoring-deleted variant below walks through such nodes, like
         # through tombstones.
@@ -309,7 +518,30 @@ def accessible_nodes_filter(node_model, user_id: int):
     )
 
 
-def accessible_nodes_filter_ignoring_deleted(node_model, user_id: int):
+def _circles_filter(node_model, user_id, as_ai=False):
+    """Query form of _circles_access."""
+    from sqlalchemy.orm import aliased
+    from backend.models import Node
+    entry = aliased(Node, flat=True)
+    # A reply in the user's own shared thread.
+    in_own_thread = and_(
+        node_model.audience_root_id != node_model.id,
+        select(entry.id).where(
+            entry.id == node_model.audience_root_id,
+            func.coalesce(entry.human_owner_id, entry.user_id) == user_id,
+        ).exists())
+    reads = [in_own_thread]
+    if not as_ai:
+        reads.append(node_model.audience_root_id.in_(
+            readable_shared_entries(user_id)))
+    return and_(
+        node_model.privacy_level == PrivacyLevel.CIRCLES.value,
+        node_model.audience_root_id.isnot(None),
+        or_(*reads))
+
+
+def accessible_nodes_filter_ignoring_deleted(node_model, user_id: int,
+                                             as_ai: bool = False):
     """Same access criteria as accessible_nodes_filter, minus the
     deleted_at AND clause. Use in recursive CTE walks where the
     traversal needs to step through tombstones to reach an alive node
@@ -322,11 +554,14 @@ def accessible_nodes_filter_ignoring_deleted(node_model, user_id: int):
     making G unreachable from Log even though it's alive and
     accessible. The §4a Case 2 feed swap depends on this traversal.
     """
+    own = or_(node_model.user_id == user_id,
+              node_model.human_owner_id == user_id)
+    if as_ai:
+        own = and_(own, ~others_thread_answer_filter(node_model))
     return or_(
-        node_model.user_id == user_id,
-        node_model.human_owner_id == user_id,
+        own,
         node_model.privacy_level == PrivacyLevel.PUBLIC,
-        # TODO: add circles membership subquery when circles feature is built
+        _circles_filter(node_model, user_id, as_ai=as_ai),
     )
 
 

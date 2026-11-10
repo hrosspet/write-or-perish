@@ -450,7 +450,7 @@ class Node(db.Model):
 
     # Privacy level: controls who can access this node
     # - private: Only the owner can read (default for new nodes)
-    # - circles: Shared with specific user-defined groups (future feature)
+    # - circles: Shared with the circles and people its author chose
     # - public: Visible to all users
     privacy_level = db.Column(db.String(16), nullable=False, default="private")
 
@@ -553,6 +553,15 @@ class Node(db.Model):
     # Pin-to-profile: surfaces any node on the Profile page & Log
     pinned_at = db.Column(db.DateTime, nullable=True)
     pinned_by = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)
+
+    # Circles: the entry whose audience decides who reads this node. Only
+    # read while privacy_level is "circles". An entry its author shared
+    # points at itself (its audience is in NodeCircle / NodeReader); a
+    # reply in a shared thread points at that entry, so the whole thread
+    # has one audience. NULL = not shared with anyone: a "circles" node
+    # without it behaves as private (old rows, old clients, #588).
+    audience_root_id = db.Column(
+        db.Integer, db.ForeignKey("node.id"), nullable=True, index=True)
 
     # Soft-delete: non-NULL means scheduled for cleanup after SOFT_DELETE_GRACE_DAYS.
     deleted_at = db.Column(db.DateTime, nullable=True, index=True)
@@ -740,6 +749,114 @@ def _enforce_node_content_encryption(mapper, connection, node):
             "encrypting; fix the writer (use set_content/set_privacy_level)",
             node.id, node.privacy_level)
         node.content = encrypt_content(node.content)
+
+
+@event.listens_for(Node, "before_insert")
+def _inherit_circle_audience(mapper, connection, node):
+    """A reply written into a shared thread joins the thread's audience,
+    whichever path creates it (typed, recorded, an AI reply): a "circles"
+    node under a shared "circles" parent takes the parent's audience
+    entry. Nothing else is touched: a "circles" node under anything else
+    stays without an audience, which reads as private."""
+    if (node.privacy_level != "circles" or node.parent_id is None
+            or node.audience_root_id is not None):
+        return
+    table = Node.__table__
+    row = connection.execute(
+        table.select().with_only_columns(
+            table.c.privacy_level, table.c.audience_root_id
+        ).where(table.c.id == node.parent_id)).first()
+    if row is not None and row[0] == "circles" and row[1] is not None:
+        node.audience_root_id = row[1]
+
+
+class Circle(db.Model):
+    """A named list of people, owned by one user. Only the owner sees the
+    circle, its name and who is in it."""
+    __tablename__ = "circle"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=False, index=True)
+    name = db.Column(db.String(80), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow,
+                           nullable=False)
+
+
+class CircleMember(db.Model):
+    """A person in a circle. ``entries_from`` is the "Only new entries"
+    cut-off: NULL = the member reads everything shared with the circle;
+    a time = only what was shared with it from then on."""
+    __tablename__ = "circle_member"
+    id = db.Column(db.Integer, primary_key=True)
+    circle_id = db.Column(
+        db.Integer, db.ForeignKey("circle.id", ondelete="CASCADE"),
+        nullable=False, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=False, index=True)
+    entries_from = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow,
+                           nullable=False)
+    __table_args__ = (
+        db.UniqueConstraint("circle_id", "user_id",
+                            name="uq_circle_member_circle_user"),
+    )
+
+
+class NodeCircle(db.Model):
+    """An entry shared with a circle. Who that is, is read from the
+    circle's members when someone opens the entry, so removing a person
+    closes it to them at once. ``shared_at`` is compared with a member's
+    ``entries_from``."""
+    __tablename__ = "node_circle"
+    id = db.Column(db.Integer, primary_key=True)
+    node_id = db.Column(
+        db.Integer, db.ForeignKey("node.id", ondelete="CASCADE"),
+        nullable=False, index=True)
+    circle_id = db.Column(
+        db.Integer, db.ForeignKey("circle.id", ondelete="CASCADE"),
+        nullable=False, index=True)
+    shared_at = db.Column(db.DateTime, default=datetime.utcnow,
+                          nullable=False)
+    __table_args__ = (
+        db.UniqueConstraint("node_id", "circle_id",
+                            name="uq_node_circle_node_circle"),
+    )
+
+
+class NodeReader(db.Model):
+    """A person named for one entry only (no circle is made)."""
+    __tablename__ = "node_reader"
+    id = db.Column(db.Integer, primary_key=True)
+    node_id = db.Column(
+        db.Integer, db.ForeignKey("node.id", ondelete="CASCADE"),
+        nullable=False, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=False, index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow,
+                           nullable=False)
+    __table_args__ = (
+        db.UniqueConstraint("node_id", "user_id",
+                            name="uq_node_reader_node_user"),
+    )
+
+
+class CircleMute(db.Model):
+    """``user_id`` chose "Don't show <name>'s entries" for
+    ``muted_user_id``: no notes about that person's shared entries, and
+    the entries are closed to ``user_id`` while the row exists. Only
+    ``user_id`` ever sees it."""
+    __tablename__ = "circle_mute"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=False, index=True)
+    muted_user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                              nullable=False, index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow,
+                           nullable=False)
+    __table_args__ = (
+        db.UniqueConstraint("user_id", "muted_user_id",
+                            name="uq_circle_mute_user_muted"),
+    )
 
 
 class NodeContextArtifact(db.Model):
@@ -1803,8 +1920,17 @@ class UserNotification(db.Model):
     read_at = db.Column(db.DateTime, nullable=True)
     # Last time the user hit "skip for now" (stays unread)
     skipped_at = db.Column(db.DateTime, nullable=True)
+    # A note about a shared entry (type "circle_share"): the entry and
+    # the person who shared it. One note per entry per reader, whatever
+    # its status. NULL on every other type.
+    node_id = db.Column(
+        db.Integer, db.ForeignKey("node.id", ondelete="CASCADE"),
+        nullable=True, index=True)
+    actor_user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                              nullable=True, index=True)
 
-    user = db.relationship("User", backref="notifications")
+    user = db.relationship("User", backref="notifications",
+                           foreign_keys=[user_id])
 
 
 class Poll(db.Model):

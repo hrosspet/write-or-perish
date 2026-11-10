@@ -38,6 +38,8 @@ import CommonsPage from "./pages/CommonsPage";
 import PublicThreadPage from "./pages/PublicThreadPage";
 import ProfileGenerationWatcher from "./components/ProfileGenerationWatcher";
 import UpdatesModal from "./components/UpdatesModal";
+import CirclesPage from "./pages/CirclesPage";
+import SharedWithYouPage from "./pages/SharedWithYouPage";
 import BothProvidersDialog from "./components/BothProvidersDialog";
 import PromptsPage from "./pages/PromptsPage";
 import PromptDetailPage from "./pages/PromptDetailPage";
@@ -283,6 +285,10 @@ function App() {
           <Route path="/share" element={<ProtectedRoute><SharePage /></ProtectedRoute>} />
           <Route path="/commons" element={<ProtectedRoute><CommonsPage /></ProtectedRoute>} />
           <Route path="/account" element={<ProtectedRoute><AccountPage /></ProtectedRoute>} />
+          {/* Circles (dark behind user.circles_enabled; the pages say
+              "Not available" without it). */}
+          <Route path="/circles" element={<ProtectedRoute><CirclesPage /></ProtectedRoute>} />
+          <Route path="/shared" element={<ProtectedRoute><SharedWithYouPage /></ProtectedRoute>} />
           <Route path="/node/:id" element={<NodeRoute />} />
           <Route path="/admin" element={<ProtectedRoute><AdminPanel /></ProtectedRoute>} />
           <Route path="/:atName" element={<AtRoute />} />

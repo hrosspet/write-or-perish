@@ -201,13 +201,17 @@ def has_ext_quotes(content: str) -> bool:
     return bool(re.search(EXT_QUOTE_PLACEHOLDER_PATTERN, content))
 
 
-def get_quote_data(node_ids: List[int], user_id: int) -> Dict[int, Optional[dict]]:
+def get_quote_data(node_ids: List[int], user_id: int,
+                   as_ai: bool = False) -> Dict[int, Optional[dict]]:
     """
     Fetch node data for the given IDs, checking access permissions.
 
     Args:
         node_ids: List of node IDs to fetch
         user_id: ID of the user requesting access (for permission checks)
+        as_ai: the text is for a model or the user's corpus, not for the
+            user's screen: another person's circle-shared entry is then
+            not accessible (privacy.py, Circles)
 
     Returns:
         Dict mapping node_id to node data dict (or None if not accessible).
@@ -233,7 +237,7 @@ def get_quote_data(node_ids: List[int], user_id: int) -> Dict[int, Optional[dict
         # access; otherwise None (renders as "not accessible"). A node whose
         # author deleted the account (#269) quotes as deleted, without a name.
         if node.deleted_at is not None or owner_hidden(node):
-            if can_user_view_tombstone(node, user_id):
+            if can_user_view_tombstone(node, user_id, as_ai=as_ai):
                 gone = author_gone(node)
                 result[node_id] = {
                     "id": node.id,
@@ -250,7 +254,7 @@ def get_quote_data(node_ids: List[int], user_id: int) -> Dict[int, Optional[dict
                 result[node_id] = None
             continue
         # Alive: standard access check.
-        if can_user_access_node(node, user_id):
+        if can_user_access_node(node, user_id, as_ai=as_ai):
             result[node_id] = {
                 "id": node.id,
                 "content": node.get_content(),
@@ -310,8 +314,10 @@ def resolve_quotes(
     if not quote_ids:
         return content, []
 
-    # Fetch all quoted nodes
-    quote_data = get_quote_data(quote_ids, user_id)
+    # Fetch all quoted nodes. Every caller builds text for a model or an
+    # export, so another person's circle-shared entry never resolves
+    # here; the thread page reads its quotes through get_quote_data.
+    quote_data = get_quote_data(quote_ids, user_id, as_ai=True)
     resolved_ids = []
 
     def replace_quote(match):
@@ -738,7 +744,8 @@ class ExportQuoteResolver:
         from backend.utils.tokens import approximate_token_count
 
         node = Node.query.get(node_id)
-        if not node or not can_user_access_node(node, self.user_id):
+        if not node or not can_user_access_node(
+                node, self.user_id, as_ai=True):
             return None
 
         # Block nodes with ai_usage='none' when filtering is enabled

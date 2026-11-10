@@ -30,7 +30,7 @@ from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.embeddings import (
     EMBEDDING_MODEL, content_hash, embed_texts, pack_vector,
 )
-from backend.utils.privacy import AI_ALLOWED
+from backend.utils.privacy import AI_ALLOWED, others_thread_answer_filter
 
 from backend.utils.hidden_rows import hidden_ids, on_hold_user_ids
 
@@ -85,6 +85,10 @@ def _candidate_nodes(limit):
             # Writing on hold for deletion (#268): nothing new is
             # embedded until a restore or the purge.
             ~User.id.in_(on_hold_user_ids()),
+            # Circles: an "Ask my AI" answer in someone else's shared
+            # thread is written from their entry; it never enters the
+            # reader's search index.
+            ~others_thread_answer_filter(Node),
         )
         .filter(or_(
             NodeEmbedding.id.is_(None),

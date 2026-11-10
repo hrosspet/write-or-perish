@@ -759,6 +759,11 @@ def create_node():
                     "error": "Replies under public posts are public.",
                     "code": "public_reply_required",
                 }), 400
+            # A shared thread has one audience, see the text path.
+            from backend.utils import circles as cz
+            if (cz.circles_enabled(current_user)
+                    and cz.reply_requires_circles(parent, privacy_level)):
+                return cz.circle_reply_required_response()
 
         agentic, auto_reply_model, err = _upload_reply_options(
             request.form, parent_id, ai_usage)
@@ -877,6 +882,13 @@ def create_node():
                 "error": "Replies under public posts are public.",
                 "code": "public_reply_required",
             }), 400
+        # A shared thread has one audience (Circles): a reply under a
+        # shared node is "circles" and is read by exactly the people the
+        # entry is shared with. The app names them before sending.
+        from backend.utils import circles as cz
+        if (cz.circles_enabled(current_user)
+                and cz.reply_requires_circles(parent, privacy_level)):
+            return cz.circle_reply_required_response()
 
     # Content above the per-node cap is auto-split into a serial chain
     # of nodes (first segment keeps this node's id). A single oversized
@@ -910,6 +922,15 @@ def create_node():
     db.session.add(node)
     db.session.flush()
 
+    # Circles: the audience sent with a new entry. Refused before
+    # anything is committed (a name nobody has, nobody in the audience).
+    from backend.utils import circles as cz
+    try:
+        cz.apply_requested_sharing(node, current_user, data, creating=True)
+    except cz.AudienceError as e:
+        db.session.rollback()
+        return e.response()
+
     parts = split_node_into_chain(node, segments=segments)
 
     # Attach context artifacts for any placeholders in the content
@@ -935,6 +956,7 @@ def create_node():
         "privacy_level": node.privacy_level,
         "permalink": permalink_for(node),
         "ai_usage": node.ai_usage,
+        "audience_set": cz.is_shared_entry(node),
         "split_into": 1 + len(parts),
         "tip_id": parts[-1].id if parts else node.id
     }), 201
@@ -985,6 +1007,16 @@ def update_node(node_id):
         if privacy_level == "private" and node.pinned_at is not None:
             node.pinned_at = None
             node.pinned_by = None
+        # Circles: the audience that goes with the level (who reads the
+        # entry, a reply joining its thread's audience, an entry taken
+        # back). Refused before anything else of the edit is written.
+        from backend.utils import circles as cz
+        try:
+            cz.apply_requested_sharing(
+                node, current_user, data, old_privacy=old_privacy)
+        except cz.AudienceError as e:
+            db.session.rollback()
+            return e.response()
 
     if "ai_usage" in data:
         ai_usage = data["ai_usage"]
@@ -1005,6 +1037,10 @@ def update_node(node_id):
     # cascade carries to the user's replies: a reply keeps its own privacy
     # when only AI usage was changed on this node, and vice versa.
     privacy_changed = "privacy_level" in data and node.privacy_level != old_privacy
+    # A changed audience counts as a privacy change for the cascade: the
+    # user's replies below a newly shared entry can join its audience.
+    audience_changed = "privacy_level" in data and (
+        "circle_ids" in data or "circle_usernames" in data)
     ai_usage_changed = "ai_usage" in data and node.ai_usage != old_ai_usage
 
     # Resolved text BEFORE any artifact change: for a system node this is
@@ -1067,12 +1103,15 @@ def update_node(node_id):
     # it that the user may edit (own nodes, LLM nodes they are the human
     # owner of). Other users' replies are untouched.
     cascaded = []
-    if data.get("apply_to_descendants") and (privacy_changed or ai_usage_changed):
+    if data.get("apply_to_descendants") and (
+            privacy_changed or ai_usage_changed or audience_changed):
         from backend.utils.node_settings import apply_settings_to_descendants
         cascaded = apply_settings_to_descendants(
             node, current_user.id,
-            privacy_level=node.privacy_level if privacy_changed else None,
+            privacy_level=(node.privacy_level
+                           if privacy_changed or audience_changed else None),
             ai_usage=node.ai_usage if ai_usage_changed else None,
+            audience_from=node if "privacy_level" in data else None,
         )
     try:
         db.session.commit()
@@ -1101,6 +1140,73 @@ def update_node(node_id):
         "node": _focal_own_fields(node, current_user.id),
         "descendants_updated": len(cascaded),
     }), 200
+
+@nodes_bp.route("/<int:node_id>/audience", methods=["GET"])
+@login_required
+def get_node_audience(node_id):
+    """Circles: who reads a node, for the edit form (the thread page gets
+    the same with the node itself). ``audience`` as on GET /<id>;
+    ``thread_audience`` when the node sits under a shared node, whose
+    people would read it if it were "circles" (a reply taken back)."""
+    from backend.utils import circles as cz
+    node = _visible_node(node_id)
+    if node is None or not cz.circles_enabled(current_user):
+        return _node_not_found()
+    thread = cz.parent_shared_entry(node)
+    return jsonify({
+        "audience": cz.audience_for_viewer(node, current_user.id),
+        "thread_audience": (cz.audience_for_viewer(thread, current_user.id)
+                            if thread is not None else None),
+    }), 200
+
+
+@nodes_bp.route("/<int:node_id>/audience", methods=["PUT"])
+@login_required
+def set_node_audience(node_id):
+    """Circles: share an entry of the user's own with circles and/or
+    people named for it (``circle_ids``, ``circle_usernames``), replacing
+    its audience. The second step for entries created on a path that
+    carries no audience (a recording, an upload, a Text-mode start):
+    until it lands such an entry is "circles" with nobody chosen, which
+    reads as private. ``apply_to_descendants`` also puts the user's own
+    replies below it (an AI reply made with it) in the audience.
+    Editing an entry's audience otherwise goes through PUT /<id>."""
+    from backend.utils import circles as cz
+    node = Node.query.get(node_id)
+    if (node is None or node.deleted_at is not None
+            or not cz.circles_enabled(current_user)
+            or not can_user_edit_node(node, current_user.id)):
+        return _node_not_found()
+    data = request.get_json(silent=True) or {}
+    old_privacy = node.privacy_level
+    try:
+        node.set_privacy_level("circles")
+        cz.apply_requested_sharing(node, current_user, {
+            "circle_ids": data.get("circle_ids") or [],
+            "circle_usernames": data.get("circle_usernames") or [],
+        }, old_privacy=old_privacy)
+    except cz.AudienceError as e:
+        db.session.rollback()
+        return e.response()
+    if data.get("apply_to_descendants"):
+        from backend.utils.node_settings import apply_settings_to_descendants
+        apply_settings_to_descendants(
+            node, current_user.id, privacy_level="circles",
+            audience_from=node)
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return jsonify({"error": "DB error sharing the entry"}), 500
+    if old_privacy == "public" or node.public_slug:
+        from backend.utils.public_cache import invalidate_for_node
+        invalidate_for_node(node)
+    return jsonify({
+        "id": node.id,
+        "privacy_level": node.privacy_level,
+        "audience": cz.audience_for_viewer(node, current_user.id),
+    }), 200
+
 
 # Retrieve a node with its full content (the highlighted node) plus previews of its children.
 _ARTIFACT_MODELS = {
@@ -1216,6 +1322,15 @@ def _focal_own_fields(node, viewer_id):
             data["feed_picks_count"] = FeedPick.query.filter_by(
                 node_id=node.id, kind="read").count()
     data.update(_system_prompt_fields(node, current_user.id))
+    # Circles: who reads this node (the banner, the icon's list, the
+    # reply dialog). Only for the author and the readers of a shared
+    # thread; people by name, never a circle's name.
+    if node.privacy_level == "circles" and node.audience_root_id is not None:
+        from backend.utils import circles as cz
+        if cz.circles_enabled_for(viewer_id):
+            audience = cz.audience_for_viewer(node, viewer_id)
+            if audience is not None:
+                data["audience"] = audience
     # A Community Archive read reply: the thread page shows what the read
     # covered (the window, from the pinned render) and offers to read
     # the day again. Focal node only — two small lookups. The window goes
@@ -1824,8 +1939,27 @@ def request_llm_response(node_id):
     # thread you respond first (a public reply of yours), then generate on
     # your own branch — the completion is attributed and billed to you.
     # (Also closes a latent gap: this route never checked ownership.)
+    # Circles, "Ask my AI": a reader of a shared thread asks their own
+    # model about it, on any node of the thread they can read. This is
+    # the only way a model reads someone else's shared entry
+    # (llm_nodes.reply_refusal), it runs on the reader's own model, on
+    # the chat key, and its answer is a reply in the thread, read by the
+    # thread's audience.
+    data = request.get_json(silent=True) or {}
+    circle_ask = False
+    if data.get("circle_ask"):
+        from backend.utils import circles as cz
+        entry = cz.shared_entry_of(parent_node)
+        circle_ask = (
+            cz.circles_enabled(current_user)
+            and entry is not None
+            and cz.entry_owner_id(entry) != current_user.id
+            and can_user_access_node(parent_node, current_user.id))
+        if not circle_ask:
+            return _node_not_found()
+
     owner_id = parent_node.human_owner_id or parent_node.user_id
-    if owner_id != current_user.id:
+    if owner_id != current_user.id and not circle_ask:
         return jsonify({
             "error": "You can only request an AI response on your own "
                      "nodes. Reply first, then generate on your reply.",
@@ -1839,9 +1973,12 @@ def request_llm_response(node_id):
     parent_node = split_chain_tip(parent_node)
 
     # Get and validate the model from request body
-    data = request.get_json() or {}
     model_id = data.get("model")
     source_mode = data.get("source_mode")
+    if circle_ask:
+        # The reader's own model, whatever the request or the thread's
+        # earlier replies (someone else's) name.
+        model_id = None
 
     if source_mode is not None and source_mode not in ("voice", "textmode"):
         return jsonify({"error": f"Invalid source_mode: {source_mode}"}), 400
@@ -1861,11 +1998,18 @@ def request_llm_response(node_id):
     # AI nodes inherit privacy settings from their parent node
     from backend.utils.node_deletion import ParentDeletedError
     try:
+        ask_kwargs = {}
+        if circle_ask:
+            from backend.utils.llm_nodes import (
+                CIRCLE_ASK_MARKER, circle_ask_ai_usage)
+            ask_kwargs = {"meta": [{"name": CIRCLE_ASK_MARKER}]}
         llm_node, task_id = create_llm_placeholder(
             parent_node.id, model_id, current_user.id,
             privacy_level=parent_node.privacy_level,
-            ai_usage=parent_node.ai_usage,
+            ai_usage=(circle_ask_ai_usage(current_user) if circle_ask
+                      else parent_node.ai_usage),
             source_mode=source_mode,
+            **ask_kwargs,
         )
     except ParentDeletedError as e:
         # Race A: parent was soft-deleted between the route's auth check
@@ -2604,6 +2748,12 @@ def init_chunked_upload():
     if err is not None:
         return err
 
+    if parent_id:
+        from backend.utils import circles as cz
+        if (cz.circles_enabled(current_user) and cz.reply_requires_circles(
+                Node.query.get(parent_id), privacy_level)):
+            return cz.circle_reply_required_response()
+
     agentic, auto_reply_model, err = _upload_reply_options(
         data, parent_id, ai_usage)
     if err is not None:
@@ -2936,6 +3086,12 @@ def init_streaming_transcription():
     err = assert_parent_alive(parent_id)
     if err is not None:
         return err
+
+    if parent_id:
+        from backend.utils import circles as cz
+        if (cz.circles_enabled(current_user) and cz.reply_requires_circles(
+                Node.query.get(parent_id), privacy_level)):
+            return cz.circle_reply_required_response()
 
     # Generate session ID
     import uuid

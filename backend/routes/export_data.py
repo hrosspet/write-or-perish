@@ -79,7 +79,7 @@ def _export_visible_filter(model, user_id):
     deleter's username/timestamp into someone else's export.
     """
     return or_(
-        accessible_nodes_filter(model, user_id),
+        accessible_nodes_filter(model, user_id, as_ai=True),
         and_(
             model.deleted_at.isnot(None),
             or_(
@@ -571,11 +571,11 @@ def format_node_tree(
             for child in _children(current, kind != "inaccessible"):
                 if _deleted(child):
                     if user_id is None or can_user_view_tombstone(
-                            child, user_id):
+                            child, user_id, as_ai=True):
                         kids.append(("tombstone", child))
                     else:
                         dead.add(child.id)
-                elif user_id and not can_user_access_node(child, user_id):
+                elif user_id and not can_user_access_node(child, user_id, as_ai=True):
                     kids.append(("inaccessible", child))
                 else:
                     kids.append(("node", child))
@@ -611,10 +611,10 @@ def format_node_tree(
             # Not accessible to the user: the inaccessible shell.
             if _deleted(current):
                 if user_id is not None and not can_user_view_tombstone(
-                        current, user_id):
+                        current, user_id, as_ai=True):
                     continue
                 kind = "tombstone"
-            elif user_id and not can_user_access_node(current, user_id):
+            elif user_id and not can_user_access_node(current, user_id, as_ai=True):
                 kind = "inaccessible"
 
         if kind == "node":
@@ -654,7 +654,7 @@ def format_node_tree(
                         or kids[0].id in processed_nodes
                         or (user_id is not None
                             and not can_user_view_tombstone(
-                                kids[0], user_id))):
+                                kids[0], user_id, as_ai=True))):
                     break
                 processed_nodes.add(last.id)
                 last = kids[0]
@@ -721,7 +721,7 @@ def _collect_all_nodes_in_tree(node, filter_ai_usage=False, created_before=None,
 
         # Include the node only if it's accessible (or no user_id check);
         # descend into children regardless — they may be accessible.
-        if not (user_id and not can_user_access_node(current, user_id)):
+        if not (user_id and not can_user_access_node(current, user_id, as_ai=True)):
             result.append(current)
 
         children = current.children
@@ -1493,10 +1493,10 @@ def _entry_point_top_level_started(node, user_id):
     # Allow soft-deleted-with-pre-access roots through (the user's own
     # tombstoned thread roots): the entry-point preamble's start-date
     # is the user's own data and is fine to surface in their export.
-    if not can_user_access_node(cur, user_id):
+    if not can_user_access_node(cur, user_id, as_ai=True):
         from backend.utils.privacy import can_user_view_tombstone
         if not (cur.deleted_at is not None
-                and can_user_view_tombstone(cur, user_id)):
+                and can_user_view_tombstone(cur, user_id, as_ai=True)):
             return None
     return cur.created_at
 
