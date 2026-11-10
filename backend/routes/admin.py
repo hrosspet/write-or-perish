@@ -813,8 +813,9 @@ def update_user_spend_limit(user_id):
     """Set a user's per-user monthly spend cap (USD) and immediately reconcile
     their block flag against current month-to-date spend: raising the limit
     above their spend unblocks them; lowering it at/below their spend blocks
-    them. 0 = uncapped for this user."""
-    from backend.utils.spend import reconcile_user_spend_block
+    them. 0 = uncapped for this user, and clears the carry (#594)."""
+    from backend.utils.spend import (
+        reconcile_user_spend_block, roll_spend_carry)
 
     data = request.get_json() or {}
     raw = data.get("limit_usd")
@@ -826,6 +827,9 @@ def update_user_spend_limit(user_id):
         return jsonify({"error": "limit_usd must be >= 0."}), 400
 
     user = User.query.get_or_404(user_id)
+    # The carry into this month is rolled with the limit that was in force
+    # when the month began (#594), before the new one applies.
+    roll_spend_carry(user, current_app.config)
     user.monthly_spend_limit_usd = limit
     state = reconcile_user_spend_block(user, current_app.config)
     db.session.commit()

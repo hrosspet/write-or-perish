@@ -714,3 +714,24 @@ class TestSpendCarry:
         body = resp.get_json()
         assert body["spend_carried_usd"] == 0
         assert body["spend_blocked"] is False        # $25 of $50
+
+    def test_a_limit_set_after_none_carries_nothing(self, app, users):
+        """Last month the user had no limit and spent $500; the month has
+        not been rolled yet. A $50 limit set now starts from 0: the carry
+        is rolled with the limit in force when the month began."""
+        from backend.utils.spend import current_month, month_start
+        user = users["impostor"]
+        last = month_start() - timedelta(days=1)
+        user.monthly_spend_limit_usd = 0.0
+        user.spend_carry_month = current_month(last)
+        _db.session.add(APICostLog(
+            user_id=user.id, model_id="claude-opus-4.6",
+            request_type="conversation", cost_microdollars=500_000_000,
+            created_at=last))
+        _db.session.commit()
+        client = app.test_client()
+        _login(client, users["renamed_admin"].id)
+        body = client.put(f"/api/admin/users/{user.id}/update_spend_limit",
+                          json={"limit_usd": 50}).get_json()
+        assert body["spend_carried_usd"] == 0
+        assert body["spend_blocked"] is False

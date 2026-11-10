@@ -255,6 +255,30 @@ def test_a_limit_of_zero_clears_the_carry(user):
     assert _carry_usd(user) == 0
 
 
+def test_a_limit_set_on_an_uncapped_user_carries_nothing_from_before(user):
+    """Spending while the user had no limit never carries: the hourly roll
+    keeps an uncapped user's month current, so a limit set later starts
+    from 0."""
+    user.monthly_spend_limit_usd = 0.0
+    _db.session.commit()
+    _log_cost(user.id, 500.0, OCT)
+    roll_spend_carries(_config(), now=NOV_1)
+    assert user.spend_carry_month == "2026-11"
+    user.monthly_spend_limit_usd = 50.0
+    state = reconcile_user_spend_block(user, _config(), now=NOV)
+    assert state["carried_usd"] == 0
+    assert state["blocked"] is False
+
+
+def test_the_cap_check_of_an_uncapped_user_writes_nothing(user):
+    """The cap check runs before every profile step: for a user with no
+    limit it neither rolls nor writes."""
+    user.monthly_spend_limit_usd = 0.0
+    _db.session.commit()
+    assert _enforce(user, NOV, limit=0)["status"] == "disabled"
+    assert user.spend_carry_month == "2026-10"
+
+
 def test_a_rollover_with_no_limit_carries_nothing(user):
     user.monthly_spend_limit_usd = 0.0
     _log_cost(user.id, 500.0, OCT)

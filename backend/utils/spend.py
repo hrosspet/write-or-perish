@@ -246,7 +246,12 @@ def roll_spend_carry(user, config, now=None):
 
 
 def refresh_spend_carry(user, config, now=None):
-    """roll_spend_carry, committed when it changed something."""
+    """roll_spend_carry, committed when it changed something, for a user
+    with a limit. For a user without one it does nothing, not even a query:
+    the cap checks before every step stay free for them, and the hourly roll
+    keeps their month current (so a limit set later starts from 0)."""
+    if (get_user_spend_limit_usd(user, config) or 0) <= 0:
+        return
     if roll_spend_carry(user, config, now):
         db.session.commit()
 
@@ -386,12 +391,12 @@ def enforce_user_spend_cap(user_id, config, now=None, send_email=None):
     if user is None:
         return {"status": "no_user", "user_id": user_id}
 
-    refresh_spend_carry(user, config, now)
-
     # Per-user override wins over the global default (and 0 = uncapped).
     limit_usd = get_user_spend_limit_usd(user, config)
     if limit_usd <= 0:
         return {"status": "disabled", "user_id": user_id}
+
+    refresh_spend_carry(user, config, now)
 
     if user.spend_blocked_month == month:
         return {"status": "already_blocked", "user_id": user_id, "month": month}
