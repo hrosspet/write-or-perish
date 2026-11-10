@@ -2,6 +2,8 @@
 merges for an older round of the user's profile edits
 (utils/profile_edit_diff.older_edit). Pure text; every profile text here
 is invented."""
+import pytest
+
 from backend.utils.profile_edit_diff import older_edit
 
 BASE = ("### SURFACE MAP\n"
@@ -145,3 +147,83 @@ def test_a_model_line_a_newer_round_deleted_is_left_out():
     result = older_edit(BASE, FIRST, [(UPDATE, second)])
     assert "Avoids crowds." not in result.text
     assert "RIGHT GUESS" in result.text
+
+
+# Review of #569, finding 1: paragraphs separated by blank lines. The update
+# rewords every paragraph of a section and adds (or drops) one; aligned
+# with the blank lines, the paragraphs paired by position, one off, and the
+# sentence the user deleted reached round 1's merge.
+PARAGRAPHS = ("### SURFACE MAP\nLikes long walks along the river.\n\n"
+              "Works as a nurse in Leeds.\n\n"
+              "### SHADOW MAP\nAvoids crowds at parties.")
+CELLO_REWORDED = "Music matters to them: most weekends go to cello practice."
+
+
+def _paragraph_history(update_adds):
+    """Round 1 adds the cello paragraph between the two and corrects the
+    other section; the update rewords the three paragraphs and adds one
+    before the cello paragraph (or drops the first); round 2 deletes the
+    cello paragraph. Returns (round 1, update, round 2)."""
+    first = PARAGRAPHS.replace(
+        "\n\nWorks", f"\n\n{CELLO}\n\nWorks").replace(
+        "Avoids crowds at parties.", "Avoids crowds, but loves concerts.")
+    walks = ("Walks by the river whenever they can.\n\n"
+             if update_adds else "")
+    running = ("Recently started running in the mornings.\n\n"
+               if update_adds else "")
+    update = ("### SURFACE MAP\n" + walks + running + CELLO_REWORDED
+              + "\n\nNursing in Leeds is their work.\n\n"
+              "### SHADOW MAP\nAvoids crowds, but loves concerts.")
+    second = update.replace(f"{CELLO_REWORDED}\n\n", "")
+    return first, update, second
+
+
+@pytest.mark.parametrize("update_adds", [True, False])
+def test_a_reworded_paragraph_the_user_deleted_does_not_come_back(
+        update_adds):
+    first, update, second = _paragraph_history(update_adds)
+    result = older_edit(PARAGRAPHS, first, [(update, second)])
+    assert result.text is not None
+    assert CELLO not in result.text
+    # The correction in the other section, which round 2 did not touch.
+    assert "Avoids crowds, but loves concerts." in result.text
+
+
+def test_the_reviewers_history_alone_has_nothing_left():
+    """Round 1 only adds the cello paragraph: nothing is left of it."""
+    first = PARAGRAPHS.replace("\n\nWorks", f"\n\n{CELLO}\n\nWorks")
+    update = ("### SURFACE MAP\nWalks by the river whenever they can.\n\n"
+              "Recently started running in the mornings.\n\n"
+              f"{CELLO_REWORDED}\n\nNursing in Leeds is their work.\n\n"
+              "### SHADOW MAP\nAvoids crowds at parties.")
+    second = update.replace(f"{CELLO_REWORDED}\n\n", "")
+    assert older_edit(PARAGRAPHS, first, [(update, second)]).text is None
+
+
+def test_a_correction_in_a_section_the_update_reworded_survives():
+    """The update rewords the whole section and keeps its number of
+    paragraphs, so they pair line by line: round 2's edit of another
+    paragraph there does not touch round 1's correction (the #421 case)."""
+    base = ("### SURFACE MAP\nGrew up with two brothers.\n\n"
+            "Works as a nurse in Leeds.\n\nLikes long walks along the river.")
+    first = base.replace("a nurse in Leeds", "a midwife in York")
+    update = ("### SURFACE MAP\nHas two older brothers.\n\n"
+              "Works as a midwife in York, on night shifts.\n\n"
+              "Walks along the river most evenings.")
+    second = update.replace("two older brothers.",
+                            "two older brothers and a sister.")
+    result = older_edit(base, first, [(update, second)])
+    assert "Works as a midwife in York." in result.text
+    assert "Grew up with two brothers." not in result.text
+
+
+def test_a_moved_sentence_with_a_small_rewording_is_found():
+    """Review of #569, finding 2: "Plays cello most weekends." is 0.67
+    similar on words and 0.85 on characters. The ratio is on characters,
+    as difflib's Differ applies it."""
+    first = f"{BASE}\n{CELLO}"
+    update = _lines("### SURFACE MAP", "Likes long walks.",
+                    "Plays cello most weekends.", "WRONG GUESS", "",
+                    "### SHADOW MAP", "Avoids crowds.")
+    second = update.replace("Plays cello most weekends.\n", "")
+    assert older_edit(BASE, first, [(update, second)]).text is None

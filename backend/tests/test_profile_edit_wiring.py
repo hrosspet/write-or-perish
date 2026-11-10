@@ -1234,8 +1234,8 @@ C_UPDATE = ("### SURFACE MAP\nLikes long walks in the hills.\n"
             f"### SHADOW MAP\nAvoids crowds.\n{CELLO}")
 
 
-def _old_chain(user, steps):
-    """An old chain: a January chunk and its integration (C_BASE, cutoff
+def _old_chain(user, steps, base=C_BASE):
+    """An old chain: a January chunk and its integration (``base``, cutoff
     February), then ``steps`` in order, one a day: ("edit", text) saves an
     edit of the newest version; ("update", text, cutoff) an update on it
     and that update's integration, both with ``text``. Returns the edits."""
@@ -1257,7 +1257,7 @@ def _old_chain(user, steps):
         made.append(row)
         return row
     january = version("JANUARY", "iterative", JAN, None)
-    newest = version(C_BASE, "integration", FEB, january)
+    newest = version(base, "integration", FEB, january)
     edits = []
     for step in steps:
         if step[0] == "edit":
@@ -1321,6 +1321,42 @@ def test_421c_a_sentence_added_then_deleted_stays_deleted(app, monkeypatch):
     assert UserProfile.query.filter_by(merged_profile_id=first.id).count() == 1
     assert f"Written by the user on {_day(first)}" in _texts(seen[2][1])[1]
     assert User.query.get(user.id).profile_pending_merge_id is None
+
+
+def test_421c_a_reworded_paragraph_the_user_deleted_does_not_come_back(
+        app, monkeypatch):
+    """Review of #569, finding 1, through a sync rebuild. Paragraphs are
+    separated by blank lines. Round 1 adds the cello paragraph and corrects
+    the other section; the update rewords the section's paragraphs and adds
+    one before the cello paragraph; round 2 deletes the cello paragraph.
+    Round 1's merge does not receive the cello sentence and keeps the
+    correction round 2 did not touch."""
+    import backend.tasks.exports as exports
+    user = _user("paragraphs", profile_needs_full_regen=True)
+    base = ("### SURFACE MAP\nLikes long walks along the river.\n\n"
+            "Works as a nurse in Leeds.\n\n"
+            "### SHADOW MAP\nAvoids crowds at parties.")
+    first_text = base.replace(
+        "\n\nWorks", f"\n\n{CELLO}\n\nWorks").replace(
+        "Avoids crowds at parties.", "Avoids crowds, but loves concerts.")
+    reworded = "Music matters to them: most weekends go to cello practice."
+    update = ("### SURFACE MAP\nWalks by the river whenever they can.\n\n"
+              "Recently started running in the mornings.\n\n"
+              f"{reworded}\n\nNursing in Leeds is their work.\n\n"
+              "### SHADOW MAP\nAvoids crowds, but loves concerts.")
+    first, second = _old_chain(user, [
+        ("edit", first_text), ("update", update, MAY),
+        ("edit", update.replace(f"{reworded}\n\n", ""))], base=base)
+
+    seen = _rebuild(monkeypatch, exports, user)
+
+    assert [kind for kind, _ in seen] == [
+        "chunk", "chunk", "merge", "chunk", "merge", "chunk", "integration"]
+    one, two = _user_texts(seen)
+    assert CELLO not in one and "cello" not in two
+    assert "Avoids crowds, but loves concerts." in one
+    assert two == second.get_content()
+    assert all(CELLO not in str(item) for _kind, item in seen)
 
 
 def test_421c_a_round_with_nothing_left_makes_no_call(app, monkeypatch):
