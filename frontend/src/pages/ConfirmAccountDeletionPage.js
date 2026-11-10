@@ -67,7 +67,7 @@ export default function ConfirmAccountDeletionPage() {
         in until {date}; after that it is deleted forever, with
         everything in it.
         {writingRestorable(user.data_deletion) && (
-          <> If you restore your account, the writing you deleted comes
+          <> If you restore your account, the content you deleted comes
             back too.</>
         )}
       </>

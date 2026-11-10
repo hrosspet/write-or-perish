@@ -1,5 +1,5 @@
 import { skipUpdatesOnce } from "../hooks/useSessionUpdates";
-// "Delete all my writing" (#268): shared helpers for the Account page,
+// "Delete all my content" (#268): shared helpers for the Account page,
 // its dialog and the status notice.
 import api from "../api";
 
@@ -11,9 +11,10 @@ export function formatDeletionDate(value) {
   return d.toLocaleDateString(undefined, { day: "numeric", month: "long", year: "numeric" });
 }
 
-// The purge revokes Loore's access at X and deletes the stored X
-// connection. If X still lists Loore (the call failed, or the user also
-// signs in with X), these are the steps to remove it there.
+// Deleting the content (at once) and deleting the account revoke Loore's
+// access at X and delete the stored X connection. If X still lists Loore
+// (the call failed, or the user also signs in with X), these are the steps
+// to remove it there.
 export const X_REMOVE_ACCESS_STEPS =
   "on X, open Settings and privacy, then Security and account access, " +
   "Apps and sessions, Connected apps, choose Loore and revoke its permissions.";
@@ -24,7 +25,7 @@ export function deletionPending(dataDeletion) {
   return status === "scheduled" || status === "running";
 }
 
-// The writing is hidden now and "Restore my writing" brings it back: the
+// The content is hidden now and "Restore my content" brings it back: the
 // user's own request, until the purge starts. Servers before the
 // rework sent no `restorable`; a scheduled request of the user's counts.
 export function writingRestorable(dataDeletion) {
@@ -33,9 +34,9 @@ export function writingRestorable(dataDeletion) {
   return dataDeletion.source !== "admin";
 }
 
-// Restore my writing: the server shows again exactly what the request
+// Restore my content: the server shows again exactly what the request
 // hid. Then the whole user is read again (has_own_entries), so every page
-// shows the writing at once.
+// shows the content at once.
 export async function restoreWriting(setUser) {
   const res = await api.post("/account/data/restore");
   setUser((prev) => (prev ? { ...prev, data_deletion: res.data } : prev));
@@ -43,7 +44,7 @@ export async function restoreWriting(setUser) {
   return res.data;
 }
 
-// After hiding or restoring the writing: the user field that describes
+// After hiding or restoring the content: the user field that describes
 // it (has_own_entries) changes too.
 export async function reloadUser(setUser) {
   try {
@@ -55,7 +56,7 @@ export async function reloadUser(setUser) {
 }
 
 // Load the current page again (after a restore from the status notice,
-// every page's data was fetched while the writing was hidden).
+// every page's data was fetched while the content was hidden).
 export function reloadPage() {
   skipUpdatesOnce();
   window.location.reload();

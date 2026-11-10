@@ -125,7 +125,7 @@ function AdminDeleteAccountDialog({ user, onClose, onStarted }) {
   const job = dry?.job;
   const graceDays = dry?.grace_days;
   // An account deletion already waits or a purge runs: the server refuses
-  // a second request. A waiting writing deletion is taken over instead.
+  // a second request. A waiting content deletion is taken over instead.
   const refusedNote = job && (job.delete_account || job.status === "running")
     ? waitingDeletionNote(job) : null;
   const identityRows = IDENTITY_COUNT_LABELS
@@ -187,9 +187,9 @@ function AdminDeleteAccountDialog({ user, onClose, onStarted }) {
             {job && job.status === "scheduled" && !job.delete_account && (
               <p style={bodyStyle}>
                 {job.source === "admin" ? "An admin" : "The user"} already deleted
-                all their writing (deleted forever on {formatDeletionDate(job.scheduled_for)}).
+                all their content (deleted forever on {formatDeletionDate(job.scheduled_for)}).
                 The account deletion takes it over; undoing the account deletion
-                puts that writing deletion back as it was.
+                puts that content deletion back as it was.
               </p>
             )}
             <CountTable rows={purgeCountRows(dry.counts)} />

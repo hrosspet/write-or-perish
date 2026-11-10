@@ -78,15 +78,15 @@ const subStyle = {
 };
 
 /**
- * Asked before "Delete all my writing" (#268). Says in plain words what
- * goes and what stays, and when: the writing disappears at once, can be
+ * Asked before "Delete all my content" (#268). Says in plain words what
+ * goes and what stays, and when: the content disappears at once, can be
  * restored safely until the end of the grace period, and is then deleted
  * forever (Peter, 2026-10-09, in the framing of his terms text). The user
  * types their username to confirm; the delete option stays disabled until
  * it matches. onConfirm(typed) returns a promise; a rejection's message
  * is shown.
  *
- * waitingUntil: the date of a writing deletion that waits now. Asking
+ * waitingUntil: the date of a content deletion that waits now. Asking
  * again also deletes what was written since, and everything is deleted on
  * one new date (Peter, 2026-10-15): the dialog says so, with that date.
  */
@@ -121,7 +121,7 @@ function DeleteWritingDialog({ open, username, graceDays, xConnected, waitingUnt
     try {
       await onConfirm(typed.trim());
     } catch (e) {
-      setError(e?.response?.data?.error || "Could not delete your writing. Please try again.");
+      setError(e?.response?.data?.error || "Could not delete your content. Please try again.");
     } finally {
       setBusy(false);
     }
@@ -136,11 +136,11 @@ function DeleteWritingDialog({ open, username, graceDays, xConnected, waitingUnt
         aria-modal="true"
         aria-labelledby="delete-writing-title"
       >
-        <h2 id="delete-writing-title" style={titleStyle}>Delete all your writing?</h2>
+        <h2 id="delete-writing-title" style={titleStyle}>Delete all your content?</h2>
         <p style={bodyStyle}>
           {again
-            ? "Loore will also delete everything you have written or recorded here since your writing was deleted: "
-            : "Loore will delete everything you have written or recorded here: "}
+            ? "Loore will also delete all the content added to your account since your content was deleted: "
+            : "Loore will delete all the content in your account: "}
           your entries and recordings, the AI's replies to you, your profile,
           intentions, memory and other documents, your todo list, drafts,
           shares, saved references and imports.
@@ -154,7 +154,7 @@ function DeleteWritingDialog({ open, username, graceDays, xConnected, waitingUnt
         {again ? (
           <p style={bodyStyle}>
             It disappears at once, for you and for everyone else. The
-            deletion of your earlier writing moves to the same date:
+            deletion of your earlier content moves to the same date:
             everything is then deleted forever on {date}
             {oldDate && oldDate !== date ? `, instead of ${oldDate}` : ""}.
             Until then you can restore all of it safely, on the Account
@@ -163,16 +163,14 @@ function DeleteWritingDialog({ open, username, graceDays, xConnected, waitingUnt
         ) : (
           <p style={bodyStyle}>
             It disappears at once, for you and for everyone else. If you
-            change your mind, you can restore your writing safely within
+            change your mind, you can restore your content safely within
             {" "}{days} days, until {date}, on the Account page. After that it
             is deleted forever. What you write from now on stays.
           </p>
         )}
         {xConnected && (
           <p style={bodyStyle}>
-            Loore also forgets your X connection for bookmarks and removes
-            its access on X. If X still lists Loore afterwards, remove it
-            yourself: {X_REMOVE_ACCESS_STEPS}
+            Loore also forgets your X connection for bookmarks and removes its access on X, at once. A restore brings back your saved bookmarks, not the connection: you can connect X again on the Import page. If X still lists Loore afterwards, remove it yourself: {X_REMOVE_ACCESS_STEPS}
           </p>
         )}
         <label htmlFor="delete-writing-confirm" style={{ ...bodyStyle, display: "block", marginBottom: "6px" }}>
@@ -203,7 +201,7 @@ function DeleteWritingDialog({ open, username, graceDays, xConnected, waitingUnt
             }}
           >
             <div style={{ fontWeight: 500 }}>
-              {busy ? "Deleting…" : "Delete all my writing"}
+              {busy ? "Deleting…" : "Delete all my content"}
             </div>
             <div style={subStyle}>
               {again ? `You can restore all of it until ${date}.` : `You can restore it until ${date}.`}
@@ -213,7 +211,7 @@ function DeleteWritingDialog({ open, username, graceDays, xConnected, waitingUnt
             onClick={onClose}
             style={{ ...buttonBaseStyle, color: "var(--text-secondary)", cursor: "pointer" }}
           >
-            Keep my writing
+            Keep my content
           </button>
         </div>
       </div>

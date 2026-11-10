@@ -578,11 +578,11 @@ export function purgeLabel(job) {
   }
   switch (job.status) {
     case "scheduled":
-      // "Delete all my writing" and the admin's "Purge data" hide the
-      // writing at once (#268, Peter 2026-10-09 and 2026-10-13) and
+      // "Delete all my content" and the admin's "Purge data" hide the
+      // content at once (#268, Peter 2026-10-09 and 2026-10-13) and
       // delete it on the date.
       return job.scope === "hidden"
-        ? `Writing hidden by ${who}, deleted on ${formatDate(job.scheduled_for)}`
+        ? `Content hidden by ${who}, deleted on ${formatDate(job.scheduled_for)}`
         : `Data purge due ${formatDate(job.scheduled_for)}`;
     case "running":
       return "Purging data…";
@@ -867,7 +867,7 @@ function AdminPanel() {
     if (!job || !job.undoable) return;
     const question = job.delete_account
       ? `Undo the deletion of the account @${u.username}? The account is shown again and can sign in.`
-      : `Undo the purge of @${u.username}? Their writing shows again at once.`;
+      : `Undo the purge of @${u.username}? Their content shows again at once.`;
     if (!window.confirm(question)) return;
     try {
       await api.post(`/admin/users/${u.id}/undo_deletion`, { job_id: job.id });
@@ -1570,7 +1570,7 @@ function AdminPanel() {
                 <button
                   onClick={() => setPurgeAsk(u)}
                   disabled={u.data_purge?.status === "running"}
-                  title={'Hide all of this user\'s writing now and delete it after the grace period, like their own "Delete all my writing" (dry run first). The account stays.'}
+                  title={'Hide all of this user\'s content now and delete it after the grace period, like their own "Delete all my content" (dry run first). The account stays.'}
                   style={{ color: "var(--error)" }}
                 >
                   Purge data
@@ -1594,7 +1594,7 @@ function AdminPanel() {
                           style={smallActionStyle}
                           title={u.data_purge.delete_account
                             ? "Show the account again, as the user's own restore does"
-                            : "Show the writing again, as the user's own restore does"}
+                            : "Show the content again, as the user's own restore does"}
                         >
                           Undo
                         </button>
