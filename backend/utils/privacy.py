@@ -316,7 +316,7 @@ def is_others_thread_answer(node) -> bool:
     if _has_ask_marker(node):
         return True
     entry_id = getattr(node, 'audience_root_id', None)
-    return (entry_id is not None and entry_id != node.id
+    return (isinstance(entry_id, int) and entry_id != node.id
             and audience_entry_owner(entry_id) != _node_owner_id(node))
 
 
