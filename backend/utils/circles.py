@@ -437,6 +437,13 @@ def set_audience(node, user, circle_ids, usernames, now=None):
     db.session.flush()
     forget_circle_access()
 
+    # A long entry is saved as a chain of parts: they are the entry, so
+    # its readers read all of it. Nothing else below it joins on its own
+    # (an AI reply made when the entry was written stays the author's).
+    from backend.utils.node_split import split_chain_parts
+    for part in split_chain_parts(node):
+        join_thread_audience(part, node)
+
     after = reader_ids(node.id)
     note_shared(node, after - before)
     return [u.username for u in readers_of(node)]

@@ -196,6 +196,9 @@ Write or Perish evolves from journaling app to **distributed intelligence networ
 **Channel Types:**
 
 **A. User-Defined Circles (Private → Semi-Public)**
+
+> **Status (2026-11-10, A.73):** ✅ built, dark behind `CIRCLES_V1` / `CIRCLES_USER_IDS` (both off by default; awaiting review). A circle is a named list of people owned by one user; an entry is shared with circles and/or with Loore names for that entry only ("Who can read this": Only me / Circles / Everyone). Readers are worked out from current membership each time an entry is opened, so removing a person, deleting a circle or taking the entry back closes it at once. Readers get "Shared with you", one note per shared entry, and can hide a sender without the sender being told. Replies in a shared thread are read by exactly its audience. No model reads another person's shared entry for a reader unless the reader presses "Ask my AI" in that thread; shared entries never enter the reader's Log, export, profile builds, recent context or search. Web and iPhone. Open: invitations for people not on Loore, shared groups that every member posts into, the Terms text (still says "coming soon").
+
 - Family
 - Close friends
 - Colleagues

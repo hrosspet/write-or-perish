@@ -1168,8 +1168,9 @@ def set_node_audience(node_id):
     its audience. The second step for entries created on a path that
     carries no audience (a recording, an upload, a Text-mode start):
     until it lands such an entry is "circles" with nobody chosen, which
-    reads as private. ``apply_to_descendants`` also puts the user's own
-    replies below it (an AI reply made with it) in the audience.
+    reads as private. The parts of a long entry go with it; an AI reply
+    made when the entry was written does not, unless
+    ``apply_to_descendants`` asks for the user's replies below it too.
     Editing an entry's audience otherwise goes through PUT /<id>."""
     from backend.utils import circles as cz
     node = Node.query.get(node_id)

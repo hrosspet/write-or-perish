@@ -494,9 +494,9 @@ const NodeForm = forwardRef(
     const shareCreated = async (createdId) => {
       if (!sharesEntry || !createdId) return;
       try {
-        await api.put(`/nodes/${createdId}/audience`, {
-          ...audienceFields(), apply_to_descendants: true,
-        });
+        // The entry only: an AI reply made along with it stays the
+        // author's own until they choose to share it.
+        await api.put(`/nodes/${createdId}/audience`, audienceFields());
       } catch (err) {
         addToast(
           'The entry is saved and only you can read it. Sharing it did '

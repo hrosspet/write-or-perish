@@ -26,7 +26,8 @@ extension OpenEnum {
     init(stringLiteral value: String) { self.init(rawString: value) }
 }
 
-/// `privacy_level` (circles is unimplemented: private for everyone but the owner).
+/// `privacy_level`. `circles`: read by the people its author chose (Circles);
+/// with nobody chosen, or Circles off, private for everyone but the owner.
 enum PrivacyLevel: OpenEnum {
     case `private`, circles, `public`, unknown(String)
 

@@ -976,6 +976,37 @@ def test_an_entry_created_without_an_audience_is_shared_in_a_second_step(app):
     assert not _can_read(app, "dana", nid)
 
 
+def test_a_long_entrys_parts_are_shared_with_it_and_an_ai_reply_is_not(app):
+    from datetime import timedelta as _td
+    from backend.utils.node_split import PART_STEP
+    anna = _user("anna")
+    first = Node(user_id=anna.id, human_owner_id=anna.id,
+                 privacy_level="circles", ai_usage="chat")
+    first.set_content("part one")
+    _db.session.add(first)
+    _db.session.commit()
+    part = Node(user_id=anna.id, human_owner_id=anna.id, parent_id=first.id,
+                privacy_level="circles", ai_usage="chat",
+                created_at=first.created_at + PART_STEP)
+    part.set_content("part two")
+    llm = User(username="gpt-5", twitter_id="llm-gpt-5")
+    _db.session.add_all([part, llm])
+    _db.session.commit()
+    reply = Node(user_id=llm.id, human_owner_id=anna.id, parent_id=part.id,
+                 node_type="llm", llm_model="gpt-5",
+                 privacy_level="circles", ai_usage="chat",
+                 created_at=part.created_at + _td(seconds=5))
+    reply.set_content("the AI reply made with the entry")
+    _db.session.add(reply)
+    _db.session.commit()
+    r = _client(app, "anna").put(f"/api/nodes/{first.id}/audience", json={
+        "circle_usernames": ["ben"]})
+    assert r.status_code == 200
+    assert _can_read(app, "ben", first.id) and _can_read(app, "ben", part.id)
+    assert not _can_read(app, "ben", reply.id)
+    assert _can_read(app, "anna", reply.id)
+
+
 def test_a_threads_prompt_is_never_shared(app):
     anna = _user("anna")
     root = Node(user_id=anna.id, human_owner_id=anna.id, node_type="user",

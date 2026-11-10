@@ -144,6 +144,24 @@ private struct AccountForm: View {
             selectRow("Default privacy", field: "default_privacy_level", helper: "Default visibility for new entries.",
                       options: [("private", "Private"), ("public", "Public")],
                       value: user.defaultPrivacyLevel.rawString) { .string($0) }
+            // Circles: the user's lists of people, and what others share with
+            // them. Shown only where Circles is on for the account.
+            if user.circlesEnabled {
+                AccountRow(label: "Circles",
+                           helper: "Share an entry with people you choose, under \"Who can read this\" when you write or edit it.") {
+                    HStack(spacing: 18) {
+                        Button("Your circles") { app.open(.circles) }
+                            .accessibilityIdentifier("account.circles")
+                        Button("Shared with you") { app.open(.sharedWithYou) }
+                            .accessibilityIdentifier("account.sharedWithYou")
+                    }
+                    .buttonStyle(.plain)
+                    .font(LooreFont.sans(14.4, .light))
+                    .foregroundStyle(LooreColor.accent)
+                    .frame(minHeight: 36)
+                }
+                .id("circles")
+            }
             if user.externalContentAvailable {
                 AccountRow(label: "External references") {
                     onOffSelect(field: "external_content_enabled", isOn: user.externalContentEnabled, onTitle: "On (experimental)")

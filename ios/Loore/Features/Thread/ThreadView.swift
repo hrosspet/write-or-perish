@@ -68,6 +68,9 @@ private struct ThreadContent: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
+                        if model.isForeignShared, let audience = model.audience {
+                            SharedEntryBanner(audience: audience).padding(.bottom, 14)
+                        }
                         header(node)
                         ForEach(node.ancestors) { ancestor in
                             BubbleView(data: BubbleData(ancestor), actions: actions(model.target(ancestor),
@@ -144,7 +147,7 @@ private struct ThreadContent: View {
             // Voice screen says why it is closed. Auto-generate keeps the AI-usage
             // rule. Glean is not up here (#435): it is in the action row of a
             // Glean-card thread, else in the entry's ⋯ menu.
-            if model.isOwner && !model.isPublicThread {
+            if model.isOwner && !model.isPublicThread && !model.isSharedThread {
                 VStack(alignment: .trailing, spacing: 6) {
                     TopRightButton(title: model.voiceLoading ? "Starting…" : "Voice Mode") {
                         Image(systemName: "mic.fill").font(.system(size: 11)).accessibilityHidden(true)
@@ -186,6 +189,10 @@ private struct ThreadContent: View {
                 NodeFooterView(username: node.authorUsername, createdAt: node.createdAt, childCount: node.childCount,
                                humanOwnerUsername: humanOwner(node), llmModel: node.llmModel, origin: node.origin,
                                isPublic: node.privacyLevel == .public) {
+                    // A shared entry (Circles): who can read it and its replies.
+                    if let audience = model.audience {
+                        CircleReadersButton(audience: audience, me: app.user?.username)
+                    }
                     Button(action: model.togglePin) {
                         Image(systemName: node.pinnedAt != nil ? "pin.fill" : "pin")
                             .font(.system(size: 11))
@@ -218,6 +225,9 @@ private struct ThreadContent: View {
                 }
             }
             .padding(.bottom, 10)
+            if model.isForeignShared && !model.isLLMPending {
+                askMyAIRow
+            }
             NodeFormView(config: inlineConfig(node)) { result in
                 formToken += 1
                 if model.isReadReply {
@@ -231,6 +241,39 @@ private struct ThreadContent: View {
             .padding(.bottom, 12)
         }
         .padding(.leading, 8)
+    }
+
+    /// A reader's reply area in someone else's shared thread: what happens to
+    /// a reply, and the one way a model answers here.
+    private var askMyAIRow: some View {
+        let offReason = model.askAIOffReason
+        let busy = model.llmRequesting || model.llmTaskNodeId != nil
+        return VStack(alignment: .leading, spacing: 10) {
+            Text("Before your reply is sent, Loore names the people who will see it. No AI answers here unless you ask for it.")
+                .font(LooreFont.sans(12.8, .light))
+                .foregroundStyle(LooreColor.textSecondary)
+                .lineSpacing(3)
+                .fixedSize(horizontal: false, vertical: true)
+            if let offReason {
+                Text(offReason)
+                    .font(LooreFont.sans(12.8, .light))
+                    .foregroundStyle(LooreColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("thread.askMyAI.reason")
+            }
+            Button(action: model.askMyAIPressed) {
+                HStack(spacing: 8) {
+                    if busy { ProgressView().controlSize(.mini).tint(LooreColor.textMuted) }
+                    Text("Ask my AI")
+                }
+            }
+            .buttonStyle(.looreOutline)
+            .disabled(offReason != nil || busy || NodePrefetch.shared.isPending)
+            .opacity(offReason != nil ? 0.4 : 1)
+            .accessibilityHint(offReason ?? "")
+            .accessibilityIdentifier("thread.askMyAI")
+        }
+        .padding(.bottom, 10)
     }
 
     private func focalActions(_ node: NodeDetail) -> [BubbleAction] {

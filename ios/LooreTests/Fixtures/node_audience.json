@@ -1,0 +1,20 @@
+{
+  "id": 31,
+  "content": "# Leaving in March\nI told the team today that I am leaving in March.",
+  "node_type": "user",
+  "created_at": "2026-11-10T09:40:00Z",
+  "user": {"id": 9, "username": "anna"},
+  "privacy_level": "circles",
+  "ai_usage": "chat",
+  "child_count": 0,
+  "children": [],
+  "ancestors": [],
+  "audience": {
+    "entry_id": 31,
+    "author": "anna",
+    "is_author": false,
+    "readers": ["ben", "chidi", "seowriter"],
+    "is_entry": true,
+    "entry_ai_usage": "chat"
+  }
+}

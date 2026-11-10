@@ -37,6 +37,11 @@ struct MoreView: View {
                         MenuRow(title: "My public page") { app.open(.webPage(path: "/@\(username)")) }
                             .accessibilityIdentifier("more.publicPage")
                     }
+                    // Circles: what people shared with the user.
+                    if caps.circlesEnabled {
+                        MenuRow(title: "Shared with you") { app.open(.sharedWithYou) }
+                            .accessibilityIdentifier("more.sharedWithYou")
+                    }
                     // The web has no menu entry for References (map A §7.2); the app lists it here.
                     MenuRow(title: "References") { app.open(.references) }
                         .accessibilityIdentifier("more.references")

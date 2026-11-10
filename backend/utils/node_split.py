@@ -113,6 +113,14 @@ def split_chain_tip(node):
     parent. Reads ``children`` (prefetched on the thread view, one query
     per part elsewhere); no content is read.
     """
+    parts = split_chain_parts(node)
+    return parts[-1] if parts else node
+
+
+def split_chain_parts(node):
+    """The parts that follow *node* in its split chain, in order (empty
+    when the entry was not split, or *node* is its last part)."""
+    parts = []
     current = node
     while current.created_at is not None:
         nxt = next(
@@ -124,5 +132,6 @@ def split_chain_tip(node):
             None)
         if nxt is None:
             break
+        parts.append(nxt)
         current = nxt
-    return current
+    return parts

@@ -971,3 +971,37 @@ From Peter's first run on his iPhone. 395 unit tests pass (one skipped), 5 of th
 - Tests: `ArtifactDeletionTests` (menu items per kind, row order, selection after a delete, the edit
   request, the dialog text, the store's delete and its errors, the deleted link); `ArtifactDeleteUITests`
   walks it all in the simulator against a native Flask on sqlite.
+
+## Circles (2026-11-10; built and unit-tested, not yet run in a simulator or on a phone)
+
+Everything shows only with `circles_enabled` in the current user (`UserCapabilities.circlesEnabled`,
+default off, absent on an older server). Off: today's app, except that the Circles option of the
+privacy select is greyed out (`SelectField.unavailable`), as on the web.
+
+- **Models** `Core/Models/Circles.swift`: `PeopleCircle` (not `Circle`: that is SwiftUI's shape),
+  `CircleMember`, `CircleMemberPreview`, `AudiencePreview`, `NodeAudience` (also `NodeDetail.audience`),
+  `NodeAudienceAnswer`, `SharedWithMe`. `UpdateNotification` gained `nodeId` / `actorUsername`
+  (`isCircleShare`), `NodeCreateResponse` `audienceSet`.
+- **Wording** `Core/Util/CirclesWording.swift`: the port of `frontend/src/utils/circles.js` plus the
+  dialogs' sentences, so the copy is tested (`CirclesWordingTests`) and stays the web's.
+- **Picker** `PrivacySelectorView`: "Who can read this" Only me / Circles / Everyone;
+  `CircleAudiencePicker` + `CircleAudienceState` (circle chips, "Edit circles" as a sheet over the form,
+  names "for this entry only" looked up when a separator is typed or the field is left, the readers
+  sentence). Imports pass `allowCircles: false`.
+- **Form** `NodeFormModel`: `sharesEntry` (own entry) sends `circle_ids` / `circle_usernames` on
+  `POST /nodes/` and `PUT /nodes/<id>`; the other creation paths (Text-mode start, a recording, an upload,
+  a custom submit) share in a second step, `PUT /nodes/<id>/audience`, and toast when it fails (the entry
+  then stays readable by its author only). The readers are checked before saving. A reply in a shared
+  thread (`threadAudience`, from the parent's `audience`) is sent as `circles` after `CircleReplyDialog`;
+  "Don't ask again in this thread" is `DefaultsKey.circleReplyAck(entryId:userId:)`.
+- **Thread**: `SharedEntryBanner` for a reader, `CircleReadersButton` (a tap opens a popover) in the focal
+  footer for author and readers, auto-generate off in a shared thread, the LLM Response bar for the
+  author, "Ask my AI" for a reader (`POST /nodes/<id>/llm {circle_ask: true}`, no model) with its dialog
+  and its off state. Voice Mode and the auto-generate switch are hidden in a shared thread, as in a
+  public one.
+- **Screens** `Features/Circles/`: `CirclesView` ("Your circles", route `.circles`, `/circles`) and
+  `SharedWithYouView` (`.sharedWithYou`, `/shared`); linked from Account ("Circles" row), More ("Shared
+  with you") and each other. **Updates**: `CircleShareItemView` ("Read it" / "Don't show <name>'s entries").
+- Tests: `CirclesTests.swift` (24: decoding from hand-written fixtures, wording, routes, the form's
+  submit paths, the thread's rules). No UI test yet: the screens have not been opened in a simulator.
+

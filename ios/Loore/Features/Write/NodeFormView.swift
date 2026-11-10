@@ -55,7 +55,8 @@ private struct NodeFormBody: View {
             editor
             if !config.hidePowerFeatures {
                 PrivacySelectorView(privacy: $model.privacy, aiUsage: $model.aiUsage, disabled: model.loading,
-                                    lockPrivacy: model.lockPrivacy)
+                                    lockPrivacy: model.lockPrivacy, audience: model.audience,
+                                    threadAudience: model.threadAudienceNames, lockPublic: model.lockPublic)
             }
             if model.showsAgenticToggles {
                 LabeledPillToggle(label: "Agentic Reply", isOn: $model.useAgenticPrompt,
@@ -92,11 +93,15 @@ private struct NodeFormBody: View {
                 RegenerateTtsDialog(onChoice: model.answerTts, onCancel: model.cancelDialog)
             case .scope?:
                 ApplyToRepliesDialog(
-                    privacyChanged: config.edit?.initialPrivacy != nil && model.privacy != config.edit?.initialPrivacy,
+                    privacyChanged: (config.edit?.initialPrivacy != nil && model.privacy != config.edit?.initialPrivacy)
+                        || (model.sharesEntry && model.audience.changed),
                     aiUsageChanged: config.edit?.initialAIUsage != nil && model.aiUsage != config.edit?.initialAIUsage,
                     onChoice: model.answerScope, onCancel: model.cancelDialog)
             case .publicReply?:
                 PublicReplyDialog(onConfirm: model.answerPublicReply, onCancel: model.cancelDialog)
+            case .circleReply?:
+                CircleReplyDialog(names: model.threadAudienceNames ?? [], onConfirm: model.answerCircleReply,
+                                  onCancel: model.cancelDialog)
             case .split?:
                 SplitContentDialog(charCount: model.pendingPaste?.jsLength ?? model.content.jsLength,
                                    onConfirm: model.confirmSplit, onCancel: model.cancelSplit)

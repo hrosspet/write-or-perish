@@ -92,14 +92,51 @@ final class ThreadModel {
 
     var isPublicThread: Bool { node?.privacyLevel == .public }
 
+    // Circles: a shared thread. Other people read what is written there, so a
+    // model answers only when asked: for the author the LLM Response bar, for
+    // a reader "Ask my AI".
+    var audience: NodeAudience? { (app?.capabilities.circlesEnabled ?? false) ? node?.audience : nil }
+    var isSharedThread: Bool { audience != nil }
+    var isForeignShared: Bool { audience.map { !$0.isAuthor } ?? false }
+    var showAskAIDialog = false
+
+    /// Why "Ask my AI" is off, in a sentence, or nil when it can be asked.
+    var askAIOffReason: String? {
+        guard let audience, isForeignShared else { return nil }
+        return CirclesWording.askAIOffReason(audience, myDefaultAIUsage: me?.defaultAIUsage)
+    }
+
+    var askAINames: [String] { CirclesWording.replyAudienceNames(audience, me: me?.username) }
+
+    /// "Ask my AI": the answer is a reply in the thread, so the people who
+    /// will see it are named first, unless "Don't ask again in this thread"
+    /// was ticked (the same memory as the reply dialog).
+    func askMyAIPressed() {
+        guard let audience else { return }
+        let key = DefaultsKey.circleReplyAck(entryId: audience.entryId, userId: me?.id)
+        if UserDefaults.standard.string(forKey: key) == "true" {
+            llmResponsePressed()
+        } else {
+            showAskAIDialog = true
+        }
+    }
+
+    func askMyAIConfirmed(dontAskAgain: Bool) {
+        showAskAIDialog = false
+        if dontAskAgain, let audience {
+            UserDefaults.standard.set("true", forKey: DefaultsKey.circleReplyAck(entryId: audience.entryId, userId: me?.id))
+        }
+        llmResponsePressed()
+    }
+
     var autoGeneratePreference: Bool {
         get { UserDefaults.standard.object(forKey: DefaultsKey.autoGenerate) == nil
             ? true : UserDefaults.standard.bool(forKey: DefaultsKey.autoGenerate) }
         set { UserDefaults.standard.set(newValue, forKey: DefaultsKey.autoGenerate) }
     }
 
-    /// Public threads force auto-generate off (#228).
-    func autoGenerateActive(_ preference: Bool) -> Bool { isPublicThread ? false : preference }
+    /// Public threads force auto-generate off (#228); shared threads too.
+    func autoGenerateActive(_ preference: Bool) -> Bool { (isPublicThread || isSharedThread) ? false : preference }
 
     var parentAncestor: AncestorNode? { node?.ancestors.last }
 
@@ -135,7 +172,8 @@ final class ThreadModel {
 
     func showCraftBar(craftMode: Bool, autoGenerate: Bool) -> Bool {
         guard let node else { return false }
-        return isOwner && (craftMode || isPublicThread) && !autoGenerateActive(autoGenerate)
+        return isOwner && !isForeignShared && (craftMode || isPublicThread || isSharedThread)
+            && !autoGenerateActive(autoGenerate)
             && node.aiUsage != .off && !isLLMPending
     }
 
@@ -454,9 +492,12 @@ final class ThreadModel {
 
     func requestLLM(for parentId: Int) async throws -> Int {
         guard let app else { throw CancellationError() }
-        let answer: LLMRequestResponse = try await app.api.post(APIPath.nodeLLM(parentId), json: .object([
-            "model": .optional(selectedModel), "source_mode": .string("textmode"),
-        ]))
+        // In someone else's shared thread the request is "Ask my AI": the
+        // reader's own model (the server picks it; none is sent).
+        let body: JSONValue = isForeignShared
+            ? .object(["circle_ask": .bool(true), "source_mode": .string("textmode")])
+            : .object(["model": .optional(selectedModel), "source_mode": .string("textmode")])
+        let answer: LLMRequestResponse = try await app.api.post(APIPath.nodeLLM(parentId), json: body)
         return answer.nodeId
     }
 

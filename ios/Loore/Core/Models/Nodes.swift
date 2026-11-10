@@ -225,6 +225,8 @@ struct NodeDetail: Decodable, Identifiable, Sendable {
     /// The thread was started from the Glean card (#435): every turn offers
     /// the Glean button. Any other thread offers "Glean for this reflection".
     var gleanThread: Bool
+    /// Circles: who reads this node, on a shared node for its author and readers.
+    var audience: NodeAudience?
 
     enum CodingKeys: String, CodingKey {
         case id, content, permalink, user, origin, ancestors, children
@@ -250,11 +252,13 @@ struct NodeDetail: Decodable, Identifiable, Sendable {
         case readReplyAbove = "read_reply_above"
         case replyAIUsage = "reply_ai_usage"
         case gleanThread = "glean_thread"
+        case audience
     }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(Int.self, forKey: .id)
+        audience = c.tolerant(.audience)
         content = c.tolerant(.content, default: "")
         nodeType = c.tolerant(.nodeType, default: .user)
         createdAt = c.tolerant(.createdAt)
@@ -443,6 +447,9 @@ struct NodeCreateResponse: Decodable, Sendable {
     var permalink: String?
     var splitInto: Int?
     var tipId: Int?
+    /// Circles: the audience sent with the entry was saved. Absent or false
+    /// on a path that carries none: the form then shares in a second step.
+    var audienceSet: Bool?
 
     enum CodingKeys: String, CodingKey {
         case id, content, username, permalink
@@ -453,6 +460,7 @@ struct NodeCreateResponse: Decodable, Sendable {
         case aiUsage = "ai_usage"
         case splitInto = "split_into"
         case tipId = "tip_id"
+        case audienceSet = "audience_set"
     }
 }
 

@@ -30,6 +30,11 @@ struct ThreadSheets: ViewModifier {
                     }
                 }
             }
+            .looreDialog(isPresented: $model.showAskAIDialog) {
+                CircleReplyDialog(names: model.askAINames, askAI: true,
+                                  onConfirm: { model.askMyAIConfirmed(dontAskAgain: $0) },
+                                  onCancel: { model.showAskAIDialog = false })
+            }
             .looreDialog(isPresented: $model.showPromptEditConfirm) {
                 PromptEditConfirmDialog(
                     onConfirm: {

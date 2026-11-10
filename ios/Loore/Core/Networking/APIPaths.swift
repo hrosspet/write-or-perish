@@ -64,6 +64,7 @@ enum APIPath {
     static func nodeTTSChapters(_ id: Int) -> String { "/api/nodes/\(id)/tts-chapters" }
     static func transcriptionStatus(_ id: Int) -> String { "/api/nodes/\(id)/transcription-status" }
     static func feedPicks(_ id: Int) -> String { "/api/nodes/\(id)/feed-picks" }
+    static func nodeAudience(_ id: Int) -> String { "/api/nodes/\(id)/audience" }
     static let uploadInit = "/api/nodes/upload/init"
     static let uploadChunk = "/api/nodes/upload/chunk"
     static let uploadFinalize = "/api/nodes/upload/finalize"
@@ -141,6 +142,18 @@ enum APIPath {
     static func shareItem(_ id: Int) -> String { "/api/share/\(id)" }
     static func sharePublish(_ id: Int) -> String { "/api/share/\(id)/publish" }
     static func shareRevoke(_ id: Int) -> String { "/api/share/\(id)/revoke" }
+    // Circles
+    static let circles = "/api/circles"
+    static func circle(_ id: Int) -> String { "/api/circles/\(id)" }
+    static func circleMembers(_ id: Int) -> String { "/api/circles/\(id)/members" }
+    static func circleMemberPreview(_ id: Int) -> String { "/api/circles/\(id)/members/preview" }
+    static func circleMember(_ id: Int, username: String) -> String {
+        "/api/circles/\(id)/members/\(escape(username))"
+    }
+    static let circlesAudiencePreview = "/api/circles/audience-preview"
+    static let circlesSharedWithMe = "/api/circles/shared-with-me"
+    static let circlesMutes = "/api/circles/mutes"
+    static func circlesMute(username: String) -> String { "/api/circles/mutes/\(escape(username))" }
     static let commonsFeed = "/api/commons/feed"
     static func commonsPermalink(username: String, slug: String) -> String {
         "/api/commons/permalink/\(escape(username))/\(escape(slug))"
@@ -190,7 +203,7 @@ enum APIPath {
     ]
 
     /// Registered as `""`: a trailing slash is a 404.
-    static let noSlashRoots: Set<String> = ["/api/updates", "/api/share"]
+    static let noSlashRoots: Set<String> = ["/api/updates", "/api/share", "/api/circles"]
 
     /// Returns the canonical form of `path` (query string untouched).
     static func canonical(_ path: String) -> String {
