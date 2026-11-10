@@ -1,4 +1,4 @@
-"""'Delete all my writing' hides everything at once (#268; Peter,
+"""'Delete all my content' hides everything at once (#268; Peter,
 2026-10-09: "a soft-delete of everything immediately + real deletion after
 30 days. The Cancel deletion button undoing the soft deletion").
 
@@ -29,8 +29,9 @@ from backend.models import (
     UserTodo,
 )
 from backend.utils.hidden_rows import (
-    drop_hidden_poll_response, including_hidden_rows, on_hold_user_ids,
-    reclaim_external_items, writing_on_hold,
+    account_on_hold, account_on_hold_user_ids, content_deletion_cutoff,
+    drop_hidden_poll_response, including_hidden_rows, read_before_deletion,
+    reclaim_external_items,
 )
 from backend.utils.privacy import can_user_access_node
 from backend.utils.system_accounts import ERASED_SYSTEM_USERNAME
@@ -83,7 +84,7 @@ def test_the_request_hides_all_her_writing_at_once(app, world, stubs):
     gone_id = _deleted_before(world)
     bob_before = _bob_snapshot(world)
     a, b = world.alice.id, world.bob.id
-    assert writing_on_hold(a) is False
+    assert content_deletion_cutoff(a) is None
 
     _, body = _ask(app, world)
     assert body["status"] == "scheduled" and body["restorable"] is True
@@ -119,11 +120,16 @@ def test_the_request_hides_all_her_writing_at_once(app, world, stubs):
     assert _bob_snapshot(world) == bob_before
     assert all(f.exists() for f in world.files_alice)
 
-    # No background job builds anything from her writing meanwhile.
-    assert writing_on_hold(a) is True
-    assert a not in {u.id for u in User.profile_eligible_query()}
-    assert {u for (u,) in _db.session.execute(on_hold_user_ids())} == {a}
-    # Nothing in flight was stopped: a restore finds it as it was.
+    # #590: the account is not on hold. A job that read before the request
+    # saves nothing; one that reads after it sees only what comes next.
+    assert content_deletion_cutoff(a) == job.requested_at
+    assert account_on_hold(a) is False
+    assert list(_db.session.execute(account_on_hold_user_ids())) == []
+    assert read_before_deletion(a, job.requested_at - timedelta(seconds=1))
+    assert not read_before_deletion(a, job.requested_at
+                                    + timedelta(seconds=1))
+    assert read_before_deletion(b, None) is False
+    # No queued task was revoked: a restore finds it as it was.
     assert stubs.revoked == []
 
 
@@ -148,7 +154,7 @@ def test_restore_brings_back_exactly_what_the_request_hid(app, world, stubs):
     assert _db.session.get(Node, gone_id).deleted_at == T0
     assert UserDataPurgeHidden.query.count() == 0
     assert UserDataPurge.query.one().status == "cancelled"
-    assert writing_on_hold(world.alice.id) is False
+    assert content_deletion_cutoff(world.alice.id) is None
     # Nothing to restore any more; the purge never starts.
     assert c.post("/api/account/data/restore").status_code == 404
     after = datetime.utcnow() + timedelta(days=31)
@@ -245,7 +251,7 @@ def test_the_purge_deletes_what_was_hidden_and_keeps_what_came_after(
     assert [r.id for r in APICostLog.query.filter_by(user_id=a)] == [cost.id]
     # The records of what it hid go with it; she is no longer on hold.
     assert UserDataPurgeHidden.query.count() == 0
-    assert writing_on_hold(a) is False
+    assert content_deletion_cutoff(a) is None
     # Verified: nothing of what it hid is left.
     scope = up.Scope(a, job.id, job.requested_at)
     assert up.leftovers(up.count_user_data(a, scope=scope)) == {}
@@ -341,7 +347,7 @@ def test_an_admin_purge_hides_her_writing_at_once_and_she_restores_it(
         assert n.deleted_at is not None, n.id
     for model in HIDDEN_ROW_TABLES:
         assert model.query.filter_by(user_id=a).count() == 0, model
-    assert writing_on_hold(a) is True
+    assert content_deletion_cutoff(a) is not None
     assert _bob_snapshot(world) == bob_before
 
     # She sees the same state as after her own request: the status bar
@@ -359,7 +365,7 @@ def test_an_admin_purge_hides_her_writing_at_once_and_she_restores_it(
     done = UserDataPurge.query.one()
     assert done.status == "cancelled" and done.cancelled_by_id == a
     assert UserDataPurgeHidden.query.count() == 0
-    assert writing_on_hold(a) is False
+    assert content_deletion_cutoff(a) is None
 
 
 def test_the_admins_undo_restores_what_the_admin_purge_hid(
@@ -638,7 +644,7 @@ def test_one_restore_brings_back_both(app, world, stubs, monkeypatch):
     assert _db.session.get(Draft, since.draft) is not None
     assert UserDataPurgeHidden.query.count() == 0
     assert UserDataPurge.query.one().status == "cancelled"
-    assert writing_on_hold(world.alice.id) is False
+    assert content_deletion_cutoff(world.alice.id) is None
 
 
 def test_the_purge_deletes_both_and_keeps_what_came_after_the_second(

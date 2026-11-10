@@ -1694,15 +1694,31 @@ def test_progress_labels_for_the_three_kinds(app):
         assert (out["message"], out["progress"]) == (message, progress)
 
 
-def test_held_writing_drops_window_results(world, monkeypatch):
+def test_windows_read_before_a_content_deletion_are_dropped_and_costed(
+        world, monkeypatch):
+    """#590: the windows were rendered before "Delete all my content": no
+    row is saved, each billed result gets its cost row, and the items
+    are marked dropped for the window pipeline's history."""
+    from backend.models import APICostLog, ProfileBatchJob, UserDataPurge
     world.corpus = _windows_corpus(2)
     u = _user(profile_needs_full_regen=True)
     _advance(u)
-    monkeypatch.setattr(pb, "writing_on_hold", lambda uid: True)
+    now = datetime.utcnow() + timedelta(seconds=1)
+    db.session.add(UserDataPurge(
+        user_id=u.id, source="self", scope="hidden", status="scheduled",
+        requested_at=now, first_requested_at=now,
+        scheduled_for=now + timedelta(days=30)))
+    db.session.commit()
+    sent = [i for j in ProfileBatchJob.query.all() for i in j.items
+            if i.get("user_id") == u.id]
     _poll()
     assert _rows(u, "window") == []
     db.session.refresh(u)
     assert u.profile_batch_pending is False
+    assert APICostLog.query.filter_by(user_id=u.id).count() == len(sent)
+    outcomes = [i.get("outcome") for j in ProfileBatchJob.query.all()
+                for i in j.items if i.get("user_id") == u.id]
+    assert outcomes and set(outcomes) == {"dropped"}
 
 
 def test_kill_switch_off_bases_updates_outside_any_set(app, world):

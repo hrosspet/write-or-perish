@@ -131,6 +131,10 @@ def stubs(monkeypatch, tmp_path):
         s.cancelled.append(batch_id)
         return None
     monkeypatch.setattr(up, "_cancel_provider_batch", cancel)
+    # "Delete all my content" sends the cancel as a Celery task (#590):
+    # here it runs inline, against the stub above.
+    monkeypatch.setattr(up, "_dispatch_batch_cancel",
+                        up.cancel_batches_read_before)
 
     @contextmanager
     def lock():

@@ -1,10 +1,12 @@
-"""A Read while "Delete all my writing" waits (#268, review of the rework).
+"""A Read while "Delete all my content" waits (#268, review of the
+rework; #590).
 
 A Read pick must never bring back a reference the request hid, and no
-Read result may be saved while the writing is on hold: a Read the user
-starts does not run, and a result that arrives meanwhile (a batch in
-flight at the request, or a live call the request overtook) is dropped
-with its cost row written. Runs the real task body through the
+Read result built from the hidden content may be saved: a result that
+arrives after the request (a batch in flight at the request, or a live
+call the request overtook) is dropped with its cost row written. A Read
+the user starts after the request runs on what is there now (#590: the
+account is not on hold); while the account is being deleted, none runs. Runs the real task body through the
 test_retrieval_loop harness with the provider scripted, as
 test_read_batch_poll does.
 """
@@ -91,9 +93,9 @@ def test_a_batch_collected_while_the_writing_is_on_hold_saves_nothing(app, monke
     assert len(_cost_rows(llm_node.id)) == 1
 
 
-def test_a_read_started_during_the_hold_does_not_run(app, monkeypatch, tmp_path):  # noqa: F811
-    """A Read the user starts while the writing waits (here the admin's
-    live run, which skips the batch) makes no model call."""
+def _read_after_request(monkeypatch, tmp_path, delete):
+    """A Read (the admin's live run, which skips the batch) asked for after
+    *delete* ran on alice."""
     from backend.tests.test_read_context import _CapturingProvider
     from backend.tests.test_retrieval_loop import _FakeSelf, _resp
     _storage(monkeypatch, tmp_path)
@@ -103,7 +105,8 @@ def test_a_read_started_during_the_hold_does_not_run(app, monkeypatch, tmp_path)
         {"n": 2, "qt": "q", "relevance": 40, "recommend": True}]))])
     monkeypatch.setattr(_llm_task_mod, "LLMProvider", _CapturingProvider)
     alice = _mk_user("alice", approved=True, plan="alpha", is_admin=True)
-    _delete_all_writing(alice)
+    item_id = _saved_bookmark(alice)
+    delete(alice)
     llm_user = _mk_user("gpt-5", twitter_id="llm-gpt-5")
     read = _prompt_node(alice, "read")
     llm_node = Node(user_id=llm_user.id, human_owner_id=alice.id,
@@ -117,7 +120,34 @@ def test_a_read_started_during_the_hold_does_not_run(app, monkeypatch, tmp_path)
     result = generate_llm_response(
         _FakeSelf(), read.id, llm_node.id, "gpt-5", alice.id,
         source_mode=None, ca_live=True)
+    return alice, item_id, result
 
+
+def test_a_read_started_after_the_request_runs(app, monkeypatch, tmp_path):  # noqa: F811
+    """#590: "Delete all my content" does not hold the account. A Read
+    asked for after it reads what is there now and is saved; its pick of
+    a tweet she had saved before does not bring the hidden reference
+    back."""
+    alice, item_id, result = _read_after_request(
+        monkeypatch, tmp_path, _delete_all_writing)
+    from backend.tests.test_read_context import _CapturingProvider
+    assert result.get("reason") != "writing_on_hold"
+    assert len(_CapturingProvider.kwargs) == 1
+    assert APICostLog.query.count() == 1
+    assert FeedPick.query.count() == 1
+    assert _still_hidden(item_id)
+
+
+def test_a_read_while_the_account_is_deleted_does_not_run(app, monkeypatch, tmp_path):  # noqa: F811
+    """An account deletion (#269) still stops everything: no model call."""
+    def delete_account(user):
+        from backend.utils.account_deletion import schedule_account_deletion
+        _mk_user("another_admin", approved=True, is_admin=True)
+        schedule_account_deletion(user, requested_by_id=user.id,
+                                  source="self")
+    _alice, _item_id, result = _read_after_request(
+        monkeypatch, tmp_path, delete_account)
+    from backend.tests.test_read_context import _CapturingProvider
     assert result["status"] == "refused"
     assert result["reason"] == "writing_on_hold"
     assert _CapturingProvider.kwargs == []
@@ -126,7 +156,7 @@ def test_a_read_started_during_the_hold_does_not_run(app, monkeypatch, tmp_path)
 
 
 def test_a_live_read_the_request_overtook_saves_nothing(app, monkeypatch, tmp_path):  # noqa: F811
-    """"Delete all my writing" is pressed while a live Read's model call
+    """"Delete all my content" is pressed while a live Read's model call
     runs: the billed result is dropped, the hidden reference stays
     hidden, and no new pick row is saved."""
     from backend.tests.test_read_context import _CapturingProvider
@@ -168,9 +198,10 @@ def test_a_live_read_the_request_overtook_saves_nothing(app, monkeypatch, tmp_pa
 
 def test_a_read_pick_never_makes_a_hidden_reference_visible(app, monkeypatch, tmp_path):  # noqa: F811
     """find_tweet_row leaves a hidden row hidden (only the user's own save
-    or import reclaims), and save_feed_picks refuses while on hold."""
+    or import reclaims), and save_feed_picks refuses the picks of a Read
+    asked for before the request."""
     from backend.utils.ca_feed import save_feed_picks
-    from backend.utils.hidden_rows import WritingOnHold
+    from backend.utils.hidden_rows import ReadBeforeDeletion
     from backend.utils.reference_rows import find_tweet_row
     _storage(monkeypatch, tmp_path)
     alice, read, llm_node = _read_thread(submitted=False)
@@ -179,7 +210,7 @@ def test_a_read_pick_never_makes_a_hidden_reference_visible(app, monkeypatch, tm
 
     assert find_tweet_row(alice.id, "222") is None
     assert _still_hidden(item_id)
-    with pytest.raises(WritingOnHold):
+    with pytest.raises(ReadBeforeDeletion):
         save_feed_picks(alice.id, llm_node, [{
             "rank": 1, "relevance": 40, "recommend": True, "qt": "q",
             "ref": {"tweet_id": "222", "username": "bob_b",

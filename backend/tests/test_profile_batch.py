@@ -677,32 +677,113 @@ def test_poll_failed_item_bumps_attempts_and_clears_pending(app, monkeypatch):
         parent_profile_id=prev.id).first() is None
 
 
-def test_poll_saves_nothing_for_a_user_whose_writing_is_on_hold(app, monkeypatch):
-    """#268: "Delete all my writing" hid the writing after the request went
-    out: the result is dropped (no profile, no failed attempt), and the
-    immediate seed builds nothing for the user meanwhile."""
+def _content_deletion(user, at=None, account=False):
+    """A waiting "Delete all my content" of *user* (#590), requested at
+    *at*; with *account*, an account deletion (#269) instead."""
     from backend.models import UserDataPurge
+    at = at or datetime.utcnow()
+    db.session.add(UserDataPurge(
+        user_id=user.id, source="self", scope="all" if account else "hidden",
+        delete_account=account, status="scheduled", requested_at=at,
+        first_requested_at=at, scheduled_for=at + timedelta(days=30)))
+    db.session.commit()
+
+
+def _collect_one(monkeypatch, item, inp=2000, out=500):
+    monkeypatch.setattr(pb, "batch_check_and_collect",
+                        lambda bids, keys: ({item["custom_id"]: {
+                            "content": "a profile", "input_tokens": inp,
+                            "output_tokens": out}}, {}, {}))
+    monkeypatch.setattr(pb, "batch_submit", MagicMock(return_value={}))
+    pb._poll_profile_batches()
+
+
+def test_a_result_read_before_a_content_deletion_is_dropped_and_costed(
+        app, monkeypatch):
+    """#590: "Delete all my content" came after the request went out (a
+    cancel landed too late, or the batch was shared): nothing is saved,
+    no failed attempt is counted, and the billed call gets its cost row
+    (Peter, 2026-10-22)."""
     u = _user()
     prev = _prev_profile(u, datetime(2026, 5, 1))
     job, item = _chunk_job(u, prev)
-    db.session.add(UserDataPurge(user_id=u.id, source="self", scope="hidden",
-                                 status="scheduled",
-                                 scheduled_for=datetime.utcnow()))
-    db.session.commit()
-    monkeypatch.setattr(pb, "batch_check_and_collect",
-                        lambda bids, keys: ({item["custom_id"]: {
-                            "content": "a profile", "input_tokens": 1,
-                            "output_tokens": 1}}, {}, {}))
-    monkeypatch.setattr(pb, "batch_submit", MagicMock(return_value={}))
+    _content_deletion(u)
 
-    pb._poll_profile_batches()
+    _collect_one(monkeypatch, item)
 
     u2 = User.query.get(u.id)
     assert u2.profile_batch_pending is False
     assert (u2.profile_batch_attempts or 0) == 0
     assert UserProfile.query.filter_by(
         parent_profile_id=prev.id).first() is None
-    assert pb._seed_profile_batches(users=[u2], ignore_backoff=True) == 0
+    rows = APICostLog.query.filter_by(user_id=u.id).all()
+    assert [(r.request_type, r.input_tokens, r.output_tokens)
+            for r in rows] == [("profile_batch", 2000, 500)]
+    assert rows[0].cost_microdollars > 0
+    assert ProfileBatchJob.query.get(job.id).status == "collected"
+
+
+def test_a_result_read_after_a_content_deletion_is_saved(app, monkeypatch):
+    """#590: the account is not on hold. A step rendered after the request
+    read only what the user wrote since, and is saved as usual."""
+    u = _user()
+    prev = _prev_profile(u, datetime(2026, 5, 1))
+    _content_deletion(u, at=datetime.utcnow() - timedelta(minutes=5))
+    job, item = _chunk_job(u, prev)
+    job.items = [dict(item, rendered_at=datetime.utcnow().isoformat())]
+    db.session.commit()
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=None))
+    monkeypatch.setattr(pb._exports, "build_integration_messages",
+                        lambda uid, pid: (None, []))
+
+    _collect_one(monkeypatch, item)
+
+    assert UserProfile.query.filter_by(
+        parent_profile_id=prev.id).first() is not None
+
+
+def test_an_integration_built_before_the_request_is_dropped(app, monkeypatch):
+    """An integration reads profile versions, not writing: its read time
+    is when its request was built (``read_at``)."""
+    u = _user()
+    tip = _prev_profile(u, datetime(2026, 5, 1))
+    job, item = _integration_job(u, tip)
+    built = datetime.utcnow() - timedelta(minutes=10)
+    job.items = [dict(item, read_at=built.isoformat())]
+    db.session.commit()
+    _content_deletion(u, at=built + timedelta(minutes=1))
+
+    _poll_integration(monkeypatch, item)
+
+    assert UserProfile.query.filter_by(
+        user_id=u.id, generation_type="integration").count() == 0
+    assert APICostLog.query.filter_by(user_id=u.id).count() == 1
+
+
+def test_the_seeder_builds_for_a_content_deletion_not_an_account_deletion(
+        app, monkeypatch):
+    """#590: the immediate seed skips an account being deleted (#269),
+    not one whose content was deleted: that account's next build reads
+    only what it writes from now on."""
+    built = []
+    monkeypatch.setattr(pb, "use_batch_for_user", lambda u, c: True)
+    monkeypatch.setattr(pb, "_should_seed", lambda u, **k: True)
+    from backend.tasks import profile_windows
+    monkeypatch.setattr(profile_windows, "wants_window_build", lambda u: False)
+    monkeypatch.setattr(pb, "_build_next_profile_request",
+                        lambda user, **k: built.append(user.id) or {
+                            "meta": {"user_id": user.id}})
+    monkeypatch.setattr(pb, "_submit_requests",
+                        lambda reqs, keys: len(reqs))
+    fresh, gone = _user(), _user()
+    _content_deletion(fresh)
+    _content_deletion(gone, account=True)
+
+    assert pb._seed_profile_batches(users=[fresh, gone]) == 1
+    assert built == [fresh.id]
+    assert {u.id for u in User.profile_eligible_query()} >= {fresh.id}
+    assert gone.id not in {u.id for u in User.profile_eligible_query()}
 
 
 def test_poll_apply_exception_bumps_attempts_and_clears_pending(app, monkeypatch):
