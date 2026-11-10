@@ -201,6 +201,23 @@ def _usd_to_microdollars(usd):
 # limit per month. A user never rolled (NULL month) starts at 0: no month
 # before the first roll is charged afterwards. Cost records are never
 # changed.
+#
+# A month in which the user had no limit at any time carries nothing
+# (User.spend_carry_free_month): a limit of 0 clears the carry, also when
+# a limit is set again later in the month (the admin lets a job through,
+# then restores the limit). The cap within that month is unchanged: its
+# real spend counts against the limit set later. A roll that finds no
+# limit marks the month, and every write of a limit rolls with the old
+# limit first (set_user_spend_limit), so a month that starts without a
+# limit or loses it mid-month is marked before its rollover.
+
+def _month_spend_for_carry(user, month):
+    """What ``month`` adds to the carry: its spend, or nothing in a month
+    the user had no limit at some time."""
+    if getattr(user, "spend_carry_free_month", None) == month:
+        return 0
+    return _user_spend_in_month_microdollars(user.id, month)
+
 
 def rolled_spend_carry(user, config, now=None):
     """The user's carry into the current month, in microdollars, rolled
@@ -216,8 +233,7 @@ def rolled_spend_carry(user, config, now=None):
         return 0
     carry = getattr(user, "spend_carry_microdollars", None) or 0
     while stored < month:
-        spend = _user_spend_in_month_microdollars(user.id, stored)
-        carry = max(0, carry + spend - limit)
+        carry = max(0, carry + _month_spend_for_carry(user, stored) - limit)
         stored = _next_month(stored)
     return carry
 
@@ -225,8 +241,9 @@ def rolled_spend_carry(user, config, now=None):
 def roll_spend_carry(user, config, now=None):
     """Bring the user's stored carry up to the current month and, when the
     carry alone reaches the limit, block the user for the month (silently:
-    the admin was emailed when the overflow happened). Idempotent; does not
-    commit. Returns True when it changed the row."""
+    the admin was emailed when the overflow happened). With no limit in
+    force, mark the month as carrying nothing. Idempotent; does not commit.
+    Returns True when it changed the row."""
     month = current_month(now)
     carry = rolled_spend_carry(user, config, now)
     changed = False
@@ -236,6 +253,9 @@ def roll_spend_carry(user, config, now=None):
         user.spend_carry_microdollars = carry
         changed = True
     limit = _usd_to_microdollars(get_user_spend_limit_usd(user, config))
+    if limit <= 0 and user.spend_carry_free_month != month:
+        user.spend_carry_free_month = month
+        changed = True
     if limit > 0 and carry >= limit and user.spend_blocked_month != month:
         user.spend_blocked_month = month
         changed = True
@@ -248,12 +268,24 @@ def roll_spend_carry(user, config, now=None):
 def refresh_spend_carry(user, config, now=None):
     """roll_spend_carry, committed when it changed something, for a user
     with a limit. For a user without one it does nothing, not even a query:
-    the cap checks before every step stay free for them, and the hourly roll
-    keeps their month current (so a limit set later starts from 0)."""
+    the cap checks before every step stay free for them. The hourly roll
+    keeps their month current and marks it as carrying nothing, and a limit
+    set later goes through set_user_spend_limit, so it starts from 0."""
     if (get_user_spend_limit_usd(user, config) or 0) <= 0:
         return
     if roll_spend_carry(user, config, now):
         db.session.commit()
+
+
+def set_user_spend_limit(user, limit_usd, config, now=None):
+    """The admin's limit edit: the carry into this month is rolled with the
+    limit in force when the month began (which marks the month as carrying
+    nothing when that was no limit), then the new limit applies and the
+    block follows it (reconcile_user_spend_block, which marks the month
+    when the new limit is 0). Does not commit."""
+    roll_spend_carry(user, config, now)
+    user.monthly_spend_limit_usd = limit_usd
+    return reconcile_user_spend_block(user, config, now=now)
 
 
 def clear_spend_carry(user, config, now=None):
@@ -300,8 +332,10 @@ def spend_cap_lift_date(user, config, now=None):
     limit = _usd_to_microdollars(get_user_spend_limit_usd(user, config))
     if limit <= 0:
         return _month_first_day(month, 1)
-    counted = (rolled_spend_carry(user, config, now)
-               + get_user_month_spend_microdollars(user.id, now=now))
+    counted = rolled_spend_carry(user, config, now)
+    if getattr(user, "spend_carry_free_month", None) != month:
+        # A month without a limit at some time carries nothing onward.
+        counted += get_user_month_spend_microdollars(user.id, now=now)
     overflow = counted - limit
     months = 1 + (overflow // limit if overflow > 0 else 0)
     return _month_first_day(month, months)

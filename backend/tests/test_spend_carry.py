@@ -38,7 +38,8 @@ from backend.models import User, APICostLog  # noqa: E402
 from backend.utils.spend import (  # noqa: E402
     clear_spend_carry, enforce_user_spend_cap, reconcile_user_spend_block,
     roll_spend_carries, roll_spend_carry, rolled_spend_carry,
-    spend_cap_lift_date, spend_cap_payload, user_is_capped,
+    set_user_spend_limit, spend_cap_lift_date, spend_cap_payload,
+    user_is_capped,
 )
 
 OCT = datetime(2026, 10, 15, 12, 0, 0)
@@ -268,6 +269,109 @@ def test_a_limit_set_on_an_uncapped_user_carries_nothing_from_before(user):
     state = reconcile_user_spend_block(user, _config(), now=NOV)
     assert state["carried_usd"] == 0
     assert state["blocked"] is False
+
+
+# ── A month with no limit at some time carries nothing ───────────────────
+# Review of #627: limit 0, $500 spent in November, a $50 limit set on
+# 20 November. The month's real spend still counts against the new limit
+# while it lasts; none of it carries into December.
+
+def _roll_dec(user, how):
+    """The December roll by each of the paths that make it."""
+    if how == "hourly":
+        roll_spend_carries(_config(), now=DEC_1)
+    elif how == "per_request":
+        _enforce(user, DEC_1)
+    elif how == "admin_edit":
+        set_user_spend_limit(user, user.monthly_spend_limit_usd, _config(),
+                             now=DEC_1)
+    else:
+        return rolled_spend_carry(user, _config(), now=DEC_1)
+    _db.session.commit()
+    return user.spend_carry_microdollars
+
+
+@pytest.mark.parametrize("hourly_ran", [True, False])
+def test_a_limit_set_mid_month_carries_nothing_from_that_month(
+        user, hourly_ran):
+    user.monthly_spend_limit_usd = 0.0
+    _db.session.commit()
+    if hourly_ran:                                 # else the edit's roll marks
+        roll_spend_carries(_config(), now=NOV_1)
+    _log_cost(user.id, 500.0, datetime(2026, 11, 5))
+    state = set_user_spend_limit(user, 50.0, _config(), now=NOV)
+    _db.session.commit()
+    assert user.spend_carry_free_month == "2026-11"
+    assert state["blocked"] is True                # this month's spend counts
+    assert spend_cap_lift_date(user, _config(), now=NOV) == date(2026, 12, 1)
+    roll_spend_carry(user, _config(), now=DEC_1)
+    _db.session.commit()
+    assert _carry_usd(user) == 0
+    assert user_is_capped(user, now=DEC_1) is False
+
+
+@pytest.mark.parametrize("how", ["hourly", "per_request", "admin_edit",
+                                 "pure"])
+def test_every_roll_path_agrees_on_a_month_without_a_limit(user, how):
+    """The hourly roll, the cap check per request, the admin edit and the
+    read-only roll (the Users list, the headroom check) give the same
+    December carry."""
+    user.monthly_spend_limit_usd = 0.0
+    _db.session.commit()
+    _log_cost(user.id, 500.0, datetime(2026, 11, 5))
+    set_user_spend_limit(user, 50.0, _config(), now=NOV)
+    _db.session.commit()
+    assert _roll_dec(user, how) == 0
+
+
+def test_letting_a_job_through_carries_nothing(user):
+    """$80 carried into November; the admin sets 0 so a job goes through,
+    it costs $200, and the limit goes back to $50 the same day. The carry
+    stays cleared and November's spending carries nothing."""
+    _log_cost(user.id, 130.0, OCT)
+    roll_spend_carry(user, _config(), now=NOV_1)
+    _db.session.commit()
+    assert _carry_usd(user) == 80.0
+    set_user_spend_limit(user, 0.0, _config(), now=NOV)
+    _db.session.commit()
+    assert _carry_usd(user) == 0
+    _log_cost(user.id, 200.0, NOV)
+    state = set_user_spend_limit(user, 50.0, _config(), now=NOV)
+    _db.session.commit()
+    assert state["carried_usd"] == 0
+    assert state["blocked"] is True                # $200 of $50 this month
+    roll_spend_carry(user, _config(), now=DEC_1)
+    _db.session.commit()
+    assert _carry_usd(user) == 0
+    assert user_is_capped(user, now=DEC_1) is False
+
+
+def test_the_mark_does_not_reach_the_next_month(user):
+    """November had no limit at some time; December has $50 all month and
+    ends at $60: January starts with $10 carried."""
+    user.monthly_spend_limit_usd = 0.0
+    _db.session.commit()
+    _log_cost(user.id, 500.0, datetime(2026, 11, 5))
+    set_user_spend_limit(user, 50.0, _config(), now=NOV)
+    roll_spend_carry(user, _config(), now=DEC_1)
+    _db.session.commit()
+    _log_cost(user.id, 60.0, datetime(2026, 12, 10))
+    roll_spend_carry(user, _config(), now=JAN_1)
+    _db.session.commit()
+    assert _carry_usd(user) == 10.0
+    assert user.spend_carry_free_month == "2026-11"
+
+
+def test_a_month_that_starts_without_a_limit_is_marked_by_the_hourly_roll(
+        user):
+    user.monthly_spend_limit_usd = 0.0
+    _db.session.commit()
+    roll_spend_carries(_config(), now=NOV_1)
+    assert user.spend_carry_free_month == "2026-11"
+    # With a limit all month, a roll marks nothing.
+    user.monthly_spend_limit_usd = 50.0
+    roll_spend_carry(user, _config(), now=DEC_1)
+    assert user.spend_carry_free_month == "2026-11"
 
 
 def test_the_cap_check_of_an_uncapped_user_writes_nothing(user):

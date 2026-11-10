@@ -129,6 +129,10 @@ class User(db.Model, UserMixin):
     spend_carry_microdollars = db.Column(
         db.BigInteger, nullable=False, default=0, server_default="0")
     spend_carry_month = db.Column(db.String(7), nullable=True)
+    # A month ("YYYY-MM") in which the user had no limit at some time: its
+    # spending carries nothing into the next month (a limit of 0 clears
+    # the carry, also when a limit is set again later in the month).
+    spend_carry_free_month = db.Column(db.String(7), nullable=True)
 
     # Per-user defaults for new nodes (overridable per-node)
     default_privacy_level = db.Column(
