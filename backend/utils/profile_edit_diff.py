@@ -6,9 +6,9 @@ at its date (tasks/exports.user_versions_to_merge). The newest round is
 merged whole. An older round contributes only what no newer round changed:
 its version without every line a newer round of the user's changed or
 deleted (or inserted lines inside), and no merge at all when none of its
-own changes is left. So a sentence the user added in one edit and deleted in a later one
-is not brought back, while an older correction on lines the user did not
-touch again still reaches the rebuilt profile.
+own changes is left. So a sentence the user added in one edit and deleted
+in a later one is not brought back, while an older correction on lines the
+user did not touch again still reaches the rebuilt profile.
 
 Pure text work: no database, no model call. Lines are compared with their
 whitespace collapsed, so a change of whitespace alone (spaces, blank lines)
@@ -20,16 +20,21 @@ The rule, line by line:
   and the lines it wrote there (difflib's line diff). A line of a block
   the round replaced belongs to the whole block: the lines it removed touch
   the lines it wrote in their place, and the other way round.
-- A newer round "touches" a line of the older round's version when, in the
-  newer round's diff, the line maps (through a line diff of the older
-  version against the version the newer round edited) onto a line the
-  newer round removed or replaced, or onto the place where it inserted
-  lines, if that place is strictly inside the mapped lines; a line that a
-  model step between them removed maps to a place, touched by a change at
-  that same place. A line next to a changed line is not touched.
-- Moved lines: a line is also touched when its words are those of a line
-  the newer round removed or wrote, or as similar as difflib's Differ
-  counts two lines as versions of one (SIMILAR_LINE_RATIO).
+- A newer round "touches" a line of the older round's version when the
+  line maps onto a line the newer round removed or replaced, or onto lines
+  with the place where it inserted lines strictly inside them; a line
+  that a model step between them removed maps to a place, touched by a
+  change at that same place. A line next to a changed line is not touched.
+- The mapping: a line diff of the older version against the version the
+  newer round edited, over their non-blank lines only (blank lines would
+  pair paragraphs by position: review of #569). A line in an unchanged
+  stretch maps onto its copy. A stretch a model step rewrote is paired line
+  by line when it has as many lines on both sides; otherwise every line of
+  it maps onto the whole rewritten stretch.
+- Moved lines: a line is also touched when it is a line the newer round
+  removed or wrote, or as similar to one as difflib's Differ counts two
+  lines as versions of one: SIMILAR_LINE_RATIO over the characters of the
+  whitespace-collapsed lines.
 - What the merge reads: the older version without its touched lines. An
   own change whose lines are touched is dropped; none left means no merge.
 """
@@ -38,8 +43,8 @@ import re
 from dataclasses import dataclass
 
 # difflib.Differ's cutoff for two lines being versions of one line, applied
-# to the lines' words. Used only to find a line a newer round moved or
-# reworded (heuristic, #421).
+# as Differ applies it, to characters (of the whitespace-collapsed lines).
+# Used only to find a line a newer round moved or reworded (heuristic, #421).
 SIMILAR_LINE_RATIO = 0.75
 
 _WORD = re.compile(r"\w")
@@ -135,14 +140,38 @@ def _overlaps(r, q):
 
 
 def _similar(a, b):
-    """Whether two line keys are the same line, moved or reworded: the
-    same words, or words as similar as SIMILAR_LINE_RATIO."""
+    """Whether two line keys are the same line, moved or reworded: equal,
+    or as similar as SIMILAR_LINE_RATIO over their characters (the ratio
+    difflib's Differ uses to pair two lines)."""
     if a == b:
         return True
-    sm = difflib.SequenceMatcher(None, a.split(), b.split(), autojunk=False)
+    sm = difflib.SequenceMatcher(None, a, b, autojunk=False)
     return (sm.real_quick_ratio() >= SIMILAR_LINE_RATIO
             and sm.quick_ratio() >= SIMILAR_LINE_RATIO
             and sm.ratio() >= SIMILAR_LINE_RATIO)
+
+
+def _nonblank_before(keys):
+    """For each place 0..len(keys) between lines: how many non-blank lines
+    come before it. Turns a range of lines into a range of non-blank ones."""
+    out = [0]
+    for key in keys:
+        out.append(out[-1] + (1 if key else 0))
+    return out
+
+
+def _paired(ops):
+    """``ops`` with every rewritten stretch that has as many lines on both
+    sides split into one-line pairs. Other rewritten stretches stay whole,
+    so each of their lines maps onto the whole stretch."""
+    out = []
+    for tag, i1, i2, j1, j2 in ops:
+        if tag == "replace" and i2 - i1 == j2 - j1:
+            out += [("replace", i1 + k, i1 + k + 1, j1 + k, j1 + k + 1)
+                    for k in range(i2 - i1)]
+        else:
+            out.append((tag, i1, i2, j1, j2))
+    return out
 
 
 def _distinctive(key):
@@ -163,19 +192,29 @@ class OlderEdit:
 
 
 class _Newer:
-    """A newer round's changes, mapped from the older version's lines."""
+    """A newer round's changes, and the mapping from the older version's
+    lines onto the version the newer round edited. The mapping works on
+    non-blank lines only: with blank lines in it, the blank lines between
+    rewritten paragraphs are the only equal lines, and paragraphs pair by
+    position, one off when the rewrite added or dropped a paragraph."""
 
     def __init__(self, older_keys, base_text, text):
         base_keys = _keys(base_text)
         self.changes = line_changes(base_keys, _keys(text))
-        self.ops = _opcodes(older_keys, base_keys)
         self.keys = [c.key for c in self.changes if _distinctive(c.key)]
+        self._older = _nonblank_before(older_keys)
+        base = _nonblank_before(base_keys)
+        self._before = [(base[c.before[0]], base[c.before[1]])
+                        for c in self.changes]
+        self.ops = _paired(_opcodes([k for k in older_keys if k],
+                                    [k for k in base_keys if k]))
 
-    def touches(self, region, keys):
-        mapped = _map(region, self.ops)
-        if any(_overlaps(mapped, c.before) for c in self.changes):
-            return True
-        return any(_similar(k, n) for k in keys for n in self.keys)
+    def touches_place(self, region):
+        """Whether ``region`` (lines of the older version) maps onto lines
+        this round changed."""
+        lo, hi = region
+        mapped = _map((self._older[lo], self._older[hi]), self.ops)
+        return any(_overlaps(mapped, q) for q in self._before)
 
 
 def older_edit(base_text, text, newer):
@@ -191,9 +230,17 @@ def older_edit(base_text, text, newer):
     keys = [line_key(line) for line in lines]
     own = line_changes(_keys(base_text), keys)
     rounds = [r for r in (_Newer(keys, b, t) for b, t in newer) if r.changes]
+    newer_keys = [k for r in rounds for k in r.keys]
+    similar = {}
+
+    def same_line(key):
+        if key not in similar:
+            similar[key] = any(_similar(key, n) for n in newer_keys)
+        return similar[key]
 
     def touched(region, ks):
-        return any(r.touches(region, ks) for r in rounds)
+        return (any(r.touches_place(region) for r in rounds)
+                or any(same_line(k) for k in ks))
 
     hit = [bool(k) and touched((t, t + 1), [k] if _distinctive(k) else [])
            for t, k in enumerate(keys)]
@@ -211,11 +258,17 @@ def older_edit(base_text, text, newer):
         return OlderEdit(None, len(own), 0, removed)
     if not removed:
         return OlderEdit(text, len(own), kept, 0)
+    return OlderEdit(_without(lines, hit), len(own), kept, removed)
+
+
+def _without(lines, gone):
+    """``lines`` without those marked ``gone``, runs of blank lines closed
+    up and none at either end."""
     out = []
-    for line, gone in zip(lines, hit):
-        if gone or (not line.strip() and (not out or not out[-1].strip())):
+    for line, drop in zip(lines, gone):
+        if drop or (not line.strip() and (not out or not out[-1].strip())):
             continue
         out.append(line)
     while out and not out[-1].strip():
         out.pop()
-    return OlderEdit("\n".join(out), len(own), kept, removed)
+    return "\n".join(out)
