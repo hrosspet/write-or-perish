@@ -310,7 +310,7 @@ Release build they are compiled out.
 ```sh
 cd ios && xcodegen
 xcodebuild -project Loore.xcodeproj -scheme Loore \
-  -destination 'platform=iOS Simulator,name=iPhone 17' test      # 616 unit tests
+  -destination 'platform=iOS Simulator,name=iPhone 17' test      # 646 unit tests
 python3 ios/scripts/check_terms_text.py                          # Terms text == TermsModal.js
 ```
 
@@ -342,6 +342,7 @@ xcodebuild -project Loore.xcodeproj -scheme LooreUITests \
 | `HomeCardsUITests` (2026-10-13) | a user who gleans: a tap on a card's Voice / Text switch (middle, edge, end) opens nothing and changes what the card opens; the card opens Text mode or Voice; each card's choice survives a relaunch; the home in both modes, dark and light | a user with Glean (skips otherwise); no billed step |
 | `ArtifactDeleteUITests` (#603) | a long press on each kind of bubble: Edit and Delete on custom artifacts, Edit only on built-ins, the digest, Profile and Todo, no menu on "+"; Edit from the menu opens each form; the delete dialog (Cancel, unsaved edits); deleting the open, a not-open and the last bubble; a link to a deleted artifact; dark and light | makes three custom artifacts (`landlord-case`, `loore-development-map`, `winter-solstice-gathering`) through the API and deletes them; skips when the user already has one of those names. `LOORE_BACKEND_URL` for a backend other than :5010 |
 | `TextModeDraftUITests` (#425, #427) | Reflect home → Text → Send (auto-generate off) or Discard → back → Text again: the text must not come back as the draft | Send right after typing: `LOORE_BACKEND_URL=http://localhost:5099` with `python3 scripts/delay_proxy.py` running (production-like latency; without it the race cannot fail locally). Send or Discard next to a dead Voice session: `state clear_top_drafts dead_voice_session` before each test. The test user's sent entries stay in the Log |
+| `SelectCopyUITests` (2026-11-10) | Selecting reading text: a long press on a word of a reply, the end handle dragged into the next paragraph, Copy, then Paste in the Log's search field shows exactly that part; no keyboard; a tap outside clears the selection; a link in the text still opens; a tap on an expanded reply card's text still opens the reply; a range of the profile | makes an entry and a markdown reply through the API and deletes them; the profile step skips without a profile. Coordinates assume an iPhone 17 at the default text size |
 
 Notes: the M2 tests cancel every dialog and delete what they create; craft mode is
 switched on through More and back off (if a run stops halfway, switch it off again).

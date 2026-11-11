@@ -255,11 +255,7 @@ struct TodoPage: View {
             Text("\(label). Copy what you need into the todo list.")
                 .font(LooreFont.sans(12.8, .light))
                 .foregroundStyle(LooreColor.textMuted)
-            Text(text)
-                .font(LooreFont.sans(13.6, .light))
-                .foregroundStyle(LooreColor.textSecondary)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            ReadingText(text: text, font: LooreUIFont.sans(13.6, .light), color: LooreColor.textSecondaryUI)
                 .padding(12)
                 .overlay(RoundedRectangle(cornerRadius: LooreRadius.small)
                     .strokeBorder(LooreColor.border, style: StrokeStyle(lineWidth: 1, dash: [4])))
@@ -358,8 +354,13 @@ private struct TodoItemRow: View {
                 } else {
                     Color.clear.frame(width: 18, height: 1)
                 }
-                MarkdownView(markdown: item.text, style: item.checked == nil ? .todoCategory : .todoItem)
-                    .strikethrough(item.checked == true)
+                // A one-line item: SwiftUI `Text` with Copy for the whole item. A text
+                // view per item made a 100-item list open about seven times slower
+                // (the page's VStack builds every row, #624 review).
+                MarkdownView(markdown: item.text, style: (item.checked == nil ? MarkdownStyle.todoCategory : .todoItem)
+                                .with { $0.strikethrough = item.checked == true })
+                    .environment(\.readingTextSelectable, false)
+                    .textSelection(.enabled)
                     .opacity(item.checked == true ? 0.4 : 1)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 if !item.children.isEmpty {

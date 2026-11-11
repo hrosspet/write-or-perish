@@ -91,7 +91,7 @@ enum LooreFont {
     /// line-height conversions; Outfit's is about 1.26).
     static let readingLineHeight: CGFloat = readingUIFont(100).lineHeight / 100
 
-    private static func uiTextStyle(_ style: Font.TextStyle) -> UIFont.TextStyle {
+    static func uiTextStyle(_ style: Font.TextStyle) -> UIFont.TextStyle {
         switch style {
         case .largeTitle: return .largeTitle
         case .title: return .title1
@@ -132,6 +132,40 @@ enum LooreFont {
     static let tag = sans(10.4, .regular, relativeTo: .caption2)
     /// Wordmark "LOORE": serif 300, 1.1rem, tracking .35em.
     static let wordmark = serif(17.6, .light, relativeTo: .headline)
+}
+
+/// UIKit fonts for the selectable reading text (`SelectableText`, a `UITextView`):
+/// the same faces as `LooreFont`, scaled for the view's Dynamic Type size the way
+/// `.custom(_:size:relativeTo:)` scales them.
+enum LooreUIFont {
+    static func sans(_ size: CGFloat, _ weight: LooreFontFace.SansWeight, italic: Bool = false) -> UIFont {
+        guard italic else { return .loore(LooreFontFace.sansName(weight), size: size) }
+        // Outfit has no italic face: the same synthetic slant as `LooreFont.sansOblique`.
+        let slant = CGAffineTransform(a: 1, b: 0, c: 0.21, d: 1, tx: 0, ty: 0)
+        let descriptor = UIFontDescriptor(fontAttributes: [.name: LooreFontFace.sansName(weight), .matrix: slant])
+        return UIFont(descriptor: descriptor, size: size)
+    }
+
+    static func serif(_ size: CGFloat, _ weight: LooreFontFace.SerifWeight, italic: Bool = false) -> UIFont {
+        let upright = UIFont.loore(LooreFontFace.serifName(weight), size: size)
+        guard italic else { return upright }
+        // Italic faces are bundled for light, regular and medium only.
+        if [.light, .regular, .medium].contains(weight),
+           let face = UIFont(name: LooreFontFace.serifName(weight, italic: true), size: size) {
+            return face
+        }
+        let traits = upright.fontDescriptor.symbolicTraits.union(.traitItalic)
+        return upright.fontDescriptor.withSymbolicTraits(traits).map { UIFont(descriptor: $0, size: size) } ?? upright
+    }
+
+    static func mono(_ size: CGFloat) -> UIFont {
+        UIFont(name: "Menlo", size: size) ?? .monospacedSystemFont(ofSize: size, weight: .regular)
+    }
+
+    /// `font` scaled for `traits`' content size, relative to `style`.
+    static func scaled(_ font: UIFont, relativeTo style: Font.TextStyle, traits: UITraitCollection) -> UIFont {
+        UIFontMetrics(forTextStyle: LooreFont.uiTextStyle(style)).scaledFont(for: font, compatibleWith: traits)
+    }
 }
 
 extension UIFont {

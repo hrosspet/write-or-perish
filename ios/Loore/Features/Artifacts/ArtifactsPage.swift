@@ -409,6 +409,9 @@ private struct IntentionEntryRow: View {
                     .padding(.top, 8)
                 }
             }
+            // Short lines (the body is one paragraph): Copy for each whole line. A text
+            // view per line made 60 intentions open about ten times slower (#624 review).
+            .textSelection(.enabled)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
         }

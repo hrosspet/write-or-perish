@@ -288,6 +288,11 @@ Until quotes arrive (or if the fetch fails) the plain path renders, so **`{quote
 - `stripInlineMarkdown` (utils/markdown.js) removes `![alt](u)`→alt, `[t](u)`→t, `**b**`, `__b__`, `~~s~~`, `` `c` ``, `*i*`, `_i_` — the Swift parser must produce the same plain text or toggles silently no-op.
 - #321 (pinned by `MarkdownBody.stable.test.js`): re-rendering after a toggle must **not** remount list items (focus stays on the tapped checkbox, the page doesn't jump, a half-typed "+" input survives parent re-renders). Swift: use stable identities for rows.
 
+### 3.6 Selecting text
+
+- Web: the browser's own selection. Any rendered text can be selected, across paragraphs, lists and cards, and copied; a click on a card still opens it (a drag selects instead).
+- iOS (2026-11-10): reading text is a non-editable `UITextView` per run of paragraphs, headings and lists (`SelectableText`, `MarkdownFlow`), so a selection can cross paragraphs but not into a code block, quote, table or another card. Cards that open on a tap pass their action to the text (`.readingTextTap`). Details in `ios/PROGRESS.md`, "Select and copy text".
+
 ---
 
 ## 4. Writing
