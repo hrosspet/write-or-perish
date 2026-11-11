@@ -166,7 +166,11 @@ Landed (PR #285):
   and the account's seeding gate is evaluated right away instead of at
   the next hourly beat. Batch accounts are seeded immediately, never sent
   to the synchronous path. The "(Re-)Generate Profile" navbar item and its
-  `/export/update_profile` route are removed.
+  `/export/update_profile` route are removed. Since #625 (2026-11-11) the
+  timestamp is the oldest entry the import changed (created, restored, or
+  moved into what AI reads), not the archive's oldest, and an import that
+  changed nothing hands off nothing; entries only moved out of what AI
+  reads ask the user whether to rebuild instead.
 - Provisional ladder (`PROVISIONAL_THRESHOLDS` = 5k, 10k, 15k, 25k, 50k,
   then T; `next_build_threshold`, `provisional_build_due`): while an
   account has no profile or a provisional one (`profile_is_provisional`:
