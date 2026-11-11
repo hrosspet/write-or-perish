@@ -207,7 +207,7 @@ def test_a_reply_under_a_members_own_private_ai_reply_is_only_me(app):  # noqa: 
 
 # ── Second review ───────────────────────────────────────────────────────
 
-def _agentic_shared(app):
+def _agentic_shared(app):  # noqa: F811
     """anna's Text-mode thread shared with ben with the discussion
     leading up to her entry: its prompt asks for the member's data."""
     prompt = _add(None, "THE-PROMPT {user_profile}", prompt_key="textmode")

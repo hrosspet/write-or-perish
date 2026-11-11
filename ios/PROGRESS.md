@@ -1101,16 +1101,31 @@ privacy select is greyed out (`SelectField.unavailable`), as on the web.
   instead of the three choices (the server refuses Everyone and another audience there).
 - A shared prompt for a reader also carries the reader's own `recent` summary and `recent_raw` window
   (server side; the views already show both).
+- **Second review of the fixes (2026-11-11)**: `NodeDetail.threadAIReads` (`thread_ai_reads`: entry,
+  what an AI reply reads, its key) on the user's own Only-me node in a shared thread. `ThreadModel`
+  (`threadReads`, `aiReplyReads`) then asks in the dialog's private variant and sends `private:<key>`;
+  `requestConfirmedLLM` repeats a refused request once at most (`retried`), then the error toast shows.
+  An AI reply in one's Only-me branch (a note under one's private AI reply) works the same way.
+  `CircleAudienceState.refusalBeforeSaving` stops a save whose readers differ from the ones the
+  sentence named (`readersChangedMessage`) and updates the sentence; `entryId` (set by the edit form)
+  goes to `audience-preview` as `node_id`, so an edited entry's sentence leaves out a person added to
+  its circle since with "Only new entries". `ThreadModel.artifactsForOwner` keeps main's
+  "[… not available]" for placeholders of someone else's prompt outside shared threads.
 - `-LooreResetState YES` also forgets the per-thread Circles choices (keys starting `loore_circle_`).
-- Tests: `CirclesTests.swift` (45: decoding from hand-written fixtures, wording, routes, the form's
-  submit paths, the thread's rules, the agreement key, the Only-me reply form). `CirclesUITests` (9 methods) walks the screens
+- Tests: `CirclesTests.swift` (48: decoding from hand-written fixtures, wording, routes, the form's
+  submit paths, the thread's rules, the agreement key, the Only-me reply form, the agreement under one's
+  own Only-me node, one retry, the placeholders outside shared threads). `CirclesUITests` (13 methods) walks the screens
   against a scratch backend (native Flask on sqlite on its own port, fake users, the model call
   stubbed): the add-person dialog, rename, new circle, the picker's readers sentence and Share button,
   the discussion toggle in the edit form, the readers popover, the reply dialog, the AI dialog with
   and without the artifacts sentence, a generated reply with its label, "Only me", a shared prompt
   with the reader's own profile and bare placeholders, the Updates note, the reply form under one's own
-  Only-me AI reply. Inputs: `TEST_RUNNER_LOORE_E2E_DIR`
-  (folder with `cookies.json` and `ids.json`, which also needs `bens_private_ai`), `TEST_RUNNER_LOORE_BACKEND_URL`,
+  Only-me AI reply, an AI reply under one's own Only-me AI reply and in one's Only-me branch, the edit
+  sentence without a person added with "Only new entries", a share stopped for a name not yet looked
+  up. Inputs: `TEST_RUNNER_LOORE_E2E_DIR`
+  (folder with `cookies.json` and `ids.json`, which also needs `bens_private_ai`,
+  `bens_agentic_private_ai` and `bens_private_note`; a fourth user `dana` in "Close friends" added with
+  "Only new entries" after the entry was shared), `TEST_RUNNER_LOORE_BACKEND_URL`,
   `TEST_RUNNER_LOORE_FRONTEND_URL`, `TEST_RUNNER_LOORE_SCREENSHOT_DIR`. Run 2026-11-11 on the
   "Loore Circles iPhone 17" simulator: 8 of 8 pass; after the third review 9 of 9 (a fresh scratch
   backend on its own port, three fake users, the model call stubbed).
