@@ -40,7 +40,7 @@ from backend.utils.quotes import (
 )
 from backend.utils.node_split import NODE_CHAR_CAP
 from backend.utils.session_helpers import (
-    chain_has_agentic_prompt, strip_agentic_prompts,
+    AGENTIC_PROMPT_KEYS, chain_has_agentic_prompt, strip_agentic_prompts,
 )
 from backend.utils.timefmt import local_stamp, strip_edge_timestamps
 from backend.utils.llm_stream import ReplyStream
@@ -1172,10 +1172,18 @@ def _reply_in_others_thread(llm_node, parent_node, node_chain, system_node,
     an AI reply in someone else's public thread uses no profile), the
     tools that read or write the user's own data stay out of it: it
     works with the thread alone. A private reply, and every reply in
-    the user's own threads, keep them."""
+    the user's own threads, keep them.
+
+    The prompt is checked the way tools are turned on: every node of the
+    chain whose prompt key is an agentic one (a prompt edited in its
+    thread keeps its key after its prompt link is removed), and the
+    linked prompt node *system_node*."""
     if llm_node.privacy_level == "private":
         return False
     if system_node is not None and not node_is_users(system_node, user_id):
+        return True
+    if any(n.get_prompt_key() in AGENTIC_PROMPT_KEYS
+           and not node_is_users(n, user_id) for n in node_chain):
         return True
     from backend.utils.thread_tree import thread_root_of
     root_id = thread_root_of([parent_node.id]).get(parent_node.id)
@@ -1183,6 +1191,16 @@ def _reply_in_others_thread(llm_node, parent_node, node_chain, system_node,
     if root is None:
         root = node_chain[0] if node_chain else parent_node
     return not node_is_users(root, user_id)
+
+
+# Closes the prompt of a reply _reply_in_others_thread restricts, after
+# the cached part: the prompt above it may describe tools and proposals
+# the reply does not have.
+OTHERS_THREAD_NOTE = (
+    "[In this thread you have no tools and cannot make proposals: no "
+    "archive search, no reading or writing of artifacts, and no todo, "
+    "issue, feedback or share proposal (nothing you write here shows a "
+    "button or saves anything). Answer from the conversation above.]")
 
 
 def _find_pending_todo_draft(node_chain, user_id):
@@ -4936,6 +4954,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     notes.append(ca_read_since)
                 if ca_note:
                     notes.append(ca_note)
+                if is_agentic and in_others_thread:
+                    notes.append(OTHERS_THREAD_NOTE)
 
                 if is_agentic and agentic_notes:
                     # Synthetic system-side note injected after the latest real

@@ -156,3 +156,84 @@ def test_a_private_reply_in_someone_elses_thread_keeps_every_tool(app, thread): 
 
     assert reply.llm_task_status == "completed"
     assert _offered() == _gated_names()
+
+
+# ── a prompt edited in its thread ────────────────────────────────────────
+
+def _prompt_under(owner, parent, detach_text=None):
+    """A public Text-mode prompt node of *owner*'s under *parent*, linked
+    as /textmode/from-node links it. With *detach_text*, edited in its
+    thread the way PUT /nodes/<id> with detach_prompt does it: the key
+    stamped, the prompt link removed, the node's own text in its place."""
+    from backend.models import NodeContextArtifact, UserPrompt
+    from backend.utils.context_artifacts import attach_context_artifacts
+    prompt = UserPrompt(user_id=owner.id, prompt_key="textmode",
+                        title="Text", generated_by="default")
+    prompt.set_content(PROMPT)
+    _db.session.add(prompt)
+    _db.session.flush()
+    node = _node(owner, parent, "")
+    attach_context_artifacts(node.id, owner.id, prompt_record=prompt)
+    _db.session.flush()
+    if detach_text is not None:
+        if not node.prompt_key:
+            node.prompt_key = node.get_artifact("prompt").prompt_key
+        NodeContextArtifact.query.filter_by(
+            node_id=node.id, artifact_type="prompt").delete()
+        node.set_content(detach_text)
+    _db.session.commit()
+    _db.session.expire_all()
+    return _fresh(node.id)
+
+
+@pytest.mark.parametrize("detached", [True, False])
+def test_someone_elses_prompt_in_my_thread_restricts_my_reply_below_it(app, thread, detached):  # noqa: F811,E501
+    """bob's public entry (no prompt); alice replies and attaches her
+    Text-mode prompt under her reply, edited in the thread (detached)
+    or not; bob replies below it in public and asks for a reply."""
+    alice, bob, system, entry, bobs_private, bobs_reply = thread
+    bobs_root = _node(bob, None, "bob writes in public")
+    alices = _node(alice, bobs_root, "alice replies")
+    prompt = _prompt_under(alice, alices,
+                           "ALICE'S OWN PROMPT" if detached else None)
+    assert prompt.get_prompt_key() == "textmode"
+    assert prompt.has_artifact("prompt") is not detached
+    below = _node(bob, prompt, "bob replies below her prompt")
+    _db.session.commit()
+
+    reply = _ask(below, bob, [_read_full(bobs_private.id), _resp("Done.")])
+
+    assert reply.llm_task_status == "completed"
+    assert _offered() == []
+    assert len(_ScriptedProvider.calls) == 1
+    assert "BOBS PRIVATE DIARY" not in _all_sent()
+
+
+# ── the closing note ─────────────────────────────────────────────────────
+
+def _last_message():
+    return _ScriptedProvider.calls[0]["messages"][-1]["text"]
+
+
+def test_the_restricted_reply_is_told_it_has_no_tools(app, thread):  # noqa: F811
+    alice, bob, system, entry, bobs_private, bobs_reply = thread
+
+    _ask(bobs_reply, bob, [_resp("An answer.")])
+
+    assert _llm_task_mod.OTHERS_THREAD_NOTE in _last_message()
+    assert _all_sent().count(_llm_task_mod.OTHERS_THREAD_NOTE) == 1
+
+
+def test_my_own_thread_and_a_private_reply_get_no_such_note(app, thread):  # noqa: F811,E501
+    alice, bob, system, entry, bobs_private, bobs_reply = thread
+
+    _ask(bobs_reply, bob, [_resp("An answer.")], privacy="private")
+    assert _llm_task_mod.OTHERS_THREAD_NOTE not in _all_sent()
+
+    own_system = _system_node(bob, PROMPT)
+    own_entry = _node(bob, own_system, "bob writes in public")
+    alices = _node(alice, own_entry, "alice replies to bob")
+    mine = _node(bob, alices, "bob answers alice")
+    _db.session.commit()
+    _ask(mine, bob, [_resp("An answer.")])
+    assert _llm_task_mod.OTHERS_THREAD_NOTE not in _all_sent()
