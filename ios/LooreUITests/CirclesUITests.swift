@@ -237,7 +237,8 @@ final class CirclesUITests: XCTestCase {
         sleep(2)
         snapshot("21-ben-ai-reply-shared")
 
-        // Only me: no dialog, and the reply is private.
+        // Only me in a thread whose shared prompt reads ben's data: the dialog in
+        // its private variant, then a private reply.
         app = try launch(as: "ben", route: "/node/\(turn)")
         waitForFocal(app)
         let onlyMe = element(app, "thread.aiReplyPrivacy.onlyMe")
@@ -246,8 +247,18 @@ final class CirclesUITests: XCTestCase {
         XCTAssertTrue(onlyMe.isSelected, "Only me was not chosen")
         snapshot("22-ben-ai-reply-only-me-chosen")
         app.buttons["thread.llmResponse"].tap()
+        let privateConfirm = app.buttons["circles.replyConfirm"]
+        XCTAssertTrue(privateConfirm.waitForExistence(timeout: 10), "the private AI dialog did not open")
+        XCTAssertTrue(app.staticTexts["Generate an AI reply?"].exists)
+        XCTAssertTrue(text(app, containing: "Only you will see it. Your AI reads your profile").exists)
+        XCTAssertTrue(text(app, containing: "for this reply, as the prompt shared in this thread asks.").exists)
+        XCTAssertFalse(text(app, containing: "will see it, marked with your name").exists, "no names for a private reply")
+        XCTAssertFalse(text(app, containing: "could share private information").exists)
+        XCTAssertTrue(privateConfirm.isHittable, "Generate is off the screen")
+        snapshot("22b-ben-ai-dialog-only-me")
+        privateConfirm.tap()
         XCTAssertTrue(text(app, containing: "Stub reply from").waitForExistence(timeout: 30), "no private AI reply appeared")
-        XCTAssertFalse(app.staticTexts["Generate an AI reply?"].exists, "a private reply needs no dialog")
+        XCTAssertFalse(element(app, "thread.readers").exists, "a private reply has no readers")
         sleep(2)
         snapshot("23-ben-ai-reply-only-me")
         // `-LooreResetState` forgets the choice: the next launch is back to shared.

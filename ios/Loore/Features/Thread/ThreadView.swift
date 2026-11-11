@@ -271,7 +271,8 @@ private struct ThreadContent: View {
             if model.showAIReplyPrivacy(craftBar: showControl, autoGenerate: autoGenerate) {
                 aiReplyPrivacyChoice
                 // What the requester's AI reads of their own for the reply.
-                if let reads = CirclesWording.aiReadsSentence(model.audience?.aiReads ?? []) {
+                if let reads = model.aiReplyPrivate ? CirclesWording.aiReadsPrivateSentence(model.audience?.aiReads ?? [])
+                    : CirclesWording.aiReadsSentence(model.audience?.aiReads ?? []) {
                     Text(reads)
                         .font(LooreFont.sans(12.8, .light))
                         .foregroundStyle(LooreColor.textSecondary)

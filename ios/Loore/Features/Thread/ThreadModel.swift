@@ -121,6 +121,8 @@ final class ThreadModel {
     @ObservationIgnored private var aiReplyAnswer: CheckedContinuation<Bool, Never>?
     /// The `ai_reads_key` of the list the open dialog shows.
     @ObservationIgnored private var aiReplyDialogKey = ""
+    /// The open dialog stands before an "Only me" reply (its private variant).
+    private(set) var aiReplyDialogOnlyMe = false
     /// The stored acknowledgement when the thread has no `ai_reads_key`.
     static let aiReplyAckMarker = "1"
     static let aiReadsChangedCode = "circle_ai_reads_changed"
@@ -184,22 +186,27 @@ final class ThreadModel {
 
     /// Before an AI reply is generated in a shared thread the people who
     /// will see it are named ("Generate an AI reply?"), with what the
-    /// requester's AI reads of their own. Not asked when the reply stays
-    /// with the one generating it ("Only me"), when "Don't ask again in this
-    /// thread" holds (`aiReplyAcknowledged`), or when nobody else reads the
-    /// thread and it has no `ai_reads_key`. `force` asks whatever is stored
-    /// (the server said the list changed). nil when the user cancels.
+    /// requester's AI reads of their own. Not asked when "Don't ask again in
+    /// this thread" holds (`aiReplyAcknowledged`), or, in a thread with no
+    /// `ai_reads_key`, when the reply stays with the one generating it
+    /// ("Only me") or nobody else reads the thread. With a key an "Only me"
+    /// reply is asked about too, in the dialog's private variant: a prompt
+    /// someone else shared still reads the requester's data. `force` asks
+    /// whatever is stored (the server said the list changed). nil when the
+    /// user cancels.
     func confirmAIReply(force: Bool = false) async -> AIReplyGo? {
-        guard let audience, !aiReplyPrivate else { return AIReplyGo(ack: nil) }
+        guard let audience else { return AIReplyGo(ack: nil) }
         let key = audience.aiReadsKey
         let ack = key.isEmpty ? nil : key
-        if key.isEmpty && aiReplyNames.isEmpty { return AIReplyGo(ack: nil) }
+        let onlyMe = aiReplyPrivate
+        if key.isEmpty && (onlyMe || aiReplyNames.isEmpty) { return AIReplyGo(ack: nil) }
         let stored = UserDefaults.standard.string(forKey: DefaultsKey.circleAiReplyAck(entryId: audience.entryId, userId: me?.id))
         if !force && Self.aiReplyAcknowledged(stored: stored, key: key) { return AIReplyGo(ack: ack) }
         answerAIReplyDialog(false)
         let go = await withCheckedContinuation { continuation in
             aiReplyAnswer = continuation
             aiReplyDialogKey = key
+            aiReplyDialogOnlyMe = onlyMe
             showAIReplyDialog = true
         }
         return go ? AIReplyGo(ack: ack) : nil
@@ -641,15 +648,12 @@ final class ThreadModel {
     /// The same request in every thread. The model is the requester's own
     /// (their preferred model, or what the picker holds). In a shared thread
     /// "Only me" keeps the reply private to the one who generates it;
-    /// otherwise the server gives it the thread's audience, and `ack` (the
-    /// `ai_reads_key` the user agreed to) goes as `ai_reads_ack`.
+    /// otherwise the server gives it the thread's audience. `ack` (the
+    /// `ai_reads_key` the user agreed to) goes as `ai_reads_ack` with either.
     func llmRequestBody(ack: String? = nil) -> [String: JSONValue] {
         var body: [String: JSONValue] = ["model": .optional(selectedModel), "source_mode": .string("textmode")]
-        if aiReplyPrivate {
-            body["privacy_level"] = .string("private")
-        } else if let ack, !ack.isEmpty {
-            body["ai_reads_ack"] = .string(ack)
-        }
+        if aiReplyPrivate { body["privacy_level"] = .string("private") }
+        if let ack, !ack.isEmpty { body["ai_reads_ack"] = .string(ack) }
         return body
     }
 

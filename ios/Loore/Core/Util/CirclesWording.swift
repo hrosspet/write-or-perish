@@ -137,6 +137,20 @@ enum CirclesWording {
         return first.isEmpty ? reads : "\(first) \(reads)"
     }
 
+    /// The same for a reply only its requester reads ("Only me"), where a
+    /// prompt someone else shared still reads the requester's data.
+    static func aiReadsPrivateSentence(_ aiReads: [String]) -> String? {
+        let list = joinPlain(aiReads)
+        guard !list.isEmpty else { return nil }
+        return "Your AI reads your \(list) for this reply, as the prompt shared in this thread asks."
+    }
+
+    /// The dialog before an "Only me" AI reply in a thread with an `ai_reads_key`.
+    static func aiReplyPrivateDialogBody(aiReads: [String]) -> String {
+        let first = "Only you will see it."
+        return aiReadsPrivateSentence(aiReads).map { "\(first) \($0)" } ?? first
+    }
+
     // MARK: Sharing the discussion above an entry
 
     static let sharePathLabel = "Share also the discussion leading up to this node?"

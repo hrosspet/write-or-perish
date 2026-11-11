@@ -1084,7 +1084,10 @@ privacy select is greyed out (`SelectField.unavailable`), as on the web.
   sends `ai_reads_ack: <key>` (only a key the user was shown); "Don't ask again in this thread" stores
   the key (`DefaultsKey.circleAiReplyAck`), so it stops applying when a prompt changes. On 409
   `circle_ai_reads_changed` the dialog opens again with the response's list and Generate retries with
-  the new key. "Only me" sends `privacy_level: "private"` and no key.
+  the new key. "Only me" sends `privacy_level: "private"`; with a key it needs the same agreement
+  (the shared prompt still reads the requester's data and its tools act on their account) and shows
+  the dialog in its private variant ("Only you will see it. Your AI reads your ... for this reply, as
+  the prompt shared in this thread asks."); without a key, no dialog.
 - **The discussion above an entry**: `thread_path` from `GET /nodes/<id>/audience`, the toggle "Share
   also the discussion leading up to this node?" (off by default), `share_path` in the requests.
 - **A shared prompt** is shown to a reader with the `context_artifacts` the server sends (the reader's
@@ -1092,7 +1095,7 @@ privacy select is greyed out (`SelectField.unavailable`), as on the web.
 - The footer of a labelled AI reply ("GPT-6 Luna via @ben") puts the label on its own line: in one row
   with the date and the icons it was cut to "GPT-6 Luna…" (found in the simulator run).
 - `-LooreResetState YES` also forgets the per-thread Circles choices (keys starting `loore_circle_`).
-- Tests: `CirclesTests.swift` (41: decoding from hand-written fixtures, wording, routes, the form's
+- Tests: `CirclesTests.swift` (43: decoding from hand-written fixtures, wording, routes, the form's
   submit paths, the thread's rules, the agreement key). `CirclesUITests` (8 methods) walks the screens
   against a scratch backend (native Flask on sqlite on its own port, fake users, the model call
   stubbed): the add-person dialog, rename, new circle, the picker's readers sentence and Share button,

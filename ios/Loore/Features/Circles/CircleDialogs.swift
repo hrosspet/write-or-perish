@@ -38,6 +38,9 @@ struct CircleReplyDialog: View {
     var aiReply = false
     /// With `aiReply`: the requester's own artifacts the reply's prompt reads.
     var aiReads: [String] = []
+    /// With `aiReply`: the reply is for its requester only ("Only me"). The
+    /// dialog then names no readers and says what the shared prompt reads.
+    var onlyMe = false
     /// `dontAskAgain`
     let onConfirm: (Bool) -> Void
     let onCancel: () -> Void
@@ -45,16 +48,17 @@ struct CircleReplyDialog: View {
 
     static func title(aiReply: Bool) -> String { aiReply ? CirclesWording.aiReplyDialogTitle : "Send this reply?" }
 
-    static func body(names: [String], aiReply: Bool, aiReads: [String] = []) -> String {
-        aiReply ? CirclesWording.aiReplyDialogBody(names: names, aiReads: aiReads)
-            : "\(CirclesWording.joinNames(names)) will see it, with your name."
+    static func body(names: [String], aiReply: Bool, aiReads: [String] = [], onlyMe: Bool = false) -> String {
+        guard aiReply else { return "\(CirclesWording.joinNames(names)) will see it, with your name." }
+        return onlyMe ? CirclesWording.aiReplyPrivateDialogBody(aiReads: aiReads)
+            : CirclesWording.aiReplyDialogBody(names: names, aiReads: aiReads)
     }
 
     static func confirmLabel(aiReply: Bool) -> String { aiReply ? CirclesWording.aiReplyDialogConfirm : "Send reply" }
 
     var body: some View {
         LooreDialogCard(title: Self.title(aiReply: aiReply)) {
-            CircleDialogBody(text: Self.body(names: names, aiReply: aiReply, aiReads: aiReads))
+            CircleDialogBody(text: Self.body(names: names, aiReply: aiReply, aiReads: aiReads, onlyMe: onlyMe))
             Button {
                 dontAskAgain.toggle()
             } label: {

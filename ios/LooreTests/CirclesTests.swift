@@ -260,6 +260,11 @@ final class CirclesWordingTests: XCTestCase {
         XCTAssertEqual(CirclesWording.aiReadsSentence(["profile"]),
                        "Your AI reads your profile for this reply and could share private information from them.")
         XCTAssertEqual(CirclesWording.joinPlain(["profile", "memory"]), "profile and memory")
+        XCTAssertEqual(CirclesWording.aiReadsSentence(["list of artifacts", "anything else its tools look up (your artifacts, to-do list and writing)"]),
+                       "Your AI reads your list of artifacts and anything else its tools look up (your artifacts, to-do list and writing) for this reply and could share private information from them.")
+        XCTAssertEqual(CirclesWording.aiReplyPrivateDialogBody(aiReads: []), "Only you will see it.")
+        // The share note's title is the server's, printed as it comes: no second "@".
+        XCTAssertEqual(CirclesWording.at("@anna"), "@anna")
         // A typed reply's dialog never carries the sentence.
         XCTAssertEqual(CircleReplyDialog.body(names: ["anna"], aiReply: false, aiReads: ["profile"]),
                        "@anna will see it, with your name.")
@@ -865,18 +870,75 @@ final class CirclesFormTests: StubbedAppTestCase {
         XCTAssertTrue(again.aiReplyOnlyMe)
         again.setAIReplyOnlyMe(false)
         XCTAssertNil(again.llmRequestBody()["privacy_level"])
-        // Only me with a keyed thread: no dialog, and no acknowledgement is sent.
-        clearAIReplyMemory()
-        let keyed = await thread(keyedParent("k1"))
-        keyed.setAIReplyOnlyMe(true)
-        XCTAssertNil(keyed.llmRequestBody(ack: "k1")["ai_reads_ack"])
-        keyed.aiReplyPressed()
-        await waitFor("POST /api/nodes/31/llm")
-        XCTAssertFalse(keyed.showAIReplyDialog)
-        XCTAssertNil(body(of: "POST /api/nodes/31/llm")?["ai_reads_ack"])
-        XCTAssertEqual(body(of: "POST /api/nodes/31/llm")?["privacy_level"] as? String, "private")
-        keyed.setAIReplyOnlyMe(false)
+        XCTAssertNil(body(of: "POST /api/nodes/31/llm")?["ai_reads_ack"], "no key in this thread: no ack")
         XCTAssertEqual(UserDefaults.standard.string(forKey: DefaultsKey.circleAiReplyPrivacy(entryId: 31, userId: 5)), "shared")
+    }
+
+    func testOnlyMeWithAKeyIsAskedAboutAndSendsTheAck() async {
+        clearAIReplyMemory()
+        defer { clearAIReplyMemory() }
+        // A prompt someone else shared reads the requester's data for a private reply too.
+        let model = await thread(keyedParent("k1", reads: #"["profile","memory"]"#))
+        model.setAIReplyOnlyMe(true)
+        model.aiReplyPressed()
+        await waitForDialog(model)
+        XCTAssertTrue(model.showAIReplyDialog)
+        XCTAssertTrue(model.aiReplyDialogOnlyMe, "the private variant")
+        XCTAssertFalse(calls.contains("POST /api/nodes/31/llm"))
+        XCTAssertEqual(CircleReplyDialog.title(aiReply: true), "Generate an AI reply?")
+        XCTAssertEqual(CircleReplyDialog.body(names: model.aiReplyNames, aiReply: true, aiReads: model.audience?.aiReads ?? [],
+                                              onlyMe: model.aiReplyDialogOnlyMe),
+                       "Only you will see it. Your AI reads your profile and memory for this reply, as the prompt shared in this thread asks.")
+        XCTAssertEqual(CircleReplyDialog.confirmLabel(aiReply: true), "Generate")
+        model.aiReplyConfirmed(dontAskAgain: true)
+        await waitFor("POST /api/nodes/31/llm")
+        let sent = body(of: "POST /api/nodes/31/llm")
+        XCTAssertEqual(sent?["privacy_level"] as? String, "private")
+        XCTAssertEqual(sent?["ai_reads_ack"] as? String, "k1")
+        // The same stored key as for shared replies: neither kind is asked about again.
+        XCTAssertEqual(UserDefaults.standard.string(forKey: DefaultsKey.circleAiReplyAck(entryId: 31, userId: 5)), "k1")
+        let again = await thread(keyedParent("k1"))
+        let privateGo = await again.confirmAIReply()
+        XCTAssertEqual(privateGo, ThreadModel.AIReplyGo(ack: "k1"))
+        again.setAIReplyOnlyMe(false)
+        let sharedGo = await again.confirmAIReply()
+        XCTAssertEqual(sharedGo, ThreadModel.AIReplyGo(ack: "k1"))
+        XCTAssertFalse(again.showAIReplyDialog)
+    }
+
+    func testAChangedListReopensThePrivateDialogToo() async {
+        clearAIReplyMemory()
+        defer { clearAIReplyMemory() }
+        UserDefaults.standard.set("k1", forKey: DefaultsKey.circleAiReplyAck(entryId: 31, userId: 5))
+        UserDefaults.standard.set("private", forKey: DefaultsKey.circleAiReplyPrivacy(entryId: 31, userId: 5))
+        let parent = keyedParent("k1")
+        StubURLProtocol.install { [self] request in
+            if path(request) == "/api/nodes/31" { return .json(200, parent) }
+            if path(request) == "/api/nodes/31/llm" {
+                let sent = (try? JSONSerialization.jsonObject(with: request.httpBody ?? Data())) as? [String: Any]
+                if (sent?["ai_reads_ack"] as? String) != "k2" {
+                    return .json(409, #"{"code":"circle_ai_reads_changed","error":"changed","ai_reads":["memory"],"ai_reads_key":"k2"}"#)
+                }
+                return .json(202, #"{"node_id":77,"status":"pending"}"#)
+            }
+            return .json(200, "{}")
+        }
+        let model = ThreadModel(nodeId: 31, awaitLLM: nil, app: app)
+        await model.load()
+        XCTAssertTrue(model.aiReplyPrivate)
+        model.aiReplyPressed()
+        await waitForDialog(model)
+        XCTAssertTrue(model.aiReplyDialogOnlyMe)
+        XCTAssertEqual(CircleReplyDialog.body(names: [], aiReply: true, aiReads: model.audience?.aiReads ?? [], onlyMe: true),
+                       "Only you will see it. Your AI reads your memory for this reply, as the prompt shared in this thread asks.")
+        model.aiReplyConfirmed(dontAskAgain: false)
+        for _ in 0..<40 where calls.filter({ $0 == "POST /api/nodes/31/llm" }).count < 2 {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        let sent = body(of: "POST /api/nodes/31/llm")
+        XCTAssertEqual(sent?["ai_reads_ack"] as? String, "k2")
+        XCTAssertEqual(sent?["privacy_level"] as? String, "private")
+        XCTAssertTrue(app.toasts.toasts.isEmpty)
     }
 
     func testTheAIReplyControlIsOffWhenTheEntryIsNone() async {
