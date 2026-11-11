@@ -99,16 +99,17 @@ def is_node_owner(node, user_id: Optional[int]) -> bool:
 #   * a model acting for a person (as_ai=True): everything that builds a
 #     prompt or a corpus for that person (the thread chain, {quote:ID},
 #     read_full, search previews, the export behind profile builds and
-#     recent context). It never reads another person's shared entry; the
-#     one exception is the reader's explicit "Ask my AI" in that thread,
-#     which passes as_ai=False for the thread chain only
+#     recent context). It never reads another person's shared entry
+#     or reply. The one exception is an AI reply generated in a shared
+#     thread itself: its chain is read as the person reads the thread
 #     (llm_completion._load_node_chain).
 
 # How the rule is evaluated. Everything about Circles that the access
 # rule needs for one user is four small sets of ids, worked out once per
 # database session (CircleSets) and handed to the queries as literal
 # lists. A user who shares nothing, reads nothing shared and has no
-# "Ask my AI" answer gets the same SQL as before the feature, with
+# AI reply in someone else's thread gets the same SQL as before the
+# feature, with
 # Circles on or off; nobody's thread or Log walk carries a subquery.
 
 def circles_enabled_for(user_id) -> bool:
@@ -147,8 +148,8 @@ _pointers_seen = {"at": 0.0, "any": False}
 def pointers_may_exist() -> bool:
     """Whether any node may carry a thread pointer (audience_root_id):
     while Circles is on for anyone, and afterwards for as long as one
-    exists (a reply or an "Ask my AI" answer made before the flag was
-    switched off keeps its rules). While Circles is off the look is one
+    exists (a reply made before the flag was switched off keeps its
+    rules). While Circles is off the look is one
     indexed query, remembered for _POINTERS_CHECK_SECONDS. When this is
     False the access rule runs no Circles query at all."""
     if circles_on_anywhere():
@@ -168,10 +169,6 @@ def pointers_may_exist() -> bool:
     return _pointers_seen["any"]
 
 
-# The name the corpus filters knew it by.
-answers_may_exist = pointers_may_exist
-
-
 def _node_owner_id(node):
     return getattr(node, 'human_owner_id', None) or node.user_id
 
@@ -188,11 +185,11 @@ class CircleSets:
     * ``own_entries``: the user's own nodes that are, or once were,
       shared entries (they point at themselves for good). A reply that
       points at one of them was written into the user's own thread.
-    * ``answers``: the "Ask my AI" answers the user owns in other
-      people's threads (their pointer is not at an entry of the user's).
+    * ``answers``: the AI replies the user asked for in other people's
+      shared threads (their pointer is not at an entry of the user's).
     * ``closed_answers``: those of them whose entry the user cannot read
-      now. An answer restates the entry, so it is open to its owner
-      exactly while the entry is: it closes when the user is removed,
+      now. Such a reply is written from the thread, so it is open to its
+      owner exactly while the entry is: it closes when the user is removed,
       hides the author, or the author takes the entry back, changes its
       audience, deletes the circle, the entry, their writing or their
       account, and opens again when the entry does.
@@ -365,29 +362,24 @@ def foreign_shared(node, user_id) -> bool:
     return not _circles_access(node, user_id, as_ai=True)
 
 
-_ASK_MARKER = "_circle_ask"     # llm_nodes.CIRCLE_ASK_MARKER
-
-
-def _has_ask_marker(node) -> bool:
-    meta = getattr(node, 'tool_calls_meta', None)
-    return isinstance(meta, str) and f'"{_ASK_MARKER}"' in meta
-
-
 def is_others_thread_answer(node) -> bool:
-    """*node* is an AI answer its owner asked for in someone else's shared
-    thread ("Ask my AI"): written from that person's shared entry, so it
-    stays in the thread. It is the reader's to read there, and no part
-    of the reader's corpus (export, profile builds, recent context,
-    search) or of their other prompts.
+    """*node* is an AI reply its owner asked for in someone else's shared
+    thread. It is the owner's: in the thread, their Log, their search,
+    their data download and their profile builds (Peter, 2026-11-11:
+    "both Ben's own writing and LLM where Ben's the human owner should
+    go to Ben's profile"). It is written from that thread, so two rules
+    are its own:
 
-    Whatever its level now: taken back to Only me it is still written
-    from that entry. Two records say so, and either is enough: its
-    pointer at an entry that is not its owner's (an entry that no longer
-    exists is nobody's), and the answer's marker."""
+    * its owner, and a model acting for them, reads it exactly while the
+      entry is open to the owner (answer_open_to_owner), like the thread
+      itself, and it is deleted with the entry;
+    * it never goes out on the training key (is_others_shared_writing).
+
+    Whatever its level now: set to Only me it is still written from that
+    thread. The record is its pointer at an entry that is not its
+    owner's (an entry that no longer exists is nobody's)."""
     if getattr(node, 'node_type', None) != "llm":
         return False
-    if _has_ask_marker(node):
-        return True
     entry_id = getattr(node, 'audience_root_id', None)
     return (isinstance(entry_id, int) and entry_id != node.id
             and audience_entry_owner(entry_id) != _node_owner_id(node))
@@ -395,7 +387,7 @@ def is_others_thread_answer(node) -> bool:
 
 def is_others_shared_writing(node) -> bool:
     """*node* was written into a shared thread by someone other than the
-    thread's author (a reader's reply, a reader's "Ask my AI" answer).
+    thread's author (a reader's reply, an AI reply a reader asked for).
     In anyone else's prompt such writing is never licensed for training,
     whatever its own ai_usage: its writer shared it with people."""
     entry_id = getattr(node, 'audience_root_id', None)
@@ -423,8 +415,9 @@ def others_shared_writing_ids(node_ids):
 
 
 def answer_open_to_owner(node, user_id) -> bool:
-    """An "Ask my AI" answer is open to its owner exactly while the
-    entry it was written from is (CircleSets.closed_answers)."""
+    """An AI reply asked for in someone else's shared thread is open to
+    its owner exactly while the entry of that thread is
+    (CircleSets.closed_answers)."""
     entry_id = getattr(node, 'audience_root_id', None)
     return (isinstance(entry_id, int) and entry_id != node.id
             and entry_id in circle_sets(user_id).readable)
@@ -457,10 +450,10 @@ _ANSWER_ENTRY = None
 
 def own_answers_filter(node_model, user_id, closed_only=False):
     """For a listing of the user's own nodes that does not go through
-    accessible_nodes_filter (keyword search, the Log, pins): a condition
-    that leaves out the user's "Ask my AI" answers in other people's
-    threads (with *closed_only*, only the ones closed to them now), or
-    None when the user has none."""
+    accessible_nodes_filter (keyword search, the Log): a condition that
+    leaves out the user's AI replies in other people's shared threads
+    (with *closed_only*, only the ones closed to them now), or None when
+    the user has none."""
     sets = circle_sets(user_id)
     ids = sets.closed_answers if closed_only else sets.answers
     return node_model.id.notin_(sorted(ids)) if ids else None
@@ -479,12 +472,11 @@ def _can_user_access_ignoring_deleted(node, user_id: int,
         getattr(node, 'human_owner_id', None)
         and node.human_owner_id == user_id)
     if owned:
-        # The user's own. The exception is the answer their "Ask my AI"
-        # wrote in someone else's shared thread: never for a model (it
-        # stays in that thread), and for the user only while the entry
-        # it was written from is there to read.
+        # The user's own. The exception is an AI reply they asked for
+        # in someone else's shared thread: theirs (and their models')
+        # only while the entry of the thread is there to read.
         if is_others_thread_answer(node):
-            return not as_ai and answer_open_to_owner(node, user_id)
+            return answer_open_to_owner(node, user_id)
         return True
 
     privacy_level = getattr(node, 'privacy_level', PrivacyLevel.PRIVATE)
@@ -735,12 +727,11 @@ def accessible_nodes_filter_ignoring_deleted(node_model, user_id: int,
 
     Circles adds literal id lists only (CircleSets), and only for a user
     they concern: the entries whose threads the user reads, and the
-    user's "Ask my AI" answers that are closed to them (all of them for
-    a model). Without either the expression is the one from before the
+    user's AI replies in other people's threads that are closed to them. Without either the expression is the one from before the
     feature.
     """
     sets = circle_sets(user_id)
-    hidden_answers = sets.answers if as_ai else sets.closed_answers
+    hidden_answers = sets.closed_answers
     entries = sets.own_entries if as_ai else (
         sets.own_entries | sets.readable)
     if not hidden_answers and not entries:

@@ -128,9 +128,58 @@ def test_delete_all_my_writing_closes_shared_entries_at_once(
         lambda j, t: tokens.append(t), now=after) == [job.id]
     assert up.run_purge_job(job.id, tokens[0]) == "done"
     _db.session.expire_all()
-    _nothing_of_alice_is_left(world, circles)
-    # The account stays.
+    # The account stays, and so does what other people keep about her
+    # (Peter, 2026-11-11: "it's Anna's circle so Ben should stay in it").
     assert _db.session.get(User, a.id) is not None
+    aid = a.id
+    # Gone: the circles she made, with their members and shares; the
+    # list of people she hid; the notes about her entries.
+    assert Circle.query.filter_by(user_id=aid).count() == 0
+    assert CircleMember.query.filter_by(
+        circle_id=circles.ids["alices"]).count() == 0
+    assert NodeCircle.query.filter_by(
+        circle_id=circles.ids["alices"]).count() == 0
+    assert NodeReader.query.filter_by(node_id=circles.ids["entry"]).count() == 0
+    assert CircleMute.query.filter_by(user_id=aid).count() == 0
+    assert UserNotification.query.filter_by(actor_user_id=aid).count() == 0
+    # Kept: her place in bob's circle, the entry bob named her for, and
+    # carol's choice to hide her.
+    assert sorted(m.user_id for m in CircleMember.query.filter_by(
+        circle_id=circles.ids["bobs"])) == sorted([aid, circles.carol.id])
+    assert NodeReader.query.filter_by(
+        node_id=circles.ids["bobs_entry"], user_id=aid).count() == 1
+    assert CircleMute.query.filter_by(
+        user_id=circles.carol.id, muted_user_id=aid).count() == 1
+    assert _db.session.get(Circle, circles.ids["bobs"]) is not None
+    # bob's entry is still open to her.
+    assert can_user_access_node(
+        _db.session.get(Node, circles.ids["bobs_entry"]), aid)
+
+
+def test_delete_all_my_writing_keeps_circles_made_after_the_request(
+        app, world, stubs, circles):
+    """What the user makes after the request stays (#590): a circle and
+    a hidden person made during the 30 days are not deleted."""
+    a = world.alice
+    job, _ = up.schedule_purge(a, requested_by_id=a.id, source="self")
+    _db.session.commit()
+    later = datetime.utcnow() + timedelta(days=1)
+    new = Circle(user_id=a.id, name="New people", created_at=later)
+    _db.session.add(new)
+    _db.session.add(CircleMute(user_id=a.id, muted_user_id=world.bob.id,
+                               created_at=later))
+    _db.session.commit()
+    new_id = new.id
+    tokens = []
+    after = datetime.utcnow() + timedelta(days=30, minutes=1)
+    assert up.dispatch_due_jobs(
+        lambda j, t: tokens.append(t), now=after) == [job.id]
+    assert up.run_purge_job(job.id, tokens[0]) == "done"
+    _db.session.expire_all()
+    assert _db.session.get(Circle, new_id) is not None
+    assert _db.session.get(Circle, circles.ids["alices"]) is None
+    assert [m.muted_user_id for m in CircleMute.query.filter_by(
+        user_id=a.id)] == [world.bob.id]
 
 
 def test_account_deletion_removes_everything_of_circles(
@@ -185,19 +234,15 @@ def test_the_daily_cleanup_deletes_a_shared_entrys_rows(
         circle_id=circles.ids["alices"]).count() == 2
 
 
-# ── A reader's Ask-my-AI answer goes with the author's entry ────────────
+# ── A reader's AI reply goes with the author's entry ────────────────────
 
 @pytest.fixture
 def answer(app, world, circles):
-    """bob's Ask-my-AI answer under alice's shared entry, and where it
-    came from."""
-    import json as _json
+    """The AI reply bob asked for under alice's shared entry."""
     llm = world.llm
     a = _node(llm, circles.entry, owner=world.bob.id, node_type="llm",
               privacy="circles", text="derived from alice's entry",
-              llm_model="claude-opus",
-              tool_calls_meta=_json.dumps(
-                  [{"name": "_circle_ask", "entry_id": circles.entry.id}]))
+              llm_model="claude-opus")
     a.audience_root_id = circles.entry.id
     _db.session.commit()
     return a.id

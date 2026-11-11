@@ -1071,12 +1071,13 @@ def _count_user_data(user_id, plan, scope):
         c[key] = _count(Node, col.in_(deleted_ids), plan.not_owned(U))
     for model, key in _USER_TABLES:
         c[key] = _count(model, scope.rows(model))
-    # Circles: the audiences and notes of the user's nodes, and
-    # everything of Circles that is the user's or names them.
+    # Circles: the audiences and notes of the user's nodes, and the rows
+    # of Circles this scope deletes (circles.user_rows_filters).
     from backend.utils import circles as cz
     c["node_audience"] = sum(
         _count(model, cond) for model, cond in cz.node_rows_filters(owned_ids))
-    for model, cond, key in cz.user_rows_filters(U):
+    for model, cond, key in cz.user_rows_filters(
+            U, everything=scope.everything, before=scope.requested_at):
         c[key] = _count(model, cond)
 
     user = db.session.get(User, U)
@@ -1349,14 +1350,18 @@ def _purge_round(user, plan, counts, heartbeat):
         if model is ExternalAccount:
             continue
         counts[key] += _delete(model, scope.rows(model))
-    # Circles: the user's circles with their members and shares, their
-    # memberships in other people's circles, the entries they were named
-    # for, the mutes by and of them, and the notes other people hold
-    # about their entries. Either scope: like the notifications, these
-    # go with "Delete all my writing" too.
+    # Circles. An account deletion: the user's circles with their
+    # members and shares, their memberships in other people's circles,
+    # the entries they were named for, the mutes by and of them, and the
+    # notes other people hold about their entries. "Delete all my
+    # content": the circles the user made and the list of people they
+    # hid; their place in other people's circles, the entries they were
+    # named for and other people's mutes of them stay (Peter,
+    # 2026-11-11; circles.user_rows_filters).
     from backend.utils.circles import user_rows_filters
-    for model, cond, key in user_rows_filters(U):
-        counts[key] += _delete(model, cond)
+    for model, cond, key in user_rows_filters(
+            U, everything=scope.everything, before=scope.requested_at):
+        counts[key] = counts.get(key, 0) + _delete(model, cond)
     db.session.commit()
     _beat(heartbeat)
 

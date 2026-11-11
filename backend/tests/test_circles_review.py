@@ -160,7 +160,7 @@ def _world(app):
     assert r.status_code == 201, r.get_json()
     ben_reply = r.get_json()["id"]
     r = _client(app, "ben").post(f"/api/nodes/{e}/llm",
-                                 json={"circle_ask": True})
+                                 json={})
     assert r.status_code == 202, r.get_json()
     answer = r.get_json()["node_id"]
     a = _db.session.get(Node, answer)
@@ -195,7 +195,7 @@ GET_ROUTES = (
 POST_ROUTES = (
     ("POST", "/api/nodes/{id}/tts", {}),
     ("POST", "/api/nodes/{id}/llm", {}),
-    ("POST", "/api/nodes/{id}/llm", {"circle_ask": True}),
+    ("POST", "/api/nodes/{id}/llm", {}),
     ("POST", "/api/nodes/", {"content": "x", "parent_id": "{id}",
                              "privacy_level": "circles", "ai_usage": "chat"}),
     ("POST", "/api/nodes/", {"content": "x", "parent_id": "{id}",
@@ -418,7 +418,7 @@ def test_pinned_answer_stays_in_readers_log_after_entry_deleted(app):
     close = _circle(app, "anna", "Close", ["ben"])
     e = _share(app, circle_ids=[close])
     ben = _client(app, "ben")
-    r = ben.post(f"/api/nodes/{e}/llm", json={"circle_ask": True})
+    r = ben.post(f"/api/nodes/{e}/llm", json={})
     aid = r.get_json()["node_id"]
     a = _db.session.get(Node, aid)
     a.set_content("ANSWER-DERIVED-FROM-ANNA")
@@ -435,7 +435,7 @@ def test_pinned_answer_stays_in_readers_log_after_entry_deleted(app):
 
 def _answer(app, who, parent):
     r = _client(app, who).post(f"/api/nodes/{parent}/llm",
-                               json={"circle_ask": True})
+                               json={})
     assert r.status_code == 202, r.get_json()
     aid = r.get_json()["node_id"]
     a = _db.session.get(Node, aid)
@@ -565,7 +565,7 @@ def test_reader_nodes_never_widen(app, flag_off, entry_state):
     assert not widened
 
 
-def test_ask_my_ai_model_through_the_route(app):
+def test_a_members_model_through_the_route(app):
     close = _circle(app, "anna", "Close", ["ben"])
     anna = _user("anna")
     llm_user = User(username="claude-x", twitter_id="llm-claude-x")
@@ -586,7 +586,7 @@ def test_ask_my_ai_model_through_the_route(app):
     _db.session.commit()
     e = _share(app, circle_ids=[close], parent_id=her_ai.id)
     r = _client(app, "ben").post(f"/api/nodes/{e}/llm",
-                                 json={"circle_ask": True})
+                                 json={})
     a = _db.session.get(Node, r.get_json()["node_id"])
     seen = _client(app, "ben").get(f"/api/nodes/{a.id}").get_json()
     assert a.llm_model == "gpt-5"

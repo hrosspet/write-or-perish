@@ -1064,17 +1064,18 @@ def get_user_ai_preferences_content(user_id, pinned_node=None, usage=None):
     return None
 
 
-def _carries_others_shared(node_chain, user_id):
-    """The chain holds circle-shared writing that is not *user_id*'s own
-    (Circles): such a prompt stays off the training key."""
-    return any(
-        n.privacy_level == "circles"
-        and n.user_id != user_id
-        and (n.human_owner_id or n.user_id) != user_id
-        for n in node_chain)
+def _carries_circle_text(node_chain, llm_node=None):
+    """The prompt is written in, or carries a node of, a circle-shared
+    thread (Circles): it stays off the training key, whatever the nodes'
+    ai_usage and whoever wrote them. People shared that text with
+    people, not with training."""
+    if llm_node is not None and llm_node.audience_root_id is not None:
+        return True
+    return any(n.privacy_level == "circles"
+               and n.audience_root_id is not None for n in node_chain)
 
 
-def _load_node_chain(parent_node, user_id, circle_ask=False):
+def _load_node_chain(parent_node, user_id, in_shared_thread=False):
     """Root-first ancestor chain ending at *parent_node*, with every
     node's DEK unwrapped in one concurrent batch. The message builder
     decrypts each node of the chain; on a cold Celery worker a 120-deep
@@ -1097,9 +1098,10 @@ def _load_node_chain(parent_node, user_id, circle_ask=False):
     is refused (AIUsageRefused).
 
     Circles: the walk reads as a model acting for the user, so it stops
-    below another person's circle-shared node. Only *circle_ask*, the
-    reader's "Ask my AI" in that thread, lets it read what the reader
-    reads there (still without the nodes marked 'none')."""
+    below another person's circle-shared node. A reply written in a
+    shared thread (*in_shared_thread*: the reply points at the thread's
+    entry) reads what its requester reads there, as a reply in a private
+    thread reads the thread (still without the nodes marked 'none')."""
     from backend.utils.encryption import prefetch_deks
     from backend.utils.privacy import (
         can_user_see_node_or_placeholder, can_user_see_node_or_tombstone,
@@ -1109,7 +1111,7 @@ def _load_node_chain(parent_node, user_id, circle_ask=False):
         raise ValueError("_load_node_chain needs the requesting user's id")
     visible = []
     current = parent_node
-    as_ai = not circle_ask
+    as_ai = not in_shared_thread
     if current is not None and not can_user_see_node_or_tombstone(
             current, user_id, as_ai=as_ai):
         current = None
@@ -1135,6 +1137,81 @@ def _load_node_chain(parent_node, user_id, circle_ask=False):
     prefetch_deks(n.content for n in node_chain
                   if not shown_as_deleted(n, user_id))
     return node_chain
+
+
+def shared_prompt_ids(llm_node, node_chain, user_id):
+    """Ids of the prompt nodes in *node_chain* whose personal
+    placeholders ({user_profile}, {user_memory}, ...) are filled with
+    *user_id*'s own latest artifacts although the node is someone
+    else's (Circles; Peter, 2026-11-11).
+
+    A prompt node follows its own sharing, like any node: when its
+    author shared it with an audience the requester is in, the requester
+    reads it, so it is in their chain, and a reply they ask for in a
+    shared thread runs under it with THEIR artifacts. The versions
+    pinned on the node are its author's and are never read for anyone
+    else. A prompt that is not shared with the requester is not in
+    their chain at all (_load_node_chain stops below it), and no
+    artifact is added to their reply.
+
+    Only for a reply written in a shared thread, and only for prompt
+    nodes that are circle-shared: in a public thread someone else's
+    prompt keeps its placeholders empty (#483)."""
+    if llm_node.audience_root_id is None:
+        return frozenset()
+    return frozenset(
+        n.id for n in node_chain
+        if n.privacy_level == "circles"
+        and n.audience_root_id is not None
+        and not node_is_users(n, user_id)
+        and n.is_system_prompt)
+
+
+def _others_circle_reply_label(node, user_id):
+    """For an AI reply in a circle-shared thread that someone other than
+    *user_id* asked for: its name in the prompt, "<model> via
+    @<requester>" (llm_nodes.circle_reply_label). None for every other
+    node, so prompts outside shared threads are unchanged."""
+    if node.audience_root_id is None:
+        return None
+    requester_id = node.human_owner_id
+    if requester_id is None or requester_id == user_id:
+        return None
+    from backend.utils.llm_nodes import circle_reply_label
+    requester = User.query.get(requester_id)
+    return circle_reply_label(
+        node.llm_model, requester.username if requester else None)
+
+
+def _circle_thread_note(llm_node, node_chain, user_id, model_id,
+                        with_profile=False):
+    """The closing note of a reply written in a circle-shared thread
+    that other people write in: who the reply is for and how the
+    replies are named, so the model can follow the discussion. None
+    outside shared threads, and in a shared thread that holds only the
+    requester's own nodes (the prompt then reads as in a private
+    thread)."""
+    if llm_node.audience_root_id is None:
+        return None
+    others = any(
+        n.audience_root_id is not None
+        and (n.human_owner_id or n.user_id) != user_id for n in node_chain)
+    if not others:
+        return None
+    from backend.utils.llm_nodes import circle_reply_label
+    requester = User.query.get(user_id)
+    name = requester.username if requester else None
+    note = (
+        "[This is a thread shared between several people. Each entry "
+        "names its author. A reply marked \"<model> via @<name>\" was "
+        "written by that person's AI; your own earlier replies are the "
+        "unmarked assistant turns. This reply is asked for by "
+        f"@{name} and will be shown as "
+        f"\"{circle_reply_label(model_id, name)}\".")
+    if with_profile:
+        note += (f" The profile and other personal context in the "
+                 f"prompt above are @{name}'s.")
+    return note + "]"
 
 
 def _turn_still_readable(node_ids):
@@ -3058,9 +3135,11 @@ def _ca_batch_poll(task, llm_node, parent_node, meta, entry, user_id):
     # key type was stored falls back to the chain (a load, not a render).
     key_type = entry.get("key_type")
     if not key_type:
-        chain = _load_node_chain(parent_node, user_id)
+        chain = _load_node_chain(
+            parent_node, user_id,
+            in_shared_thread=llm_node.audience_root_id is not None)
         key_type = determine_api_key_type(chain, logger=logger)
-        if _carries_others_shared(chain, user_id):
+        if _carries_circle_text(chain, llm_node):
             key_type = 'chat'
         entry["key_type"] = key_type  # once; written with the heartbeat
     api_keys = llm_batch.apply_batch_key_override(
@@ -3759,11 +3838,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # re-dispatch (read rerun, resumed batch) does not pass through
             # create_llm_placeholder. A batch already sent is collected.
             if batch_entry is None:
-                from backend.utils.llm_nodes import (
-                    is_circle_ask, reply_refusal)
+                from backend.utils.llm_nodes import reply_refusal
                 refused = reply_refusal(parent_node, user_id,
-                                        llm_node.ai_usage,
-                                        circle_ask=is_circle_ask(llm_node))
+                                        llm_node.ai_usage)
                 if refused is not None:
                     logger.warning(
                         "Node %s: reply refused, AI usage keeps the thread "
@@ -3791,9 +3868,29 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             llm_node.llm_task_progress = 20
             db.session.commit()
 
-            from backend.utils.llm_nodes import is_circle_ask
+            # Circles: a reply in a shared thread reads the thread as
+            # its requester does. A prompt node its author shared with
+            # the requester is in the chain like any node they read,
+            # and is filled with the requester's own artifacts
+            # (shared_prompt_ids).
             node_chain = _load_node_chain(
-                parent_node, user_id, circle_ask=is_circle_ask(llm_node))
+                parent_node, user_id,
+                in_shared_thread=llm_node.audience_root_id is not None)
+            circle_prompts = shared_prompt_ids(llm_node, node_chain, user_id)
+
+            def _fills(n):
+                """*n*'s personal placeholders resolve in this reply:
+                the user's own node, or a prompt shared with them in a
+                circle."""
+                return node_is_users(n, user_id) or n.id in circle_prompts
+
+            def _pins(n):
+                """The node whose pinned versions a placeholder of *n*
+                resolves from: *n* when it is the user's own. A shared
+                prompt pins its author's versions, so it gives none and
+                the user's latest are read."""
+                return n if n is not None and node_is_users(
+                    n, user_id) else None
 
             # Step 2: Build messages array
             self.update_state(state='PROGRESS', meta={'progress': 30, 'status': 'Preparing messages'})
@@ -3820,7 +3917,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             export_node = None
             export_placeholder_match = None
             for node in node_chain:
-                if not _alive(node) or not node_is_users(node, user_id):
+                if not _alive(node) or not _fills(node):
                     continue
                 m = USER_EXPORT_PATTERN.search(node.get_content())
                 if m:
@@ -4064,8 +4161,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # A {quote_ext:ID} is volatile too: a cached render would
                 # replay the resolved reference on later turns without
                 # the licence hearing of it (#325 review).
+                # Nor a shared prompt rendered for a member: it reads
+                # the member's latest artifacts, not pinned versions, so
+                # a stored render would go stale. (A stored render is
+                # keyed by user either way, _system_render_variant.)
                 system_render_cacheable = (
-                    not USER_EXPORT_PATTERN.search(_sys_text)
+                    system_node.id not in circle_prompts
+                    and not USER_EXPORT_PATTERN.search(_sys_text)
                     and not CA_TWEETS_PATTERN.search(_sys_text)
                     and not has_quotes(_sys_text)
                     and not has_ext_quotes(_sys_text)
@@ -4086,7 +4188,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 for n in node_chain:
                     if cached_system_render is not None and n is system_node:
                         continue  # already rendered — no fetch needed
-                    if (_alive(n) and node_is_users(n, user_id)
+                    if (_alive(n) and _fills(n)
                             and placeholder in n.get_content()):
                         return n
                 return None
@@ -4138,7 +4240,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
             if needs_profile:
                 profile_obj = get_user_profile_content(
-                    user_id, pinned_node=profile_node, usage=context_usage
+                    user_id, pinned_node=_pins(profile_node),
+                    usage=context_usage
                 )
                 if profile_obj:
                     # Metadata already baked into stored content
@@ -4146,19 +4249,22 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
             if needs_todo:
                 user_todo_content = get_user_todo_content(
-                    user_id, pinned_node=todo_node, usage=context_usage
+                    user_id, pinned_node=_pins(todo_node),
+                    usage=context_usage
                 )
 
             if needs_recent:
                 rc = get_user_recent_content(
-                    user_id, pinned_node=recent_node, usage=context_usage
+                    user_id, pinned_node=_pins(recent_node),
+                    usage=context_usage
                 )
                 if rc:
                     # Metadata already baked into stored content
                     user_recent_content = rc.get_content()
 
             if needs_recent_raw:
-                raw_cutoff = recent_raw_node.created_at if recent_raw_node else None
+                raw_cutoff = (recent_raw_node.created_at
+                              if _pins(recent_raw_node) else None)
                 raw_result = get_user_recent_raw_content(
                     user_id, created_before=raw_cutoff, usage=context_usage
                 )
@@ -4172,14 +4278,16 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
             if needs_ai_prefs:
                 user_ai_preferences_content = get_user_ai_preferences_content(
-                    user_id, pinned_node=ai_prefs_node, usage=context_usage
+                    user_id, pinned_node=_pins(ai_prefs_node),
+                    usage=context_usage
                 )
 
             if needs_artifacts:
                 (user_memory_content, user_scratchpad_content,
                  user_intentions_content,
                  user_artifacts_index) = get_user_artifacts_context(
-                    user_id, pinned_node=artifacts_node, usage=context_usage,
+                    user_id, pinned_node=_pins(artifacts_node),
+                    usage=context_usage,
                     rendered={p for p in _ARTIFACT_PLACEHOLDERS
                               if _placeholder_node(p) is not None},
                 )
@@ -4294,17 +4402,15 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     "Node %s: read thread (turn %r); forcing chat keys "
                     "over the chain's %r", llm_node_id, ca_turn, key_type)
                 key_type = 'chat'
-            if key_type != 'chat' and _carries_others_shared(
-                    node_chain, user_id):
-                # Circles: a prompt that carries another person's
-                # circle-shared writing (a reader's "Ask my AI", or a
-                # reader's reply in the author's own thread) never goes
-                # out on the training key, whatever the nodes' ai_usage:
-                # that person shared it with people, not with training.
+            if key_type != 'chat' and _carries_circle_text(
+                    node_chain, llm_node):
+                # Circles: circle text never goes out on the training
+                # key, whatever the nodes' ai_usage and whoever asks
+                # (the author in her own thread too): it was shared with
+                # people, not with training.
                 logger.info(
-                    "Node %s: thread carries another person's shared "
-                    "writing; forcing chat keys over the chain's %r",
-                    llm_node_id, key_type)
+                    "Node %s: circle-shared thread; forcing chat keys "
+                    "over the chain's %r", llm_node_id, key_type)
                 key_type = 'chat'
             if (ca_turn in ("read", "read_again")
                     and llm_node.ai_usage == 'train'):
@@ -4518,7 +4624,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     if user and max_export_tokens != 0:
                         # Use the timestamp of the node containing {user_export} as cutoff
                         # to only include archive data created before that node
-                        created_before = export_node.created_at if export_node else None
+                        created_before = (export_node.created_at
+                                          if _pins(export_node) else None)
                         # days=N floors the window at N days before that
                         # same cutoff, so a period review anchors to when
                         # the request was written, not when the task runs.
@@ -4643,9 +4750,24 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     # text as tool calls with the system's answers (#604).
                     replayed_writes = []
 
+                    # Circles: an AI reply another member of the shared
+                    # thread asked for is not this model's own earlier
+                    # turn. It is sent as a message in the thread, named
+                    # like a person's entry ("<model> via @<requester>:"),
+                    # so each model can tell the replies apart. The
+                    # requester's own replies stay assistant turns, and
+                    # outside shared threads nothing changes.
+                    others_reply_label = (
+                        _others_circle_reply_label(node, user_id)
+                        if is_llm_node else None)
                     if is_llm_node:
                         role = "assistant"
                         message_text = f"{time_prefix} {node_content}"
+                        if others_reply_label:
+                            role = "user"
+                            message_text = (
+                                f"{time_prefix} {others_reply_label}: "
+                                f"{node_content}")
                         if has_ext_quotes(node_content):
                             quoted_ext_ids.extend(
                                 find_ext_quote_ids(node_content))
@@ -4724,7 +4846,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         # public thread, a message of theirs): its personal
                         # placeholders read as empty, and none of the
                         # resolvers below run on it.
-                        owned = node_is_users(node, user_id)
+                        owned = _fills(node)
                         if not owned:
                             message_text = blank_personal_placeholders(
                                 message_text)
@@ -4856,8 +4978,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             # user's rows (placeholders blanked), so its
                             # render carries no verdict of theirs.
                             _verdict_text = (
-                                _sys_text if node_is_users(system_node, user_id)
-                                else "")
+                                _sys_text if _fills(system_node) else "")
                             store_render(
                                 flask_app.config, system_node, message_text,
                                 render_variant,
@@ -4941,6 +5062,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     ca_note = CA_CHAT_TURN_NOTE
                 plain_notes = []
                 notes = agentic_notes if is_agentic else plain_notes
+                circle_note = _circle_thread_note(
+                    llm_node, node_chain, user_id, model_id,
+                    with_profile=bool(circle_prompts))
+                if circle_note:
+                    notes.append(circle_note)
                 if reference_marks:
                     notes.append(reference_marks)
                 if ca_read_since:

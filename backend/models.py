@@ -579,16 +579,17 @@ class Node(db.Model):
     # has one audience. NULL = not shared with anyone: a "circles" node
     # without it behaves as private (old rows, old clients, #588).
     # Set only by the code that shares an entry (circles.set_audience,
-    # the apply-to-replies cascade) and by the explicit reply paths
-    # (circles.join_reply: a person's typed, recorded or uploaded reply
-    # into the thread, and an "Ask my AI" answer). Nothing else that is
-    # created under a shared node joins its audience: a Voice session, a
-    # Glean prompt and gleaning, a Text-mode prompt, an AI reply of the
-    # author's, a node type added later. They keep the level they were
-    # created with, and a "circles" level without this pointer is
-    # private.
-    # No foreign key on purpose: on a reply or an "Ask my AI" answer it
-    # is also the lasting record of whose thread the node was written
+    # the apply-to-replies cascade) and by the explicit reply paths:
+    # circles.join_reply (a person's typed, recorded or uploaded reply
+    # into the thread) and circles.join_ai_reply (an AI reply one of the
+    # thread's people asked for under a node of the thread; it is set
+    # there also on a reply its requester keeps private). Nothing else
+    # that is created under a shared node joins its audience: a prompt
+    # node (Voice, Text mode, Glean) and what is written below it, a
+    # node type added later. They keep the level they were created with,
+    # and a "circles" level without this pointer is private.
+    # No foreign key on purpose: on a reply it is also the lasting
+    # record of whose thread the node was written
     # into, and it must outlive the entry. A pointer whose entry is gone
     # reads as "someone else's, closed" (privacy.py, circles.py).
     audience_root_id = db.Column(db.Integer, nullable=True, index=True)
@@ -779,30 +780,6 @@ def _enforce_node_content_encryption(mapper, connection, node):
             "encrypting; fix the writer (use set_content/set_privacy_level)",
             node.id, node.privacy_level)
         node.content = encrypt_content(node.content)
-
-
-@event.listens_for(Node, "before_update")
-def _keep_answer_pointer(mapper, connection, node):
-    """An "Ask my AI" answer carries two records of the entry it was
-    written from: its pointer (audience_root_id), which the query
-    filters read, and its marker in tool_calls_meta. If an update would
-    leave the marker without the pointer, the pointer is put back from
-    the marker, so the filters never lose an answer."""
-    if node.audience_root_id is not None or node.node_type != "llm":
-        return
-    meta = node.tool_calls_meta
-    if not isinstance(meta, str) or '"_circle_ask"' not in meta:
-        return
-    import json
-    try:
-        entries = [m.get("entry_id") for m in json.loads(meta)
-                   if isinstance(m, dict) and m.get("name") == "_circle_ask"]
-    except (ValueError, TypeError):
-        return
-    if entries and isinstance(entries[0], int):
-        logger.warning("Node %s: Ask-my-AI answer lost its thread pointer; "
-                       "restored from its marker", node.id)
-        node.audience_root_id = entries[0]
 
 
 class Circle(db.Model):

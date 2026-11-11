@@ -30,8 +30,7 @@ from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.embeddings import (
     EMBEDDING_MODEL, content_hash, embed_texts, pack_vector,
 )
-from backend.utils.privacy import (
-    AI_ALLOWED, answers_may_exist, others_thread_answer_filter)
+from backend.utils.privacy import AI_ALLOWED
 
 from backend.utils.hidden_rows import account_on_hold_user_ids, hidden_ids
 
@@ -87,11 +86,6 @@ def _candidate_nodes(limit):
             # The nodes a "Delete all my content" hid are soft-deleted,
             # so they are left out above (#590).
             ~User.id.in_(account_on_hold_user_ids()),
-            # Circles: an "Ask my AI" answer in someone else's shared
-            # thread is written from their entry; it never enters the
-            # reader's search index.
-            *([~others_thread_answer_filter(Node)]
-              if answers_may_exist() else []),
         )
         .filter(or_(
             NodeEmbedding.id.is_(None),

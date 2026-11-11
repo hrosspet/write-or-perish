@@ -22,7 +22,7 @@ nothing here decrypts content.
 import logging
 from datetime import datetime
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 
 from backend.extensions import db
 from backend.models import (
@@ -309,7 +309,7 @@ def audience_for_viewer(node, viewer_id):
         "is_author": is_author,
         "readers": [u.username for u in readers],
         "is_entry": entry.id == node.id,
-        # May a model read the entry when a reader asks (Ask my AI)?
+        # May a model read the entry (an AI reply in the thread)?
         "entry_ai_usage": entry.ai_usage,
     }
     if is_author and entry.id == node.id:
@@ -370,16 +370,125 @@ def preview_readers(circles, people, owner_id):
 
 def parent_shared_entry(node):
     """The shared entry of the thread *node* was written into (its
-    parent is shared), or None."""
+    parent is in a shared thread), or None."""
     if node.parent_id is None:
         return None
-    return shared_entry_of(db.session.get(Node, node.parent_id))
+    entry = shared_entry_of(db.session.get(Node, node.parent_id))
+    # The discussion leading up to a shared entry may be shared with it
+    # (share_thread_path): its parent then points at the entry itself,
+    # which does not make the entry a reply in its own thread.
+    if entry is not None and entry.id == node.id:
+        return None
+    return entry
+
+
+# How far above an entry the discussion leading up to it is followed.
+THREAD_PATH_HOPS = 500
+PROMPT_ALONE = (
+    "A thread's prompt is shared together with the discussion below it. "
+    "Share an entry of the thread and choose to share the discussion "
+    "leading up to it.")
+
+
+def thread_path(node, user_id):
+    """The discussion leading up to *node*: the nodes above it that are
+    *user_id*'s own (their entries, the thread's prompt, the AI replies
+    they asked for), nearest first, up to the thread's start or the
+    first node that is someone else's. Only the path, no side branch."""
+    path = []
+    current = node.parent if node is not None else None
+    for _ in range(THREAD_PATH_HOPS):
+        if (current is None
+                or (current.human_owner_id or current.user_id) != user_id):
+            break
+        path.append(current)
+        current = current.parent
+    return path
+
+
+def path_is_shared(node, path):
+    """Every alive node of *path* is read by *node*'s audience."""
+    alive = [n for n in path if n.deleted_at is None]
+    return bool(alive) and is_shared_entry(node) and all(
+        n.privacy_level == CIRCLES and n.audience_root_id == node.id
+        for n in alive)
+
+
+def share_thread_path(node, user, data):
+    """``share_path`` of a sharing request for the user's own entry
+    *node* ("Share also the discussion leading up to this node?";
+    Peter, 2026-11-11). True: every node of the path from the thread's
+    start down to *node* (the prompt the thread starts from included) is
+    read by *node*'s audience: it points at *node*, like a reply below
+    it. False: the path is taken back to Only me. Without the flag
+    nothing above the entry changes: sharing an entry shares only it.
+    A node of the path that is public stays public."""
+    if "share_path" not in data or not is_shared_entry(node):
+        return
+    for above in thread_path(node, user.id):
+        if above.deleted_at is not None:
+            continue
+        if data.get("share_path"):
+            if above.privacy_level == PrivacyLevel.PUBLIC.value:
+                continue
+            if above.audience_root_id == above.id:
+                clear_audience(above)
+            if above.privacy_level != CIRCLES:
+                above.set_privacy_level(CIRCLES)
+            above.audience_root_id = node.id
+        elif (above.audience_root_id == node.id
+              and above.privacy_level == CIRCLES):
+            above.set_privacy_level(PrivacyLevel.PRIVATE.value)
+    forget_circle_access()
+
+
+# What each personal placeholder of a prompt reads, in the words the
+# dialog before an AI reply uses.
+_PLACEHOLDER_NAMES = (
+    ("{user_profile}", "profile"),
+    ("{user_memory}", "memory"),
+    ("{user_scratchpad}", "scratchpad"),
+    ("{user_intentions}", "intentions"),
+    ("{user_todo}", "to-do list"),
+    ("{user_recent}", "summary of recent writing"),
+    ("{user_recent_raw}", "recent writing"),
+    ("{user_ai_preferences}", "AI preferences"),
+    ("{user_artifacts_index}", "list of artifacts"),
+    ("{user_export", "archive"),
+)
+
+
+def ai_reads(node, user_id):
+    """The artifacts of *user_id*'s own that an AI reply under *node*
+    would read, by name ("profile", "memory", ...), for the dialog shown
+    before the reply is generated in a shared thread: the personal
+    placeholders of every prompt node in the chain the reply is built
+    from that resolves for the user (their own prompt, or one shared
+    with them in a circle). Empty when there is none. Decrypts only
+    prompt nodes the user can read."""
+    from backend.utils.privacy import can_user_access_node
+    found = []
+    current = node
+    for _ in range(THREAD_PATH_HOPS):
+        if current is None or not can_user_access_node(current, user_id):
+            break
+        if current.is_system_prompt and (
+                (current.human_owner_id or current.user_id) == user_id
+                or (current.privacy_level == CIRCLES
+                    and current.audience_root_id is not None)):
+            text = current.get_content() or ""
+            for placeholder, name in _PLACEHOLDER_NAMES:
+                if placeholder in text and name not in found:
+                    found.append(name)
+        current = current.parent
+    order = [name for _, name in _PLACEHOLDER_NAMES]
+    return sorted(found, key=order.index)
 
 
 class ThreadSource:
-    """Where a node was written: the entry's id (0 when only an answer's
-    marker says so) and the entry's owner, None when the entry no longer
-    exists. A source nobody owns is nobody's to widen."""
+    """Where a node was written: the entry's id and the entry's owner,
+    None when the entry no longer exists. A source nobody owns is
+    nobody's to widen."""
 
     def __init__(self, entry_id, owner_id):
         self.entry_id = entry_id
@@ -393,16 +502,15 @@ def thread_source(node):
     """The thread *node* was written into (a ThreadSource), whether or
     not its entry is shared now or still exists; None for a node that
     was not written into anyone's shared thread. A reply in a shared
-    thread and an "Ask my AI" answer keep this for good
-    (Node.audience_root_id is never cleared on them and has no foreign
-    key, so it outlives the entry; the answer's marker says it too), and
-    a node written under such a reply is found through its ancestors.
-    The entry itself is not its own source.
+    thread, typed or written by a model, keeps this for good
+    (Node.audience_root_id is never cleared on it and has no foreign
+    key, so it outlives the entry), and a node written under such a
+    reply is found through its ancestors. The entry itself is not its
+    own source.
 
     Who may widen a node is decided from this, not from what its direct
     parent is at the moment, and a record that no longer resolves stays
     a record: the node is then someone else's for everyone."""
-    from backend.utils.llm_nodes import circle_ask_entry_id, is_circle_ask
     from backend.utils.thread_tree import ancestor_chain
 
     def of(entry_id):
@@ -410,11 +518,8 @@ def thread_source(node):
         return ThreadSource(
             entry_id, entry_owner_id(entry) if entry is not None else None)
 
-    for entry_id in (node.audience_root_id, circle_ask_entry_id(node)):
-        if entry_id is not None and entry_id != node.id:
-            return of(entry_id)
-    if is_circle_ask(node):
-        return ThreadSource(0, None)
+    if node.audience_root_id is not None and node.audience_root_id != node.id:
+        return of(node.audience_root_id)
     if node.id is None or node.parent_id is None:
         return None
     chain = ancestor_chain(
@@ -449,11 +554,9 @@ def set_audience(node, user, circle_ids, usernames, now=None):
     The caller commits. Returns the readers' usernames."""
     now = now or datetime.utcnow()
     if node.is_system_prompt:
-        # An agentic thread's root holds the prompt, with the author's
-        # profile and notes pinned to it: never an entry to share.
-        raise AudienceError(
-            "This is the thread's prompt, not an entry. Share an entry "
-            "of the thread instead.", code="circle_prompt_node")
+        # A prompt is shared only as part of the whole discussion that
+        # leads up to a shared entry (share_thread_path), never alone.
+        raise AudienceError(PROMPT_ALONE, code="circle_prompt_node")
     circles, people = resolve_audience(user, circle_ids, usernames)
     if not preview_readers(circles, people, user.id):
         raise AudienceError(NO_READERS, code="circle_no_readers")
@@ -487,11 +590,25 @@ def set_audience(node, user, circle_ids, usernames, now=None):
     forget_circle_access()
 
     # A long entry is saved as a chain of parts: they are the entry, so
-    # its readers read all of it. Nothing else below it joins on its own
-    # (an AI reply made when the entry was written stays the author's).
+    # its readers read all of it.
     from backend.utils.node_split import split_chain_parts
-    for part in split_chain_parts(node):
+    parts = split_chain_parts(node)
+    for part in parts:
         join_thread_audience(part, node)
+    # An AI reply made along with the entry (auto-generate, Text mode, a
+    # recording) was created before this second step gave the entry its
+    # audience: it carries the entry's level and no pointer yet. It is a
+    # reply in the thread like one asked for afterwards. Replies that
+    # are private (an older entry shared through Edit) stay private.
+    if not was_shared:
+        tip = parts[-1] if parts else node
+        for child in Node.query.filter(
+                Node.parent_id == tip.id, Node.node_type == "llm",
+                Node.privacy_level == CIRCLES,
+                Node.audience_root_id.is_(None),
+                Node.human_owner_id == user.id,
+                Node.deleted_at.is_(None)):
+            join_ai_reply(child, node)
 
     after = reader_ids(node.id)
     note_shared(node, after - before)
@@ -505,6 +622,46 @@ def join_thread_audience(node, entry):
         node.set_privacy_level(CIRCLES)
     if node.audience_root_id == node.id:
         clear_audience(node)
+    node.audience_root_id = entry.id
+    forget_circle_access()
+
+
+def reply_thread_entry(parent, user_id):
+    """The shared entry whose thread an AI reply under *parent* for
+    *user_id* is written in, or None: *parent* is a node of a thread
+    that is shared now (the entry itself, or a reply that points at it,
+    whatever the reply's own level), *user_id* can read *parent*, and
+    they read the thread as its author or as part of its audience."""
+    from backend.utils.privacy import (
+        can_user_access_node, in_audience, pointers_may_exist)
+    if (parent is None or parent.audience_root_id is None
+            or not pointers_may_exist()):
+        return None
+    entry = (parent if parent.audience_root_id == parent.id
+             else db.session.get(Node, parent.audience_root_id))
+    if (entry is None or entry.deleted_at is not None
+            or not is_shared_entry(entry)):
+        return None
+    owner_id = entry_owner_id(entry)
+    if not circles_enabled_for(owner_id):
+        return None
+    if user_id != owner_id and not in_audience(entry.id, user_id):
+        return None
+    if not can_user_access_node(parent, user_id):
+        return None
+    return entry
+
+
+def join_ai_reply(node, entry):
+    """*node*, a new AI reply in *entry*'s shared thread, joins the
+    thread: its pointer is set for good (where it was written). Created
+    "private" it is its requester's alone; with any other level it is
+    "circles" and the thread's audience reads it. Never public."""
+    if node.privacy_level != PrivacyLevel.PRIVATE.value:
+        if node.id is None:
+            node.privacy_level = CIRCLES     # no content to move yet
+        elif node.privacy_level != CIRCLES:
+            node.set_privacy_level(CIRCLES)
     node.audience_root_id = entry.id
     forget_circle_access()
 
@@ -544,7 +701,8 @@ def apply_requested_sharing(node, user, data, *, old_privacy=None,
     names_an_audience = wants and bool(
         data.get("circle_ids") or split_names(data.get("circle_usernames")))
     # What was written into someone else's thread (a reply, a reply to a
-    # reply, an "Ask my AI" answer) is read by that thread's audience or
+    # reply, an AI reply the user asked for) is read by that thread's
+    # audience or
     # by its writer alone, whatever its parent is now and whether or not
     # Circles is on for the writer: never public, never another audience.
     from backend.utils.privacy import pointers_may_exist
@@ -588,18 +746,21 @@ def apply_requested_sharing(node, user, data, *, old_privacy=None,
         raise AudienceError(NO_READERS, code="circle_no_readers")
     if (node.human_owner_id or node.user_id) != user.id:
         raise AudienceError(ONLY_AUTHOR, code="circle_not_author", status=403)
-    return set_audience(node, user, data.get("circle_ids"),
-                        data.get("circle_usernames"))
+    readers = set_audience(node, user, data.get("circle_ids"),
+                           data.get("circle_usernames"))
+    share_thread_path(node, user, data)
+    return readers
 
 
 def join_reply(node, parent, user_id) -> bool:
-    """The explicit act that puts a new node in a shared thread's
-    audience: called by the paths on which a person replies into the
-    thread (typed, recorded, uploaded) and for an "Ask my AI" answer,
-    before the node is saved. *node* is "circles" and *parent* is a node
-    of a shared thread that *user_id* can read; otherwise nothing
-    happens and the node keeps what it was created with. No other code
-    path makes a new node readable by a thread's audience."""
+    """The explicit act that puts a person's new node in a shared
+    thread's audience: called by the paths on which a person replies
+    into the thread (typed, recorded, uploaded), before the node is
+    saved. *node* is "circles" and *parent* is a node of a shared thread
+    that *user_id* can read; otherwise nothing happens and the node
+    keeps what it was created with. An AI reply joins through
+    join_ai_reply (llm_nodes.create_llm_placeholder). No other code path
+    makes a new node readable by a thread's audience."""
     from backend.utils.privacy import can_user_access_node
     if (node is None or parent is None or node.privacy_level != CIRCLES
             or node.audience_root_id is not None):
@@ -700,23 +861,54 @@ def node_rows_filters(node_ids):
     )
 
 
-def user_rows_filters(user_id):
-    """(model, condition, count key) for everything of Circles that
-    belongs to or names one user, in an order that respects the foreign
-    keys: the shares and members of their circles, their memberships in
+def user_rows_filters(user_id, everything=True, before=None):
+    """(model, condition, count key) for the rows of Circles that a purge
+    of *user_id* deletes, in an order that respects the foreign keys.
+
+    An account deletion (*everything*): all that belongs to or names the
+    user: the shares and members of their circles, their memberships in
     other people's circles, the entries they were named for, the mutes
-    by and of them, the notes about their entries, their circles."""
-    own_circles = select(Circle.id).where(Circle.user_id == user_id)
+    by and of them, the notes about their entries, their circles.
+
+    "Delete all my content" (not *everything*; Peter, 2026-11-11): only
+    what is the user's own, made until the request (*before*; what the
+    user makes afterwards stays, #590). The circles they made go, with
+    their members and shares; the list of people they hid goes; the
+    notes about their entries go with the entries. What other people
+    keep about them stays: their place in other people's circles ("it's
+    Anna's circle so Ben should stay in it"), the entries other people
+    named them for, and other people's choice to hide them."""
+    if everything:
+        own_circles = select(Circle.id).where(Circle.user_id == user_id)
+        return (
+            (NodeCircle, NodeCircle.circle_id.in_(own_circles),
+             "node_circle"),
+            (CircleMember, or_(CircleMember.circle_id.in_(own_circles),
+                               CircleMember.user_id == user_id),
+             "circle_member"),
+            (NodeReader, NodeReader.user_id == user_id, "node_reader"),
+            (CircleMute, or_(CircleMute.user_id == user_id,
+                             CircleMute.muted_user_id == user_id),
+             "circle_mute"),
+            (UserNotification, UserNotification.actor_user_id == user_id,
+             "circle_note"),
+            (Circle, Circle.user_id == user_id, "circle"),
+        )
+
+    def until(cond, column):
+        return cond if before is None else and_(cond, column <= before)
+
+    circles = until(Circle.user_id == user_id, Circle.created_at)
+    own_circles = select(Circle.id).where(circles)
     return (
         (NodeCircle, NodeCircle.circle_id.in_(own_circles), "node_circle"),
-        (CircleMember, or_(CircleMember.circle_id.in_(own_circles),
-                           CircleMember.user_id == user_id),
+        (CircleMember, CircleMember.circle_id.in_(own_circles),
          "circle_member"),
-        (NodeReader, NodeReader.user_id == user_id, "node_reader"),
-        (CircleMute, or_(CircleMute.user_id == user_id,
-                         CircleMute.muted_user_id == user_id),
-         "circle_mute"),
-        (UserNotification, UserNotification.actor_user_id == user_id,
-         "circle_note"),
-        (Circle, Circle.user_id == user_id, "circle"),
+        (CircleMute, until(CircleMute.user_id == user_id,
+                           CircleMute.created_at), "circle_mute"),
+        (UserNotification,
+         until(and_(UserNotification.actor_user_id == user_id,
+                    UserNotification.type == NOTE_TYPE),
+               UserNotification.created_at), "circle_note"),
+        (Circle, circles, "circle"),
     )

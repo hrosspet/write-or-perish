@@ -157,11 +157,11 @@ def get_log():
         # pages and skip another.
         Node.id.desc(),
     )
-    # Circles: an "Ask my AI" answer in someone else's thread is no part
-    # of its owner's Log (it cannot be pinned; one pinned earlier is
-    # left out).
+    # Circles: an AI reply the user asked for in someone else's shared
+    # thread is in their Log like their typed replies there, while the
+    # thread is open to them. One that is closed to them now is left out.
     from backend.utils.privacy import own_answers_filter
-    not_answers = own_answers_filter(Node, current_user.id)
+    not_answers = own_answers_filter(Node, current_user.id, closed_only=True)
     if not_answers is not None:
         query = query.filter(not_answers)
     if cursor is not None:

@@ -58,67 +58,57 @@ class AIUsageRefused(Exception):
         self.scope = scope
 
 
-# ── Circles: a reader's model in someone else's shared thread ───────────
-# No model answers there on its own. The reader's explicit "Ask my AI"
-# (POST /nodes/<id>/llm with circle_ask) stamps the reply with this
-# marker; reply_refusal and the completion task read it. Only then does
-# the reader's model read the thread: the nodes whose own ai_usage lets
-# AI read, on the chat key, never the training key.
-CIRCLE_ASK_MARKER = "_circle_ask"
-CIRCLE_AI_CODE = "circle_ai_not_asked"
-CIRCLE_AI_MESSAGE = "No AI answers here unless you ask for it."
+# ── Circles: AI replies in a shared thread ──────────────────────────────
+# Every current member of a shared thread (the author and the readers)
+# may ask for an AI reply under any node of the thread they can read, as
+# in a private thread. The reply is the requester's (human_owner_id), is
+# written by the requester's own model on the chat key, and joins the
+# thread's audience unless the requester keeps it private. Nothing is
+# generated in someone else's thread on its own.
 CIRCLE_ENTRY_NONE_MESSAGE = (
     "The author set this entry's AI usage to None, so no AI can read it.")
+CIRCLE_THREAD_MESSAGE = (
+    "An AI reply in a shared thread is made on an entry or a reply of "
+    "that thread.")
+CIRCLE_VOICE_MESSAGE = (
+    "Voice Mode is not available in a thread someone else shared with "
+    "you.")
 
 
-class CircleAIRefused(AIUsageRefused):
-    """A reply in someone else's shared thread that the reader did not
-    ask for with "Ask my AI"."""
-
-    code = CIRCLE_AI_CODE
-
-    def __init__(self, message=CIRCLE_AI_MESSAGE):
-        super().__init__(message, scope="thread")
-
-
-def is_circle_ask(node) -> bool:
-    """*node* is an "Ask my AI" reply (it carries CIRCLE_ASK_MARKER)."""
-    try:
-        meta = json.loads(getattr(node, "tool_calls_meta", None) or "[]") or []
-    except (json.JSONDecodeError, TypeError):
-        return False
-    return any(isinstance(m, dict) and m.get("name") == CIRCLE_ASK_MARKER
-               for m in meta)
-
-
-def circle_ask_entry_id(node):
-    """The shared entry an "Ask my AI" answer was written from (its
-    marker's ``entry_id``), or None for any other node."""
-    try:
-        meta = json.loads(getattr(node, "tool_calls_meta", None) or "[]") or []
-    except (json.JSONDecodeError, TypeError):
-        return None
-    for m in meta:
-        if isinstance(m, dict) and m.get("name") == CIRCLE_ASK_MARKER:
-            return m.get("entry_id")
-    return None
-
-
-def own_chat_model(user):
-    """The model an "Ask my AI" answer runs on: the asking user's own
-    account model (effective_preferred_model), else the server default.
-    Nothing in the thread has a say: not the request, not an earlier
-    reply, not even the asker's own."""
-    return (effective_preferred_model(user)
-            or current_app.config.get("DEFAULT_LLM_MODEL", "claude-opus-4.6"))
-
-
-def circle_ask_ai_usage(user):
-    """The ai_usage of an "Ask my AI" answer: 'chat', never 'train' (it
-    is written from other people's shared entries), and the account's
-    'none' when the reader keeps AI out altogether (then refused)."""
+def circle_reply_ai_usage(user):
+    """The ai_usage of an AI reply a member asks for in someone else's
+    shared thread: 'chat', never 'train' (it is written from other
+    people's entries), and the account's 'none' when the member keeps AI
+    out altogether (then refused)."""
     default = getattr(user, "default_ai_usage", None) or "none"
     return "chat" if default in AI_ALLOWED else default
+
+
+def model_display_name(model_id):
+    """The name a model is shown by ("Claude Fable 5.2"), else its id."""
+    spec = (current_app.config.get("SUPPORTED_MODELS") or {}).get(model_id)
+    return (spec or {}).get("display_name") or model_id or "AI"
+
+
+def circle_reply_label(model_id, requester_username):
+    """How an AI reply in a shared thread is named, on screen and in the
+    prompt of another member's reply: "<model> via @<requester>"."""
+    name = model_display_name(model_id)
+    return f"{name} via @{requester_username}" if requester_username else name
+
+
+def llm_label_fields(node):
+    """Serialized fields that name an AI reply written in a shared thread
+    (Circles): ``llm_label`` and ``human_owner_username``. Empty for
+    every other node."""
+    if (getattr(node, "node_type", None) != "llm"
+            or node.audience_root_id is None):
+        return {}
+    owner = (db.session.get(User, node.human_owner_id)
+             if node.human_owner_id else None)
+    username = owner.username if owner is not None else None
+    return {"llm_label": circle_reply_label(node.llm_model, username),
+            "human_owner_username": username}
 
 
 def ai_usage_refused_response(exc=None):
@@ -344,7 +334,7 @@ class _Chain:
         """The nearest node of the chain that is another person's
         circle-shared content for *user_id* (privacy.foreign_shared) and
         that *user_id* can read, else None: a reply for the user there
-        needs their "Ask my AI"."""
+        is a reply in someone else's shared thread."""
         from backend.utils.privacy import (
             can_user_see_node_or_placeholder, foreign_shared,
             pointers_may_exist)
@@ -411,14 +401,21 @@ def resolve_chat_model(parent_node, user, chain=None):
     supported = current_app.config.get("SUPPORTED_MODELS", {})
     chain = chain or _Chain(parent_node)
     user_id = getattr(user, "id", None)
+    # Circles: a reply in someone else's shared thread runs on the
+    # requester's own model. No reply made for another person sets it,
+    # in the thread or above it (the author's private replies above her
+    # entry are not the requester's to read, let alone to follow).
+    own_only = user_id is not None and in_others_shared_thread(
+        parent_node, user_id, chain=chain)
     for node in chain.llm_replies():
         if node.id in chain.reads:
             continue
+        if own_only and node.human_owner_id != user_id:
+            continue
         # Circles only: a reply made for another person in a shared
-        # thread (a reader's "Ask my AI" answer) does not set this
-        # user's default. Everywhere else the walk is as it was. An
-        # "Ask my AI" answer itself never comes through here: it runs
-        # on the asker's account model (own_chat_model).
+        # thread never sets this user's model ("A user's model is
+        # theirs"). The user's own earlier reply there does, as in any
+        # thread. Everywhere else the walk is as it was.
         if (node.privacy_level == "circles" and node.audience_root_id
                 and user_id is not None and node.human_owner_id is not None
                 and node.human_owner_id != user_id):
@@ -613,8 +610,23 @@ def reply_ai_usage(parent_node, user, chain=None, parent_content=None):
     return default
 
 
-def reply_refusal(parent_node, user_id, ai_usage=None, chain=None,
-                  circle_ask=False):
+def in_others_shared_thread(parent_node, user_id, chain=None):
+    """A reply under *parent_node* for *user_id* would be written from
+    someone else's shared thread (Circles): the chain holds another
+    person's shared node the user reads, or *parent_node* is something
+    the user wrote into such a thread (also after its entry closed)."""
+    from backend.utils.privacy import audience_entry_owner, pointers_may_exist
+    if parent_node is None or not pointers_may_exist():
+        return False
+    pointer = parent_node.audience_root_id
+    if (pointer is not None and pointer != parent_node.id
+            and audience_entry_owner(pointer) != user_id):
+        return True
+    chain = chain or _Chain(parent_node)
+    return chain.foreign_shared(user_id) is not None
+
+
+def reply_refusal(parent_node, user_id, ai_usage=None, chain=None):
     """Why no reply may be generated under *parent_node* for *user_id*
     (an AIUsageRefused), or None when it may: a node the reply would send
     to the model is not AI-readable, or *ai_usage*, the setting the reply
@@ -622,26 +634,27 @@ def reply_refusal(parent_node, user_id, ai_usage=None, chain=None,
     that starts a reply asks here or goes through create_llm_placeholder,
     which does.
 
-    Circles: in someone else's shared thread no reply is generated for a
-    reader (CircleAIRefused) unless *circle_ask* says they pressed "Ask
-    my AI". Then the rule is the reader's: the shared entry itself must
-    let AI read it (else refused); any other node set to None is left
-    out of the prompt by the task instead of refusing the reply."""
+    Circles: in someone else's shared thread a member's reply is made in
+    the thread itself (circles.reply_thread_entry: *parent_node* is a
+    node of the thread, and the member reads the thread now). The shared
+    entry and *parent_node* must let AI read them (else refused, as in a
+    private thread); any other node set to None is left out of the
+    prompt by the task instead of refusing the reply. The author's own
+    replies in her thread follow the ordinary rule below."""
     if ai_usage is not None and ai_usage not in AI_ALLOWED:
         return AIUsageRefused()
     if parent_node is None:
         return None
     chain = chain or _Chain(parent_node)
-    foreign = chain.foreign_shared(user_id)
-    if foreign is not None:
-        if not circle_ask:
-            return CircleAIRefused()
-        from backend.utils.privacy import can_user_access_node
-        entry = db.session.get(Node, foreign.audience_root_id)
-        if entry is None or not can_user_access_node(entry, user_id):
-            return CircleAIRefused()
+    if in_others_shared_thread(parent_node, user_id, chain=chain):
+        from backend.utils.circles import reply_thread_entry
+        entry = reply_thread_entry(parent_node, user_id)
+        if entry is None:
+            return AIUsageRefused(CIRCLE_THREAD_MESSAGE, "thread")
         if entry.ai_usage not in AI_ALLOWED:
             return AIUsageRefused(CIRCLE_ENTRY_NONE_MESSAGE)
+        if parent_node.ai_usage not in AI_ALLOWED:
+            return AIUsageRefused()
         return None
     if chain.unreadable(user_id) is not None:
         return AIUsageRefused()
@@ -668,10 +681,10 @@ def voice_turn_refusal(user, parent_node=None, ai_usage=None):
             return AIUsageRefused(VOICE_REFUSED_ACCOUNT_MESSAGE, "account")
         return None
     chain = _Chain(parent_node)
-    # Someone else's shared thread (Circles): no Voice turn there, a
-    # reply would be a model answering without "Ask my AI".
-    if chain.foreign_shared(user.id) is not None:
-        return AIUsageRefused(CIRCLE_AI_MESSAGE, "thread")
+    # Someone else's shared thread (Circles): no Voice session there. A
+    # member asks for an AI reply in the thread itself, one at a time.
+    if in_others_shared_thread(parent_node, user.id, chain=chain):
+        return AIUsageRefused(CIRCLE_VOICE_MESSAGE, "thread")
     if chain.unreadable(user.id) is not None:
         return AIUsageRefused(VOICE_REFUSED_THREAD_MESSAGE, "thread")
     if reply_ai_usage(parent_node, user, chain=chain) not in AI_ALLOWED:
@@ -825,11 +838,15 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     # parent and what is above it) and the reply itself. Before anything
     # is decrypted or written.
     chain = _Chain(parent)
-    circle_ask = any(isinstance(m, dict)
-                     and m.get("name") == CIRCLE_ASK_MARKER
-                     for m in (meta or []))
-    refused = reply_refusal(parent, human_owner_id, ai_usage, chain=chain,
-                            circle_ask=circle_ask)
+    # Circles: a reply under a node of a shared thread is a reply in
+    # that thread. Asked for in someone else's thread it is written from
+    # other people's entries: 'chat' at most, whatever the caller passed.
+    from backend.utils.circles import reply_thread_entry
+    thread_entry = reply_thread_entry(parent, human_owner_id)
+    if thread_entry is not None and in_others_shared_thread(
+            parent, human_owner_id, chain=chain):
+        ai_usage = circle_reply_ai_usage(User.query.get(human_owner_id))
+    refused = reply_refusal(parent, human_owner_id, ai_usage, chain=chain)
     if refused is not None:
         raise refused
 
@@ -889,9 +906,6 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     # before writing.
     turn = reply_read_turn(parent, meta, parent_content, chain=chain)
     is_read_turn = turn in ("read", "read_again")
-    if circle_ask:
-        # Whatever the caller passed.
-        model_id = own_chat_model(owner)
     if is_read_turn:
         model_id = _read_turn_model(parent, owner, model_id, chain)
     elif is_active_model(model_id) and not is_chat_model(model_id):
@@ -933,11 +947,14 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
         ai_usage=ai_usage,
         token_count=approximate_token_count(placeholder_text),
     )
-    if circle_ask:
-        # An "Ask my AI" answer is a reply in the thread. Every other AI
-        # reply under a shared node stays its owner's (no pointer).
-        from backend.utils.circles import join_reply
-        join_reply(llm_node, parent, human_owner_id)
+    if thread_entry is not None:
+        # Circles: the reply joins the thread (its pointer), whoever of
+        # the thread's people asked for it and on whichever path. It is
+        # read by the thread's audience while it is "circles" (the level
+        # of the node it answers), and by its requester alone when the
+        # requester asked for it as private or answers a private node.
+        from backend.utils.circles import join_ai_reply
+        join_ai_reply(llm_node, thread_entry)
     llm_node.set_content(placeholder_text)
     meta = _with_read_marker(meta, is_read_turn, read_live)
     client = client or request_client()

@@ -218,10 +218,11 @@ def search():
         # the prompt_key stamp: still prompt text, not the user's writing.
         Node.prompt_key.is_(None),
     )
-    # Circles: an "Ask my AI" answer in someone else's thread is no part
-    # of its owner's search.
+    # Circles: an AI reply the user asked for in someone else's shared
+    # thread is searched like their typed replies there, while the
+    # thread is open to them. One that is closed to them now is left out.
     from backend.utils.privacy import own_answers_filter
-    not_answers = own_answers_filter(Node, current_user.id)
+    not_answers = own_answers_filter(Node, current_user.id, closed_only=True)
     if not_answers is not None:
         query = query.filter(not_answers)
 
@@ -420,6 +421,11 @@ def semantic_search():
         if (node.user_id != current_user.id
                 and node.human_owner_id != current_user.id):
             continue
+        # Circles: an AI reply the user asked for in someone else's
+        # shared thread is theirs only while that thread is open to them.
+        from backend.utils.privacy import can_user_access_node
+        if not can_user_access_node(node, current_user.id):
+            continue
         content = node.get_content() or ""
         results.append({
             "id": node.id,
@@ -473,6 +479,9 @@ def semantic_neighbors():
     if (node.user_id != current_user.id
             and node.human_owner_id != current_user.id):
         return jsonify({"error": "Not authorized."}), 403
+    from backend.utils.privacy import can_user_access_node
+    if not can_user_access_node(node, current_user.id):
+        return jsonify({"error": "Node not found."}), 404
 
     src = NodeEmbedding.query.filter_by(node_id=node_id).first()
     if src is None:

@@ -10,7 +10,9 @@ from backend.tests.test_retrieval_loop import (  # noqa: F401 (fixture)
     _ScriptedProvider, _mk_user, _resp, _fresh,
 )
 from backend.extensions import db as _db
-from backend.models import Node, NodeReader
+from backend.models import (
+    APICostLog, Node, NodeContextArtifact, NodeReader, UserProfile)
+from backend.tests.test_retrieval_loop import _mk_artifact
 
 
 @pytest.fixture
@@ -26,8 +28,10 @@ def circles(app):  # noqa: F811
     cfg["ANTHROPIC_API_KEY_TRAIN"] = "ant-train"
     cfg["ANTHROPIC_API_KEY_CHAT"] = "ant-chat"
     cfg["SUPPORTED_MODELS"] = {
-        "gpt-5": {"provider": "openai", "api_model": "gpt-5"},
-        "claude-x": {"provider": "anthropic", "api_model": "claude-x"},
+        "gpt-5": {"provider": "openai", "api_model": "gpt-5",
+                  "display_name": "GPT Five"},
+        "claude-x": {"provider": "anthropic", "api_model": "claude-x",
+                     "display_name": "Claude X"},
     }
     yield
     for k, v in saved.items():
@@ -104,22 +108,26 @@ def _world():
                 c_chat=c_chat, b=b)
 
 
-def test_ask_my_ai_end_to_end(app, circles):  # noqa: F811
-    from backend.utils.llm_nodes import (
-        CIRCLE_ASK_MARKER, create_llm_placeholder, circle_ask_ai_usage)
-    from backend.utils.llm_nodes import own_chat_model
+def test_a_members_ai_reply_end_to_end(app, circles):  # noqa: F811
+    """ben asks for an AI reply in anna's shared thread: his model, his
+    key (never the training key), his spend row; the thread he reads,
+    without the node set to None and without anything of anna's above
+    her entry."""
+    from backend.utils.llm_nodes import create_llm_placeholder, reply_refusal
     w = _world()
     ben = w["ben"]
-    # The route's rule for an Ask my AI: the asker's account model.
-    model = own_chat_model(ben)
-    from backend.utils.llm_nodes import reply_refusal
-    print("refusal for the ask:", reply_refusal(
-        w["b"], ben.id, circle_ask_ai_usage(ben), circle_ask=True))
-    llm_node = _placeholder(
-        w["b"], ben, model, "circles", circle_ask_ai_usage(ben),
-        meta=[{"name": CIRCLE_ASK_MARKER, "entry_id": w["entry"].id}])
+    assert reply_refusal(w["b"], ben.id, "chat") is None
+    llm_node, _ = create_llm_placeholder(
+        w["b"].id, None, ben.id, privacy_level="circles", ai_usage="train",
+        enqueue=False)
+    # anna's private Claude reply above the entry does not set his model.
+    assert llm_node.llm_model == "gpt-5"
+    assert llm_node.human_owner_id == ben.id
+    assert llm_node.audience_root_id == w["entry"].id
+    assert llm_node.privacy_level == "circles" and llm_node.ai_usage == "chat"
     _ScriptedProvider.reset([_resp("An answer.")])
-    generate_llm_response(_FakeSelf(), w["b"].id, llm_node.id, model, ben.id)
+    generate_llm_response(_FakeSelf(), w["b"].id, llm_node.id, "gpt-5",
+                          ben.id)
     assert len(_ScriptedProvider.calls) == 1
     sent = _sent()
     call = _ScriptedProvider.calls[0]
@@ -127,9 +135,35 @@ def test_ask_my_ai_end_to_end(app, circles):  # noqa: F811
     assert "CHIDI SAYS CHAT" in sent and "BEN ASKS" in sent
     assert "CHIDI SAYS NONE" not in sent
     assert "ANNA PRIVATE" not in sent
+    assert call["model_id"] == "gpt-5"
     keys = call["api_keys"]
     assert "sk-train" not in keys.values() and "ant-train" not in keys.values()
-    assert model == "gpt-5", "ben's model was switched by anna's private reply"
+    assert keys.get("openai") == "sk-chat"
+    # The cost is ben's.
+    rows = APICostLog.query.all()
+    assert rows and {r.user_id for r in rows} == {ben.id}
+    assert _fresh(llm_node.id).get_content() == "An answer."
+
+
+def test_the_authors_own_reply_in_her_shared_thread_uses_the_chat_key(
+        app, circles):  # noqa: F811
+    """Circle text never goes out on a training key, whatever the
+    entry's AI usage: anna's entry and account are 'train'."""
+    from backend.utils.llm_nodes import create_llm_placeholder
+    w = _world()
+    anna = w["anna"]
+    llm_node, _ = create_llm_placeholder(
+        w["entry"].id, "gpt-5", anna.id, privacy_level="circles",
+        ai_usage="train", enqueue=False)
+    assert llm_node.audience_root_id == w["entry"].id
+    _ScriptedProvider.reset([_resp("ok")])
+    generate_llm_response(_FakeSelf(), w["entry"].id, llm_node.id, "gpt-5",
+                          anna.id)
+    call = _ScriptedProvider.calls[0]
+    assert "sk-train" not in call["api_keys"].values()
+    assert call["api_keys"].get("openai") == "sk-chat"
+    # Her own chain keeps her private nodes above the entry.
+    assert "ANNA PRIVATE ROOT" in _sent()
 
 
 def test_authors_quote_of_readers_reply_goes_out_on_train_key(app, circles):  # noqa: F811,E501
@@ -200,45 +234,206 @@ def test_authors_export_carries_direct_reader_reply(app, circles):  # noqa: F811
     text = out.get("content") if isinstance(out, dict) else out
 
 
-def test_full_ask_prompt(app, circles):  # noqa: F811
-    from backend.utils.llm_nodes import CIRCLE_ASK_MARKER, circle_ask_ai_usage
+def test_another_members_ai_reply_is_named_in_the_prompt(app, circles):  # noqa: F811,E501
+    """In the prompt, an AI reply another member asked for is a message
+    of the thread named "<model> via @<requester>", not the model's own
+    earlier turn. The requester's own replies stay assistant turns."""
     w = _world()
-    ben = w["ben"]
-    llm_node = _placeholder(
-        w["b"], ben, "gpt-5", "circles", circle_ask_ai_usage(ben),
-        meta=[{"name": CIRCLE_ASK_MARKER, "entry_id": w["entry"].id}])
+    ben, chidi, anna = w["ben"], w["chidi"], w["anna"]
+    chidis = _node(w["claude"], w["entry"], "CHIDIS AI SAYS", "circles",
+                   human_owner=chidi, node_type="llm", llm_model="claude-x")
+    bens = _node(w["gpt"], chidis, "BENS AI SAYS", "circles",
+                 human_owner=ben, node_type="llm", llm_model="gpt-5")
+    annas = _node(w["claude"], bens, "ANNAS AI SAYS", "circles",
+                  human_owner=anna, node_type="llm", llm_model="claude-x")
+    _db.session.commit()
+    llm_node = _placeholder(annas, ben, "gpt-5", "circles", "chat")
+    llm_node.audience_root_id = w["entry"].id
+    _db.session.commit()
     _ScriptedProvider.reset([_resp("An answer.")])
-    generate_llm_response(_FakeSelf(), w["b"].id, llm_node.id, "gpt-5",
+    generate_llm_response(_FakeSelf(), annas.id, llm_node.id, "gpt-5",
                           ben.id)
-    for m in _ScriptedProvider.calls[0]["messages"]:
-        print("MSG", m["role"], repr(m["text"][:400]))
+    messages = _ScriptedProvider.calls[0]["messages"]
+    by_text = {key: m for m in messages
+               for key in ("CHIDIS AI SAYS", "BENS AI SAYS", "ANNAS AI SAYS")
+               if key in m["text"]}
+    assert by_text["CHIDIS AI SAYS"]["role"] == "user"
+    assert "Claude X via @chidi: CHIDIS AI SAYS" in by_text[
+        "CHIDIS AI SAYS"]["text"]
+    assert by_text["ANNAS AI SAYS"]["role"] == "user"
+    assert "Claude X via @anna: ANNAS AI SAYS" in by_text[
+        "ANNAS AI SAYS"]["text"]
+    assert by_text["BENS AI SAYS"]["role"] == "assistant"
+    assert "via @" not in by_text["BENS AI SAYS"]["text"]
+    # The closing note says who the reply is for and how it will be named.
+    assert messages[-1]["role"] == "user"
+    assert "asked for by @ben" in messages[-1]["text"]
+    assert '"GPT Five via @ben"' in messages[-1]["text"]
+    # The prompt ends on a user turn for both providers.
     a = _fresh(llm_node.id)
     assert a.audience_root_id == w["entry"].id
-    assert "_circle_ask" in (a.tool_calls_meta or "")
     assert a.privacy_level == "circles" and a.ai_usage == "chat"
 
 
-def test_ask_my_ai_runs_on_the_readers_provider(app, circles):  # noqa: F811
-    """anna's thread is on Anthropic, ben's account on OpenAI: through
-    create_llm_placeholder and the task, ben's answer is made on his
-    model and sent to his provider, whatever model the caller passes."""
-    from backend.utils.llm_nodes import (
-        CIRCLE_ASK_MARKER, create_llm_placeholder, circle_ask_ai_usage)
+def test_a_private_thread_gets_no_circle_text_in_its_prompt(app, circles):  # noqa: F811,E501
+    """Outside shared threads the prompt is what it was: no label, no
+    closing note, an earlier AI reply as an assistant turn."""
+    w = _world()
+    anna = w["anna"]
+    llm_node = _placeholder(w["her_ai"], anna, "claude-x", "private", "train")
+    _ScriptedProvider.reset([_resp("ok")])
+    generate_llm_response(_FakeSelf(), w["her_ai"].id, llm_node.id,
+                          "claude-x", anna.id)
+    messages = _ScriptedProvider.calls[0]["messages"]
+    assert [m["role"] for m in messages] == ["user", "assistant", "user"]
+    assert messages[-1]["text"] == "[continue]"
+    assert "via @" not in _sent() and "shared between" not in _sent()
+    assert messages[1]["text"].endswith(" ANNA PRIVATE AI REPLY")
+
+
+def test_a_members_reply_runs_on_the_members_provider(app, circles):  # noqa: F811,E501
+    """anna's thread is on Anthropic, ben's account on OpenAI: with no
+    model named, ben's reply is made on his model and sent to his
+    provider. A model he names himself is his to choose."""
+    from backend.utils.llm_nodes import create_llm_placeholder
     w = _world()
     ben = w["ben"]
+    annas = _node(w["claude"], w["b"], "ANNAS AI SAYS", "circles",
+                  human_owner=w["anna"], node_type="llm",
+                  llm_model="claude-x")
+    _db.session.commit()
     llm_node, _ = create_llm_placeholder(
-        w["b"].id, "claude-x", ben.id, privacy_level="circles",
-        ai_usage=circle_ask_ai_usage(ben), enqueue=False,
-        meta=[{"name": CIRCLE_ASK_MARKER, "entry_id": w["entry"].id}])
+        annas.id, None, ben.id, privacy_level="circles", ai_usage="chat",
+        enqueue=False)
     assert llm_node.llm_model == "gpt-5"
     _ScriptedProvider.reset([_resp("An answer.")])
-    generate_llm_response(_FakeSelf(), w["b"].id, llm_node.id,
+    generate_llm_response(_FakeSelf(), annas.id, llm_node.id,
                           llm_node.llm_model, ben.id)
     call = _ScriptedProvider.calls[0]
     assert call["model_id"] == "gpt-5"
     assert set(call["api_keys"].values()) & {"ant-train", "ant-chat",
                                              "sk-train"} <= {"ant-chat"}
     assert call["api_keys"].get("openai") == "sk-chat"
+    named, _ = create_llm_placeholder(
+        annas.id, "claude-x", ben.id, privacy_level="circles",
+        ai_usage="chat", enqueue=False)
+    assert named.llm_model == "claude-x"
+
+
+def _agentic_world(share_path):
+    """anna's agentic thread: her prompt P (with her profile and memory
+    pinned), her turn E, shared with ben, with or without the discussion
+    leading up to it. Both have a profile; only anna has a memory."""
+    from backend.models import UserPrompt
+    anna = _mk_user("anna", approved=True, plan="alpha",
+                    default_ai_usage="chat")
+    ben = _mk_user("ben", approved=True, plan="alpha",
+                   default_ai_usage="chat", preferred_model="gpt-5")
+    _mk_user("gpt-5", twitter_id="llm-gpt-5")
+    hers = UserProfile(user_id=anna.id, generated_by="test", ai_usage="chat")
+    hers.set_content("ANNAS-PROFILE")
+    his = UserProfile(user_id=ben.id, generated_by="test", ai_usage="chat")
+    his.set_content("BENS-PROFILE")
+    _db.session.add_all([hers, his])
+    her_memory = _mk_artifact(anna.id, "memory", "ANNAS-MEMORY")
+    prompt = UserPrompt(user_id=anna.id, prompt_key="textmode",
+                        title="Text", generated_by="test")
+    prompt.set_content(
+        "THE-PROMPT profile=[{user_profile}] memory=[{user_memory}]")
+    _db.session.add(prompt)
+    _db.session.flush()
+    p = Node(user_id=anna.id, human_owner_id=anna.id, node_type="user",
+             privacy_level="private", ai_usage="chat", prompt_key="textmode")
+    _db.session.add(p)
+    _db.session.flush()
+    _db.session.add_all([
+        NodeContextArtifact(node_id=p.id, artifact_type="prompt",
+                            artifact_id=prompt.id),
+        NodeContextArtifact(node_id=p.id, artifact_type="profile",
+                            artifact_id=hers.id),
+        NodeContextArtifact(node_id=p.id, artifact_type="user_artifact",
+                            artifact_id=her_memory.id)])
+    entry = _node(anna, p, "ANNA SHARED TURN")
+    _share_with(entry, ben)
+    if share_path:
+        p.privacy_level = "circles"
+        p.audience_root_id = entry.id
+    _db.session.commit()
+    return dict(anna=anna, ben=ben, p=p, entry=entry)
+
+
+def _run(w, who):
+    from backend.utils.llm_nodes import create_llm_placeholder
+    llm_node, _ = create_llm_placeholder(
+        w["entry"].id, "gpt-5", who.id, privacy_level="circles",
+        ai_usage="chat", enqueue=False)
+    _ScriptedProvider.reset([_resp("ok")])
+    generate_llm_response(_FakeSelf(), w["entry"].id, llm_node.id, "gpt-5",
+                          who.id)
+    return _sent()
+
+
+def test_a_shared_prompt_is_filled_with_the_requesters_artifacts(
+        app, circles, monkeypatch):  # noqa: F811
+    """The prompt anna shared with the discussion is in ben's chain,
+    filled with BEN's latest artifacts; her pinned versions are never
+    read for him, and no stored render of hers reaches him."""
+    w = _agentic_world(share_path=True)
+    # A render cache that works (tests have no Redis), so that a render
+    # of anna's kept under a key ben's request could read would show.
+    import backend.utils.prompt_cache as pc
+    stored = {}
+    monkeypatch.setattr(
+        pc, "get_cached_render",
+        lambda config, node, variant: stored.get((node.id, variant)))
+    monkeypatch.setattr(
+        pc, "store_render",
+        lambda config, node, text, variant, unlicensed=None, rows=None:
+        stored.__setitem__((node.id, variant), (text, unlicensed)))
+    # anna first, so that her render is in the cache.
+    hers = _run(w, w["anna"])
+    assert "profile=[ANNAS-PROFILE]" in hers
+    assert "ANNAS-MEMORY" in hers
+    assert stored, "anna's render was not cached"
+    for _ in range(2):                  # twice: nothing cached leaks
+        his = _run(w, w["ben"])
+        assert "THE-PROMPT" in his and "ANNA SHARED TURN" in his
+        assert "profile=[BENS-PROFILE]" in his
+        assert "ANNAS-PROFILE" not in his and "ANNAS-MEMORY" not in his
+        # ben has no memory: what an owner without one gets on main.
+        assert "memory=[]" in his
+        assert len(stored) == 1, "a render for ben was stored"
+        assert "personal context in the prompt above are @ben's" in his
+    # And anna's own render is still hers afterwards.
+    again = _run(w, w["anna"])
+    assert "profile=[ANNAS-PROFILE]" in again and "BENS-PROFILE" not in again
+
+
+def test_a_prompt_that_is_not_shared_never_reaches_the_member(
+        app, circles):  # noqa: F811
+    """Only the entry is shared: ben's request holds the entry and
+    nothing above it; no prompt, no artifacts (not his, not anna's), no
+    tools."""
+    w = _agentic_world(share_path=False)
+    his = _run(w, w["ben"])
+    assert "ANNA SHARED TURN" in his
+    for words in ("THE-PROMPT", "ANNAS-PROFILE", "ANNAS-MEMORY",
+                  "BENS-PROFILE"):
+        assert words not in his, words
+    assert not _ScriptedProvider.calls[0]["tools"]
+    # A gap made later does the same: the prompt is shared, a node
+    # between it and the entry is not.
+    p, entry = w["p"], w["entry"]
+    p.privacy_level = "circles"
+    p.audience_root_id = entry.id
+    gap = _node(w["anna"], p, "ANNA PRIVATE TURN")
+    entry.parent_id = gap.id
+    _db.session.commit()
+    his = _run(w, w["ben"])
+    assert "ANNA SHARED TURN" in his
+    for words in ("THE-PROMPT", "ANNA PRIVATE TURN", "BENS-PROFILE",
+                  "ANNAS-PROFILE"):
+        assert words not in his, words
 
 
 def test_read_full_of_a_readers_reply_uses_the_chat_key(app, circles):  # noqa: F811,E501

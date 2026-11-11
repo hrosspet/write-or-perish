@@ -160,8 +160,8 @@ def _wipe_content_and_versions(node):
 
 
 def sweep_answers_of_deleted_entries(cutoff):
-    """Mark as deleted, as of *cutoff*, every "Ask my AI" answer whose
-    source entry is gone: the row no longer exists, its content was
+    """Mark as deleted, as of *cutoff*, every AI reply a member asked
+    for in someone else's shared thread whose entry is gone: the row no longer exists, its content was
     wiped (a tombstone of the author's purge), or it was deleted before
     *cutoff* (its own grace period is over). The run that follows wipes
     or purges them like any deleted node. Until then they are already
@@ -199,12 +199,13 @@ def finalize_deleted_nodes(now=None):
     cutoff = (datetime.fromtimestamp(now, timezone.utc).replace(tzinfo=None)
               - timedelta(days=SOFT_DELETE_GRACE_DAYS))
 
-    # Circles: an "Ask my AI" answer goes with the entry it was written
-    # from (it holds that entry's content in derived form).
+    # Circles: an AI reply a member asked for in someone else's shared
+    # thread goes with the entry (it holds the thread's content in
+    # derived form).
     swept = sweep_answers_of_deleted_entries(cutoff)
     if swept:
-        logger.info("cleanup_deleted_nodes: %d Ask-my-AI answer(s) of "
-                    "deleted entries marked for deletion", swept)
+        logger.info("cleanup_deleted_nodes: %d AI repl(ies) in shared "
+                    "threads of deleted entries marked for deletion", swept)
 
     # "Has any child row in DB" subquery — true when the node still
     # has children referencing it (alive or soft-deleted, doesn't

@@ -92,13 +92,16 @@ def test_ask_model_variants(app, ben_pref, author_model, expect):
     ben = _user("ben")
     ben.preferred_model = ben_pref
     _db.session.commit()
-    r = _client(app, "ben").post(f"/api/nodes/{her_ai.id}/llm",
-                                 json={"circle_ask": True,
-                                       "model": author_model})
-    print("ask:", r.status_code, r.get_json())
+    # ben names no model: his own, never the model of anna's reply.
+    r = _client(app, "ben").post(f"/api/nodes/{her_ai.id}/llm", json={})
     a = _db.session.get(Node, r.get_json()["node_id"])
-    print("answer model:", a.llm_model)
     assert a.llm_model == expect
+    assert a.human_owner_id == ben.id and a.audience_root_id == e
+    # A model ben names himself is his choice.
+    r = _client(app, "ben").post(f"/api/nodes/{her_ai.id}/llm",
+                                 json={"model": author_model})
+    assert _db.session.get(
+        Node, r.get_json()["node_id"]).llm_model == author_model
 
 
 def test_take_back_semantics(app):
@@ -226,18 +229,17 @@ def test_every_path_that_creates_a_node_under_a_shared_entry(app, monkeypatch):
     _db.session.commit()
     assert ben.post(f"/api/drafts/streaming/{d.session_id}/save-as-node",
                     json={}).status_code in (200, 201)
-    #    ... and an Ask my AI answer.
-    assert ben.post(f"/api/nodes/{e}/llm",
-                    json={"circle_ask": True}).status_code == 202
+    #    ... and an AI reply, the reader's and the author's.
+    assert ben.post(f"/api/nodes/{e}/llm", json={}).status_code == 202
+    assert anna.post(f"/api/nodes/{e}/llm", json={}).status_code == 202
     joined = new_under(e, before)
-    assert len(joined) == 5, [(n.id, n.node_type) for n in joined]
+    assert len(joined) == 6, [(n.id, n.node_type) for n in joined]
     for n in joined:
         assert n.privacy_level == "circles" and n.audience_root_id == e, n.id
         assert _seen(app, "anna", n.id) == 200
 
     # 2. Everything else the author starts from her shared entry.
     before = ids()
-    assert anna.post(f"/api/nodes/{e}/llm", json={}).status_code == 202
     anna.post(f"/api/voice/from-node/{e}", json={})
     anna.post(f"/api/read/from-node/{e}", json={})
     anna.post(f"/api/textmode/from-node/{e}", json={
@@ -245,7 +247,7 @@ def test_every_path_that_creates_a_node_under_a_shared_entry(app, monkeypatch):
         "ai_usage": "chat"})
     anna.post(f"/api/nodes/{e}/link", json={"content": "a link"})
     kept = new_under(e, before)
-    assert len(kept) >= 4, [(n.id, n.node_type, n.parent_id) for n in kept]
+    assert len(kept) >= 3, [(n.id, n.node_type, n.parent_id) for n in kept]
     for n in kept:
         assert n.audience_root_id is None, (n.id, n.node_type, n.parent_id)
         assert _seen(app, "ben", n.id) == 404, (n.id, n.node_type)

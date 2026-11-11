@@ -31,11 +31,10 @@ def apply_settings_to_descendants(root, user_id, *, privacy_level=None,
         return []
     # Circles: where each reply came from (circles.thread_source),
     # carried down the walk instead of asked per node: a reply's own
-    # pointer or marker, else what its parent hands down. `below` is the
+    # pointer, else what its parent hands down. `below` is the
     # entry a node's replies come from: its own pointer (an entry points
     # at itself), else what it inherited.
     from backend.utils.circles import entry_owner_id, thread_source
-    from backend.utils.llm_nodes import circle_ask_entry_id, is_circle_ask
     root_source = thread_source(root)
     below = {root.id: root.audience_root_id
              or (root_source.entry_id if root_source is not None else None)}
@@ -53,9 +52,7 @@ def apply_settings_to_descendants(root, user_id, *, privacy_level=None,
             if own is not None and own != n.id:
                 source_of[n.id] = own
             else:
-                # 0: an answer whose marker names no entry is still one.
-                source_of[n.id] = (circle_ask_entry_id(n)
-                                   or (0 if is_circle_ask(n) else inherited))
+                source_of[n.id] = inherited
             below[n.id] = own if own is not None else inherited
         editable.extend(
             n for n in level
@@ -82,7 +79,7 @@ def apply_settings_to_descendants(root, user_id, *, privacy_level=None,
         # usage: unwrap first, then the checks below are cache hits.
         prefetch_deks(n.content for n in editable if n.ai_usage != ai_usage)
     # Circles: what the user wrote into someone else's thread (a reply,
-    # an "Ask my AI" answer) is never made public and never moved to
+    # an AI reply they asked for) is never made public and never moved to
     # another audience by a cascade either; it can be taken back.
     changed = []
     for n in editable:
