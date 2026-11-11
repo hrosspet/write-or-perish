@@ -203,3 +203,137 @@ def test_a_reply_under_a_members_own_private_ai_reply_is_only_me(app):  # noqa: 
     hers = r.get_json()["node_id"]
     assert "reply_only_private" not in _client(app, "anna").get(
         f"/api/nodes/{hers}").get_json()
+
+
+# ── Second review ───────────────────────────────────────────────────────
+
+def _agentic_shared(app):
+    """anna's Text-mode thread shared with ben with the discussion
+    leading up to her entry: its prompt asks for the member's data."""
+    prompt = _add(None, "THE-PROMPT {user_profile}", prompt_key="textmode")
+    entry = _add(prompt, SECRET)
+    r = _client(app, "anna").put(f"/api/nodes/{entry}", json={
+        "content": SECRET, "privacy_level": "circles",
+        "circle_usernames": ["ben"], "share_path": True})
+    assert r.status_code == 200, r.get_json()
+    key = _client(app, "ben").get(
+        f"/api/nodes/{entry}").get_json()["audience"]["ai_reads_key"]
+    assert key
+    return entry, key
+
+
+def test_a_members_only_me_ai_reply_tells_the_client_what_to_agree_to(app):  # noqa: F811,E501
+    """2. Under his own Only-me AI reply ben's next AI reply needs the
+    agreement too: the node says what it reads and the key, so the
+    client can ask (in the private wording) instead of being refused."""
+    entry, key = _agentic_shared(app)
+    ben = _client(app, "ben")
+    r = ben.post(f"/api/nodes/{entry}/llm", json={
+        "privacy_level": "private", "ai_reads_ack": f"private:{key}"})
+    assert r.status_code == 202, r.get_json()
+    mine = r.get_json()["node_id"]
+    data = ben.get(f"/api/nodes/{mine}").get_json()
+    assert "audience" not in data
+    from backend.utils import circles as cz
+    assert data["thread_ai_reads"] == {
+        "entry_id": entry, "ai_reads": ["profile", cz.TOOLS_NAME],
+        "ai_reads_key": key}
+    assert ben.post(f"/api/nodes/{mine}/llm", json={}).status_code == 409
+    r = ben.post(f"/api/nodes/{mine}/llm",
+                 json={"ai_reads_ack": f"private:{key}"})
+    assert r.status_code == 202, r.get_json()
+    again = _node(r.get_json()["node_id"])
+    assert again.privacy_level == "private"
+    assert again.audience_root_id == entry
+    # No other node carries it: the author's shared entry, a private note.
+    assert "thread_ai_reads" not in _client(app, "anna").get(
+        f"/api/nodes/{entry}").get_json()
+    alone = _add(None, "A PRIVATE NOTE")
+    assert "thread_ai_reads" not in _client(app, "anna").get(
+        f"/api/nodes/{alone}").get_json()
+
+
+def test_a_members_only_me_branch_works_like_his_private_thread(app):  # noqa: F811,E501
+    """3. ben replies under his own Only-me AI reply and asks for an AI
+    reply there: it is made (Only me, in the thread), never joins the
+    audience, and closes and goes with the entry like his other AI
+    replies there. His typed replies stay his."""
+    from backend.tasks.node_cleanup import finalize_deleted_nodes
+    entry, key = _agentic_shared(app)
+    ben = _client(app, "ben")
+    ack = {"ai_reads_ack": f"private:{key}"}
+    r = ben.post(f"/api/nodes/{entry}/llm",
+                 json={"privacy_level": "private", **ack})
+    mine = r.get_json()["node_id"]
+    r = _reply(app, "ben", mine, content="BENS PRIVATE NOTE",
+               privacy="private")
+    assert r.status_code == 201, r.get_json()
+    note = r.get_json()["id"]
+    data = ben.get(f"/api/nodes/{note}").get_json()
+    assert data["reply_only_private"] is True
+    assert data["thread_ai_reads"]["ai_reads_key"] == key
+    r = ben.post(f"/api/nodes/{note}/llm", json=ack)
+    assert r.status_code == 202, r.get_json()
+    deeper = r.get_json()["node_id"]
+    node = _node(deeper)
+    assert node.privacy_level == "private" and node.audience_root_id == entry
+    assert not _can_read(app, "anna", deeper)
+    assert _can_read(app, "ben", deeper)
+    # Never into the audience: not the note, not a reply under it.
+    r = ben.put(f"/api/nodes/{note}", json={
+        "content": "BENS PRIVATE NOTE", "privacy_level": "circles"})
+    assert r.status_code == 400
+    assert r.get_json()["code"] == "circle_only_me_branch"
+    r = _reply(app, "ben", note, content="to the thread?", privacy="circles")
+    assert r.status_code == 400
+    assert r.get_json()["code"] == "circle_only_me_branch"
+    assert not _can_read(app, "anna", note)
+    # It closes with ben's access...
+    r = _client(app, "anna").put(f"/api/nodes/{entry}", json={
+        "content": SECRET, "privacy_level": "circles",
+        "circle_usernames": ["chidi"]})
+    assert r.status_code == 200, r.get_json()
+    assert not _can_read(app, "ben", deeper)
+    assert _can_read(app, "ben", note)              # his own writing
+    # ... and goes with the entry.
+    assert _client(app, "anna").delete(f"/api/nodes/{entry}").status_code == 200
+    later = time.time() + 31 * 86400
+    for _ in range(3):
+        finalize_deleted_nodes(now=later)
+    _db.session.expire_all()
+    gone = _db.session.get(Node, deeper)
+    assert gone is None or gone.content is None
+    assert _db.session.get(Node, note).deleted_at is None
+
+
+def test_the_readers_sentence_names_only_who_can_read_the_entry(app):  # noqa: F811,E501
+    """5. A person added to a circle with "Only new entries" after the
+    entry was shared with it does not read the entry: the sentence of
+    the edit form does not name them, and an audience only such people
+    are in is refused."""
+    from backend.tests.test_circles import _circle
+    close = _circle(app, "anna", "Close", ["ben"])
+    entry = _share(app, circle_ids=[close])
+    anna = _client(app, "anna")
+    r = anna.post(f"/api/circles/{close}/members",
+                  json={"username": "dana", "include_existing": False})
+    assert r.status_code == 201, r.get_json()
+    assert not _can_read(app, "dana", entry)
+
+    def preview(**extra):
+        return anna.post("/api/circles/audience-preview", json={
+            "circle_ids": [close], "usernames": [], **extra}).get_json()
+    assert preview(node_id=entry)["readers"] == ["ben"]
+    assert preview()["readers"] == ["ben", "dana"]     # a new entry
+    readers = _client(app, "ben").get(
+        f"/api/nodes/{entry}").get_json()["audience"]["readers"]
+    assert readers == ["ben"]
+    # ben leaves the circle: nobody who can read the entry is left in it.
+    r = anna.delete(f"/api/circles/{close}/members/ben")
+    assert r.status_code == 200, r.get_json()
+    assert preview(node_id=entry)["readers"] == []
+    r = anna.put(f"/api/nodes/{entry}", json={
+        "content": SECRET, "privacy_level": "circles",
+        "circle_ids": [close], "circle_usernames": []})
+    assert r.status_code == 400
+    assert r.get_json()["code"] == "circle_no_readers"

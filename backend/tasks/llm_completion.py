@@ -4356,8 +4356,14 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                               if _placeholder_node(p) is not None},
                 )
 
-            # Detect if this is an agentic session (enables tools)
-            is_agentic = _is_agentic_prompt(node_chain)
+            # Detect if this is an agentic session (enables tools). The
+            # prompts that act in this reply (privacy.acting_prompts): in a
+            # reply written in a shared thread a deleted prompt turns no
+            # tools on, the rule the agreement before it is worked out by.
+            from backend.utils.privacy import acting_prompts
+            is_agentic = _is_agentic_prompt(acting_prompts(
+                node_chain, user_id,
+                in_shared_thread=llm_node.audience_root_id is not None))
             # semantic_search / read_full are on for everyone under the env
             # killswitch (#329); the "External references" Account toggle
             # only decides, inside the handler, whether the search also

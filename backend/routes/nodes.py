@@ -1446,8 +1446,21 @@ def _focal_own_fields(node, viewer_id):
         from backend.utils import circles as cz
         if cz.circles_enabled_for(viewer_id):
             source = cz.thread_source(node)
-            if source is not None and source.is_someone_elses(viewer_id):
+            elsewhere = (source is not None
+                         and source.is_someone_elses(viewer_id))
+            if elsewhere:
                 data["reply_only_private"] = True
+            # An AI reply the viewer asks for under such a node (or under
+            # their Only-me node in their own shared thread) is an Only-me
+            # reply in that thread: what it reads of their data and the
+            # key the request must carry (the dialog's private variant).
+            if node.audience_root_id is not None or elsewhere:
+                entry = cz.reply_thread_entry(node, viewer_id)
+                if entry is not None:
+                    reads, key = cz.ai_reply_reads(node, viewer_id)
+                    data["thread_ai_reads"] = {
+                        "entry_id": entry.id, "ai_reads": reads,
+                        "ai_reads_key": key}
     # A Community Archive read reply: the thread page shows what the read
     # covered (the window, from the pinned render) and offers to read
     # the day again. Focal node only — two small lookups. The window goes

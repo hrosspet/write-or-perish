@@ -710,6 +710,23 @@ def reply_context_nodes(parent_node, user_id, in_shared_thread=False):
     return visible
 
 
+def acting_prompts(chain, user_id, in_shared_thread=False):
+    """The prompt nodes of *chain* (reply_context_nodes, the nodes a reply
+    is built from) that act in the reply: fill their placeholders, turn
+    the tools on, and are named in the agreement before a reply in a
+    shared thread. In a reply written in a shared thread a prompt shown as
+    deleted to *user_id* does none of it, whoever wrote it. Anywhere else
+    every prompt node of the chain counts, a deleted one too, as before
+    Circles (its text is never sent).
+
+    The one rule for the agreement (circles.agreement_prompts) and for the
+    completion task's tools (llm_completion), so the two never differ."""
+    prompts = [n for n in chain if n.is_system_prompt]
+    if not in_shared_thread:
+        return prompts
+    return [n for n in prompts if not shown_as_deleted(n, user_id)]
+
+
 def can_ai_access_node(node, user_id) -> bool:
     """can_user_access_node for a model acting for *user_id*."""
     return can_user_access_node(node, user_id, as_ai=True)

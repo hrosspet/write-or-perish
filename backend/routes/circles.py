@@ -233,15 +233,28 @@ def remove_member(circle_id, username):
 @login_required
 def audience_preview():
     """Who would read an entry shared with these circles and names: the
-    sentence the form shows before saving."""
+    sentence the form shows before saving. ``node_id``: the user's own
+    entry being edited, whose circles keep the time they were shared
+    with it (a member added since with "Only new entries" is not named);
+    without it, a new entry."""
     data = request.get_json(silent=True) or {}
     try:
         circles, people = cz.resolve_audience(
             current_user, data.get("circle_ids"), data.get("usernames"))
     except cz.AudienceError as e:
         return e.response()
+    entry = None
+    try:
+        node_id = int(data["node_id"]) if data.get("node_id") else None
+    except (TypeError, ValueError):
+        node_id = None
+    if node_id is not None:
+        node = db.session.get(Node, node_id)
+        if node is not None and cz.entry_owner_id(node) == current_user.id:
+            entry = node
     return jsonify({
-        "readers": cz.preview_readers(circles, people, current_user.id),
+        "readers": cz.preview_readers(circles, people, current_user.id,
+                                      entry=entry),
     }), 200
 
 

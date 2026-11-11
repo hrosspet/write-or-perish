@@ -331,3 +331,40 @@ def test_the_cascade_reads_no_prompt_links_per_reply(app, circles):  # noqa: F81
         assert len(links) == 1, links
     finally:
         privacy._pointers_seen["at"] = 0.0
+
+
+# ── Second review, 1. A deleted prompt acts in no way ───────────────────
+
+def test_a_deleted_prompt_neither_fills_nor_turns_tools_on(app, circles):  # noqa: F811,E501
+    """The author deletes only the prompt node above her shared entry
+    (its replies stay). In a member's reply the prompt then fills
+    nothing, turns no tools on and is not named: the dialog and the task
+    follow one rule (privacy.acting_prompts)."""
+    from backend.utils import circles as cz
+    for world in (lambda: _agentic_world(share_path=True),
+                  _public_prompt_world):
+        _db.drop_all()
+        _db.create_all()
+        w = world()
+        w["p"].deleted_at = datetime.utcnow()
+        _db.session.commit()
+        ben = w["ben"]
+        names, key = cz.ai_reply_reads(w["entry"], ben.id)
+        assert (names, key) == ([], "")
+        sent = _ask(w, ben, w["entry"], key="")
+        assert sent is not None and "ANNA SHARED TURN" in sent
+        assert not _ScriptedProvider.calls[0]["tools"], "tools turned on"
+        assert "PROMPT" not in sent and "BENS-PROFILE" not in sent
+
+
+def test_a_deleted_prompt_in_a_private_thread_is_as_on_main(app, circles):  # noqa: F811,E501
+    """Outside shared threads nothing changes: a private agentic thread
+    whose prompt node was deleted keeps its tools, as before Circles."""
+    from backend.tests.test_retrieval_loop import _build_chain
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    system.deleted_at = datetime.utcnow()
+    _db.session.commit()
+    _ScriptedProvider.reset([_resp("ok")])
+    generate_llm_response(_FakeSelf(), user_node.id, llm_node.id, "gpt-5",
+                          alice.id, source_mode="textmode")
+    assert _ScriptedProvider.calls[0]["tools"]

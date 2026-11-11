@@ -55,6 +55,8 @@ NO_READERS = ("Nobody could read this entry yet. Choose a circle with "
 REPLY_AUDIENCE = ("Replies in a shared thread are read by the people the "
                   "entry is shared with.")
 ONLY_AUTHOR = "Only the author of the entry can change who reads this thread."
+ONLY_ME_BRANCH = ("This stays Only me: the node it answers is not read by "
+                  "the people of this thread.")
 
 
 class AudienceError(Exception):
@@ -352,14 +354,29 @@ def resolve_audience(user, circle_ids, usernames):
     return circles, people
 
 
-def preview_readers(circles, people, owner_id):
-    """Usernames of everyone who would read a new entry shared with
-    *circles* and *people* now, ordered by name."""
+def preview_readers(circles, people, owner_id, entry=None):
+    """Usernames of everyone who would read *entry* (None: a new entry)
+    shared with *circles* and *people* now, ordered by name: exactly who
+    reader_ids gives once it is saved. A circle the entry is already
+    shared with keeps the time of that share (set_audience), so a member
+    added to it since with "Only new entries" does not read the entry
+    and is not named; a circle newly chosen is shared from now on."""
     ids = {u.id for u in people}
     if circles:
-        ids.update(uid for (uid,) in db.session.query(
-            CircleMember.user_id).filter(
-            CircleMember.circle_id.in_([c.id for c in circles])))
+        cids = [c.id for c in circles]
+        shared_at = {}
+        if entry is not None and entry.id is not None:
+            shared_at = dict(db.session.query(
+                NodeCircle.circle_id, NodeCircle.shared_at).filter(
+                NodeCircle.node_id == entry.id,
+                NodeCircle.circle_id.in_(cids)))
+        for cid, uid, entries_from in db.session.query(
+                CircleMember.circle_id, CircleMember.user_id,
+                CircleMember.entries_from).filter(
+                CircleMember.circle_id.in_(cids)):
+            since = shared_at.get(cid)
+            if since is None or entries_from is None or since >= entries_from:
+                ids.add(uid)
     ids.discard(owner_id)
     if not ids:
         return []
@@ -548,13 +565,13 @@ def agreement_prompts(chain, user_id):
 
     *chain*: the nodes the reply is built from, root first, without the
     ones whose ai_usage keeps AI out (privacy.reply_context_nodes, then
-    that filter). A deleted node is not sent and is not counted."""
-    from backend.utils.privacy import shown_as_deleted
+    that filter). A deleted prompt acts in no way
+    (privacy.acting_prompts, the rule the task's tools follow too)."""
+    from backend.utils.privacy import acting_prompts
     from backend.utils.session_helpers import chain_has_agentic_prompt
     out = []
-    for n in chain:
-        if (not n.is_system_prompt or shown_as_deleted(n, user_id)
-                or (n.human_owner_id or n.user_id) == user_id):
+    for n in acting_prompts(chain, user_id, in_shared_thread=True):
+        if (n.human_owner_id or n.user_id) == user_id:
             continue
         if is_shared_prompt_for(n, user_id) or chain_has_agentic_prompt([n]):
             out.append(n)
@@ -607,13 +624,11 @@ def ai_reply_reads(node, user_id):
 
     The walk is the task's (chain_for_reply). Decrypts only prompt
     nodes."""
-    from backend.utils.privacy import shown_as_deleted
+    from backend.utils.privacy import acting_prompts
     from backend.utils.session_helpers import chain_has_agentic_prompt
     chain = chain_for_reply(node, user_id)
     found = []
-    for n in chain:
-        if not n.is_system_prompt or shown_as_deleted(n, user_id):
-            continue
+    for n in acting_prompts(chain, user_id, in_shared_thread=True):
         mine = (n.human_owner_id or n.user_id) == user_id
         if not (mine or is_shared_prompt_for(n, user_id)):
             continue   # a public prompt of someone else's fills nothing
@@ -706,7 +721,7 @@ def set_audience(node, user, circle_ids, usernames, now=None):
         # leads up to a shared entry (share_thread_path), never alone.
         raise AudienceError(PROMPT_ALONE, code="circle_prompt_node")
     circles, people = resolve_audience(user, circle_ids, usernames)
-    if not preview_readers(circles, people, user.id):
+    if not preview_readers(circles, people, user.id, entry=node):
         raise AudienceError(NO_READERS, code="circle_no_readers")
 
     was_shared = is_shared_entry(node)
@@ -782,11 +797,27 @@ def reply_thread_entry(parent, user_id):
     they read the thread as its author or as part of its audience."""
     from backend.utils.privacy import (
         can_user_access_node, in_audience, pointers_may_exist)
-    if (parent is None or parent.audience_root_id is None
-            or not pointers_may_exist()):
+    if parent is None or not pointers_may_exist():
         return None
-    entry = (parent if parent.audience_root_id == parent.id
-             else db.session.get(Node, parent.audience_root_id))
+    pointer = parent.audience_root_id
+    if pointer is None:
+        # A member's own Only-me branch in someone else's shared thread:
+        # what they wrote under their own Only-me node there carries no
+        # pointer, and its thread is found through its ancestors
+        # (thread_source). An AI reply asked for in that branch is a reply
+        # in the thread like any other of theirs: Only me, and closed and
+        # deleted with their access to the entry. The author's own
+        # private branches stay as they are.
+        if (parent.privacy_level != PrivacyLevel.PRIVATE.value
+                or (parent.human_owner_id or parent.user_id) != user_id):
+            return None
+        source = thread_source(parent)
+        if (source is None or source.entry_id is None
+                or not source.is_someone_elses(user_id)):
+            return None
+        pointer = source.entry_id
+    entry = (parent if pointer == parent.id
+             else db.session.get(Node, pointer))
     if (entry is None or entry.deleted_at is not None
             or not is_shared_entry(entry)):
         return None
@@ -866,6 +897,17 @@ def apply_requested_sharing(node, user, data, *, old_privacy=None,
         if names_an_audience:
             raise AudienceError(REPLY_AUDIENCE, code="circle_reply_audience")
         _refuse_prompt_alone(node, source.entry_id, old_privacy)
+        # A node of the writer's own Only-me branch (under a node the
+        # thread's people do not read) stays Only me: it joins the
+        # audience only where its parent is read by it. A node that is
+        # "circles" already keeps it through an edit of its text.
+        if old_privacy != CIRCLES:
+            parent = (db.session.get(Node, node.parent_id)
+                      if node.parent_id is not None else None)
+            in_thread = shared_entry_of(parent)
+            if in_thread is None or in_thread.id != source.entry_id:
+                raise AudienceError(ONLY_ME_BRANCH,
+                                    code="circle_only_me_branch")
         # Back in its thread (when the thread is still there to point at).
         if source.entry_id and node.audience_root_id != node.id:
             node.audience_root_id = source.entry_id
