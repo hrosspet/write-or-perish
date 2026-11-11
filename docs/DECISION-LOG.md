@@ -3321,6 +3321,37 @@ Kinds (one per entry and per table row):
 - **Source:** Claude Code session 2026-11-10 (Fable 5.2)
 - **Applies to:** #588, #590, #591, #592, #594, #626, #627, #629, #630, #631
 
+### 2026-11-11 · Re-raising choices Peter had ticked on the train's summary node
+
+- **Kind:** escalation
+- **Situation:** after train #635 merged, the post-merge pass kept four PR questions marked pending: which limit decides #627's carry when a limit is lowered during a month, #627's carry starting with the deploy's month, #630's restored profile next to a version the user saved by hand, and #624's optional "Copy text" menu item. The builder named them in the terminal as unanswered and, when Peter asked what they were, explained them again as open questions. The #627 and #630 choices were in the train's summary node in Loore under "Choices left as built, for you to object to"; Peter had ticked them there and then merged the train. (#624's item was not in the node; it asked for nothing to change.)
+- **Decision:** asked instead of deciding.
+- **Peter:** "the last three questions were mentioned in the brief for the merge train on local loore node 201849. I check-marked them on that node and then I merged it, so that means these questions were already answered."
+- **Score:** miss. A choice in a merge train's summary node that Peter ticked is answered when he merges the train; the post-merge pass reads the node's ticks before it calls anything pending. He answered "keep as built" for all four again.
+- **Source:** Claude Code session 2026-11-11 (Opus 5.5)
+- **Applies to:** #624, #627, #630, #635
+
+### 2026-11-11 · #623's question left out of the merge train's summary node
+
+- **Kind:** escalation
+- **Situation:** #623's PR listed one "Needs Peter" item: a ChatGPT, Claude or document re-import dates its profile update from the oldest entry in the whole archive, skipped duplicates included, so a re-upload with one new conversation can rebuild the profile from scratch; and a Twitter re-import that only changes existing entries (AI usage from None to Chat) starts no profile update. The builder recommended a follow-up issue (#625) and left both as they were. The train's summary node listed the other PRs' choices for Peter to object to, but not this one, so he merged without seeing it.
+- **Decision:** decided without asking Peter.
+- **Peter:** "the #623 questions were not raised on the brief - which they should have - and thus need a followup now."
+- **Score:** miss. Every open "Needs Peter" item of every PR in a train goes into the train's summary node.
+- **Source:** Claude Code session 2026-11-11 (Opus 5.5)
+- **Applies to:** #623, #625, #635
+
+### 2026-11-11 · A re-import rebuilds the profile only from what it changed
+
+- **Kind:** cost
+- **Situation:** the #623 question above. A user uploads the same ChatGPT export again with one new conversation; or a Twitter re-import changes existing entries from None to Chat and adds nothing.
+- **Prediction:** Peter takes the recommended follow-up #625 (date the profile update from the entries the import added or changed, and start none when there are none), to be built later, 75 %.
+- **Decision:** the builder recommended #625 and left the behaviour as it was until then.
+- **Peter:** "only what's changed by the import should count towards the decision whether / how much of the profile should be rebuilt"; for the re-upload, "only the new conversation should count towards profile rebuild. If it's placed chronologically somewhere in the middle of the users total Loore archive (not just the import, but everything considered) - only the second part since the new conversation should be regenerated"; for the Twitter case, "changing from None to Chat means this data now should count towards the profile re-generation decision, and should trigger profile update".
+- **Score:** hit. He took #625's direction and made it exact: the rebuild starts at the changed entry's place in the user's whole Loore history, and a change to Chat counts as a change.
+- **Source:** Claude Code session 2026-11-11 (Opus 5.5)
+- **Applies to:** #623, #625
+
 ## Decided by the builder
 
 Choices that agents flagged in PRs and that the builder decided because a rule above already covers them (Peter, 2026-10-02: decide what the log supports, raise only real judgement calls). Each is also recorded on its PR, or in the session where Peter asked. The Decided column holds only the builder's part; a rule or decision of Peter's goes in the Rule column. Questions raised to Peter instead are not listed; his answers become entries. Model is the model that wrote the PR (its Co-Authored-By line). Result is "accepted by merge (PR #N, date)" once the PR has merged and Peter didn't correct the choice, "pending" until it merges, and "corrected → entry <title>" when he overrules it; the entry is then scored as a miss.
@@ -3703,11 +3734,11 @@ Choices that agents flagged in PRs and that the builder decided because a rule a
 | 2026-11-10 | #629 | privacy | A copy of the export on the server | None is stored | Peter's answers of 2026-10-22: no extra step where an existing mechanism is enough | Fable 5.2 | accepted by merge (PR #635, 2026-11-11) |
 | 2026-11-10 | #629 | UX | An email when a long export is ready | None: the browser's download list shows when the file is complete | none: builder's judgement | Fable 5.2 | accepted by merge (PR #635, 2026-11-11) |
 | 2026-11-10 | #627 | UX | What users see of a carried overflow | No amounts and no new text; the cap's message names the date it lifts only when that is later than the start of next month | No new user-facing text without Peter (#543) | Fable 5.2 | accepted by merge (PR #635, 2026-11-11) |
-| 2026-11-10 | #627 | cost | Which limit decides a month's carry | The limit in force at the end of the month | none: builder's judgement | Fable 5.2 | pending |
+| 2026-11-10 | #627 | cost | Which limit decides a month's carry | The limit in force at the end of the month | none: builder's judgement | Fable 5.2 | accepted by merge (PR #635, 2026-11-11) |
 | 2026-11-10 | #627 | UX | How an admin sees and clears a carry | A Carried column with a clear action that asks first; a limit of 0 also clears it | none: builder's judgement | Fable 5.2 | accepted by merge (PR #635, 2026-11-11) |
 | 2026-11-10 | #630 | UX | The "content deleted" bar during the 30 days | Stays on every page, as before; only its words change | none: builder's judgement | Fable 5.2 | accepted by merge (PR #635, 2026-11-11) |
 | 2026-11-10 | #630 | user-facing text | The words of the bar, the dialog and the button | Peter's sentences kept, with "writing" changed to "content" | Peter, 2026-10-22: "Delete all my content" | Fable 5.2 | accepted by merge (PR #635, 2026-11-11) |
-| 2026-11-10 | #630 | data safety | A profile version the user saved by hand between the request and a restore | Kept, and merged into the restored profile at the next update | The user's edit wins | Fable 5.2 | pending |
+| 2026-11-10 | #630 | data safety | A profile version the user saved by hand between the request and a restore | Kept, and merged into the restored profile at the next update | The user's edit wins | Fable 5.2 | accepted by merge (PR #635, 2026-11-11) |
 | 2026-11-10 | #630 | data safety | A todo list or document written between the request and a restore | No special handling: the newest stays current, and the restored versions are in the history | Peter's restore model (2026-10-22): no history rebuild | Fable 5.2 | accepted by merge (PR #635, 2026-11-11) |
 | 2026-11-10 | #630 | privacy | The X bookmark connection at "Delete all my content" | Disconnected at once, with access revoked at X; a restore brings back the saved bookmarks, not the connection, and reconnecting is one approval | Peter asked for the revoke (2026-10-09) | Fable 5.2 | accepted by merge (PR #635, 2026-11-11) |
 | 2026-11-10 | #623 | privacy | An import request that sends no AI usage | Gets the account's setting, as a new reply does, instead of None | Peter, 2026-09-29: a new reply falls back to the account setting; No AI means no AI | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
@@ -3717,7 +3748,7 @@ Choices that agents flagged in PRs and that the builder decided because a rule a
 | 2026-11-10 | #626 | privacy | A reply the export leaves out (a deleted reply the user can't see) | Takes no letter and no separator, so the export doesn't show that it exists | The export's access rule: such a reply leaves no trace | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
 | 2026-11-10 | #626 | privacy | A quoted entry that is deleted, inaccessible or marked None | Never gets its author and time; keeps the export's existing placeholder texts | No AI means no AI | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
 | 2026-11-10 | #626 | privacy | A quote reference by author and time, for the training key | Not reported to the payload licence, since it carries no text of the entry | Training licence | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
-| 2026-11-10 | #627 | cost | Overflows from the months before the deploy | Not carried; the first overflow that carries is the one of the deploy's month | Peter, 2026-11-05: err towards the job going through | Opus 5.5 | pending |
+| 2026-11-10 | #627 | cost | Overflows from the months before the deploy | Not carried; the first overflow that carries is the one of the deploy's month | Peter, 2026-11-05: err towards the job going through | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
 | 2026-11-10 | #627 | UX | An admin email when the carry alone caps a user at the start of a month | None; the admin was emailed when that overflow first reached the cap | One alert per cause | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
 | 2026-11-10 | #627 | cost | The start of a month, before the hourly roll | A user can stay uncapped for a few minutes, until the roll or the check after their first new cost row | Peter, 2026-11-05: running a few dollars over the cap is fine | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
 | 2026-11-10 | #627 | cost | A month in which the user had no limit at some time | Carries nothing, also when a limit is set later in that month | Follows "a limit of 0 clears the carry" (Peter, 2026-10-22) | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
