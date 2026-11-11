@@ -124,6 +124,17 @@ enum DefaultsKey {
     static func circleReplyAck(entryId: Int, userId: Int?) -> String {
         "loore_circle_reply_ack_\(userId.map(String.init) ?? "")_\(entryId)"
     }
+    /// Circles, the same for an AI reply generated in a shared thread: its
+    /// own memory, apart from the typed reply's (web `aiReplyAckKey`).
+    static func circleAiReplyAck(entryId: Int, userId: Int?) -> String {
+        "loore_circle_ai_reply_ack_\(userId.map(String.init) ?? "")_\(entryId)"
+    }
+    /// Circles, "AI reply: Shared with this thread / Only me" in a shared
+    /// thread ("shared" | "private"; absent = shared): per thread and per
+    /// user, on this device (web `aiReplyPrivacyKey`).
+    static func circleAiReplyPrivacy(entryId: Int, userId: Int?) -> String {
+        "loore_circle_ai_reply_privacy_\(userId.map(String.init) ?? "")_\(entryId)"
+    }
     /// The Voice / Text choice of each home card by purpose ("voice" | "text";
     /// absent = Voice). Each card remembers its own (Peter, 2026-10-13).
     static let homeReflectMode = "home.reflectMode"

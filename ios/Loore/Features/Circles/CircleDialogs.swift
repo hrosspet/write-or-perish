@@ -29,31 +29,32 @@ private struct CircleDialogNote: View {
 }
 
 /// Before a reply is sent into a shared thread: "Send this reply? <names> will
-/// see it, with your name." With `askAI` it stands before "Ask my AI", whose
-/// answer is a reply in the thread too. "Don't ask again in this thread" is
-/// remembered by the caller (per thread, per user, on this device).
+/// see it, with your name." With `aiReply` it stands before an AI reply is
+/// generated in the thread, which the same people see. "Don't ask again in
+/// this thread" is remembered by the caller (per thread, per user, on this
+/// device; typed replies and AI replies each have their own memory).
 struct CircleReplyDialog: View {
     let names: [String]
-    var askAI = false
+    var aiReply = false
+    /// With `aiReply`: the requester's own artifacts the reply's prompt reads.
+    var aiReads: [String] = []
     /// `dontAskAgain`
     let onConfirm: (Bool) -> Void
     let onCancel: () -> Void
     @State private var dontAskAgain = false
 
-    static func title(askAI: Bool) -> String { askAI ? "Ask your AI here?" : "Send this reply?" }
+    static func title(aiReply: Bool) -> String { aiReply ? CirclesWording.aiReplyDialogTitle : "Send this reply?" }
 
-    static func body(names: [String], askAI: Bool) -> String {
-        let who = CirclesWording.joinNames(names)
-        return askAI
-            ? "Your AI reads this thread and answers in it. \(who) will see the answer, with your name."
-            : "\(who) will see it, with your name."
+    static func body(names: [String], aiReply: Bool, aiReads: [String] = []) -> String {
+        aiReply ? CirclesWording.aiReplyDialogBody(names: names, aiReads: aiReads)
+            : "\(CirclesWording.joinNames(names)) will see it, with your name."
     }
 
-    static func confirmLabel(askAI: Bool) -> String { askAI ? "Ask my AI" : "Send reply" }
+    static func confirmLabel(aiReply: Bool) -> String { aiReply ? CirclesWording.aiReplyDialogConfirm : "Send reply" }
 
     var body: some View {
-        LooreDialogCard(title: Self.title(askAI: askAI)) {
-            CircleDialogBody(text: Self.body(names: names, askAI: askAI))
+        LooreDialogCard(title: Self.title(aiReply: aiReply)) {
+            CircleDialogBody(text: Self.body(names: names, aiReply: aiReply, aiReads: aiReads))
             Button {
                 dontAskAgain.toggle()
             } label: {
@@ -76,7 +77,7 @@ struct CircleReplyDialog: View {
             HStack(spacing: 10) {
                 Spacer()
                 Button("Cancel", action: onCancel).buttonStyle(.looreOutline)
-                Button(Self.confirmLabel(askAI: askAI)) { onConfirm(dontAskAgain) }
+                Button(Self.confirmLabel(aiReply: aiReply)) { onConfirm(dontAskAgain) }
                     .buttonStyle(.looreFilled)
                     .accessibilityIdentifier("circles.replyConfirm")
             }
@@ -84,8 +85,9 @@ struct CircleReplyDialog: View {
     }
 }
 
-/// Adding a person to a circle: Cancel, "Only new entries", "Add <name>" (= also
-/// the entries already shared with the circle; the real count is stated).
+/// Adding a person to a circle: Cancel, "Also show earlier entries" (= also
+/// the entries already shared with the circle; the real count is stated),
+/// and the emphasized "Add <name>", which is for entries shared from now on.
 struct AddCircleMemberDialog: View {
     let name: String
     let circleName: String
@@ -95,16 +97,25 @@ struct AddCircleMemberDialog: View {
     let onChoice: (Bool) -> Void
     let onCancel: () -> Void
 
+    /// What each button sends as `include_existing`.
+    static let emphasizedIncludesExisting = false
+    static let plainIncludesExisting = true
+
+    /// "Also show earlier entries" is offered when there are earlier entries.
+    static func offersEarlier(sharedCount: Int) -> Bool { sharedCount > 0 }
+
     var body: some View {
-        LooreDialogCard(title: "Add \(name) to \(circleName)?") {
+        LooreDialogCard(title: CirclesWording.addMemberTitle(name: name, circle: circleName)) {
             CircleDialogBody(text: CirclesWording.addMemberBody(name: name, circle: circleName, sharedCount: sharedCount))
             CircleDialogNote(text: CirclesWording.addMemberNote(name: name))
             FlowLayout(spacing: 10, lineSpacing: 10) {
                 Button("Cancel", action: onCancel).buttonStyle(.looreOutline)
-                Button("Only new entries") { onChoice(false) }
-                    .buttonStyle(.looreOutline)
-                    .accessibilityIdentifier("circles.onlyNew")
-                Button("Add \(name)") { onChoice(true) }
+                if Self.offersEarlier(sharedCount: sharedCount) {
+                    Button(CirclesWording.addMemberAlsoEarlier) { onChoice(Self.plainIncludesExisting) }
+                        .buttonStyle(.looreOutline)
+                        .accessibilityIdentifier("circles.alsoEarlier")
+                }
+                Button(CirclesWording.addMemberConfirm(name: name)) { onChoice(Self.emphasizedIncludesExisting) }
                     .buttonStyle(.looreFilled)
                     .accessibilityIdentifier("circles.addConfirm")
             }

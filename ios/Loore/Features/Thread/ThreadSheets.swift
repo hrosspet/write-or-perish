@@ -23,17 +23,18 @@ struct ThreadSheets: ViewModifier {
                     NodeFormSheet(title: "Edit Text", config: NodeFormConfig(
                         edit: .init(nodeId: target.id, initialContent: target.content, initialPrivacy: target.privacy,
                                     initialAIUsage: target.aiUsage, detachPrompt: target.hasPromptArtifact,
-                                    hasGeneratedTTS: target.hasTTS, hasChildren: target.hasChildren))) { result in
+                                    hasGeneratedTTS: target.hasTTS, hasChildren: target.hasChildren,
+                                    isAIReply: target.isAIReply))) { result in
                         Task { await model.editSaved(result, autoGenerate: $autoGenerate) }
                     } onClose: {
                         model.showEditForm = false
                     }
                 }
             }
-            .looreDialog(isPresented: $model.showAskAIDialog) {
-                CircleReplyDialog(names: model.askAINames, askAI: true,
-                                  onConfirm: { model.askMyAIConfirmed(dontAskAgain: $0) },
-                                  onCancel: { model.showAskAIDialog = false })
+            .looreDialog(isPresented: $model.showAIReplyDialog) {
+                CircleReplyDialog(names: model.aiReplyNames, aiReply: true, aiReads: model.audience?.aiReads ?? [],
+                                  onConfirm: { model.aiReplyConfirmed(dontAskAgain: $0) },
+                                  onCancel: { model.showAIReplyDialog = false })
             }
             .looreDialog(isPresented: $model.showPromptEditConfirm) {
                 PromptEditConfirmDialog(

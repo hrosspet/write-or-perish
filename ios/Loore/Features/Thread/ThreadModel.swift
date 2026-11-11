@@ -12,6 +12,9 @@ struct NodeTarget: Identifiable, Equatable {
     var hasChildren: Bool
     var hasTTS: Bool
     var hasPromptArtifact: Bool
+    /// An AI reply: in a shared thread its edit form offers Only me and the
+    /// thread's people, not Everyone.
+    var isAIReply = false
 }
 
 /// State and behaviour of one thread screen (web `NodeDetail`, map D §1, §4.7–4.8, §5).
@@ -72,13 +75,21 @@ final class ThreadModel {
     private var me: CurrentUser? { app?.user }
 
     var isOwner: Bool {
-        guard let node, let me else { return false }
-        return node.user?.id == me.id || (node.nodeType == .llm && node.parentUserId == me.id)
+        guard let node else { return false }
+        return ownedByMe(userId: node.user?.id, parentUserId: node.parentUserId, nodeType: node.nodeType,
+                         humanOwnerUsername: node.humanOwnerUsername)
     }
 
-    func ownedByMe(userId: Int?, parentUserId: Int?, nodeType: NodeType) -> Bool {
+    /// An AI reply belongs to the person who asked for it. Where the server
+    /// names that person (`human_owner_username`, on AI replies in a shared
+    /// thread) the name decides: under another person's node `parent_user_id`
+    /// is that person, not the one who asked.
+    func ownedByMe(userId: Int?, parentUserId: Int?, nodeType: NodeType, humanOwnerUsername: String? = nil) -> Bool {
         guard let me else { return false }
-        return userId == me.id || (nodeType == .llm && parentUserId == me.id)
+        if userId == me.id { return true }
+        guard nodeType == .llm else { return false }
+        if let human = humanOwnerUsername, !human.isEmpty { return human == me.username }
+        return parentUserId == me.id
     }
 
     var isLLMNode: Bool { node.map { $0.nodeType == .llm || $0.llmModel != nil } ?? false }
@@ -92,42 +103,100 @@ final class ThreadModel {
 
     var isPublicThread: Bool { node?.privacyLevel == .public }
 
-    // Circles: a shared thread. In someone else's, a model answers only when
-    // the reader asks ("Ask my AI"), and the answer is a reply in the thread.
-    // On the author's own shared entry nothing changes: what her AI, a Voice
-    // session or a gleaning writes under it stays hers.
+    // Circles: a shared thread. An AI reply here works like an AI reply in a
+    // private thread, and the thread's people read it: every member (the
+    // author and each reader) can generate one under any node of the thread,
+    // with their own model and profile, and it is marked with their name.
+    // That holds for the author's own AI replies under her shared entry too.
+    // The one who generates it can keep it to themselves ("Only me").
+    // In someone else's shared thread there is no auto-generate and no Voice Mode.
     var audience: NodeAudience? { (app?.capabilities.circlesEnabled ?? false) ? node?.audience : nil }
     var isSharedThread: Bool { audience != nil }
     var isForeignShared: Bool { audience.map { !$0.isAuthor } ?? false }
-    var showAskAIDialog = false
+    /// The "Generate an AI reply?" dialog. Closing it any other way than
+    /// with its Generate button answers no.
+    var showAIReplyDialog = false {
+        didSet { if !showAIReplyDialog { answerAIReplyDialog(false) } }
+    }
+    @ObservationIgnored private var aiReplyAnswer: CheckedContinuation<Bool, Never>?
+    /// "AI reply: Shared with this thread / Only me" (Craft mode): remembered
+    /// per thread and user on this device; read when the node loads.
+    private(set) var aiReplyOnlyMe = false
+    private var craftMode: Bool { app?.capabilities.craftMode ?? false }
 
-    /// Why "Ask my AI" is off, in a sentence, or nil when it can be asked.
-    var askAIOffReason: String? {
-        guard let audience, isForeignShared else { return nil }
-        return CirclesWording.askAIOffReason(audience, myDefaultAIUsage: me?.defaultAIUsage)
+    /// The next AI reply is for the one generating it only. The choice counts
+    /// only while its control is on the page (Craft mode), so a choice the
+    /// user cannot see never decides who reads a reply.
+    var aiReplyPrivate: Bool { isSharedThread && craftMode && aiReplyOnlyMe }
+
+    /// The two-choice control shows with the AI-reply control, and also
+    /// where auto-generate will ask for the reply.
+    func showAIReplyPrivacy(craftBar: Bool, autoGenerate: Bool) -> Bool {
+        craftMode && isSharedThread && !isLLMPending && aiReplyOffReason == nil
+            && (craftBar || autoGenerateActive(autoGenerate))
     }
 
-    var askAINames: [String] { CirclesWording.replyAudienceNames(audience, me: me?.username) }
+    /// Why the AI-reply control is off in a shared thread, in a sentence, or
+    /// nil when a reply can be generated.
+    var aiReplyOffReason: String? {
+        guard let audience, let node else { return nil }
+        return CirclesWording.aiReplyOffReason(audience, nodeAIUsage: node.aiUsage,
+                                               myDefaultAIUsage: me?.defaultAIUsage)
+    }
 
-    /// "Ask my AI": the answer is a reply in the thread, so the people who
-    /// will see it are named first, unless "Don't ask again in this thread"
-    /// was ticked (the same memory as the reply dialog).
-    func askMyAIPressed() {
+    /// The people who will see an AI reply generated here, except the one generating it.
+    var aiReplyNames: [String] { CirclesWording.replyAudienceNames(audience, me: me?.username) }
+
+    private func aiReplyPrivacyKey(_ audience: NodeAudience) -> String {
+        DefaultsKey.circleAiReplyPrivacy(entryId: audience.entryId, userId: me?.id)
+    }
+
+    func setAIReplyOnlyMe(_ onlyMe: Bool) {
+        aiReplyOnlyMe = onlyMe
         guard let audience else { return }
-        let key = DefaultsKey.circleReplyAck(entryId: audience.entryId, userId: me?.id)
-        if UserDefaults.standard.string(forKey: key) == "true" {
-            llmResponsePressed()
-        } else {
-            showAskAIDialog = true
+        UserDefaults.standard.set(onlyMe ? "private" : "shared", forKey: aiReplyPrivacyKey(audience))
+    }
+
+    private func readAIReplyChoice() {
+        aiReplyOnlyMe = audience.map { UserDefaults.standard.string(forKey: aiReplyPrivacyKey($0)) == "private" } ?? false
+    }
+
+    /// Before an AI reply is generated in a shared thread the people who
+    /// will see it are named ("Generate an AI reply?"), unless the reply
+    /// stays with the one generating it ("Only me"), nobody else reads the
+    /// thread, or "Don't ask again in this thread" was ticked for AI replies.
+    /// True to go on, false when the user cancels.
+    func confirmAIReply() async -> Bool {
+        guard let audience, !aiReplyPrivate, !aiReplyNames.isEmpty,
+              UserDefaults.standard.string(forKey: DefaultsKey.circleAiReplyAck(entryId: audience.entryId, userId: me?.id)) != "true"
+        else { return true }
+        answerAIReplyDialog(false)
+        return await withCheckedContinuation { continuation in
+            aiReplyAnswer = continuation
+            showAIReplyDialog = true
         }
     }
 
-    func askMyAIConfirmed(dontAskAgain: Bool) {
-        showAskAIDialog = false
-        if dontAskAgain, let audience {
-            UserDefaults.standard.set("true", forKey: DefaultsKey.circleReplyAck(entryId: audience.entryId, userId: me?.id))
+    private func answerAIReplyDialog(_ go: Bool) {
+        aiReplyAnswer?.resume(returning: go)
+        aiReplyAnswer = nil
+    }
+
+    /// The AI-reply control was pressed.
+    func aiReplyPressed() {
+        guard aiReplyOffReason == nil else { return }
+        Task {
+            if await confirmAIReply() { llmResponsePressed() }
         }
-        llmResponsePressed()
+    }
+
+    /// The dialog's Generate button.
+    func aiReplyConfirmed(dontAskAgain: Bool) {
+        if dontAskAgain, let audience {
+            UserDefaults.standard.set("true", forKey: DefaultsKey.circleAiReplyAck(entryId: audience.entryId, userId: me?.id))
+        }
+        answerAIReplyDialog(true)
+        showAIReplyDialog = false
     }
 
     var autoGeneratePreference: Bool {
@@ -171,11 +240,20 @@ final class ThreadModel {
         return isOwner && (me?.shareV1Enabled ?? false) && ProposalParser.hasShareBlocks(node.content)
     }
 
+    /// The AI-reply control under the focal node. In a shared thread every
+    /// member has it on every node they can read, other people's included.
+    /// In someone else's shared thread it shows without Craft mode, as in a
+    /// public thread: auto-generate is off there, so it is the only way to
+    /// get an AI reply. Where AI usage closes it, it stays, disabled, with
+    /// `aiReplyOffReason`.
     func showCraftBar(craftMode: Bool, autoGenerate: Bool) -> Bool {
-        guard let node else { return false }
-        return isOwner && !isForeignShared && (craftMode || isPublicThread)
+        guard let node, !isLLMPending else { return false }
+        if isSharedThread {
+            return (craftMode || isForeignShared) && !autoGenerateActive(autoGenerate)
+        }
+        return isOwner && (craftMode || isPublicThread)
             && !autoGenerateActive(autoGenerate)
-            && node.aiUsage != .off && !isLLMPending
+            && node.aiUsage != .off
     }
 
     var tabTitle: String {
@@ -206,6 +284,7 @@ final class ThreadModel {
             case nil: fetched = try await app.api.nodeDetail(nodeId)
             }
             node = fetched
+            readAIReplyChoice()
             pageError = nil
             loading = false
             refreshQuotesIfNeeded()
@@ -422,6 +501,7 @@ final class ThreadModel {
         streamTask?.cancel()
         streamTask = nil
         llmTaskNodeId = nil
+        answerAIReplyDialog(false)
     }
 
     /// Completion, failure or cancellation of the tracked reply (map D §5.5–5.6).
@@ -493,13 +573,18 @@ final class ThreadModel {
 
     func requestLLM(for parentId: Int) async throws -> Int {
         guard let app else { throw CancellationError() }
-        // In someone else's shared thread the request is "Ask my AI": the
-        // reader's own model (the server picks it; none is sent).
-        let body: JSONValue = isForeignShared
-            ? .object(["circle_ask": .bool(true), "source_mode": .string("textmode")])
-            : .object(["model": .optional(selectedModel), "source_mode": .string("textmode")])
-        let answer: LLMRequestResponse = try await app.api.post(APIPath.nodeLLM(parentId), json: body)
+        let answer: LLMRequestResponse = try await app.api.post(APIPath.nodeLLM(parentId), json: .object(llmRequestBody))
         return answer.nodeId
+    }
+
+    /// The same request in every thread. The model is the requester's own
+    /// (their preferred model, or what the picker holds). In a shared thread
+    /// "Only me" keeps the reply private to the one who generates it;
+    /// otherwise the server gives it the thread's audience.
+    var llmRequestBody: [String: JSONValue] {
+        var body: [String: JSONValue] = ["model": .optional(selectedModel), "source_mode": .string("textmode")]
+        if aiReplyPrivate { body["privacy_level"] = .string("private") }
+        return body
     }
 
     func handleLLMRequestError(_ error: Error) {
@@ -534,6 +619,9 @@ final class ThreadModel {
             app?.toasts.show("Turning off auto-generate. AI usage on some nodes is turned off.", duration: 8)
             return nil
         }
+        // The author's automatic reply in her shared thread is read by its
+        // readers too: she is asked first, as for a pressed one.
+        guard await confirmAIReply() else { return nil }
         return try await requestLLM(for: parentId)
     }
 
@@ -836,19 +924,20 @@ final class ThreadModel {
     func target(focal node: NodeDetail) -> NodeTarget {
         NodeTarget(id: node.id, content: node.content, privacy: node.privacyLevel, aiUsage: node.aiUsage,
                    childCount: node.childCount, hasChildren: node.childCount > 0 || !node.children.isEmpty,
-                   hasTTS: node.hasTTS, hasPromptArtifact: node.systemPrompt.contextArtifacts?.prompt != nil)
+                   hasTTS: node.hasTTS, hasPromptArtifact: node.systemPrompt.contextArtifacts?.prompt != nil,
+                   isAIReply: node.nodeType == .llm)
     }
 
     func target(_ n: AncestorNode) -> NodeTarget {
         NodeTarget(id: n.id, content: n.content ?? "", privacy: n.privacyLevel, aiUsage: n.aiUsage,
                    childCount: n.childCount, hasChildren: n.childCount > 0, hasTTS: false,
-                   hasPromptArtifact: n.systemPrompt.contextArtifacts?.prompt != nil)
+                   hasPromptArtifact: n.systemPrompt.contextArtifacts?.prompt != nil, isAIReply: n.nodeType == .llm)
     }
 
     func target(_ n: TreeNode) -> NodeTarget {
         NodeTarget(id: n.id, content: n.content ?? "", privacy: n.privacyLevel, aiUsage: n.aiUsage,
                    childCount: n.childCount, hasChildren: n.childCount > 0 || !n.children.isEmpty, hasTTS: n.hasTTS,
-                   hasPromptArtifact: n.systemPrompt.contextArtifacts?.prompt != nil)
+                   hasPromptArtifact: n.systemPrompt.contextArtifacts?.prompt != nil, isAIReply: n.nodeType == .llm)
     }
 
     func beginEdit(_ target: NodeTarget) {

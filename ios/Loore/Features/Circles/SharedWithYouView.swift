@@ -74,7 +74,7 @@ struct SharedWithYouView: View {
 
     static func hideTitle(_ name: String) -> String { "Stop showing \(CirclesWording.possessive(name)) entries?" }
     static func hideBody(_ name: String) -> String {
-        "You will get no notes about \(CirclesWording.possessive(name)) entries and will not see them here. \(name) is not told what you choose. You can undo this at the bottom of this page."
+        "You will get no notes about \(CirclesWording.possessive(name)) entries and will not see them here. \(CirclesWording.at(name)) is not told what you choose. You can undo this at the bottom of this page."
     }
     static func hideConfirm(_ name: String) -> String { "Don't show \(CirclesWording.possessive(name)) entries" }
 
@@ -173,7 +173,7 @@ struct SharedWithYouView: View {
         VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 0) {
                 AdaptiveStack(spacing: 12, alignment: .firstTextBaseline) {
-                    Text(person.username)
+                    Text(CirclesWording.at(person.username))
                         .font(LooreFont.sans(15, .regular))
                         .foregroundStyle(LooreColor.accent)
                         .accessibilityAddTraits(.isHeader)
@@ -235,7 +235,7 @@ struct SharedWithYouView: View {
                 .fixedSize(horizontal: false, vertical: true)
             ForEach(model.hidden, id: \.self) { name in
                 AdaptiveStack(spacing: 12) {
-                    Text(name).font(LooreFont.sans(15, .light)).foregroundStyle(LooreColor.textPrimary)
+                    Text(CirclesWording.at(name)).font(LooreFont.sans(15, .light)).foregroundStyle(LooreColor.textPrimary)
                     Spacer(minLength: 8)
                     Button {
                         Task { await model.show(name) }

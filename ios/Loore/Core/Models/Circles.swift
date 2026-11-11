@@ -35,7 +35,7 @@ struct PeopleCircle: Decodable, Identifiable, Hashable, Sendable {
 
 struct CircleMember: Decodable, Hashable, Sendable {
     var username: String
-    /// Added with "Only new entries": reads what is shared with the circle from then on.
+    /// Added for new entries only (the default): reads what is shared with the circle from then on.
     var onlyNew: Bool
 
     enum CodingKeys: String, CodingKey {
@@ -118,14 +118,19 @@ struct NodeAudience: Decodable, Hashable, Sendable {
     var readers: [String]
     /// The node is the shared entry itself (not a reply in its thread).
     var isEntry: Bool
-    /// The entry's own AI usage: `none` closes "Ask my AI" for its readers.
+    /// The entry's own AI usage: with `none` nobody can generate an AI reply in its thread.
     var entryAIUsage: AIUsage
     /// What the entry is shared with: for its author, on the entry itself.
     var circleIds: [Int]?
     var usernames: [String]?
+    /// The viewer's own artifacts an AI reply generated here would read, by
+    /// their plain names ("profile", "memory", "to-do list"). Empty when the
+    /// thread has no prompt that reads artifacts of the viewer's.
+    var aiReads: [String]
 
     enum CodingKeys: String, CodingKey {
         case author, readers, usernames
+        case aiReads = "ai_reads"
         case entryId = "entry_id"
         case isAuthor = "is_author"
         case isEntry = "is_entry"
@@ -134,7 +139,8 @@ struct NodeAudience: Decodable, Hashable, Sendable {
     }
 
     init(entryId: Int, author: String, isAuthor: Bool, readers: [String], isEntry: Bool = true,
-         entryAIUsage: AIUsage = .chat, circleIds: [Int]? = nil, usernames: [String]? = nil) {
+         entryAIUsage: AIUsage = .chat, circleIds: [Int]? = nil, usernames: [String]? = nil,
+         aiReads: [String] = []) {
         self.entryId = entryId
         self.author = author
         self.isAuthor = isAuthor
@@ -143,6 +149,7 @@ struct NodeAudience: Decodable, Hashable, Sendable {
         self.entryAIUsage = entryAIUsage
         self.circleIds = circleIds
         self.usernames = usernames
+        self.aiReads = aiReads
     }
 
     init(from decoder: Decoder) throws {
@@ -155,6 +162,7 @@ struct NodeAudience: Decodable, Hashable, Sendable {
         entryAIUsage = c.tolerant(.entryAIUsage, default: .off)
         circleIds = c.tolerant(.circleIds)
         usernames = c.tolerant(.usernames)
+        aiReads = c.tolerant(.aiReads, default: [])
     }
 }
 
@@ -163,16 +171,36 @@ struct NodeAudienceAnswer: Decodable, Sendable {
     var audience: NodeAudience?
     /// The node sits under a shared node: these people would read it as "circles".
     var threadAudience: NodeAudience?
+    /// For the node's author: the discussion above the node, from the start
+    /// of the thread. `count` is the number of the author's entries on that
+    /// path; `shared` says the path is shared with the node's audience now.
+    /// nil when the node has nothing above it.
+    var threadPath: ThreadPath?
+
+    struct ThreadPath: Decodable, Hashable, Sendable {
+        var count: Int
+        var shared: Bool
+
+        enum CodingKeys: String, CodingKey { case count, shared }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            count = c.tolerant(.count, default: 0)
+            shared = c.tolerant(.shared, default: false)
+        }
+    }
 
     enum CodingKeys: String, CodingKey {
         case audience
         case threadAudience = "thread_audience"
+        case threadPath = "thread_path"
     }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         audience = c.tolerant(.audience)
         threadAudience = c.tolerant(.threadAudience)
+        threadPath = c.tolerant(.threadPath)
     }
 }
 

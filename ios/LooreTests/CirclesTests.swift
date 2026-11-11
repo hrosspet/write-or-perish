@@ -69,6 +69,49 @@ final class CirclesModelTests: XCTestCase {
         XCTAssertEqual(own.circleIds, [3])
         XCTAssertEqual(own.usernames, ["ben"])
         XCTAssertEqual(own.entryAIUsage, .off)
+        // What an AI reply here would read of the viewer's own: absent = nothing.
+        XCTAssertEqual(audience.aiReads, [])
+        XCTAssertEqual(own.aiReads, [])
+        let reads = try decode(NodeAudience.self, """
+        {"entry_id":4,"author":"anna","is_author":false,"readers":["seowriter"],"is_entry":true,
+         "entry_ai_usage":"chat","ai_reads":["profile","memory","to-do list"]}
+        """)
+        XCTAssertEqual(reads.aiReads, ["profile", "memory", "to-do list"])
+        let odd = try decode(NodeAudience.self, #"{"entry_id":4,"author":"anna","ai_reads":"profile"}"#)
+        XCTAssertEqual(odd.aiReads, [])
+        // The edit form's answer: the prompt the thread starts from, for the author.
+        let answer = try decode(NodeAudienceAnswer.self, #"{"audience":null,"thread_audience":null,"thread_path":{"count":3,"shared":true}}"#)
+        XCTAssertEqual(answer.threadPath?.count, 3)
+        XCTAssertEqual(answer.threadPath?.shared, true)
+        XCTAssertNil(try decode(NodeAudienceAnswer.self, #"{"audience":null,"thread_path":null}"#).threadPath)
+    }
+
+    func testAReaderOfASharedPromptSeesTheirOwnArtifacts() throws {
+        // A prompt anna shared, as the server sends it to a reader: the
+        // reader's own latest artifacts, no version numbers, and no key for
+        // an artifact the reader does not have.
+        let node = try decode(NodeDetail.self, """
+        {"id":7,"content":"Reflect.\\n{user_profile}\\n{user_memory}","node_type":"user",
+         "user":{"id":9,"username":"anna"},"privacy_level":"circles","ai_usage":"chat",
+         "is_system_prompt":true,"prompt_title":"Reflect",
+         "context_artifacts":{"profile":{"id":70,"content":"The reader's own profile."}}}
+        """)
+        let artifacts = node.systemPrompt.contextArtifacts
+        XCTAssertEqual(ContentSegmenter.segments(node.content),
+                       [.text("Reflect.\n"), .artifact(.profile), .text("\n"), .artifact(.memory)])
+        // The reader's profile is embedded, without a version in its header.
+        let profile = try XCTUnwrap(InlineArtifactSection.artifact(.profile, in: artifacts))
+        XCTAssertEqual(profile.content, "The reader's own profile.")
+        XCTAssertNil(profile.versionNumber)
+        XCTAssertEqual(InlineArtifactSection.headerLabel(.profile, profile), "User Profile")
+        // The reader has no memory: the placeholder itself is shown.
+        XCTAssertNil(InlineArtifactSection.artifact(.memory, in: artifacts))
+        XCTAssertEqual(InlineArtifactSection.missingText(.memory, forOwner: false), "{user_memory}")
+        XCTAssertEqual(InlineArtifactSection.missingText(.aiPreferences, forOwner: false), "{user_ai_preferences}")
+        // The owner's own view is as before.
+        XCTAssertEqual(InlineArtifactSection.missingText(.memory, forOwner: true), "[Memory not available]")
+        let pinned = try decode(ContextArtifacts.self, #"{"profile":{"id":1,"version_number":4,"content":"p"}}"#)
+        XCTAssertEqual(InlineArtifactSection.headerLabel(.profile, try XCTUnwrap(pinned.profile)), "User Profile v4")
     }
 
     func testTheShareNoteDecodes() throws {
@@ -96,6 +139,37 @@ final class CirclesModelTests: XCTestCase {
         XCTAssertEqual(APIPath.circlesMute(username: "anna"), "/api/circles/mutes/anna")
         XCTAssertEqual(APIPath.nodeAudience(9), "/api/nodes/9/audience")
         XCTAssertEqual(DefaultsKey.circleReplyAck(entryId: 31, userId: 5), "loore_circle_reply_ack_5_31")
+        // An AI reply has its own "Don't ask again" memory, and its own privacy choice.
+        XCTAssertEqual(DefaultsKey.circleAiReplyAck(entryId: 31, userId: 5), "loore_circle_ai_reply_ack_5_31")
+        XCTAssertEqual(DefaultsKey.circleAiReplyPrivacy(entryId: 31, userId: 5), "loore_circle_ai_reply_privacy_5_31")
+    }
+
+    func testAnAIReplyInASharedThreadCarriesItsLabel() throws {
+        let node = try decoder.decode(NodeDetail.self, from: try fixture("node_shared_ai_reply.json"))
+        XCTAssertEqual(node.llmLabel, "Claude Fable 5.2 via @ben")
+        XCTAssertEqual(node.humanOwnerUsername, "ben")
+        XCTAssertEqual(node.ancestors[0].llmLabel, nil)
+        let child = try XCTUnwrap(node.children.first)
+        XCTAssertEqual(child.llmLabel, "GPT-6 Luna via @seowriter")
+        XCTAssertEqual(child.humanOwnerUsername, "seowriter")
+        XCTAssertEqual(BubbleData(child).llmLabel, "GPT-6 Luna via @seowriter")
+        // The label stands in place of the model id in the footer.
+        XCTAssertEqual(NodeFooterText.author(username: "anna", llmModel: node.llmModel, llmLabel: node.llmLabel,
+                                             humanOwnerUsername: node.humanOwnerUsername, isPublic: false),
+                       "Claude Fable 5.2 via @ben")
+        // Without a label (a private or public thread, an older server): as before.
+        XCTAssertEqual(NodeFooterText.author(username: "anna", llmModel: "claude-opus-5.5", llmLabel: nil,
+                                             humanOwnerUsername: "anna", isPublic: false), "claude-opus-5.5")
+        XCTAssertEqual(NodeFooterText.author(username: "anna", llmModel: "claude-opus-5.5", llmLabel: "",
+                                             humanOwnerUsername: "anna", isPublic: true), "claude-opus-5.5 · via anna")
+        XCTAssertEqual(NodeFooterText.author(username: "anna", llmModel: nil, llmLabel: nil,
+                                             humanOwnerUsername: nil, isPublic: false), "anna")
+        // A label of the wrong type is dropped; the node still decodes.
+        let odd = try decode(TreeNode.self, #"{"id":3,"node_type":"llm","llm_model":"m","llm_label":7}"#)
+        XCTAssertNil(odd.llmLabel)
+        XCTAssertEqual(odd.llmModel, "m")
+        let card = try decode(LogCard.self, #"{"id":3,"llm_model":"m","llm_label":"M via @ben","human_owner_username":"ben"}"#)
+        XCTAssertEqual(card.llmLabel, "M via @ben")
     }
 }
 
@@ -107,9 +181,15 @@ final class CirclesWordingTests: XCTestCase {
 
     func testNames() {
         XCTAssertEqual(CirclesWording.joinNames([]), "")
-        XCTAssertEqual(CirclesWording.joinNames(["anna"]), "anna")
-        XCTAssertEqual(CirclesWording.joinNames(["anna", "ben"]), "anna and ben")
-        XCTAssertEqual(CirclesWording.joinNames(["anna", "ben", "chidi"]), "anna, ben and chidi")
+        XCTAssertEqual(CirclesWording.joinNames(["ben"]), "@ben")
+        XCTAssertEqual(CirclesWording.joinNames(["anna", "ben"]), "@anna and @ben")
+        XCTAssertEqual(CirclesWording.joinNames(["ben", "chidi", "dana"]), "@ben, @chidi and @dana")
+        // A name is printed with one "@", also when it already has one.
+        XCTAssertEqual(CirclesWording.joinNames(["@ben", "@@chidi", ""]), "@ben and @chidi")
+        XCTAssertEqual(CirclesWording.at("ben"), "@ben")
+        XCTAssertEqual(CirclesWording.at("@ben"), "@ben")
+        XCTAssertEqual(CirclesWording.at(""), "")
+        XCTAssertEqual(CirclesWording.possessive("anna"), "@anna's")
         XCTAssertEqual(CirclesWording.splitNames("@dana, @emeka  Dana ,,@@x"), ["dana", "emeka", "x"])
         XCTAssertEqual(CirclesWording.splitNames("   "), [])
         XCTAssertTrue(CirclesWording.endsAName("@dana, "))
@@ -122,7 +202,7 @@ final class CirclesWordingTests: XCTestCase {
 
     func testTheReadersSentenceAndTheSaveButton() {
         XCTAssertEqual(CirclesWording.readersSentence(["anna", "ben", "chidi"]),
-                       "anna, ben and chidi can read this entry and reply to it. Nobody else can.")
+                       "@anna, @ben and @chidi can read this entry and reply to it. Nobody else can.")
         XCTAssertEqual(CirclesWording.readersSentence([]), "")
         let circles = [PeopleCircle(id: 3, name: "Close friends"), PeopleCircle(id: 4, name: "Family")]
         XCTAssertEqual(CirclesWording.shareButtonLabel(circles: circles, circleIds: [3], names: [], readers: ["a", "b"]),
@@ -136,19 +216,19 @@ final class CirclesWordingTests: XCTestCase {
 
     func testTheBannerNamesTheAuthorAndCountsTheOthers() {
         XCTAssertEqual(CirclesWording.sharedBannerText(audience(readers: ["ben", "chidi", "me"])),
-                       "anna shared this with you and two other people. Only they can read it, and nobody but anna can make it public.")
+                       "@anna shared this with you and two other people. Only they can read it, and nobody but @anna can make it public.")
         XCTAssertEqual(CirclesWording.sharedBannerText(audience(readers: ["ben", "me"])),
-                       "anna shared this with you and one other person. Only they can read it, and nobody but anna can make it public.")
+                       "@anna shared this with you and one other person. Only they can read it, and nobody but @anna can make it public.")
         XCTAssertEqual(CirclesWording.sharedBannerText(audience(readers: ["me"])),
-                       "anna shared this with you. Only you and anna can read it, and nobody but anna can make it public.")
+                       "@anna shared this with you. Only you and @anna can read it, and nobody but @anna can make it public.")
     }
 
     func testTheReadersListMarksTheAuthorAndTheViewer() {
         XCTAssertEqual(CirclesWording.readersListTitle, "Can read this entry and its replies")
         XCTAssertEqual(CirclesWording.readerLines(audience(readers: ["ben", "chidi", "me"]), me: "me"),
-                       ["anna, the author", "ben", "chidi", "You"])
+                       ["@anna, the author", "@ben", "@chidi", "You"])
         XCTAssertEqual(CirclesWording.readerLines(audience(readers: ["ben"], isAuthor: true), me: "anna"),
-                       ["You, the author", "ben"])
+                       ["You, the author", "@ben"])
     }
 
     func testTheReplyDialogNamesEveryoneButTheWriter() {
@@ -156,39 +236,79 @@ final class CirclesWordingTests: XCTestCase {
         XCTAssertEqual(CirclesWording.replyAudienceNames(a, me: "me"), ["anna", "ben", "chidi"])
         XCTAssertEqual(CirclesWording.replyAudienceNames(a, me: "anna"), ["ben", "chidi", "me"])
         XCTAssertEqual(CirclesWording.replyAudienceNames(nil, me: "me"), [])
-        XCTAssertEqual(CircleReplyDialog.title(askAI: false), "Send this reply?")
-        XCTAssertEqual(CircleReplyDialog.body(names: ["anna", "ben", "chidi"], askAI: false),
-                       "anna, ben and chidi will see it, with your name.")
-        XCTAssertEqual(CircleReplyDialog.confirmLabel(askAI: false), "Send reply")
-        XCTAssertEqual(CircleReplyDialog.title(askAI: true), "Ask your AI here?")
-        XCTAssertEqual(CircleReplyDialog.body(names: ["anna"], askAI: true),
-                       "Your AI reads this thread and answers in it. anna will see the answer, with your name.")
-        XCTAssertEqual(CircleReplyDialog.confirmLabel(askAI: true), "Ask my AI")
+        XCTAssertEqual(CircleReplyDialog.title(aiReply: false), "Send this reply?")
+        XCTAssertEqual(CircleReplyDialog.body(names: ["anna", "ben", "chidi"], aiReply: false),
+                       "@anna, @ben and @chidi will see it, with your name.")
+        XCTAssertEqual(CircleReplyDialog.confirmLabel(aiReply: false), "Send reply")
     }
 
-    func testAskMyAIIsOffWithItsReason() {
-        XCTAssertNil(CirclesWording.askAIOffReason(audience(readers: ["me"]), myDefaultAIUsage: .chat))
-        XCTAssertEqual(CirclesWording.askAIOffReason(audience(readers: ["me"], ai: .off), myDefaultAIUsage: .chat),
-                       "anna set this entry's AI usage to None, so no AI can read it.")
-        XCTAssertEqual(CirclesWording.askAIOffReason(audience(readers: ["me"]), myDefaultAIUsage: .off),
+    func testTheDialogBeforeAnAIReply() {
+        XCTAssertEqual(CircleReplyDialog.title(aiReply: true), "Generate an AI reply?")
+        // The thread's prompt reads none of the requester's artifacts: one sentence.
+        XCTAssertEqual(CircleReplyDialog.body(names: ["anna", "ben"], aiReply: true),
+                       "@anna and @ben will see it, marked with your name.")
+        XCTAssertEqual(CircleReplyDialog.body(names: ["anna"], aiReply: true, aiReads: []),
+                       "@anna will see it, marked with your name.")
+        XCTAssertNil(CirclesWording.aiReadsSentence([]))
+        // It reads some: they are named, without "@".
+        XCTAssertEqual(CircleReplyDialog.body(names: ["anna"], aiReply: true, aiReads: ["profile", "memory", "to-do list"]),
+                       "@anna will see it, marked with your name. Your AI reads your profile, memory and to-do list for this reply and could share private information from them.")
+        XCTAssertEqual(CirclesWording.aiReadsSentence(["profile"]),
+                       "Your AI reads your profile for this reply and could share private information from them.")
+        XCTAssertEqual(CirclesWording.joinPlain(["profile", "memory"]), "profile and memory")
+        // A typed reply's dialog never carries the sentence.
+        XCTAssertEqual(CircleReplyDialog.body(names: ["anna"], aiReply: false, aiReads: ["profile"]),
+                       "@anna will see it, with your name.")
+        XCTAssertEqual(CirclesWording.sharePathLabel, "Share also the discussion leading up to this node?")
+        XCTAssertEqual(CirclesWording.sharePathNote,
+                       "Everything from the start of this thread down to this entry is then shared with the same people, including the thread's prompt and the AI replies on the way. People's AI replies use the prompt with their own artifacts, never yours. Without it, only this entry is shared.")
+        XCTAssertEqual(CircleReplyDialog.confirmLabel(aiReply: true), "Generate")
+        XCTAssertEqual(CirclesWording.aiReplyPrivacyLabel, "AI reply:")
+        XCTAssertEqual(CirclesWording.aiReplyShared, "Shared with this thread")
+        XCTAssertEqual(CirclesWording.aiReplyOnlyMe, "Only me")
+        XCTAssertEqual(CirclesWording.foreignSharedNote,
+                       "Before your reply is sent, Loore names the people who will see it. No AI reply is generated here unless you press LLM Response.")
+    }
+
+    func testTheAIReplyControlIsOffWithItsReason() {
+        let reader = audience(readers: ["me"])
+        XCTAssertNil(CirclesWording.aiReplyOffReason(reader, nodeAIUsage: .chat, myDefaultAIUsage: .chat))
+        XCTAssertEqual(CirclesWording.aiReplyOffReason(audience(readers: ["me"], ai: .off), nodeAIUsage: .chat,
+                                                       myDefaultAIUsage: .chat),
+                       "@anna set this entry's AI usage to None, so no AI can read it.")
+        XCTAssertEqual(CirclesWording.aiReplyOffReason(audience(readers: ["me"], isAuthor: true, ai: .off),
+                                                       nodeAIUsage: .off, myDefaultAIUsage: .chat),
+                       "This entry's AI usage is None, so no AI can read it.")
+        // The node the reply would answer is closed to AI.
+        XCTAssertEqual(CirclesWording.aiReplyOffReason(reader, nodeAIUsage: .off, myDefaultAIUsage: .chat),
+                       "This entry's AI usage is None, so no AI can read it.")
+        XCTAssertEqual(CirclesWording.aiReplyOffReason(reader, nodeAIUsage: .chat, myDefaultAIUsage: .off),
                        "Your own AI usage is set to None in Account settings.")
     }
 
-    func testTheAddDialogStatesTheRealCount() {
+    func testTheAddDialogAddsForNewEntriesAndStatesTheRealCount() {
+        XCTAssertEqual(CirclesWording.addMemberTitle(name: "dana", circle: "Close friends"), "Add @dana to Close friends?")
         XCTAssertEqual(CirclesWording.addMemberBody(name: "dana", circle: "Close friends", sharedCount: 12),
-                       "dana will be able to read the 12 entries you have already shared with Close friends, and every entry you share with it from now on.")
+                       "@dana will read every entry you share with Close friends from now on. The 12 entries you have already shared with it stay closed to @dana unless you choose \"Also show earlier entries\".")
         XCTAssertEqual(CirclesWording.addMemberBody(name: "dana", circle: "Close friends", sharedCount: 1),
-                       "dana will be able to read the entry you have already shared with Close friends, and every entry you share with it from now on.")
+                       "@dana will read every entry you share with Close friends from now on. The entry you have already shared with it stays closed to @dana unless you choose \"Also show earlier entries\".")
         XCTAssertEqual(CirclesWording.addMemberBody(name: "dana", circle: "Family", sharedCount: 0),
-                       "dana will be able to read every entry you share with Family from now on. You have not shared anything with it yet.")
+                       "@dana will read every entry you share with Family from now on. You have not shared anything with it yet.")
+        // The emphasized button adds for new entries only; the plain one opens the earlier ones too.
+        XCTAssertEqual(CirclesWording.addMemberConfirm(name: "dana"), "Add @dana")
+        XCTAssertEqual(CirclesWording.addMemberAlsoEarlier, "Also show earlier entries")
+        XCTAssertFalse(AddCircleMemberDialog.emphasizedIncludesExisting)
+        XCTAssertTrue(AddCircleMemberDialog.plainIncludesExisting)
+        XCTAssertTrue(AddCircleMemberDialog.offersEarlier(sharedCount: 1))
+        XCTAssertFalse(AddCircleMemberDialog.offersEarlier(sharedCount: 0))
         XCTAssertEqual(CirclesWording.addMemberNote(name: "dana"),
-                       "dana gets a note in Loore the first time there is something to read. You can remove dana at any time; the entries are closed to dana from that moment.")
+                       "@dana gets a note in Loore the first time there is something to read. You can remove @dana at any time; the entries are closed to @dana from that moment.")
         XCTAssertEqual(CirclesWording.deleteCircleBody(name: "Family", sharedCount: 0),
                        "The list of people is deleted. Nothing was shared with this circle.")
         XCTAssertEqual(CirclesWording.deleteCircleBody(name: "Family", sharedCount: 2),
                        "The 2 entries you shared with Family are closed to its people from this moment, unless you also shared them another way. The entries stay yours.")
         XCTAssertEqual(CirclesWording.removeMemberBody(name: "ben", circleName: "Close friends"),
-                       "From this moment ben no longer reads your entries through Close friends. An entry you also shared with ben another way (another circle ben is in, or by name) stays open to ben. ben is not told.")
+                       "From this moment @ben no longer reads your entries through Close friends. An entry you also shared with @ben another way (another circle @ben is in, or by name) stays open to @ben. @ben is not told.")
     }
 
     func testSharedWithYouDatesAndLines() throws {
@@ -201,11 +321,14 @@ final class CirclesWordingTests: XCTestCase {
         XCTAssertEqual(CirclesWording.sharedDate(at("2025-11-02T10:00:00Z"), now: now, timeZone: utc), "2 November 2025")
         XCTAssertEqual(CirclesWording.sharedDate(nil, now: now, timeZone: utc), "")
         let replied = SharedWithMe.Entry(id: 1, title: "t", createdAt: at("2026-11-10T09:40:00Z"), lastReplyBy: "ben")
-        XCTAssertEqual(CirclesWording.entryMeta(replied, now: now, timeZone: utc), "Today, 9:40. ben replied.")
+        XCTAssertEqual(CirclesWording.entryMeta(replied, now: now, timeZone: utc), "Today, 9:40. @ben replied.")
         let mine = SharedWithMe.Entry(id: 1, title: "t", createdAt: at("2026-10-28T18:05:00Z"), lastReplyBy: "me",
                                       lastReplyByMe: true)
         XCTAssertEqual(CirclesWording.entryMeta(mine, now: now, timeZone: utc), "28 October. You replied.")
-        XCTAssertEqual(SharedWithYouView.hideConfirm("anna"), "Don't show anna's entries")
+        XCTAssertEqual(SharedWithYouView.hideConfirm("anna"), "Don't show @anna's entries")
+        XCTAssertEqual(SharedWithYouView.hideTitle("anna"), "Stop showing @anna's entries?")
+        XCTAssertEqual(SharedWithYouView.hideBody("anna"),
+                       "You will get no notes about @anna's entries and will not see them here. @anna is not told what you choose. You can undo this at the bottom of this page.")
         XCTAssertEqual(SharedWithYouView.nobodySees, "Nobody sees whether you have read an entry.")
     }
 
@@ -215,7 +338,9 @@ final class CirclesWordingTests: XCTestCase {
         XCTAssertEqual(PrivacySelectorView.choices(allowCircles: true).map(\.0.rawString), ["private", "circles", "public"])
         XCTAssertEqual(PrivacySelectorView.choices(allowCircles: false).map(\.1), ["Only me", "Everyone"])
         XCTAssertEqual(PrivacySelectorView.threadNote(["anna", "ben"]),
-                       "anna and ben will see it, with your name. Nobody else can.")
+                       "@anna and @ben will see it, with your name. Nobody else can.")
+        // An AI reply in a shared thread: Only me or the thread's people, never Everyone.
+        XCTAssertEqual(PrivacySelectorView.choices(allowCircles: true, allowPublic: false).map(\.1), ["Only me", "Circles"])
     }
 }
 
@@ -384,6 +509,122 @@ final class CirclesFormTests: StubbedAppTestCase {
         XCTAssertEqual(body(of: "PUT /api/nodes/9")?["apply_to_descendants"] as? Bool, true)
     }
 
+    private func pathEdit(shared: Bool?) -> (URLRequest) -> StubResponse {
+        let threadPath = shared.map { #"{"count":2,"shared":\#($0)}"# } ?? "null"
+        return { [self] request in
+            switch (request.httpMethod ?? "", path(request)) {
+            case ("GET", "/api/nodes/9/audience"):
+                return .json(200, """
+                {"audience":{"entry_id":9,"author":"seowriter","is_author":true,"readers":["ben"],"is_entry":true,
+                 "entry_ai_usage":"chat","circle_ids":[3],"usernames":[]},"thread_audience":null,"thread_path":\(threadPath)}
+                """)
+            case ("POST", "/api/circles/audience-preview"): return .json(200, #"{"readers":["ben"]}"#)
+            case ("PUT", "/api/nodes/9"): return .json(200, #"{"node":{"id":9,"content":"same"},"descendants_updated":0}"#)
+            default: return .json(200, "{}")
+            }
+        }
+    }
+
+    private func editForm() -> NodeFormModel {
+        form(NodeFormConfig(edit: .init(nodeId: 9, initialContent: "same", initialPrivacy: .circles,
+                                        initialAIUsage: .chat))).0
+    }
+
+    func testTheDiscussionAboveAnEntryIsSharedOnlyWhenChosen() async {
+        StubURLProtocol.install(pathEdit(shared: false))
+        let model = editForm()
+        await model.start()
+        XCTAssertTrue(model.audience.offersSharePath)
+        XCTAssertFalse(model.audience.sharePath, "off by default: sharing an entry does not share what is above it")
+        await model.submit()
+        let plain = body(of: "PUT /api/nodes/9")
+        XCTAssertNotNil(plain)
+        XCTAssertNil(plain?["share_path"], "not shared before and not chosen: the flag is left out")
+        model.audience.sharePath = true
+        await model.submit()
+        let sent = body(of: "PUT /api/nodes/9")
+        XCTAssertEqual(sent?["share_path"] as? Bool, true)
+        XCTAssertEqual(sent?["circle_ids"] as? [Int], [3])
+    }
+
+    func testASharedPathShowsOnAndCanBeTakenBack() async {
+        StubURLProtocol.install(pathEdit(shared: true))
+        let model = editForm()
+        await model.start()
+        XCTAssertTrue(model.audience.sharePath)
+        await model.submit()
+        XCTAssertEqual(body(of: "PUT /api/nodes/9")?["share_path"] as? Bool, true)
+        model.audience.sharePath = false
+        await model.submit()
+        XCTAssertEqual(body(of: "PUT /api/nodes/9")?["share_path"] as? Bool, false)
+    }
+
+    func testAnEntryWithNothingAboveItIsNotAsked() async {
+        StubURLProtocol.install(pathEdit(shared: nil))
+        let model = editForm()
+        await model.start()
+        XCTAssertFalse(model.audience.offersSharePath)
+        await model.submit()
+        let sent = body(of: "PUT /api/nodes/9")
+        XCTAssertNotNil(sent)
+        XCTAssertNil(sent?["share_path"])
+        // A new entry without a parent is not asked either.
+        let (fresh, _) = form(NodeFormConfig(parentId: nil))
+        await fresh.start()
+        XCTAssertFalse(fresh.audience.offersSharePath)
+    }
+
+    func testANewEntryUnderTheUsersOwnNodeCanTakeTheDiscussionAlong() async {
+        let parentJSON = """
+        {"id":20,"content":"earlier","node_type":"user","user":{"id":5,"username":"seowriter"},
+         "privacy_level":"private","ai_usage":"chat","child_count":0,"children":[],"ancestors":[]}
+        """
+        StubURLProtocol.install { [self] request in
+            switch (request.httpMethod ?? "", path(request)) {
+            case ("GET", "/api/nodes/20"): return .json(200, parentJSON)
+            case ("POST", "/api/circles/audience-preview"): return .json(200, #"{"readers":["ben"]}"#)
+            case ("POST", "/api/nodes/"):
+                let sent = (try? JSONSerialization.jsonObject(with: request.httpBody ?? Data())) as? [String: Any]
+                if (sent?["content"] as? String) == "refused" {
+                    return .json(400, #"{"error":"A prompt cannot be shared on its own.","code":"circle_prompt_node"}"#)
+                }
+                return .json(201, #"{"id":21,"parent_id":20,"privacy_level":"circles","audience_set":true}"#)
+            default: return .json(200, "{}")
+            }
+        }
+        let (model, result) = form(NodeFormConfig(parentId: 20))
+        await model.start()
+        XCTAssertTrue(model.audience.offersSharePath)
+        XCTAssertFalse(model.audience.sharePath)
+        model.content = "the one I share"
+        model.privacy = .circles
+        model.audience.circleIds = [3]
+        model.audience.sharePath = true
+        await model.submit()
+        XCTAssertEqual(result()?.id, 21)
+        let sent = body(of: "POST /api/nodes/")
+        XCTAssertEqual(sent?["share_path"] as? Bool, true)
+        XCTAssertEqual(sent?["circle_ids"] as? [Int], [3])
+        // The server's refusal is shown in its own words.
+        let (refused, _) = form(NodeFormConfig(parentId: 20))
+        await refused.start()
+        refused.content = "refused"
+        refused.privacy = .circles
+        refused.audience.circleIds = [3]
+        await refused.submit()
+        XCTAssertEqual(refused.error, "A prompt cannot be shared on its own.")
+    }
+
+    func testAReplyUnderSomeoneElsesNodeIsNotAsked() async {
+        let parent = sharedParent
+        StubURLProtocol.install { [self] request in
+            path(request) == "/api/nodes/31" ? .json(200, parent) : .json(200, "{}")
+        }
+        let (model, _) = form(NodeFormConfig(parentId: 31))
+        await model.start()
+        XCTAssertFalse(model.audience.offersSharePath, "a reply in a shared thread has the thread's people")
+    }
+
     func testWithCirclesOffTheFormIsAsBefore() async throws {
         let user = try decode(CurrentUser.self, StubbedAppTestCase.userJSON)
         app.useForTesting(api: makeStubbedClient(environment: .local), user: user)
@@ -419,38 +660,152 @@ final class CirclesFormTests: StubbedAppTestCase {
         return model
     }
 
-    func testAReaderGetsAskMyAIAndNoAutomaticReply() async {
+    private func waitFor(_ call: String) async {
+        for _ in 0..<40 where !calls.contains(call) {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+    }
+
+    private func waitForDialog(_ model: ThreadModel) async {
+        for _ in 0..<40 where !model.showAIReplyDialog {
+            try? await Task.sleep(nanoseconds: 25_000_000)
+        }
+    }
+
+    private func clearAIReplyMemory() {
+        for key in [DefaultsKey.circleAiReplyAck(entryId: 31, userId: 5), DefaultsKey.circleReplyAck(entryId: 31, userId: 5),
+                    DefaultsKey.circleAiReplyPrivacy(entryId: 31, userId: 5)] {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
+    }
+
+    func testAReaderGeneratesAnAIReplyWithTheNormalRequest() async {
+        clearAIReplyMemory()
+        defer { clearAIReplyMemory() }
+        // "Don't ask again" for typed replies does not skip the AI dialog.
+        UserDefaults.standard.set("true", forKey: DefaultsKey.circleReplyAck(entryId: 31, userId: 5))
         let model = await thread(sharedParent)
         XCTAssertTrue(model.isSharedThread)
         XCTAssertTrue(model.isForeignShared)
-        XCTAssertFalse(model.autoGenerateActive(true), "no model answers in a shared thread on its own")
-        XCTAssertFalse(model.showCraftBar(craftMode: true, autoGenerate: false))
-        XCTAssertNil(model.askAIOffReason)
-        XCTAssertEqual(model.askAINames, ["anna", "ben", "chidi"])
-        // The people are named first; the request then carries circle_ask and no model.
-        let key = DefaultsKey.circleReplyAck(entryId: 31, userId: 5)
-        UserDefaults.standard.removeObject(forKey: key)
-        defer { UserDefaults.standard.removeObject(forKey: key) }
-        model.askMyAIPressed()
-        XCTAssertTrue(model.showAskAIDialog)
+        XCTAssertFalse(model.isOwner, "the entry is anna's")
+        XCTAssertFalse(model.autoGenerateActive(true), "no AI reply is generated automatically for a reader")
+        // The control shows for a reader on someone else's node, with or without Craft mode.
+        XCTAssertTrue(model.showCraftBar(craftMode: true, autoGenerate: true))
+        XCTAssertTrue(model.showCraftBar(craftMode: false, autoGenerate: true))
+        XCTAssertNil(model.aiReplyOffReason)
+        XCTAssertEqual(model.aiReplyNames, ["anna", "ben", "chidi"])
+        // The people are named first.
+        model.aiReplyPressed()
+        await waitForDialog(model)
+        XCTAssertTrue(model.showAIReplyDialog)
         XCTAssertFalse(calls.contains("POST /api/nodes/31/llm"))
-        model.askMyAIConfirmed(dontAskAgain: false)
-        for _ in 0..<40 where !calls.contains("POST /api/nodes/31/llm") {
-            try? await Task.sleep(nanoseconds: 50_000_000)
-        }
+        model.aiReplyConfirmed(dontAskAgain: true)
+        await waitFor("POST /api/nodes/31/llm")
+        XCTAssertFalse(model.showAIReplyDialog)
         let sent = body(of: "POST /api/nodes/31/llm")
-        XCTAssertEqual(sent?["circle_ask"] as? Bool, true)
-        XCTAssertNil(sent?["model"], "the reader's own model: the server picks it")
-        XCTAssertNil(UserDefaults.standard.string(forKey: key))
+        XCTAssertNil(sent?["circle_ask"], "the normal request: no circle_ask")
+        XCTAssertEqual(sent?["model"] as? String, "gpt-6-luna", "the requester's own model")
+        XCTAssertEqual(sent?["source_mode"] as? String, "textmode")
+        XCTAssertNil(sent?["privacy_level"], "shared with the thread: the server gives it the thread's audience")
+        XCTAssertEqual(UserDefaults.standard.string(forKey: DefaultsKey.circleAiReplyAck(entryId: 31, userId: 5)), "true")
     }
 
-    func testAskMyAIIsOffWhenTheEntryIsNone() async {
+    func testCancellingTheAIDialogSendsNothing() async {
+        clearAIReplyMemory()
+        defer { clearAIReplyMemory() }
+        let model = await thread(sharedParent)
+        model.aiReplyPressed()
+        await waitForDialog(model)
+        model.showAIReplyDialog = false   // Cancel, or the dialog closed any other way
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertFalse(calls.contains("POST /api/nodes/31/llm"))
+        XCTAssertNil(UserDefaults.standard.string(forKey: DefaultsKey.circleAiReplyAck(entryId: 31, userId: 5)))
+    }
+
+    func testOnlyMeSendsAPrivateReplyWithoutTheDialog() async {
+        clearAIReplyMemory()
+        defer { clearAIReplyMemory() }
+        let model = await thread(sharedParent)
+        XCTAssertFalse(model.aiReplyOnlyMe, "shared with the thread by default")
+        XCTAssertTrue(model.showAIReplyPrivacy(craftBar: true, autoGenerate: false))
+        model.setAIReplyOnlyMe(true)
+        XCTAssertEqual(model.llmRequestBody["privacy_level"], .string("private"))
+        model.aiReplyPressed()
+        await waitFor("POST /api/nodes/31/llm")
+        XCTAssertFalse(model.showAIReplyDialog, "only the requester reads it: nobody to name")
+        let sent = body(of: "POST /api/nodes/31/llm")
+        XCTAssertEqual(sent?["privacy_level"] as? String, "private")
+        XCTAssertNil(sent?["circle_ask"])
+        // Remembered for this thread and user.
+        let again = await thread(sharedParent)
+        XCTAssertTrue(again.aiReplyOnlyMe)
+        again.setAIReplyOnlyMe(false)
+        XCTAssertNil(again.llmRequestBody["privacy_level"])
+        XCTAssertEqual(UserDefaults.standard.string(forKey: DefaultsKey.circleAiReplyPrivacy(entryId: 31, userId: 5)), "shared")
+    }
+
+    func testTheAIReplyControlIsOffWhenTheEntryIsNone() async {
+        clearAIReplyMemory()
         let model = await thread(sharedParent.replacingOccurrences(of: #""entry_ai_usage": "chat""#,
                                                                     with: #""entry_ai_usage": "none""#))
-        XCTAssertEqual(model.askAIOffReason, "anna set this entry's AI usage to None, so no AI can read it.")
+        XCTAssertEqual(model.aiReplyOffReason, "@anna set this entry's AI usage to None, so no AI can read it.")
+        XCTAssertTrue(model.showCraftBar(craftMode: false, autoGenerate: true), "the control stays, disabled, with the reason")
+        XCTAssertFalse(model.showAIReplyPrivacy(craftBar: true, autoGenerate: false))
+        model.aiReplyPressed()
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertFalse(model.showAIReplyDialog)
+        XCTAssertFalse(calls.contains("POST /api/nodes/31/llm"))
     }
 
-    func testTheAuthorKeepsTheLLMResponseBarInTheirOwnSharedThread() async {
+    func testAnAIReplyBelongsToWhoeverAskedForIt() async throws {
+        clearAIReplyMemory()
+        let json = String(data: try fixture("node_shared_ai_reply.json"), encoding: .utf8) ?? "{}"
+        let model = await thread(json)
+        // ben's AI wrote the focal reply under anna's entry: not seowriter's, though any member can answer it.
+        XCTAssertFalse(model.isOwner)
+        XCTAssertTrue(model.showCraftBar(craftMode: false, autoGenerate: true))
+        // The reply seowriter's AI wrote under it is seowriter's, whatever parent_user_id says.
+        XCTAssertTrue(model.ownedByMe(userId: 9, parentUserId: 12, nodeType: .llm, humanOwnerUsername: "seowriter"))
+        XCTAssertFalse(model.ownedByMe(userId: 9, parentUserId: 5, nodeType: .llm, humanOwnerUsername: "ben"))
+        // Without the name (a private thread): parent_user_id decides, as before.
+        XCTAssertTrue(model.ownedByMe(userId: 9, parentUserId: 5, nodeType: .llm))
+        // Its edit form is told it is an AI reply.
+        let child = try XCTUnwrap(model.node?.children.first)
+        XCTAssertTrue(model.target(child).isAIReply)
+    }
+
+    func testEditingAnAIReplyInASharedThreadOffersOnlyMeAndTheThread() async {
+        StubURLProtocol.install { [self] request in
+            if path(request) == "/api/nodes/40/audience" {
+                return .json(200, """
+                {"audience":null,"thread_audience":{"entry_id":31,"author":"anna","is_author":false,
+                 "readers":["ben","seowriter"],"is_entry":false,"entry_ai_usage":"chat"}}
+                """)
+            }
+            if path(request) == "/api/nodes/40" { return .json(200, #"{"node":{"id":40,"content":"x"},"descendants_updated":0}"#) }
+            return .json(200, "{}")
+        }
+        let (model, _) = form(NodeFormConfig(edit: .init(nodeId: 40, initialContent: "x", initialPrivacy: .private,
+                                                           initialAIUsage: .chat, isAIReply: true)))
+        await model.start()
+        XCTAssertTrue(model.hidePublic)
+        XCTAssertEqual(model.threadAudienceNames, ["anna", "ben"])
+        XCTAssertFalse(model.sharesEntry, "Circles here is the thread's people: no picker, no other circle")
+        model.privacy = .circles
+        await model.submit()
+        let sent = body(of: "PUT /api/nodes/40")
+        XCTAssertEqual(sent?["privacy_level"] as? String, "circles")
+        XCTAssertNil(sent?["circle_ids"])
+        // A typed reply in the same thread keeps its choices.
+        let (typed, _) = form(NodeFormConfig(edit: .init(nodeId: 40, initialContent: "x", initialPrivacy: .circles,
+                                                           initialAIUsage: .chat)))
+        await typed.start()
+        XCTAssertFalse(typed.hidePublic)
+    }
+
+    func testTheAuthorsAIRepliesAreSharedWithTheThread() async {
+        clearAIReplyMemory()
+        defer { clearAIReplyMemory() }
         let own = """
         {"id":31,"content":"mine","node_type":"user","user":{"id":5,"username":"seowriter"},
          "privacy_level":"circles","ai_usage":"chat","child_count":0,"children":[],"ancestors":[],
@@ -460,11 +815,34 @@ final class CirclesFormTests: StubbedAppTestCase {
         let model = await thread(own)
         XCTAssertTrue(model.isSharedThread)
         XCTAssertFalse(model.isForeignShared)
-        // The author's own shared entry works like any entry of hers: what
-        // her AI writes under it stays hers.
+        // Her own shared entry keeps auto-generate and the control of any entry of hers.
         XCTAssertTrue(model.autoGenerateActive(true))
         XCTAssertFalse(model.showCraftBar(craftMode: false, autoGenerate: true))
         XCTAssertTrue(model.showCraftBar(craftMode: true, autoGenerate: false))
-        XCTAssertNil(model.askAIOffReason)
+        XCTAssertNil(model.aiReplyOffReason)
+        // What her AI writes is read by the thread's people: they are named first.
+        XCTAssertEqual(model.aiReplyNames, ["ben"])
+        model.aiReplyPressed()
+        await waitForDialog(model)
+        XCTAssertTrue(model.showAIReplyDialog)
+        XCTAssertFalse(calls.contains("POST /api/nodes/31/llm"))
+        model.aiReplyConfirmed(dontAskAgain: false)
+        await waitFor("POST /api/nodes/31/llm")
+        XCTAssertNil(body(of: "POST /api/nodes/31/llm")?["privacy_level"])
+        XCTAssertNil(UserDefaults.standard.string(forKey: DefaultsKey.circleAiReplyAck(entryId: 31, userId: 5)))
+    }
+
+    func testAThreadThatIsNotSharedAsksNothing() async {
+        let plain = """
+        {"id":31,"content":"mine","node_type":"user","user":{"id":5,"username":"seowriter"},
+         "privacy_level":"private","ai_usage":"chat","child_count":0,"children":[],"ancestors":[]}
+        """
+        let model = await thread(plain)
+        XCTAssertFalse(model.isSharedThread)
+        XCTAssertFalse(model.showAIReplyPrivacy(craftBar: true, autoGenerate: false))
+        model.aiReplyPressed()
+        await waitFor("POST /api/nodes/31/llm")
+        XCTAssertFalse(model.showAIReplyDialog)
+        XCTAssertNil(body(of: "POST /api/nodes/31/llm")?["privacy_level"])
     }
 }

@@ -1053,12 +1053,32 @@ privacy select is greyed out (`SelectField.unavailable`), as on the web.
   "Don't ask again in this thread" is `DefaultsKey.circleReplyAck(entryId:userId:)`.
 - **Thread**: `SharedEntryBanner` for a reader, `CircleReadersButton` (a tap opens a popover) in the focal
   footer for author and readers. In someone else's shared thread: auto-generate off, no Voice Mode or
-  auto-generate switch, and "Ask my AI" (`POST /nodes/<id>/llm {circle_ask: true}`, no model) with its
-  dialog and its off state. On the author's own shared entry nothing changes: what her AI, Voice or a
-  gleaning writes under it stays hers (only a person's reply and an Ask my AI answer join the thread).
+  auto-generate switch.
+- **AI replies in a shared thread** (2026-11-11; "Ask my AI" and `circle_ask` are gone): every member has
+  the normal LLM Response control on every node they can read (`ThreadModel.showCraftBar`; a reader
+  without Craft mode too, then without the model picker). The request is the normal
+  `POST /nodes/<id>/llm {model, source_mode}`, plus `privacy_level: "private"` when "AI reply: Only me"
+  is chosen (Craft mode; `DefaultsKey.circleAiReplyPrivacy`). Before a shared AI reply the
+  `CircleReplyDialog` AI variant names the readers (`confirmAIReply`, also before the author's
+  auto-generated reply; `DefaultsKey.circleAiReplyAck`), with the `audience.ai_reads` sentence when
+  the prompt reads the requester's artifacts. Off states: `CirclesWording.aiReplyOffReason`. The
+  author's own AI replies under her shared entry are shared with the thread too. An AI reply shows
+  `llm_label` in place of the model id (`NodeFooterText.author`) and belongs to
+  `human_owner_username` (`ThreadModel.ownedByMe`); its edit form offers Only me and Circles
+  (`NodeFormModel.hidePublic`).
+- **Sharing the discussion above an entry**: `GET /nodes/<id>/audience` `thread_path {count, shared}`
+  (edit) or a new entry under the user's own node offers "Share also the discussion leading up to this
+  node?" in the picker (`CircleAudienceState.offerSharePath`); `share_path` goes with `circle_ids` /
+  `circle_usernames` (true when on; false only when it was shared and is turned off).
+- **A shared prompt, for a reader**: placeholders are filled from the `context_artifacts` the server
+  sends (the reader's own); a missing one shows as its own text, e.g. `{user_memory}`
+  (`InlineArtifactSection.missingText`); no version line without `version_number`.
+- **Names** are printed with "@" (`CirclesWording.at`, `joinNames`).
+- **Adding a person**: the emphasized "Add @name" is for new entries only; "Also show earlier entries"
+  sends `include_existing: true` and is offered when the circle has shared entries.
 - **Screens** `Features/Circles/`: `CirclesView` ("Your circles", route `.circles`, `/circles`) and
   `SharedWithYouView` (`.sharedWithYou`, `/shared`); linked from Account ("Circles" row), More ("Shared
   with you") and each other. **Updates**: `CircleShareItemView` ("Read it" / "Don't show <name>'s entries").
-- Tests: `CirclesTests.swift` (24: decoding from hand-written fixtures, wording, routes, the form's
+- Tests: `CirclesTests.swift` (37: decoding from hand-written fixtures, wording, routes, the form's
   submit paths, the thread's rules). No UI test yet: the screens have not been opened in a simulator.
 

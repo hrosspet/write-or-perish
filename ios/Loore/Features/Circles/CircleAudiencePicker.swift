@@ -23,6 +23,13 @@ final class CircleAudienceState {
     private(set) var pending = false
     /// The audience the entry was saved with (edit): nil = not shared before.
     private(set) var savedKey: String?
+    /// An entry of the author's own with something above it in its thread:
+    /// "Share also the discussion leading up to this node?" is offered, off
+    /// by default. Sharing an entry does not share what is above it.
+    private(set) var offersSharePath = false
+    var sharePath = false
+    /// The path above the entry is shared now (edit).
+    private(set) var pathWasShared = false
     @ObservationIgnored private var request = 0
     @ObservationIgnored private var previewTask: Task<Void, Never>?
     @ObservationIgnored private var loaded = false
@@ -46,10 +53,29 @@ final class CircleAudienceState {
     var changed: Bool { savedKey != key }
     var nothingChosen: Bool { circleIds.isEmpty && committed.isEmpty }
 
-    /// The JSON fields that go with `privacy_level: "circles"`.
+    /// The JSON fields that go with `privacy_level: "circles"`. `share_path`
+    /// goes with them as true when the toggle is on, as false only when the
+    /// path was shared and the toggle was turned off (that takes the path
+    /// back to only the author), and not at all otherwise.
     var fields: [String: JSONValue] {
-        ["circle_ids": .array(circleIds.map(JSONValue.int)),
-         "circle_usernames": .array(names.map(JSONValue.string))]
+        var fields: [String: JSONValue] = ["circle_ids": .array(circleIds.map(JSONValue.int)),
+                                           "circle_usernames": .array(names.map(JSONValue.string))]
+        if offersSharePath {
+            if sharePath {
+                fields["share_path"] = .bool(true)
+            } else if pathWasShared {
+                fields["share_path"] = .bool(false)
+            }
+        }
+        return fields
+    }
+
+    /// The entry has a discussion above it: offer the toggle, on when that
+    /// path is already shared (edit).
+    func offerSharePath(shared: Bool = false) {
+        offersSharePath = true
+        sharePath = shared
+        pathWasShared = shared
     }
 
     /// The line under the picker: an error, a prompt to choose, or the readers.
@@ -251,6 +277,35 @@ struct CircleAudiencePicker: View {
                 .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier("circles.sentence")
+            if state.offersSharePath {
+                VStack(alignment: .leading, spacing: 4) {
+                    Button {
+                        state.sharePath.toggle()
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: state.sharePath ? "checkmark.square" : "square")
+                                .font(.system(size: 20, weight: .light))
+                                .foregroundStyle(state.sharePath ? LooreColor.accent : LooreColor.textSecondary)
+                                .accessibilityHidden(true)
+                            Text(CirclesWording.sharePathLabel)
+                                .multilineTextAlignment(.leading)
+                        }
+                        .font(LooreFont.sans(14, .light))
+                        .foregroundStyle(LooreColor.textPrimary)
+                        .frame(minHeight: 44)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(disabled)
+                    .accessibilityAddTraits(.isToggle)
+                    .accessibilityValue(state.sharePath ? "On" : "Off")
+                    .accessibilityIdentifier("circles.sharePath")
+                    Text(CirclesWording.sharePathNote)
+                        .font(LooreFont.sans(12.8, .light))
+                        .foregroundStyle(LooreColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
             Text("You can change this later, or take the entry back to only you.")
                 .font(LooreFont.sans(12.8, .light))
                 .foregroundStyle(LooreColor.textSecondary)

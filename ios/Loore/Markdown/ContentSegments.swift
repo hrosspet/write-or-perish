@@ -16,6 +16,9 @@ enum ArtifactPlaceholder: String, CaseIterable, Sendable {
     case profile, todo, recentRaw = "recent_raw", recent, aiPreferences = "ai_preferences",
          memory, scratchpad, intentions
 
+    /// The placeholder as it is written in a prompt: "{user_memory}".
+    var token: String { "{user_\(rawValue)}" }
+
     /// The web's `InlineArtifactSection` labels.
     var label: String {
         switch self {

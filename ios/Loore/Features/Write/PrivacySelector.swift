@@ -17,11 +17,14 @@ struct PrivacySelectorView: View {
     /// into (the picker is then a note naming them). `allowCircles` false
     /// leaves the choice out (imports: Only me / Everyone). `lockPublic`: an
     /// existing reply in someone's shared thread, where Everyone is not its
-    /// writer's to choose.
+    /// writer's to choose. `hidePublic`: an AI reply in a shared thread, which
+    /// is read by the one who generated it or by the thread's people (the
+    /// choices are then Only me and Circles).
     var audience: CircleAudienceState?
     var threadAudience: [String]?
     var allowCircles = true
     var lockPublic = false
+    var hidePublic = false
     var onEditCircles: (() -> Void)?
 
     @Environment(AppState.self) private var app
@@ -31,10 +34,10 @@ struct PrivacySelectorView: View {
     static let whoCanReadLabel = "Who can read this"
 
     /// The three choices with Circles on (two for imports).
-    static func choices(allowCircles: Bool) -> [(PrivacyLevel, String)] {
+    static func choices(allowCircles: Bool, allowPublic: Bool = true) -> [(PrivacyLevel, String)] {
         var list: [(PrivacyLevel, String)] = [(.private, "Only me")]
         if allowCircles { list.append((.circles, "Circles")) }
-        list.append((.public, "Everyone"))
+        if allowPublic { list.append((.public, "Everyone")) }
         return list
     }
 
@@ -110,7 +113,7 @@ extension PrivacySelectorView {
     @ViewBuilder fileprivate var whoCanRead: some View {
         FieldLabel(text: Self.whoCanReadLabel)
         HStack(spacing: 8) {
-            ForEach(Self.choices(allowCircles: allowCircles), id: \.0) { choice in
+            ForEach(Self.choices(allowCircles: allowCircles, allowPublic: !hidePublic), id: \.0) { choice in
                 let selected = privacy == choice.0
                 let off = choice.0 == .public && lockPublic
                 Button {

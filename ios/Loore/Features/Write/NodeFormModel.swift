@@ -12,6 +12,9 @@ struct NodeFormConfig {
         var detachPrompt = false
         var hasGeneratedTTS = false
         var hasChildren = false
+        /// The node is an AI reply (Circles: in a shared thread it is read by
+        /// the one who generated it or by the thread's people, never by everyone).
+        var isAIReply = false
     }
 
     var parentId: Int?
@@ -184,6 +187,9 @@ final class NodeFormModel {
                 aiUsage = parent.replyAIUsage ?? parent.aiUsage
                 // A shared thread (Circles): the reply is read by its people.
                 if circlesOn { threadAudience = parent.audience }
+                // A new entry under the user's own node, in a thread that is
+                // not shared: sharing it can take the discussion above along.
+                if circlesOn, threadAudience == nil, ownsNode(parent) { audience.offerSharePath() }
             }
         }
         // Editing: what the entry is shared with now, to seed the picker; or,
@@ -194,6 +200,11 @@ final class NodeFormModel {
                 audience.seed(circleIds: own.circleIds ?? [], usernames: own.usernames ?? [])
             } else {
                 threadAudience = answer.threadAudience ?? answer.audience.flatMap { $0.isEntry ? nil : $0 }
+            }
+            // The entry has a discussion above it: that can be shared with
+            // the entry's people too, or taken back.
+            if let path = answer.threadPath, threadAudience == nil {
+                audience.offerSharePath(shared: path.shared)
             }
         }
         await draftLoad
@@ -225,6 +236,15 @@ final class NodeFormModel {
         return privacy
     }
 
+    /// The node is the user's own (an AI reply: the one they asked for).
+    private func ownsNode(_ node: NodeDetail) -> Bool {
+        guard let me = app.user else { return false }
+        if node.user?.id == me.id { return true }
+        guard node.nodeType == .llm else { return false }
+        if let human = node.humanOwnerUsername, !human.isEmpty { return human == me.username }
+        return node.parentUserId == me.id
+    }
+
     var lockPrivacy: Bool { !config.isEdit && (parentPrivacy == .public || threadAudience != nil) }
 
     // MARK: Circles
@@ -243,6 +263,10 @@ final class NodeFormModel {
     /// An existing reply in someone else's shared thread: Everyone is not its
     /// writer's to choose.
     var lockPublic: Bool { config.isEdit && threadAudience != nil && threadAudience?.isAuthor == false }
+
+    /// An AI reply in a shared thread: the choices are Only me and the
+    /// thread's people. Everyone is left out.
+    var hidePublic: Bool { config.edit?.isAIReply == true && threadAudience != nil }
 
     private var audienceChanged: Bool { sharesEntry && audience.changed }
 

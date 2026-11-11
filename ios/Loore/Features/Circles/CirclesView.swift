@@ -74,7 +74,7 @@ final class CirclesModel {
             let preview: CircleMemberPreview = try await api.post(
                 APIPath.circleMemberPreview(circle.id), json: .object(["username": .string(username)]))
             if preview.alreadyMember {
-                return .failure(.init(message: "\(preview.username) is already in \(circle.name)."))
+                return .failure(.init(message: "\(CirclesWording.at(preview.username)) is already in \(circle.name)."))
             }
             return .success(preview)
         } catch { return .failure(.init(message: message(error))) }
@@ -324,9 +324,9 @@ private struct CircleCard: View {
                                       onCancel: { dialog = nil })
             case .remove(let username)?:
                 CircleConfirmDialog(
-                    title: "Remove \(username) from \(circle.name)?",
+                    title: "Remove \(CirclesWording.at(username)) from \(circle.name)?",
                     message: CirclesWording.removeMemberBody(name: username, circleName: circle.name),
-                    confirmLabel: "Remove \(username)", busy: model.busy,
+                    confirmLabel: "Remove \(CirclesWording.at(username))", busy: model.busy,
                     onConfirm: {
                         Task {
                             addError = await model.removeMember(circle, username: username)
@@ -359,7 +359,7 @@ private struct CircleCard: View {
                     .font(LooreFont.serif(24, .medium, relativeTo: .title2))
                     .foregroundStyle(LooreColor.textPrimary)
                     .accessibilityAddTraits(.isHeader)
-                Text(circle.members.isEmpty ? Self.nobody : circle.members.map(\.username).joined(separator: ", "))
+                Text(circle.members.isEmpty ? Self.nobody : CirclesWording.joinNames(circle.members.map(\.username)))
                     .font(LooreFont.sans(14, .light))
                     .foregroundStyle(LooreColor.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -427,7 +427,7 @@ private struct CircleCard: View {
             ForEach(circle.members, id: \.username) { member in
                 HairlineDivider()
                 HStack(spacing: 12) {
-                    Text(member.username)
+                    Text(CirclesWording.at(member.username))
                         .font(LooreFont.sans(16, .regular))
                         .foregroundStyle(LooreColor.textPrimary)
                     if member.onlyNew {
@@ -438,7 +438,7 @@ private struct CircleCard: View {
                     Spacer(minLength: 8)
                     CircleQuietButton(title: "Remove") { dialog = .remove(member.username) }
                         .disabled(model.busy)
-                        .accessibilityLabel("Remove \(member.username)")
+                        .accessibilityLabel("Remove \(CirclesWording.at(member.username))")
                 }
                 .frame(minHeight: 48)
             }

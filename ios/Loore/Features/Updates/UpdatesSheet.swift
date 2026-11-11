@@ -226,7 +226,7 @@ private struct CircleShareItemView: View {
 
     private var name: String { notification.actorUsername ?? "" }
 
-    static func notTold(_ name: String) -> String { "\(name) is not told what you choose." }
+    static func notTold(_ name: String) -> String { "\(CirclesWording.at(name)) is not told what you choose." }
     static func hideLabel(_ name: String) -> String { "Don't show \(CirclesWording.possessive(name)) entries" }
 
     var body: some View {
