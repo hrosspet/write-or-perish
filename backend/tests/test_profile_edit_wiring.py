@@ -952,3 +952,519 @@ def test_a_pending_merge_with_no_new_writing_still_runs(app, monkeypatch):
     assert merge.merged_profile_id == edit.id
     assert merge.parent_profile_id == rebuilt.id
     assert User.query.get(user.id).profile_pending_merge_id is None
+
+
+# ── #421: a rebuild merges every edit, not only the newest ──────────────
+
+FEB = datetime(2026, 2, 1)
+# The first correction as the update after it left it, and the second
+# edit, made on that text (_two_edit_rounds).
+UPDATE_WORDING = "FIRST CORRECTION, AS THE UPDATE LEFT IT"
+SECOND_EDIT = f"{UPDATE_WORDING}\nSECOND CORRECTION"
+
+
+def _two_edit_rounds(user):
+    """An old chain with two edit rounds. January and February chunks and
+    their integration; the user corrects the integration (FIRST, dated
+    February); an update builds on that edit (May) and is integrated; the
+    user corrects that integration (SECOND, dated May). The second edit
+    starts from the integration's text, so it carries the first correction
+    in the update's wording, not in the user's: the rebuild's first merge
+    reads the user's wording, the second merge the update's."""
+    now = datetime.utcnow()
+
+    def version(text, gen_type, cutoff, units, parent, age):
+        row = UserProfile(
+            user_id=user.id, generated_by="gpt-5.5", tokens_used=0,
+            ai_usage="chat", generation_type=gen_type,
+            source_tokens_used=units, source_data_cutoff=cutoff,
+            source_rendered_at=None if gen_type == "integration" else cutoff,
+            parent_profile_id=parent.id if parent else None,
+            created_at=now - age)
+        row.set_content(text)
+        _db.session.add(row)
+        _db.session.commit()
+        return row
+    january = version("JANUARY", "iterative", JAN, 90_000, None,
+                      timedelta(days=12))
+    february = version("FEBRUARY", "update", FEB, 180_000, january,
+                       timedelta(days=11))
+    integrated = version("WRONG GUESS", "integration", FEB, 180_000,
+                         february, timedelta(days=10, hours=23))
+    first = _edit(user, integrated, "FIRST CORRECTION",
+                  created_at=now - timedelta(days=9))
+    update = version(UPDATE_WORDING, "update", MAY, 270_000, first,
+                     timedelta(days=5))
+    integrated_again = version(UPDATE_WORDING, "integration", MAY, 270_000,
+                               update, timedelta(days=4, hours=23))
+    assert SECOND_EDIT.startswith(integrated_again.get_content())
+    second = _edit(user, integrated_again, SECOND_EDIT,
+                   created_at=now - timedelta(days=1))
+    return first, second
+
+
+def _sequence(*outputs, record=None):
+    """A stand-in output that returns ``outputs`` in turn and, before each,
+    calls ``record``."""
+    pending = list(outputs)
+
+    def next_output():
+        if record is not None:
+            record()
+        return pending.pop(0)
+    return next_output
+
+
+def test_421_a_full_rebuild_merges_every_edit_at_its_date(app, monkeypatch):
+    """Two edit rounds with an update between them: the rebuild merges the
+    first edit after the window that reaches February and the second after
+    the window that reaches May, each with main's note, and goes on from
+    each merge. The pending merge stays the newest edit until it is
+    merged."""
+    import backend.tasks.exports as exports
+    user = _user("everyedit", profile_needs_full_regen=True)
+    first, second = _two_edit_rounds(user)
+    assert exports.carried_user_versions(second) == [first.id, second.id]
+    _writing(user)
+    monkeypatch.setattr(exports, "should_continue_chain",
+                        lambda user, profile: True)
+    pending_at_merge = []
+    seen = _stand_in(
+        monkeypatch, exports,
+        [_window("2019 ARCHIVE", latest=datetime(2019, 12, 1)),
+         _window("WINTER WRITING", latest=datetime(2026, 3, 1)),
+         _window("SPRING WRITING", latest=datetime(2026, 5, 15)),
+         _window("JUNE WRITING", latest=JUN)],
+        [360_000, 270_000, 180_000, 90_000, 0],
+        ["REBUILT 2019", "REBUILT WINTER", "REBUILT SPRING", "REBUILT JUNE"],
+        merge_output=_sequence(
+            "MERGED FIRST", "MERGED SECOND",
+            record=lambda: pending_at_merge.append(
+                User.query.get(user.id).profile_pending_merge_id)))
+
+    exports._do_initial_generation(MagicMock(), user, "gpt-5.5", 32_000, {})
+
+    assert [kind for kind, _ in seen] == [
+        "chunk", "chunk", "merge", "chunk", "merge", "chunk", "integration"]
+    assert "CORRECTION" not in seen[0][1] + seen[1][1]
+    first_merge, second_merge = _texts(seen[2][1]), _texts(seen[4][1])
+    assert "REBUILT WINTER" in first_merge[0]
+    assert first_merge[1] == (
+        "Profile No. 2\n- Covers all the writing from the start to "
+        f"2026-02-01\n- Written by the user on {_day(first)}\n\n"
+        f"{MAIN_NOTE}\n\nFIRST CORRECTION")
+    assert _existing_profile(seen[3][1]) == "MERGED FIRST"
+    assert "REBUILT SPRING" in second_merge[0]
+    assert second_merge[1] == (
+        "Profile No. 2\n- Covers all the writing from the start to "
+        f"2026-05-01\n- Written by the user on {_day(second)}\n\n"
+        f"{MAIN_NOTE}\n\n{SECOND_EDIT}")
+    assert _existing_profile(seen[5][1]) == "MERGED SECOND"
+    assert pending_at_merge == [second.id, second.id]
+    merged_first = UserProfile.query.filter_by(merged_profile_id=first.id).one()
+    merged_second = UserProfile.query.filter_by(
+        merged_profile_id=second.id).one()
+    spring = UserProfile.query.get(merged_second.parent_profile_id)
+    assert spring.parent_profile_id == merged_first.id
+    # The integration: 4 chunks, the 2 merges, the prompt.
+    assert len(_texts(seen[6][1])) == 7
+    assert User.query.get(user.id).profile_pending_merge_id is None
+
+
+def test_421_saves_with_no_model_step_between_are_one_merge(app):
+    """Two saves in a row (the second an edit of the first), and an edit of
+    the version a rebuild's merge saved: the later save holds the earlier
+    text as the user left it, so only the latest is merged."""
+    import backend.tasks.exports as exports
+    user = _user("twosaves")
+    _tip, integration = _finished_chain(user)
+    now = datetime.utcnow()
+    first = _edit(user, integration, "FIRST SAVE",
+                  created_at=now - timedelta(hours=3))
+    second = _edit(user, first, "SECOND SAVE",
+                   created_at=now - timedelta(hours=2))
+
+    assert exports.carried_user_versions(second) == [second.id]
+    assert [v.id for v in exports.user_versions_to_merge(second, None)] == [
+        second.id]
+
+    rebuilt = UserProfile(user_id=user.id, generated_by="gpt-5.5",
+                          tokens_used=0, generation_type="initial",
+                          source_tokens_used=90_000, source_data_cutoff=MAY,
+                          source_rendered_at=MAY,
+                          created_at=now - timedelta(hours=1, minutes=30))
+    rebuilt.set_content("REBUILT")
+    _db.session.add(rebuilt)
+    _db.session.flush()
+    merge = UserProfile(user_id=user.id, generated_by="gpt-5.5",
+                        tokens_used=0, generation_type="initial",
+                        source_tokens_used=90_000, source_data_cutoff=MAY,
+                        source_rendered_at=MAY, parent_profile_id=rebuilt.id,
+                        merged_profile_id=second.id,
+                        created_at=now - timedelta(hours=1))
+    merge.set_content("MERGED")
+    _db.session.add(merge)
+    _db.session.commit()
+    edit_of_merge = _edit(user, merge, "THIRD SAVE")
+
+    assert exports.carried_user_versions(merge) == [second.id]
+    assert exports.carried_user_versions(edit_of_merge) == [edit_of_merge.id]
+
+
+def test_421_a_re_tip_between_the_edits_merges_only_the_later_one(app):
+    """An import dated between the two edits re-tips the chain at the
+    first edit: the regenerated chain holds it, and only the second edit
+    is merged."""
+    import backend.tasks.exports as exports
+    user = _user("retipbetween")
+    first, second = _two_edit_rounds(user)
+
+    action, copy = exports.revert_profile_for_import(
+        user.id, datetime(2026, 4, 1))
+    _db.session.commit()
+
+    assert action == "revert" and copy.parent_profile_id == first.id
+    assert User.query.get(user.id).profile_pending_merge_id == second.id
+    assert [v.id for v in exports.user_versions_to_merge(second, copy)] == [
+        second.id]
+
+
+def test_421_a_re_tip_before_both_edits_merges_each_at_its_date(
+        app, monkeypatch):
+    """An import dated before both edits re-tips the chain at the January
+    chunk: the regenerated chain merges the first edit after the window
+    that reaches February and the second after the window that reaches
+    May."""
+    import backend.tasks.exports as exports
+    user = _user("retipbefore")
+    first, second = _two_edit_rounds(user)
+
+    action, copy = exports.revert_profile_for_import(
+        user.id, datetime(2026, 1, 15))
+    _db.session.commit()
+    assert action == "revert"
+    assert User.query.get(user.id).profile_pending_merge_id == second.id
+
+    _writing(user, at=datetime(2026, 1, 16))
+    monkeypatch.setattr(exports, "should_continue_chain",
+                        lambda user, profile: True)
+    seen = _stand_in(
+        monkeypatch, exports,
+        [_window("IMPORTED WINTER", latest=datetime(2026, 3, 1)),
+         _window("SPRING", latest=datetime(2026, 5, 15))],
+        [180_000, 90_000, 0], ["REGENERATED WINTER", "REGENERATED SPRING"],
+        merge_output=_sequence("MERGED FIRST", "MERGED SECOND"))
+    exports._do_incremental_update(
+        MagicMock(), user, "gpt-5.5", copy.id, 200_000, 32_000, {})
+
+    assert [kind for kind, _ in seen] == [
+        "chunk", "merge", "chunk", "merge", "integration"]
+    assert _texts(seen[1][1])[1].endswith(f"{MAIN_NOTE}\n\nFIRST CORRECTION")
+    assert _texts(seen[3][1])[1].endswith(f"{MAIN_NOTE}\n\n{SECOND_EDIT}")
+    assert UserProfile.query.filter_by(
+        merged_profile_id=first.id).one().generation_type == "update"
+    assert User.query.get(user.id).profile_pending_merge_id is None
+
+
+def test_421_edits_newer_than_all_of_the_writing_are_the_last_steps(
+        app, monkeypatch):
+    """The writing after January was deleted, so both edits are newer
+    than all of it: after the single chunk, the run merges the first edit,
+    then the second, and the second merge is the final version (no
+    integration for a single chunk)."""
+    import backend.tasks.exports as exports
+    user = _user("laststeps", profile_needs_full_regen=True)
+    first, second = _two_edit_rounds(user)
+    _writing(user, units=6_000, at=datetime(2026, 1, 10))
+    seen = _stand_in(
+        monkeypatch, exports,
+        [_window("JANUARY WRITING", latest=datetime(2026, 1, 10),
+                 units=6_000)],
+        [6_000], ["REBUILT JANUARY"],
+        merge_output=_sequence("MERGED FIRST", "MERGED SECOND"))
+
+    result = exports._do_initial_generation(
+        MagicMock(), user, "gpt-5.5", 32_000, {})
+
+    assert [kind for kind, _ in seen] == ["chunk", "merge", "merge"]
+    final = UserProfile.query.get(result["profile_id"])
+    assert final.merged_profile_id == second.id
+    assert final.generation_type == "initial"
+    before = UserProfile.query.get(final.parent_profile_id)
+    assert before.merged_profile_id == first.id
+    assert UserProfile.query.get(before.parent_profile_id).merged_profile_id \
+        is None
+    assert User.query.get(user.id).profile_pending_merge_id is None
+
+
+def test_421_a_revert_past_the_second_edit_keeps_the_first(app):
+    """The user reverts to the version they made their second edit on: the
+    first edit is in that version's lineage, so a rebuild still merges it;
+    the second is not merged."""
+    import backend.tasks.exports as exports
+    user = _user("revertsecond")
+    first, second = _two_edit_rounds(user)
+    edited = UserProfile.query.get(second.parent_profile_id)
+    revert = UserProfile(user_id=user.id, generated_by=edited.generated_by,
+                         tokens_used=0, generation_type="revert",
+                         source_tokens_used=edited.source_tokens_used,
+                         source_data_cutoff=edited.source_data_cutoff,
+                         parent_profile_id=edited.id)
+    revert.set_content(edited.get_content())
+    _db.session.add(revert)
+    _db.session.commit()
+
+    assert exports.profile_update_base(user.id).id == revert.id
+    assert exports.plan_user_version_merge(user, revert).id == first.id
+    assert [v.id for v in exports.user_versions_to_merge(first, None)] == [
+        first.id]
+
+
+# ── #421, option (c): an older round only for the lines no newer one changed
+# Peter (voice review, 2026-11-10): "let's go with c)". The texts are
+# invented.
+
+C_BASE = ("### SURFACE MAP\nLikes long walks.\nWRONG GUESS\n\n"
+          "### SHADOW MAP\nAvoids crowds.")
+CELLO = "Plays the cello on weekends."
+C_FIRST = ("### SURFACE MAP\nLikes long walks.\nRIGHT GUESS\n\n"
+           f"### SHADOW MAP\nAvoids crowds.\n{CELLO}")
+C_UPDATE = ("### SURFACE MAP\nLikes long walks in the hills.\n"
+            "Right guess, in the update's words.\n\n"
+            f"### SHADOW MAP\nAvoids crowds.\n{CELLO}")
+
+
+def _old_chain(user, steps, base=C_BASE):
+    """An old chain: a January chunk and its integration (``base``, cutoff
+    February), then ``steps`` in order, one a day: ("edit", text) saves an
+    edit of the newest version; ("update", text, cutoff) an update on it
+    and that update's integration, both with ``text``. Returns the edits."""
+    start = datetime.utcnow() - timedelta(days=30)
+    made = []
+
+    def version(text, gen_type, cutoff, parent):
+        row = UserProfile(
+            user_id=user.id, generated_by="gpt-5.5", tokens_used=0,
+            ai_usage="chat", generation_type=gen_type,
+            source_tokens_used=90_000 * (len(made) + 1),
+            source_data_cutoff=cutoff,
+            source_rendered_at=None if gen_type == "integration" else cutoff,
+            parent_profile_id=parent.id if parent else None,
+            created_at=start + timedelta(days=len(made)))
+        row.set_content(text)
+        _db.session.add(row)
+        _db.session.commit()
+        made.append(row)
+        return row
+    january = version("JANUARY", "iterative", JAN, None)
+    newest = version(base, "integration", FEB, january)
+    edits = []
+    for step in steps:
+        if step[0] == "edit":
+            newest = _edit(user, newest, step[1],
+                           created_at=start + timedelta(days=len(made)))
+            made.append(newest)
+            edits.append(newest)
+        else:
+            _kind, text, cutoff = step
+            update = version(text, "update", cutoff, newest)
+            newest = version(text, "integration", cutoff, update)
+    return edits
+
+
+def _user_texts(seen):
+    """The user's version in each merge call the stand-in received."""
+    return [_texts(messages)[1].split(f"{MAIN_NOTE}\n\n", 1)[1]
+            for kind, messages in seen if kind == "merge"]
+
+
+def _rebuild(monkeypatch, exports, user):
+    """A full rebuild over four windows (2019, to March, to mid-May,
+    June). Returns what the stand-in model received."""
+    _writing(user)
+    monkeypatch.setattr(exports, "should_continue_chain",
+                        lambda user, profile: True)
+    seen = _stand_in(
+        monkeypatch, exports,
+        [_window("2019 ARCHIVE", latest=datetime(2019, 12, 1)),
+         _window("WINTER WRITING", latest=datetime(2026, 3, 1)),
+         _window("SPRING WRITING", latest=datetime(2026, 5, 15)),
+         _window("JUNE WRITING", latest=JUN)],
+        [360_000, 270_000, 180_000, 90_000, 0],
+        ["REBUILT 2019", "REBUILT WINTER", "REBUILT SPRING", "REBUILT JUNE"],
+        merge_output=_sequence("MERGED ONE", "MERGED TWO"))
+    exports._do_initial_generation(MagicMock(), user, "gpt-5.5", 32_000, {})
+    return seen
+
+
+def test_421c_a_sentence_added_then_deleted_stays_deleted(app, monkeypatch):
+    """Round 1 corrects WRONG GUESS and adds a sentence; the update keeps
+    both; round 2 deletes the sentence. The rebuild merges round 1 without
+    the sentence and with its correction, then round 2 whole."""
+    import backend.tasks.exports as exports
+    user = _user("addeddeleted", profile_needs_full_regen=True)
+    first, second = _old_chain(user, [
+        ("edit", C_FIRST), ("update", C_UPDATE, MAY),
+        ("edit", C_UPDATE.replace(f"\n{CELLO}", ""))])
+
+    seen = _rebuild(monkeypatch, exports, user)
+
+    assert [kind for kind, _ in seen] == [
+        "chunk", "chunk", "merge", "chunk", "merge", "chunk", "integration"]
+    assert _user_texts(seen) == [
+        "### SURFACE MAP\nLikes long walks.\nRIGHT GUESS\n\n"
+        "### SHADOW MAP\nAvoids crowds.",
+        second.get_content()]
+    assert all(CELLO not in str(item) for _kind, item in seen)
+    # The merge still records the version it merged, and the label is the
+    # version's: written by the user on the day of round 1.
+    assert UserProfile.query.filter_by(merged_profile_id=first.id).count() == 1
+    assert f"Written by the user on {_day(first)}" in _texts(seen[2][1])[1]
+    assert User.query.get(user.id).profile_pending_merge_id is None
+
+
+def test_421c_a_reworded_paragraph_the_user_deleted_does_not_come_back(
+        app, monkeypatch):
+    """Review of #569, finding 1, through a sync rebuild. Paragraphs are
+    separated by blank lines. Round 1 adds the cello paragraph and corrects
+    the other section; the update rewords the section's paragraphs and adds
+    one before the cello paragraph; round 2 deletes the cello paragraph.
+    Round 1's merge does not receive the cello sentence and keeps the
+    correction round 2 did not touch."""
+    import backend.tasks.exports as exports
+    user = _user("paragraphs", profile_needs_full_regen=True)
+    base = ("### SURFACE MAP\nLikes long walks along the river.\n\n"
+            "Works as a nurse in Leeds.\n\n"
+            "### SHADOW MAP\nAvoids crowds at parties.")
+    first_text = base.replace(
+        "\n\nWorks", f"\n\n{CELLO}\n\nWorks").replace(
+        "Avoids crowds at parties.", "Avoids crowds, but loves concerts.")
+    reworded = "Music matters to them: most weekends go to cello practice."
+    update = ("### SURFACE MAP\nWalks by the river whenever they can.\n\n"
+              "Recently started running in the mornings.\n\n"
+              f"{reworded}\n\nNursing in Leeds is their work.\n\n"
+              "### SHADOW MAP\nAvoids crowds, but loves concerts.")
+    first, second = _old_chain(user, [
+        ("edit", first_text), ("update", update, MAY),
+        ("edit", update.replace(f"{reworded}\n\n", ""))], base=base)
+
+    seen = _rebuild(monkeypatch, exports, user)
+
+    assert [kind for kind, _ in seen] == [
+        "chunk", "chunk", "merge", "chunk", "merge", "chunk", "integration"]
+    one, two = _user_texts(seen)
+    assert CELLO not in one and "cello" not in two
+    assert "Avoids crowds, but loves concerts." in one
+    assert two == second.get_content()
+    assert all(CELLO not in str(item) for _kind, item in seen)
+
+
+def test_421c_a_round_with_nothing_left_makes_no_call(app, monkeypatch):
+    """Round 1 only adds the sentence and round 2 deletes it: round 1 has
+    nothing left, so only round 2 is merged, after the window that reaches
+    its date."""
+    import backend.tasks.exports as exports
+    user = _user("nothingleft", profile_needs_full_regen=True)
+    with_cello = f"{C_BASE}\n{CELLO}"
+    first, second = _old_chain(user, [
+        ("edit", with_cello), ("update", with_cello, MAY),
+        ("edit", C_BASE)])
+
+    seen = _rebuild(monkeypatch, exports, user)
+
+    assert [kind for kind, _ in seen] == [
+        "chunk", "chunk", "chunk", "merge", "chunk", "integration"]
+    assert _user_texts(seen) == [C_BASE]
+    assert all(CELLO not in str(item) for _kind, item in seen)
+    assert UserProfile.query.filter_by(merged_profile_id=first.id).count() == 0
+    assert UserProfile.query.filter_by(
+        merged_profile_id=second.id).count() == 1
+    assert User.query.get(user.id).profile_pending_merge_id is None
+
+
+def test_421c_three_rounds(app):
+    """Round 1 corrects a line and adds a sentence, round 2 deletes the
+    sentence (a deletion alone), round 3 rewrites a third line. Each older
+    round is read without the lines a newer one changed; round 3 whole."""
+    import backend.tasks.exports as exports
+    user = _user("threerounds")
+    second_text = C_UPDATE.replace(f"\n{CELLO}", "")
+    update2 = second_text.replace("in the hills", "in the hills at dawn")
+    first, second, third = _old_chain(user, [
+        ("edit", C_FIRST), ("update", C_UPDATE, MAY),
+        ("edit", second_text), ("update", update2, JUN),
+        ("edit", update2.replace("Avoids crowds.", "Seeks small gatherings."))])
+    assert exports.carried_user_versions(third) == [
+        first.id, second.id, third.id]
+
+    one = exports.user_merge_input(first, third)
+    two = exports.user_merge_input(second, third)
+
+    assert isinstance(one, exports.ReducedUserVersion) and one.id == first.id
+    assert one.get_content() == ("### SURFACE MAP\nLikes long walks.\n"
+                                 "RIGHT GUESS\n\n### SHADOW MAP")
+    assert one.generated_by == "user" and one.created_at == first.created_at
+    assert two.id == second.id
+    assert "Avoids crowds." not in two.get_content()
+    assert "Right guess, in the update's words." in two.get_content()
+    assert exports.user_merge_input(third, third) is third
+    # Nothing is changed in the versions themselves.
+    assert first.get_content() == C_FIRST
+
+
+def test_421c_a_round_untouched_by_newer_ones_is_read_whole(app):
+    import backend.tasks.exports as exports
+    user = _user("untouched")
+    first, second = _old_chain(user, [
+        ("edit", C_FIRST), ("update", C_UPDATE, MAY),
+        ("edit", f"{C_UPDATE}\nA NEW LAST LINE")])
+    assert exports.user_merge_input(first, second) is first
+
+
+def test_421c_an_older_whitespace_only_round_is_not_merged(app):
+    """Whitespace inside a line is a new version on the edit route, but no
+    change of words: such a round has nothing to merge."""
+    import backend.tasks.exports as exports
+    user = _user("whitespace")
+    first, second = _old_chain(user, [
+        ("edit", C_BASE.replace("Likes long walks.", "Likes  long   walks.")),
+        ("update", C_BASE, MAY),
+        ("edit", C_BASE.replace("Avoids crowds.", "Avoids large crowds."))])
+    assert exports.user_merge_input(first, second) is None
+
+
+def test_421c_a_merged_round_an_edit_replaced_still_counts_as_newer(app):
+    """An earlier rebuild merged round 1 (adds the sentence) and round 2
+    (deletes it); the user then edited the version round 2's merge saved.
+    That edit replaces round 2, and round 2's deletion still keeps round 1
+    from bringing the sentence back, even though the merge's text (the
+    model's) no longer shows the sentence."""
+    import backend.tasks.exports as exports
+    user = _user("foldedmerge")
+    with_cello = f"{C_BASE}\n{CELLO}"
+    first, second = _old_chain(user, [
+        ("edit", with_cello), ("update", with_cello, MAY), ("edit", C_BASE)])
+    now = datetime.utcnow()
+
+    def step(text, parent, merged, hours_ago):
+        row = UserProfile(user_id=user.id, generated_by="gpt-5.5",
+                          tokens_used=0, ai_usage="chat",
+                          generation_type="iterative",
+                          source_tokens_used=90_000, source_data_cutoff=MAY,
+                          source_rendered_at=MAY,
+                          parent_profile_id=parent.id if parent else None,
+                          merged_profile_id=merged.id if merged else None,
+                          created_at=now - timedelta(hours=hours_ago))
+        row.set_content(text)
+        _db.session.add(row)
+        _db.session.commit()
+        return row
+    rebuilt = step("REBUILT", None, None, 5)
+    merge_one = step(f"MERGED\n{CELLO}", rebuilt, first, 4)
+    merge_two = step("MERGED, THE MODEL'S WORDS", merge_one, second, 3)
+    edit = _edit(user, merge_two, "MERGED, THE MODEL'S WORDS\nMY NEW LINE")
+
+    assert exports.carried_user_versions(edit) == [first.id, edit.id]
+    assert exports._user_rounds(edit) == [(first.id, []),
+                                          (edit.id, [second.id])]
+    assert exports.user_merge_input(first, edit) is None

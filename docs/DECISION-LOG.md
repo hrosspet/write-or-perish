@@ -3137,10 +3137,21 @@ Kinds (one per entry and per table row):
 - **Kind:** data safety
 - **Situation:** #569 merges every round of a user's profile edits at a rebuild, oldest first. As built, a sentence the user added in one edit and deleted in a later one can come back. The options: (a) as built, (b) only the newest edit, as main does, (c) merge an older edit only for the lines the newer edits didn't change. Recommended (c).
 - **Prediction:** (c) (50 %).
-- **Peter:** "let's go with c)" · "but if" (the answer ends there; asked for the rest)
+- **Peter:** "let's go with c)" · "but if" (the answer ends there); asked about it: "what 'but if'?", so no condition
 - **Score:** hit.
 - **Source:** Loore voice review, node 201651, 2026-11-10; questions from the train #581 summary (node 201566), Claude Code session 2026-10-21 (Opus 5.5)
 - **Applies to:** #569, #421
+
+### 2026-11-10 · Root-level Markdown files keep deploying
+
+- **Kind:** release/ops
+- **Situation:** since #581 a push that only changes `docs/` doesn't deploy; `CLAUDE.md` at the repo root is outside it, so #620 deployed. Proposed: add root-level `*.md` (not `backend/user_changelog.md`, which the server reads) to the deploy's skip list.
+- **Prediction:** yes (80 %).
+- **Peter:** "no"
+- **Score:** miss. The skip list stays `ios/**` and `docs/**`.
+- **Why it missed:** a deploy for a root Markdown change is rare and costs only a restart; the prediction counted the restart as a cost Peter wants to avoid.
+- **Source:** Claude Code session 2026-11-10 (Opus 5.5)
+- **Applies to:** #581, #620
 
 ### 2026-11-10 · No rebuild of existing profiles after #551 and #565
 
@@ -3423,6 +3434,15 @@ Choices that agents flagged in PRs and that the builder decided because a rule a
 | 2026-10-20 | #414 | data safety | A profile edit that changes only whitespace (blank lines, trailing spaces, a trailing newline) | Saved in place, no new version | Every added heuristic is named | Opus 5.5 | accepted by merge (PR #548, 2026-10-21) |
 | 2026-10-20 | #414 | product scope | The date a rebuild merges the user's version at | Its cutoff, or the time it was written for a hand-written profile with no cutoff; the merge follows the first step whose cutoff reaches that date | A rebuild merges the user's version at its date (Peter, 2026-10-20); every added heuristic is named | Opus 5.5 | accepted by merge (PR #548, 2026-10-21) |
 | 2026-10-20 | #414 | product scope | The version a user's edit replaced, when a later integration runs | Not an integration input: the integration chain starts at the user's version (found by the real-model check) | An edit is a new version, with the version it changed as its predecessor (Peter, 2026-10-20) | Opus 5.5 | accepted by merge (PR #548, 2026-10-21) |
+| 2026-11-10 | #569 | data safety | The unit option (c) compares | A line (whitespace collapsed, blank lines ignored for the mapping), not a paragraph or section | Option (c) as Peter chose it: "the lines your newer edits didn't change" | Opus 5.5 | pending |
+| 2026-11-10 | #569 | data safety | A newer edit inside a stretch a model step rewrote | Every older line mapped onto that stretch counts as touched, so the whole stretch is left out of the older round's merge | The user's edit wins | Opus 5.5 | pending |
+| 2026-11-10 | #569 | data safety | A line a model update moved and reworded, then the user deleted | Matched at 0.75 character similarity (difflib's Differ cutoff) and treated as touched | Every added heuristic is named | Opus 5.5 | pending |
+| 2026-11-10 | #569 | data safety | A newer edit on a neighbouring line | Doesn't touch the older line | Option (c) as Peter chose it | Opus 5.5 | pending |
+| 2026-11-10 | #569 | data safety | What an older round's merge reads | Its version without the touched lines, not those lines restored to their earlier text | The user's edit wins | Opus 5.5 | pending |
+| 2026-11-10 | #569 | cost | An older round with only deletions left | Still one merge call | The user's edit wins | Opus 5.5 | pending |
+| 2026-11-10 | #569 | data safety | The newest round | Always merged whole, as on main | A rebuild merges the user's version at its date (Peter, 2026-10-20) | Opus 5.5 | pending |
+| 2026-11-10 | #569 | product scope | The window path's final | Also merges every older round with something left, within that rebuild; across later rebuilds it still sees only the newest round, as on main (a schema change, left as a follow-up) | Sibling paths are fixed in the same PR (#551) | Opus 5.5 | pending |
+| 2026-11-10 | #569 | data safety | Telling the merge model that lines were left out | No note, no prompt change | Autonomy | Opus 5.5 | pending |
 | 2026-10-21 | #589 | testing | The window size of the Haiku 5.5 versions in the Haiku test | Prod's chunk planner size for Haiku (46.6k units here), under Haiku's 100k-token price step: 53 versions against the 26 Luna windows, so the test mixes the change of model with the number of versions; said so before the run | Test what would ship; #259 (no request across a price tier) | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
 | 2026-10-21 | #553 | data safety | A Voice recording with stored audio but no transcribed text (failed, timed out or empty) | Saved as an entry with its audio and no reply; the PR's first version made no entry for silence | No recording with content is lost | Opus 5.5 | accepted by merge (PR #581, 2026-11-10) |
 | 2026-10-21 | #553 | UX | Glean under an entry with no transcribed text | Disabled, with its own text | The issue's own request | Opus 5.5 | accepted by merge (PR #581, 2026-11-10) |
