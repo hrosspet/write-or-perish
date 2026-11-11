@@ -1178,6 +1178,12 @@ def revert_profile_for_import(user_id, earliest_imported_created_at):
     chain's root, or no version carries a cutoff — the whole chain is
     invalidated and a from-scratch build is flagged.
 
+    A large build's window set (#545) keeps its windows that end before
+    the timestamp and reads the rest again (``_retip_window_set``; #625,
+    Peter 2026-11-11: only the part of the user's history from the
+    import's oldest change on is regenerated), also when the profile in
+    use is a version the user saved on the set's final.
+
     Returns ``("full", None)`` (flag set), ``("revert", copy)`` or
     ``("none", tip)`` when nothing is invalidated: no parseable timestamp,
     or the import is newer than the tip's cutoff.
@@ -1201,14 +1207,16 @@ def revert_profile_for_import(user_id, earliest_imported_created_at):
     if tip.generation_type in SET_INTERNAL_TYPES:
         # A large build's window set (#545): an import newer than the
         # set's tip is new writing for its next window; an older one
-        # rebuilds the set from scratch (a partial re-tip of a set is not
-        # worth its code: rebuilding the windows costs a few dollars).
+        # re-tips the set before it (#625), or, where that is not
+        # possible, rebuilds it from scratch.
         set_tip = window_set_tip(user_id, tip.window_set) or tip
         if earliest_imported_created_at is None or (
                 set_tip.source_data_cutoff is not None
                 and set_tip.source_data_cutoff < earliest_imported_created_at):
             return "none", set_tip
-        return _flag_full()
+        return (_retip_window_set(user_id, tip.window_set,
+                                  earliest_imported_created_at)
+                or _flag_full())
     if earliest_imported_created_at is None:
         return "none", tip
 
@@ -1223,7 +1231,14 @@ def revert_profile_for_import(user_id, earliest_imported_created_at):
          and p.source_data_cutoff < earliest_imported_created_at),
         None)
     if valid is None:
-        return _flag_full()
+        # The chain may start on a window set's final (a version the user
+        # saved on it, and the chained updates after it): the set is
+        # re-tipped before the import instead (#625).
+        set_id = _window_set_under(chain)
+        return ((_retip_window_set(user_id, set_id,
+                                   earliest_imported_created_at)
+                 if set_id else None)
+                or _flag_full())
     if valid.id == tip.id:
         return "none", valid
     logger.info(
@@ -1238,6 +1253,123 @@ def revert_profile_for_import(user_id, earliest_imported_created_at):
     if user is not None:
         plan_user_version_merge(user, old_base, new_base=copy)
     return "revert", copy
+
+
+def _window_set_under(lineage):
+    """The window set (#545) whose final the oldest version of ``lineage``
+    (``_retip_lineage``, tip first) was saved on: a version the user wrote
+    on the set's final or reverted to it, with the chained updates after
+    it. None when the lineage does not start on a set's final, or that set
+    is not the user's newest one (a rebuild started a newer set since)."""
+    from backend.utils.profile_versions import current_window_set
+    if not lineage or not lineage[-1].parent_profile_id:
+        return None
+    parent = db.session.get(UserProfile, lineage[-1].parent_profile_id)
+    if (parent is not None and parent.generation_type == "integration"
+            and parent.window_set
+            and parent.window_set == current_window_set(parent.user_id)):
+        return parent.window_set
+    return None
+
+
+def _copy_set_row(row, set_id, created_at, parent_id):
+    """A copy of the window set row ``row`` (a window or a group) in set
+    ``set_id``. The stored text is copied as stored, encrypted when the
+    row is: nothing is decrypted."""
+    copy = UserProfile(
+        user_id=row.user_id, generated_by=row.generated_by, tokens_used=0,
+        privacy_level=row.privacy_level, ai_usage=row.ai_usage,
+        source_tokens_used=row.source_tokens_used,
+        source_data_cutoff=row.source_data_cutoff,
+        source_origin_stats=row.source_origin_stats,
+        source_rendered_at=row.source_rendered_at,
+        generation_type=row.generation_type, parent_profile_id=parent_id,
+        merged_profile_id=row.merged_profile_id, window_set=set_id,
+        covers_start=row.covers_start, created_at=created_at)
+    copy.content = row.content
+    db.session.add(copy)
+    return copy
+
+
+def _retip_window_set(user_id, set_id, earliest):
+    """Re-tip the window set ``set_id`` (#545) for an import whose oldest
+    change is dated ``earliest`` (#625; Peter, 2026-11-11: "only the
+    second part since the new conversation should be regenerated").
+
+    The set's windows that end before that date hold none of the import
+    and are kept: they are copied into a new set, with the groups that
+    merge only them and are current, and the copy of the last one is
+    stamped with the present moment as its render time (as
+    ``retip_profile_chain`` stamps its copy). The writing after it, the
+    import's and everything the later windows had read, is then the new
+    set's unfinished range (the continue rule): new windows read it, and
+    the new set's final merges them with the kept ones. Until that final
+    is saved, the profile in use stays as it is; the old set stays as
+    history. The versions of the user's the profile in use carries are
+    merged by the new final at their dates (``plan_user_version_merge``,
+    #183).
+
+    No window ends before the date: the profile the set continues (its
+    base) is re-tipped as a chain is, at its latest version that ends
+    before the date, when the set has a final for that copy to replace.
+
+    Returns ``("revert", copy)``, or None when the set is not re-tipped:
+    the window path is off, something of the user's set is in the batch
+    (a set in flight does not see an import, a known limit of #545), or
+    nothing before the date can be kept. The caller then flags a rebuild
+    from scratch, as before."""
+    from backend.tasks import profile_windows as pw
+    from backend.utils.profile_versions import latest_set_final
+    user = db.session.get(User, user_id)
+    if (user is None or not set_id or not pw.enabled()
+            or pw.inflight_items(user_id)):
+        return None
+    windows = pw.set_windows(user_id, set_id)
+    kept = [w for w in windows if w.source_data_cutoff is not None
+            and w.source_data_cutoff < earliest]
+    in_use = pw._visible_profile(user_id)
+    if not kept:
+        base_id = windows[0].parent_profile_id if windows else None
+        base = db.session.get(UserProfile, base_id) if base_id else None
+        if base is None or latest_set_final(user_id, set_id) is None:
+            return None
+        valid = next((p for p in _retip_lineage(base)
+                      if p.source_data_cutoff
+                      and p.source_data_cutoff < earliest), None)
+        if valid is None:
+            return None
+        copy = retip_profile_chain(user_id, valid)
+        plan_user_version_merge(user, in_use, new_base=copy)
+        return "revert", copy
+
+    new_set = pw.new_set_id()
+    now = datetime.utcnow()
+    copies = [_copy_set_row(w, new_set, now, w.parent_profile_id)
+              for w in kept]
+    tip = copies[-1]
+    tip.source_rendered_at = now
+    db.session.flush()
+    # A group is kept when its windows are all kept and it is newer than
+    # each of them (a window built again after it makes it stale); newer
+    # than their copies too, so the new set's merge plan reuses it.
+    first = {w.covers_start: i for i, w in enumerate(kept)}
+    last = {w.source_data_cutoff: i for i, w in enumerate(kept)}
+    groups = {}
+    for g in pw._set_rows(user_id, set_id, ("group",)):
+        i, j = first.get(g.covers_start), last.get(g.source_data_cutoff)
+        if (i is not None and j is not None and i < j
+                and pw._group_matches(g, kept[i:j + 1])):
+            groups[(i, j)] = g          # rows come oldest first
+    for (_i, j), g in sorted(groups.items()):
+        _copy_set_row(g, new_set, now + timedelta(microseconds=1),
+                      copies[j].id)
+    db.session.flush()
+    plan_user_version_merge(user, in_use, new_base=tip)
+    logger.info(
+        "User %d: import dated %s re-tips profile set %s: %d of its %d "
+        "windows and %d groups kept in set %s", user_id, earliest, set_id,
+        len(kept), len(windows), len(groups), new_set)
+    return "revert", tip
 
 
 def window_hand_off(user, task_id, integrate_only=False):

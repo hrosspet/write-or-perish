@@ -1685,6 +1685,120 @@ def test_an_import_on_a_set(app):
     assert action == "full" and u.profile_needs_full_regen is True
 
 
+# #625 (Peter, 2026-11-11): an import inside a set's history regenerates
+# the profile from the import's oldest change on; what comes before stays.
+
+def _import_inside(world, rows, k):
+    """A synthetic entry imported inside window ``k`` (0-based) of
+    ``rows``; returns its date."""
+    inside = rows[k].source_data_cutoff - timedelta(hours=12)
+    world.corpus.rows = sorted(world.corpus.rows + [(inside, 1000)])
+    return inside
+
+
+def test_an_import_inside_a_set_keeps_the_windows_before_it(world):
+    u = _user()
+    rows = _set_of(u, 10)
+    _corpus_for(world, rows)
+    _finish(world, u)
+    [old_final] = _finals(u)
+    inside = _import_inside(world, rows, 5)
+    action, tip = ex.revert_profile_for_import(u.id, inside)
+    db.session.commit()
+    assert action == "revert" and u.profile_needs_full_regen is not True
+    # Windows 1-5 end before the import: copied into a new set, unchanged.
+    assert tip.window_set != "set1"
+    kept = pw.set_windows(u.id, tip.window_set)
+    assert [(w.covers_start, w.source_data_cutoff) for w in kept] == [
+        (r.covers_start, r.source_data_cutoff) for r in rows[:5]]
+    assert [w.get_content() for w in kept] == [
+        r.get_content() for r in rows[:5]]
+    assert ex.profile_update_base(u.id).id == tip.id
+    # The profile in use stays the old final until the new one is saved.
+    from backend.utils.profile_versions import current_profile_query
+    assert current_profile_query(u.id).first().id == old_final.id
+
+    before = len(_items("window"))
+    _finish(world, u)
+    new = _items("window")[before:]
+    # Only the writing from window 6 on is read again.
+    assert new and {i["start"] for i in new} == {
+        rows[4].source_data_cutoff.isoformat()}
+    final = [f for f in _finals(u) if f.window_set == tip.window_set]
+    assert len(final) == 1
+    assert current_profile_query(u.id).first().id == final[0].id
+    [final_item] = [i for i in _items("final")
+                    if i["set"] == tip.window_set]
+    assert {w.id for w in kept} <= set(final_item["inputs"])
+
+
+def test_an_import_inside_a_set_keeps_its_full_groups(app, world):
+    """65 windows merged in groups of 30: an import in window 50 keeps the
+    group of windows 1-30; only windows from 50 on are read again."""
+    u = _user()
+    rows = _set_of(u, 65)
+    _corpus_for(world, rows)
+    _finish(world, u)
+    first = [g for g in _rows(u, "group") if g.covers_start is None]
+    assert first
+    inside = _import_inside(world, rows, 49)
+    action, tip = ex.revert_profile_for_import(u.id, inside)
+    db.session.commit()
+    assert action == "revert"
+    groups = [g for g in _rows(u, "group") if g.window_set == tip.window_set]
+    assert [(g.covers_start, g.source_data_cutoff) for g in groups] == [
+        (None, rows[29].source_data_cutoff)]
+    before_groups = len(_items("group"))
+    _finish(world, u)
+    sent = _items("group")[before_groups:]
+    assert sent and all(g["start"] is not None for g in sent)
+
+
+def test_an_import_inside_a_set_keeps_the_users_edit(world):
+    """The user edited the set's final: the import re-tips inside the set
+    (not a rebuild from scratch), and the new final merges the edit."""
+    u = _user()
+    rows = _set_of(u, 6)
+    _corpus_for(world, rows)
+    _finish(world, u)
+    [final] = _finals(u)
+    edit = _edit(u, final)
+    inside = _import_inside(world, rows, 3)
+    action, tip = ex.revert_profile_for_import(u.id, inside)
+    db.session.commit()
+    assert action == "revert" and tip.window_set != "set1"
+    assert len(pw.set_windows(u.id, tip.window_set)) == 3
+    _finish(world, u)
+    new_final = [f for f in _finals(u) if f.window_set == tip.window_set]
+    assert len(new_final) == 1 and new_final[0].merged_profile_id == edit.id
+
+
+def test_an_import_inside_a_sets_first_window_retips_its_base(world):
+    """No window ends before the import: the profile the set continues
+    is re-tipped as a chain is, and a new set builds on it."""
+    u = _user()
+    base = _profile(u, gen_type="update", cutoff=T0, units=WINDOW_UNITS)
+    rows = _set_of(u, 4, base=base)
+    _corpus_for(world, rows)
+    _finish(world, u)
+    action, copy = ex.revert_profile_for_import(
+        u.id, rows[0].source_data_cutoff - timedelta(hours=2))
+    db.session.commit()
+    assert action == "revert"
+    assert copy.generation_type == "revert" and copy.parent_profile_id == base.id
+    assert ex.profile_update_base(u.id).id == copy.id
+
+
+def test_an_import_while_the_set_is_in_flight_rebuilds_from_scratch(world):
+    """A set with work in the batch does not see an import (a known limit
+    of #545): the rebuild from scratch, as before #625."""
+    u = _user()
+    rows, _final = _update_in_flight(world, u)
+    action, _v = ex.revert_profile_for_import(
+        u.id, rows[2].source_data_cutoff - timedelta(hours=2))
+    assert action == "full" and u.profile_needs_full_regen is True
+
+
 # ── 16. restarts ──────────────────────────────────────────────────────────
 
 def test_an_exception_mid_render_submits_nothing(world, monkeypatch):
