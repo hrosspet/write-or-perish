@@ -113,7 +113,11 @@ test('the private dialog is shown and its key is sent', async () => {
 
 test('refused again after one retry: the message is shown and nothing more is sent', async () => {
   let n = 0;
-  mockPost.mockImplementation(() => Promise.reject(refused(`key-${n += 2}`)));
+  // Refused four times, then accepted: a page that kept retrying would
+  // send more than two requests.
+  mockPost.mockImplementation(() => ((n += 2) <= 8
+    ? Promise.reject(refused(`key-${n}`))
+    : Promise.resolve({ data: { node_id: 80, status: "pending" } })));
   await renderReply();
   await press('LLM Response');
   await press('Generate');
@@ -129,7 +133,11 @@ test('refused again after one retry: the message is shown and nothing more is se
 test('a node the page knows nothing about stops after one retry too', async () => {
   routes['/nodes/30'] = onlyMeReply({ thread_ai_reads: undefined });
   let n = 0;
-  mockPost.mockImplementation(() => Promise.reject(refused(`key-${n += 2}`)));
+  // Refused four times, then accepted: a page that kept retrying would
+  // send more than two requests.
+  mockPost.mockImplementation(() => ((n += 2) <= 8
+    ? Promise.reject(refused(`key-${n}`))
+    : Promise.resolve({ data: { node_id: 80, status: "pending" } })));
   await renderReply();
   await press('LLM Response');
   await waitFor(() => expect(mockToast).toHaveBeenCalled());
