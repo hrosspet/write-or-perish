@@ -170,6 +170,8 @@ final class ImportModel {
     var dateOrdering = "modified"
     var includeReplies = false
     var privacy: PrivacyLevel = .private
+    /// Starts at the account's AI usage setting (#593, as the web), again each
+    /// time a confirm dialog opens; the value shown is the value sent.
     var aiUsage: AIUsage = .off
     private(set) var progress: (done: Int, total: Int)?
     /// `409 deleted_content_matches`: the count to show; the retry repeats the confirm.
@@ -184,7 +186,11 @@ final class ImportModel {
 
     init(app: AppState) {
         self.app = app
+        aiUsage = accountAIUsage
     }
+
+    /// The account's AI usage setting; None while the account isn't known.
+    private var accountAIUsage: AIUsage { app.user?.defaultAIUsage ?? .off }
 
     var busy: Bool { stage != nil }
 
@@ -257,6 +263,7 @@ final class ImportModel {
             }
             analysis = ImportAnalysis(kind: kind, raw: object)
             importType = "separate_nodes"
+            aiUsage = accountAIUsage
             stage = nil
         } catch let failure as APIError {
             fail(analyzeMessage(failure, kind: kind))

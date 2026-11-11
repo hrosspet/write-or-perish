@@ -1319,7 +1319,7 @@ class TestConfirmImportSettingsUpdate:
         _login(client, alice.id)
 
         convs = [_analyzed_conv()]
-        r1 = _confirm_conversations(client, convs)  # private / none
+        r1 = _confirm_conversations(client, convs, ai_usage="none")  # private
         assert r1.get_json()["created"] == 2
 
         r2 = _confirm_conversations(
@@ -1357,7 +1357,7 @@ class TestConfirmImportSettingsUpdate:
         _login(client, alice.id)
 
         convs = [_analyzed_conv()]
-        _confirm_conversations(client, convs)
+        _confirm_conversations(client, convs, ai_usage="none")
         deleted_node = Node.query.filter_by(
             human_owner_id=alice.id, source_key="chatgpt:u1"
         ).one()
@@ -1393,7 +1393,7 @@ class TestConfirmImportSettingsUpdate:
         _login(client, alice.id)
 
         convs = [_analyzed_conv()]
-        _confirm_conversations(client, convs)
+        _confirm_conversations(client, convs, ai_usage="none")
         for node in self._nodes(alice.id):
             node.deleted_at = datetime.utcnow()
         _db.session.commit()

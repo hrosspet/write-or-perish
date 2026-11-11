@@ -228,6 +228,14 @@ def _restore_node(node_id, content, privacy_level, ai_usage,
     node.deleted_at = None
 
 
+def _requested_ai_usage(data):
+    """The AI usage an import applies: the value the request names, else
+    the account's AI usage setting, the default every new entry gets
+    (#593). The import dialogs send the value they show, which starts at
+    the account's setting; a request without one gets the same."""
+    return data.get('ai_usage') or current_user.default_ai_usage or 'none'
+
+
 def _apply_settings_to_skipped(node_ids, privacy_level, ai_usage, dek=None):
     """Apply this import's privacy/ai_usage to already-imported nodes.
 
@@ -740,6 +748,8 @@ def confirm_import():
             ],
             "import_type": "single_thread" | "separate_nodes",
             "date_ordering": "modified" | "created",
+            "privacy_level": "private",
+            "ai_usage": "chat",  # default: the account's AI usage
             "whose_writing": "mine" | "someone_else"   (required for a PDF)
         }
 
@@ -762,7 +772,7 @@ def confirm_import():
     import_type = data.get('import_type', 'separate_nodes')
     date_ordering = data.get('date_ordering', 'modified')
     privacy_level = data.get('privacy_level', 'private')
-    ai_usage = data.get('ai_usage', 'none')
+    ai_usage = _requested_ai_usage(data)
     on_deleted = data.get('on_deleted')
 
     if not files:
@@ -1403,7 +1413,7 @@ def confirm_claude_import():
         {
             "import_token": "...",            # from /import/claude/analyze
             "privacy_level": "private",
-            "ai_usage": "none",
+            "ai_usage": "chat",  # default: the account's AI usage
             "on_deleted": "restore" | "skip"  # after a 409
         }
 
@@ -1703,7 +1713,7 @@ def confirm_twitter_import():
             "import_type": "single_thread" | "separate_nodes",
             "include_replies": true | false,
             "privacy_level": "private",
-            "ai_usage": "none",
+            "ai_usage": "chat",  # default: the account's AI usage
             "on_deleted": "restore" | "skip"   # after a 409
         }
 
@@ -1722,7 +1732,7 @@ def confirm_twitter_import():
     import_type = data.get('import_type', 'separate_nodes')
     include_replies = bool(data.get('include_replies', False))
     privacy_level = data.get('privacy_level', 'private')
-    ai_usage = data.get('ai_usage', 'none')
+    ai_usage = _requested_ai_usage(data)
     on_deleted = data.get('on_deleted')
 
     path = ta.stash_path(current_user.id, data.get('import_token'))
@@ -2067,7 +2077,7 @@ def confirm_chatgpt_import():
         {
             "import_token": "...",            # from /import/chatgpt/analyze
             "privacy_level": "private",
-            "ai_usage": "none",
+            "ai_usage": "chat",  # default: the account's AI usage
             "on_deleted": "restore" | "skip"  # after a 409
         }
 
@@ -2221,7 +2231,7 @@ def _confirm_conversation_import(source):
         return jsonify({"error": IMPORT_OUTDATED_CLIENT_MESSAGE}), 400
 
     privacy_level = data.get('privacy_level', 'private')
-    ai_usage = data.get('ai_usage', 'none')
+    ai_usage = _requested_ai_usage(data)
     on_deleted = data.get('on_deleted')
 
     path = cs.stash_path(current_user.id, token)

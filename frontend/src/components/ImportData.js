@@ -14,6 +14,7 @@ import api from "../api";
 import PrivacySelector from "./PrivacySelector";
 import { BothProvidersQuestion } from "./BothProvidersDialog";
 import { noteBothProvidersLater } from "../hooks/useBothProvidersQuestion";
+import { useUser } from "../contexts/UserContext";
 
 const ghostBtnStyle = {
   backgroundColor: "transparent",
@@ -284,7 +285,12 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
   const uploadDetail =
     importStage === "uploading" && uploadPercent != null ? ` ${uploadPercent} %` : null;
   const [importPrivacy, setImportPrivacy] = useState("private");
-  const [importAiUsage, setImportAiUsage] = useState("none");
+  // AI usage starts at the account's setting, the default every new entry
+  // gets (#593, Peter 2026-11-10), each time a confirm dialog opens. The
+  // value shown is the value sent: it also applies to entries this archive
+  // already brought in. "none" only if the account isn't known.
+  const accountAiUsage = useUser()?.user?.default_ai_usage || "none";
+  const [importAiUsage, setImportAiUsage] = useState(accountAiUsage);
   // "Whose writing is this?" for a PDF: null until the user picks
   // "mine" or "someone_else". No default: a wrong guess would feed
   // another author's text into the user's profile.
@@ -398,6 +404,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     })
       .then((response) => {
         setImportFiles(response.data);
+        setImportAiUsage(accountAiUsage);
         setShowImportDialog(true);
         setImporting(false);
         setImportStage(null);
@@ -475,6 +482,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     })
       .then((response) => {
         setTwitterImportData(response.data);
+        setImportAiUsage(accountAiUsage);
         setShowTwitterImportDialog(true);
         setImporting(false);
         setImportStage(null);
@@ -625,6 +633,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     api.post("/import/claude/analyze", formData, conversationUploadConfig())
       .then((response) => {
         setClaudeImportData(response.data);
+        setImportAiUsage(accountAiUsage);
         setShowClaudeImportDialog(true);
         setImporting(false);
         setImportStage(null);
@@ -724,6 +733,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
     api.post("/import/chatgpt/analyze", formData, conversationUploadConfig())
       .then((response) => {
         setChatGPTImportData(response.data);
+        setImportAiUsage(accountAiUsage);
         setShowChatGPTImportDialog(true);
         setImporting(false);
         setImportStage(null);
