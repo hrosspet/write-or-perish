@@ -113,6 +113,22 @@ final class ThreadModel {
     var audience: NodeAudience? { (app?.capabilities.circlesEnabled ?? false) ? node?.audience : nil }
     var isSharedThread: Bool { audience != nil }
     var isForeignShared: Bool { audience.map { !$0.isAuthor } ?? false }
+    /// The user's own Only-me node in a shared thread: an AI reply under it is
+    /// an Only-me reply in that thread, asked about in the dialog's private
+    /// variant when its key is not empty.
+    var threadReads: ThreadAIReads? {
+        guard app?.capabilities.circlesEnabled ?? false, audience == nil else { return nil }
+        return node?.threadAIReads
+    }
+    /// The shared entry the next AI reply is written under, for what "Don't
+    /// ask again in this thread" stores.
+    private var aiReplyEntryId: Int? { audience?.entryId ?? threadReads?.entryId }
+    /// What the open dialog says the reply reads of the user's data.
+    var aiReplyReads: [String] { audience?.aiReads ?? threadReads?.aiReads ?? [] }
+    /// A prompt someone else wrote shows the user's own artifacts in place of
+    /// its placeholders only in a shared thread (Circles); everywhere else a
+    /// placeholder without an artifact reads "[… not available]", as before.
+    var artifactsForOwner: Bool { isOwner || !isSharedThread }
     /// The "Generate an AI reply?" dialog. Closing it any other way than
     /// with its Generate button answers no.
     var showAIReplyDialog = false {
@@ -212,12 +228,14 @@ final class ThreadModel {
     /// user cancels. The `ack` is what the user agreed to in that scope: the
     /// bare key from the shared dialog, `private:<key>` from the "Only me" one.
     func confirmAIReply(force: Bool = false) async -> AIReplyGo? {
-        guard let audience else { return AIReplyGo(ack: nil) }
-        let key = audience.aiReadsKey
-        let onlyMe = aiReplyPrivate
+        // Under the user's own Only-me node the reply is Only me whatever the
+        // craft-mode choice (`threadReads`).
+        guard let entryId = aiReplyEntryId else { return AIReplyGo(ack: nil) }
+        let key = audience?.aiReadsKey ?? threadReads?.aiReadsKey ?? ""
+        let onlyMe = aiReplyPrivate || threadReads != nil
         let ack = key.isEmpty ? nil : (onlyMe ? Self.aiReplyPrivateAck(key) : key)
         if key.isEmpty && (onlyMe || aiReplyNames.isEmpty) { return AIReplyGo(ack: nil) }
-        let stored = UserDefaults.standard.string(forKey: DefaultsKey.circleAiReplyAck(entryId: audience.entryId, userId: me?.id))
+        let stored = UserDefaults.standard.string(forKey: DefaultsKey.circleAiReplyAck(entryId: entryId, userId: me?.id))
         if !force, let standing = Self.aiReplyStanding(stored: stored, key: key, onlyMe: onlyMe) { return standing }
         answerAIReplyDialog(false)
         let go = await withCheckedContinuation { continuation in
@@ -251,10 +269,10 @@ final class ThreadModel {
     /// changes; from the "Only me" dialog as `private:<key>`, so it never
     /// stands in for the shared dialog, which names the readers.
     func aiReplyConfirmed(dontAskAgain: Bool) {
-        if dontAskAgain, let audience {
+        if dontAskAgain, let entryId = aiReplyEntryId {
             let value = aiReplyDialogKey.isEmpty ? Self.aiReplyAckMarker
                 : (aiReplyDialogOnlyMe ? Self.aiReplyPrivateAck(aiReplyDialogKey) : aiReplyDialogKey)
-            UserDefaults.standard.set(value, forKey: DefaultsKey.circleAiReplyAck(entryId: audience.entryId, userId: me?.id))
+            UserDefaults.standard.set(value, forKey: DefaultsKey.circleAiReplyAck(entryId: entryId, userId: me?.id))
         }
         answerAIReplyDialog(true)
         showAIReplyDialog = false
@@ -264,22 +282,29 @@ final class ThreadModel {
     /// server answers that what the requester's AI reads has changed (409
     /// `circle_ai_reads_changed`), the dialog comes again with the new list,
     /// whatever was stored, and Generate sends the request with the new key.
+    /// That happens once at most (`retried`): refused again, for whatever
+    /// reason, the error goes to the caller, which shows its message.
     /// nil when the user cancels.
-    func requestConfirmedLLM(for parentId: Int, force: Bool = false) async throws -> Int? {
+    func requestConfirmedLLM(for parentId: Int, force: Bool = false, retried: Bool = false) async throws -> Int? {
         guard let go = await confirmAIReply(force: force) else { return nil }
         llmRequesting = true
         do {
             let id = try await requestLLM(for: parentId, ack: go.ack)
             llmRequesting = false
             return id
-        } catch let error as APIError where error.status == 409 && error.code == Self.aiReadsChangedCode {
+        } catch let error as APIError where error.status == 409 && error.code == Self.aiReadsChangedCode && !retried {
             llmRequesting = false
             let extra = error.body?.extra ?? [:]
             var reads: [String] = []
             if case .array(let items)? = extra["ai_reads"] { reads = items.compactMap(\.stringValue) }
-            node?.audience?.aiReads = reads
-            node?.audience?.aiReadsKey = extra["ai_reads_key"]?.stringValue ?? ""
-            return try await requestConfirmedLLM(for: parentId, force: true)
+            let key = extra["ai_reads_key"]?.stringValue ?? ""
+            if node?.audience != nil {
+                node?.audience?.aiReads = reads
+                node?.audience?.aiReadsKey = key
+            } else if let entryId = node?.threadAIReads?.entryId {
+                node?.threadAIReads = ThreadAIReads(entryId: entryId, aiReads: reads, aiReadsKey: key)
+            }
+            return try await requestConfirmedLLM(for: parentId, force: true, retried: true)
         } catch {
             llmRequesting = false
             throw error

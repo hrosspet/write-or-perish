@@ -235,6 +235,9 @@ struct NodeDetail: Decodable, Identifiable, Sendable {
     /// Circles: the viewer's own node that only they read, in a thread someone
     /// else shared. A reply under it is Only me (the server refuses anything else).
     var replyOnlyPrivate: Bool
+    /// Circles: the viewer's own Only-me node in a shared thread; what an AI
+    /// reply under it reads of their data and the key it must carry.
+    var threadAIReads: ThreadAIReads?
 
     enum CodingKeys: String, CodingKey {
         case id, content, permalink, user, origin, ancestors, children
@@ -264,6 +267,7 @@ struct NodeDetail: Decodable, Identifiable, Sendable {
         case gleanThread = "glean_thread"
         case audience
         case replyOnlyPrivate = "reply_only_private"
+        case threadAIReads = "thread_ai_reads"
     }
 
     init(from decoder: Decoder) throws {
@@ -271,6 +275,7 @@ struct NodeDetail: Decodable, Identifiable, Sendable {
         id = try c.decode(Int.self, forKey: .id)
         audience = c.tolerant(.audience)
         replyOnlyPrivate = c.tolerant(.replyOnlyPrivate, default: false)
+        threadAIReads = c.tolerant(.threadAIReads)
         content = c.tolerant(.content, default: "")
         nodeType = c.tolerant(.nodeType, default: .user)
         createdAt = c.tolerant(.createdAt)

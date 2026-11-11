@@ -149,6 +149,8 @@ final class NodeFormModel {
         drafts = DraftAutosaver(api: app.api, nodeId: config.edit?.nodeId,
                                 parentId: config.isEdit ? nil : config.parentId)
         audience = CircleAudienceState(api: app.api)
+        // Editing: the sentence names who can read this very entry.
+        audience.entryId = config.edit?.nodeId
         content = config.edit?.initialContent ?? ""
         let user = app.user
         let remembers = !config.isEdit && config.parentId == nil

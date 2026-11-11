@@ -174,6 +174,34 @@ struct NodeAudience: Decodable, Hashable, Sendable {
     }
 }
 
+/// `thread_ai_reads` of a node (Circles): the viewer's own Only-me node in a
+/// shared thread. An AI reply under it is an Only-me reply in that thread;
+/// what it reads of the viewer's data, and the key the request must carry.
+struct ThreadAIReads: Decodable, Equatable, Hashable, Sendable {
+    var entryId: Int
+    var aiReads: [String]
+    var aiReadsKey: String
+
+    enum CodingKeys: String, CodingKey {
+        case entryId = "entry_id"
+        case aiReads = "ai_reads"
+        case aiReadsKey = "ai_reads_key"
+    }
+
+    init(entryId: Int, aiReads: [String] = [], aiReadsKey: String = "") {
+        self.entryId = entryId
+        self.aiReads = aiReads
+        self.aiReadsKey = aiReadsKey
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        entryId = try c.decode(Int.self, forKey: .entryId)
+        aiReads = c.tolerant(.aiReads, default: [])
+        aiReadsKey = c.tolerant(.aiReadsKey, default: "")
+    }
+}
+
 /// `GET /api/nodes/<id>/audience`: for the edit form.
 struct NodeAudienceAnswer: Decodable, Sendable {
     var audience: NodeAudience?

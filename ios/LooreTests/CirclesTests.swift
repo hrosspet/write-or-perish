@@ -377,6 +377,14 @@ final class CirclesFormTests: StubbedAppTestCase {
 
     private func path(_ request: URLRequest) -> String { request.url?.path(percentEncoded: true) ?? "" }
 
+    /// The readers sentence is on the screen, as it is before a person
+    /// presses Share (nobody is shared with before it names them).
+    private func waitForSentence(_ model: NodeFormModel) async {
+        for _ in 0..<40 where model.audience.pending || model.audience.readers.isEmpty {
+            try? await Task.sleep(nanoseconds: 25_000_000)
+        }
+    }
+
     private var sharedParent: String {
         String(data: (try? fixture("node_audience.json")) ?? Data(), encoding: .utf8) ?? "{}"
     }
@@ -393,8 +401,15 @@ final class CirclesFormTests: StubbedAppTestCase {
         model.content = "to my friends"
         model.privacy = .circles
         model.audience.circleIds = [3]
-        model.audience.namesChanged("@dana")   // not yet looked up: the save checks it
+        model.audience.namesChanged("@dana")   // not yet looked up: the sentence does not name dana
         XCTAssertTrue(model.sharesEntry)
+        await model.submit()
+        // Nobody is shared with before the sentence names them: the save
+        // stops, and the sentence now names everyone who would read it.
+        XCTAssertNil(result())
+        XCTAssertFalse(calls.contains("POST /api/nodes/"))
+        XCTAssertEqual(model.error, CircleAudienceState.readersChangedMessage)
+        XCTAssertEqual(model.audience.sentence, "@anna, @ben and @dana can read this entry and reply to it. Nobody else can.")
         await model.submit()
         XCTAssertEqual(result()?.id, 42)
         let sent = body(of: "POST /api/nodes/")
@@ -443,6 +458,7 @@ final class CirclesFormTests: StubbedAppTestCase {
         model.content = "agentic and shared"
         model.privacy = .circles
         model.audience.namesChanged("ben ")
+        await waitForSentence(model)
         await model.submit()
         XCTAssertEqual(result()?.userNodeId, 2)
         let second = body(of: "PUT /api/nodes/2/audience")
@@ -509,6 +525,7 @@ final class CirclesFormTests: StubbedAppTestCase {
         // A changed audience on an entry with replies asks whether they follow.
         model.audience.namesChanged("@ben, @chidi ")
         XCTAssertTrue(model.audience.changed)
+        await waitForSentence(model)
         await model.submit()
         XCTAssertEqual(model.dialog, .scope)
         model.answerScope(true)
@@ -516,6 +533,9 @@ final class CirclesFormTests: StubbedAppTestCase {
         XCTAssertNotNil(result())
         XCTAssertEqual(body(of: "PUT /api/nodes/9")?["circle_usernames"] as? [String], ["ben", "chidi"])
         XCTAssertEqual(body(of: "PUT /api/nodes/9")?["apply_to_descendants"] as? Bool, true)
+        // The sentence is asked for this very entry: its circles keep the time
+        // they were shared with it.
+        XCTAssertEqual(body(of: "POST /api/circles/audience-preview")?["node_id"] as? Int, 9)
     }
 
     private func pathEdit(shared: Bool?) -> (URLRequest) -> StubResponse {
@@ -607,8 +627,9 @@ final class CirclesFormTests: StubbedAppTestCase {
         XCTAssertFalse(model.audience.sharePath)
         model.content = "the one I share"
         model.privacy = .circles
-        model.audience.circleIds = [3]
+        model.audience.toggle(3)
         model.audience.sharePath = true
+        await waitForSentence(model)
         await model.submit()
         XCTAssertEqual(result()?.id, 21)
         let sent = body(of: "POST /api/nodes/")
@@ -619,7 +640,8 @@ final class CirclesFormTests: StubbedAppTestCase {
         await refused.start()
         refused.content = "refused"
         refused.privacy = .circles
-        refused.audience.circleIds = [3]
+        refused.audience.toggle(3)
+        await waitForSentence(refused)
         await refused.submit()
         XCTAssertEqual(refused.error, "A prompt cannot be shared on its own.")
     }
@@ -818,6 +840,83 @@ final class CirclesFormTests: StubbedAppTestCase {
         XCTAssertEqual(standing("true", ""), Go(ack: nil))
         XCTAssertNil(standing("1", "k2"))
         XCTAssertNil(standing("1", "k2", onlyMe: true))
+    }
+
+    /// The user's own AI reply, kept to Only me, in a shared thread: no
+    /// `audience`; `thread_ai_reads` when the server sends it.
+    private func ownOnlyMeReply(key: String? = "k1") -> String {
+        let reads = key.map { #","thread_ai_reads":{"entry_id":30,"ai_reads":["profile"],"ai_reads_key":"\#($0)"}"# } ?? ""
+        return #"{"id":31,"node_type":"llm","content":"my own AI reply","privacy_level":"private","ai_usage":"chat","#
+            + #""llm_model":"gpt-6-luna","user":{"id":9,"username":"gpt-6-luna"},"human_owner_username":"seowriter","#
+            + #""parent_user_id":5,"llm_task_status":"completed","children":[],"ancestors":[]"# + reads + "}"
+    }
+
+    func testUnderOnesOwnOnlyMeReplyTheAgreementIsAskedInThePrivateWording() async {
+        clearAIReplyMemory()
+        defer { clearAIReplyMemory() }
+        UserDefaults.standard.removeObject(forKey: DefaultsKey.circleAiReplyAck(entryId: 30, userId: 5))
+        defer { UserDefaults.standard.removeObject(forKey: DefaultsKey.circleAiReplyAck(entryId: 30, userId: 5)) }
+        let model = await thread(ownOnlyMeReply())
+        XCTAssertNil(model.audience)
+        XCTAssertEqual(model.threadReads?.aiReadsKey, "k1")
+        model.aiReplyPressed()
+        await waitForDialog(model)
+        XCTAssertTrue(model.showAIReplyDialog, "the key is not sent before the user saw the list")
+        XCTAssertTrue(model.aiReplyDialogOnlyMe)
+        XCTAssertFalse(calls.contains("POST /api/nodes/31/llm"))
+        XCTAssertEqual(CircleReplyDialog.body(names: model.aiReplyNames, aiReply: true, aiReads: model.aiReplyReads,
+                                              onlyMe: model.aiReplyDialogOnlyMe),
+                       "Only you will see it. Your AI reads your profile for this reply, as the prompt shared in this thread asks.")
+        model.aiReplyConfirmed(dontAskAgain: true)
+        await waitFor("POST /api/nodes/31/llm")
+        XCTAssertEqual(body(of: "POST /api/nodes/31/llm")?["ai_reads_ack"] as? String, "private:k1")
+        XCTAssertEqual(UserDefaults.standard.string(forKey: DefaultsKey.circleAiReplyAck(entryId: 30, userId: 5)),
+                       "private:k1")
+    }
+
+    /// Counts the requests a stub has answered.
+    private final class Count: @unchecked Sendable { var value = 0 }
+
+    func testARefusedRequestIsRetriedOnceThenItsMessageIsShown() async {
+        clearAIReplyMemory()
+        defer { clearAIReplyMemory() }
+        // The page knows of nothing to agree to; the server keeps refusing,
+        // then (fourth time on) accepts: a page that kept retrying would
+        // send more than two requests and never show the message.
+        let parent = ownOnlyMeReply(key: nil)
+        let refused = Count()
+        StubURLProtocol.install { [self] request in
+            if path(request) == "/api/nodes/31" { return .json(200, parent) }
+            if path(request) == "/api/nodes/31/llm" {
+                refused.value += 1
+                if refused.value <= 4 {
+                    return .json(409, #"{"code":"circle_ai_reads_changed","error":"The prompt asks for more.","ai_reads":["memory"],"ai_reads_key":"k\#(refused.value)"}"#)
+                }
+                return .json(202, #"{"node_id":77,"status":"pending"}"#)
+            }
+            return .json(200, "{}")
+        }
+        let model = ThreadModel(nodeId: 31, awaitLLM: nil, app: app)
+        await model.load()
+        model.aiReplyPressed()
+        for _ in 0..<60 where app.toasts.toasts.isEmpty {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertFalse(app.toasts.toasts.isEmpty, "the refusal is shown")
+        XCTAssertEqual(calls.filter { $0 == "POST /api/nodes/31/llm" }.count, 2)
+        XCTAssertFalse(model.llmRequesting)
+    }
+
+    func testPlaceholdersOfSomeoneElsesPromptReadAsBeforeOutsideSharedThreads() async throws {
+        // A public prompt of someone else's: "[… not available]", as on main.
+        let model = await thread(#"{"id":31,"node_type":"user","content":"{user_profile}","privacy_level":"public","#
+            + #""ai_usage":"chat","user":{"id":8,"username":"anna"},"children":[],"ancestors":[]}"#)
+        XCTAssertFalse(model.isOwner)
+        XCTAssertTrue(model.artifactsForOwner)
+        // A prompt shared with the reader in a circle shows their own, else the placeholder.
+        let shared = await thread(sharedParent)
+        XCTAssertFalse(shared.isOwner)
+        XCTAssertFalse(shared.artifactsForOwner)
     }
 
     func testAChangedListReopensTheDialogAndTheRetryCarriesTheNewKey() async {

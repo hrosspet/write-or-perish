@@ -32,7 +32,7 @@ struct ThreadSheets: ViewModifier {
                 }
             }
             .looreDialog(isPresented: $model.showAIReplyDialog) {
-                CircleReplyDialog(names: model.aiReplyNames, aiReply: true, aiReads: model.audience?.aiReads ?? [],
+                CircleReplyDialog(names: model.aiReplyNames, aiReply: true, aiReads: model.aiReplyReads,
                                   onlyMe: model.aiReplyDialogOnlyMe,
                                   onConfirm: { model.aiReplyConfirmed(dontAskAgain: $0) },
                                   onCancel: { model.showAIReplyDialog = false })

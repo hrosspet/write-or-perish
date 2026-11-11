@@ -527,7 +527,7 @@ private struct FocalCard: View {
         if model.isLLMPending && !partial.jsTrimmed.isEmpty {
             VStack(alignment: .leading, spacing: 0) {
                 QuotedContentView(content: partial, contextArtifacts: node.systemPrompt.contextArtifacts,
-                                  artifactsForOwner: model.isOwner, nodeId: node.id)
+                                  artifactsForOwner: model.artifactsForOwner, nodeId: node.id)
                 PulsingDots().padding(.vertical, 6).accessibilityLabel("Still writing")
             }
         } else if model.isLLMPending {
@@ -550,7 +550,7 @@ private struct FocalCard: View {
             if !showProposal || !display.isEmpty {
                 QuotedContentView(
                     content: display, quotes: model.quotes, contextArtifacts: node.systemPrompt.contextArtifacts,
-                    artifactsForOwner: model.isOwner, nodeId: node.id,
+                    artifactsForOwner: model.artifactsForOwner, nodeId: node.id,
                     checklist: model.isOwner ? ChecklistActions(toggle: { model.toggleCheckbox($0, checked: $1) },
                                                                 add: { model.insertTask(after: $0, $1) }) : nil,
                     onExternalReadChange: { model.updateExternalRead($0, readAt: $1) },
@@ -565,7 +565,7 @@ private struct FocalCard: View {
                 if let after = split?.after, !after.isEmpty {
                     QuotedContentView(content: after, quotes: model.quotes,
                                       contextArtifacts: node.systemPrompt.contextArtifacts,
-                                      artifactsForOwner: model.isOwner, nodeId: node.id)
+                                      artifactsForOwner: model.artifactsForOwner, nodeId: node.id)
                         .padding(.top, 20)
                 }
             }

@@ -30,6 +30,10 @@ final class CircleAudienceState {
     var sharePath = false
     /// The path above the entry is shared now (edit).
     private(set) var pathWasShared = false
+    /// The entry being edited: a circle it is already shared with keeps the
+    /// time of that share, so a person added since with "Only new entries"
+    /// does not read it and is not named. nil for a new entry.
+    var entryId: Int?
     @ObservationIgnored private var request = 0
     @ObservationIgnored private var previewTask: Task<Void, Never>?
     @ObservationIgnored private var loaded = false
@@ -39,6 +43,8 @@ final class CircleAudienceState {
     }
 
     static let noReadersMessage = "Nobody could read this entry yet. Choose a circle with people in it, or name a person."
+    /// The check before saving found readers the sentence did not name.
+    static let readersChangedMessage = "Who can read this has changed. Check the names above, then share again."
     static let previewFailed = "The readers could not be worked out. Try again."
 
     var names: [String] { CirclesWording.splitNames(namesText) }
@@ -180,10 +186,12 @@ final class CircleAudienceState {
 
     private func preview(circleIds: [Int], names: [String]) async -> Result<[String], PreviewFailure> {
         do {
-            let answer: AudiencePreview = try await api.post(APIPath.circlesAudiencePreview, json: .object([
+            var body: [String: JSONValue] = [
                 "circle_ids": .array(circleIds.map(JSONValue.int)),
                 "usernames": .array(names.map(JSONValue.string)),
-            ]))
+            ]
+            if let entryId { body["node_id"] = .int(entryId) }
+            let answer: AudiencePreview = try await api.post(APIPath.circlesAudiencePreview, json: .object(body))
             return .success(answer.readers)
         } catch {
             return .failure(PreviewFailure(
@@ -192,18 +200,33 @@ final class CircleAudienceState {
     }
 
     /// The check before saving, with every typed name (also one not yet
-    /// looked up): nil when someone would read the entry, else the plain
-    /// message the form shows. The server refuses the same cases.
+    /// looked up): nil when someone would read the entry and the sentence on
+    /// the screen names exactly them, else the plain message the form shows.
+    /// Nobody is shared with unless the sentence named them: when the readers
+    /// differ from the ones it named (a name not yet looked up, a lookup not
+    /// back yet), the sentence is brought up to date and the save stops. The
+    /// server refuses the no-readers cases too.
     func refusalBeforeSaving() async -> String? {
+        let shown = readers
         committed = names
+        previewTask?.cancel()
+        request += 1
         switch await preview(circleIds: circleIds, names: committed) {
         case .success(let found):
             readers = found
             error = nil
-            return found.isEmpty ? Self.noReadersMessage : nil
+            pending = false
+            if found.isEmpty { return Self.noReadersMessage }
+            return Self.sameNames(shown, found) ? nil : Self.readersChangedMessage
         case .failure(let failure):
+            pending = false
             return failure.message
         }
+    }
+
+    /// The same people, in any order, case ignored.
+    static func sameNames(_ a: [String], _ b: [String]) -> Bool {
+        a.map { $0.lowercased() }.sorted() == b.map { $0.lowercased() }.sorted()
     }
 }
 
