@@ -39,7 +39,7 @@ def _node(node_id):
 
 # ── 1. The agreement, on the route ──────────────────────────────────────
 
-def test_a_public_agentic_prompt_needs_the_agreement_on_the_route(app):
+def test_a_public_agentic_prompt_needs_the_agreement_on_the_route(app):  # noqa: F811
     from backend.utils import circles as cz
     # anna's Text-mode thread from a public prompt; her turn in it is
     # shared with ben through Edit.
@@ -65,7 +65,7 @@ def test_a_public_agentic_prompt_needs_the_agreement_on_the_route(app):
 
 # ── 5. Deleting a shared entry keeps the author's own nodes ─────────────
 
-def test_deleting_the_shared_entry_gives_the_path_back_to_its_author(app):
+def test_deleting_the_shared_entry_gives_the_path_back_to_its_author(app):  # noqa: F811
     from backend.tasks.node_cleanup import finalize_deleted_nodes
     from backend.utils.privacy import can_user_access_node
     llm = _llm_user()
@@ -124,7 +124,7 @@ def test_deleting_the_shared_entry_gives_the_path_back_to_its_author(app):
 
 # ── 7. A prompt is shared only with the discussion leading up to an entry
 
-def test_a_prompt_under_a_shared_entry_cannot_be_shared_on_its_own(app):
+def test_a_prompt_under_a_shared_entry_cannot_be_shared_on_its_own(app):  # noqa: F811
     entry = _share(app, names=["ben"])
     prompt = _add(entry, "A PROMPT {user_profile}", prompt_key="textmode")
     r = _client(app, "anna").put(f"/api/nodes/{prompt}", json={
@@ -152,7 +152,7 @@ def test_a_prompt_under_a_shared_entry_cannot_be_shared_on_its_own(app):
 
 # ── 11. A reader's own recent writing on a shared prompt ────────────────
 
-def test_a_reader_sees_his_own_recent_writing_on_a_shared_prompt(app):
+def test_a_reader_sees_his_own_recent_writing_on_a_shared_prompt(app):  # noqa: F811
     from backend.models import UserProfile, UserRecentContext
     ben = _user("ben")
     profile = UserProfile(user_id=ben.id, generated_by="test",
@@ -182,7 +182,7 @@ def test_a_reader_sees_his_own_recent_writing_on_a_shared_prompt(app):
 
 # ── 11. The reply form under a member's own private AI reply ────────────
 
-def test_a_reply_under_a_members_own_private_ai_reply_is_only_me(app):
+def test_a_reply_under_a_members_own_private_ai_reply_is_only_me(app):  # noqa: F811
     entry = _share(app, names=["ben"])
     ben = _client(app, "ben")
     r = ben.post(f"/api/nodes/{entry}/llm", json={"privacy_level": "private"})

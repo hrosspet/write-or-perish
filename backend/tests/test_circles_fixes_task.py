@@ -2,7 +2,6 @@
 per fix of the third review of #631. The real generate_llm_response runs
 through the test_retrieval_loop harness (scripted provider, no model is
 called)."""
-import json
 from datetime import datetime
 
 from sqlalchemy import event
