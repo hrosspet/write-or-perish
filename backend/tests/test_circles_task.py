@@ -213,25 +213,25 @@ def test_authors_export_carries_readers_replies(app, circles):  # noqa: F811
     assert "CHIDI SAYS NONE" not in text
 
 
-def test_authors_export_carries_direct_reader_reply(app, circles):  # noqa: F811,E501
+def test_authors_export_leaves_out_a_readers_reply(app, circles):  # noqa: F811,E501
+    """A reader's reply in anna's shared thread is not in anna's corpus
+    (her profile builds, {user_export}, her download); it stays readable
+    in the thread."""
     from backend.routes.export_data import build_user_export_content
     from backend.utils.api_keys import PayloadLicence
     w = _world()
-    direct = _node(w["ben"], w["entry"], "BEN DIRECT REPLY", privacy="circles",
-                   ai_usage="train")
+    _node(w["ben"], w["entry"], "BEN DIRECT REPLY", privacy="circles",
+          ai_usage="train")
     _db.session.commit()
-    lic = PayloadLicence("train")
-    out = build_user_export_content(w["anna"], filter_ai_usage=True,
-                                    licence=lic)
-    text = out.get("content") if isinstance(out, dict) else out
-    assert "BEN DIRECT REPLY" in text and lic.key_type == "chat"
-    lic2 = PayloadLicence("train")
-    out = build_user_export_content(w["anna"], filter_ai_usage=True,
-                                    licence=lic2, max_tokens=10000,
-                                    return_metadata=True,
-                                    collapse_artifacts=True,
-                                    chronological_order=False)
-    text = out.get("content") if isinstance(out, dict) else out
+    for kw in ({}, {"max_tokens": 10000, "return_metadata": True,
+                    "collapse_artifacts": True,
+                    "chronological_order": False}):
+        out = build_user_export_content(
+            w["anna"], filter_ai_usage=True, licence=PayloadLicence("train"),
+            **kw)
+        text = out.get("content") if isinstance(out, dict) else out
+        assert "ANNA SHARED ENTRY" in text
+        assert "BEN DIRECT REPLY" not in text
 
 
 def test_another_members_ai_reply_is_named_in_the_prompt(app, circles):  # noqa: F811,E501

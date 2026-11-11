@@ -1103,22 +1103,13 @@ def _load_node_chain(parent_node, user_id, in_shared_thread=False):
     entry) reads what its requester reads there, as a reply in a private
     thread reads the thread (still without the nodes marked 'none')."""
     from backend.utils.encryption import prefetch_deks
-    from backend.utils.privacy import (
-        can_user_see_node_or_placeholder, can_user_see_node_or_tombstone,
-        shown_as_deleted,
-    )
+    from backend.utils.privacy import reply_context_nodes, shown_as_deleted
     if user_id is None:
         raise ValueError("_load_node_chain needs the requesting user's id")
-    visible = []
-    current = parent_node
-    as_ai = not in_shared_thread
-    if current is not None and not can_user_see_node_or_tombstone(
-            current, user_id, as_ai=as_ai):
-        current = None
-    while current and can_user_see_node_or_placeholder(
-            current, user_id, as_ai=as_ai):
-        visible.insert(0, current)
-        current = current.parent
+    # The same walk the agreement before a reply in a shared thread is
+    # worked out from (circles.ai_reply_reads).
+    visible = reply_context_nodes(
+        parent_node, user_id, in_shared_thread=in_shared_thread)
     if not visible:
         raise ValueError(
             f"Node {getattr(parent_node, 'id', None)} is not visible to "
@@ -3910,14 +3901,29 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 parent_node, user_id,
                 in_shared_thread=llm_node.audience_root_id is not None)
             circle_prompts = shared_prompt_ids(llm_node, node_chain, user_id)
-            if circle_prompts and batch_entry is None:
+            # The prompts someone else wrote that fill the requester's
+            # data or turn tools on in this reply (circles
+            # .agreement_prompts): a shared prompt, or an agentic prompt
+            # the requester reads, shared or public.
+            agreed_prompts = frozenset()
+            if llm_node.audience_root_id is not None:
+                from backend.utils import circles as _cz
+                _held = _cz.agreement_prompts(node_chain, user_id)
+                agreed_prompts = frozenset(n.id for n in _held)
+            if agreed_prompts and batch_entry is None:
                 # The requester agreed to exactly these prompts, as they
                 # were (the dialog named what they fill). One edited or
                 # added since fills nothing: the reply is not made, and
-                # the requester is asked again.
-                from backend.utils import circles as _cz
+                # the requester is asked again. Each prompt's text is
+                # read once and held: the reply is built from the text
+                # the key is worked out from, whatever happens to the
+                # prompt after this (Node.hold_content).
+                _texts = {}
+                for n in _held:
+                    _texts[n.id] = n.get_content() or ""
+                    n.hold_content(_texts[n.id])
                 if _acknowledged_reads_key(llm_node) != _cz.prompts_key(
-                        [n for n in node_chain if n.id in circle_prompts]):
+                        _texts):
                     logger.warning(
                         "Node %s: the shared prompt changed after the "
                         "requester agreed; reply not made", llm_node_id)
@@ -4219,8 +4225,12 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # the member's latest artifacts, not pinned versions, so
                 # a stored render would go stale. (A stored render is
                 # keyed by user either way, _system_render_variant.)
+                # Nor any prompt the requester agreed to: the reply is
+                # built from the text held at the agreement, never from
+                # a render made of another.
                 system_render_cacheable = (
                     system_node.id not in circle_prompts
+                    and system_node.id not in agreed_prompts
                     and not USER_EXPORT_PATTERN.search(_sys_text)
                     and not CA_TWEETS_PATTERN.search(_sys_text)
                     and not has_quotes(_sys_text)
@@ -4409,6 +4419,18 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     placeholder=export_placeholder_match,
                     log=logger,
                 )
+                if not node_is_users(export_node, user_id):
+                    # Circles: {user_export} in a prompt someone else
+                    # shared (the requester agreed to it in the dialog)
+                    # reads at most OTHERS_PROMPT_EXPORT_TOKENS of the
+                    # requester's archive, on every plan, whatever the
+                    # prompt asks for. In the requester's own prompts
+                    # nothing changes.
+                    from backend.utils.circles import (
+                        OTHERS_PROMPT_EXPORT_TOKENS as _cap)
+                    max_export_tokens = (
+                        _cap if max_export_tokens is None
+                        else min(max_export_tokens, _cap))
                 export_days = parse_days(
                     export_params.get('days'),
                     user_id=user_id,
@@ -5700,8 +5722,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                          else None),
                         tts_task_id=(LIVE_TTS_TASK_ID
                                      if speech_turn is not None else None),
-                        privacy_level=current_node.privacy_level,
-                        ai_usage=current_node.ai_usage,
+                        # Every node of the reply has the privacy and the
+                        # audience of its first node (Circles: the thread
+                        # it was written in, also when it was kept to
+                        # Only me), as they are now.
+                        privacy_level=llm_node.privacy_level,
+                        ai_usage=llm_node.ai_usage,
+                        audience_root_id=llm_node.audience_root_id,
                     )
                     continuation.set_content(
                         "[LLM response generation pending...]")

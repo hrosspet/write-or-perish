@@ -489,6 +489,29 @@ def _viewers_own_artifacts(n, viewer_id):
         if (art is not None and art.user_id == viewer_id
                 and art.ai_usage in AI_ALLOWED):
             out[kind] = {"id": art.id, "content": art.get_content()}
+    if "{user_recent}" in text:
+        # The summary of recent writing the reply reads: the latest one
+        # made for the viewer's current profile (llm_completion
+        # .get_user_recent_content without a pin).
+        profile = current_profile_query(viewer_id).filter(
+            UserProfile.ai_usage.in_(AI_ALLOWED)).first()
+        q = UserRecentContext.query.filter_by(user_id=viewer_id)
+        q = (q.filter_by(profile_id=profile.id) if profile is not None
+             else q.filter(UserRecentContext.profile_id.is_(None)))
+        rc = q.order_by(UserRecentContext.created_at.desc()).first()
+        if rc is not None and rc.ai_usage in AI_ALLOWED:
+            out["recent"] = {"id": rc.id, "content": rc.get_content()}
+    if "{user_recent_raw}" in text:
+        # The window of the viewer's own recent writing the reply reads,
+        # as dates and a size (no text, as for the owner's own prompt).
+        from backend.routes.export_data import get_raw_data_date_range
+        earliest, newest, total_tokens = get_raw_data_date_range(viewer_id)
+        if earliest and newest:
+            out["recent_raw"] = {
+                "covers_start": earliest.strftime('%Y-%m-%d'),
+                "covers_end": newest.strftime('%Y-%m-%d'),
+                "source_tokens": total_tokens,
+            }
     return out
 
 
@@ -1413,6 +1436,18 @@ def _focal_own_fields(node, viewer_id):
                  audience["ai_reads_key"]) = cz.ai_reply_reads(
                     node, viewer_id)
                 data["audience"] = audience
+    # Circles: the viewer's own node that only they read, written in
+    # someone else's shared thread (an AI reply kept to Only me, a reply
+    # taken back). A reply under it is Only me: the server refuses
+    # Everyone and another audience there (circles.apply_requested_
+    # sharing), so the reply form offers Only me alone.
+    if (node.privacy_level == "private" and viewer_id is not None
+            and (node.human_owner_id or node.user_id) == viewer_id):
+        from backend.utils import circles as cz
+        if cz.circles_enabled_for(viewer_id):
+            source = cz.thread_source(node)
+            if source is not None and source.is_someone_elses(viewer_id):
+                data["reply_only_private"] = True
     # A Community Archive read reply: the thread page shows what the read
     # covered (the window, from the pinned render) and offers to read
     # the day again. Focal node only — two small lookups. The window goes

@@ -748,8 +748,20 @@ class Node(db.Model):
                             if dek is not None
                             else encrypt_content(self.content))
 
+    def hold_content(self, text):
+        """Keep *text* as this object's content for as long as the object
+        lives (one task's session): get_content returns it from now on,
+        also after a commit expires the row. Nothing is written. The
+        completion task holds a prompt someone else shared with the
+        requester at the text the requester agreed to, so a later edit of
+        the prompt cannot reach the reply being built."""
+        self._held_content = text
+
     def get_content(self) -> str:
         """Get decrypted content. Resolves from linked UserPrompt if set."""
+        held = getattr(self, "_held_content", None)
+        if held is not None:
+            return held
         # Artifact-based prompt resolution
         prompt_artifact = self.get_artifact_row("prompt")
         if prompt_artifact is not None:

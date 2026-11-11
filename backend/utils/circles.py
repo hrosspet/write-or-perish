@@ -384,6 +384,12 @@ def parent_shared_entry(node):
 
 # How far above an entry the discussion leading up to it is followed.
 THREAD_PATH_HOPS = 500
+# The most of the requester's archive a {user_export} in a prompt someone
+# else shared reads, on every plan (Pro included): Peter, 2026-11-11,
+# "100k ... should be fine given the explicit question & acknowledgement".
+# A larger max_export_tokens in such a prompt is cut to it. INTRODUCED
+# HEURISTIC.
+OTHERS_PROMPT_EXPORT_TOKENS = 100_000
 PROMPT_ALONE = (
     "A thread's prompt is shared together with the discussion below it. "
     "Share an entry of the thread and choose to share the discussion "
@@ -425,21 +431,68 @@ def share_thread_path(node, user, data):
     A node of the path that is public stays public."""
     if "share_path" not in data or not is_shared_entry(node):
         return
+    if not data.get("share_path"):
+        release_thread_path(node)
+        return
     for above in thread_path(node, user.id):
         if above.deleted_at is not None:
             continue
-        if data.get("share_path"):
-            if above.privacy_level == PrivacyLevel.PUBLIC.value:
-                continue
-            if above.audience_root_id == above.id:
-                clear_audience(above)
-            if above.privacy_level != CIRCLES:
-                above.set_privacy_level(CIRCLES)
-            above.audience_root_id = node.id
-        elif (above.audience_root_id == node.id
-              and above.privacy_level == CIRCLES):
-            above.set_privacy_level(PrivacyLevel.PRIVATE.value)
+        if above.privacy_level == PrivacyLevel.PUBLIC.value:
+            continue
+        if above.audience_root_id == above.id:
+            clear_audience(above)
+        if above.privacy_level != CIRCLES:
+            above.set_privacy_level(CIRCLES)
+        above.audience_root_id = node.id
     forget_circle_access()
+
+
+def _back_to_author(node):
+    """*node*, the author's own, is read by nobody but her again: Only
+    me, no pointer (as before it was shared)."""
+    if node.privacy_level == CIRCLES:
+        node.set_privacy_level(PrivacyLevel.PRIVATE.value)
+    node.audience_root_id = None
+
+
+def release_thread_path(entry):
+    """"Share also the discussion leading up to this node?" unticked:
+    the discussion leading up to *entry* that was shared with it goes
+    back to the entry's author alone. Each node of the path that points
+    at *entry* becomes Only me and stops pointing at it, as before it
+    was shared (deleted ones too). Nothing below *entry* changes."""
+    if entry is None or entry.id is None:
+        return
+    released = False
+    for above in thread_path(entry, entry_owner_id(entry)):
+        if above.audience_root_id == entry.id:
+            _back_to_author(above)
+            released = True
+    if released:
+        forget_circle_access()
+
+
+def release_deleted_entry(entry):
+    """*entry*, a shared entry (or one that was shared), is deleted
+    (node_deletion.soft_delete_node): every node of its author's that
+    points at it (the discussion leading up to it when that was shared,
+    her AI replies in the thread, her own replies) goes back to her
+    alone, Only me with no pointer. They are her own writing: open to
+    her and never closed or deleted with the entry, also after the
+    entry's row is purged. Only what other people wrote changes nothing
+    here: their AI replies go with the entry
+    (node_cleanup.sweep_answers_of_deleted_entries), their typed
+    replies stay theirs. One indexed query (audience_root_id)."""
+    if entry is None or entry.id is None:
+        return
+    owner = entry_owner_id(entry)
+    nodes = Node.query.filter(
+        Node.audience_root_id == entry.id, Node.id != entry.id,
+        func.coalesce(Node.human_owner_id, Node.user_id) == owner).all()
+    for node in nodes:
+        _back_to_author(node)
+    if nodes:
+        forget_circle_access()
 
 
 # What each personal placeholder of a prompt reads, in the words the
@@ -477,18 +530,57 @@ def is_shared_prompt_for(node, user_id) -> bool:
             and node.is_system_prompt)
 
 
-def prompts_key(prompts):
-    """The key of what a set of shared prompt nodes asks of a requester:
-    it changes when a prompt is added to the chain or its text changes
-    (and with the text, its placeholders and whether it turns tools
-    on). "" for no prompt."""
+def agreement_prompts(chain, user_id):
+    """The prompt nodes of *chain* that a reply for *user_id* in a shared
+    thread may run only with *user_id*'s agreement: every prompt someone
+    else wrote, however the user reads it, that fills the user's data or
+    turns tools on in the reply.
+
+    * A prompt shared with the user in a circle (is_shared_prompt_for):
+      its personal placeholders are filled with the user's own data.
+    * Any agentic prompt someone else wrote, shared or public: its tools
+      act on the user's account (their memory, their to-do list) and
+      what they find goes into a reply other people read.
+
+    *chain*: the nodes the reply is built from, root first, without the
+    ones whose ai_usage keeps AI out (privacy.reply_context_nodes, then
+    that filter). A deleted node is not sent and is not counted."""
+    from backend.utils.privacy import shown_as_deleted
+    from backend.utils.session_helpers import chain_has_agentic_prompt
+    out = []
+    for n in chain:
+        if (not n.is_system_prompt or shown_as_deleted(n, user_id)
+                or (n.human_owner_id or n.user_id) == user_id):
+            continue
+        if is_shared_prompt_for(n, user_id) or chain_has_agentic_prompt([n]):
+            out.append(n)
+    return out
+
+
+def prompts_key(texts):
+    """The key of what a set of prompt nodes asks of a requester, from
+    ``{node id: text}``: it changes when a prompt is added to the chain
+    or its text changes (and with the text, its placeholders and whether
+    it turns tools on). "" for no prompt. The caller passes the very text
+    the reply is built from (the task holds it, Node.hold_content), so
+    the text agreed to is the text sent."""
     import hashlib
     parts = sorted(
-        f"{n.id}:{hashlib.sha256((n.get_content() or '').encode()).hexdigest()}"
-        for n in prompts)
+        f"{nid}:{hashlib.sha256((text or '').encode()).hexdigest()}"
+        for nid, text in texts.items())
     if not parts:
         return ""
     return hashlib.sha256("|".join(parts).encode()).hexdigest()[:32]
+
+
+def chain_for_reply(node, user_id):
+    """The nodes an AI reply in a shared thread under *node* for
+    *user_id* is built from, root first, without the ones AI may not
+    read: the completion task's walk (privacy.reply_context_nodes)."""
+    from backend.utils.privacy import AI_ALLOWED, reply_context_nodes
+    return [n for n in reply_context_nodes(node, user_id,
+                                           in_shared_thread=True)
+            if n.ai_usage in AI_ALLOWED]
 
 
 def ai_reply_reads(node, user_id):
@@ -499,41 +591,38 @@ def ai_reply_reads(node, user_id):
     *names*: the personal placeholders of every prompt node in the chain
     the reply is built from that resolves for the user (their own
     prompt, or one shared with them in a circle), by plain name, and the
-    tools when a prompt someone else shared turns them on.
+    tools when a prompt someone else wrote turns them on.
 
-    *key*: prompts_key of the prompts someone ELSE shared. The request
-    for the reply carries the key the user saw; the route and the task
-    work it out again and refuse when it differs, so a prompt edited
-    after the dialog fills nothing the user did not agree to. "" when
-    only the user's own prompts fill anything (own data, own prompt:
-    nothing to agree to).
+    *key*: prompts_key of agreement_prompts (the prompts someone ELSE
+    wrote that fill the user's data or turn tools on). The request for
+    the reply carries the key the user saw; the route and the task work
+    it out again and refuse when it differs, so a prompt edited after
+    the dialog fills nothing the user did not agree to. "" when only the
+    user's own prompts fill anything (own data, own prompt: nothing to
+    agree to).
 
-    The walk is the task's: up from *node* through what the user can
-    read, without the nodes AI may not read. Decrypts only prompt
+    The walk is the task's (chain_for_reply). Decrypts only prompt
     nodes."""
-    from backend.utils.privacy import AI_ALLOWED, can_user_access_node
+    from backend.utils.privacy import shown_as_deleted
     from backend.utils.session_helpers import chain_has_agentic_prompt
-    found, theirs = [], []
-    current = node
-    for _ in range(THREAD_PATH_HOPS):
-        if current is None or not can_user_access_node(current, user_id):
-            break
-        shared = is_shared_prompt_for(current, user_id)
-        mine = (current.human_owner_id or current.user_id) == user_id
-        if (current.ai_usage in AI_ALLOWED and current.is_system_prompt
-                and (shared or mine)):
-            text = current.get_content() or ""
-            for placeholder, name in _PLACEHOLDER_NAMES:
-                if placeholder in text and name not in found:
-                    found.append(name)
-            if shared:
-                theirs.append(current)
-        current = current.parent
+    chain = chain_for_reply(node, user_id)
+    found = []
+    for n in chain:
+        if not n.is_system_prompt or shown_as_deleted(n, user_id):
+            continue
+        mine = (n.human_owner_id or n.user_id) == user_id
+        if not (mine or is_shared_prompt_for(n, user_id)):
+            continue   # a public prompt of someone else's fills nothing
+        text = n.get_content() or ""
+        for placeholder, name in _PLACEHOLDER_NAMES:
+            if placeholder in text and name not in found:
+                found.append(name)
     order = [name for _, name in _PLACEHOLDER_NAMES]
     names = sorted(found, key=order.index)
+    theirs = agreement_prompts(chain, user_id)
     if theirs and chain_has_agentic_prompt(theirs):
         names.append(TOOLS_NAME)
-    return names, prompts_key(theirs)
+    return names, prompts_key({n.id: n.get_content() or "" for n in theirs})
 
 
 def ai_reads(node, user_id):
@@ -772,6 +861,7 @@ def apply_requested_sharing(node, user, data, *, old_privacy=None,
             return None
         if names_an_audience:
             raise AudienceError(REPLY_AUDIENCE, code="circle_reply_audience")
+        _refuse_prompt_alone(node, source.entry_id, old_privacy)
         # Back in its thread (when the thread is still there to point at).
         if source.entry_id and node.audience_root_id != node.id:
             node.audience_root_id = source.entry_id
@@ -790,6 +880,7 @@ def apply_requested_sharing(node, user, data, *, old_privacy=None,
         if wants and (data.get("circle_ids")
                       or split_names(data.get("circle_usernames"))):
             raise AudienceError(REPLY_AUDIENCE, code="circle_reply_audience")
+        _refuse_prompt_alone(node, thread_entry.id, old_privacy)
         join_thread_audience(node, thread_entry)
         return None
     if not wants:
@@ -805,6 +896,20 @@ def apply_requested_sharing(node, user, data, *, old_privacy=None,
                            data.get("circle_usernames"))
     share_thread_path(node, user, data)
     return readers
+
+
+def _refuse_prompt_alone(node, entry_id, old_privacy):
+    """A prompt node joins a thread's audience only with the whole
+    discussion leading up to a shared entry (share_thread_path), never on
+    its own: not as a reply in the thread (a Voice or Text-mode session
+    started under a shared node keeps its prompt to its starter), and not
+    as a prompt below its author's own shared entry. A prompt the path
+    share already put in this audience keeps it (an edit of its text)."""
+    if not node.is_system_prompt:
+        return
+    if old_privacy == CIRCLES and node.audience_root_id == entry_id:
+        return
+    raise AudienceError(PROMPT_ALONE, code="circle_prompt_node")
 
 
 def join_reply(node, parent, user_id) -> bool:

@@ -334,7 +334,7 @@ def audience_entry_owner(entry_id):
     return cache[entry_id]
 
 
-def _circles_access(node, user_id, as_ai=False) -> bool:
+def _circles_access(node, user_id, as_ai=False, corpus=False) -> bool:
     """The circles branch of the access rule for a node that is not the
     user's own. A node without an audience entry is private."""
     entry_id = getattr(node, 'audience_root_id', None)
@@ -343,9 +343,14 @@ def _circles_access(node, user_id, as_ai=False) -> bool:
     sets = circle_sets(user_id)
     # A reply in the user's own shared thread: the thread's author reads
     # every reply written to it (their model too, by each reply's own
-    # ai_usage, as in a public thread).
+    # ai_usage, as in a public thread). Not into the author's corpus: her
+    # profile builds, {user_export} and data download hold only her own
+    # nodes of a shared thread (Peter, 2026-11-11, for the reader's side:
+    # "let's leave Anna's circle nodes out of Ben's profile, but both
+    # Ben's own writing and LLM where Ben's the human owner should go to
+    # Ben's profile"; applied to the author the same way).
     if entry_id != node.id and entry_id in sets.own_entries:
-        return True
+        return not corpus
     if as_ai:
         return False
     return entry_id in sets.readable
@@ -460,7 +465,8 @@ def own_answers_filter(node_model, user_id, closed_only=False):
 
 
 def _can_user_access_ignoring_deleted(node, user_id: int,
-                                      as_ai: bool = False) -> bool:
+                                      as_ai: bool = False,
+                                      corpus: bool = False) -> bool:
     """Same body as can_user_access_node, minus the deleted_at short-circuit.
 
     Internal helper used by can_user_view_tombstone to check whether a viewer
@@ -486,7 +492,8 @@ def _can_user_access_ignoring_deleted(node, user_id: int,
     elif privacy_level == PrivacyLevel.PUBLIC:
         return True
     elif privacy_level == PrivacyLevel.CIRCLES:
-        return _circles_access(node, user_id, as_ai=as_ai)
+        return _circles_access(node, user_id, as_ai=as_ai or corpus,
+                               corpus=corpus)
 
     return False
 
@@ -539,7 +546,7 @@ def hidden_owner_filter(node_model):
 
 
 def can_user_access_node(node, user_id: Optional[int] = None,
-                         as_ai: bool = False) -> bool:
+                         as_ai: bool = False, corpus: bool = False) -> bool:
     """Check if a user can currently access a node (alive + privacy passes).
 
     Soft-deleted nodes are treated as inaccessible regardless of ownership;
@@ -551,6 +558,10 @@ def can_user_access_node(node, user_id: Optional[int] = None,
         user_id: The user ID to check (defaults to current_user.id)
         as_ai: the reader is a model acting for the user (see Circles
             above): another person's shared entry is closed to it.
+        corpus: the reader is the user's own corpus (profile builds,
+            {user_export}, recent context, the data download): as
+            *as_ai*, and other people's nodes in the user's own shared
+            threads are left out too.
 
     Returns:
         True if user can access, False otherwise
@@ -564,7 +575,8 @@ def can_user_access_node(node, user_id: Optional[int] = None,
     # serialize_node, which uses can_user_view_tombstone.
     if getattr(node, 'deleted_at', None) is not None:
         return False
-    if not _can_user_access_ignoring_deleted(node, user_id, as_ai=as_ai):
+    if not _can_user_access_ignoring_deleted(node, user_id, as_ai=as_ai,
+                                             corpus=corpus):
         return False
     # Someone else's node whose author deleted the account and is in the
     # grace period (#269). Checked last: the viewer's own nodes and nodes
@@ -577,7 +589,7 @@ def can_user_access_node(node, user_id: Optional[int] = None,
 
 
 def can_user_view_tombstone(node, user_id: Optional[int] = None,
-                            as_ai: bool = False) -> bool:
+                            as_ai: bool = False, corpus: bool = False) -> bool:
     """Check if a viewer should see a tombstone placeholder for a soft-deleted node.
 
     Returns True only when the viewer *would have* had access pre-deletion
@@ -608,7 +620,8 @@ def can_user_view_tombstone(node, user_id: Optional[int] = None,
             return False
         user_id = current_user.id
 
-    return _can_user_access_ignoring_deleted(node, user_id, as_ai=as_ai)
+    return _can_user_access_ignoring_deleted(node, user_id, as_ai=as_ai,
+                                             corpus=corpus)
 
 
 def can_user_see_node_or_tombstone(node, user_id: Optional[int] = None,
@@ -668,6 +681,35 @@ def can_user_see_node_or_placeholder(node, user_id,
             or can_user_view_tombstone(node, user_id, as_ai=as_ai))
 
 
+def reply_context_nodes(parent_node, user_id, in_shared_thread=False):
+    """The nodes an AI reply under *parent_node* for *user_id* is built
+    from, root first, before the ones whose ai_usage keeps AI out are
+    taken away: up from *parent_node* while *user_id* can see the node or
+    its placeholder (a deleted node, or one hidden with its owner's
+    deleted account, is passed through; its text is never read). The
+    node replied to must itself be visible.
+
+    It reads as a model acting for the user (as_ai), except in a reply
+    written in a shared thread (*in_shared_thread*), which reads what its
+    requester reads there.
+
+    The one walk for the completion task (llm_completion._load_node_chain)
+    and for the agreement before an AI reply in a shared thread
+    (circles.ai_reply_reads): what the dialog names is worked out from
+    the nodes the reply is built from."""
+    as_ai = not in_shared_thread
+    visible = []
+    current = parent_node
+    if current is not None and not can_user_see_node_or_tombstone(
+            current, user_id, as_ai=as_ai):
+        current = None
+    while current and can_user_see_node_or_placeholder(
+            current, user_id, as_ai=as_ai):
+        visible.insert(0, current)
+        current = current.parent
+    return visible
+
+
 def can_ai_access_node(node, user_id) -> bool:
     """can_user_access_node for a model acting for *user_id*."""
     return can_user_access_node(node, user_id, as_ai=True)
@@ -685,7 +727,8 @@ def can_ai_see_node_or_placeholder(node, user_id) -> bool:
     return can_user_see_node_or_placeholder(node, user_id, as_ai=True)
 
 
-def accessible_nodes_filter(node_model, user_id: int, as_ai: bool = False):
+def accessible_nodes_filter(node_model, user_id: int, as_ai: bool = False,
+                            corpus: bool = False):
     """Return a SQLAlchemy filter clause for nodes accessible by the given user.
 
     This is the query-level counterpart of can_user_access_node().
@@ -695,13 +738,15 @@ def accessible_nodes_filter(node_model, user_id: int, as_ai: bool = False):
 
     Allows: the owner's own nodes, public nodes and circle-shared nodes
     the user reads (alive only). With *as_ai* (a model acting for the
-    user, or the user's own corpus: export, profile builds) another
-    person's shared entry is left out; see Circles above.
+    user) another person's shared entry is left out; see Circles above.
+    With *corpus* (the user's own corpus: export, profile builds, the
+    data download) other people's nodes in the user's own shared
+    threads are left out too.
     """
     return and_(
         node_model.deleted_at.is_(None),
         accessible_nodes_filter_ignoring_deleted(
-            node_model, user_id, as_ai=as_ai),
+            node_model, user_id, as_ai=as_ai, corpus=corpus),
         # Not by an account deleted and in its grace period (#269). The
         # ignoring-deleted variant below walks through such nodes, like
         # through tombstones.
@@ -712,7 +757,8 @@ def accessible_nodes_filter(node_model, user_id: int, as_ai: bool = False):
 
 
 def accessible_nodes_filter_ignoring_deleted(node_model, user_id: int,
-                                             as_ai: bool = False):
+                                             as_ai: bool = False,
+                                             corpus: bool = False):
     """Same access criteria as accessible_nodes_filter, minus the
     deleted_at AND clause. Use in recursive CTE walks where the
     traversal needs to step through tombstones to reach an alive node
@@ -732,8 +778,13 @@ def accessible_nodes_filter_ignoring_deleted(node_model, user_id: int,
     """
     sets = circle_sets(user_id)
     hidden_answers = sets.closed_answers
-    entries = sets.own_entries if as_ai else (
-        sets.own_entries | sets.readable)
+    if corpus:
+        # The user's own nodes of a shared thread are theirs (`own`
+        # below); other people's there stay out of the user's corpus.
+        entries = frozenset()
+    else:
+        entries = sets.own_entries if as_ai else (
+            sets.own_entries | sets.readable)
     if not hidden_answers and not entries:
         return or_(
             node_model.user_id == user_id,

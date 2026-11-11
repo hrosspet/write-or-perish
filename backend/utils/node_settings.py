@@ -7,10 +7,71 @@ LLM nodes they are the human owner of. Other users' replies are left
 alone but walked through, since the user's own replies may sit under
 them — the same promise soft_delete_node makes.
 """
-from backend.models import Node
+from backend.extensions import db
+from backend.models import Node, NodeContextArtifact, UserPrompt
 from backend.utils.ca_feed import is_feed_node
 from backend.utils.encryption import prefetch_deks
 from backend.utils.privacy import can_user_edit_node
+
+
+def _prompt_linked_ids(nodes):
+    """Ids of those of *nodes* without a prompt_key stamp that are prompt
+    nodes all the same (Node.is_system_prompt: they link a prompt version
+    with a key), in one query per 900 ids."""
+    ids = sorted(n.id for n in nodes if not n.prompt_key)
+    out = set()
+    for start in range(0, len(ids), 900):
+        out.update(nid for (nid,) in db.session.query(
+            NodeContextArtifact.node_id)
+            .join(UserPrompt, UserPrompt.id == NodeContextArtifact.artifact_id)
+            .filter(NodeContextArtifact.node_id.in_(ids[start:start + 900]),
+                    NodeContextArtifact.artifact_type == "prompt",
+                    UserPrompt.prompt_key.isnot(None)))
+    return out
+
+
+def _circle_walk(root, levels, editable, privacy_level):
+    """What the cascade needs about Circles, from the levels the walk
+    read: ``(source_of, under_prompt, owners)``.
+
+    * ``source_of``: where each reply came from (circles.thread_source),
+      carried down the levels instead of asked per node: a reply's own
+      pointer, else what its parent hands down. ``below`` is the entry a
+      node's replies come from: its own pointer (an entry points at
+      itself), else what it inherited.
+    * ``under_prompt``: the prompt nodes and the sessions written below
+      them, which never join an audience through a cascade (a prompt is
+      shared only with the whole discussion leading up to an entry,
+      circles.share_thread_path). Only for a cascade to "circles"; the
+      prompt links are read in one query, not one per node.
+    * ``owners``: the owner of each entry a reply came from (None for an
+      entry that is gone: nobody's, so nobody widens)."""
+    from backend.utils.circles import entry_owner_id, thread_source
+    root_source = thread_source(root)
+    below = {root.id: root.audience_root_id
+             or (root_source.entry_id if root_source is not None else None)}
+    source_of = {}
+    under_prompt = set()
+    prompt_ids = (_prompt_linked_ids([n for level in levels for n in level])
+                  if privacy_level == "circles" else set())
+    for level in levels:
+        for n in level:
+            inherited = below.get(n.parent_id)
+            own = n.audience_root_id
+            if own is not None and own != n.id:
+                source_of[n.id] = own
+            else:
+                source_of[n.id] = inherited
+            below[n.id] = own if own is not None else inherited
+            if privacy_level == "circles" and (
+                    n.parent_id in under_prompt or n.prompt_key
+                    or n.id in prompt_ids):
+                under_prompt.add(n.id)
+    owners = {}
+    for entry_id in {source_of.get(n.id) for n in editable} - {None}:
+        entry = db.session.get(Node, entry_id)
+        owners[entry_id] = entry_owner_id(entry) if entry is not None else None
+    return source_of, under_prompt, owners
 
 
 def apply_settings_to_descendants(root, user_id, *, privacy_level=None,
@@ -29,46 +90,26 @@ def apply_settings_to_descendants(root, user_id, *, privacy_level=None,
     """
     if privacy_level is None and ai_usage is None:
         return []
-    # Circles: where each reply came from (circles.thread_source),
-    # carried down the walk instead of asked per node: a reply's own
-    # pointer, else what its parent hands down. `below` is the
-    # entry a node's replies come from: its own pointer (an entry points
-    # at itself), else what it inherited.
-    from backend.utils.circles import entry_owner_id, thread_source
-    root_source = thread_source(root)
-    below = {root.id: root.audience_root_id
-             or (root_source.entry_id if root_source is not None else None)}
-    source_of = {}
     editable = []
-    under_prompt = set()
+    levels = []
     seen = {root.id}
     frontier = [root.id]
     while frontier:
         level = Node.query.filter(Node.parent_id.in_(frontier)).all()
         frontier = [n.id for n in level if n.id not in seen]
         seen.update(frontier)
-        for n in level:
-            inherited = below.get(n.parent_id)
-            own = n.audience_root_id
-            if own is not None and own != n.id:
-                source_of[n.id] = own
-            else:
-                source_of[n.id] = inherited
-            below[n.id] = own if own is not None else inherited
-            # Circles: a prompt node, and the session written below it,
-            # never join an audience through a cascade. A prompt is
-            # shared only with the whole discussion leading up to an
-            # entry (circles.share_thread_path).
-            if n.parent_id in under_prompt or n.is_system_prompt:
-                under_prompt.add(n.id)
+        levels.append(level)
         editable.extend(
             n for n in level
             if n.deleted_at is None and can_user_edit_node(n, user_id))
-    owners = {}
-    for entry_id in {source_of.get(n.id) for n in editable} - {None}:
-        entry = Node.query.get(entry_id) if entry_id else None
-        # None: an entry that is gone is nobody's, so nobody widens.
-        owners[entry_id] = entry_owner_id(entry) if entry is not None else None
+    # Circles, only while a node may carry a thread pointer (the flag is
+    # on, or a pointer is left from when it was): with none, the walk
+    # above is all the cascade reads, as before the feature.
+    from backend.utils.privacy import pointers_may_exist
+    source_of, under_prompt, owners = (
+        _circle_walk(root, levels, editable, privacy_level)
+        if privacy_level is not None and pointers_may_exist()
+        else ({}, set(), {}))
 
     def written_into_someone_elses_thread(n, uid):
         entry_id = source_of.get(n.id)
