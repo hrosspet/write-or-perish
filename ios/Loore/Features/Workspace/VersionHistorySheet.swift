@@ -152,12 +152,8 @@ private struct VersionDetailView: View {
                     if mode == .diff, let diff {
                         DiffRowsView(diff: diff)
                     } else {
-                        Text(content)
-                            .font(LooreFont.sans(12.8, .light))
-                            .foregroundStyle(LooreColor.textSecondary)
-                            .lineSpacing(7.5)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                        ReadingText(text: content, font: LooreUIFont.sans(12.8, .light), color: LooreColor.textSecondaryUI,
+                                    lineSpacing: 7.5)
                     }
                 } else {
                     Text("Loading...")

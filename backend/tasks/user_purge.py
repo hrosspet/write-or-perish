@@ -29,6 +29,20 @@ def run_user_data_purge(self, job_id, token):
     return {"job_id": job_id, "outcome": outcome}
 
 
+@celery.task(name="backend.tasks.user_purge.cancel_batches_read_before",
+             bind=True, max_retries=3, default_retry_delay=60)
+def cancel_batches_read_before(self, user_id, job_id, cutoff_iso):
+    """After a "Delete all my content" (#590): ask the providers to cancel
+    the pending batches that carry only the user's work read before the
+    request. Off the request, so a slow provider never holds the user's
+    click; the collectors drop and cost whatever still comes back."""
+    from datetime import datetime
+    with flask_app.app_context():
+        n = user_purge.cancel_batches_read_before(
+            user_id, job_id, datetime.fromisoformat(cutoff_iso))
+    return {"user_id": user_id, "cancelled": n}
+
+
 def dispatch(job_id, token):
     """Send the runner for a claimed job; the token is the task id."""
     run_user_data_purge.apply_async(args=(job_id, token), task_id=token)

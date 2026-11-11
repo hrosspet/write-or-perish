@@ -202,7 +202,7 @@ export default function AccountPage() {
     !emailSaving && !!emailInput.trim(),
   );
 
-  // "Delete all my writing" (#268): the writing is hidden at once and
+  // "Delete all my content" (#268): the content is hidden at once and
   // deleted forever after the grace period; until then "Restore my
   // writing" brings it back. The state comes with the user (/dashboard)
   // and is read again when the page opens.
@@ -275,11 +275,11 @@ export default function AccountPage() {
     setDeletionMsg(null);
     try {
       await restoreWriting(setUser);
-      setDeletionMsg({ type: "success", text: "Your writing is restored." });
+      setDeletionMsg({ type: "success", text: "Your content is restored." });
     } catch (e) {
       setDeletionMsg({
         type: "error",
-        text: e.response?.data?.error || "Could not restore your writing. Please try again.",
+        text: e.response?.data?.error || "Could not restore your content. Please try again.",
       });
     } finally {
       setDeletionBusy(false);
@@ -954,7 +954,7 @@ export default function AccountPage() {
         </div>
       </div>
 
-      {/* ─── Delete all my writing (#268). Anchor: /account#delete-data,
+      {/* ─── Delete all my content (#268). Anchor: /account#delete-data,
           where the reminder banner links. ─── */}
       {askProviders && (
         <BothProvidersDialog onClose={(answered) => {
@@ -1070,12 +1070,12 @@ function DeleteWritingSection({ id, deletion, busy, msg, onOpen, onRestore, labe
   const bodyStyle = { ...helperStyle, fontSize: "0.85rem", lineHeight: 1.6, marginTop: 0 };
   return (
     <div id={id} style={{ scrollMarginTop: "72px" }}>
-      <h3 style={sectionTitleStyle}>Delete all my writing</h3>
+      <h3 style={sectionTitleStyle}>Delete all my content</h3>
 
       {status === "scheduled" && writingRestorable(deletion) && (
         <>
           <p style={{ ...labelStyle, lineHeight: 1.6 }}>
-            Your writing is deleted.
+            Your content is deleted.
           </p>
           <p style={bodyStyle}>
             You can restore it safely until {formatDeletionDate(deletion.purge_at)}.
@@ -1087,15 +1087,15 @@ function DeleteWritingSection({ id, deletion, busy, msg, onOpen, onRestore, labe
             disabled={busy}
             style={{ ...quietButtonStyle, borderColor: "var(--accent)", color: "var(--accent)" }}
           >
-            {busy ? "Restoring…" : "Restore my writing"}
+            {busy ? "Restoring…" : "Restore my content"}
           </button>
-          {/* Written or saved since: "Delete all my writing" again adds it
+          {/* Written or saved since: "Delete all my content" again adds it
               to this deletion, with one new date (Peter, 2026-10-15). */}
           {deletion.new_writing && (
             <>
               <p style={{ ...bodyStyle, marginTop: "1.25rem" }}>
-                Since your writing was deleted, you have written or saved
-                more. It stays, unless you delete all your writing again.
+                Since your content was deleted, you have written or saved
+                more. It stays, unless you delete all your content again.
                 Then everything is deleted forever on one date,{" "}
                 {deletion.grace_days || 30} days after you ask again, and
                 you can restore all of it until then.
@@ -1106,7 +1106,7 @@ function DeleteWritingSection({ id, deletion, busy, msg, onOpen, onRestore, labe
                 disabled={busy}
                 style={{ ...quietButtonStyle, color: "var(--error)" }}
               >
-                Delete all my writing…
+                Delete all my content…
               </button>
             </>
           )}
@@ -1115,19 +1115,19 @@ function DeleteWritingSection({ id, deletion, busy, msg, onOpen, onRestore, labe
 
       {status === "scheduled" && !writingRestorable(deletion) && (
         <p style={bodyStyle}>
-          Your writing will be deleted forever on {formatDeletionDate(deletion.purge_at)}.
+          Your content will be deleted forever on {formatDeletionDate(deletion.purge_at)}.
         </p>
       )}
 
       {status === "running" && (
         <p style={bodyStyle}>
-          Your writing is being deleted forever now. This can take a few minutes.
+          Your content is being deleted forever now. This can take a few minutes.
         </p>
       )}
 
       {status === "failed" && (
         <p style={bodyStyle}>
-          Deleting your writing did not finish. We have been told and will
+          Deleting your content did not finish. We have been told and will
           complete it.
         </p>
       )}
@@ -1136,7 +1136,7 @@ function DeleteWritingSection({ id, deletion, busy, msg, onOpen, onRestore, labe
         <>
           {status === "done" && (
             <p style={bodyStyle}>
-              Your writing was deleted forever on {formatDeletionDate(deletion.finished_at)}.
+              Your content was deleted forever on {formatDeletionDate(deletion.finished_at)}.
               {deletion.x_connection_removed && (
                 <> Loore no longer keeps your X connection and asked X to
                   remove its access. If X still lists Loore, remove it
@@ -1148,7 +1148,7 @@ function DeleteWritingSection({ id, deletion, busy, msg, onOpen, onRestore, labe
             Deletes everything you have written or recorded in Loore, and
             what Loore made from it: the AI's replies, your profile, intentions
             and other documents, saved references and imports. Your account,
-            username and settings stay. You can restore your writing safely
+            username and settings stay. You can restore your content safely
             within {deletion?.grace_days || 30} days. After that it is deleted forever.
           </p>
           <button
@@ -1156,7 +1156,7 @@ function DeleteWritingSection({ id, deletion, busy, msg, onOpen, onRestore, labe
             onClick={onOpen}
             style={{ ...quietButtonStyle, color: "var(--error)" }}
           >
-            Delete all my writing…
+            Delete all my content…
           </button>
         </>
       )}

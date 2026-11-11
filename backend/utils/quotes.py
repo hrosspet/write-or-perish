@@ -14,7 +14,7 @@ Supports two modes:
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Tuple, List, Dict, Optional, Set
+from typing import Callable, Tuple, List, Dict, Optional, Set
 from celery.utils.log import get_task_logger
 
 from backend.utils.timefmt import iso_utc, local_stamp
@@ -930,7 +930,8 @@ def resolve_quotes_for_export(
     embedded_quotes: Dict[int, Dict[int, str]],
     user_id: int,
     ai_blocked_ids: Optional[Set[int]] = None,
-    _resolving: Optional[Set[int]] = None
+    _resolving: Optional[Set[int]] = None,
+    reference: Optional[Callable[[int], str]] = None,
 ) -> str:
     """
     Resolve quotes in a node's content for export rendering.
@@ -950,6 +951,11 @@ def resolve_quotes_for_export(
         ai_blocked_ids: Optional set of node IDs blocked due to ai_usage='none'.
                        Quotes referencing these nodes show a blocked message.
         _resolving: Internal - tracks IDs being resolved to prevent infinite loops
+        reference: Optional quoted node id -> text for a quote resolved
+                   by reference. The export passes a marker it fills in
+                   with the quoted entry's position label once the whole
+                   document is rendered (#592); without it the text
+                   names the node id.
 
     Returns:
         Content with quotes resolved (embedded or marked as reference)
@@ -989,7 +995,8 @@ def resolve_quotes_for_export(
                     embedded_quotes,
                     user_id,
                     ai_blocked_ids=ai_blocked_ids,
-                    _resolving=new_resolving
+                    _resolving=new_resolving,
+                    reference=reference,
                 )
 
             # Get username for formatting
@@ -1003,6 +1010,8 @@ def resolve_quotes_for_export(
                     f'{embedded_content}\n--- End quote ---\n')
         else:
             # Resolved by reference - the quoted node is elsewhere in the export
+            if reference is not None:
+                return reference(quoted_id)
             return f'[See node #{quoted_id} in export]'
 
     return re.sub(QUOTE_PLACEHOLDER_PATTERN, replace_quote, content)

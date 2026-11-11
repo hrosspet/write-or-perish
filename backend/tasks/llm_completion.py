@@ -2944,10 +2944,11 @@ def _superseded(llm_node, this_task_id):
 
 CA_BATCH_PROVIDERS = ("anthropic", "openai")
 CA_BATCH_LIVE_STATUSES = ("submitted", "cancelling")
-# A Read whose owner's "Delete all my writing" waited or ran (#268): it did
-# not run, or its result was dropped. Shown on the node after a restore,
-# as the reason of a failed gleaning: users know the read as Glean (#435).
-READ_ON_HOLD_TEXT = ("Glean did not run: your writing was deleted. You "
+# A Read whose owner's "Delete all my content" came after it was asked
+# for (#590), or whose account is being deleted: it did not run, or its
+# result was dropped. Shown on the node after a restore, as the reason of
+# a failed gleaning: users know the read as Glean (#435).
+READ_ON_HOLD_TEXT = ("Glean did not run: your content was deleted. You "
                      "can restore it on the Account page.")
 # What a read withdrawn at the provider says in place of its reply, the
 # same for everyone who can see it.
@@ -3863,12 +3864,14 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 logger.info("Node %s: {ca_tweets} turn is %r",
                             llm_node_id, ca_turn)
             if needs_ca and batch_entry is None:
-                from backend.utils.hidden_rows import writing_on_hold
-                if writing_on_hold(llm_node.human_owner_id or user_id):
-                    # "Delete all my writing" waits or runs (#268): no Read
-                    # runs for the user, like the other background jobs.
-                    logger.info("Node %s: Read not run, the owner's writing "
-                                "is on hold for deletion", llm_node_id)
+                from backend.utils.hidden_rows import account_on_hold
+                if account_on_hold(llm_node.human_owner_id or user_id):
+                    # The owner's account is being deleted (#269): no Read
+                    # runs for it, like the other background jobs. A
+                    # waiting "Delete all my content" does not stop one:
+                    # it reads only what was written since (#590).
+                    logger.info("Node %s: Read not run, the owner's account "
+                                "is being deleted", llm_node_id)
                     llm_node.llm_task_status = 'failed'
                     llm_node.llm_task_error = READ_ON_HOLD_TEXT
                     llm_node.llm_task_progress = 100
@@ -4411,17 +4414,20 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 ))
 
             def _read_on_hold():
-                """The Read's owner pressed "Delete all my writing" while it
-                ran (#268): the request waits or the purge runs, or the
-                Read's node is hidden. Its picks would save tweets and
-                marks the user asked to delete."""
-                from backend.utils.hidden_rows import writing_on_hold
+                """The Read's owner pressed "Delete all my content" after it
+                was asked for (#590), the Read's node is hidden, or the
+                account is being deleted. Its picks would save tweets and
+                marks the user asked to delete. A Read asked for after
+                the request read only what came since, and is kept."""
+                from backend.utils.hidden_rows import read_before_deletion
                 # Read from the database, not the (possibly stale) object;
                 # unlike a refresh this keeps the run's pending changes.
-                deleted_at = db.session.query(Node.deleted_at).filter(
-                    Node.id == llm_node.id).scalar()
+                deleted_at, asked_at = db.session.query(
+                    Node.deleted_at, Node.created_at).filter(
+                    Node.id == llm_node.id).one()
                 return (deleted_at is not None
-                        or writing_on_hold(llm_node.human_owner_id or user_id))
+                        or read_before_deletion(
+                            llm_node.human_owner_id or user_id, asked_at))
 
             def _drop_held_read(resp):
                 """A Read result that arrived while the writing is on hold:

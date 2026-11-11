@@ -3137,10 +3137,21 @@ Kinds (one per entry and per table row):
 - **Kind:** data safety
 - **Situation:** #569 merges every round of a user's profile edits at a rebuild, oldest first. As built, a sentence the user added in one edit and deleted in a later one can come back. The options: (a) as built, (b) only the newest edit, as main does, (c) merge an older edit only for the lines the newer edits didn't change. Recommended (c).
 - **Prediction:** (c) (50 %).
-- **Peter:** "let's go with c)" · "but if" (the answer ends there; asked for the rest)
+- **Peter:** "let's go with c)" · "but if" (the answer ends there); asked about it: "what 'but if'?", so no condition
 - **Score:** hit.
 - **Source:** Loore voice review, node 201651, 2026-11-10; questions from the train #581 summary (node 201566), Claude Code session 2026-10-21 (Opus 5.5)
 - **Applies to:** #569, #421
+
+### 2026-11-10 · Root-level Markdown files keep deploying
+
+- **Kind:** release/ops
+- **Situation:** since #581 a push that only changes `docs/` doesn't deploy; `CLAUDE.md` at the repo root is outside it, so #620 deployed. Proposed: add root-level `*.md` (not `backend/user_changelog.md`, which the server reads) to the deploy's skip list.
+- **Prediction:** yes (80 %).
+- **Peter:** "no"
+- **Score:** miss. The skip list stays `ios/**` and `docs/**`.
+- **Why it missed:** a deploy for a root Markdown change is rare and costs only a restart; the prediction counted the restart as a cost Peter wants to avoid.
+- **Source:** Claude Code session 2026-11-10 (Opus 5.5)
+- **Applies to:** #581, #620
 
 ### 2026-11-10 · No rebuild of existing profiles after #551 and #565
 
@@ -3172,6 +3183,174 @@ Kinds (one per entry and per table row):
 - **Score:** hit. Search keeps ranking in Python until then.
 - **Source:** Claude Code session 2026-11-10 (Opus 5.5)
 - **Applies to:** #580, #331
+
+### 2026-11-10 · The two users the Account page may have moved to Anthropic stay there
+
+- **Kind:** provider
+- **Situation:** #555's second count found two users with Opus 5.5 saved whose last reply before 2026-09-24 ran on OpenAI (GPT-6 Astra, GPT-6 Luna). The Account page bug only overwrote a retired saved model, and both of those models were still offered, so the counts don't show the page made the switch. Recommended: leave both on Anthropic.
+- **Prediction:** leave them (55 %); ask the two users 35 %; restore 10 %.
+- **Peter:** "yes, leave as they are"
+- **Score:** hit.
+- **Source:** Loore voice review, node 201654, 2026-11-10; Claude Code session 2026-11-10 (Opus 5.5)
+- **Applies to:** #555, #487
+
+### 2026-11-10 · #593: a re-import with AI usage left as the dialog opened
+
+- **Kind:** data safety
+- **Situation:** #593 makes the import dialog start AI usage at Chat instead of None (Peter, 2026-10-22). On a re-import, the value the dialog sends is applied to the archive's entries already in Loore. Proposed as the default: when the user leaves the setting as it opened, the entries already imported keep their AI usage and only the new ones get Chat; a value the user picks applies to all of them, as before.
+- **Prediction:** the default (65 %); a line in the dialog with a count (20 %); as the issue specified, every entry of the archive takes the value shown (15 %).
+- **Peter:** "no, if chat is selected (even though by default), chat is used on all entries"
+- **Score:** miss. Built in #623: the value the dialog shows applies to the archive's existing entries whether the user picked it or not.
+- **Why it missed:** the builder added a special case to protect the AI usage of entries already imported from a value the user never chose. Peter chose the plain, consistent rule: the value the dialog shows is the value Loore uses.
+- **Source:** Loore voice review, node 201658, 2026-11-10; prediction in the issue triage brief of 2026-10-22 (Opus 5.5)
+- **Applies to:** #593, #623
+
+### 2026-11-10 · #593: the starting AI usage of accounts set to None or Train
+
+- **Kind:** UX
+- **Situation:** with the import dialog no longer starting at None, which value does it start at for accounts whose AI usage setting is not Chat? Proposed as the default: an account set to None starts its imports at None, and accounts set to Chat or Train start them at Chat.
+- **Prediction:** the default (55 %); Train accounts start at Train, so the dialog follows the account's setting fully (30 %); every account starts at Chat (15 %).
+- **Peter:** "it should simply follow the account's setting. I would not complicate it further."
+- **Score:** miss. Built in #623: every import dialog, on the web and the iPhone, starts at the account's AI usage setting.
+- **Why it missed:** the builder added a special case for Train accounts that kept their imports off Train unless picked. Peter chose the plain rule, the account's setting with no exception, which was the second guess.
+- **Source:** Loore voice review, node 201658, 2026-11-10; prediction in the issue triage brief of 2026-10-22 (Opus 5.5)
+- **Applies to:** #593, #623
+
+### 2026-11-10 · The issue triage briefs of 2026-10-22: ask or decide
+
+- **Kind:** escalation
+- **Situation:** the issue triage voice review of 2026-10-22 put one to three questions each about #588 (Circles on the text-mode start), #590 ("Delete all my content"), #591 (the export of large accounts), #592 (entry headers in exports) and #594 (the spend cap's carry) to Peter, each with a default or a recommendation, and asked whether each was ready to build. By 2026-11-10 none of them had been built.
+- **Decision:** asked Peter instead of deciding.
+- **Peter:** "Do they really need me, or could you decide them based on the decision log yourself?"
+- **Score:** miss. On 2026-11-10 the builder (Fable 5.2) decided the questions itself in new briefs; its choices are rows in "Decided by the builder" (#626, #627, #629, #630, #631). The 2026-10-22 predictions for these questions are not scored, since Peter did not answer them.
+- **Why it missed:** each question already came with a default the builder was ready to build, most of the choices could be changed after a merge, and the new briefs settled them from rules and entries already in the log, at 60–90 % confidence. Asking held five issues for nearly three weeks.
+- **Source:** Claude Code session 2026-11-10; the briefs were written in Claude Code session 2026-10-22 (Opus 5.5)
+- **Applies to:** #588, #590, #591, #592, #594
+
+### 2026-11-10 · Circles: one note to a reader the first time only
+
+- **Kind:** UX
+- **Situation:** at Peter's request, instead of #588's question, the builder designed the Circles feature: a design brief in Loore and a mockup of seven screens. A circle is a named list of people that only its owner sees; an entry is shared with chosen circles; readers find it on a page of entries shared with them. Five questions went with the design, and it decided some things without asking, among them how a reader learns of a shared entry: no email per entry, and one in-app note the first time someone shares with them.
+- **Decision:** one in-app note the first time only, no email.
+- **Peter:** "I'd like such notice for every new note shared with me by default" · "Don't show Anna's entries would prevent that for that user"
+- **Score:** miss. #631 sends a note for each shared entry, with "Don't show <name>'s entries" on it.
+- **Why it missed:** fewer notes were chosen to keep Loore calm, although the design already let a reader stop one person's entries, which is the control Peter pointed to.
+- **Source:** Claude Code session 2026-11-10, Circles design (Fable 5.2)
+- **Applies to:** #588, #631
+
+### 2026-11-10 · Circles: readers don't see each other
+
+- **Kind:** product scope
+- **Situation:** as in the entry before. The first question: a circle is the owner's private list, and its members see neither the circle nor each other unless they reply; or a circle is a shared group.
+- **Prediction:** the private list, readers apart (60 %); shared groups (25 %); other (15 %).
+- **Peter:** "there should be an icon in the footer ... showing circles and mouse-over should display a list of people who will see it. Sending a reply should pop up a dialog saying who will see it, with the possibility to don't show this dialog for this thread anymore" · "there should be a freeform input text field which would allow the author to send this to a one off list of usernames"
+- **Score:** miss, for the part that readers don't see each other: an entry shows who can read it, and a reply names its readers before it is sent. Whether a circle is a private list or a shared group was not answered; the builder kept the private list. The one-off list of names for a single entry was in neither the design nor the prediction.
+- **Why it missed:** readers knowing about each other was treated as a cost to their privacy. For Peter, a writer needs to know who will see an entry or a reply before writing it.
+- **Source:** Claude Code session 2026-11-10, Circles design (Fable 5.2)
+- **Applies to:** #588, #631
+
+### 2026-11-10 · Circles: the note's small print
+
+- **Kind:** user-facing text
+- **Situation:** as in the entry before. The mockup's note to a reader came with a line of small print, written by the builder.
+- **Decision:** wrote the note's small print.
+- **Peter:** "this is too long in the dialog. But good decision to couple the two"
+- **Score:** partial: the coupling in it was right, and the text too long for the dialog. Peter then edited the note's wording on the mockup himself.
+- **Source:** Claude Code session 2026-11-10, Circles design (Fable 5.2)
+- **Applies to:** #588, #631
+
+### 2026-11-10 · Circles: when to build it
+
+- **Kind:** product scope
+- **Situation:** as in the entry before. The question of when: build Circles after the Beta blockers (recommended), or for the Beta.
+- **Prediction:** after the Beta blockers (60 %); for the Beta (30 %); other (10 %).
+- **Peter:** "thx I really like this design. Could you create a PR implementing it both for web and iOS app?"
+- **Score:** miss. Built at once for the web and the iPhone in #631, behind a flag that is off by default.
+- **Why it missed:** the recommendation followed the order "Beta blockers first". Peter asked for the PR as soon as he had seen the design, as the pattern on recommendations to defer in `DECISION-PATTERNS.md` describes.
+- **Source:** Claude Code session 2026-11-10, Circles design (Fable 5.2)
+- **Applies to:** #588, #631
+
+### 2026-11-10 · Circles: a reader's AI
+
+- **Kind:** privacy
+- **Situation:** as in the entry before. The question about a reader's AI: no AI answers in a shared thread unless the reader asks; then the reader's own model reads the thread, only if the author's AI usage allows it, never into the reader's profile or context, and never for training.
+- **Prediction:** as proposed (55 %); no AI for readers in the first version (30 %); other (15 %).
+- **Peter:** "I actually like the AI reply design"
+- **Score:** hit. #631 builds "Ask my AI".
+- **Source:** Claude Code session 2026-11-10, Circles design (Fable 5.2)
+- **Applies to:** #588, #631
+
+### 2026-11-10 · Circles: "Ask my AI" left out of the first build brief
+
+- **Kind:** privacy
+- **Situation:** as in the entry before. After Peter's "thx I really like this design" and his request for a PR, the brief for the builder left "Ask my AI" out, because he had not answered the question about a reader's AI.
+- **Decision:** left "Ask my AI" out of the build brief until Peter answered.
+- **Peter:** "I actually like the AI reply design"
+- **Score:** miss. The builder was told to build "Ask my AI".
+- **Why it missed:** "I really like this design" was read as not covering an open question that the mockup showed: its screen for reading a shared entry had the "Ask my AI" button.
+- **Source:** Claude Code session 2026-11-10 (Fable 5.2)
+- **Applies to:** #631
+
+### 2026-11-10 · Circles: no invitations in the first version
+
+- **Kind:** product scope
+- **Situation:** as in the entry before. The question about people not on Loore ("Q2" after Peter's first answers renumbered the questions): only people with a Loore account can be added, found by their exact name; email invitations wait.
+- **Prediction:** as proposed (65 %); invitations now (25 %); other (10 %).
+- **Peter:** "Q2: yes, invitations are out of the first version"
+- **Score:** hit.
+- **Source:** Claude Code session 2026-11-10, Circles design (Fable 5.2)
+- **Applies to:** #631
+
+### 2026-11-10 · Circles: the words
+
+- **Kind:** user-facing text
+- **Situation:** as in the entry before. The question about the words ("Q3" after the renumbering), each with a recommendation: "Only me / Circles / Everyone" for the three choices of who can read an entry (or "Private / Circles / Public"), "Shared with you" for the readers' page, "Your circles" for the owner's page.
+- **Prediction:** he changes at least one of the words (60 %); he takes all of them (40 %).
+- **Peter:** "Q3: 'Shared with you' (recommended)"
+- **Score:** hit, for the readers' page: he took the recommended "Shared with you". He did not answer about the labels of the three choices; #631 uses the recommended "Only me / Circles / Everyone".
+- **Source:** Claude Code session 2026-11-10, Circles design (Fable 5.2)
+- **Applies to:** #631
+
+### 2026-11-10 · Building the triage issues without a "ready to build": ask or decide
+
+- **Kind:** escalation
+- **Situation:** after the briefs for #588, #590, #591, #592 and #594 were decided again by the builder, Peter asked "what about the issues at 201586" (the triage brief's root) without a "ready to build" for any of them. Read it as a request to build and started builders for them, #588 as part of the Circles PR, at most three at a time.
+- **Decision:** decided without asking Peter.
+- **Peter:** "we have 9 minutes until a 5-hour window limit, so you can temporarily run all PRs in parallel"
+- **Score:** hit. He did not object to the builds and let all of them run at once; they became #626, #627, #629, #630 and #631.
+- **Source:** Claude Code session 2026-11-10 (Fable 5.2)
+- **Applies to:** #588, #590, #591, #592, #594, #626, #627, #629, #630, #631
+
+### 2026-11-11 · Re-raising choices Peter had ticked on the train's summary node
+
+- **Kind:** escalation
+- **Situation:** after train #635 merged, the post-merge pass kept four PR questions marked pending: which limit decides #627's carry when a limit is lowered during a month, #627's carry starting with the deploy's month, #630's restored profile next to a version the user saved by hand, and #624's optional "Copy text" menu item. The builder named them in the terminal as unanswered and, when Peter asked what they were, explained them again as open questions. The #627 and #630 choices were in the train's summary node in Loore under "Choices left as built, for you to object to"; Peter had ticked them there and then merged the train. (#624's item was not in the node; it asked for nothing to change.)
+- **Decision:** asked instead of deciding.
+- **Peter:** "the last three questions were mentioned in the brief for the merge train on local loore node 201849. I check-marked them on that node and then I merged it, so that means these questions were already answered."
+- **Score:** miss. A choice in a merge train's summary node that Peter ticked is answered when he merges the train; the post-merge pass reads the node's ticks before it calls anything pending. He answered "keep as built" for all four again.
+- **Source:** Claude Code session 2026-11-11 (Opus 5.5)
+- **Applies to:** #624, #627, #630, #635
+
+### 2026-11-11 · #623's question left out of the merge train's summary node
+
+- **Kind:** escalation
+- **Situation:** #623's PR listed one "Needs Peter" item: a ChatGPT, Claude or document re-import dates its profile update from the oldest entry in the whole archive, skipped duplicates included, so a re-upload with one new conversation can rebuild the profile from scratch; and a Twitter re-import that only changes existing entries (AI usage from None to Chat) starts no profile update. The builder recommended a follow-up issue (#625) and left both as they were. The train's summary node listed the other PRs' choices for Peter to object to, but not this one, so he merged without seeing it.
+- **Decision:** decided without asking Peter.
+- **Peter:** "the #623 questions were not raised on the brief - which they should have - and thus need a followup now."
+- **Score:** miss. Every open "Needs Peter" item of every PR in a train goes into the train's summary node.
+- **Source:** Claude Code session 2026-11-11 (Opus 5.5)
+- **Applies to:** #623, #625, #635
+
+### 2026-11-11 · A re-import rebuilds the profile only from what it changed
+
+- **Kind:** cost
+- **Situation:** the #623 question above. A user uploads the same ChatGPT export again with one new conversation; or a Twitter re-import changes existing entries from None to Chat and adds nothing.
+- **Prediction:** Peter takes the recommended follow-up #625 (date the profile update from the entries the import added or changed, and start none when there are none), to be built later, 75 %.
+- **Decision:** the builder recommended #625 and left the behaviour as it was until then.
+- **Peter:** "only what's changed by the import should count towards the decision whether / how much of the profile should be rebuilt"; for the re-upload, "only the new conversation should count towards profile rebuild. If it's placed chronologically somewhere in the middle of the users total Loore archive (not just the import, but everything considered) - only the second part since the new conversation should be regenerated"; for the Twitter case, "changing from None to Chat means this data now should count towards the profile re-generation decision, and should trigger profile update".
+- **Score:** hit. He took #625's direction and made it exact: the rebuild starts at the changed entry's place in the user's whole Loore history, and a change to Chat counts as a change.
+- **Source:** Claude Code session 2026-11-11 (Opus 5.5)
+- **Applies to:** #623, #625
 
 ## Decided by the builder
 
@@ -3413,6 +3592,15 @@ Choices that agents flagged in PRs and that the builder decided because a rule a
 | 2026-10-20 | #414 | data safety | A profile edit that changes only whitespace (blank lines, trailing spaces, a trailing newline) | Saved in place, no new version | Every added heuristic is named | Opus 5.5 | accepted by merge (PR #548, 2026-10-21) |
 | 2026-10-20 | #414 | product scope | The date a rebuild merges the user's version at | Its cutoff, or the time it was written for a hand-written profile with no cutoff; the merge follows the first step whose cutoff reaches that date | A rebuild merges the user's version at its date (Peter, 2026-10-20); every added heuristic is named | Opus 5.5 | accepted by merge (PR #548, 2026-10-21) |
 | 2026-10-20 | #414 | product scope | The version a user's edit replaced, when a later integration runs | Not an integration input: the integration chain starts at the user's version (found by the real-model check) | An edit is a new version, with the version it changed as its predecessor (Peter, 2026-10-20) | Opus 5.5 | accepted by merge (PR #548, 2026-10-21) |
+| 2026-11-10 | #569 | data safety | The unit option (c) compares | A line (whitespace collapsed, blank lines ignored for the mapping), not a paragraph or section | Option (c) as Peter chose it: "the lines your newer edits didn't change" | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #569 | data safety | A newer edit inside a stretch a model step rewrote | Every older line mapped onto that stretch counts as touched, so the whole stretch is left out of the older round's merge | The user's edit wins | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #569 | data safety | A line a model update moved and reworded, then the user deleted | Matched at 0.75 character similarity (difflib's Differ cutoff) and treated as touched | Every added heuristic is named | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #569 | data safety | A newer edit on a neighbouring line | Doesn't touch the older line | Option (c) as Peter chose it | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #569 | data safety | What an older round's merge reads | Its version without the touched lines, not those lines restored to their earlier text | The user's edit wins | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #569 | cost | An older round with only deletions left | Still one merge call | The user's edit wins | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #569 | data safety | The newest round | Always merged whole, as on main | A rebuild merges the user's version at its date (Peter, 2026-10-20) | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #569 | product scope | The window path's final | Also merges every older round with something left, within that rebuild; across later rebuilds it still sees only the newest round, as on main (a schema change, left as a follow-up) | Sibling paths are fixed in the same PR (#551) | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #569 | data safety | Telling the merge model that lines were left out | No note, no prompt change | Autonomy | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
 | 2026-10-21 | #589 | testing | The window size of the Haiku 5.5 versions in the Haiku test | Prod's chunk planner size for Haiku (46.6k units here), under Haiku's 100k-token price step: 53 versions against the 26 Luna windows, so the test mixes the change of model with the number of versions; said so before the run | Test what would ship; #259 (no request across a price tier) | Opus 5.5 | accepted by merge (PR #589, 2026-11-06) |
 | 2026-10-21 | #553 | data safety | A Voice recording with stored audio but no transcribed text (failed, timed out or empty) | Saved as an entry with its audio and no reply; the PR's first version made no entry for silence | No recording with content is lost | Opus 5.5 | accepted by merge (PR #581, 2026-11-10) |
 | 2026-10-21 | #553 | UX | Glean under an entry with no transcribed text | Disabled, with its own text | The issue's own request | Opus 5.5 | accepted by merge (PR #581, 2026-11-10) |
@@ -3503,6 +3691,15 @@ Choices that agents flagged in PRs and that the builder decided because a rule a
 | 2026-11-06 | #608 | privacy | A saved reference's speech | Deleted when the reference is deleted, because references have no grace period today | Deletion means deletion | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
 | 2026-11-06 | #608 | reliability | The sweep's batch size | 500 folders per round of lookups (`BATCH_SIZE`), the same as the user purge's chunk size | Every added heuristic is named | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
 | 2026-11-06 | #608 | testing | Tests and real audio folders | An autouse fixture gives every test a scratch audio root, so no test deletes or marks anything under a real folder | Data safety first | Opus 5.5 | accepted by merge (PR #609, 2026-11-09) |
+| 2026-11-10 | #624 | UX | How text is selected in the iPhone app | Range selection with handles (a non-editable UITextView), not SwiftUI's whole-block Copy | Peter's words, "select text" (2026-11-10) | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #624 | UX | How far a selection reaches | Across a run of paragraphs, headings and lists; not into or out of code blocks, quotes, tables, checklists or other cards | Autonomy | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #624 | UX | What Copy puts on the clipboard | Plain text, no fonts or colours; list items as "•", tab, text | Autonomy | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #624 | privacy | A long press on a link | Open Link and Copy Link, with no web preview, since a preview would load pages outside the #442 link allowlist | Links open only through the allowlist (#442) | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #624 | UX | A tap on a card's text | Still opens the card (presses up to 0.45 s); a tap that only clears a selection doesn't | Autonomy | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #624 | UX | Collapsed reply cards, Log cards and the Terms screen | Stay non-selectable | Autonomy | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #624 | UX | Short rows in long lists (todo items, intention lines) | Whole-item Copy, not range selection, so those pages open as fast as before (review fix) | Latency counts as quality | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #624 | UX | Tight list items in the profile, reply-card, reference and share styles | Sit a few points further apart, closer to the web | Autonomy | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #624 | UX | Introduced constants | Card tap up to 0.45 s and 10 pt of movement; a tap outside clears the selection after 0.05 s, ignoring touches within 20 pt of the text; a tap within 4 pt of link text counts as on the link | Every added heuristic is named | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
 | 2026-11-09 | #610 | data safety | The backlog on the first run after the fix | No cap: about 30 ms per entry, so the 55-minute limit is reached only past about 100,000 entries | Every added heuristic is named | Opus 5.5 | accepted by merge (PR #618, 2026-11-09) |
 | 2026-11-09 | #610 | privacy | A deleted entry a share points at | The purge clears the share's links to it, as the "Delete all my writing" purge already does, so the entry is purged on time | Deletion | Opus 5.5 | accepted by merge (PR #618, 2026-11-09) |
 | 2026-11-09 | #610 | data safety | A restore that commits while the cleanup reaches the entry | Each entry is loaded with a row lock, so the restore finishes first and the entry keeps its text (review finding, second-tier check by the coordinating builder) | The user's edit wins | Opus 5.5 | accepted by merge (PR #618, 2026-11-09) |
@@ -3523,6 +3720,75 @@ Choices that agents flagged in PRs and that the builder decided because a rule a
 | 2026-11-09 | #581 | user-facing text | A Glean reply the provider's content filter blocked, after the merge with main | Shows the plain failure text, like every failed reply; the block's code goes only to the report. Main showed the exception's text there; a message saying the provider blocked it would be new wording for Peter | Owners never read raw exception text (#582) | Opus 5.5 | accepted by merge (PR #581, 2026-11-10) |
 | 2026-11-09 | #581 | reliability | Where #566's batch rules and main's later ones disagree | Main's: an unreadable OpenAI error file gets the batch polled again instead of its results collected, and a job's age is checked before each poll | Main's version is the later decision on the same code | Opus 5.5 | accepted by merge (PR #581, 2026-11-10) |
 | 2026-11-09 | #581 | data safety | #558's audio work, which main's #608 and #610 already do | Dropped whole, including two extras main lacks: removing a voice session's drafts folder when its entry is finalised, and the sweep script's wrong-database guard; #558's helpers would have replaced main's with a different signature | Main's versions win where #558 duplicates them | Opus 5.5 | accepted by merge (PR #581, 2026-11-10) |
+| 2026-11-10 | #622 | UX | Where Try again shows for a user without craft mode | Only under an entry whose automatic reply was tried and did not succeed (its latest reply failed or was cancelled, and no reply succeeded); never on entries with no reply, such as pre-filled tweets, imports and old entries. Narrowed by the coordinator after the review | The decision's scope, "a user whose automatic reply failed" (Peter, 2026-11-10) | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #622 | provider | The model Try again asks | The automatic reply's own request: the user's saved model, or the server's choice for any reply | A user's model is theirs | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #622 | UX | Try again with auto-generate off | Not shown: no automatic reply was asked for | The decision's scope | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #622 | UX | Try again in public threads and before a Glean thread's first picks | Not shown, as for LLM Response; public threads' owners already have LLM Response | The same situations as LLM Response | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #622 | product scope | Try again on the iPhone | Left out: the app shows no button after a failed automatic reply even in craft mode, because #561's rule never reached it | The decision covers the web's missing button; the app gets it with #561's rule | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #631 | privacy | An Agentic Reply entry set to Circles, which the text-mode start refused (#588) | Accepted through the same privacy check as other entries; the value "anonymous" is dropped | none: builder's judgement | Fable 5.2 | pending |
+| 2026-11-10 | #631 | UX | The Circles option in the writing form while Circles is off | Greyed out, on the web and the iPhone | none: builder's judgement | Fable 5.2 | pending |
+| 2026-11-10 | #626 | UX | The header of an entry in exports and prompts | Linear stretches numbered in order and a letter per branch at a branch point ([1.199], [2.2b.2]); the BRANCH line names the entry the branch replies to | Autonomy | Fable 5.2 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #626 | product scope | Which renderings take the new headers | All of them, the user's data download included | Autonomy | Fable 5.2 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #626 | UX | A quote of another entry in the same export | Refers to the quoted entry's label, or to its author and time when it is not shown as an entry | Autonomy | Fable 5.2 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #629 | product scope | How "Export data" reaches the user for a large account | The file is streamed in the same request, on one path for every account size, instead of a background job | Autonomy | Fable 5.2 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #629 | privacy | A copy of the export on the server | None is stored | Peter's answers of 2026-10-22: no extra step where an existing mechanism is enough | Fable 5.2 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #629 | UX | An email when a long export is ready | None: the browser's download list shows when the file is complete | none: builder's judgement | Fable 5.2 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #627 | UX | What users see of a carried overflow | No amounts and no new text; the cap's message names the date it lifts only when that is later than the start of next month | No new user-facing text without Peter (#543) | Fable 5.2 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #627 | cost | Which limit decides a month's carry | The limit in force at the end of the month | none: builder's judgement | Fable 5.2 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #627 | UX | How an admin sees and clears a carry | A Carried column with a clear action that asks first; a limit of 0 also clears it | none: builder's judgement | Fable 5.2 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #630 | UX | The "content deleted" bar during the 30 days | Stays on every page, as before; only its words change | none: builder's judgement | Fable 5.2 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #630 | user-facing text | The words of the bar, the dialog and the button | Peter's sentences kept, with "writing" changed to "content" | Peter, 2026-10-22: "Delete all my content" | Fable 5.2 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #630 | data safety | A profile version the user saved by hand between the request and a restore | Kept, and merged into the restored profile at the next update | The user's edit wins | Fable 5.2 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #630 | data safety | A todo list or document written between the request and a restore | No special handling: the newest stays current, and the restored versions are in the history | Peter's restore model (2026-10-22): no history rebuild | Fable 5.2 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #630 | privacy | The X bookmark connection at "Delete all my content" | Disconnected at once, with access revoked at X; a restore brings back the saved bookmarks, not the connection, and reconnecting is one approval | Peter asked for the revoke (2026-10-09) | Fable 5.2 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #623 | privacy | An import request that sends no AI usage | Gets the account's setting, as a new reply does, instead of None | Peter, 2026-09-29: a new reply falls back to the account setting; No AI means no AI | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #623 | UX | An import request that names a value (iPhone builds before the next one send "none") | Keeps the value it names | The brief: a client that sends a value keeps working | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #623 | product scope | The iPhone importer | Changed in the same PR, since the app already has the account's setting | The brief: change iOS if the setting is already there | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #626 | UX | The heading level of an entry's header | 2 along a thread's first stretch, plus one per branch point above the entry, at most 6 | Autonomy | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #626 | privacy | A reply the export leaves out (a deleted reply the user can't see) | Takes no letter and no separator, so the export doesn't show that it exists | The export's access rule: such a reply leaves no trace | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #626 | privacy | A quoted entry that is deleted, inaccessible or marked None | Never gets its author and time; keeps the export's existing placeholder texts | No AI means no AI | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #626 | privacy | A quote reference by author and time, for the training key | Not reported to the payload licence, since it carries no text of the entry | Training licence | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #627 | cost | Overflows from the months before the deploy | Not carried; the first overflow that carries is the one of the deploy's month | Peter, 2026-11-05: err towards the job going through | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #627 | UX | An admin email when the carry alone caps a user at the start of a month | None; the admin was emailed when that overflow first reached the cap | One alert per cause | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #627 | cost | The start of a month, before the hourly roll | A user can stay uncapped for a few minutes, until the roll or the check after their first new cost row | Peter, 2026-11-05: running a few dollars over the cap is fine | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #627 | cost | A month in which the user had no limit at some time | Carries nothing, also when a limit is set later in that month | Follows "a limit of 0 clears the carry" (Peter, 2026-10-22) | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #627 | user-facing text | The date the cap lifts | Shown without a year ("January 1"), as the existing toast does | none: builder's judgement | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #627 | reliability | Introduced constant | The carry roll runs at minute 7 of every hour (UTC), on the background queue | Every added heuristic is named | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #629 | UX | A download cut off part-way | No resume: the browser marks it failed and the user starts it again | Problems show | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #629 | reliability | The reverse proxy for the export path | Its own location, HTTP/1.1 to the app server without buffering, so a failure part-way shows as a failed download | Problems show | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #629 | UX | A download that can't start (signed out, server down) | A HEAD check first, then a plain message: "The export couldn't start. Please try again." | Problems show | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #629 | reliability | Introduced constants | 50 threads loaded at once; 400 data keys unwrapped ahead; a piece sent every 64 KiB or 2 s; a 1 ms pause every 50 ms of the export's work; 500 ids per query | Every added heuristic is named | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #630 | privacy | Which jobs save nothing after a content deletion | Those that read at or before the latest request; a second request moves the cut-off; a job with no recorded read time counts as before | Peter, 2026-10-22: builds based on deleted data shouldn't finish | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #630 | data safety | What a restore drops after two requests | What Loore built since the first request, which a new column records | Peter's restore model (2026-10-22) | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #630 | product scope | A content-policy block or refusal streak recorded before the request | Does not hold builds of the new writing while the deletion waits; a restore brings it back | The account works like a new one (Peter, 2026-10-22) | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #630 | user-facing text | Glean during an account deletion | "Glean is off while your account is being deleted." | none: builder's judgement | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #630 | privacy | Notifications, artifact views and blocked profile ranges at a content deletion | Not hidden at the request; the day-30 purge deletes those from before it and keeps newer ones | The purge deletes what the request covered (#415, Peter, 2026-10-13) | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #630 | privacy | A bookmark sync running when the request lands | Stops before it stores the next page, so the hidden bookmarks stay hidden | none: builder's judgement | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #630 | UX | Where the provider's batch cancels run | In a background task, so the request doesn't wait; the X revoke stays in the request | Latency counts as quality | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #630 | user-facing text | Other texts that name the action | Renamed too: the account-deletion texts on the web and the iPhone, the restore and confirm pages, the admin dialogs and the server's error messages | none: builder's judgement (the app's words follow its buttons) | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-10 | #631 | UX | Adding a person to a circle that already has shared entries | The dialog offers both: the entries already shared and new ones, or only new ones | Show the choices | Fable 5.2 | pending |
+| 2026-11-10 | #631 | privacy | Who reads the replies in a shared thread | The entry's whole audience, as in public threads | none: builder's judgement | Fable 5.2 | pending |
+| 2026-11-10 | #631 | UX | Read receipts and counts | None | Offering over performance | Fable 5.2 | pending |
+| 2026-11-10 | #631 | UX | Email about shared entries | None | none: builder's judgement | Fable 5.2 | pending |
+| 2026-11-10 | #631 | UX | Notes about shared entries | One in-app note the first time someone shares with a reader | none: builder's judgement | Fable 5.2 | corrected → entry Circles: one note to a reader the first time only |
+| 2026-11-10 | #631 | UX | A reader who wants no more entries from someone | Can stop that person's entries; the sender is not told | none: builder's judgement | Fable 5.2 | pending |
+| 2026-11-10 | #631 | privacy | Removing a person from a circle | Closes the circle's entries to them at once | Nothing leaves without your say: sharing is revocable | Fable 5.2 | pending |
+| 2026-11-10 | #631 | privacy | Shared content at rest | Encrypted like private content | none: builder's judgement | Fable 5.2 | pending |
+| 2026-11-10 | #631 | privacy | Who reads an Ask-my-AI answer | The thread's audience, as an AI reply takes its parent's privacy in public threads | The approved mockup | Fable 5.2 | pending |
+| 2026-11-10 | #631 | privacy | `{quote:ID}` and read_full of another person's shared entry in the reader's own threads | Closed to the reader's AI; the thread page still shows the reader the quote | No AI means no AI, taken strictly | Fable 5.2 | pending |
+| 2026-11-10 | #631 | privacy | Where an Ask-my-AI answer counts | Only in the thread, saved as Chat; left out of the reader's export, profile builds, recent context and search | The design: shared content never enters the reader's profile | Fable 5.2 | pending |
+| 2026-11-10 | #631 | privacy | The training key for a prompt with another person's shared writing | Never used | Training licence | Fable 5.2 | pending |
+| 2026-11-10 | #631 | UX | Replies generated on their own in a shared thread | None, for the author too: auto-generate off, the LLM Response bar instead, Voice mode hidden | Nothing leaves without your say | Fable 5.2 | pending |
+| 2026-11-10 | #631 | privacy | An AI reply made when a new shared entry is written | Not shared with the entry; the author shares replies through Edit | Nothing leaves without your say | Fable 5.2 | pending |
+| 2026-11-10 | #631 | privacy | A thread's system prompt | Never shared, since it holds the author's profile and notes | none: builder's judgement | Fable 5.2 | pending |
+| 2026-11-10 | #631 | product scope | Changing an entry's audience | Changes who reads the replies under it too | none: builder's judgement | Fable 5.2 | pending |
+| 2026-11-10 | #631 | UX | Notes when a person is added to a circle with entries already shared | One note, not one per entry; a new or newly shared entry sends one note per reader, a reply none | Calm over clever | Fable 5.2 | pending |
+| 2026-11-10 | #631 | user-facing text | The names shown for people | Loore usernames, since accounts have no separate display name | none: builder's judgement | Fable 5.2 | pending |
+| 2026-11-10 | #631 | privacy | Circles, memberships and mutes after "Delete all my writing" | Deleted after the 30 days; the shared entries close at once | The brief | Fable 5.2 | pending |
+| 2026-11-10 | #631 | privacy | An Ask-my-AI answer when the author deletes the entry | Closed at once, also to the reader who asked, and deleted with the entry; the readers' typed replies stay theirs | none: builder's judgement (the answer restates the entry) | Fable 5.2 | pending |
+| 2026-11-10 | #631 | cost | Speech for a shared entry | A reader with Voice mode may generate it when the entry allows AI, billed to the reader | The existing speech rule | Fable 5.2 | pending |
+| 2026-11-10 | #631 | UX | Default privacy on the Account page | Circles is not offered; with Circles on, the greyed option reads "Circles (chosen for each entry)" | none: builder's judgement | Fable 5.2 | pending |
+| 2026-11-10 | #631 | reliability | Introduced limits | 50 circles per user, 150 people per circle, 20 names for one entry, 60 characters per circle name; 30 entries per page of Shared with you, titles up to 80 and previews up to 160 characters | Every added heuristic is named | Fable 5.2 | pending |
 
 ## Backfilled decisions
 
@@ -4354,3 +4620,21 @@ Builder decisions listed in PRs that merged without Peter correcting them, backf
 | 2026-11-06 | #605 | UX | The ⋮ is hidden while the edit form is open, so a delete never drops a draft; after a delete the URL is replaced, not pushed | Opus 5.5 | accepted by merge (PR #605, 2026-11-06) |
 | 2026-11-06 | #605 | privacy | No name is kept after the purge, so a link to it opens an empty artifact like any unused name; the purge also deletes the kind's view pings when no live version is left | Opus 5.5 | accepted by merge (PR #605, 2026-11-06) |
 | 2026-11-06 | #605 | reliability | A repeated DELETE answers 404 with `deleted: true`, so a second device can treat it as done; the page's view ping is not sent for a deleted kind | Opus 5.5 | accepted by merge (PR #605, 2026-11-06) |
+| 2026-11-11 | #622 | UX | Guards on Try again: Same as craft mode's LLM Response: hidden while an upload's transcription is unfinished or failed, while a reply is pending or done, on AI usage None, and before the first picks of a Glean thread; disabled while a request is in flight | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-11 | #622 | UX | Craft mode's LLM Response on an upload whose transcription failed: No longer offered (review fix), so neither button sends a failed upload's placeholder to the model | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-11 | #569 | data safety | Saves with no model step between them: One round: the later save is the user's own revision of the earlier text; editing the version a merge saved replaces that merge's round, whose changes still count as newer changes for older rounds | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-11 | #569 | data safety | A revert past the newest correction: Keeps the earlier correction: a rebuild still merges the one the reverted-to version was built on | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-11 | #569 | privacy | A version that is missing, another user's or not AI-readable, when comparing rounds: Counts as empty text; only the older round's own lines are ever sent | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-11 | #569 | data safety | Rebuilds made before this change: If the user edited after one, a later rebuild merges that merged version and the new edit; if not, it walks the merged version's lineage and merges the older corrections one by one | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-11 | #623 | privacy | An import page that does not know the account's AI usage setting: The dialog starts at None | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-11 | #623 | privacy | The background import job's own fallback when it gets no AI usage: Stays None: the confirm step always passes the resolved value, and a job has no signed-in user to read a setting from | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-11 | #626 | UX | Separators under deleted and inaccessible placeholders: Also written, so the format is the same everywhere (the old code left them out only because of its recursive helpers) | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-11 | #626 | reliability | Siblings that share a timestamp: Ordered by id, so two renders of the same thread give the same labels and a byte-identical prompt prefix | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-11 | #627 | product scope | Where the carry is stored: In its own field; `current_month_spending_usd` stays the real spend, and the admin's sort and zero filters on This Month are unchanged | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-11 | #629 | privacy | Cache control on the export download: `no-store`, since it is private writing | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-11 | #629 | privacy | Data keys of replies the user cannot see during the export: No longer unwrapped (their text was never read, but their keys were unwrapped with the rest) | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-11 | #629 | reliability | The legacy export builder's deleted-thread check: Batched too: same output, faster for the unbudgeted AI exports | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-11 | #630 | privacy | When each background job's read time is taken: Before the read (batch items carry a read time, a Glean uses the time it was asked for); a job with no read time counts as read before the request, and the request time is taken again after the hide commits | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-11 | #630 | privacy | A restore and builds in flight: A restore is a second cut-off: profile steps, recent context, intentions and the digest that read during a deletion since restored are not saved, so a fresh-start build cannot replace the restored profile | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-11 | #630 | privacy | Holds during an account deletion: The account-wide hold stays for an account deletion and a purge of everything; it replaces the content hold in job gates, profile eligibility, the embedding sweep and Glean | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |
+| 2026-11-11 | #630 | data safety | What the day-30 purge of a content deletion does to new work: Leaves it alone: no reset of the profile pipeline flags, no revoking of the profile task, and it strips from the batch tables only items that read before the request; an account deletion still does all of it | Opus 5.5 | accepted by merge (PR #635, 2026-11-11) |

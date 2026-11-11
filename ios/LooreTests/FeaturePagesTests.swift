@@ -713,12 +713,37 @@ final class ImportTests: StubbedAppTestCase {
                        + "--\(boundary)\r\n\(head)\"conversations-001.json\"\r\nContent-Type: application/json\r\n\r\n[2]\r\n--\(boundary)--\r\n")
     }
 
+    /// #593 (Peter, 2026-11-10): the dialog starts at the account's AI usage
+    /// setting, again each time a dialog opens, and sends it untouched.
+    func testTheDialogOpensAtTheAccountsAIUsage() async throws {
+        let model = ImportModel(app: app)
+        XCTAssertEqual(model.aiUsage, .chat, "the test account is set to Chat")
+        model.aiUsage = .train // picked in an earlier dialog
+        StubURLProtocol.install { _ in
+            .json(200, #"{"files":[{"name":"a.md"}],"total_files":1,"total_tokens":2,"total_size":6,"errors":[]}"#)
+        }
+        let file = dir.appendingPathComponent("a.md")
+        try Data("# a".utf8).write(to: file)
+        await model.picked(file, kind: .markdown)
+        XCTAssertNotNil(model.analysis)
+        XCTAssertEqual(model.aiUsage, .chat)
+        XCTAssertEqual(model.confirmBody(model.analysis!, onDeleted: nil)["ai_usage"] as? String, "chat")
+        XCTAssertEqual(model.privacy, .private)
+
+        app.useForTesting(api: app.api, user: try decode(CurrentUser.self,
+            #"{"id":5,"username":"seowriter","approved":true,"default_ai_usage":"none"}"#))
+        XCTAssertEqual(ImportModel(app: app).aiUsage, .off)
+        app.useForTesting(api: app.api, user: try decode(CurrentUser.self,
+            #"{"id":5,"username":"seowriter","approved":true,"default_ai_usage":"train"}"#))
+        XCTAssertEqual(ImportModel(app: app).aiUsage, .train)
+    }
+
     func testConfirmBodiesPerImporter() {
         let model = ImportModel(app: app)
         let markdown = ImportAnalysis(kind: .markdown, raw: ["files": [["name": "a.md"]], "total_files": 1])
         var body = model.confirmBody(markdown, onDeleted: nil)
         XCTAssertEqual(body["privacy_level"] as? String, "private", "import defaults: private")
-        XCTAssertEqual(body["ai_usage"] as? String, "none", "import defaults: no AI")
+        XCTAssertEqual(body["ai_usage"] as? String, "chat", "import defaults: the account's AI usage (#593)")
         XCTAssertEqual(body["import_type"] as? String, "separate_nodes")
         XCTAssertEqual(body["date_ordering"] as? String, "modified")
         XCTAssertNil(body["on_deleted"])

@@ -36,7 +36,7 @@ struct CurrentUser: Decodable, Equatable, Sendable {
     var externalContentEnabled: Bool
     /// Deleting the account (#269); nil when the server has no account deletion.
     var accountDeletion: AccountDeletionInfo?
-    /// "Delete all my writing" (#268), which an account deletion replaces.
+    /// "Delete all my content" (#268), which an account deletion replaces.
     var dataDeletion: DataDeletionStatus?
     /// Inside Glean's rollout gate (#435): the web's Account shows the switch.
     var gleanAvailable: Bool

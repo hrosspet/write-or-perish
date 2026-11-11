@@ -218,7 +218,7 @@ def finalize_deleted_nodes(now=None):
     # Needs-action filter: content not yet wiped, OR no children
     # (purge-eligible). Excludes long-stable tombstones from per-day
     # re-scan.
-    # A node a "Delete all my writing" hid (#268) is the purge's: it
+    # A node a "Delete all my content" hid (#268) is the purge's: it
     # comes back whole on a restore, or the purge deletes it with
     # everything else the request hid.
     # Ids only, read in full before the loop: the loop commits per node,

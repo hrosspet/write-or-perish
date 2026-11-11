@@ -18,7 +18,7 @@ from backend.utils.timefmt import iso_utc, is_valid_timezone
 from backend.utils.privacy import VALID_PRIVACY_LEVELS, VALID_AI_USAGE
 from backend.routes.terms import CURRENT_TERMS_VERSION
 from backend.utils.reserved_usernames import validate_username
-from backend.utils.spend import user_is_capped
+from backend.utils.spend import spend_cap_payload, user_is_capped
 from backend.utils.llm_nodes import effective_preferred_model, is_chat_model
 from backend.utils.own_entries import has_own_entries
 from backend.utils.user_purge import deletion_status
@@ -78,6 +78,7 @@ def _serialize_current_user():
     would vanish from the page after the other (the Account page lost
     its deletion state after any settings change)."""
     voice_mode_enabled = current_user.has_voice_mode
+    spend_blocked = user_is_capped(current_user)
     return {
         "id": current_user.id,
         "username": current_user.username,
@@ -109,7 +110,13 @@ def _serialize_current_user():
         "timezone": current_user.timezone or "UTC",
         # Lets the client block cost actions (e.g. starting a long voice
         # recording) up front instead of after the fact (issue #85).
-        "spend_blocked": user_is_capped(current_user),
+        "spend_blocked": spend_blocked,
+        # The date (UTC) a capped user's limit lifts: the first of next
+        # month, or later while a carry over a whole month's limit holds
+        # the cap (#594). Null when not capped.
+        "spend_cap_lifts_on": (
+            spend_cap_payload(current_user)["lifts_on"]
+            if spend_blocked else None),
         # Public side (#228): enabled = deployed (env) AND the user's
         # own opt-in — every frontend surface keys off this. available
         # = deployed only; it decides whether Account shows the toggle.
@@ -143,7 +150,7 @@ def _serialize_current_user():
             current_user.profile_both_providers_answered_at),
         "profile_provider": profile_provider(current_user),
         "ask_both_providers": both_providers_ask(current_user),
-        # "Delete all my writing" (#268): a scheduled deletion shows
+        # "Delete all my content" (#268): a scheduled deletion shows
         # its date and a way to cancel on every page.
         "data_deletion": deletion_status(current_user.id),
         # "Delete my account" (#269): the numbers the Account page
@@ -376,21 +383,11 @@ def remove_email():
 
 
 def _end_bookmark_sync(user_id):
-    """End the X bookmarks connection: revoke its stored tokens at X, as
-    the purge does (user_purge.revoke_x_access), then delete it. Bookmarks
-    already saved stay. An unread "X disconnected" notice is answered by
-    this, as by a reconnect. Returns True when X confirmed every token."""
-    from backend.models import ExternalAccount, UserNotification
-    from backend.utils.user_purge import revoke_x_access
-    _, not_revoked = revoke_x_access(user_id, during="Disconnect X")
-    ExternalAccount.query.filter_by(
-        user_id=user_id, provider="twitter").delete(synchronize_session=False)
-    UserNotification.query.filter_by(
-        user_id=user_id, type="x_disconnected", status="unread").update(
-        {"status": "read", "read_at": datetime.utcnow()},
-        synchronize_session=False)
-    db.session.commit()
-    return not not_revoked
+    """End the X bookmarks connection (user_purge.end_x_bookmark_sync,
+    which "Delete all my content" uses too). Returns True when X confirmed
+    every token."""
+    from backend.utils.user_purge import end_x_bookmark_sync
+    return end_x_bookmark_sync(user_id, during="Disconnect X")
 
 
 @dashboard_bp.route("/x", methods=["DELETE"])

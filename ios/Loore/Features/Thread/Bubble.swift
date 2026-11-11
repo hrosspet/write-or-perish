@@ -147,6 +147,7 @@ struct BubbleView: View {
                 placeholderLine("[Node inaccessible]")
             } else if expanded, let content = data.content {
                 MarkdownView(markdown: BubblePreview.stripQuoteMarkers(content), style: .bubble)
+                    .readingTextTap(onOpen)
                     .padding(.bottom, 9.6)
             } else {
                 Text(heading)

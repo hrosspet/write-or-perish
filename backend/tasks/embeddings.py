@@ -33,7 +33,7 @@ from backend.utils.embeddings import (
 from backend.utils.privacy import (
     AI_ALLOWED, answers_may_exist, others_thread_answer_filter)
 
-from backend.utils.hidden_rows import hidden_ids, on_hold_user_ids
+from backend.utils.hidden_rows import account_on_hold_user_ids, hidden_ids
 
 logger = get_task_logger(__name__)
 
@@ -83,9 +83,10 @@ def _candidate_nodes(limit):
             Node.content != "",
             Node.ai_usage.in_(AI_ALLOWED),
             User.default_ai_usage.in_(AI_ALLOWED),
-            # Writing on hold for deletion (#268): nothing new is
-            # embedded until a restore or the purge.
-            ~User.id.in_(on_hold_user_ids()),
+            # An account being deleted (#269): nothing new is embedded.
+            # The nodes a "Delete all my content" hid are soft-deleted,
+            # so they are left out above (#590).
+            ~User.id.in_(account_on_hold_user_ids()),
             # Circles: an "Ask my AI" answer in someone else's shared
             # thread is written from their entry; it never enters the
             # reader's search index.
@@ -139,7 +140,7 @@ def _candidate_external_items(limit):
         .join(User, User.id == ExternalItem.user_id)
         .filter(ExternalItemEmbedding.id.is_(None),
                 User.default_ai_usage.in_(AI_ALLOWED),
-                ~User.id.in_(on_hold_user_ids()),   # #268
+                ~User.id.in_(account_on_hold_user_ids()),   # #269
                 # A Read pick nobody saved is not a reference (#352).
                 ExternalItem.saved())
         .order_by(ExternalItem.id.desc())
@@ -214,7 +215,7 @@ def sweep(limit=SWEEP_BATCH_SIZE):
         return {"status": "skipped", "reason": "no_api_key"}
 
     # Remove embeddings of deleted / opted-out nodes. A node hidden by
-    # a waiting "Delete all my writing" keeps its embedding (#268): a
+    # a waiting "Delete all my content" keeps its embedding (#268): a
     # restore brings it back as it was, without decrypting and
     # embedding it again; the purge deletes both.
     stale = (

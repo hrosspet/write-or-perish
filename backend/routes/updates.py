@@ -258,7 +258,7 @@ def _get_active_poll(poll_id):
 
 
 def _get_or_create_response(poll):
-    # An answer "Delete all my writing" hid is replaced by the new one
+    # An answer "Delete all my content" hid is replaced by the new one
     # (#268): the poll's unique key would refuse a second row.
     from backend.utils.hidden_rows import drop_hidden_poll_response
     drop_hidden_poll_response(poll.id, current_user.id)

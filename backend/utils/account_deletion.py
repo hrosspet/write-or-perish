@@ -18,7 +18,7 @@ Scheduling (``schedule_account_deletion``) hides the account at once
 invalidated, the public pages answer 404, other members see its public
 writing as deleted, and no background job runs for it. The deletion is
 a ``UserDataPurge`` job with ``delete_account``, due after the grace
-period. A waiting "Delete all my writing" request of the user (theirs
+period. A waiting "Delete all my content" request of the user (theirs
 or an admin's) becomes this job; what it was is kept in
 ``UserDataPurge.replaced``.
 
@@ -323,7 +323,7 @@ def _own_legacy_ai_replies(user_id):
 def schedule_account_deletion(user, *, requested_by_id, source, at=None):
     """Hide the account and schedule its deletion, due at *at* (default:
     after the grace period, for the user's own request and an admin's
-    alike). A waiting "Delete all my writing" of the user (theirs or an
+    alike). A waiting "Delete all my content" of the user (theirs or an
     admin's) becomes this job, and what it was is kept in ``replaced``.
     Returns the job. Raises AccountDeletionRefused, also when the account
     deletion is already waiting (an admin's request does not move the
@@ -360,7 +360,7 @@ def schedule_account_deletion(user, *, requested_by_id, source, at=None):
         job = UserDataPurge(user_id=user.id, status="scheduled")
         db.session.add(job)
     else:
-        # The waiting "Delete all my writing" this job replaces, so an
+        # The waiting "Delete all my content" this job replaces, so an
         # admin's Undo of the account deletion can put it back as it was.
         job.replaced = {
             "source": job.source,
@@ -393,11 +393,11 @@ def restore_account(user):
     once the deletion has started (it can no longer be undone). The
     cancel is a conditional update on the job's status, so a restore and
     the beat's claim have one winner. If the deletion replaced a "Delete
-    all my writing", the writing that request hid is shown again too
+    all my content", the writing that request hid is shown again too
     (restoring cancels both)."""
     if user.deleted_at is None:
         return True
-    # A "Delete all my writing" this deletion replaced is cancelled with
+    # A "Delete all my content" this deletion replaced is cancelled with
     # it, and the writing it hid comes back, in the same transaction.
     cancelled = user_purge.cancel_jobs(
         UserDataPurge.user_id == user.id,
@@ -408,6 +408,7 @@ def restore_account(user):
         return False
     user.deleted_at = None
     db.session.commit()
+    user_purge.settle_restore(cancelled)
     _drop_public_pages(user)
     logger.warning("Account of user %s restored", user.id)
     return True
@@ -417,7 +418,7 @@ def undo_admin_deletion(job_id, admin_id):
     """The admin's Undo of an admin's waiting account deletion: the
     account is shown again, as the user's restore after signing in does.
 
-    If the deletion replaced a waiting "Delete all my writing"
+    If the deletion replaced a waiting "Delete all my content"
     (``replaced``), that request is put back (its source, requester,
     scope and request date): the writing it hid stays hidden, and if the
     request was the user's own, only the user can restore it. Its due
@@ -455,12 +456,15 @@ def undo_admin_deletion(job_id, admin_id):
             UserDataPurge.replaced: null(),
         }, synchronize_session=False)
     else:
-        n = len(user_purge.cancel_jobs(*waiting, cancelled_by_id=admin_id))
+        cancelled = user_purge.cancel_jobs(*waiting, cancelled_by_id=admin_id)
+        n = len(cancelled)
     if not n:
         db.session.rollback()
         return False
     user.deleted_at = None
     db.session.commit()
+    if not replaced:
+        user_purge.settle_restore(cancelled)
     _drop_public_pages(user)
     logger.warning("Admin %s undid the deletion of account %s (job %s%s)",
                    admin_id, user.id, job_id,
@@ -497,7 +501,7 @@ def restore_offer(user):
         "username": user.username,
         "delete_on": iso_utc(job.scheduled_for) if job else None,
         "restorable": not _deletion_started(user.id),
-        # The deletion replaced a "Delete all my writing" whose writing is
+        # The deletion replaced a "Delete all my content" whose writing is
         # still hidden: a restore brings that writing back too (#268).
         "writing_comes_back": job is not None and db.session.query(
             UserDataPurgeHidden.id).filter(

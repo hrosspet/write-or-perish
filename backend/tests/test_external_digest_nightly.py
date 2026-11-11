@@ -369,25 +369,29 @@ def test_account_opted_out_of_ai_gets_no_digest(app, monkeypatch):
     assert calls == []
 
 
-def _hold_writing(user):
-    """A waiting "Delete all my writing" of *user* (#268)."""
+def _hold_writing(user, account=False, at=None):
+    """A waiting "Delete all my content" of *user* (#590), requested at
+    *at*, or with *account* an account deletion (#269)."""
     from backend.models import UserDataPurge
-    job = UserDataPurge(user_id=user.id, source="self", scope="hidden",
-                        status="scheduled", scheduled_for=datetime.utcnow())
+    at = at or datetime.utcnow()
+    job = UserDataPurge(user_id=user.id, source="self",
+                        scope="all" if account else "hidden",
+                        delete_account=account, status="scheduled",
+                        requested_at=at, first_requested_at=at,
+                        scheduled_for=at + timedelta(days=30))
     _db.session.add(job)
     _db.session.commit()
     return job
 
 
-def test_no_digest_while_the_writing_is_on_hold(app, monkeypatch):
-    """#268: while "Delete all my writing" waits, neither the nightly
-    sweep nor a manual rebuild builds a digest, and a batch result that
-    arrives meanwhile is not saved (its cost is logged)."""
+def test_no_digest_while_the_account_is_deleted(app, monkeypatch):
+    """#269: while an account deletion waits, neither the nightly sweep
+    nor a manual rebuild builds a digest."""
     user = User.query.first()
     user.timezone = _tz_at_hour(_digest.NIGHTLY_DIGEST_LOCAL_HOUR)
     _db.session.commit()
     _mk_item(user.id, "clip")
-    hold = _hold_writing(user)
+    hold = _hold_writing(user, account=True)
     submitted = _stub_batch_submit(monkeypatch)
     calls = _stub_llm(monkeypatch)
 
@@ -402,21 +406,69 @@ def test_no_digest_while_the_writing_is_on_hold(app, monkeypatch):
     _db.session.commit()
     _digest.sweep_external_digests()
     assert len(submitted) == 1
-    ExternalDigestBatchJob.query.delete()
-    hold.status = "scheduled"
-    _db.session.commit()
 
-    corpus_at = datetime.utcnow()
-    job = _pending_job(user, corpus_at, batch_id="batch_held")
+
+def test_a_digest_read_during_a_restored_deletion_is_not_saved(
+        app, monkeypatch):
+    """Review of #630, finding 1: a digest rendered during a deletion (the
+    references saved since only) and collected after the restore is not
+    saved; its cost is logged."""
+    user = User.query.first()
+    _mk_item(user.id, "clip")
+    asked = datetime.utcnow() - timedelta(minutes=10)
+    hold = _hold_writing(user, at=asked)
+    hold.status = "cancelled"
+    hold.cancelled_at = datetime.utcnow()
+    _db.session.commit()
+    job = _pending_job(user, asked + timedelta(minutes=1),
+                       batch_id="batch_restored")
     monkeypatch.setattr(_digest, "batch_check_and_collect", lambda ids, k: (
         {f"external-digest-{user.id}": {
-            "content": "# Topics\n- from hidden writing", "input_tokens": 10,
-            "output_tokens": 5}}, {}, {}))
+            "content": "# Topics\n- from the new references only",
+            "input_tokens": 10, "output_tokens": 5}}, {}, {}))
     _digest._collect_digest_batches()
-    assert UserArtifact.latest_for(user.id, _digest.DIGEST_KIND) is None
-    assert APICostLog.query.count() == 1
     _db.session.expire_all()
     assert ExternalDigestBatchJob.query.get(job.id).status == "collected"
+    assert UserArtifact.latest_for(user.id, _digest.DIGEST_KIND) is None
+    assert APICostLog.query.count() == 1
+
+
+def test_a_content_deletion_drops_only_a_digest_read_before_it(
+        app, monkeypatch):
+    """#590: "Delete all my content" does not hold the digest (the
+    references it hid are left out of what the sweep reads). A batch
+    result rendered before the request is not saved, and its cost is
+    logged; one rendered after it is saved."""
+    user = User.query.first()
+    user.timezone = _tz_at_hour(_digest.NIGHTLY_DIGEST_LOCAL_HOUR)
+    _db.session.commit()
+    _mk_item(user.id, "clip")
+    requested = datetime.utcnow() - timedelta(minutes=5)
+    _hold_writing(user, at=requested)
+    submitted = _stub_batch_submit(monkeypatch)
+    _stub_llm(monkeypatch)
+    _digest.sweep_external_digests()
+    assert len(submitted) == 1
+    ExternalDigestBatchJob.query.delete()
+    _db.session.commit()
+
+    def collect(corpus_at, batch_id):
+        job = _pending_job(user, corpus_at, batch_id=batch_id)
+        monkeypatch.setattr(_digest, "batch_check_and_collect",
+                            lambda ids, k: ({f"external-digest-{user.id}": {
+                                "content": "# Topics\n- something",
+                                "input_tokens": 10, "output_tokens": 5}},
+                                {}, {}))
+        _digest._collect_digest_batches()
+        _db.session.expire_all()
+        assert ExternalDigestBatchJob.query.get(job.id).status == "collected"
+
+    collect(requested - timedelta(minutes=1), "batch_before")
+    assert UserArtifact.latest_for(user.id, _digest.DIGEST_KIND) is None
+    assert APICostLog.query.count() == 1
+    collect(datetime.utcnow(), "batch_after")
+    assert UserArtifact.latest_for(user.id, _digest.DIGEST_KIND) is not None
+    assert APICostLog.query.count() == 2
 
 
 def _pending_job(user, corpus_at, provider_key="anthropic",

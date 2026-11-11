@@ -666,21 +666,28 @@ def test_a_result_for_an_account_opted_out_meanwhile_is_billed_not_saved(
     assert _job_for(user)[0].items[0]["outcome"] == "skipped"
 
 
-def _hold_writing(user):
-    """A waiting "Delete all my writing" of *user* (#268)."""
-    from datetime import datetime
+def _hold_writing(user, account=False):
+    """A waiting "Delete all my content" of *user* (#590), or with
+    *account* an account deletion (#269)."""
+    from datetime import datetime, timedelta
     from backend.models import UserDataPurge
-    job = UserDataPurge(user_id=user.id, source="self", scope="hidden",
-                        status="scheduled", scheduled_for=datetime.utcnow())
+    now = datetime.utcnow()
+    job = UserDataPurge(user_id=user.id, source="self",
+                        scope="all" if account else "hidden",
+                        delete_account=account, status="scheduled",
+                        requested_at=now, first_requested_at=now,
+                        scheduled_for=now + timedelta(days=30))
     _db.session.add(job)
     _db.session.commit()
     return job
 
 
-def test_no_summary_while_the_writing_is_on_hold(app, rc, world, monkeypatch):
-    """#268: "Delete all my writing" hid the writing while the batch ran:
-    the result is billed and not saved; no new request goes out, and the
-    direct path builds nothing either."""
+def test_a_summary_read_before_a_content_deletion_is_not_saved(
+        app, rc, world, monkeypatch):
+    """#590: "Delete all my content" came after the batch request read the
+    writing: the result is billed and not saved. The account is not on
+    hold: the next check sends a request again (it reads only what is
+    not hidden, the writing since), and the direct path runs and saves."""
     user = _user("hidden-meanwhile")
     _check(rc)
     hold = _hold_writing(user)
@@ -692,13 +699,55 @@ def test_no_summary_while_the_writing_is_on_hold(app, rc, world, monkeypatch):
 
     world["submitted"].clear()
     _check(rc)
+    assert world["submitted"] != []
+    calls = []
+
+    def completion(*a, **k):
+        calls.append(a)
+        return {"content": "A FRESH SUMMARY", "input_tokens": 10,
+                "output_tokens": 5, "total_tokens": 15}
+    monkeypatch.setattr(rc.LLMProvider, "get_completion",
+                        staticmethod(completion))
+    rc._generate_recent_context_impl(user.id)
+    assert len(calls) == 1
+    assert _shown_summary(user).endswith("A FRESH SUMMARY")
+    assert hold.status == "scheduled"
+
+
+def test_a_summary_read_during_a_restored_deletion_is_not_saved(
+        app, rc, world, monkeypatch):
+    """Review of #630, finding 1: the summary was read during a deletion
+    (the new writing only) and collected after the restore. The restored
+    content is back, so it is not saved; its cost row is written."""
+    from datetime import datetime, timedelta
+    user = _user("restored-meanwhile")
+    _check(rc)
+    hold = _hold_writing(user)
+    hold.first_requested_at = hold.requested_at = (
+        datetime.utcnow() - timedelta(minutes=5))
+    hold.status = "cancelled"
+    hold.cancelled_at = datetime.utcnow() + timedelta(seconds=1)
+    _db.session.commit()
+
+    _collect_with(rc, monkeypatch, _summary(user))
+    assert UserRecentContext.query.count() == 0
+    assert APICostLog.query.count() == 1
+    assert _job_for(user)[0].items[0]["outcome"] == "skipped"
+
+
+def test_no_summary_while_the_account_is_deleted(app, rc, world, monkeypatch):
+    """An account deletion (#269) still holds everything: no new request
+    goes out, and the direct path builds nothing."""
+    user = _user("account-deleted")
+    _hold_writing(user, account=True)
+    world["submitted"].clear()
+    _check(rc)
     assert world["submitted"] == []
     calls = []
     monkeypatch.setattr(rc.LLMProvider, "get_completion",
                         staticmethod(lambda *a, **k: calls.append(a)))
     rc._generate_recent_context_impl(user.id)
     assert calls == []
-    assert hold.status == "scheduled"
 
 
 def test_a_result_older_than_the_saved_summary_is_not_saved(

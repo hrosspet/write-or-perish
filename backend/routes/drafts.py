@@ -1603,9 +1603,9 @@ def save_streaming_as_node(session_id):
         # The entry (and its audio) is already saved above: the user's
         # writing is never blocked by the cap or by a placeholder error,
         # only the reply is skipped — same stance as /textmode/start.
-        from backend.utils.spend import user_is_capped
+        from backend.utils.spend import spend_capped_fields, user_is_capped
         if user_is_capped(current_user):
-            response["spend_capped"] = True
+            response.update(spend_capped_fields(current_user))
         else:
             from backend.utils.llm_nodes import create_llm_placeholder
             from backend.utils.placeholders import UserExportValidationError

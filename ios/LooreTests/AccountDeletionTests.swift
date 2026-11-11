@@ -69,7 +69,7 @@ final class DeleteAccountModelTests: AccountDeletionTestCase {
         try signIn(["data_deletion": ["status": "scheduled", "purge_at": "2026-10-20T08:00:00Z", "x_connected": true]])
         let paragraphs = model().dialogParagraphs
         XCTAssertEqual(paragraphs.count, 5)
-        XCTAssertEqual(paragraphs[3], "This replaces your request to delete all your writing: everything is deleted forever on \(deleteDate) instead. If you restore your account, your writing comes back too.")
+        XCTAssertEqual(paragraphs[3], "This replaces your request to delete all your content: everything is deleted forever on \(deleteDate) instead. If you restore your account, your content comes back too.")
         XCTAssertTrue(paragraphs[4].hasPrefix("Loore also forgets your X connection for bookmarks and removes its access on X. If X still lists Loore afterwards, remove it yourself: on X, open Settings and privacy"))
         try signIn(["data_deletion": ["status": "done", "purge_at": "2026-10-01T08:00:00Z", "x_connected": false]])
         XCTAssertEqual(model().dialogParagraphs.count, 3, "a finished writing deletion is not replaced")
@@ -192,7 +192,7 @@ final class ConfirmAccountDeletionModelTests: AccountDeletionTestCase {
             "status": "scheduled", "purge_at": "2026-11-01T08:00:00Z", "restorable": true]])
         let model = ConfirmAccountDeletionModel(app: app, token: "tok123")
         model.now = { pinnedNow }
-        XCTAssertTrue(model.message.hasSuffix("with everything in it. If you restore your account, the writing you deleted comes back too."))
+        XCTAssertTrue(model.message.hasSuffix("with everything in it. If you restore your account, the content you deleted comes back too."))
     }
 
     func testConfirmingPostsTheTokenAndSignsOut() async throws {
@@ -305,13 +305,13 @@ final class AccountRestoreTests: AccountDeletionTestCase {
         XCTAssertEqual(model.message, "You deleted @seowriter. You can restore it until \(date); after that it is deleted forever, with everything in it. Restore it to keep using Loore, or keep it deleted.")
     }
 
-    /// #268 rework: the deletion replaced a "Delete all my writing" whose
-    /// writing is still hidden; the restore brings it back too.
+    /// #268 rework: the deletion replaced a "Delete all my content" whose
+    /// content is still hidden; the restore brings it back too.
     func testTheOfferSaysTheDeletedWritingComesBack() async throws {
         StubURLProtocol.install { _ in .json(200, #"{"username":"seowriter","delete_on":"2026-11-08T12:00:00Z","restorable":true,"writing_comes_back":true}"#) }
         let model = restoring()
         await model.load()
-        XCTAssertTrue(model.message.hasSuffix("Restore it to keep using Loore, or keep it deleted. Restoring it also brings back the writing you deleted."))
+        XCTAssertTrue(model.message.hasSuffix("Restore it to keep using Loore, or keep it deleted. Restoring it also brings back the content you deleted."))
     }
 
     func testAStartedDeletionCannotBeUndone() async throws {

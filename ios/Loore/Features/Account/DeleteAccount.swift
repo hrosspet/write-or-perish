@@ -77,8 +77,8 @@ final class DeleteAccountModel {
                 + "\(info?.usernameReserveDays ?? 365) days.",
         ]
         if user?.dataDeletion?.scheduledWritingDeletion != nil {
-            paragraphs.append("This replaces your request to delete all your writing: everything is deleted forever "
-                + "on \(date) instead. If you restore your account, your writing comes back too.")
+            paragraphs.append("This replaces your request to delete all your content: everything is deleted forever "
+                + "on \(date) instead. If you restore your account, your content comes back too.")
         }
         if let xNote = Self.xNote(xConnected: user?.dataDeletion?.xConnected == true, info: info) {
             paragraphs.append(xNote)
@@ -332,7 +332,7 @@ final class ConfirmAccountDeletionModel {
         let message = "When you confirm, your account is deleted and you are signed out everywhere. If you change your "
             + "mind, you can still restore it by signing in until \(date); after that it is deleted forever, with everything in it."
         guard app.user?.dataDeletion?.writingRestorable == true else { return message }
-        return message + " If you restore your account, the writing you deleted comes back too."
+        return message + " If you restore your account, the content you deleted comes back too."
     }
 
     /// The error line; for another account's link it says whose session this is.

@@ -22,7 +22,9 @@ export const UserProvider = ({ children }) => {
         setLoading(false);
         // Remember an already-capped user so cost actions (e.g. starting a
         // voice recording) can be blocked up front this session (issue #85).
-        if (fetchedUser?.spend_blocked) markSpendBlocked();
+        if (fetchedUser?.spend_blocked) {
+          markSpendBlocked(fetchedUser.spend_cap_lifts_on);
+        }
 
         // Persist the browser timezone so the LLM context can render absolute
         // local-time stamps (#130). Only PATCH when it differs from what the

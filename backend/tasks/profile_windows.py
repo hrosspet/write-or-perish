@@ -96,7 +96,9 @@ from backend.utils.chunk_plan import (
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.error_privacy import describe_exception
 from backend.utils.heavy_slot import HeavyTask
-from backend.utils.hidden_rows import WritingOnHold, writing_on_hold
+from backend.utils.hidden_rows import (
+    ReadBeforeDeletion, account_on_hold, item_read_at,
+)
 from backend.utils.llm_batch import apply_batch_key_override, blocked_items
 from backend.utils.privacy import AI_ALLOWED, account_allows_ai
 from backend.utils.profile_versions import (
@@ -721,6 +723,8 @@ class MergePlan:
     user_version: object = None
     waiting: bool = False                            # something in flight
     nothing_read: bool = False                       # every input skipped
+    older_versions: list = field(default_factory=list)  # #421: ids
+    _sent: list = None                               # final_inputs_to_send
 
 
 def _group_size():
@@ -742,7 +746,8 @@ def user_version_for(user, set_id, windows):
     the newest AI-readable version the user wrote (or reverted to) after
     the set started, else the version a rebuild still has to merge
     (User.profile_pending_merge_id, #183), else the one the set's last
-    final merged. None when there is none."""
+    final merged. None when there is none. The older rounds of edits it
+    carries are merged before it (``final_user_versions``, #421)."""
     started = _set_started_at(windows)
     if started is not None:
         newest = UserProfile.query.filter(
@@ -786,16 +791,58 @@ def set_superseded(user, set_id, final=None):
         user, final.created_at) is not None
 
 
-def _with_user_version(inputs, version, base):
-    """``inputs`` (by cutoff) with the user's version placed at its date
-    (exports.merge_date): after every input whose cutoff is not later."""
+def final_user_versions(version, base):
+    """The versions of the user's a set's final merges, oldest first:
+    the rounds of the user's edits ``version`` carries that the set's
+    ``base`` does not already hold (exports.user_versions_to_merge, #421),
+    then ``version`` (``user_version_for``) itself, unless it is the base.
+    Metadata only."""
     if version is None or (base is not None and version.id == base.id):
-        return list(inputs)
-    key = _exports.merge_date(version)
-    at = sum(1 for p in inputs
-             if p.source_data_cutoff is not None and key is not None
-             and p.source_data_cutoff <= key)
-    return list(inputs[:at]) + [version] + list(inputs[at:])
+        return []
+    older = [v for v in _exports.user_versions_to_merge(version, base)
+             if v.id != version.id]
+    return older + [version]
+
+
+def _with_user_versions(inputs, versions):
+    """``inputs`` (by cutoff) with each of the user's ``versions`` (oldest
+    first) placed at its date (exports.merge_date): after every input
+    whose cutoff is not later, and never before an older one of them."""
+    at, places = 0, []
+    for version in versions:
+        key = _exports.merge_date(version)
+        at = max(at, sum(1 for p in inputs
+                         if p.source_data_cutoff is not None
+                         and key is not None and p.source_data_cutoff <= key))
+        places.append(at)
+    out = []
+    for i, p in enumerate(list(inputs) + [None]):
+        out += [v for v, place in zip(versions, places) if place == i]
+        if p is not None:
+            out.append(p)
+    return out
+
+
+def final_inputs_to_send(plan):
+    """The final's inputs as the merge reads them: each older round of the
+    user's edits without the lines a newer round changed, and left out when
+    none of its own changes is left (exports.user_merge_input; Peter,
+    2026-11-10: option (c)). Decrypts those rounds, so it runs only when
+    the final goes out, not when ``merge_plan`` is asked whether it is
+    due. Once per plan."""
+    if plan.final_inputs is None:
+        return None
+    if plan._sent is None:
+        older = set(plan.older_versions)
+        sent = []
+        for p in plan.final_inputs:
+            if p.id in older:
+                p = _exports.user_merge_input(p, plan.user_version)
+                if p is None:
+                    continue
+            sent.append(p)
+        plan._sent = sent
+    return plan._sent
 
 
 def merge_plan(user, state, grouped=None):
@@ -864,17 +911,26 @@ def merge_plan(user, state, grouped=None):
                           and state.base.ai_usage in AI_ALLOWED) else None
     version = user_version_for(user, state.set_id, windows)
     inputs = ([base] if base is not None else []) + mid
-    inputs = _with_user_version(inputs, version, base)
-    if all(p.generation_type == "window_skip" for p in inputs):
+    newest = ([] if version is None
+              or (base is not None and version.id == base.id) else [version])
+    if all(p.generation_type == "window_skip" for p in inputs + newest):
         plan.nothing_read = True
         return plan
     tip = windows[-1]
+    # The older rounds of the user's edits are older than ``version``, so
+    # the version alone tells whether the final is current.
     if (final is not None and final.parent_profile_id == tip.id
             and final.merged_profile_id == (version.id if version else None)
-            and all(final.created_at > p.created_at for p in inputs)):
+            and all(final.created_at > p.created_at
+                    for p in inputs + newest)):
         return plan
-    plan.final_inputs = inputs
+    # #421: every round of the user's edits the version carries, each at its
+    # date; the older ones are read reduced when the final goes out
+    # (final_inputs_to_send).
+    users = final_user_versions(version, base)
+    plan.final_inputs = _with_user_versions(inputs, users)
     plan.user_version = version
+    plan.older_versions = [v.id for v in users[:-1]]
     return plan
 
 
@@ -1012,14 +1068,15 @@ def estimate_cost_usd(user, state, models, plan_windows, plan=None):
     return cost / 1e6
 
 
-def _hold(user, needed=None, spent=None, limit=None):
+def _hold(user, needed=None, spent=None, limit=None, carried=0):
     """Hold the set's next submission: the user is over their monthly
     limit (the spend cap), or, with ``needed``, the windows due and the
     merges after them are estimated at more than what is left of the limit.
     Nothing is submitted; the hourly seeder resumes the set once there is
     room (profile_cap_held: the month turns or the admin raises the limit).
     What is in flight is collected and saved meanwhile. A wait on the
-    estimate says so in the admin Profile column, with the amount."""
+    estimate says so in the admin Profile column, with the amount; ``spent``
+    includes ``carried``, the overflow of earlier months (#594)."""
     _batch._hold_for_cap(user)
     if needed is None:
         logger.warning("User %s: spend-capped; no profile window step",
@@ -1027,27 +1084,34 @@ def _hold(user, needed=None, spent=None, limit=None):
         return "held"
     note = (f"{HOLD_NOTE}: the build needs about ${needed:.2f}; "
             f"${spent:.2f} of ${limit:.2f} used this month")
+    if carried:
+        note += f" (${carried:.2f} carried over)"
     first = not (user.profile_seed_error or "").startswith(HOLD_NOTE)
     user.profile_seed_error = note[:255]
     db.session.commit()
     (logger.error if first else logger.info)(
         "User %s: profile build waits: needs about $%.2f, $%.2f of $%.2f "
-        "used this month", user.id, needed, spent, limit)
+        "used this month, $%.2f of it carried over", user.id, needed, spent,
+        limit, carried)
     return "held"
 
 
 def _short_of_headroom(user, estimate):
-    """(spent, limit) in dollars when ``estimate`` does not fit into what
-    is left of the user's monthly spend limit this month, else None. A user
-    with no limit (0) is never short."""
+    """(counted, limit, carried) in dollars when ``estimate`` does not fit
+    into what is left of the user's monthly spend limit this month, else
+    None. What is left is the limit less this month's spend and the carry
+    from earlier months (#594). A user with no limit (0) is never short."""
     from backend.utils.spend import (
-        get_user_month_spend_microdollars, get_user_spend_limit_usd)
-    limit = get_user_spend_limit_usd(user, current_app.config) or 0
+        get_user_month_spend_microdollars, get_user_spend_limit_usd,
+        rolled_spend_carry)
+    config = current_app.config
+    limit = get_user_spend_limit_usd(user, config) or 0
     if limit <= 0:
         return None
-    spent = get_user_month_spend_microdollars(user.id) / 1e6
-    if estimate > limit - spent:
-        return spent, limit
+    carried = rolled_spend_carry(user, config) / 1e6
+    counted = carried + get_user_month_spend_microdollars(user.id) / 1e6
+    if estimate > limit - counted:
+        return counted, limit, carried
     return None
 
 
@@ -1115,6 +1179,9 @@ class _Submission:
     PROFILE_BATCH_MAX_BYTES, every slice in the same run."""
 
     def __init__(self, keys, providers, recheck=None, own=None):
+        # When the pass began reading (next_work sets it before its
+        # first read).
+        self.read_at = datetime.utcnow()
         self.keys = keys
         # The providers this user's writing may reach in this pass.
         self.providers = set(providers)
@@ -1531,12 +1598,13 @@ def _merge_requests(user, state, models, sub, keys, history):
     if plan.final_inputs is not None and _structure() == "flat":
         if not sub.may_reach(provider, user.id):
             return False
-        messages = _merge_messages(user, plan.final_inputs)
+        messages = _merge_messages(user, final_inputs_to_send(plan))
         over, tokens = merge_over_cap(models.merge, messages, keys)
         if over:
             logger.info("User %s: a flat merge of %d versions is %s tokens, "
                         "over %s's cap; merging in groups", user.id,
-                        len(plan.final_inputs), tokens, models.merge)
+                        len(final_inputs_to_send(plan)), tokens,
+                        models.merge)
             plan = merge_plan(user, state, grouped=True)
     base_id = state.base.id if state.base is not None else None
     windows = state.windows
@@ -1574,6 +1642,7 @@ def _merge_requests(user, state, models, sub, keys, history):
             "cumulative": last.source_tokens_used,
             "origin_stats": last.source_origin_stats,
             "parent_id": last.id, "model_id": models.merge,
+            "read_at": _iso(sub.read_at),
         })
     if plan.final_inputs is None:
         return False
@@ -1583,7 +1652,8 @@ def _merge_requests(user, state, models, sub, keys, history):
         return False
     if not sub.may_reach(provider, user.id):
         return False
-    messages = _merge_messages(user, plan.final_inputs)
+    inputs = final_inputs_to_send(plan)
+    messages = _merge_messages(user, inputs)
     over, tokens = merge_over_cap(models.merge, messages, keys)
     if over:
         _stop_merge(user, "final", state.set_id, tokens, models.merge)
@@ -1595,10 +1665,10 @@ def _merge_requests(user, state, models, sub, keys, history):
         "custom_id": cid, "user_id": user.id, "kind": "final",
         "set": state.set_id, "base_id": base_id, "attempt": attempt,
         "start": None, "cutoff": _iso(tip.source_data_cutoff),
-        "tip_id": tip.id, "inputs": [p.id for p in plan.final_inputs],
+        "tip_id": tip.id, "inputs": [p.id for p in inputs],
         "user_version_id": (plan.user_version.id
                             if plan.user_version is not None else None),
-        "built_at": _iso(datetime.utcnow()),
+        "built_at": _iso(sub.read_at),
         "cumulative": tip.source_tokens_used,
         "origin_stats": tip.source_origin_stats, "model_id": models.merge,
     })
@@ -1614,6 +1684,11 @@ def next_work(user, keys, deadline, wait_for_imports=True):
     content-policy block of a group or final stops the account's build) or
     "failed"."""
     run_locks.beat()
+    # Before anything of the user's is read: the read time of the groups
+    # and the final this pass builds (#590, review of #630). A "Delete all
+    # my content" after it drops them; a version the user saves after it
+    # supersedes the final.
+    read_at = datetime.utcnow()
     code = _policy_blocked(user)
     if code:
         # A blocked group or final (a blocked window is skipped instead):
@@ -1716,6 +1791,7 @@ def next_work(user, keys, deadline, wait_for_imports=True):
                 len(state.windows_in_flight), len(state.due),
                 plan_windows[0], estimate)
     sub = _Submission(keys, providers, recheck, own=models.provider)
+    sub.read_at = read_at
     outcome = None
     if state.due:
         outcome = _render_windows(user, state, models, sub, history,
@@ -2094,7 +2170,7 @@ def advance(user_id, task_id, wait_for_imports=True):
     lost = False
     try:
         with run_locks.holding(lock):
-            if not account_allows_ai(user) or writing_on_hold(user_id):
+            if not account_allows_ai(user) or account_on_hold(user_id):
                 outcome = "off"
             else:
                 cfg = current_app.config
@@ -2258,7 +2334,8 @@ def _collect_window(user, item, result, job, history, template, notes,
         window_set=item["set"], covers_start=start,
         date_line_start=(None if chained
                          else start or _dt(item.get("earliest"))),
-        date_line_tokens=None if chained else item.get("units"))
+        date_line_tokens=None if chained else item.get("units"),
+        read_at=item_read_at(item))
     _exports.record_token_ratio(user, item["model_id"], item.get("units"),
                                 response.get("input_tokens"))
     if item.get("base_id") is None and user.profile_needs_full_regen:
@@ -2315,7 +2392,8 @@ def _collect_merge(user, item, result, job, gen_template, history, notes):
                 source_origin_stats=item.get("origin_stats"),
                 window_set=item["set"], covers_start=start,
                 date_line_start=_dt(item.get("start_day")),
-                date_line_tokens=item.get("units"))
+                date_line_tokens=item.get("units"),
+                read_at=item_read_at(item))
         user.profile_batch_attempts = 0
         db.session.commit()
         return "saved"
@@ -2339,7 +2417,8 @@ def _collect_merge(user, item, result, job, gen_template, history, notes):
         source_tokens_used=item.get("cumulative"), source_data_cutoff=cutoff,
         generation_type="integration", parent_profile_id=item.get("tip_id"),
         batch=True, source_origin_stats=item.get("origin_stats"),
-        merged_profile_id=version_id, window_set=item["set"])
+        merged_profile_id=version_id, window_set=item["set"],
+        read_at=item_read_at(item))
     if (version_id and user.profile_pending_merge_id == version_id
             and final.ai_usage in AI_ALLOWED):
         user.profile_pending_merge_id = None
@@ -2434,7 +2513,7 @@ def collect(job, items, results, queue_full=False):
                 else:
                     outcome = _collect_merge(user, item, result, job,
                                              gen_template, history, notes)
-            except WritingOnHold:
+            except ReadBeforeDeletion:
                 outcome = "dropped"
             except Exception as e:
                 db.session.rollback()

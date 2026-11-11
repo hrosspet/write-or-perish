@@ -462,7 +462,7 @@ class ItemTTSTask(EntityTTSTask):
 
 
 def _hidden_for_deletion(kind, row_id):
-    """A waiting "Delete all my writing" hid this row (#268)."""
+    """A waiting "Delete all my content" hid this row (#268)."""
     from backend.models import UserDataPurgeHidden
     return db.session.query(UserDataPurgeHidden.id).filter(
         UserDataPurgeHidden.kind == kind,
@@ -482,7 +482,7 @@ def _run_entity_tts(task, entity_cls, entity_id, text_of, subdir,
         entity = entity_cls.query.get(entity_id)
         if not entity and _hidden_for_deletion(entity_cls.__tablename__,
                                                entity_id):
-            # "Delete all my writing" hid it after the TTS was queued
+            # "Delete all my content" hid it after the TTS was queued
             # (#268): nothing is spoken. After a restore it offers its
             # speaker again, as after any failed TTS.
             logger.info(f"{label} {entity_id} is hidden for deletion; no TTS")
@@ -759,7 +759,7 @@ def generate_tts_audio(self, node_id: int, audio_storage_root: str,
         if not node:
             raise ValueError(f"Node {node_id} not found")
         if _hidden_for_deletion("node", node_id):
-            # "Delete all my writing" hid it after the TTS was queued
+            # "Delete all my content" hid it after the TTS was queued
             # (#268): nothing is spoken. After a restore the node offers
             # its speaker again, as after any failed TTS.
             logger.info("Node %s is hidden for deletion; no TTS", node_id)

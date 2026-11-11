@@ -108,6 +108,7 @@ struct CommonsCard: View {
             .foregroundStyle(LooreColor.textMuted)
             .padding(.bottom, 10)
             MarkdownView(markdown: item.content, style: .referenceBody)
+                .readingTextTap(onOpen)
             if item.replyCount > 0 {
                 Text("\(item.replyCount) \(item.replyCount == 1 ? "response" : "responses")")
                     .font(LooreFont.meta)

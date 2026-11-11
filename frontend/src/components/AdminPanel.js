@@ -578,11 +578,11 @@ export function purgeLabel(job) {
   }
   switch (job.status) {
     case "scheduled":
-      // "Delete all my writing" and the admin's "Purge data" hide the
-      // writing at once (#268, Peter 2026-10-09 and 2026-10-13) and
+      // "Delete all my content" and the admin's "Purge data" hide the
+      // content at once (#268, Peter 2026-10-09 and 2026-10-13) and
       // delete it on the date.
       return job.scope === "hidden"
-        ? `Writing hidden by ${who}, deleted on ${formatDate(job.scheduled_for)}`
+        ? `Content hidden by ${who}, deleted on ${formatDate(job.scheduled_for)}`
         : `Data purge due ${formatDate(job.scheduled_for)}`;
     case "running":
       return "Purging data…";
@@ -867,7 +867,7 @@ function AdminPanel() {
     if (!job || !job.undoable) return;
     const question = job.delete_account
       ? `Undo the deletion of the account @${u.username}? The account is shown again and can sign in.`
-      : `Undo the purge of @${u.username}? Their writing shows again at once.`;
+      : `Undo the purge of @${u.username}? Their content shows again at once.`;
     if (!window.confirm(question)) return;
     try {
       await api.post(`/admin/users/${u.id}/undo_deletion`, { job_id: job.id });
@@ -939,6 +939,23 @@ function AdminPanel() {
     } catch (err) {
       console.error(err);
       setError(err.response?.data?.error || "Error updating spend limit.");
+    }
+  };
+
+  // Forgive the overflow of earlier months counted this month (#594). The
+  // carry is not kept anywhere else, so ask first.
+  const clearCarry = async (u) => {
+    const amount = (u.spend_carried_usd || 0).toFixed(2);
+    if (!window.confirm(
+      `Clear the $${amount} carried into this month for @${u.username}? `
+      + "Only this month's own spending will count toward their limit.")) return;
+    try {
+      await api.post(`/admin/users/${u.id}/clear_spend_carry`);
+      setError("");
+      fetchUsers(); // refreshes the row (incl. the blocked icon)
+    } catch (err) {
+      console.error(err);
+      setError(err.response?.data?.error || "Error clearing the carry.");
     }
   };
 
@@ -1300,6 +1317,12 @@ function AdminPanel() {
                 label="This Month"
               />
             </th>
+            <th
+              style={{ border: "1px solid var(--border)", padding: "8px", width: "90px", whiteSpace: "nowrap" }}
+              title="Spending above the limit in earlier months, counted toward this month's limit (#594). This Month shows only this month's own spending. A limit of 0 clears it."
+            >
+              Carried
+            </th>
             <th style={{ border: "1px solid var(--border)", padding: "8px", width: "85px", whiteSpace: "nowrap" }}>Limit ($)</th>
             <th
               style={{ border: "1px solid var(--border)", padding: "8px", width: "150px", whiteSpace: "nowrap" }}
@@ -1355,6 +1378,28 @@ function AdminPanel() {
                     aria-label="Blocked this month"
                     style={{ color: "var(--error)", marginLeft: "6px", verticalAlign: "middle" }}
                   />
+                )}
+              </td>
+              <td style={{ border: "1px solid var(--border)", padding: "8px", width: "90px", whiteSpace: "nowrap" }}>
+                {(u.spend_carried_usd || 0) > 0 ? (
+                  <>
+                    ${u.spend_carried_usd.toFixed(2)}
+                    <button
+                      type="button"
+                      onClick={() => clearCarry(u)}
+                      title="Clear the carry: only this month's own spending counts toward the limit"
+                      aria-label={`Clear the carry of ${u.username}`}
+                      style={{
+                        marginLeft: "6px", padding: 0, background: "none", border: "none",
+                        cursor: "pointer", verticalAlign: "middle", fontSize: "0.85em",
+                        color: "var(--text-muted)",
+                      }}
+                    >
+                      clear
+                    </button>
+                  </>
+                ) : (
+                  <span style={{ color: "var(--text-muted)" }}>—</span>
                 )}
               </td>
               <td style={{ border: "1px solid var(--border)", padding: "8px", width: "85px" }}>
@@ -1570,7 +1615,7 @@ function AdminPanel() {
                 <button
                   onClick={() => setPurgeAsk(u)}
                   disabled={u.data_purge?.status === "running"}
-                  title={'Hide all of this user\'s writing now and delete it after the grace period, like their own "Delete all my writing" (dry run first). The account stays.'}
+                  title={'Hide all of this user\'s content now and delete it after the grace period, like their own "Delete all my content" (dry run first). The account stays.'}
                   style={{ color: "var(--error)" }}
                 >
                   Purge data
@@ -1594,7 +1639,7 @@ function AdminPanel() {
                           style={smallActionStyle}
                           title={u.data_purge.delete_account
                             ? "Show the account again, as the user's own restore does"
-                            : "Show the writing again, as the user's own restore does"}
+                            : "Show the content again, as the user's own restore does"}
                         >
                           Undo
                         </button>

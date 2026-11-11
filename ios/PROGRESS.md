@@ -92,7 +92,8 @@ ios/Loore/Markdown/             the one markdown renderer — MarkdownView (+Mar
                                 ChecklistActions), MarkdownModel (swift-markdown → render tree, GFM autolinks,
                                 HTML as code, list tightness), MarkdownEdits (utils/markdown.js port), JSRegex,
                                 ContentSegments + QuotedContentView (quote/artifact markers, quote bubbles),
-                                NodeLinks (+NodeTitleStore on AppState.nodeTitles)
+                                NodeLinks (+NodeTitleStore on AppState.nodeTitles), SelectableText
+                                (+ReadingText; selectable reading text) and MarkdownFlow (text runs)
 ios/Loore/Audio/                M3: Recording/ (SegmentPackager + MP4Boxes, FMP4SegmentWriter + AACEncoder +
                                 PCMConverter, AudioSources [mic, Debug file], VoiceRecorder, ChunkUploader),
                                 Voice/ (VoiceTurnController, VoiceTurnDependencies + LiveVoiceBackend),
@@ -163,6 +164,9 @@ ios/scripts/                    check_terms_text.py, local_backend.sh
 - Markdown anywhere: `MarkdownView(markdown:style:checklist:onLink:)`; node content with quote and
   artifact markers: `QuotedContentView`. Pick or derive a `MarkdownStyle` preset (`.focal`, `.bubble`,
   `.quote`, `.proposal`, `.changelog`); `flowText` makes soft breaks spaces (authored docs only).
+  Its text is selectable (`SelectableText`); inside a card whose tap opens something, pass the card's
+  action with `.readingTextTap(...)` too, or taps on the text open nothing. Plain reading text:
+  `ReadingText`.
   Checklists: `ChecklistActions` + `MarkdownEdits.toggleCheckbox / insertItemAfter / appendItemToSection`.
 - Text matching for list edits: `MarkdownEdits` (same strings as the web). Port JS regexes with `JSRegex`
   (UTF-16, ASCII `\w`), lengths with `.jsLength`, cuts with `.jsPrefix`.
@@ -972,6 +976,59 @@ From Peter's first run on his iPhone. 395 unit tests pass (one skipped), 5 of th
   request, the dialog text, the store's delete and its errors, the deleted link); `ArtifactDeleteUITests`
   walks it all in the simulator against a native Flask on sqlite.
 
+## Select and copy text (Peter, 2026-11-10)
+
+Peter: "currently it's not possible to select text in the app and copy it. Could we enable it?"
+
+- Reading text is selectable the way it is in Safari and Notes: a long press selects a word, the handles
+  widen the selection (also across paragraphs), and the menu offers Copy, Look Up, Translate, Share.
+  SwiftUI's `.textSelection(.enabled)` was not enough: on iOS (checked on iOS 26.3) a long press only
+  offers Copy and Share for a whole `Text`, with no handles.
+- How: `SelectableText` (`Markdown/SelectableText.swift`) is a non-editable, selectable `UITextView` with
+  no scrolling of its own, sized to its width (`sizeThatFits`, cached per width). In `MarkdownView`, each
+  run of paragraphs, headings and lists is one such text view (`MarkdownFlow`, `MarkdownFlowBuilder`), so
+  a selection can run from one paragraph into the next; code blocks, block quotes, tables, rules, task
+  lists and paragraphs with images keep their own views, and the text inside them is selectable on its
+  own (table cells and code blocks offer Copy for the whole cell or block, as SwiftUI does). Plain
+  reading text uses `ReadingText`: a version in Version history, the text kept beside the todo list,
+  and the new default prompt.
+- Short rows in long, non-lazy lists keep SwiftUI `Text` with `.textSelection(.enabled)` (Copy for the
+  whole row, no handles): todo items and the intentions' lines (`MarkdownView` with
+  `.environment(\.readingTextSelectable, false)`). The workspace pages are a `ScrollView` with a plain
+  `VStack`, so every row is built when the page opens; a `UITextView` per row made 100 todo items and
+  60 intentions open several times slower and use tens of MB more (#624 review; numbers in the PR).
+- The text looks as before: the same faces, sizes, colours (dynamic, so both themes), Dynamic Type
+  scaling, line spacing, paragraph margins, list markers and indents. TextKit puts a paragraph's line
+  spacing under its last line too, so the builder takes it off the next paragraph's gap; where the gap
+  is smaller than the line spacing (tight list items in the profile, bubble and reference styles), items
+  now sit one line spacing apart instead of 2 pt (a few points more, closer to the web's line-height).
+  Words wrap as `Text` wraps them (`lineBreakStrategy = .standard`).
+- Copy puts plain text on the pasteboard (no theme colours carried into other apps); a line break
+  inside a paragraph copies as a newline, list items as "•", tab, text.
+- Links: a tap opens them through the router as before (`openURL` from the environment). A long press on
+  a link shows Open Link and Copy Link, with no preview (the system preview would load the page outside
+  the router, #442).
+- Cards whose tap opens something (an expanded reply card, a quote card, a gleaning's tweet card for its
+  owner, a Commons card, a published share): the text view takes the touches, so the card's
+  `onTapGesture` never saw a tap on its text. `.readingTextTap(action)` passes the card's action to the
+  text: a short tap on the text opens the card, a tap on a link opens the link, and a tap that clears a
+  selection only clears it. The tap recognizer fails after 0.45 s (`QuickTapRecognizer`), because the
+  text view's long press waits for it to fail; a `UITapGestureRecognizer` would make the long press take
+  about twice as long. 0.45 s sits just under the long press's own delay (about 0.5 s): with 0.3 s, a
+  press of 0.3–0.5 s on a card's text did nothing (#624 review).
+- A tap anywhere outside the text clears the selection (`OutsideTapClearer`, a tap recognizer on the
+  window that does not take the tap); a selection in one text view clears the one in another.
+- Not selectable, as before: collapsed reply cards (a preview; a tap opens the full text), titles,
+  buttons, labels, footers, the Terms screen, editors (they already allowed selection).
+- VoiceOver: the text views read their text; headings keep their level (`accessibilityTextHeadingLevel`).
+  `.accessibilityElement(children: .combine)` rows (an intention, a tweet card) still read the text, as
+  the combined element's value.
+- `.environment(\.readingTextSelectable, false)` renders a `MarkdownView` with SwiftUI `Text` as before.
+- Tests: `SelectableTextTests` (which blocks share a text view, the text and its attributes, Copy, link
+  hit-testing, height, a 13,000-word reply, the hosted view is selectable and not editable);
+  `SelectCopyUITests` (local backend): a selection across two paragraphs copied and pasted back, no
+  keyboard, a tap outside clears it, a link still opens, in an expanded reply card a 0.7 s press
+  selects and a 0.4 s press opens the reply, the profile.
 ## Circles (2026-11-10; built and unit-tested, not yet run in a simulator or on a phone)
 
 Everything shows only with `circles_enabled` in the current user (`UserCapabilities.circlesEnabled`,

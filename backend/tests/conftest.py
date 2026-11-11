@@ -27,6 +27,20 @@ _AUDIO_ROOT_ATTRS = (
 
 
 @pytest.fixture(autouse=True)
+def _no_provider_cancel_from_a_content_deletion(monkeypatch):
+    """"Delete all my content" sends a Celery task that asks the model
+    providers to cancel the user's old batches (#590). No test may send it
+    for real: a developer's shell can hold a real provider key. A test
+    that wants the cancel (test_user_purge's ``stubs``) runs it inline
+    against its own stub."""
+    module = sys.modules.get("backend.utils.user_purge")
+    if isinstance(module, types.ModuleType) and hasattr(
+            module, "_dispatch_batch_cancel"):
+        monkeypatch.setattr(module, "_dispatch_batch_cancel",
+                            lambda *a, **k: None)
+
+
+@pytest.fixture(autouse=True)
 def _scratch_audio_root(tmp_path_factory, monkeypatch):
     """Point the audio storage root at a new folder of the test's own
     (outside its tmp_path, which some tests list), for every test: the

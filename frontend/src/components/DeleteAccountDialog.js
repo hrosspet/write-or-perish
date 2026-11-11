@@ -182,9 +182,9 @@ function DeleteAccountDialog({
         </p>
         {writingDeletionAt && (
           <p style={bodyStyle}>
-            This replaces your request to delete all your writing:
+            This replaces your request to delete all your content:
             everything is deleted forever on {date} instead. If you restore
-            your account, your writing comes back too.
+            your account, your content comes back too.
           </p>
         )}
         {xNote && <p style={bodyStyle}>{xNote}</p>}

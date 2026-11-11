@@ -645,11 +645,7 @@ const NodeForm = forwardRef(
           setStreamingSessionId(null);
           // Spend cap: backend kept the system + user nodes but skipped the
           // LLM placeholder (e.g. /textmode/start). Surface the banner.
-          if (data && data.spend_capped) {
-            try {
-              window.dispatchEvent(new CustomEvent('loore:spend-capped', {}));
-            } catch (e) { /* no-op */ }
-          }
+          if (data && data.spend_capped) notifySpendBlocked(data.spend_cap_lifts_on);
           // The entry was saved but the reply was refused (e.g. an
           // uncapped {user_export} on a non-Pro plan): say why.
           if (data && data.llm_error) addToast(data.llm_error, 10000);
@@ -681,11 +677,7 @@ const NodeForm = forwardRef(
           // Spend cap: backend kept the system + user nodes but skipped the
           // LLM placeholder. Surface the banner; the no-llm_node_id branch
           // below lands the user on their new thread without a placeholder.
-          if (res.data.spend_capped) {
-            try {
-              window.dispatchEvent(new CustomEvent('loore:spend-capped', {}));
-            } catch (e) { /* no-op */ }
-          }
+          if (res.data.spend_capped) notifySpendBlocked(res.data.spend_cap_lifts_on);
           if (res.data.llm_error) addToast(res.data.llm_error, 10000);
           if (res.data.llm_node_id) {
             // Through the USER node so the entry gets its own URL/history
@@ -726,9 +718,7 @@ const NodeForm = forwardRef(
           setHasDraft(false);
           setStreamingSessionId(null);
           if (response.data.spend_capped) {
-            try {
-              window.dispatchEvent(new CustomEvent('loore:spend-capped', {}));
-            } catch (e) { /* no-op */ }
+            notifySpendBlocked(response.data.spend_cap_lifts_on);
           }
           // Land on the entry; ?awaitLlm hands a pending reply to NodeDetail.
           succeed({
