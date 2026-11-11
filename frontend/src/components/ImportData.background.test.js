@@ -150,3 +150,22 @@ test.each([[true, true], [false, false]])(
     expect(!!screen.queryByRole('button', { name: 'Use both' })).toBe(shown);
     expect(!!screen.queryByText('Use both Anthropic and OpenAI?')).toBe(shown);
   });
+
+test.each([[{ token: 'signed', entries: 6 }, true], [null, false]])(
+  'the result asks whether to rebuild the profile when the server says so (#625)',
+  async (ask, shown) => {
+    const button = await openConfirm(/Import ChatGPT/, () =>
+      Promise.resolve({ data: { task_id: 'job-6', status: 'queued', total: 6 } }));
+    mockGet.mockResolvedValue({ data: { status: 'completed', done: 6, total: 6,
+      result: { ...result, created: 0, updated: 6, ask_profile_rebuild: ask } } });
+    fireEvent.click(button);
+    expect(await screen.findByText('Import Finished', {}, { timeout: 4000 })).toBeTruthy();
+    expect(!!screen.queryByText('Rebuild your profile?')).toBe(shown);
+    expect(!!screen.queryByRole('button', { name: 'Rebuild my profile' })).toBe(shown);
+    if (shown) {
+      mockPost.mockResolvedValue({ data: { profile_update_task_id: null } });
+      fireEvent.click(screen.getByRole('button', { name: 'Rebuild my profile' }));
+      await waitFor(() => expect(mockPost).toHaveBeenCalledWith(
+        '/import/profile-rebuild', { token: 'signed' }));
+    }
+  });

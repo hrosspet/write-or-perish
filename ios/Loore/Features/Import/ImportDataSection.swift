@@ -87,7 +87,10 @@ private struct ImportOptions: View {
                                           }),
                      dismissOnBackdropTap: model.result != nil) {
             if let result = model.result {
-                ImportFinishedDialog(result: result) { Task { await model.acknowledgeResult() } }
+                ImportFinishedDialog(result: result, rebuildAnswer: model.rebuildAnswer,
+                                     onRebuild: { yes in Task { await model.answerRebuild(yes) } }) {
+                    Task { await model.acknowledgeResult() }
+                }
             } else if let count = model.deletedMatches {
                 DeletedContentDialog(count: count) { choice in
                     Task { await model.resolveDeleted(choice) }
@@ -295,9 +298,12 @@ private struct DeletedContentDialog: View {
     }
 }
 
-/// "Import Finished" with the big serif numbers and the notes.
+/// "Import Finished" with the big serif numbers and the notes, and the
+/// rebuild question when the server asks it (#625).
 private struct ImportFinishedDialog: View {
     let result: ImportResult
+    var rebuildAnswer: ImportModel.RebuildAnswer?
+    var onRebuild: (Bool) -> Void = { _ in }
     let onOK: () -> Void
 
     var body: some View {
@@ -324,9 +330,61 @@ private struct ImportFinishedDialog: View {
                     .foregroundStyle(LooreColor.textMuted)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            if let question = result.rebuildQuestion {
+                rebuildQuestion(question)
+            }
             Button("OK", action: onOK)
                 .buttonStyle(.loorePrimary)
                 .accessibilityIdentifier("import.ok")
         }
+    }
+
+    /// Two equal answers, nothing preselected (as the web's question).
+    @ViewBuilder
+    private func rebuildQuestion(_ question: ProfileRebuildQuestion) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Rectangle().fill(LooreColor.border).frame(height: 1)
+            Text(ProfileRebuildQuestion.title)
+                .font(LooreFont.serif(19, .light, relativeTo: .title3))
+                .foregroundStyle(LooreColor.textPrimary)
+            switch rebuildAnswer {
+            case .rebuilding:
+                status(question.savedYes)
+            case .kept:
+                status(ProfileRebuildQuestion.savedNo)
+            default:
+                ForEach(question.lines, id: \.self) { line in
+                    Text(line)
+                        .font(LooreFont.sans(14.4, .light))
+                        .foregroundStyle(LooreColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                let sending = rebuildAnswer == .sending
+                VStack(alignment: .leading, spacing: 8) {
+                    Button(sending ? "Starting…" : ProfileRebuildQuestion.yes) { onRebuild(true) }
+                        .buttonStyle(.looreOutline)
+                        .accessibilityIdentifier("import.rebuildYes")
+                    Button(ProfileRebuildQuestion.no) { onRebuild(false) }
+                        .buttonStyle(.looreOutline)
+                        .accessibilityIdentifier("import.rebuildNo")
+                }
+                .disabled(sending)
+                if case .failed(let message) = rebuildAnswer {
+                    Text(message)
+                        .font(LooreFont.sans(13.6, .light))
+                        .foregroundStyle(LooreColor.accent)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("import.rebuildQuestion")
+    }
+
+    private func status(_ text: String) -> some View {
+        Text(text)
+            .font(LooreFont.sans(14.4, .light))
+            .foregroundStyle(LooreColor.textSecondary)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }

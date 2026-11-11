@@ -173,6 +173,8 @@ enum APIPath {
     static let importTwitterAnalyze = "/api/import/twitter/analyze"
     static let importTwitterConfirm = "/api/import/twitter/confirm"
     static func importStatus(_ taskId: String) -> String { "/api/import/status/\(escape(taskId))" }
+    /// The yes to an import's rebuild question (#625).
+    static let importProfileRebuild = "/api/import/profile-rebuild"
 
     // MARK: Server-sent events
     static func sseLLMStream(_ nodeId: Int) -> String { "/api/sse/nodes/\(nodeId)/llm-stream" }

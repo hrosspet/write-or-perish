@@ -80,6 +80,43 @@ struct ImportAnalysis {
     var originalTokens: Int { int("original_tokens") }
 }
 
+/// The rebuild question after a re-import set entries already in Loore to
+/// None (#625, Peter 2026-11-11): the profile may include them, not
+/// necessarily. The server asks it (`ask_profile_rebuild`) only when the
+/// profile in use may hold them; the texts are the web's
+/// (`ProfileRebuildQuestion.js`). Two equal answers; "Rebuild" sends the
+/// token back, "Keep" and OK without an answer send nothing.
+struct ProfileRebuildQuestion: Equatable {
+    let token: String
+    let entries: Int
+
+    init?(_ object: Any?) {
+        guard let object = object as? [String: Any], let token = object["token"] as? String, !token.isEmpty
+        else { return nil }
+        self.token = token
+        entries = (object["entries"] as? NSNumber)?.intValue ?? 0
+    }
+
+    private var many: Bool { entries != 1 }
+    private var them: String { many ? "them" : "it" }
+
+    static let title = "Rebuild your profile?"
+    static let yes = "Rebuild my profile"
+    static let no = "Keep my profile as it is"
+    static let savedNo = "Your profile stays as it is."
+
+    var lines: [String] {
+        let count = "\(jsLocaleNumber(entries)) \(many ? "entries" : "entry")"
+        return [
+            "This import set \(count) that \(many ? "were" : "was") already in Loore to None, so AI no longer reads \(them).",
+            "Your current profile may still include what \(many ? "they say" : "it says"), if it was built while AI could read \(them). It may also not: for example, if you set \(them) to None soon after you first imported \(them).",
+            "A rebuild reads your writing again from the oldest of \(many ? "these entries" : "this entry") on, without \(them). The part of your profile from before \(them) stays as it is.",
+        ]
+    }
+
+    var savedYes: String { "Your profile will be rebuilt without \(many ? "these entries" : "this entry")." }
+}
+
 /// The "Import Finished" numbers (`created`, `skipped`, `restored`, `updated`, `empty`).
 struct ImportResult: Equatable {
     var created = 0
@@ -92,6 +129,8 @@ struct ImportResult: Equatable {
     /// counted conversations; `archiveSummary` names both.
     var countsMessages = false
     var archiveSummary: String?
+    /// `ask_profile_rebuild` (#625), or nil.
+    var rebuildQuestion: ProfileRebuildQuestion?
 
     init(_ object: [String: Any]) {
         func int(_ key: String) -> Int { (object[key] as? NSNumber)?.intValue ?? 0 }
@@ -101,6 +140,7 @@ struct ImportResult: Equatable {
         updated = int("updated")
         empty = int("empty")
         profileUpdateTaskId = object["profile_update_task_id"] as? String
+        rebuildQuestion = ProfileRebuildQuestion(object["ask_profile_rebuild"])
     }
 
     init(created: Int = 0, skipped: Int = 0, restored: Int = 0, updated: Int = 0, empty: Int = 0) {
@@ -177,6 +217,9 @@ final class ImportModel {
     /// `409 deleted_content_matches`: the count to show; the retry repeats the confirm.
     var deletedMatches: Int?
     var result: ImportResult?
+    /// The answer to the result's rebuild question (#625): nil until answered.
+    enum RebuildAnswer: Equatable { case sending, rebuilding, kept, failed(String) }
+    var rebuildAnswer: RebuildAnswer?
     /// A queued background import is being polled: the dialog can be closed meanwhile.
     private(set) var pollingTask = false
     /// Polling cadence and the stall limit (tests shorten them).
@@ -431,6 +474,26 @@ final class ImportModel {
         await confirm(onDeleted: choice)
     }
 
+    /// The rebuild question's answer (#625): a yes posts the token, a no
+    /// sends nothing.
+    func answerRebuild(_ rebuild: Bool) async {
+        guard let question = result?.rebuildQuestion, rebuildAnswer != .sending else { return }
+        guard rebuild else {
+            rebuildAnswer = .kept
+            return
+        }
+        rebuildAnswer = .sending
+        do {
+            _ = try await app.api.post(APIPath.importProfileRebuild, json: .object(["token": .string(question.token)]),
+                                       as: EmptyResponse.self)
+            rebuildAnswer = .rebuilding
+        } catch let failure as APIError {
+            rebuildAnswer = .failed(failure.serverMessage ?? "Couldn't start the rebuild. Please try again.")
+        } catch {
+            rebuildAnswer = .failed("Couldn't start the rebuild. Please try again.")
+        }
+    }
+
     private func finish(_ outcome: ImportResult) {
         var outcome = outcome
         if let analysis, analysis.kind == .claude || analysis.kind == .chatgpt, analysis.totalConversations > 0 {
@@ -443,6 +506,7 @@ final class ImportModel {
         stage = nil
         progress = nil
         error = nil
+        rebuildAnswer = nil
         result = outcome
         log.info("import finished: created \(outcome.created), skipped \(outcome.skipped)")
     }
@@ -458,6 +522,7 @@ final class ImportModel {
     func acknowledgeResult() async {
         let started = result?.profileUpdateTaskId != nil
         result = nil
+        rebuildAnswer = nil
         app.signals.post(.logChanged)
         await app.loadUser()
         if started { app.profileWatcher.start() }
