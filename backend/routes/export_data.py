@@ -15,6 +15,7 @@ from backend.utils.quotes import (
     resolve_quotes, has_quotes, ExportQuoteResolver,
     resolve_quotes_for_export, resolve_ext_quotes, has_ext_quotes,
     ai_blocked_artifact, AI_BLOCKED_ARTIFACT_TEXT,
+    quotes_inside, release_ext_quotes,
 )
 from backend.utils.timefmt import iso_utc
 from backend.utils.encryption import dek_cached, prefetch_deks
@@ -563,8 +564,16 @@ def _format_node_text(node, label, user_id, embedded_quotes,
     for line in ref_lines:
         result += line + "\n"
 
-    # Resolve {quote:ID} placeholders in content
+    # Resolve {quote:ID} placeholders in content. In text the user did
+    # not write (someone else's reply in their thread, or quoted text of
+    # someone else's at any depth), a quote resolves only when every
+    # reader of that text can read the quoted node, and a saved
+    # reference stays as written (quotes_inside).
     content = node.get_content()
+    inside = only = None
+    if user_id and (has_quotes(content) or has_ext_quotes(content)):
+        inside = quotes_inside(user_id)
+        only = inside(node.id)
     if has_quotes(content):
         if embedded_quotes is not None:
             # Use smart resolution from ExportQuoteResolver
@@ -575,6 +584,7 @@ def _format_node_text(node, label, user_id, embedded_quotes,
                 content, node.id, embedded_quotes, user_id,
                 ai_blocked_ids=ai_blocked_ids,
                 reference=quote_reference,
+                only=only, inside=inside,
             )
         elif user_id:
             # Fallback to simple resolution (depth 1). The unbudgeted
@@ -583,15 +593,17 @@ def _format_node_text(node, label, user_id, embedded_quotes,
             # nodes marked 'none' like the resolver path does.
             content, quoted_ids = resolve_quotes(
                 content, user_id, for_llm=False, max_depth=1,
-                block_ai_none=filter_ai_usage)
+                block_ai_none=filter_ai_usage, only=only, inside=inside)
             if licence is not None:
                 licence.note_nodes(quoted_ids, what="archive quoted entry")
     # {quote_ext:ID} (saved references) resolve inline unconditionally —
     # they're small and never nest, so no dedup machinery is needed.
-    if user_id and has_ext_quotes(content):
+    # Only in the user's own text: they resolve against the user.
+    if user_id and only is None and has_ext_quotes(content):
         content, ext_ids = resolve_ext_quotes(content, user_id, for_llm=False)
         if licence is not None:
             licence.note_external(ext_ids, what="archive reference")
+    content = release_ext_quotes(content)
 
     result += content
     result += "\n\n"
@@ -1841,6 +1853,7 @@ def _build_user_export_incremental(
             # A collapsed export emits no preamble, so the budget counts
             # only the entries it does emit (#518).
             with_preamble=not collapse_artifacts,
+            inside=quotes_inside(user.id),
         )
         for node in selected_nodes:
             if node.deleted_at is not None:
@@ -2523,6 +2536,7 @@ def build_user_export_content(
             filter_ai_usage=filter_ai_usage,
             chronological=chronological_order,
             with_preamble=not collapse_artifacts,
+            inside=quotes_inside(user.id),
         )
 
         # Add only the pre-selected nodes to the resolver (decrypts here)

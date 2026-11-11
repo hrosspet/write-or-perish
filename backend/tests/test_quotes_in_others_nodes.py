@@ -10,6 +10,9 @@ In a public thread, an entry someone else wrote may hold {quote:ID} and
   who cannot open the quoted node;
 - a {quote_ext:ID} there, or in another person's AI reply, is never
   resolved, and adds none of the requester's marks to the prompt;
+- the same holds inside another person's text that the requester's own
+  entry quotes, at every depth: only what the requester wrote resolves
+  with the requester's access;
 - in the requester's own entries, quotes resolve as before, and a
   private thread's prompt is unchanged.
 
@@ -308,3 +311,133 @@ def test_a_private_thread_resolves_every_quote_as_before(app, people):  # noqa: 
     assert bobs.endswith(expected)
     assert "INNER PRIVATE" in bobs and "BOBS PRIVATE DIARY" in bobs
     assert "ALICES PUBLIC NOTE" in bobs and "BOBS UPLOADED DOCUMENT" in bobs
+
+
+# ── someone else's text inside my own entry ──────────────────────────────
+
+def _alices_text_in_bobs_entry(alice, bob, alices_text):
+    """bob's own public entry quotes alice's public note *alices_text*;
+    returns (alices_note, bobs_entry)."""
+    note = _node(alice, None, alices_text)
+    root = _node(alice, None, "alice opens a public thread")
+    entry = _node(bob, root, "bob quotes {quote:%d}" % note.id)
+    _db.session.commit()
+    return note, entry
+
+
+def test_my_reference_inside_someone_elses_quoted_text_is_not_resolved(app, people):  # noqa: F811,E501
+    """(a) alice's note names an item of bob's; bob's own entry quotes
+    the note: the item stays as written, bob's own literal reference in
+    the same entry resolves."""
+    alice, bob, _, _ = people
+    bobs_item = _item(bob, "BOBS UPLOADED DOCUMENT")
+    bobs_other = _item(bob, "BOBS OTHER DOCUMENT")
+    note = _node(alice, None, "ALICES NOTE {quote_ext:%d}" % bobs_item.id)
+    root = _node(alice, None, "alice opens a public thread")
+    entry = _node(bob, root, "bob quotes {quote:%d} and {quote_ext:%d}"
+                  % (note.id, bobs_other.id))
+    _db.session.commit()
+
+    _ask(entry, bob)
+
+    bobs = _message_with("bob quotes")
+    assert "ALICES NOTE {quote_ext:%d}" % bobs_item.id in bobs
+    assert "BOBS UPLOADED DOCUMENT" not in _sent()
+    assert "BOBS OTHER DOCUMENT" in bobs
+    assert '<quoted_reference id="%d"' % bobs_other.id in bobs
+    assert "" not in _sent()
+
+
+def test_my_private_entry_inside_someone_elses_quoted_text_stays_as_written(app, people):  # noqa: F811,E501
+    """(b) alice's note quotes bob's private entry; bob's own entry
+    quotes the note: the private entry stays as written, at any depth."""
+    alice, bob, bobs_private, _ = people
+    inner = _node(alice, None, "ALICES INNER {quote:%d}" % bobs_private.id)
+    _, entry = _alices_text_in_bobs_entry(
+        alice, bob, "ALICES NOTE {quote:%d} {quote:%d}"
+        % (bobs_private.id, inner.id))
+
+    _ask(entry, bob)
+
+    bobs = _message_with("bob quotes")
+    assert "ALICES NOTE {quote:%d}" % bobs_private.id in bobs
+    assert "ALICES INNER {quote:%d}" % bobs_private.id in bobs
+    assert "BOBS PRIVATE DIARY" not in _sent()
+
+
+def test_a_placeholder_inside_someone_elses_quoted_text_stays_unfilled(app, people):  # noqa: F811,E501
+    """(c) alice's note holds {user_profile}; bob's own entry quotes it
+    and also asks for his own profile: his placeholder is filled once,
+    hers stays as written."""
+    from backend.models import UserProfile
+    alice, bob, _, _ = people
+    profile = UserProfile(user_id=bob.id, generated_by="test",
+                          ai_usage="chat")
+    profile.set_content("BOBS PROFILE TEXT")
+    _db.session.add(profile)
+    note = _node(alice, None, "ALICES NOTE {user_profile} {user_memory}")
+    root = _node(alice, None, "alice opens a public thread")
+    entry = _node(bob, root, "bob quotes {quote:%d} with {user_profile}"
+                  % note.id)
+    _db.session.commit()
+
+    _ask(entry, bob)
+
+    bobs = _message_with("bob quotes")
+    assert "ALICES NOTE {user_profile} {user_memory}" in bobs
+    assert _sent().count("BOBS PROFILE TEXT") == 1
+    assert bobs.endswith("with BOBS PROFILE TEXT")
+
+
+def test_my_own_quoted_entry_and_ai_reply_still_resolve_my_references(app, people):  # noqa: F811,E501
+    """bob quotes his own entry and his own AI reply, each naming an item
+    of his: both resolve, byte for byte as before."""
+    alice, bob, bobs_private, _ = people
+    item = _item(bob, "BOBS UPLOADED DOCUMENT")
+    own = _node(bob, None, "BOBS NOTE {quote_ext:%d} {quote:%d}"
+                % (item.id, bobs_private.id), privacy_level="private")
+    asked = _node(bob, None, "bob asked", privacy_level="private")
+    own_ai = _llm(asked, bob, "BOBS AI {quote_ext:%d}" % item.id,
+                  status="completed")
+    root = _node(alice, None, "alice opens a public thread")
+    text = "bob quotes {quote:%d} and {quote:%d}" % (own.id, own_ai.id)
+    entry = _node(bob, root, text)
+    _db.session.commit()
+
+    _ask(entry, bob)
+
+    bobs = _message_with("bob quotes")
+    expected, _ = resolve_quotes(text, bob.id, for_llm=True, tz_name="UTC")
+    expected, _ = resolve_ext_quotes(expected, bob.id, for_llm=True)
+    assert bobs.endswith(expected)
+    assert bobs.count("BOBS UPLOADED DOCUMENT") == 2
+    assert "BOBS PRIVATE DIARY" in bobs
+
+
+def test_a_thread_of_only_my_own_text_is_unchanged_by_the_rule(app, people, monkeypatch):  # noqa: F811,E501
+    """The payload for bob's thread that quotes only his own text is the
+    same with the rule and without it (every quoted node counted as his)."""
+    alice, bob, bobs_private, _ = people
+    item = _item(bob, "BOBS UPLOADED DOCUMENT")
+    inner = _node(bob, None, "INNER {quote:%d} {quote_ext:%d}"
+                  % (bobs_private.id, item.id), privacy_level="private")
+    root = _node(bob, None, "bob's thread", privacy_level="private")
+    asked = _llm(root, bob, "An AI answer {quote_ext:%d}" % item.id,
+                 status="completed")
+    entry = _node(bob, asked, "bob quotes {quote:%d} {quote_ext:%d}"
+                  % (inner.id, item.id), privacy_level="private")
+    _db.session.commit()
+
+    _ask(entry, bob)
+    with_rule = _ScriptedProvider.calls[-1]["raw"]
+    monkeypatch.setattr(_llm_task_mod, "quotes_inside",
+                        lambda *a, **k: (lambda _node_id: None))
+    _ask(entry, bob)
+    without_rule = _ScriptedProvider.calls[-1]["raw"]
+
+    def _texts(raw):
+        return [b.get("text") for m in raw for b in m["content"]
+                if isinstance(b, dict) and "text" in b
+                and "author bob" in (b.get("text") or "")]
+    assert _texts(with_rule) == _texts(without_rule)
+    assert any("BOBS PRIVATE DIARY" in t for t in _texts(with_rule))

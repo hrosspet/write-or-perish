@@ -37,6 +37,7 @@ from backend.utils.tokens import (
 from backend.utils.quotes import (
     resolve_quotes, has_quotes,
     resolve_ext_quotes, has_ext_quotes, find_ext_quote_ids,
+    quotes_inside, release_ext_quotes,
 )
 from backend.utils.node_split import NODE_CHAR_CAP
 from backend.utils.session_helpers import (
@@ -1122,8 +1123,9 @@ def _load_node_chain(parent_node, user_id):
 
 def _quotable_for_thread(node):
     """For the text of *node*, which someone other than the requester
-    wrote into the thread: the test a {quote:ID} in it must pass to be
-    resolved. The quoted node must be readable by every reader of
+    wrote (into the thread, or in an entry the requester quotes): the
+    test a {quote:ID} in it must pass to be resolved. The quoted node
+    must be readable by every reader of
     *node*. Another person's node that the requester reads is public,
     so the quoted node must be public too. Any other quote stays as
     written, as the thread page shows it to a reader who cannot open
@@ -4798,24 +4800,30 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         # a quote resolves only when every reader of that
                         # text can read the quoted node; a saved reference
                         # (the requester's own) never does. In the
-                        # requester's own nodes, as before.
+                        # requester's own nodes, as before, except inside
+                        # text of someone else's they quote: there, at
+                        # every depth, the same rule (quotes_inside).
                         others_text = not node_is_users(node, user_id)
                         if needs_quotes and has_quotes(message_text):
                             message_text, resolved_ids = resolve_quotes(
                                 message_text, user_id, for_llm=True,
                                 tz_name=user_tz,
                                 only=(_quotable_for_thread(node)
-                                      if others_text else None))
+                                      if others_text else None),
+                                inside=quotes_inside(
+                                    user_id, _quotable_for_thread))
                             if resolved_ids:
                                 logger.info(f"Resolved quotes for node IDs: {resolved_ids}")
                                 licence.note_nodes(resolved_ids)
                         # Resolve {quote_ext:ID} (saved references) inline —
-                        # small, non-recursive, owner-only.
+                        # small, non-recursive, owner-only. One held in
+                        # quoted text someone else wrote stays as written.
                         if has_ext_quotes(message_text) and (
                                 not others_text):
                             message_text, ext_ids = resolve_ext_quotes(
                                 message_text, user_id, for_llm=True)
                             licence.note_external(ext_ids)
+                        message_text = release_ext_quotes(message_text)
 
                     if (node.id == parent_node_id and not is_llm_node
                             and cache_split_offset
