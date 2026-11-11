@@ -92,9 +92,10 @@ final class ThreadModel {
 
     var isPublicThread: Bool { node?.privacyLevel == .public }
 
-    // Circles: a shared thread. Other people read what is written there, so a
-    // model answers only when asked: for the author the LLM Response bar, for
-    // a reader "Ask my AI".
+    // Circles: a shared thread. In someone else's, a model answers only when
+    // the reader asks ("Ask my AI"), and the answer is a reply in the thread.
+    // On the author's own shared entry nothing changes: what her AI, a Voice
+    // session or a gleaning writes under it stays hers.
     var audience: NodeAudience? { (app?.capabilities.circlesEnabled ?? false) ? node?.audience : nil }
     var isSharedThread: Bool { audience != nil }
     var isForeignShared: Bool { audience.map { !$0.isAuthor } ?? false }
@@ -135,8 +136,8 @@ final class ThreadModel {
         set { UserDefaults.standard.set(newValue, forKey: DefaultsKey.autoGenerate) }
     }
 
-    /// Public threads force auto-generate off (#228); shared threads too.
-    func autoGenerateActive(_ preference: Bool) -> Bool { (isPublicThread || isSharedThread) ? false : preference }
+    /// Public threads force auto-generate off (#228); someone else's shared thread too.
+    func autoGenerateActive(_ preference: Bool) -> Bool { (isPublicThread || isForeignShared) ? false : preference }
 
     var parentAncestor: AncestorNode? { node?.ancestors.last }
 
@@ -172,7 +173,7 @@ final class ThreadModel {
 
     func showCraftBar(craftMode: Bool, autoGenerate: Bool) -> Bool {
         guard let node else { return false }
-        return isOwner && !isForeignShared && (craftMode || isPublicThread || isSharedThread)
+        return isOwner && !isForeignShared && (craftMode || isPublicThread)
             && !autoGenerateActive(autoGenerate)
             && node.aiUsage != .off && !isLLMPending
     }

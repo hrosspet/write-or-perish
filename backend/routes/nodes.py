@@ -794,6 +794,11 @@ def create_node():
             ai_usage=ai_usage,
             token_count=_atc2(placeholder_text),
         )
+        if parent_id and system_node is None:
+            from backend.utils import circles as cz
+            # A reply into a shared thread joins its audience (the
+            # explicit act: nothing joins by being created under one).
+            cz.join_reply(node, Node.query.get(parent_id), current_user.id)
         node.set_content(placeholder_text)
         db.session.add(node)
         db.session.commit()  # Need node.id for the file path.
@@ -913,6 +918,11 @@ def create_node():
         privacy_level=privacy_level,
         ai_usage=ai_usage
     )
+    if parent_id:
+        from backend.utils import circles as cz
+        # A reply into a shared thread joins its audience (the explicit
+        # act: nothing joins by being created under a shared node).
+        cz.join_reply(node, Node.query.get(parent_id), current_user.id)
     node.set_content(first_content)
     # Public ROOTS get a human-readable permalink slug at birth (#228) —
     # the share pipeline does this at publish; this covers direct
@@ -2796,6 +2806,9 @@ def init_chunked_upload():
         ai_usage=ai_usage,
         token_count=_atc3(placeholder_text),
     )
+    if parent_id and system_node is None:
+        from backend.utils import circles as cz
+        cz.join_reply(node, Node.query.get(parent_id), current_user.id)
     node.set_content(placeholder_text)
     db.session.add(node)
     db.session.commit()
@@ -3131,6 +3144,9 @@ def init_streaming_transcription():
         ai_usage=ai_usage,
         token_count=_atc4(placeholder_text),
     )
+    if parent_id:
+        from backend.utils import circles as cz
+        cz.join_reply(node, Node.query.get(parent_id), current_user.id)
     node.set_content(placeholder_text)
     db.session.add(node)
     db.session.commit()

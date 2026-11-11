@@ -42,6 +42,11 @@ def _node(user, parent, text, privacy="private", ai_usage="chat",
     n = Node(user_id=user.id, human_owner_id=(human_owner or user).id,
              parent_id=parent.id if parent else None, node_type=node_type,
              privacy_level=privacy, ai_usage=ai_usage, llm_model=llm_model)
+    # A reply into a shared thread joins it explicitly (the routes call
+    # circles.join_reply; nothing joins by being created under a node).
+    if privacy == "circles" and parent is not None \
+            and parent.audience_root_id is not None:
+        n.audience_root_id = parent.audience_root_id
     n.set_content(text)
     _db.session.add(n)
     _db.session.flush()
@@ -102,10 +107,11 @@ def _world():
 def test_ask_my_ai_end_to_end(app, circles):  # noqa: F811
     from backend.utils.llm_nodes import (
         CIRCLE_ASK_MARKER, create_llm_placeholder, circle_ask_ai_usage)
-    from backend.utils.llm_nodes import pick_model_for_generation
+    from backend.utils.llm_nodes import own_chat_model
     w = _world()
     ben = w["ben"]
-    model = pick_model_for_generation(w["b"], ben)
+    # The route's rule for an Ask my AI: the asker's account model.
+    model = own_chat_model(ben)
     from backend.utils.llm_nodes import reply_refusal
     print("refusal for the ask:", reply_refusal(
         w["b"], ben.id, circle_ask_ai_usage(ben), circle_ask=True))

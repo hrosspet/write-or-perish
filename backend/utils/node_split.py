@@ -88,6 +88,9 @@ def split_node_into_chain(node, segments=None):
             privacy_level=node.privacy_level,
             ai_usage=node.ai_usage,
             token_count=approximate_token_count(seg),
+            # Circles: the parts of one entry or reply are read by the
+            # same people as its first part.
+            audience_root_id=node.audience_root_id,
         )
         part.set_content(seg)
         part.created_at = node.created_at + PART_STEP * i

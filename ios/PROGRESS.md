@@ -995,10 +995,10 @@ privacy select is greyed out (`SelectField.unavailable`), as on the web.
   thread (`threadAudience`, from the parent's `audience`) is sent as `circles` after `CircleReplyDialog`;
   "Don't ask again in this thread" is `DefaultsKey.circleReplyAck(entryId:userId:)`.
 - **Thread**: `SharedEntryBanner` for a reader, `CircleReadersButton` (a tap opens a popover) in the focal
-  footer for author and readers, auto-generate off in a shared thread, the LLM Response bar for the
-  author, "Ask my AI" for a reader (`POST /nodes/<id>/llm {circle_ask: true}`, no model) with its dialog
-  and its off state. Voice Mode and the auto-generate switch are hidden in a shared thread, as in a
-  public one.
+  footer for author and readers. In someone else's shared thread: auto-generate off, no Voice Mode or
+  auto-generate switch, and "Ask my AI" (`POST /nodes/<id>/llm {circle_ask: true}`, no model) with its
+  dialog and its off state. On the author's own shared entry nothing changes: what her AI, Voice or a
+  gleaning writes under it stays hers (only a person's reply and an Ask my AI answer join the thread).
 - **Screens** `Features/Circles/`: `CirclesView` ("Your circles", route `.circles`, `/circles`) and
   `SharedWithYouView` (`.sharedWithYou`, `/shared`); linked from Account ("Circles" row), More ("Shared
   with you") and each other. **Updates**: `CircleShareItemView` ("Read it" / "Don't show <name>'s entries").

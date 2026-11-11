@@ -147,7 +147,7 @@ private struct ThreadContent: View {
             // Voice screen says why it is closed. Auto-generate keeps the AI-usage
             // rule. Glean is not up here (#435): it is in the action row of a
             // Glean-card thread, else in the entry's ⋯ menu.
-            if model.isOwner && !model.isPublicThread && !model.isSharedThread {
+            if model.isOwner && !model.isPublicThread && !model.isForeignShared {
                 VStack(alignment: .trailing, spacing: 6) {
                     TopRightButton(title: model.voiceLoading ? "Starting…" : "Voice Mode") {
                         Image(systemName: "mic.fill").font(.system(size: 11)).accessibilityHidden(true)

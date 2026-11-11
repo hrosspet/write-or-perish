@@ -592,6 +592,26 @@ def apply_requested_sharing(node, user, data, *, old_privacy=None,
                         data.get("circle_usernames"))
 
 
+def join_reply(node, parent, user_id) -> bool:
+    """The explicit act that puts a new node in a shared thread's
+    audience: called by the paths on which a person replies into the
+    thread (typed, recorded, uploaded) and for an "Ask my AI" answer,
+    before the node is saved. *node* is "circles" and *parent* is a node
+    of a shared thread that *user_id* can read; otherwise nothing
+    happens and the node keeps what it was created with. No other code
+    path makes a new node readable by a thread's audience."""
+    from backend.utils.privacy import can_user_access_node
+    if (node is None or parent is None or node.privacy_level != CIRCLES
+            or node.audience_root_id is not None):
+        return False
+    entry = shared_entry_of(parent)
+    if entry is None or not can_user_access_node(parent, user_id):
+        return False
+    node.audience_root_id = entry.id
+    forget_circle_access()
+    return True
+
+
 def reply_requires_circles(parent, privacy_level, user_id) -> bool:
     """A reply under a shared node must itself be "circles" (it is then
     read by the thread's audience), the rule public threads have. Only

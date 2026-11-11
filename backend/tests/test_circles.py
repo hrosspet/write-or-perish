@@ -813,8 +813,18 @@ def test_the_authors_model_reads_replies_by_their_own_ai_usage(app):
     # Her own entries are unchanged: a reply on her own shared entry.
     r = _client(app, "anna").post(f"/api/nodes/{nid}/llm", json={})
     assert r.status_code == 202
+    # What her AI writes under her shared entry stays hers: it is not in
+    # the thread's audience unless she shares it (Edit, "apply to my
+    # replies").
     answer = _db.session.get(Node, r.get_json()["node_id"])
-    assert answer.audience_root_id == nid and _can_read(app, "ben", answer.id)
+    assert answer.audience_root_id is None
+    assert not _can_read(app, "ben", answer.id)
+    assert _can_read(app, "anna", answer.id)
+    r = _client(app, "anna").put(f"/api/nodes/{nid}", json={
+        "content": SECRET, "privacy_level": "circles",
+        "circle_usernames": ["ben", "chidi"], "apply_to_descendants": True})
+    assert r.status_code == 200
+    assert _can_read(app, "ben", answer.id)
 
 
 def test_another_persons_model_never_sets_my_default(app):
@@ -1413,3 +1423,60 @@ def test_the_sets_are_read_once_per_session_and_dropped_on_a_write(app):
         assert entry not in circle_sets(ben.id).readable
     finally:
         event.remove(_db.engine, "before_cursor_execute", count)
+
+
+# ── The model of a reply ────────────────────────────────────────────────
+
+def _ai_reply(parent_id, owner, model, privacy, pointer=None):
+    llm = User.query.filter_by(username=model).first()
+    if llm is None:
+        llm = User(username=model, twitter_id=f"llm-{model}")
+        _db.session.add(llm)
+        _db.session.flush()
+    n = Node(user_id=llm.id, human_owner_id=owner.id, parent_id=parent_id,
+             node_type="llm", llm_model=model, privacy_level=privacy,
+             ai_usage="chat", audience_root_id=pointer)
+    n.set_content("an AI reply")
+    _db.session.add(n)
+    _db.session.commit()
+    return n
+
+
+def test_a_public_or_private_thread_resolves_the_model_as_before(app):
+    """Outside a circle-shared thread the default model of a reply is
+    resolved exactly as before this feature: the closest earlier AI
+    reply in the thread decides, whoever it was made for, then the
+    user's own model, then the server default. With the flag on or off."""
+    from backend.utils.llm_nodes import resolve_chat_model
+    anna, ben = _user("anna"), _user("ben")
+    ben.preferred_model = "gpt-5"
+    _db.session.commit()
+    root = _client(app, "anna").post("/api/nodes/", json={
+        "content": "public root", "privacy_level": "public",
+        "ai_usage": "chat"}).get_json()["id"]
+    annas_ai = _ai_reply(root, anna, "claude-x", "public")
+    bens = _client(app, "ben").post("/api/nodes/", json={
+        "content": "ben in public", "privacy_level": "public",
+        "ai_usage": "chat", "parent_id": annas_ai.id}).get_json()["id"]
+    own_root = _client(app, "ben").post("/api/nodes/", json={
+        "content": "ben private", "ai_usage": "chat"}).get_json()["id"]
+    for config in ({"CIRCLES_V1": True}, {"CIRCLES_V1": False,
+                                          "CIRCLES_USER_IDS": set()}):
+        app.config.update(config)
+        assert resolve_chat_model(_db.session.get(Node, bens), ben) == (
+            "claude-x", "predecessor")
+        assert resolve_chat_model(_db.session.get(Node, own_root), ben) == (
+            "gpt-5", "user_preference")
+        assert resolve_chat_model(_db.session.get(Node, root), anna) == (
+            "gpt-5", "default")
+
+
+def test_in_a_shared_thread_only_my_own_replies_set_my_default(app):
+    from backend.utils.llm_nodes import resolve_chat_model
+    anna, ben = _user("anna"), _user("ben")
+    entry = _share(app, names=["ben"])
+    bens_answer = _ai_reply(entry, ben, "claude-x", "circles", pointer=entry)
+    # anna's next reply below ben's answer: not moved to his model.
+    assert resolve_chat_model(bens_answer, anna) == ("gpt-5", "default")
+    # ben's own earlier reply does count for him.
+    assert resolve_chat_model(bens_answer, ben) == ("claude-x", "predecessor")

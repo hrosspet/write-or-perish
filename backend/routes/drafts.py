@@ -1555,6 +1555,11 @@ def save_streaming_as_node(session_id):
         transcription_status="completed",
         streaming_transcription=True  # Mark as having chunked audio
     )
+    # Circles: a recorded reply into a shared thread joins its audience
+    # (the explicit act; only directly under the node replied to).
+    if draft.parent_id is not None and user_parent_id == draft.parent_id:
+        from backend.utils import circles as cz
+        cz.join_reply(node, Node.query.get(draft.parent_id), current_user.id)
     from backend.utils.tokens import approximate_token_count
     node.set_content(content)
     node.token_count = approximate_token_count(content)

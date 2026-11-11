@@ -560,6 +560,15 @@ class Node(db.Model):
     # reply in a shared thread points at that entry, so the whole thread
     # has one audience. NULL = not shared with anyone: a "circles" node
     # without it behaves as private (old rows, old clients, #588).
+    # Set only by the code that shares an entry (circles.set_audience,
+    # the apply-to-replies cascade) and by the explicit reply paths
+    # (circles.join_reply: a person's typed, recorded or uploaded reply
+    # into the thread, and an "Ask my AI" answer). Nothing else that is
+    # created under a shared node joins its audience: a Voice session, a
+    # Glean prompt and gleaning, a Text-mode prompt, an AI reply of the
+    # author's, a node type added later. They keep the level they were
+    # created with, and a "circles" level without this pointer is
+    # private.
     # No foreign key on purpose: on a reply or an "Ask my AI" answer it
     # is also the lasting record of whose thread the node was written
     # into, and it must outlive the entry. A pointer whose entry is gone
@@ -752,41 +761,6 @@ def _enforce_node_content_encryption(mapper, connection, node):
             "encrypting; fix the writer (use set_content/set_privacy_level)",
             node.id, node.privacy_level)
         node.content = encrypt_content(node.content)
-
-
-@event.listens_for(Node, "before_insert")
-def _inherit_circle_audience(mapper, connection, node):
-    """A reply written into a shared thread is read by the thread's
-    audience, whichever path creates it (typed, recorded, uploaded, Text
-    mode, Voice, an AI reply) and whatever level that path asked for: a
-    node under a shared "circles" parent becomes "circles" and takes the
-    parent's audience entry. The routes that take a level from the
-    client refuse another one first; this is the rule for the paths that
-    do not ask. A "circles" node under anything else stays without an
-    audience, which reads as private.
-
-    The one node that never joins is a thread's prompt node
-    (session_helpers marks it): it stays its writer's alone."""
-    if node.parent_id is None or node.audience_root_id is not None:
-        return
-    if getattr(node, "_circles_exempt", False):
-        return
-    from backend.utils.privacy import pointers_may_exist
-    if node.privacy_level != "circles" and not pointers_may_exist():
-        return
-    table = Node.__table__
-    row = connection.execute(
-        table.select().with_only_columns(
-            table.c.privacy_level, table.c.audience_root_id
-        ).where(table.c.id == node.parent_id)).first()
-    if row is None or row[0] != "circles" or row[1] is None:
-        return
-    node.audience_root_id = row[1]
-    if node.privacy_level != "circles":
-        node.privacy_level = "circles"
-        if (node.content and is_encryption_enabled()
-                and not is_encrypted(node.content)):
-            node.content = encrypt_content(node.content)
 
 
 @event.listens_for(Node, "before_update")

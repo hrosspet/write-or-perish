@@ -346,7 +346,10 @@ class _Chain:
         that *user_id* can read, else None: a reply for the user there
         needs their "Ask my AI"."""
         from backend.utils.privacy import (
-            can_user_see_node_or_placeholder, foreign_shared)
+            can_user_see_node_or_placeholder, foreign_shared,
+            pointers_may_exist)
+        if not pointers_may_exist():
+            return None        # nothing is shared anywhere: no extra walk
         for n in self.nodes:
             if not can_user_see_node_or_placeholder(n, user_id):
                 return None
@@ -411,12 +414,13 @@ def resolve_chat_model(parent_node, user, chain=None):
     for node in chain.llm_replies():
         if node.id in chain.reads:
             continue
-        # Only a reply made for this user sets their default. Another
-        # person's reply above (in a shared or public thread, or the
-        # author's private one above the entry she shared) would move
-        # them to a model, maybe a provider, they never chose. A reply
-        # with no recorded owner (older rows, imports) counts as before.
-        if (user_id is not None and node.human_owner_id is not None
+        # Circles only: a reply made for another person in a shared
+        # thread (a reader's "Ask my AI" answer) does not set this
+        # user's default. Everywhere else the walk is as it was. An
+        # "Ask my AI" answer itself never comes through here: it runs
+        # on the asker's account model (own_chat_model).
+        if (node.privacy_level == "circles" and node.audience_root_id
+                and user_id is not None and node.human_owner_id is not None
                 and node.human_owner_id != user_id):
             continue
         if is_chat_model(node.llm_model):
@@ -929,6 +933,11 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
         ai_usage=ai_usage,
         token_count=approximate_token_count(placeholder_text),
     )
+    if circle_ask:
+        # An "Ask my AI" answer is a reply in the thread. Every other AI
+        # reply under a shared node stays its owner's (no pointer).
+        from backend.utils.circles import join_reply
+        join_reply(llm_node, parent, human_owner_id)
     llm_node.set_content(placeholder_text)
     meta = _with_read_marker(meta, is_read_turn, read_live)
     client = client or request_client()

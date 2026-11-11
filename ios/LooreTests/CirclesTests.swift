@@ -460,9 +460,11 @@ final class CirclesFormTests: StubbedAppTestCase {
         let model = await thread(own)
         XCTAssertTrue(model.isSharedThread)
         XCTAssertFalse(model.isForeignShared)
-        XCTAssertFalse(model.autoGenerateActive(true))
-        XCTAssertTrue(model.showCraftBar(craftMode: false, autoGenerate: true),
-                      "like a public thread: the explicit bar, also without craft mode")
+        // The author's own shared entry works like any entry of hers: what
+        // her AI writes under it stays hers.
+        XCTAssertTrue(model.autoGenerateActive(true))
+        XCTAssertFalse(model.showCraftBar(craftMode: false, autoGenerate: true))
+        XCTAssertTrue(model.showCraftBar(craftMode: true, autoGenerate: false))
         XCTAssertNil(model.askAIOffReason)
     }
 }

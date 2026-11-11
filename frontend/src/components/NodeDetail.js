@@ -213,14 +213,17 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // deliberate act — auto-generate is forced off (and its toggle hidden),
   // and the explicit LLM Response bar shows for the node's owner instead.
   const isPublicThread = node?.privacy_level === 'public';
-  // SHARED threads (Circles) follow the same rule: other people read
-  // what is written there, so a model answers only when asked. For the
-  // author that is the LLM Response bar; for a reader, "Ask my AI".
+  // Someone else's SHARED thread (Circles) follows the same rule: a
+  // model answers there only when the reader asks ("Ask my AI"), and
+  // the answer is a reply in the thread. On the author's own shared
+  // entry nothing changes: what her AI, a Voice session or a gleaning
+  // writes under it stays hers (only a person's reply and an Ask my AI
+  // answer join the thread's audience).
   const audience = node?.audience || null;
   const isSharedThread = !!audience;
   const isForeignShared = isSharedThread && !audience.is_author;
   const [showAskAiDialog, setShowAskAiDialog] = useState(false);
-  const autoGenerateActive = (isPublicThread || isSharedThread)
+  const autoGenerateActive = (isPublicThread || isForeignShared)
     ? false : autoGenerate;
 
   // LLM completion polling - enabled automatically when llmTaskNodeId is set
@@ -1258,7 +1261,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     && !(entryEnd.children || []).some(c => !c.deleted
       && !['failed', 'cancelled'].includes(c.llm_task_status));
   const showCraftBar = isOwner && !isForeignShared
-    && (craftMode || isPublicThread || isSharedThread)
+    && (craftMode || isPublicThread)
     && (!autoGenerateActive || awaitsReply)
     && node.ai_usage !== 'none' && !isLlmPending;
   // In a thread started from the Glean card (#435) the action row under
@@ -1431,7 +1434,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
       : currentUser?.default_ai_usage === 'none'
         ? 'Your own AI usage is set to None in Account settings.'
         : null;
-  const topRightControls = isOwner && !isPublicThread && !isSharedThread && (
+  const topRightControls = isOwner && !isPublicThread && !isForeignShared && (
     <div style={{
       display: 'flex',
       flexDirection: 'column',
