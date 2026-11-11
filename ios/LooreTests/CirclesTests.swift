@@ -634,6 +634,38 @@ final class CirclesFormTests: StubbedAppTestCase {
         XCTAssertFalse(model.audience.offersSharePath, "a reply in a shared thread has the thread's people")
     }
 
+    func testAReplyUnderTheUsersOwnOnlyMeNodeInSomeoneElsesThreadIsOnlyMe() async {
+        // The user's own AI reply, kept to Only me, in a thread someone else
+        // shared: the server says a reply under it can only be Only me.
+        let parent = """
+        {"id":32,"node_type":"llm","content":"my private AI reply","privacy_level":"private","ai_usage":"chat",
+         "user":{"id":9,"username":"gpt-6-luna"},"human_owner_username":"seowriter","parent_user_id":5,
+         "reply_only_private":true,"children":[],"ancestors":[]}
+        """
+        StubURLProtocol.install { [self] request in
+            switch (request.httpMethod ?? "", path(request)) {
+            case ("GET", "/api/nodes/32"): return .json(200, parent)
+            case ("POST", "/api/nodes/"): return .json(201, #"{"id":60,"parent_id":32}"#)
+            default: return .json(200, "{}")
+            }
+        }
+        // A remembered "Everyone" must not reach the request.
+        defaults.set("public", forKey: DefaultsKey.lastPrivacyLevel)
+        let (model, result) = form(NodeFormConfig(parentId: 32))
+        await model.start()
+        XCTAssertTrue(model.onlyMe)
+        XCTAssertEqual(model.effectivePrivacy, .private)
+        XCTAssertFalse(model.audience.offersSharePath)
+        XCTAssertFalse(model.sharesEntry)
+        model.content = "a note to myself"
+        await model.submit()
+        XCTAssertNil(model.dialog)
+        XCTAssertEqual(result()?.id, 60)
+        let sent = body(of: "POST /api/nodes/")
+        XCTAssertEqual(sent?["privacy_level"] as? String, "private")
+        XCTAssertNil(sent?["circle_ids"])
+    }
+
     func testWithCirclesOffTheFormIsAsBefore() async throws {
         let user = try decode(CurrentUser.self, StubbedAppTestCase.userJSON)
         app.useForTesting(api: makeStubbedClient(environment: .local), user: user)

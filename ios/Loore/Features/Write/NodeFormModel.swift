@@ -102,6 +102,9 @@ final class NodeFormModel {
     /// Set instead when the node is a reply in a shared thread: its readers
     /// are the thread's, named before sending.
     private(set) var threadAudience: NodeAudience?
+    /// A reply under the user's own node that only they read, in a thread
+    /// someone else shared (`reply_only_private`): Only me is the one choice.
+    private(set) var replyOnlyPrivate = false
     var useAgenticPrompt: Bool {
         didSet { if config.allowAgenticPrompt { defaults.set(useAgenticPrompt, forKey: DefaultsKey.agenticReply) } }
     }
@@ -187,9 +190,17 @@ final class NodeFormModel {
                 aiUsage = parent.replyAIUsage ?? parent.aiUsage
                 // A shared thread (Circles): the reply is read by its people.
                 if circlesOn { threadAudience = parent.audience }
+                // Under the user's own Only-me node in someone else's shared
+                // thread the reply is Only me (the server refuses the rest).
+                if circlesOn, parent.replyOnlyPrivate {
+                    replyOnlyPrivate = true
+                    privacy = .private
+                }
                 // A new entry under the user's own node, in a thread that is
                 // not shared: sharing it can take the discussion above along.
-                if circlesOn, threadAudience == nil, ownsNode(parent) { audience.offerSharePath() }
+                if circlesOn, threadAudience == nil, !replyOnlyPrivate, ownsNode(parent) {
+                    audience.offerSharePath()
+                }
             }
         }
         // Editing: what the entry is shared with now, to seed the picker; or,
@@ -233,8 +244,12 @@ final class NodeFormModel {
     var effectivePrivacy: PrivacyLevel {
         if !config.isEdit && parentPrivacy == .public { return .public }
         if !config.isEdit && threadAudience != nil { return .circles }
+        if !config.isEdit && replyOnlyPrivate { return .private }
         return privacy
     }
+
+    /// The form offers Only me alone (see `replyOnlyPrivate`).
+    var onlyMe: Bool { !config.isEdit && replyOnlyPrivate }
 
     /// The node is the user's own (an AI reply: the one they asked for).
     private func ownsNode(_ node: NodeDetail) -> Bool {

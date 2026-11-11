@@ -232,6 +232,9 @@ struct NodeDetail: Decodable, Identifiable, Sendable {
     var gleanThread: Bool
     /// Circles: who reads this node, on a shared node for its author and readers.
     var audience: NodeAudience?
+    /// Circles: the viewer's own node that only they read, in a thread someone
+    /// else shared. A reply under it is Only me (the server refuses anything else).
+    var replyOnlyPrivate: Bool
 
     enum CodingKeys: String, CodingKey {
         case id, content, permalink, user, origin, ancestors, children
@@ -260,12 +263,14 @@ struct NodeDetail: Decodable, Identifiable, Sendable {
         case replyAIUsage = "reply_ai_usage"
         case gleanThread = "glean_thread"
         case audience
+        case replyOnlyPrivate = "reply_only_private"
     }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(Int.self, forKey: .id)
         audience = c.tolerant(.audience)
+        replyOnlyPrivate = c.tolerant(.replyOnlyPrivate, default: false)
         content = c.tolerant(.content, default: "")
         nodeType = c.tolerant(.nodeType, default: .user)
         createdAt = c.tolerant(.createdAt)

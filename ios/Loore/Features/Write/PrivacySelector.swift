@@ -25,6 +25,9 @@ struct PrivacySelectorView: View {
     var allowCircles = true
     var lockPublic = false
     var hidePublic = false
+    /// A reply under the user's own node that only they read, in a thread
+    /// someone else shared: Only me is the one choice, shown as text.
+    var onlyMe = false
     var onEditCircles: (() -> Void)?
 
     @Environment(AppState.self) private var app
@@ -40,6 +43,9 @@ struct PrivacySelectorView: View {
         if allowPublic { list.append((.public, "Everyone")) }
         return list
     }
+
+    static let onlyMeNote = "Only you. You are replying under a node only you can read, "
+        + "in a thread someone else shared."
 
     static func threadNote(_ names: [String]) -> String {
         let who = CirclesWording.joinNames(names)
@@ -79,7 +85,10 @@ struct PrivacySelectorView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 6) {
-                if lockPrivacy, let threadAudience {
+                if onlyMe {
+                    FieldLabel(text: Self.whoCanReadLabel)
+                    FieldDescription(text: Self.onlyMeNote)
+                } else if lockPrivacy, let threadAudience {
                     // A reply in a shared thread is read by the thread's people.
                     FieldLabel(text: Self.whoCanReadLabel)
                     FieldDescription(text: Self.threadNote(threadAudience))
