@@ -61,7 +61,8 @@ const answerButtonStyle = (busy) => ({
 /** ``question``: the import result's ask_profile_rebuild ({token, entries}). */
 export default function ProfileRebuildQuestion({ question }) {
   const [busy, setBusy] = useState(false);
-  const [answered, setAnswered] = useState(null); // true | false | null
+  // true | false | the server's reason a yes started nothing | null
+  const [answered, setAnswered] = useState(null);
   const [error, setError] = useState("");
   const t = profileRebuildText(question.entries || 0);
 
@@ -70,8 +71,11 @@ export default function ProfileRebuildQuestion({ question }) {
     setBusy(true);
     setError("");
     try {
-      await api.post("/import/profile-rebuild", { token: question.token });
-      setAnswered(true);
+      const res = await api.post("/import/profile-rebuild", { token: question.token });
+      // "skipped": the question was answered already, or the profile is
+      // being updated or changed since; the server says why.
+      setAnswered(res?.data?.status === "skipped" && res.data.message
+        ? res.data.message : true);
     } catch (e) {
       setError(e?.response?.data?.error || "Couldn't start the rebuild. Please try again.");
     } finally {
@@ -82,7 +86,7 @@ export default function ProfileRebuildQuestion({ question }) {
   if (answered !== null) {
     return (
       <p role="status" style={{ ...bodyStyle, margin: 0 }}>
-        {answered ? t.savedYes : t.savedNo}
+        {typeof answered === "string" ? answered : answered ? t.savedYes : t.savedNo}
       </p>
     );
   }

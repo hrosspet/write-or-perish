@@ -218,7 +218,9 @@ final class ImportModel {
     var deletedMatches: Int?
     var result: ImportResult?
     /// The answer to the result's rebuild question (#625): nil until answered.
-    enum RebuildAnswer: Equatable { case sending, rebuilding, kept, failed(String) }
+    /// `skipped`: the server started nothing (the question was answered
+    /// already, or the profile is being updated or changed since) and says why.
+    enum RebuildAnswer: Equatable { case sending, rebuilding, kept, skipped(String), failed(String) }
     var rebuildAnswer: RebuildAnswer?
     /// A queued background import is being polled: the dialog can be closed meanwhile.
     private(set) var pollingTask = false
@@ -484,9 +486,13 @@ final class ImportModel {
         }
         rebuildAnswer = .sending
         do {
-            _ = try await app.api.post(APIPath.importProfileRebuild, json: .object(["token": .string(question.token)]),
-                                       as: EmptyResponse.self)
-            rebuildAnswer = .rebuilding
+            let answer: [String: JSONValue] = try await app.api.post(
+                APIPath.importProfileRebuild, json: .object(["token": .string(question.token)]))
+            if answer["status"]?.stringValue == "skipped", let message = answer["message"]?.stringValue {
+                rebuildAnswer = .skipped(message)
+            } else {
+                rebuildAnswer = .rebuilding
+            }
         } catch let failure as APIError {
             rebuildAnswer = .failed(failure.serverMessage ?? "Couldn't start the rebuild. Please try again.")
         } catch {

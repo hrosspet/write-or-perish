@@ -1715,13 +1715,20 @@ def _profile_rebuild_question(user_id, changes):
     that ends before them never read them, and a profile written by hand
     covers no writing.
 
+    The question gets an id, stored on the user
+    (``User.profile_rebuild_offer_id``): the answer is accepted once
+    (``rebuild_profile_after_import``), and a newer import's question
+    replaces an open one.
+
     Returns ``{"token", "entries"}`` (``token`` is what the answer sends
-    back, signed: the user and the oldest entry's date; ``entries`` how
-    many entries left what AI reads), or None. Best-effort: None on any
-    error."""
+    back, signed: the user, the question's id, when it was asked and the
+    oldest entry's date; ``entries`` how many entries left what AI reads),
+    or None. Best-effort: None on any error."""
     try:
+        import secrets
         from backend.utils.privacy import account_allows_ai
         from backend.utils.profile_versions import current_profile_query
+        asked_at = datetime.utcnow()   # before the profile in use is read
         user = db.session.get(User, user_id)
         if (user is None or changes.earliest is None
                 or (user.plan or "free") not in User.VOICE_MODE_PLANS
@@ -1732,8 +1739,12 @@ def _profile_rebuild_question(user_id, changes):
         cutoff = in_use.source_data_cutoff if in_use is not None else None
         if cutoff is None or cutoff < changes.earliest:
             return None
+        question_id = secrets.token_hex(16)
+        user.profile_rebuild_offer_id = question_id
+        db.session.commit()
         token = _rebuild_signer().dumps(
-            {"u": user_id, "from": changes.earliest.isoformat()},
+            {"u": user_id, "q": question_id, "at": asked_at.isoformat(),
+             "from": changes.earliest.isoformat()},
             salt=_PROFILE_REBUILD_SALT)
         return {"token": token, "entries": changes.removed}
     except Exception as e:
@@ -1756,9 +1767,20 @@ def rebuild_profile_after_import():
     A no sends nothing, and closing the result without an answer starts
     nothing and records nothing.
 
-    Returns 202 ``{"profile_update_task_id", "profile_waits_for_imports"}``,
-    400 when the question has expired or is not this user's, 409 when the
-    account no longer gets profile builds."""
+    One question starts at most one rebuild (review of #625: each rebuild
+    is billed). The question's id is cleared in the same UPDATE that
+    checks it, so an answer sent again, or twice at once, finds it gone;
+    a newer import's question has replaced it too. The yes then starts
+    nothing either when a profile update is already pending or running
+    (a rebuild flagged, a batch in flight, a profile task running), or a
+    profile version was saved after the question was asked: the profile
+    has moved on since. These answers are 200 ``{"status": "skipped",
+    "message"}``, the message saying that no rebuild was started.
+
+    Returns 202 ``{"status": "rebuilding", "profile_update_task_id",
+    "profile_waits_for_imports"}``, 200 skipped as above, 400 when the
+    question has expired or is not this user's, 409 when the account no
+    longer gets profile builds."""
     from itsdangerous import BadSignature
     from backend.utils.privacy import account_allows_ai
     data = request.get_json(silent=True) or {}
@@ -1772,9 +1794,11 @@ def rebuild_profile_after_import():
             token, salt=_PROFILE_REBUILD_SALT,
             max_age=PROFILE_REBUILD_QUESTION_MAX_AGE)
         earliest = datetime.fromisoformat(payload["from"])
+        asked_at = datetime.fromisoformat(payload["at"])
+        question_id = payload["q"]
     except (BadSignature, KeyError, TypeError, ValueError):
         return expired
-    if payload.get("u") != current_user.id:
+    if payload.get("u") != current_user.id or not question_id:
         return expired
     user = db.session.get(User, current_user.id)
     if ((user.plan or "free") not in User.VOICE_MODE_PLANS
@@ -1782,8 +1806,32 @@ def rebuild_profile_after_import():
         return jsonify({"error": "Your account doesn't build a profile "
                                  "right now, so there is nothing to "
                                  "rebuild."}), 409
+
+    def skipped(message):
+        return jsonify({"status": "skipped", "message": message}), 200
+
+    claimed = User.query.filter(
+        User.id == user.id,
+        User.profile_rebuild_offer_id == question_id,
+    ).update({"profile_rebuild_offer_id": None}, synchronize_session=False)
+    if claimed != 1:
+        db.session.rollback()
+        return skipped("This question has been answered already, so no "
+                       "rebuild was started.")
+    db.session.refresh(user)
+    if _profile_update_under_way(user):
+        db.session.commit()
+        return skipped("Your profile is being updated right now, so no "
+                       "second rebuild was started.")
+    if UserProfile.query.filter(
+            UserProfile.user_id == user.id,
+            UserProfile.created_at > asked_at).first() is not None:
+        db.session.commit()
+        return skipped("Your profile has changed since this import, so no "
+                       "rebuild was started.")
     try:
         task_id = _hand_off_profile_update_after_import(user, earliest, 0)
+        db.session.commit()
     except Exception as e:
         db.session.rollback()
         current_app.logger.warning(
@@ -1791,9 +1839,22 @@ def rebuild_profile_after_import():
         return jsonify({"error": "Couldn't start the rebuild. Please try "
                                  "again."}), 500
     return jsonify({
+        "status": "rebuilding",
         "profile_update_task_id": task_id,
         "profile_waits_for_imports": _profile_waits_for_imports(user.id),
     }), 202
+
+
+def _profile_update_under_way(user):
+    """Whether a profile update of ``user``'s is pending or running: a
+    rebuild from scratch is flagged, profile work is in the Batch queue
+    (the chained steps or a window set's items), or a profile task holds
+    the user's guard. Metadata only."""
+    if (user.profile_needs_full_regen or user.profile_batch_pending
+            or user.profile_generation_task_id):
+        return True
+    from backend.tasks.profile_windows import inflight_items
+    return bool(inflight_items(user.id))
 
 
 def _hand_off_profile_update_after_import(user_obj, earliest_ts, imported_tokens):

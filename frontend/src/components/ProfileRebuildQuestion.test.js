@@ -40,6 +40,15 @@ test('a yes sends the token back and says so', async () => {
     'Your profile will be rebuilt without these entries.'));
 });
 
+test('a yes that started nothing says why', async () => {
+  mockPost.mockResolvedValue({ data: { status: 'skipped',
+    message: 'This question has been answered already, so no rebuild was started.' } });
+  render(<ProfileRebuildQuestion question={question} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Rebuild my profile' }));
+  await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(
+    'This question has been answered already, so no rebuild was started.'));
+});
+
 test('a no sends nothing', () => {
   render(<ProfileRebuildQuestion question={question} />);
   fireEvent.click(screen.getByRole('button', { name: 'Keep my profile as it is' }));

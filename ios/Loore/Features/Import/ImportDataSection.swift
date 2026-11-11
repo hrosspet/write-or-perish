@@ -352,6 +352,8 @@ private struct ImportFinishedDialog: View {
                 status(question.savedYes)
             case .kept:
                 status(ProfileRebuildQuestion.savedNo)
+            case .skipped(let message):
+                status(message)
             default:
                 ForEach(question.lines, id: \.self) { line in
                     Text(line)

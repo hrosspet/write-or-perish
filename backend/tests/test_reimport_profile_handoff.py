@@ -395,6 +395,67 @@ def test_the_answer_expires(app, hand_offs, monkeypatch):
     assert hand_offs == []
 
 
+# ── one question starts at most one rebuild (review of #625) ─────────────
+
+def _asked(app, name):
+    u, client = _user(app, name)
+    _import_tweets(u.id, TWEETS, "chat")
+    _covered_by_a_profile(u, datetime(2024, 1, 1))
+    token = _import_tweets(u.id, TWEETS, "none")["ask_profile_rebuild"]["token"]
+    return u, client, token
+
+
+def test_the_same_answer_sent_twice_starts_one_rebuild(app, hand_offs):
+    u, client, token = _asked(app, "twice")
+    hand_offs.clear()
+    first = client.post("/api/import/profile-rebuild", json={"token": token})
+    second = client.post("/api/import/profile-rebuild", json={"token": token})
+    assert first.status_code == 202
+    assert first.get_json()["status"] == "rebuilding"
+    assert second.status_code == 200
+    assert second.get_json()["status"] == "skipped"
+    assert "answered already" in second.get_json()["message"]
+    assert len(hand_offs) == 1
+    assert User.query.get(u.id).profile_rebuild_offer_id is None
+
+
+def test_a_newer_question_replaces_an_open_one(app, hand_offs):
+    u, client, older = _asked(app, "replaced")
+    _import_tweets(u.id, TWEETS, "chat")
+    newer = _import_tweets(u.id, TWEETS, "none")["ask_profile_rebuild"]["token"]
+    hand_offs.clear()
+    assert client.post("/api/import/profile-rebuild",
+                       json={"token": older}).get_json()["status"] == "skipped"
+    assert client.post("/api/import/profile-rebuild",
+                       json={"token": newer}).status_code == 202
+    assert len(hand_offs) == 1
+
+
+@pytest.mark.parametrize("state", ["full_regen", "batch_pending", "task",
+                                   "new_version"])
+def test_a_yes_starts_nothing_while_the_profile_moves_on(
+        app, hand_offs, state):
+    u, client, token = _asked(app, f"busy_{state}")
+    hand_offs.clear()
+    user = User.query.get(u.id)
+    if state == "full_regen":
+        user.profile_needs_full_regen = True
+    elif state == "batch_pending":
+        user.profile_batch_pending = True
+    elif state == "task":
+        user.profile_generation_task_id = "t-running"
+    else:
+        _covered_by_a_profile(u, datetime(2024, 6, 1))   # saved after asking
+    _db.session.commit()
+    resp = client.post("/api/import/profile-rebuild", json={"token": token})
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["status"] == "skipped" and "no" in body["message"]
+    assert hand_offs == []
+    # The question is settled: sending it again starts nothing either.
+    assert User.query.get(u.id).profile_rebuild_offer_id is None
+
+
 def test_a_rerun_with_other_settings_keeps_what_the_first_run_changed(
         app, hand_offs):
     """A conversation import confirmed again with other settings starts

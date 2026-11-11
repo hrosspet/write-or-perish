@@ -844,6 +844,14 @@ final class ImportTests: StubbedAppTestCase {
         XCTAssertFalse(calls.contains("POST /api/import/profile-rebuild"))
     }
 
+    func testAYesThatStartedNothingSaysWhy() async {
+        let model = await importAskingToRebuild(
+            answer: .json(200, #"{"status":"skipped","message":"This question has been answered already, so no rebuild was started."}"#))
+        await model.answerRebuild(true)
+        XCTAssertEqual(model.rebuildAnswer,
+                       .skipped("This question has been answered already, so no rebuild was started."))
+    }
+
     func testARefusedRebuildShowsTheServersReason() async {
         let model = await importAskingToRebuild(
             answer: .json(400, #"{"error":"This question has expired. Your profile stays as it is."}"#))
