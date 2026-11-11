@@ -188,7 +188,7 @@ def _export_budgets(monkeypatch):
 
 def test_an_export_in_someone_elses_prompt_is_capped(
         app, circles, monkeypatch):  # noqa: F811
-    from backend.utils import circles as cz
+    cap = 100_000          # circles.OTHERS_PROMPT_EXPORT_TOKENS
     w = _agentic_world(share_path=True)
     ben, anna = w["ben"], w["anna"]
     ben.plan = "pro"
@@ -203,8 +203,7 @@ def test_an_export_in_someone_elses_prompt_is_capped(
         _db.session.commit()
         seen.clear()
         assert _ask(w, ben, w["entry"]) is not None
-        assert seen == [("ben", min(mine or cz.OTHERS_PROMPT_EXPORT_TOKENS,
-                                    cz.OTHERS_PROMPT_EXPORT_TOKENS))]
+        assert seen == [("ben", min(mine or cap, cap))]
         # In her own prompt nothing changes.
         seen.clear()
         assert _ask(w, anna, w["entry"]) is not None
@@ -216,7 +215,7 @@ def test_an_export_in_someone_elses_prompt_is_capped(
     _db.session.commit()
     seen.clear()
     assert _ask(w, ben, w["entry"]) is not None
-    assert seen == [("ben", cz.OTHERS_PROMPT_EXPORT_TOKENS)]
+    assert seen == [("ben", cap)]
 
 
 # ── 4. Each person's corpus holds their own nodes of a shared thread ────
