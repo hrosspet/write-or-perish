@@ -1267,6 +1267,16 @@ def test_the_discussion_leading_up_to_an_entry_is_shared_only_when_asked(app):
         "privacy_level": "private", "ai_reads_ack": key})
     assert r.status_code == 202
     assert not _can_read(app, "anna", r.get_json()["node_id"])
+    # An agreement given for a private reply holds for a private reply
+    # only: its dialog named no readers.
+    r = _client(app, "ben").post(f"/api/nodes/{entry}/llm", json={
+        "privacy_level": "private", "ai_reads_ack": "private:" + key})
+    assert r.status_code == 202
+    before = Node.query.count()
+    r = _client(app, "ben").post(f"/api/nodes/{entry}/llm", json={
+        "ai_reads_ack": "private:" + key})
+    assert r.status_code == 409
+    assert Node.query.count() == before
     # anna's own prompt asks nothing of her to agree to.
     hers = _client(app, "anna").get(f"/api/nodes/{entry}").get_json()
     assert hers["audience"]["ai_reads_key"] == ""

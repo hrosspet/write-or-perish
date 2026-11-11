@@ -2090,7 +2090,15 @@ def request_llm_response(node_id):
             reads, reads_key = cz.ai_reply_reads(
                 parent_node, current_user.id)
             if reads_key:
-                if data.get("ai_reads_ack") != reads_key:
+                # An agreement given for a private reply (its dialog
+                # names no readers) is sent as "private:<key>" and
+                # holds for a private reply only; one given for a
+                # shared reply holds for both.
+                ack = data.get("ai_reads_ack")
+                agreed = ack == reads_key or (
+                    privacy_level == "private"
+                    and ack == f"private:{reads_key}")
+                if not agreed:
                     return jsonify({
                         "error": cz.AI_READS_CHANGED,
                         "code": cz.AI_READS_CHANGED_CODE,
