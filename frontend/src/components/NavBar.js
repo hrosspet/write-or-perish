@@ -89,6 +89,27 @@ function NavBar({ onNewEntryClick }) {
     }
   };
 
+  // Export data: the browser's own download of the file, which the server
+  // sends while it builds it (#591). It starts at once, shows in the
+  // browser's download list with its progress, and is never held in this
+  // page's memory. A HEAD request first checks that it can start (signed
+  // in, server reachable); the server builds nothing for it.
+  const handleExportData = async () => {
+    setOverflowOpen(false);
+    try {
+      await api.head("/export/threads");
+    } catch (err) {
+      addToast("The export couldn't start. Please try again.", 5000);
+      return;
+    }
+    const a = document.createElement("a");
+    a.href = `${api.defaults.baseURL}/export/threads`;
+    a.download = ""; // the server names the file (loore-export-YYYY-MM-DD.txt)
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+
   const currentPath = location.pathname;
   const isAboutPage = aboutPaths.includes(currentPath);
 
@@ -476,19 +497,7 @@ function NavBar({ onNewEntryClick }) {
                         <button onClick={handleWriteClick} style={craftItemStyle}>
                           <span style={craftItemLabelStyle}><CraftIcon />Write new entry</span>
                         </button>
-                        <button onClick={() => {
-                          setOverflowOpen(false);
-                          api.get("/export/threads", { responseType: "blob" })
-                            .then((res) => {
-                              const url = window.URL.createObjectURL(new Blob([res.data]));
-                              const a = document.createElement("a");
-                              a.href = url;
-                              a.download = `loore-export-${new Date().toISOString().slice(0, 10)}.txt`;
-                              a.click();
-                              window.URL.revokeObjectURL(url);
-                            })
-                            .catch((err) => console.error("Export failed:", err));
-                        }} style={craftItemStyle}>
+                        <button onClick={handleExportData} style={craftItemStyle}>
                           <span style={craftItemLabelStyle}><CraftIcon />Export data</span>
                         </button>
                         <Link to="/prompts" onClick={() => setOverflowOpen(false)} style={craftItemStyle}>

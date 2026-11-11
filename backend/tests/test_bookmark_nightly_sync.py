@@ -368,17 +368,18 @@ def test_a_sync_queued_before_an_account_deletion_does_not_call_x(
     assert result["status"] == "account_deleted"
 
 
-def test_no_sync_while_the_writing_is_on_hold(app, monkeypatch):
-    """#268: while "Delete all my writing" waits, the sync would bring
-    back the saved references it hid: neither the nightly fan-out nor a
-    queued sync calls X."""
+def test_no_sync_while_the_account_is_on_hold(app, monkeypatch):
+    """#269: while an account deletion waits (an admin's: the account
+    is not hidden yet), neither the nightly fan-out nor a queued sync
+    calls X."""
     from datetime import datetime
     from backend.models import UserDataPurge
     user = User.query.first()
     user.timezone = _tz_at_hour(_sync_mod.NIGHTLY_SYNC_LOCAL_HOUR)
     _mk_account(user.id)
-    _db.session.add(UserDataPurge(user_id=user.id, source="self",
-                                  scope="hidden", status="scheduled",
+    _db.session.add(UserDataPurge(user_id=user.id, source="admin",
+                                  scope="all", delete_account=True,
+                                  status="scheduled",
                                   scheduled_for=datetime.utcnow()))
     _db.session.commit()
     monkeypatch.setattr(_sync_mod.requests, "get", lambda *a, **k:
@@ -392,6 +393,92 @@ def test_no_sync_while_the_writing_is_on_hold(app, monkeypatch):
     fake_task.apply_async = lambda args, countdown: dispatched.append(args)
     monkeypatch.setattr(_sync_mod, "sync_twitter_bookmarks", fake_task)
     assert _sync_mod.sync_all_twitter_bookmarks()["dispatched"] == 0
+
+
+def _delete_all_content(monkeypatch, tmp_path, user):
+    """The user's "Delete all my content" (#590), with X's revoke
+    endpoint and the storage stubbed."""
+    from backend.utils import audio_storage, external_content, twitter_archive
+    from backend.utils import user_purge
+    monkeypatch.setattr(audio_storage, "AUDIO_STORAGE_ROOT", tmp_path / "a")
+    monkeypatch.setattr(twitter_archive, "STASH_ROOT", tmp_path / "i")
+    revoked = []
+    monkeypatch.setattr(external_content, "x_revoke_token",
+                        lambda token, *a, **k: revoked.append(token))
+    user_purge.schedule_purge(user, requested_by_id=user.id, source="self")
+    return revoked
+
+
+def test_a_content_deletion_ends_the_connection_so_no_sync_runs(
+        app, monkeypatch, tmp_path):
+    """#590: "Delete all my content" ends the X connection at once (with
+    Loore's access revoked at X), so the nightly sync cannot bring back
+    the bookmarks it hid: the fan-out dispatches nothing and a queued
+    sync finds no connection."""
+    user = User.query.first()
+    user.timezone = _tz_at_hour(_sync_mod.NIGHTLY_SYNC_LOCAL_HOUR)
+    _mk_account(user.id, expired=False)
+    saved = ExternalItem(user_id=user.id, source="twitter_bookmark",
+                         external_id="5", content="saved before")
+    _db.session.add(saved)
+    _db.session.commit()
+
+    revoked = _delete_all_content(monkeypatch, tmp_path, user)
+
+    assert revoked == ["access-token", "refresh-token"]
+    assert ExternalAccount.query.filter_by(user_id=user.id).count() == 0
+    monkeypatch.setattr(_sync_mod.requests, "get", lambda *a, **k:
+                        pytest.fail("called X"))
+    dispatched = []
+    fake_task = MagicMock()
+    fake_task.apply_async = lambda args, countdown: dispatched.append(args)
+    real = _sync_mod.sync_twitter_bookmarks
+    monkeypatch.setattr(_sync_mod, "sync_twitter_bookmarks", fake_task)
+    assert _sync_mod.sync_all_twitter_bookmarks()["dispatched"] == 0
+    monkeypatch.setattr(_sync_mod, "sync_twitter_bookmarks", real)
+    assert _sync_mod.sync_twitter_bookmarks(_FakeSelf(), user.id) == {
+        "status": "not_connected"}
+    assert ExternalItem.query.filter_by(user_id=user.id).count() == 0
+
+
+def test_a_sync_running_at_the_request_stores_nothing_after_it(
+        app, monkeypatch, tmp_path):
+    """#590: the request lands while a sync reads a page from X. The page
+    is not stored, so the bookmark the request hid stays hidden; the
+    pages X returned are still costed."""
+    from backend.utils import external_content as content
+    from backend.utils.hidden_rows import including_hidden_rows
+    user = User.query.first()
+    _mk_account(user.id, expired=False)
+    saved = ExternalItem(user_id=user.id, source="twitter_bookmark",
+                         external_id="5", content="saved before")
+    _db.session.add(saved)
+    _db.session.commit()
+    saved_id = saved.id
+    _fake_x_bookmarks(monkeypatch, ["5", "6"])
+    fake_get = content.requests.get
+    asked = []
+
+    def get_then_delete(*a, **k):
+        resp = fake_get(*a, **k)
+        if not asked:
+            asked.append(True)
+            _delete_all_content(monkeypatch, tmp_path,
+                                User.query.get(user.id))
+        return resp
+    monkeypatch.setattr(content.requests, "get", get_then_delete)
+
+    result = _sync_mod.sync_twitter_bookmarks(_FakeSelf(), user.id)
+
+    assert result["status"] == "content_deleted"
+    assert result["created"] == 0
+    assert ExternalItem.query.filter_by(user_id=user.id).count() == 0
+    with including_hidden_rows():
+        assert [i.id for i in ExternalItem.query.filter_by(
+            user_id=user.id)] == [saved_id]
+    cost = APICostLog.query.filter_by(user_id=user.id).one()
+    assert cost.request_type == "x_bookmark_sync"
+    assert cost.cost_microdollars > 0
 
 
 def _tweet_row(user_id, external_id, source="twitter_bookmark",

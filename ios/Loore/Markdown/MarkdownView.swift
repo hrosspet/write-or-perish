@@ -19,6 +19,8 @@ struct MarkdownStyle: Equatable {
     /// The text face: Outfit, or the reading serif where the web sets
     /// Newsreader (`--reading-serif`). Headings stay Cormorant either way.
     var face: Face = .sans
+    /// Every run struck through (a done todo item).
+    var strikethrough = false
 
     enum Face: Equatable {
         case sans
@@ -61,6 +63,20 @@ struct MarkdownStyle: Equatable {
     }
 
     var baseFont: Font { font() }
+
+    /// `font(size:bold:italic:)` as a `UIFont` scaled for `traits` (`SelectableText`).
+    func uiFont(size: CGFloat? = nil, bold: Bool = false, italic: Bool = false, traits: UITraitCollection) -> UIFont {
+        let size = size ?? fontSize
+        let base: UIFont
+        switch face {
+        case .readingSerif:
+            base = LooreFont.readingUIFont(size, bold: bold, italic: italic)
+        case .sans:
+            base = LooreUIFont.sans(size, bold ? .bold : weight, italic: italic)
+        }
+        return LooreUIFont.scaled(base, relativeTo: textStyle, traits: traits)
+    }
+
     /// The face's own line height as a multiple of its size (Outfit's is about 1.26).
     private var naturalLineHeight: CGFloat { face == .readingSerif ? LooreFont.readingLineHeight : 1.26 }
     var lineSpacing: CGFloat { max(0, (lineHeight - naturalLineHeight) * fontSize) }
@@ -99,6 +115,7 @@ struct MarkdownView: View {
         let document = MarkdownParser.document(for: markdown)
         MarkdownBlocks(blocks: document.blocks, context: context, trimOuter: true)
             .environment(\.openURL, OpenURLAction { url in handle(url) })
+            .environment(\.markdownLinkOrigin, app.environment.frontendOrigin)
             .tint(LooreColor.accent)
     }
 
@@ -149,7 +166,9 @@ struct MarkdownRenderContext {
 
 // MARK: - Blocks
 
-/// A column of blocks with the web's collapsing vertical margins.
+/// A column of blocks with the web's collapsing vertical margins. With
+/// selectable text, each run of paragraphs, headings and lists is one
+/// `SelectableText` (`MarkdownFlow`), so a selection can cross them.
 private struct MarkdownBlocks: View {
     let blocks: [MDBlock]
     let context: MarkdownRenderContext
@@ -157,13 +176,31 @@ private struct MarkdownBlocks: View {
     var trimOuter: Bool
     var tightListItem = false
     var listDepth = 0
+    @Environment(\.readingTextSelectable) private var selectable
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            ForEach(Array(blocks.enumerated()), id: \.element.id) { index, block in
-                BlockView(block: block, context: context, tightListItem: tightListItem, listDepth: listDepth)
-                    .padding(.top, topSpacing(index))
-                    .padding(.bottom, index == blocks.count - 1 && !trimOuter ? margins(block).bottom : 0)
+            if selectable {
+                ForEach(MarkdownFlow.segments(blocks)) { segment in
+                    Group {
+                        if segment.isFlow {
+                            FlowTextView(blocks: Array(blocks[segment.range]), context: context,
+                                         tightListItem: tightListItem, listDepth: listDepth)
+                        } else {
+                            BlockView(block: blocks[segment.range.lowerBound], context: context,
+                                      tightListItem: tightListItem, listDepth: listDepth)
+                        }
+                    }
+                    .padding(.top, topSpacing(segment.range.lowerBound))
+                    .padding(.bottom, segment.range.upperBound == blocks.count && !trimOuter
+                             ? margins(blocks[blocks.count - 1]).bottom : 0)
+                }
+            } else {
+                ForEach(Array(blocks.enumerated()), id: \.element.id) { index, block in
+                    BlockView(block: block, context: context, tightListItem: tightListItem, listDepth: listDepth)
+                        .padding(.top, topSpacing(index))
+                        .padding(.bottom, index == blocks.count - 1 && !trimOuter ? margins(block).bottom : 0)
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -176,11 +213,19 @@ private struct MarkdownBlocks: View {
     }
 
     private func margins(_ block: MDBlock) -> (top: CGFloat, bottom: CGFloat) {
-        let em = context.style.fontSize
+        MarkdownSpacing.margins(block, style: context.style, tightListItem: tightListItem)
+    }
+}
+
+/// Block margins and list spacing, shared by the SwiftUI blocks and the
+/// selectable text runs (`MarkdownFlowBuilder`).
+enum MarkdownSpacing {
+    static func margins(_ block: MDBlock, style: MarkdownStyle, tightListItem: Bool) -> (top: CGFloat, bottom: CGFloat) {
+        let em = style.fontSize
         switch block.kind {
         case .paragraph:
             if tightListItem { return (0, 0) }
-            let m = context.style.paragraphSpacing
+            let m = style.paragraphSpacing
             return (m, m)
         case .heading(let level, _):
             let size = HeadingMetrics.size(level) * em
@@ -189,6 +234,24 @@ private struct MarkdownBlocks: View {
         case .list: return (4, 4)
         case .rule: return (20, 20)
         case .table: return (8, 8)
+        }
+    }
+
+    /// The gap between list items.
+    static func itemSpacing(_ list: MDList, style: MarkdownStyle) -> CGFloat {
+        list.tight ? 2 : max(2, style.paragraphSpacing)
+    }
+
+    /// List markers sit right-aligned in this column, then `markerGap`, then the item's text.
+    static let markerColumn: CGFloat = 18
+    static let markerGap: CGFloat = 6
+
+    static func marker(_ list: MDList, index: Int, depth: Int) -> String {
+        if list.ordered { return "\(list.start + index)." }
+        switch depth % 3 {
+        case 0: return "•"
+        case 1: return "◦"
+        default: return "▪"
         }
     }
 }
@@ -300,12 +363,16 @@ private struct ParagraphView: View {
     let inlines: [MDInline]
     let context: MarkdownRenderContext
     var softBreakAsSpace: Bool
+    @Environment(\.readingTextSelectable) private var selectable
 
     var body: some View {
         if inlines.containsImage {
             VStack(alignment: .leading, spacing: 6) {
-                ForEach(Array(pieces.enumerated()), id: \.offset) { _, piece in
+                ForEach(Array(pieces.enumerated()), id: \.offset) { index, piece in
                     switch piece {
+                    case .text(let run) where selectable:
+                        FlowTextView(blocks: [MDBlock(id: "p\(index)", kind: .paragraph(run))], context: context,
+                                     tightListItem: softBreakAsSpace, listDepth: 0)
                     case .text(let run):
                         InlineText(inlines: run, context: context, softBreakAsSpace: softBreakAsSpace)
                     case .image(let source, let alt):
@@ -423,13 +490,16 @@ struct InlineText: View {
     }
 }
 
-/// Builds the `AttributedString` for a run of inlines.
+/// Builds the `AttributedString` for a run of inlines: SwiftUI attributes for a
+/// `Text`, or with `ui` set, UIKit attributes for a `SelectableText`.
 @MainActor
 struct InlineAttributedBuilder {
     let context: MarkdownRenderContext
     var softBreakAsSpace: Bool
     var baseSize: CGFloat
     var isHeading: Bool
+    /// UIKit output: fonts scaled for `traits`, and the colour of runs that set none.
+    var ui: (traits: UITraitCollection, color: UIColor)?
 
     struct Traits {
         var bold = false
@@ -443,6 +513,10 @@ struct InlineAttributedBuilder {
         return out
     }
 
+    /// A line break inside the paragraph. In a text view "\n" would start a new
+    /// paragraph (with paragraph spacing), so it is a line separator there.
+    private var lineBreak: String { ui == nil ? "\n" : "\u{2028}" }
+
     private func font(_ traits: Traits) -> Font {
         if isHeading {
             let base = LooreFont.serif(baseSize, traits.bold ? .bold : .semibold, relativeTo: .title3)
@@ -451,13 +525,30 @@ struct InlineAttributedBuilder {
         return context.style.font(size: baseSize, bold: traits.bold, italic: traits.italic || context.italic)
     }
 
+    private func uiFont(_ traits: Traits, _ ui: UITraitCollection) -> UIFont {
+        if isHeading {
+            let base = LooreUIFont.serif(baseSize, traits.bold ? .bold : .semibold, italic: traits.italic)
+            return LooreUIFont.scaled(base, relativeTo: .title3, traits: ui)
+        }
+        return context.style.uiFont(size: baseSize, bold: traits.bold, italic: traits.italic || context.italic, traits: ui)
+    }
+
     private func styled(_ text: String, _ traits: Traits, link: URL?) -> AttributedString {
         var s = AttributedString(text)
-        s.font = font(traits)
-        if traits.strike {
-            s.strikethroughStyle = .single
-            s.foregroundColor = LooreColor.textMuted
+        let strike = traits.strike || context.style.strikethrough
+        if let ui {
+            s.uiKit.font = uiFont(traits, ui.traits)
+            s.uiKit.foregroundColor = traits.strike ? LooreColor.textMutedUI : ui.color
+            if strike { s.uiKit.strikethroughStyle = .single }
+            if let link {
+                s.link = link
+                s.uiKit.underlineStyle = .single
+            }
+            return s
         }
+        s.font = font(traits)
+        if strike { s.strikethroughStyle = .single }
+        if traits.strike { s.foregroundColor = LooreColor.textMuted }
         if let link {
             s.link = link
             s.underlineStyle = .single
@@ -470,12 +561,16 @@ struct InlineAttributedBuilder {
         case .text(let text):
             return styled(text, traits, link: link)
         case .softBreak:
-            return styled(softBreakAsSpace ? " " : "\n", traits, link: link)
+            return styled(softBreakAsSpace ? " " : lineBreak, traits, link: link)
         case .lineBreak:
-            return styled("\n", traits, link: link)
+            return styled(lineBreak, traits, link: link)
         case .code(let code):
             var s = styled(code, traits, link: link)
-            s.font = MarkdownFonts.mono(0.9 * baseSize)
+            if let ui {
+                s.uiKit.font = LooreUIFont.scaled(LooreUIFont.mono(0.9 * baseSize), relativeTo: .body, traits: ui.traits)
+            } else {
+                s.font = MarkdownFonts.mono(0.9 * baseSize)
+            }
             return s
         case .emphasis(let children):
             var t = traits; t.italic = true
@@ -520,7 +615,11 @@ struct InlineAttributedBuilder {
         var t = traits
         t.italic = true
         var s = styled(text, t, link: nil)
-        s.foregroundColor = LooreColor.textMuted
+        if ui != nil {
+            s.uiKit.foregroundColor = LooreColor.textMutedUI
+        } else {
+            s.foregroundColor = LooreColor.textMuted
+        }
         return s
     }
 
@@ -539,17 +638,17 @@ private struct ListBlockView: View {
     let depth: Int
 
     var body: some View {
-        VStack(alignment: .leading, spacing: list.tight ? 2 : max(2, context.style.paragraphSpacing)) {
+        VStack(alignment: .leading, spacing: MarkdownSpacing.itemSpacing(list, style: context.style)) {
             ForEach(Array(list.items.enumerated()), id: \.element.id) { index, item in
                 if list.isTaskList {
                     TaskItemView(item: item, list: list, context: context, depth: depth)
                 } else {
                     HStack(alignment: .firstTextBaseline, spacing: 0) {
-                        Text(marker(index))
+                        Text(MarkdownSpacing.marker(list, index: index, depth: depth))
                             .font(context.style.baseFont)
                             .foregroundStyle(context.style.color)
-                            .frame(width: 18, alignment: .trailing)
-                            .padding(.trailing, 6)
+                            .frame(width: MarkdownSpacing.markerColumn, alignment: .trailing)
+                            .padding(.trailing, MarkdownSpacing.markerGap)
                             .accessibilityHidden(true)
                         ItemContent(item: item, list: list, context: context, depth: depth)
                     }
@@ -561,15 +660,6 @@ private struct ListBlockView: View {
 
     /// Nested task lists indent 1.5em (`ul.contains-task-list ul.contains-task-list`).
     private var isNestedTask: Bool { depth > 0 }
-
-    private func marker(_ index: Int) -> String {
-        if list.ordered { return "\(list.start + index)." }
-        switch depth % 3 {
-        case 0: return "•"
-        case 1: return "◦"
-        default: return "▪"
-        }
-    }
 }
 
 private struct ItemContent: View {
@@ -694,6 +784,20 @@ private struct TaskItemView: View {
 
 // MARK: - Tables
 
+/// Table cells keep their own `Text` (they size to their content inside a
+/// horizontal scroll): a long press offers Copy for the whole cell.
+private struct WholeTextCopy: ViewModifier {
+    @Environment(\.readingTextSelectable) private var selectable
+
+    func body(content: Content) -> some View {
+        if selectable {
+            content.textSelection(.enabled)
+        } else {
+            content
+        }
+    }
+}
+
 private struct TableBlockView: View {
     let table: MDTable
     let context: MarkdownRenderContext
@@ -728,6 +832,7 @@ private struct TableBlockView: View {
                     }
                 }
             }
+            .modifier(WholeTextCopy())
         }
     }
 

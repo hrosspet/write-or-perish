@@ -62,9 +62,9 @@ struct AccountDeletionInfo: Decodable, Equatable, Sendable {
     }
 }
 
-/// `user.data_deletion`: the user's "Delete all my writing" request (#268),
+/// `user.data_deletion`: the user's "Delete all my content" request (#268),
 /// which the account deletion replaces, and whether X is connected. The
-/// request hides the writing at once; until `purge_at` it can be restored
+/// request hides the content at once; until `purge_at` it can be restored
 /// (`restorable`, sent since the 2026-10-09 rework).
 struct DataDeletionStatus: Decodable, Equatable, Sendable {
     var status: String?
@@ -137,7 +137,7 @@ struct RestoreOffer: Decodable, Equatable, Sendable {
     var username: String
     var deleteOn: Date?
     var restorable: Bool
-    /// The deletion replaced a "Delete all my writing" whose writing is
+    /// The deletion replaced a "Delete all my content" whose content is
     /// still hidden: a restore brings it back too (#268).
     var writingComesBack: Bool
 

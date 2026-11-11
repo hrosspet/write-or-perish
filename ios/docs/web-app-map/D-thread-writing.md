@@ -104,7 +104,7 @@ Not included on ancestors/children: `human_owner_username`, `pinned_at`, `has_or
 | Surface | Floor (craft off) | Ceiling (craft on) |
 |---|---|---|
 | Thread top-right | "Voice Mode" button (owner, ai_usage≠none, not public) | + **Auto-generate** toggle |
-| Action row under focal | Nothing, unless thread is public (owner then sees craft bar) or it's a read thread | **LLM Response + model picker** — shown when auto-generate is **off**, or when no reply stands under the entry (#416): `showCraftBar = isOwner && (craftMode || isPublicThread) && (!autoGenerateActive || awaitsReply) && node.ai_usage !== 'none' && !isLlmPending`, where `awaitsReply = !isLlmNode && transcription_status not pending/processing && no child that is non-deleted and not failed/cancelled` (children carry `llm_task_status`) |
+| Action row under focal | Nothing, unless thread is public (owner then sees craft bar) or it's a read thread; and a plain **Try again** (no picker) on the owner's entry whose automatic reply failed (Peter, 2026-11-10): `showTryAgain = isOwner && !craftMode && autoGenerateActive && awaitsReply && replyAttemptFailed && node.ai_usage !== 'none' && !isLlmPending && !(inReadThread && !readReplyAbove)`, where `replyAttemptFailed` = a non-deleted AI reply with `llm_task_status` failed or cancelled stands under the entry (or its last part); an entry with no reply at all (imports, old entries, a recording with no words) gets none; it sends LLM Response's request (`POST /nodes/<id>/llm {model: selectedModel, source_mode: 'textmode'}`, `selectedModel` = `preferred_model`) | **LLM Response + model picker** — shown when auto-generate is **off**, or when no reply stands under the entry (#416): `showCraftBar = isOwner && (craftMode || isPublicThread) && (!autoGenerateActive || awaitsReply) && node.ai_usage !== 'none' && !isLlmPending`, where `awaitsReply = !isLlmNode && transcription_status not pending/processing/failed && no child that is non-deleted and not failed/cancelled` (children carry `llm_task_status`) |
 | Inline reply form | textarea, Send, Discard draft, Record (mic) | + Privacy/AI-usage selectors, + audio **Upload** button |
 | Reply modal (kebab → Reply) | textarea + **Record + Upload** (upload is not hidden here) | + Privacy/AI-usage selectors |
 | Edit modal | Privacy/AI-usage selectors **always** shown (hidePowerFeatures not passed) | same |
@@ -188,7 +188,7 @@ Below the card:
   + **SpeakerIcon** (TTS play; hidden unless `user.voice_mode_enabled` or node is public; disabled with title "TTS disabled — No AI access" when `ai_usage === 'none'`; otherwise "Play audio"/"Generating audio..."). Flow: `GET /nodes/<id>/audio` → if none, `GET /nodes/<id>/audio-chunks`, else `POST /nodes/<id>/tts` then SSE `…/api/sse/nodes/<id>/tts-stream` `chunk_ready` events; chapters `GET /nodes/<id>/tts-chapters`. (Audio playback details belong to the voice/audio map.)
   + **DownloadAudioIcon** (same gating; "Download audio"/"Download disabled — No AI access"; `GET /nodes/<id>/audio`).
 - **Action row** (§5.1).
-- **In-progress line** (only when a request is tracked but the craft bar isn't shown): spinner + "Waiting for AI…" (status pending) / "Generating…".
+- **In-progress line** (only when a request is tracked and neither LLM Response nor Try again is shown): spinner + "Waiting for AI…" (status pending) / "Generating…".
 - **Inline form** (§4).
 
 ### 2.4 Privacy / AI-usage indicators
@@ -287,6 +287,11 @@ Until quotes arrive (or if the fetch fails) the plain path renders, so **`{quote
 - Per-row **"+"** (accent, title/aria "Add an item below"), visible on row hover (web). Opens an inline input (placeholder **"New item…"**, dashed circle). Enter inserts, Esc or blur-when-empty cancels. `insertItemAfter(content, afterText, newText)` inserts after the matched item and its deeper-indented subtree, copying indent, bullet char (`-`/`*`) and checkbox style (`- [ ] `). Save via `PUT /nodes/<id> {content}`; failure toast **"Couldn't add task — reverted (<reason>)"**.
 - `stripInlineMarkdown` (utils/markdown.js) removes `![alt](u)`→alt, `[t](u)`→t, `**b**`, `__b__`, `~~s~~`, `` `c` ``, `*i*`, `_i_` — the Swift parser must produce the same plain text or toggles silently no-op.
 - #321 (pinned by `MarkdownBody.stable.test.js`): re-rendering after a toggle must **not** remount list items (focus stays on the tapped checkbox, the page doesn't jump, a half-typed "+" input survives parent re-renders). Swift: use stable identities for rows.
+
+### 3.6 Selecting text
+
+- Web: the browser's own selection. Any rendered text can be selected, across paragraphs, lists and cards, and copied; a click on a card still opens it (a drag selects instead).
+- iOS (2026-11-10): reading text is a non-editable `UITextView` per run of paragraphs, headings and lists (`SelectableText`, `MarkdownFlow`), so a selection can cross paragraphs but not into a code block, quote, table or another card. Cards that open on a tap pass their action to the text (`.readingTextTap`). Details in `ios/PROGRESS.md`, "Select and copy text".
 
 ---
 
@@ -403,6 +408,7 @@ Flow:
 ### 5.1 The action row under the focal node
 
 - **LLM Response** group (shown when `showLlmResponse`: craft bar condition and not "a read thread before its first picks"): button + attached `ModelSelector` (joined borders). Button states: **"LLM Response"** / spinner + **"Requesting…"** (during the POST) / "Waiting for AI…" / "Generating…". Disabled while requesting or tracking a task, and directly under a completed read reply (title "To chat about the recommendations, send your reply first. To read further, use the button on the right."; in a read thread otherwise title "Chat about the picks").
+- **Try again** (craft mode off, `showTryAgain`, see the craft-mode table): a lone button, no model picker and no `data-action-group` (it takes no part in the stacked grid). Same request, states and disabling as LLM Response: **"Try again"** / spinner + "Requesting…" / "Waiting for AI…" / "Generating…".
 - **Read / Read further** group (owner, read thread, AI allowed, not pending) — admin read feature; see §5.9.
 - On narrow screens the two groups become a 2-column grid (buttons | pickers).
 
@@ -537,7 +543,7 @@ After each success the page's copy of `tool_calls_meta` is updated (`onApplied`)
 
 ## 7. UI copy catalogue (thread + writing)
 
-Buttons / labels: "Thread", "Voice Mode", "Starting…", "Relevant tweets", "Read", "Read further", "Auto-generate", "LLM Response", "Requesting…", "Waiting for AI…", "Generating…", "Thinking", "Processing", "Actions taken (N)", "Reply", "Edit", "Delete", "More actions", "Send", "Sending...", "Uploading... N%", "Transcribing... N%", "Waiting to transcribe...", "Discard draft", "Record", "Offline", "Resume", "Finalizing...", "Error - Retry", "Stop & save", "Save audio", "Upload", "Remove", "Agentic Reply", "Privacy Level", "AI Usage", "More models…", "Mark as read", "Mark as unread", "Good quote", "Bad quote", "Mark all as read", "All read.", "New item…" (placeholder), "Add an item below".
+Buttons / labels: "Thread", "Voice Mode", "Starting…", "Relevant tweets", "Read", "Read further", "Auto-generate", "LLM Response", "Try again", "Requesting…", "Waiting for AI…", "Generating…", "Thinking", "Processing", "Actions taken (N)", "Reply", "Edit", "Delete", "More actions", "Send", "Sending...", "Uploading... N%", "Transcribing... N%", "Waiting to transcribe...", "Discard draft", "Record", "Offline", "Resume", "Finalizing...", "Error - Retry", "Stop & save", "Save audio", "Upload", "Remove", "Agentic Reply", "Privacy Level", "AI Usage", "More models…", "Mark as read", "Mark as unread", "Good quote", "Bad quote", "Mark all as read", "All read.", "New item…" (placeholder), "Add an item below".
 
 Placeholders: "What's present for you right now..." (default), "Type what's on your mind…" (thread inline, /textmode), "Ask about these picks, or say what you make of them…" (read reply).
 

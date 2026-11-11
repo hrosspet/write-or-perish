@@ -115,6 +115,15 @@ celery.conf.update(
             'task': 'backend.tasks.spend_monitor.check_api_spend',
             'schedule': 3600.0,  # hourly
         },
+        # The spend cap's carry into the new month (#594): caps the users
+        # whose carry alone reaches their limit. A fixed minute, not an
+        # interval (which starts over on every deploy), so a new month's
+        # caps are set by 00:07 UTC on the 1st. Touches only users not yet
+        # rolled this month.
+        'roll-spend-carry': {
+            'task': 'backend.tasks.spend_monitor.roll_carries',
+            'schedule': schedules.crontab(minute=7),  # hourly, at :07 UTC
+        },
         # Poll drafts ride the Batch API (#207); no-op when none pending.
         'collect-poll-draft-batches': {
             'task': 'backend.tasks.poll_draft.collect_poll_draft_batches',

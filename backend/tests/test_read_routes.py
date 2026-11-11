@@ -234,15 +234,17 @@ class TestReadStart:
         assert resp.status_code == 400
         assert Node.query.count() == 0
 
-    def test_no_read_while_the_writing_is_on_hold(self, app):
-        """#268: while "Delete all my writing" waits, no Read starts (the
-        start, read further and rerun routes share the guard)."""
+    def test_no_read_while_the_account_is_on_hold(self, app):
+        """#269: while an account deletion waits, no Read starts (the
+        start, read further and rerun routes share the guard). A waiting
+        "Delete all my content" does not stop one (#590)."""
         from datetime import datetime
         from backend.models import UserDataPurge
         client = app.test_client()
         alice = _make_user("alice", is_admin=True)
         _db.session.add(UserDataPurge(
-            user_id=alice.id, source="self", scope="hidden",
+            user_id=alice.id, source="admin", scope="all",
+            delete_account=True,
             status="scheduled", scheduled_for=datetime.utcnow()))
         _db.session.commit()
 
@@ -250,8 +252,8 @@ class TestReadStart:
         resp = client.post("/api/read/start", json={"model": "gpt-5"})
         assert resp.status_code == 409
         assert resp.get_json()["code"] == "writing_on_hold"
-        assert resp.get_json()["error"].startswith(
-            "Glean is off while your writing is deleted.")
+        assert resp.get_json()["error"] == (
+            "Glean is off while your account is being deleted.")
         assert Node.query.count() == 0
 
 
@@ -1787,16 +1789,19 @@ class TestNoGleanUnderAFailedReply:
 
 
 class TestNoGleanWhileTheWritingIsOnHold:
-    """#268 with #435: while "Delete all my writing" waits, a user who
-    gleans gets no glean, neither a first one nor Glean again under a
-    gleaning: 409 writing_on_hold in Glean's words, and nothing is
-    created. Once the request is gone, Glean works again."""
+    """#269 with #435: while an account deletion waits (an admin's, so the
+    session still works), a user who gleans gets no glean, neither a
+    first one nor Glean again under a gleaning: 409 writing_on_hold in
+    Glean's words, and nothing is created. Once the request is gone,
+    Glean works again. A waiting "Delete all my content" does not stop
+    Glean (#590): it reads only what was written since."""
 
-    def _hold(self, user):
+    def _hold(self, user, account=True):
         from datetime import datetime
         from backend.models import UserDataPurge
         job = UserDataPurge(
-            user_id=user.id, source="self", scope="hidden",
+            user_id=user.id, source="admin",
+            scope="all" if account else "hidden", delete_account=account,
             status="scheduled", scheduled_for=datetime.utcnow())
         _db.session.add(job)
         _db.session.commit()
@@ -1807,8 +1812,17 @@ class TestNoGleanWhileTheWritingIsOnHold:
         body = resp.get_json()
         assert body["code"] == "writing_on_hold"
         assert body["error"] == (
-            "Glean is off while your writing is deleted. Restore "
-            "your writing on the Account page to glean again.")
+            "Glean is off while your account is being deleted.")
+
+    def test_a_content_deletion_does_not_stop_glean(self, app_glean):
+        client = app_glean.test_client()
+        ana = _glean_user(app_glean, glean_enabled=True)
+        self._hold(ana, account=False)
+        entry = _make_node(ana, content="written after the request")
+        _db.session.commit()
+        _login(client, ana.id)
+        resp = client.post(f"/api/read/from-node/{entry.id}", json={})
+        assert resp.status_code == 202, resp.get_json()
 
     def test_no_glean_during_the_hold(self, app_glean):
         client = app_glean.test_client()

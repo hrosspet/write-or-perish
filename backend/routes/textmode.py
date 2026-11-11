@@ -162,14 +162,14 @@ def start_conversation():
     # blocked), but skip the LLM placeholder and signal the frontend to show
     # the cap banner. Handled inline (not via the chokepoint's 402) so the
     # committed nodes aren't rolled back and the UI lands on the new thread.
-    from backend.utils.spend import user_is_capped
+    from backend.utils.spend import spend_capped_fields, user_is_capped
     if auto_generate and user_is_capped(current_user):
         db.session.commit()
         return jsonify({
             "conversation_id": system_node.id,
             "user_node_id": user_node.id,
             "tip_id": tip_node.id,
-            "spend_capped": True,
+            **spend_capped_fields(current_user),
         }), 202
 
     # 3. Placeholder LLM node and enqueue task — unless the caller
@@ -472,10 +472,10 @@ def continue_from_node(node_id):
     }
     # Spend cap and a refused {user_export}: the message is kept, only
     # the reply is skipped — the same stance as /start and /message.
-    from backend.utils.spend import user_is_capped
+    from backend.utils.spend import spend_capped_fields, user_is_capped
     if auto_generate and user_is_capped(current_user):
         db.session.commit()
-        response["spend_capped"] = True
+        response.update(spend_capped_fields(current_user))
         return jsonify(response), 202
     if auto_generate:
         try:

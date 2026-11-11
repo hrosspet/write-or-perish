@@ -35,16 +35,16 @@ test('shows both choices; restoring signs in and opens the app', async () => {
   const body = screen.getByText(/You deleted @alice/).textContent;
   expect(body).toMatch(/You can restore it until\s+.*2026; after that it is deleted forever/);
   expect(body).not.toMatch(/hidden/);
-  expect(screen.queryByText(/the writing you deleted/)).toBeNull();
+  expect(screen.queryByText(/the content you deleted/)).toBeNull();
   expect(screen.getByRole('button', { name: /keep it deleted/i })).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: /restore my account/i }));
   await waitFor(() => expect(mockPost).toHaveBeenCalledWith('/account/restore'));
   expect(assign).toHaveBeenCalledWith('/');
 });
 
-test('says the deleted writing comes back too when it does', async () => {
-  // #268: the account deletion replaced a "Delete all my writing" whose
-  // writing is still hidden.
+test('says the deleted content comes back too when it does', async () => {
+  // #268: the account deletion replaced a "Delete all my content" whose
+  // content is still hidden.
   mockGet.mockResolvedValue({ data: {
     username: 'alice', delete_on: '2026-11-08T12:00:00Z', restorable: true,
     writing_comes_back: true,
@@ -52,7 +52,7 @@ test('says the deleted writing comes back too when it does', async () => {
   renderPage();
   await waitFor(() => expect(screen.getByText(/You deleted @alice/)).toBeTruthy());
   expect(screen.getByText(/You deleted @alice/).textContent)
-    .toMatch(/Restoring it also brings back the writing you deleted\./);
+    .toMatch(/Restoring it also brings back the content you deleted\./);
 });
 
 test('keeping it deleted forgets the question', async () => {

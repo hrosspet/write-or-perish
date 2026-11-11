@@ -47,7 +47,9 @@ from backend.utils.llm_batch import (
 # ImportError; attribute access at call time is fine.
 from backend.tasks import exports as _exports
 
-from backend.utils.hidden_rows import writing_on_hold
+from backend.utils.hidden_rows import (
+    ReadBeforeDeletion, account_on_hold, corpus_changed, item_read_at,
+)
 logger = get_task_logger(__name__)
 
 # Mirror maybe_trigger_incremental_profile_update's gates (exports.py);
@@ -442,18 +444,23 @@ def _build_next_profile_request(user, allow_chunk=True, chunk_num=1):
     cutoff = prev.source_data_cutoff if prev else None
     cumulative = (prev.source_tokens_used or 0) if prev else 0
 
-    # #183, option 2: a from-scratch build merges the user's version the
-    # current chain carries into the new chain at its date; a chain that
-    # has reached that date merges it before anything else.
+    # #183, option 2: a from-scratch build merges the user's versions the
+    # current chain carries into the new chain, each at its date and the
+    # oldest first (#421); a chain that has reached the next one's date
+    # merges it before anything else, one merge per request. An older one
+    # is merged without the lines a newer one changed, and not at all when
+    # none of its own changes is left (#421, option (c)).
     if prev is None and _exports.plan_user_version_merge(
             user, _exports.profile_update_base(user.id)) is not None:
         db.session.commit()
-    pending = _exports.settled_pending_merge(user, prev)
-    if pending is not None and _exports.merge_due(
-            user, prev, pending, more_to_read=(
-                allow_chunk and _exports.should_continue_chain(user, prev))):
-        return _merge_request(user, prev, pending, provider, api_model,
+    merge = _exports.next_user_merge(
+        user, prev, lambda: (allow_chunk
+                             and _exports.should_continue_chain(user, prev)))
+    if merge is not None:
+        return _merge_request(user, prev, merge, provider, api_model,
                               model_id, chunk_num)
+    pending = _exports.pending_merge_version(user) if prev is not None \
+        else None
 
     # The remainder after the cutoff, summed in the export window's own
     # scope, is planned into equal chunks (docs/design/chunk-planner.md):
@@ -564,12 +571,14 @@ def _build_next_profile_request(user, allow_chunk=True, chunk_num=1):
                 },
             }
 
-    # The run ends before the chain reached the date of the user's version
-    # it must merge (the version is newer than all of the writing): the
-    # merge is the run's last step (#183).
+    # The run ends before the chain reached the date of the user's versions
+    # it must merge (they are newer than all of the writing): the merges
+    # are the run's last steps, oldest first, one per request (#183, #421).
     if pending is not None:
-        return _merge_request(user, prev, pending, provider, api_model,
-                              model_id, chunk_num)
+        merge = _exports.next_user_merge(user, prev, lambda: False)
+        if merge is not None:
+            return _merge_request(user, prev, merge, provider, api_model,
+                                  model_id, chunk_num)
 
     # No (full-size) new data → integrate the chain if there are ≥2 versions
     # and we haven't already integrated this tip.
@@ -579,6 +588,7 @@ def _build_next_profile_request(user, allow_chunk=True, chunk_num=1):
             user_id=user.id, generation_type="integration",
             parent_profile_id=prev.id).first()
         if _exports.needs_integration(chain) and not already:
+            read_at = datetime.utcnow()
             messages, _chain = _exports.build_integration_messages(user.id, prev.id)
             if messages is not None:
                 cid = f"profile_{user.id}_{prev.id}_integration"
@@ -598,6 +608,9 @@ def _build_next_profile_request(user, allow_chunk=True, chunk_num=1):
                             prev.source_data_cutoff.isoformat()
                             if prev.source_data_cutoff else None),
                         "model_id": model_id,
+                        # When it read the versions it merges: a content
+                        # deletion after it drops the result (#590).
+                        "read_at": read_at.isoformat(),
                     },
                 }
     return None
@@ -607,7 +620,10 @@ def _merge_request(user, prev, version, provider, api_model, model_id,
                    chunk_num):
     """The batch request of a rebuild's merge step (#183): the rebuilt
     chain's version ``prev`` and the user's ``version``, merged with the
-    integration prompt (exports.build_merge_messages)."""
+    integration prompt (exports.build_merge_messages). ``version`` is what
+    the merge reads (exports.user_merge_input): an older round without the
+    lines a newer one changed (#421); the meta keeps its id."""
+    read_at = datetime.utcnow()
     messages = _exports.build_merge_messages(user.id, prev, version)
     cid = f"profile_{user.id}_{prev.id}_merge"
     return {
@@ -623,6 +639,8 @@ def _merge_request(user, prev, version, provider, api_model, model_id,
             "model_id": model_id,
             # The ordinal the next chunk gets; a merge is not a chunk.
             "chunk_num": chunk_num,
+            # When it read the two versions (#590, as an integration).
+            "read_at": read_at.isoformat(),
         },
     }
 
@@ -711,7 +729,8 @@ def _apply_result(user, item, result, submitted_at):
                 # rendered right before its submission.
                 source_rendered_at=(
                     datetime.fromisoformat(item["rendered_at"])
-                    if item.get("rendered_at") else submitted_at))
+                    if item.get("rendered_at") else submitted_at),
+                read_at=item_read_at(item))
             # mirror PR #181: a from-scratch full regen is no longer needed
             # once its first chunk is committed. Only a from-scratch chunk
             # (prev_profile_id None) satisfies the flag — a flag set while
@@ -755,7 +774,8 @@ def _apply_result(user, item, result, submitted_at):
             source_tokens_used=item.get("prev_source_tokens"),
             source_data_cutoff=cutoff, generation_type="integration",
             parent_profile_id=item["prev_profile_id"], batch=True,
-            source_origin_stats=item.get("prev_origin_stats"))
+            source_origin_stats=item.get("prev_origin_stats"),
+            read_at=item_read_at(item))
         logger.info(f"User {user.id}: saved batch integration profile")
         # Integration = the batch rebuild finished for this user (#207).
         from backend.utils.notifications import notify_profile_ready
@@ -786,7 +806,8 @@ def _apply_merge(user, item, response, submitted_at):
         user.profile_batch_attempts = 0
         return None
     merged = _exports.save_merge(
-        user, item["model_id"], response, base, version, batch=True)
+        user, item["model_id"], response, base, version, batch=True,
+        read_at=item_read_at(item))
     user.profile_batch_attempts = 0
     return _build_next_profile_request(
         user, allow_chunk=_exports.should_continue_chain(user, merged),
@@ -998,6 +1019,36 @@ POLICY_BLOCK_NOTE = ("Stopped: the provider's content-policy filter "
                      "only after Build profile with the override")
 
 
+def _drop_read_before_deletion(user, item, result):
+    """A collected item that read content the user deleted after it went
+    out ("Delete all my content", #590), or that read during a deletion
+    restored since, or whose account is being deleted: nothing is saved
+    from it (hidden_rows.corpus_changed). A result the provider returned was
+    billed (a cancel can land after the request ran), so its cost row is
+    written on the user, as for any other call (Peter, 2026-10-22: such
+    results are dropped, "but their cost is logged"). The profile flags
+    are cleared as after a finished step, so the build of what the user
+    writes from now on is not held behind it."""
+    kind = item.get("kind")
+    if result is not None:
+        if kind == "intentions":
+            from backend.tasks import intentions as intentions_mod
+            intentions_mod._add_cost_log(
+                user, item.get("model_id") or intentions_mod.PINNED_MODEL_ID,
+                result.get("input_tokens", 0) or 0,
+                result.get("output_tokens", 0) or 0, batch=True)
+        else:
+            _exports._add_profile_cost_log(
+                user, item.get("model_id") or _model_for(user),
+                _response_from_result(result), batch=True)
+    if kind != "intentions":
+        user.profile_batch_pending = False
+    db.session.commit()
+    logger.info(f"Batch result {item.get('custom_id')} ({kind}) for user "
+                f"{user.id} dropped: it read content deleted after it went "
+                f"out{'; cost logged' if result is not None else ''}")
+
+
 def _stop_for_policy_block(user, item, code):
     """A profile step the provider's content-policy filter blocked: final
     (Peter, 2026-11-04). Not a batch attempt (attempts lead to the
@@ -1129,7 +1180,7 @@ def _seed_profile_batches(users=None, ignore_backoff=False,
     nothing for a user whose imports are still settling (#598,
     import_settling); an immediate seed the admin sends (Build profile,
     pre-fill) does not wait for them."""
-    from backend.utils.spend import user_is_capped
+    from backend.utils.spend import refresh_spend_carry, user_is_capped
     config = current_app.config
     if config.get("PROFILE_UPDATES_PAUSED"):
         logger.info("PROFILE_UPDATES_PAUSED — skipping batch seeder")
@@ -1152,9 +1203,11 @@ def _seed_profile_batches(users=None, ignore_backoff=False,
     for user in users:
         if user.profile_batch_pending:
             continue
-        # The immediate seed passes users in directly: one whose writing
-        # is on hold for deletion (#268) gets nothing built.
-        if writing_on_hold(user.id):
+        # The immediate seed passes users in directly: one whose account
+        # is being deleted (#269) gets nothing built. A waiting "Delete
+        # all my content" does not hold the account: its build reads
+        # only what the user wrote since (#590).
+        if account_on_hold(user.id):
             continue
         # profile_eligible_query already excludes opted-out accounts, but
         # the immediate seed (admin Build profile, pre-fill, import
@@ -1175,7 +1228,10 @@ def _seed_profile_batches(users=None, ignore_backoff=False,
                 continue
             imports_done = user.profile_import_quiet_from is not None
         # The per-user monthly spend cap, checked as the synchronous task
-        # checks it on entry. The builder below settles it too.
+        # checks it on entry. The builder below settles it too. At a new
+        # month the carry is rolled first (#594): a build held at the cap
+        # stays held while last month's overflow still fills the limit.
+        refresh_spend_carry(user, config)
         if user_is_capped(user):
             _hold_for_cap(user)
             continue
@@ -1353,19 +1409,23 @@ def _poll_profile_batches():
             continue
 
         set_items = []
+        dropped_set_ids = set()
         blocked = blocked_items(results)
         for item in job.items:
             user = User.query.get(item["user_id"])
             if not user:
                 continue
-            if writing_on_hold(user.id):
-                # "Delete all my writing" hid this user's writing after the
-                # request went out (#268): nothing is saved from it.
-                logger.info(f"Batch result for user {user.id} dropped: "
-                            "their writing is on hold for deletion")
-                if item.get("kind") != "intentions":
-                    user.profile_batch_pending = False
-                    db.session.commit()
+            if corpus_changed(user.id, item_read_at(item)):
+                # The request read content the user then deleted ("Delete
+                # all my content", #590), or read during a deletion she
+                # has restored since (the restored profile is the one in
+                # use), or the account is being deleted: nothing is saved
+                # from it, and a billed result gets its cost row (Peter,
+                # 2026-10-22).
+                _drop_read_before_deletion(user, item,
+                                           results.get(item["custom_id"]))
+                if item.get("kind") in SET_ITEM_KINDS:
+                    dropped_set_ids.add(item["custom_id"])
                 continue
             if item.get("kind") in SET_ITEM_KINDS:
                 # A window set's item (#545): collected below, together.
@@ -1390,7 +1450,9 @@ def _poll_profile_batches():
                     elif result is None:
                         intentions_mod.handle_failed_intentions_item(user, item, job, keys)
                     else:
-                        intentions_mod.apply_intentions_item(user, item, result)
+                        intentions_mod.apply_intentions_item(
+                            user, item, result,
+                            read_at=item_read_at(item))
                 except EmptyTruncatedOutputError as e:
                     # Refused (cut off before any text, #368): the cost row
                     # is written and nothing saved. Shown as "failed" in the
@@ -1444,6 +1506,12 @@ def _poll_profile_batches():
                 continue
             try:
                 nxt = _apply_result(user, item, result, job.submitted_at)
+            except ReadBeforeDeletion:
+                # Deleted between the check above and the save (#590): the
+                # cost row is written, nothing saved, no attempt counted.
+                user.profile_batch_pending = False
+                db.session.commit()
+                continue
             except Exception as e:
                 logger.error(
                     f"Apply batch result failed for user {user.id}: {e}",
@@ -1483,6 +1551,11 @@ def _poll_profile_batches():
             from backend.tasks import profile_windows
             advance_users = profile_windows.collect(
                 job, set_items, results, queue_full=queue_full)
+        if dropped_set_ids:
+            # The window pipeline's attempt history reads the outcomes.
+            job.items = [dict(i, outcome="dropped")
+                         if i.get("custom_id") in dropped_set_ids else i
+                         for i in job.items or []]
         if queue_full:
             logger.warning(
                 f"Profile batch {job.batch_id} ({job.provider_key}) failed "

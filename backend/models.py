@@ -121,6 +121,19 @@ class User(db.Model, UserMixin):
     # global env var. See backend/utils/spend.get_user_spend_limit_usd.
     monthly_spend_limit_usd = db.Column(db.Float, nullable=True)
 
+    # The spend cap's carry (#594): what earlier months spent above the
+    # user's limit, counted toward the month in spend_carry_month ("YYYY-MM",
+    # UTC), in microdollars. Rolled forward one month at a time at the
+    # rollover (backend/utils/spend.roll_spend_carry); NULL month = never
+    # rolled, which starts the carry at 0. Cost records are never changed.
+    spend_carry_microdollars = db.Column(
+        db.BigInteger, nullable=False, default=0, server_default="0")
+    spend_carry_month = db.Column(db.String(7), nullable=True)
+    # A month ("YYYY-MM") in which the user had no limit at some time: its
+    # spending carries nothing into the next month (a limit of 0 clears
+    # the carry, also when a limit is set again later in the month).
+    spend_carry_free_month = db.Column(db.String(7), nullable=True)
+
     # Per-user defaults for new nodes (overridable per-node)
     default_privacy_level = db.Column(
         db.String(16), nullable=False, default="private",
@@ -140,8 +153,12 @@ class User(db.Model, UserMixin):
     profile_needs_full_regen = db.Column(db.Boolean, nullable=False, default=False)
     # The version the user wrote that a rebuild or an import's re-tip in
     # progress still has to merge into the new chain at its date (#183;
-    # tasks/exports.plan_user_version_merge). Cleared by the merge and by
-    # any version the user saves. A plain id, not a foreign key.
+    # tasks/exports.plan_user_version_merge): the newest one the old chain
+    # carried. The older ones it carries are merged before it, each at its
+    # date, only for the lines no newer one changed (#421;
+    # tasks/exports.user_versions_to_merge, user_merge_input). Cleared by the
+    # merge of this version and by any version the user saves. A plain id,
+    # not a foreign key.
     profile_pending_merge_id = db.Column(db.Integer, nullable=True)
 
     # --- Profile-generation batch pipeline (issue #173, Part A) ---
@@ -299,11 +316,12 @@ class User(db.Model, UserMixin):
           still KEEPS email / magic-link humans (``twitter_id`` NULL), who
           never author LLM nodes.
 
-        * An account with a data purge waiting or running (#268) is left
-          out: "Delete all my writing" hides the writing at once, and no
-          scheduled job may build a profile or summary from it while it
-          can still be restored or is being deleted. The account is
-          eligible again after a restore or once the purge is done.
+        * An account whose deletion (#269), or a purge of everything,
+          waits or runs is left out (hidden_rows.account_on_hold_user_ids).
+          A waiting "Delete all my content" does not leave it out: the
+          account starts afresh, and what the user writes after the
+          request gets its profile and summaries as a new account's would
+          (#590). Builds that read the hidden content save nothing.
 
         * A deleted account in its grace period (#269) is left out: it
           is hidden, and nothing runs for it unless it is restored.
@@ -311,12 +329,12 @@ class User(db.Model, UserMixin):
         Shared helper (not an inline filter) so the profile and
         recent-context tasks can't drift apart again.
         """
+        from backend.utils.hidden_rows import account_on_hold_user_ids
         from backend.utils.privacy import AI_ALLOWED
         llm_authors = db.session.query(Node.user_id).filter(
             Node.node_type == "llm", Node.user_id.isnot(None)
         ).distinct()
-        purging = db.session.query(UserDataPurge.user_id).filter(
-            UserDataPurge.status.in_(UserDataPurge.ACTIVE_STATUSES))
+        purging = account_on_hold_user_ids()
         return cls.query.filter(
             cls.approved.is_(True),
             cls.plan.in_(list(cls.VOICE_MODE_PLANS)),
@@ -1979,7 +1997,7 @@ class FeedPick(db.Model):
     # that sees the user's profile and intentions, so no copy, hash or
     # excerpt of it goes with the verdict (Peter: "we shouldn't be
     # tracking the contents of the point"). Goes with the row: hidden by
-    # a waiting "Delete all my writing" and deleted by the purge.
+    # a waiting "Delete all my content" and deleted by the purge.
     intro_verdict = db.Column(db.String(8), nullable=True)
     intro_verdict_at = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
@@ -2171,7 +2189,7 @@ class UserDataPurge(db.Model):
     of what the purge did.
 
     A request to delete all of a user's writing, the user's own ("Delete
-    all my writing") or an admin's ("Purge data"; Peter, 2026-10-13: "it
+    all my content") or an admin's ("Purge data"; Peter, 2026-10-13: "it
     should definitely work the same as user doing themselves"), hides
     everything it will delete at once (``scope = "hidden"``; what it hid
     is recorded in ``UserDataPurgeHidden``) and waits out a grace period
@@ -2213,11 +2231,18 @@ class UserDataPurge(db.Model):
     requested_by_id = db.Column(db.Integer, nullable=True)
     status = db.Column(db.String(16), nullable=False, default="scheduled",
                        index=True)
-    # The latest request: the user's "Delete all my writing" while a
-    # writing deletion waits adds to it and moves this and scheduled_for
-    # (Peter, 2026-10-15; user_purge.extend_waiting_purge).
+    # The latest request: the user's "Delete all my content" while a
+    # content deletion waits adds to it and moves this and scheduled_for
+    # (Peter, 2026-10-15; user_purge.extend_waiting_purge). A job that
+    # read the user's content before it saves nothing from it (#590,
+    # hidden_rows.read_before_deletion).
     requested_at = db.Column(db.DateTime, nullable=False,
                              default=datetime.utcnow)
+    # The first request of a content deletion, which a second request
+    # does not move: a restore drops the profile versions Loore built
+    # since then (#590, user_purge.restore_profile_versions). Null on
+    # jobs from before #590 (requested_at stands in).
+    first_requested_at = db.Column(db.DateTime, nullable=True)
     # When the purge may start: the end of the grace period
     # (PURGE_GRACE_DAYS) after the latest request, for the user's own
     # request and an admin's alike.
@@ -2250,7 +2275,7 @@ class UserDataPurge(db.Model):
     # the account itself.
     delete_account = db.Column(db.Boolean, nullable=False, default=False,
                                server_default=db.text("false"))
-    # The waiting "Delete all my writing" (the user's or an admin's) that
+    # The waiting "Delete all my content" (the user's or an admin's) that
     # an account deletion replaced: its source, requester, scope and dates
     # (JSON, ids and ISO dates only). An admin's Undo of the account
     # deletion puts that request back as it was, so the writing it hid
@@ -2281,9 +2306,9 @@ class ReleasedUsername(db.Model):
 
 
 class UserDataPurgeHidden(db.Model):
-    """What one "Delete all my writing" job hid, the user's own or an
+    """What one "Delete all my content" job hid, the user's own or an
     admin's "Purge data" (#268; Peter, 2026-10-09: everything is hidden at
-    once, "Restore my writing" brings back exactly that, and the purge
+    once, "Restore my content" brings back exactly that, and the purge
     deletes it after the grace period; 2026-10-13: the admin's works the
     same way). The user's request while the job waits adds what they
     wrote since under the same job (2026-10-15: one date, one restore).
@@ -2323,7 +2348,7 @@ class UserDataPurgeHidden(db.Model):
     )
 
 
-# The per-user tables whose rows a waiting "Delete all my writing" hides
+# The per-user tables whose rows a waiting "Delete all my content" hides
 # (UserDataPurgeHidden): every ORM query leaves them out until a restore
 # or the purge. Nodes are hidden by deleted_at instead, so a thread keeps
 # its placeholders and other people's replies.

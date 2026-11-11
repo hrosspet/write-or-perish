@@ -1,6 +1,8 @@
 """
 Celery tasks for asynchronous data export operations.
 """
+import contextvars
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from celery.utils.log import get_task_logger
 import os
@@ -450,13 +452,36 @@ def _call_llm_with_retries(self, model_id, prompt_text, user_id,
             prompt_text = prompt_text[:int(len(prompt_text) * ratio)]
 
 
+# When the synchronous profile run in this context started reading the
+# user's writing (``profile_read_started``): every version it saves was
+# built from what it read from then on (#590, _save_profile's check).
+_profile_read_at = contextvars.ContextVar("profile_read_at", default=None)
+
+
+@contextmanager
+def profile_read_started():
+    """A synchronous profile run reads from now on: the versions it saves
+    are checked against a "Delete all my content" requested since."""
+    token = _profile_read_at.set(datetime.utcnow())
+    try:
+        yield
+    finally:
+        _profile_read_at.reset(token)
+
+
 def _save_profile(user, model_id, profile_text, response,
                    source_tokens_used, source_data_cutoff,
                    generation_type, parent_profile_id=None, batch=False,
                    source_origin_stats=None, source_rendered_at=None, merged_profile_id=None,
                    window_set=None, covers_start=None, date_line_start=None,
-                   date_line_tokens=None):
+                   date_line_tokens=None, read_at=None):
     """Save a new UserProfile and log API cost. Returns the profile.
+
+    read_at: when the step read its input (a batch item's render, a
+    synchronous run's start, ``profile_read_started``). A version whose
+    input was read before a "Delete all my content" is not saved: the
+    cost is logged and ReadBeforeDeletion raised (#590). Unknown falls
+    back to ``source_rendered_at``, then counts as before.
 
     batch=True records the Batch API discount in the cost log (issue #173).
     source_rendered_at: when the window this version covers was rendered
@@ -468,17 +493,25 @@ def _save_profile(user, model_id, profile_text, response,
     A being ``date_line_start`` and N ``date_line_tokens`` (the window's
     own units, where source_tokens_used is cumulative)."""
     from backend.utils.privacy import PrivacyLevel
-    from backend.utils.hidden_rows import WritingOnHold, writing_on_hold
+    from backend.utils.hidden_rows import (
+        ReadBeforeDeletion, corpus_changed,
+    )
 
     total_tokens = response["total_tokens"]
 
     _add_profile_cost_log(user, model_id, response, batch=batch)
-    if writing_on_hold(user.id):
-        # "Delete all my writing" hid the writing this version was built
-        # from while it was being generated (#268): the cost is logged,
-        # the version is not saved.
+    if read_at is None:
+        read_at = _profile_read_at.get() or source_rendered_at
+    if corpus_changed(user.id, read_at):
+        # "Delete all my content" hid the content this version was built
+        # from while it was being generated, or the version read during a
+        # deletion that has been restored since (#590): the cost is
+        # logged, the version is not saved. A restore makes the restored
+        # profile the one in use, so a from-scratch step of the new
+        # writing alone must not replace it (review of #630).
         db.session.commit()
-        raise WritingOnHold(f"user {user.id}: writing on hold for deletion")
+        raise ReadBeforeDeletion(
+            f"user {user.id}: read content deleted since")
     # A saved version ends a refusal streak (#368) and whatever error the
     # admin column showed for it.
     if user.profile_seed_error:
@@ -632,6 +665,15 @@ def discard_step_output(user, model_id, response, job, batch=False):
 # rebuilt version and the user's version (main's integration prompt, main's
 # user note before the user's version), and the rebuild continues from the
 # merge.
+#
+# #421: every version of the user's the old chain carried is merged, oldest
+# first, each at its date, not only the newest. The pending merge
+# (User.profile_pending_merge_id) stays the newest one; the older ones are
+# read from its lineage (``user_versions_to_merge``). Peter (voice review,
+# 2026-11-10), option (c): the newest is merged whole, an older one only
+# for the lines no newer one changed, and not at all when none of its own
+# changes is left (``user_merge_input``, utils/profile_edit_diff). The
+# window path's final does the same (profile_windows.final_user_versions).
 
 def carried_user_version(profile):
     """The newest version the user wrote that ``profile`` carries: the
@@ -658,9 +700,204 @@ def carried_user_version(profile):
     return None
 
 
+_LINEAGE_COLUMNS = (
+    UserProfile.id, UserProfile.user_id, UserProfile.parent_profile_id,
+    UserProfile.generated_by, UserProfile.ai_usage,
+    UserProfile.merged_profile_id)
+
+
+def _lineage_row(profile_id):
+    """A version's lineage columns (no content), or None."""
+    return db.session.query(*_LINEAGE_COLUMNS).filter(
+        UserProfile.id == profile_id).first()
+
+
+def _lineage_rows(profile_id, seen):
+    """The lineage of version ``profile_id`` (the version, then its
+    parents) as lineage rows, newest first. Stops at a version in ``seen``,
+    which collects the ids walked."""
+    current = _lineage_row(profile_id) if profile_id else None
+    while current is not None and current.id not in seen:
+        seen.add(current.id)
+        yield current
+        if current.parent_profile_id is None:
+            return
+        current = _lineage_row(current.parent_profile_id)
+
+
+def _merged_version_row(row):
+    """The user's version a merge step ``row`` stands for, as a lineage
+    row, when it is the same user's and AI-readable; else None."""
+    if not row.merged_profile_id:
+        return None
+    merged = _lineage_row(row.merged_profile_id)
+    if (merged is None or merged.user_id != row.user_id
+            or merged.ai_usage not in AI_ALLOWED):
+        return None
+    return merged
+
+
+def _users_by_writing(row):
+    return row.generated_by == "user" and row.ai_usage in AI_ALLOWED
+
+
+def _user_rounds(profile):
+    """The rounds of the user's edits ``profile`` carries, oldest first:
+    [(id, folded ids)]. A round is the version ``carried_user_versions``
+    keeps; its folded ids are the versions a merge step merged that the
+    round's own version replaced (an edit of the version the merge saved),
+    whose changes the round's own diff does not show (#421 (c)). Saves of
+    the user's in a row are not listed: the round's diff, measured from the
+    version the first of them edited (``_round_base_id``), holds them."""
+    found, ids = [], set()
+    child = None
+    for row in _lineage_rows(profile.id if profile else None, set()):
+        if row.ai_usage in AI_ALLOWED:
+            carried = (row if row.generated_by == "user"
+                       else _merged_version_row(row))
+            if carried is not None and carried.id not in ids:
+                ids.add(carried.id)
+                if child is None or not _users_by_writing(child):
+                    found.append((carried.id, []))
+                elif carried is not row and found:
+                    found[-1][1].append(carried.id)
+        child = row
+    found.reverse()
+    return found
+
+
+def carried_user_versions(profile):
+    """Every version the user wrote that ``profile`` carries, oldest first,
+    the newest (``carried_user_version``) last: walking its lineage, each
+    version the user wrote (generated_by "user") and each user's version a
+    merge step merged (merged_profile_id). Only AI-readable versions count.
+
+    A version the user replaced with the next version in the lineage, also
+    one of theirs (saves with no model step in between: an edit of their
+    own edit, or of the merge that merged it), is left out: the later save
+    holds that text as the user left it (#421). Reads metadata only;
+    nothing is decrypted. Returns ids."""
+    return [vid for vid, _folded in _user_rounds(profile)]
+
+
+def held_user_versions(base):
+    """The ids of the versions the user wrote that ``base`` already holds:
+    every one in its lineage, every one a merge step in it merged, and
+    everything such a merged version holds in turn. A rebuilt chain at
+    ``base`` merges none of them again. Metadata only."""
+    held, seen = set(), set()
+    stack = [base.id] if base is not None else []
+    while stack:
+        for row in _lineage_rows(stack.pop(), seen):
+            if row.ai_usage not in AI_ALLOWED:
+                continue
+            if row.generated_by == "user":
+                held.add(row.id)
+                continue
+            merged = _merged_version_row(row)
+            if merged is not None:
+                held.add(merged.id)
+                stack.append(merged.id)
+    return held
+
+
+def user_versions_to_merge(pending, base):
+    """The versions of the user's a rebuilt chain at ``base`` still has to
+    merge, oldest first, for the pending merge ``pending`` (the newest
+    version the old chain carried): ``carried_user_versions(pending)``
+    without those ``base`` holds. ``base`` None (a from-scratch build
+    before its first step) holds none. Returns versions."""
+    held = held_user_versions(base)
+    return [UserProfile.query.get(vid)
+            for vid in carried_user_versions(pending) if vid not in held]
+
+
+def _round_base_id(version_id):
+    """The version a round of the user's saves edited: the first version
+    in ``version_id``'s lineage, after it, that the user did not write
+    (saves in a row are one round). None for a profile written by hand.
+    Metadata only."""
+    seen = set()
+    row = _lineage_row(version_id) if version_id else None
+    while row is not None and row.parent_profile_id and row.id not in seen:
+        seen.add(row.id)
+        row = _lineage_row(row.parent_profile_id)
+        if row is not None and row.generated_by != "user":
+            return row.id
+    return None
+
+
+def _diff_text(user_id, version_id, texts):
+    """A version's text for #421 (c)'s line diff, read once per call
+    (``texts``): "" for none, a missing version, another user's, or one no
+    model may read. Only the older round's own text is ever sent."""
+    if version_id not in texts:
+        version = (db.session.get(UserProfile, version_id)
+                   if version_id else None)
+        readable = (version is not None and version.user_id == user_id
+                    and version.ai_usage in AI_ALLOWED)
+        texts[version_id] = (version.get_content() or "") if readable else ""
+    return texts[version_id]
+
+
+class ReducedUserVersion:
+    """A version of the user's as an older round's merge reads it (#421
+    (c)): the version, with ``content`` (its text without the lines a
+    newer round of the user's changed) in place of its text. Everything
+    else, the id and the dates the labels give included, is the version's."""
+
+    def __init__(self, version, content):
+        self._version = version
+        self._content = content
+
+    def get_content(self):
+        return self._content
+
+    def __getattr__(self, name):
+        return getattr(self._version, name)
+
+
+def user_merge_input(version, newest):
+    """What a rebuild's merge reads for ``version``, one of the user's
+    rounds of edits that ``newest`` carries (#421, Peter 2026-11-10: option
+    (c)). ``newest`` itself is read whole. An older round is read without
+    every line a newer round of the user's changed
+    (utils/profile_edit_diff), a ReducedUserVersion, or as itself when no
+    line was; None when none of its own changes is left: it is not merged.
+    The newer rounds are those after it in ``newest``'s lineage, with the
+    merged versions they replaced (``_user_rounds``). Decrypts the round,
+    the newer ones and the versions each edited, never anything else."""
+    if newest is None or version.id == newest.id:
+        return version
+    rounds = _user_rounds(newest)
+    ids = [vid for vid, _folded in rounds]
+    if version.id not in ids:
+        return version
+    newer = [vid for vid, folded in rounds[ids.index(version.id) + 1:]
+             for vid in [vid] + folded]
+    from backend.utils.profile_edit_diff import older_edit
+    texts = {}
+    uid = version.user_id
+    result = older_edit(
+        _diff_text(uid, _round_base_id(version.id), texts),
+        _diff_text(uid, version.id, texts),
+        [(_diff_text(uid, _round_base_id(vid), texts),
+          _diff_text(uid, vid, texts)) for vid in newer])
+    logger.info("User %s: the user's version %s against %d newer saves: "
+                "%d of its %d changed lines left, %d lines left out (#421)",
+                uid, version.id, len(newer), result.kept, result.changes,
+                result.removed)
+    if result.text is None:
+        return None
+    if result.removed == 0:
+        return version
+    return ReducedUserVersion(version, result.text)
+
+
 def pending_merge_version(user):
-    """The user's version a rebuild or a re-tip in progress still has to
-    merge (User.profile_pending_merge_id), or None."""
+    """The newest version of the user's a rebuild or a re-tip in progress
+    still has to merge (User.profile_pending_merge_id), or None. The older
+    versions it carries are merged before it (``user_versions_to_merge``)."""
     version_id = getattr(user, "profile_pending_merge_id", None)
     if not isinstance(version_id, int) or not version_id:
         return None
@@ -672,57 +909,73 @@ def pending_merge_version(user):
 
 
 def plan_user_version_merge(user, old_base, new_base=None):
-    """Record which version of the user's the new chain must merge, when a
+    """Record which versions of the user's the new chain must merge, when a
     chain is rebuilt from an earlier point: at the start of a from-scratch
     build (``new_base`` None) and when an import re-tips the chain at
-    ``new_base``. It is the user's version the old chain carried
-    (``carried_user_version(old_base)``). Nothing is recorded when the new
-    chain already carries it (a re-tip at the user's version or after it),
-    and a merge already pending (an interrupted rebuild) is kept. The
-    caller commits."""
+    ``new_base``. They are the versions of the user's the old chain carried
+    (``carried_user_versions(old_base)``); the newest is recorded, and the
+    older ones are read from its lineage as the rebuild goes (#421).
+    Nothing is recorded when the new chain already holds them all (a re-tip
+    at the newest one or after it), and a merge already pending (an
+    interrupted rebuild) is kept. The caller commits."""
     if pending_merge_version(user) is not None:
         return None
     carried = carried_user_version(old_base) if old_base is not None else None
     if carried is None:
         return None
-    if new_base is not None:
-        kept = carried_user_version(new_base)
-        if kept is not None and (kept.id == carried.id
-                                 or _descends_from(new_base, carried.id)):
-            return None
+    to_merge = user_versions_to_merge(carried, new_base)
+    if not to_merge:
+        return None
     user.profile_pending_merge_id = carried.id
-    logger.info("User %s: the rebuilt chain will merge the user's version "
-                "%s at %s", user.id, carried.id, merge_date(carried))
+    logger.info("User %s: the rebuilt chain will merge the user's versions "
+                "%s at %s", user.id, [v.id for v in to_merge],
+                [merge_date(v) for v in to_merge])
     return carried
 
 
-def _descends_from(profile, ancestor_id):
-    """Whether ``ancestor_id`` is ``profile`` or one of its parents."""
-    seen = set()
-    current = profile
-    while current is not None and current.id not in seen:
-        if current.id == ancestor_id:
-            return True
-        seen.add(current.id)
-        if current.parent_profile_id is None:
-            return False
-        current = UserProfile.query.get(current.parent_profile_id)
-    return False
-
-
 def settled_pending_merge(user, base):
-    """The pending merge to run on ``base``, or None. A base that already
-    descends from the pending version (it was rebuilt on it, or the run
-    that recorded it stopped before its first step) holds it: the pending
-    merge is dropped without a call, so a version is never merged with
-    itself. The caller commits."""
+    """The version of the user's to merge next on ``base``, or None: the
+    oldest of ``user_versions_to_merge`` for the pending merge. A base that
+    already holds every one of them (it was rebuilt on them, or the run
+    that recorded them stopped before its first step) ends the pending
+    merge without a call, so a version is never merged with itself. The
+    caller commits."""
     pending = pending_merge_version(user) if base is not None else None
-    if pending is not None and _descends_from(base, pending.id):
+    if pending is None:
+        return None
+    to_merge = user_versions_to_merge(pending, base)
+    if not to_merge:
         user.profile_pending_merge_id = None
         logger.info("User %s: version %s already holds the user's version "
                     "%s; no merge", user.id, base.id, pending.id)
         return None
-    return pending
+    return to_merge[0]
+
+
+def next_user_merge(user, base, more_to_read):
+    """The merge step due on the rebuilt chain's version ``base`` (#183,
+    #421), as what the merge reads (``user_merge_input``), or None. The
+    user's rounds still to merge are taken oldest first; the first one not
+    due (``merge_due``) ends the search. An older round with none of its
+    own changes left is passed over without a call (Peter, 2026-11-10:
+    option (c)); the pending version, the newest, is always merged.
+    ``more_to_read``: a callable, asked only when a merge is pending,
+    saying whether the run has older writing left to read. The caller
+    commits (``settled_pending_merge``)."""
+    if settled_pending_merge(user, base) is None:
+        return None
+    pending = pending_merge_version(user)
+    more = more_to_read()
+    for version in user_versions_to_merge(pending, base):
+        if not merge_due(user, base, version, more):
+            return None
+        merged = user_merge_input(version, pending)
+        if merged is not None:
+            return merged
+        logger.info("User %s: every change of the user's version %s was "
+                    "changed again by a newer one; not merged (#421)",
+                    user.id, version.id)
+    return None
 
 
 def merge_date(version):
@@ -762,13 +1015,15 @@ def build_merge_messages(user_id, base, version):
     return _integration_messages(user_id, [base, version], cumulative=True)
 
 
-def save_merge(user, model_id, response, base, version, batch=False):
+def save_merge(user, model_id, response, base, version, batch=False,
+               read_at=None):
     """Save the merge as the chain's next version: the rebuilt version is
     its parent and it carries that version's coverage, so the rebuild goes
-    on from it as from the version it merged. Clears the pending merge,
-    unless the merge was saved as 'none' (the account was switched while
-    the call ran): such a version is never a base, so the merge runs again
-    once the account allows AI."""
+    on from it as from the version it merged. The merge of the pending
+    version, the newest of the user's versions to merge (#421), clears the
+    pending merge, unless it was saved as 'none' (the account was switched
+    while the call ran): such a version is never a base, so the merge runs
+    again once the account allows AI."""
     merged = _save_profile(
         user, model_id, response["content"], response,
         source_tokens_used=base.source_tokens_used,
@@ -777,7 +1032,7 @@ def save_merge(user, model_id, response, base, version, batch=False):
         parent_profile_id=base.id, batch=batch,
         source_origin_stats=base.source_origin_stats,
         source_rendered_at=base.source_rendered_at,
-        merged_profile_id=version.id)
+        merged_profile_id=version.id, read_at=read_at)
     if (user.profile_pending_merge_id == version.id
             and merged.ai_usage in AI_ALLOWED):
         user.profile_pending_merge_id = None
@@ -834,18 +1089,17 @@ def _discard_if_base_moved(user, model_id, base_id, response, job):
 
 
 def _merge_if_due(self, user, model_id, base_id, api_keys, run_ends=False):
-    """The sync loop's merge step (#183), when one is pending and due on
-    the chain's version ``base_id`` (``merge_due``; always when the run
-    ends). Returns (text, saved version), or None."""
+    """The sync loop's merge step (#183), when a version of the user's is
+    still to merge (the oldest first, #421) and due on the chain's version
+    ``base_id`` (``merge_due``; always when the run ends). Returns (text,
+    saved version), or None."""
     base = UserProfile.query.get(base_id) if base_id is not None else None
-    pending = settled_pending_merge(user, base)
-    if pending is None:
+    version = next_user_merge(
+        user, base, lambda: (not run_ends
+                             and should_continue_chain(user, base)))
+    if version is None:
         return None
-    if not run_ends and not merge_due(
-            user, base, pending,
-            more_to_read=should_continue_chain(user, base)):
-        return None
-    return _do_merge(self, user, model_id, base, pending, api_keys)
+    return _do_merge(self, user, model_id, base, version, api_keys)
 
 
 def retip_profile_chain(user_id, version):
@@ -1050,96 +1304,102 @@ def update_user_profile(self, user_id: int, model_id: str,
                 "User %s has opted out of AI usage; skipping profile update",
                 user_id)
             return
-        from backend.utils.hidden_rows import WritingOnHold, writing_on_hold
-        if writing_on_hold(user_id):
-            logger.info("User %s: writing on hold for deletion; skipping "
-                        "profile update", user_id)
+        from backend.utils.hidden_rows import (
+            ReadBeforeDeletion, account_on_hold,
+        )
+        if account_on_hold(user_id):
+            logger.info("User %s: account being deleted; skipping profile "
+                        "update", user_id)
             return
-        handed_off = window_hand_off(user, self.request.id, integrate_only)
-        if handed_off is not None:
-            return handed_off
-        previous_profile_id = ai_readable_base_id(user_id, previous_profile_id)
+        # Every version this run saves was built from what it reads from
+        # now on: one saved after a "Delete all my content" requested
+        # meanwhile is dropped (#590, _save_profile).
+        with profile_read_started():
+            handed_off = window_hand_off(user, self.request.id, integrate_only)
+            if handed_off is not None:
+                return handed_off
+            previous_profile_id = ai_readable_base_id(user_id, previous_profile_id)
 
-        # Set concurrency guard
-        user.profile_generation_task_id = self.request.id
-        user.profile_generation_task_dispatched_at = datetime.utcnow()
-        db.session.commit()
+            # Set concurrency guard
+            user.profile_generation_task_id = self.request.id
+            user.profile_generation_task_dispatched_at = datetime.utcnow()
+            db.session.commit()
 
-        success = False
-        try:
-            if model_id not in flask_app.config["SUPPORTED_MODELS"]:
-                raise ValueError(f"Unsupported model: {model_id}")
+            success = False
+            try:
+                if model_id not in flask_app.config["SUPPORTED_MODELS"]:
+                    raise ValueError(f"Unsupported model: {model_id}")
 
-            model_cfg = flask_app.config["SUPPORTED_MODELS"][model_id]
-            context_window = model_cfg.get("context_window", 200000)
-            max_output_tokens = min(
-                model_cfg.get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS),
-                DEFAULT_MAX_OUTPUT_TOKENS)
-            api_keys = get_api_keys_for_usage(flask_app.config, 'chat')
+                model_cfg = flask_app.config["SUPPORTED_MODELS"][model_id]
+                context_window = model_cfg.get("context_window", 200000)
+                max_output_tokens = min(
+                    model_cfg.get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS),
+                    DEFAULT_MAX_OUTPUT_TOKENS)
+                api_keys = get_api_keys_for_usage(flask_app.config, 'chat')
 
-            if integrate_only and previous_profile_id:
-                result = _do_integration(
-                    self, user, model_id, previous_profile_id, api_keys
-                ) or {'user_id': user.id, 'profile_id': None,
-                      'status': 'completed',
-                      'message': 'Nothing to integrate'}
-            elif previous_profile_id:
-                result = _do_incremental_update(
-                    self, user, model_id, previous_profile_id,
-                    context_window, max_output_tokens, api_keys
+                if integrate_only and previous_profile_id:
+                    result = _do_integration(
+                        self, user, model_id, previous_profile_id, api_keys
+                    ) or {'user_id': user.id, 'profile_id': None,
+                          'status': 'completed',
+                          'message': 'Nothing to integrate'}
+                elif previous_profile_id:
+                    result = _do_incremental_update(
+                        self, user, model_id, previous_profile_id,
+                        context_window, max_output_tokens, api_keys
+                    )
+                else:
+                    result = _do_initial_generation(
+                        self, user, model_id, max_output_tokens, api_keys
+                    )
+
+                success = True
+                if result and result.get('profile_id'):
+                    from backend.utils.notifications import notify_profile_ready
+                    notify_profile_ready(user_id)
+                return result
+
+            except ReadBeforeDeletion:
+                logger.info("User %s: content deleted during the profile "
+                            "update; nothing saved from it", user_id)
+                return None
+            except ProfileBaseMoved:
+                # The versions saved before the step stay; the next scheduled
+                # run builds on the newest version (#183).
+                logger.info("User %s: profile run ended early: a newer version "
+                            "was saved while it ran", user_id)
+                return None
+            except Exception as e:
+                code = policy_block_code(e)
+                if code:
+                    # Final (Peter, 2026-11-04): the block's cost row stops
+                    # the hourly trigger for this user; already reported by
+                    # the provider call.
+                    db.session.rollback()
+                    stopped = User.query.get(user_id)
+                    if stopped:
+                        stopped.profile_seed_error = (
+                            f"Stopped: the provider's content-policy filter "
+                            f"blocked the profile update ({code}); runs again "
+                            f"only after Build profile with the override"
+                        )[:255]
+                    refusal_backoff.record_policy_block(
+                        user_id, "profile", model_id, code, "profile update",
+                        report=False)
+                logger.error(
+                    f"Profile update error for user {user_id}: {e}",
+                    exc_info=True
                 )
-            else:
-                result = _do_initial_generation(
-                    self, user, model_id, max_output_tokens, api_keys
-                )
-
-            success = True
-            if result and result.get('profile_id'):
-                from backend.utils.notifications import notify_profile_ready
-                notify_profile_ready(user_id)
-            return result
-
-        except WritingOnHold:
-            logger.info("User %s: writing put on hold for deletion during "
-                        "the profile update; nothing saved", user_id)
-            return None
-        except ProfileBaseMoved:
-            # The versions saved before the step stay; the next scheduled
-            # run builds on the newest version (#183).
-            logger.info("User %s: profile run ended early: a newer version "
-                        "was saved while it ran", user_id)
-            return None
-        except Exception as e:
-            code = policy_block_code(e)
-            if code:
-                # Final (Peter, 2026-11-04): the block's cost row stops
-                # the hourly trigger for this user; already reported by
-                # the provider call.
-                db.session.rollback()
-                stopped = User.query.get(user_id)
-                if stopped:
-                    stopped.profile_seed_error = (
-                        f"Stopped: the provider's content-policy filter "
-                        f"blocked the profile update ({code}); runs again "
-                        f"only after Build profile with the override"
-                    )[:255]
-                refusal_backoff.record_policy_block(
-                    user_id, "profile", model_id, code, "profile update",
-                    report=False)
-            logger.error(
-                f"Profile update error for user {user_id}: {e}",
-                exc_info=True
-            )
-            raise
-        finally:
-            # Clear concurrency guard; only clear full-regen flag on success
-            user = User.query.get(user_id)
-            if user:
-                user.profile_generation_task_id = None
-                user.profile_generation_task_dispatched_at = None
-                if success:
-                    user.profile_needs_full_regen = False
-                db.session.commit()
+                raise
+            finally:
+                # Clear concurrency guard; only clear full-regen flag on success
+                user = User.query.get(user_id)
+                if user:
+                    user.profile_generation_task_id = None
+                    user.profile_generation_task_dispatched_at = None
+                    if success:
+                        user.profile_needs_full_regen = False
+                    db.session.commit()
 
 
 def _do_incremental_update(self, user, model_id, previous_profile_id,
@@ -1977,8 +2237,9 @@ def _chunked_profile_loop(self, user, model_id, update_template,
         # The user saved a version (an edit or a revert) while the run was
         # working: the next step would build past it, so the run ends
         # (ProfileBaseMoved). A rebuilt chain that has reached the date of
-        # the user's version it must merge merges it now and goes on from
-        # the merge (#183).
+        # the next version of the user's it must merge merges it now and
+        # goes on from the merge (#183); versions due at the same step are
+        # merged one after the other, oldest first (#421).
         merge = _before_step(self, user, model_id, current_profile_id,
                              api_keys, f"chunk {chunk_num + 1}")
         if merge is not None:
@@ -2084,15 +2345,25 @@ def _chunked_profile_loop(self, user, model_id, update_template,
             f"cumulative={cumulative_units}"
         )
 
-    # The run ends before the chain reached the date of the user's version
-    # it must merge (the version is newer than all of the writing): the
-    # merge is the run's last step (#183).
-    merge = _merge_if_due(self, user, model_id, current_profile_id, api_keys,
-                          run_ends=True)
-    if merge is not None:
-        current_profile_id = merge[1].id
+    # The run ends before the chain reached the date of the user's versions
+    # it must merge (they are newer than all of the writing): the merges are
+    # the run's last steps, oldest first (#183, #421).
+    current_profile_id = _merge_the_rest(self, user, model_id,
+                                         current_profile_id, api_keys)
 
     return current_profile_id, chunk_num, cumulative_units
+
+
+def _merge_the_rest(self, user, model_id, base_id, api_keys):
+    """At the end of a sync run: merge every version of the user's still to
+    merge, oldest first, each on the previous merge. Returns the id of the
+    run's last version."""
+    while True:
+        merge = _merge_if_due(self, user, model_id, base_id, api_keys,
+                              run_ends=True)
+        if merge is None:
+            return base_id
+        base_id = merge[1].id
 
 
 def _iterative_generation(self, user, model_id, gen_template,
@@ -2234,10 +2505,10 @@ def maybe_trigger_profile_update(user_id, model_id=None,
         logger.info(
             f"Skipping profile update for user {user_id}: opted out of AI usage")
         return None
-    from backend.utils.hidden_rows import writing_on_hold
-    if writing_on_hold(user_id):
-        logger.info(f"Skipping profile update for user {user_id}: writing "
-                    "on hold for deletion")
+    from backend.utils.hidden_rows import account_on_hold
+    if account_on_hold(user_id):
+        logger.info(f"Skipping profile update for user {user_id}: account "
+                    "being deleted")
         return None
     # A content-policy block stops it for good, the import hand-off
     # included: the blocked writing would go out again (Peter, 2026-11-04).

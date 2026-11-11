@@ -7,14 +7,14 @@ import {
 } from "../utils/dataDeletion";
 
 /**
- * The status of "Delete all my writing" (#268) on every page while it
- * waits or runs. The writing is hidden at once, so every page looks empty
+ * The status of "Delete all my content" (#268) on every page while it
+ * waits or runs. The content is hidden at once, so every page looks empty
  * until a restore or the purge; this says why, and offers the way back.
  *
  * A status bar, not a toast (Peter, 2026-10-09: the earlier floating card
  * with a × "looked like a toast on the upper side of the window"): it
  * spans the page directly under the navigation bar, in the page flow,
- * and stays until the writing is restored or deleted. It reuses the
+ * and stays until the content is restored or deleted. It reuses the
  * persistent notice of the spend cap (SpendCapBanner: an uppercase accent
  * label before the text) and the outlined accent button of the recording
  * recovery (RecoveryBanner). Hidden on the Account page, whose section
@@ -39,28 +39,28 @@ export default function DataDeletionBanner() {
     setError(null);
     try {
       await restoreWriting(setUser);
-      // Every page fetched its data while the writing was hidden: load the
+      // Every page fetched its data while the content was hidden: load the
       // page again so it shows what came back.
       reloadPage();
     } catch (e) {
-      setError(e?.response?.data?.error || "Could not restore your writing. Please try again.");
+      setError(e?.response?.data?.error || "Could not restore your content. Please try again.");
       setBusy(false);
     }
   };
 
   let text;
   if (running) {
-    text = "Your writing is being deleted forever now.";
+    text = "Your content is being deleted forever now.";
   } else if (restorable) {
-    text = `You can restore your writing safely until ${formatDeletionDate(deletion.purge_at)}. After that it is deleted forever.`;
+    text = `You can restore your content safely until ${formatDeletionDate(deletion.purge_at)}. After that it is deleted forever.`;
   } else {
-    text = `Your writing will be deleted forever on ${formatDeletionDate(deletion.purge_at)}.`;
+    text = `Your content will be deleted forever on ${formatDeletionDate(deletion.purge_at)}.`;
   }
 
   return (
     <div
       role="status"
-      aria-label="Writing deleted"
+      aria-label="Content deleted"
       style={{
         width: "100%",
         // Flush under the navigation bar: it is 56 px high and the page
@@ -93,7 +93,7 @@ export default function DataDeletionBanner() {
             whiteSpace: "nowrap",
           }}
         >
-          {running ? "Deleting your writing" : "Writing deleted"}
+          {running ? "Deleting your content" : "Content deleted"}
         </span>
         <span
           style={{
@@ -125,7 +125,7 @@ export default function DataDeletionBanner() {
               whiteSpace: "nowrap",
             }}
           >
-            {busy ? "Restoring…" : "Restore my writing"}
+            {busy ? "Restoring…" : "Restore my content"}
           </button>
         )}
         {error && (

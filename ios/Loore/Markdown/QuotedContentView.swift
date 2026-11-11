@@ -90,6 +90,7 @@ struct InlineQuoteBubble: View {
                     .foregroundStyle(LooreColor.textMuted)
                     .padding(.bottom, 6)
                 MarkdownView(markdown: truncated, style: .quote)
+                    .readingTextTap { onOpen(quote.id) }
                     .padding(.bottom, 8)
                 NodeFooterView(username: quote.username ?? "", createdAt: quote.createdAt, childCount: 0)
                     .padding(.top, -12)
@@ -229,6 +230,7 @@ struct ExternalQuoteBubble: View {
                     }
                 }
                 MarkdownView(markdown: Self.previewText(quote.content), style: .quote)
+                    .readingTextTap(mine ? { openReference(quote) } : nil)
                     .padding(.bottom, 4)
             }
             .accessibilityElement(children: .combine)

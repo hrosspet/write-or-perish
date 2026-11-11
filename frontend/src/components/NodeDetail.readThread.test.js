@@ -330,6 +330,175 @@ describe('#416: LLM Response after an automatic reply that did not happen', () =
   });
 });
 
+// Peter, 2026-11-10: a user without craft mode whose automatic reply
+// failed gets a plain Try again, where craft mode shows LLM Response.
+// Only where a reply was attempted and did not succeed: a failed or
+// cancelled reply under the entry, and no other reply.
+describe('Try again without craft mode', () => {
+  const NO_CRAFT = { ...ME, craft_mode: false, is_admin: false, preferred_model: 'claude-opus-5.5' };
+  const tryAgain = () => screen.queryByRole('button', { name: 'Try again' });
+  const llmResponse = () => screen.queryByRole('button', { name: 'LLM Response' });
+  const reply = (status, id = 61) => ({ ...AI_REPLY_CHILD, id, llm_task_status: status });
+  const FAILED_REPLY = { children: [reply('failed')], child_count: 1 };
+  const plainEntry = (overrides = {}) => uploadUnderPicks({
+    content: 'A note.', ancestors: [], in_read_thread: false, read_reply_above: false,
+    glean_thread: false, ...overrides,
+  });
+  const show = async (entry) => {
+    routes['/nodes/60'] = entry;
+    const view = renderAt('/node/60');
+    await screen.findByText(entry.content);
+    return view;
+  };
+
+  beforeEach(() => {
+    mockUser = NO_CRAFT;
+    localStorage.setItem('loore_auto_generate', 'true');
+  });
+
+  test.each(['failed', 'cancelled'])('an entry whose automatic reply %s offers Try again', async (status) => {
+    await show(plainEntry({ children: [reply(status)], child_count: 1 }));
+    expect(tryAgain()).toBeEnabled();
+    expect(llmResponse()).toBeNull();
+  });
+
+  test.each(['pending', 'processing', 'completed'])('a %s reply hides it', async (status) => {
+    await show(plainEntry({ children: [reply(status)], child_count: 1 }));
+    expect(tryAgain()).toBeNull();
+  });
+
+  test('a failed reply followed by a completed one hides it', async () => {
+    await show(plainEntry({ children: [reply('failed'), reply('completed', 62)], child_count: 2 }));
+    expect(tryAgain()).toBeNull();
+  });
+
+  // No reply was ever attempted on these, so nothing failed.
+  test('an old entry with no reply offers no Try again', async () => {
+    await show(plainEntry());
+    expect(tryAgain()).toBeNull();
+    expect(llmResponse()).toBeNull();
+  });
+
+  test.each(['twitter', 'pdf'])('an imported entry (origin %s) with no reply offers no Try again', async (origin) => {
+    await show(plainEntry({ origin }));
+    expect(tryAgain()).toBeNull();
+  });
+
+  test('a recording saved with no words, and so no reply, offers no Try again', async () => {
+    await show(plainEntry({ content: '*Note: No words were transcribed*' }));
+    expect(tryAgain()).toBeNull();
+  });
+
+  test.each(['pending', 'processing'])('an audio upload still %s transcription offers no Try again', async (status) => {
+    await show(plainEntry({ transcription_status: status, ...FAILED_REPLY }));
+    expect(tryAgain()).toBeNull();
+  });
+
+  test('once transcription is completed a failed reply offers Try again', async () => {
+    await show(plainEntry({ transcription_status: 'completed', ...FAILED_REPLY }));
+    expect(tryAgain()).toBeEnabled();
+  });
+
+  test('a failed transcription offers neither button, with or without craft mode', async () => {
+    const failedUpload = plainEntry({
+      content: '[Voice note – transcription pending]', transcription_status: 'failed',
+    });
+    const view = await show(failedUpload);
+    expect(tryAgain()).toBeNull();
+    expect(llmResponse()).toBeNull();
+    view.unmount();
+
+    mockUser = { ...NO_CRAFT, craft_mode: true };
+    await show(failedUpload);
+    expect(llmResponse()).toBeNull();
+    expect(tryAgain()).toBeNull();
+  });
+
+  test('with auto-generate off no automatic reply was asked for: no Try again', async () => {
+    localStorage.setItem('loore_auto_generate', 'false');
+    await show(plainEntry(FAILED_REPLY));
+    expect(tryAgain()).toBeNull();
+    expect(llmResponse()).toBeNull();
+  });
+
+  test('an entry kept away from AI offers no Try again', async () => {
+    await show(plainEntry({ ai_usage: 'none', ...FAILED_REPLY }));
+    expect(tryAgain()).toBeNull();
+  });
+
+  test("another user's entry offers no Try again", async () => {
+    await show(plainEntry({ user: { id: 7, username: 'someone' }, user_id: 7, ...FAILED_REPLY }));
+    expect(tryAgain()).toBeNull();
+  });
+
+  test('a public thread keeps its LLM Response for the owner, without Try again', async () => {
+    await show(plainEntry({ privacy_level: 'public', ...FAILED_REPLY }));
+    expect(llmResponse()).toBeEnabled();
+    expect(tryAgain()).toBeNull();
+  });
+
+  test('craft mode keeps LLM Response, without Try again', async () => {
+    mockUser = { ...NO_CRAFT, craft_mode: true };
+    await show(plainEntry(FAILED_REPLY));
+    expect(llmResponse()).toBeEnabled();
+    expect(tryAgain()).toBeNull();
+  });
+
+  test('in a Glean thread a failed reply to a comment offers Try again beside Glean', async () => {
+    await show(uploadUnderPicks(FAILED_REPLY));
+    expect(tryAgain()).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Glean' })).toBeEnabled();
+  });
+
+  test('a note under the Glean entry, before the first picks, offers Glean only', async () => {
+    // A reply asked for here would be the first gleaning, as for LLM
+    // Response.
+    await show(uploadUnderPicks({
+      content: 'A first note.', ancestors: [READ_PROMPT], read_reply_above: false, ...FAILED_REPLY,
+    }));
+    expect(tryAgain()).toBeNull();
+    expect(screen.getByRole('button', { name: 'Glean' })).toBeInTheDocument();
+  });
+
+  test('it sends the request LLM Response sends, with the user\'s own model, and opens the reply', async () => {
+    mockPost.mockResolvedValue({ data: { node_id: 80, status: 'pending' } });
+    routes['/nodes/80'] = {
+      ...pendingRead(), id: 80, llm_model: 'claude-opus-5.5', llm_task_status: 'pending',
+      ancestors: [plainEntry()], in_read_thread: false, read_reply_above: false,
+    };
+    await show(plainEntry(FAILED_REPLY));
+
+    await act(async () => { tryAgain().click(); });
+
+    expect(mockPost).toHaveBeenCalledTimes(1);
+    expect(mockPost).toHaveBeenCalledWith('/nodes/60/llm', {
+      model: 'claude-opus-5.5', source_mode: 'textmode',
+    });
+    // The page moves on to the reply, as after LLM Response.
+    expect(await screen.findByText('Thinking')).toBeInTheDocument();
+  });
+
+  test('the request is the same one craft mode\'s LLM Response sends, and is sent once', async () => {
+    mockPost.mockReturnValue(new Promise(() => {}));
+    const entry = plainEntry(FAILED_REPLY);
+
+    mockUser = { ...NO_CRAFT, craft_mode: true };
+    const craft = await show(entry);
+    await act(async () => { llmResponse().click(); });
+    craft.unmount();
+
+    mockUser = NO_CRAFT;
+    await show(entry);
+    await act(async () => { tryAgain().click(); });
+    // A second press while the first is on its way sends nothing.
+    await act(async () => { screen.getByRole('button', { name: 'Requesting…' }).click(); });
+
+    expect(mockPost).toHaveBeenCalledTimes(2);
+    expect(mockPost.mock.calls[1]).toEqual(mockPost.mock.calls[0]);
+    expect(screen.getByRole('button', { name: 'Requesting…' })).toBeDisabled();
+  });
+});
+
 describe('a read cancelled before it ran', () => {
   const NEUTRAL = 'This read was cancelled.';
   const REASON = 'This read was cancelled before it ran: the monthly spend '

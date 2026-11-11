@@ -43,7 +43,9 @@ from backend.utils.llm_batch import (
 )
 from backend.utils import refusal_backoff
 
-from backend.utils.hidden_rows import writing_on_hold
+from backend.utils.hidden_rows import (
+    account_on_hold, corpus_changed, item_read_at,
+)
 
 logger = get_task_logger(__name__)
 
@@ -410,6 +412,7 @@ def _build_batch_request(user, profile, data_cutoff):
     """The batch request for one due user: the same checks, model, prompt
     and data window as the direct path. Returns {"provider", "request",
     "meta"}, or None when nothing is to be generated."""
+    read_at = datetime.utcnow()
     prep = _prepare_recent_context(
         user, profile.id if profile else None, data_cutoff)
     if prep is None:
@@ -464,6 +467,9 @@ def _build_batch_request(user, profile, data_cutoff):
             "data_cutoff": _iso(data_cutoff),
             "source_data_cutoff": _iso(export["latest_node_created_at"]),
             "source_tokens": export["token_count"],
+            # When it read the writing: a "Delete all my content" after
+            # it drops the summary (#590).
+            "read_at": read_at.isoformat(),
         },
     }
 
@@ -562,7 +568,7 @@ def _submit_due_users():
     return {"status": "ok", "submitted": submitted}
 
 
-def _apply_item(item, result, batch_id, blocked_code=None):
+def _apply_item(item, result, batch_id, blocked_code=None, read_at=None):
     """Save one collected item's summary. Returns (outcome, billed): the
     outcome is saved, refused (cut off before any text), failed, blocked
     (the provider's content-policy filter, ``blocked_code``) or skipped;
@@ -630,11 +636,11 @@ def _apply_item(item, result, batch_id, blocked_code=None):
             logger.info("User %s opted out of AI usage while their recent "
                         "context ran; not saved", user_id)
             return "skipped", billed
-        if writing_on_hold(user_id):
-            # "Delete all my writing" hid the writing it summarises while
-            # the batch ran (#268): don't store it.
-            logger.info("User %s: writing on hold for deletion; recent "
-                        "context not saved", user_id)
+        if corpus_changed(user_id, read_at):
+            # "Delete all my content" hid the writing it summarises after
+            # it was read (#590): the cost row is written, nothing saved.
+            logger.info("User %s: content deleted after it was read; "
+                        "recent context not saved", user_id)
             return "skipped", billed
         profile_id = item.get("profile_id")
         latest_ts = _from_iso(item.get("source_data_cutoff"))
@@ -796,7 +802,8 @@ def _claim_and_apply(job, results, now):
     for item in items:
         item["outcome"], item["billed"] = _apply_item(
             item, results.get(item["custom_id"]), batch_id,
-            blocked_code=blocked.get(item["custom_id"]))
+            blocked_code=blocked.get(item["custom_id"]),
+            read_at=item_read_at(item))
     job.items = items
     db.session.commit()
     _report_unsaved(items)
@@ -834,10 +841,11 @@ def _generate_recent_context_impl(user_id, profile_id=None,
     if not user:
         logger.warning(f"User {user_id} not found")
         return
-    if writing_on_hold(user_id):
-        logger.info(f"User {user_id}: writing on hold for deletion; no "
-                    "recent context")
+    if account_on_hold(user_id):
+        logger.info(f"User {user_id}: account being deleted; no recent "
+                    "context")
         return
+    read_at = datetime.utcnow()
 
     data_cutoff = (
         datetime.fromisoformat(data_cutoff_iso)
@@ -928,12 +936,12 @@ def _generate_recent_context_impl(user_id, profile_id=None,
             f"recent context for user {user_id}", model_id,
             response.get("output_tokens"), refused=refused)
 
-    if writing_on_hold(user_id):
-        # Hidden for deletion while the call ran (#268): cost logged,
+    if corpus_changed(user_id, read_at):
+        # Hidden for deletion while the call ran (#590): cost logged,
         # nothing saved.
         db.session.commit()
-        logger.info(f"User {user_id}: writing put on hold for deletion "
-                    "during the recent context; not saved")
+        logger.info(f"User {user_id}: content deleted during the recent "
+                    "context; not saved")
         return
 
     # Save the recent context

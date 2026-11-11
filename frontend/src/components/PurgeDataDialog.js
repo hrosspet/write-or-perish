@@ -130,13 +130,13 @@ export function waitingDeletionNote(job) {
   return byAdmin
     ? `An admin already purged this data. It is deleted forever on ${on}; ` +
       "until then the user can restore it, and you can undo it in the Users table."
-    : `The user already deleted all their writing. It is deleted forever on ${on}; ` +
+    : `The user already deleted all their content. It is deleted forever on ${on}; ` +
       "until then only they can restore it.";
 }
 
 /**
- * Admin "Purge data" (#268): delete all of one user's writing. It works
- * like the user's own "Delete all my writing" (Peter, 2026-10-13: "it
+ * Admin "Purge data" (#268): delete all of one user's content. It works
+ * like the user's own "Delete all my content" (Peter, 2026-10-13: "it
  * should definitely work the same as user doing themselves"): hidden at
  * once, restorable by the user, undoable by the admin in the Users table,
  * deleted forever after the grace period. Opens with a dry run, so the
@@ -200,7 +200,7 @@ function PurgeDataDialog({ user, onClose, onStarted }) {
           Hides everything this person wrote or recorded, the AI replies
           they asked for, their profile, documents, saved references, imports
           and files at once, for them and for everyone else. It works like
-          their own "Delete all my writing": they see "Writing deleted" and
+          their own "Delete all my content": they see "Content deleted" and
           can restore it themselves
           {state.graceDays ? ` within ${state.graceDays} days` : ""}, and you
           can undo it in the Users table until then. After that it is
@@ -235,7 +235,7 @@ function PurgeDataDialog({ user, onClose, onStarted }) {
         {state.started ? (
           <>
             <p style={bodyStyle}>
-              The writing of @{user.username} is hidden now (job {state.started.id}). It is
+              The content of @{user.username} is hidden now (job {state.started.id}). It is
               deleted forever on {formatDeletionDate(state.started.scheduled_for)}. Until
               then they can restore it, and you can undo it in the Users table.
             </p>

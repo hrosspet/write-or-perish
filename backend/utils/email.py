@@ -438,13 +438,22 @@ def send_provider_account_alert_email(to_email, provider, kind, model,
           f"Failed to send provider account alert to {to_email}")
 
 
-def send_user_spend_block_email(to_email, username, spend_usd, limit_usd):
+def send_user_spend_block_email(to_email, username, spend_usd, limit_usd,
+                                carried_usd=0):
     """Alert the admin that a single user hit their monthly spend cap and has
-    been hard-blocked until month rollover (issue #85 follow-up)."""
+    been hard-blocked until month rollover (issue #85 follow-up).
+    ``carried_usd`` is the overflow of earlier months counted this month
+    (#594); the cap is reached when it and this month's spend reach it."""
+    carried_line = (f"Carried from earlier months: ${carried_usd:,.2f}\n"
+                    if carried_usd else "")
+    carried_html = (f'\n      (plus <strong style="color: #c4956a;">'
+                    f'${carried_usd:,.2f}</strong> carried from earlier months)'
+                    if carried_usd else "")
     text_body = (
         f"Per-user spend cap reached\n\n"
         f"User: {username}\n"
         f"Month-to-date spend: ${spend_usd:,.2f}\n"
+        f"{carried_line}"
         f"Monthly cap: ${limit_usd:,.2f}\n\n"
         f"This user is now hard-blocked from cost-incurring actions until the "
         f"month rolls over.\n"
@@ -453,7 +462,7 @@ def send_user_spend_block_email(to_email, username, spend_usd, limit_usd):
     html_body = _card(
         "User hit monthly cap",
         [f'<strong style="color: #ede8dd;">{escape(str(username))}</strong> reached\n'
-         f'      <strong style="color: #c4956a;">${spend_usd:,.2f}</strong>\n'
+         f'      <strong style="color: #c4956a;">${spend_usd:,.2f}</strong>{carried_html}\n'
          f'      of the <strong style="color: #ede8dd;">${limit_usd:,.2f}</strong> monthly cap\n'
          f'      and is now hard-blocked until the month rolls over.'],
         "Open admin dashboard", "https://loore.org/admin")

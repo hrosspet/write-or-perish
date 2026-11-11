@@ -302,6 +302,19 @@ def prefetch_deks(ciphertexts):
     return len(missing)
 
 
+def dek_cached(ciphertext) -> bool:
+    """True when decrypting *ciphertext* makes no KMS call: encryption is
+    off, it is no v2 envelope, or its DEK is in the cache. A v1 blob
+    needs KMS on every decrypt, which no prefetch can save, so it counts
+    as cached here too."""
+    if not is_encryption_enabled():
+        return True
+    wrapped = wrapped_dek_of(ciphertext)
+    if wrapped is None:
+        return True
+    return _cache_get(base64.b64encode(wrapped).decode("ascii")) is not None
+
+
 def is_encrypted(value) -> bool:
     """True when *value* carries a v1/v2 encryption envelope."""
     return bool(value) and isinstance(value, str) and value.startswith(

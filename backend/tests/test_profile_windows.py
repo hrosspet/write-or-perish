@@ -1220,6 +1220,117 @@ def test_a_set_in_flight_after_an_edit_on_its_final_sends_nothing_more(
     assert len(world.provider.submits) == n
 
 
+# #421, option (c) (Peter, voice review 2026-11-10): a rebuild's final
+# merges every round of the user's edits at its date, an older round only
+# for the lines no newer round changed. Invented texts.
+BASE421 = ("### SURFACE MAP\nLikes long walks.\nWRONG GUESS\n\n"
+           "### SHADOW MAP\nAvoids crowds.")
+CELLO421 = "Plays the cello on weekends."
+
+
+def _rebuild_with_two_rounds(world, first_text, update_text, second_text):
+    """An old chain built before the set: an integration (BASE421, day 3),
+    the first round (an edit of it), an update and its integration
+    (``update_text``, day 6), and the second round (an edit of that). Then
+    a from-scratch set of ten windows (days 1 to 10) whose final is due,
+    with the second round as the merge the rebuild still has to make (as
+    next_work plans it for a fresh full rebuild). Returns (user, first,
+    second)."""
+    u = _user()
+    ago = datetime.utcnow() - timedelta(days=20)
+
+    def version(gen_type, day, parent, text, hours):
+        return _profile(u, gen_type=gen_type, cutoff=T0 + timedelta(days=day),
+                        text=text, parent_profile_id=(
+                            parent.id if parent else None),
+                        created_at=ago + timedelta(hours=hours))
+
+    def edit(of, text, hours):
+        e = _edit(u, of, when=ago + timedelta(hours=hours))
+        e.set_content(text)
+        db.session.commit()
+        return e
+    old = version("integration", 3, None, BASE421, 1)
+    first = edit(old, first_text, 2)
+    update = version("update", 6, first, update_text, 3)
+    again = version("integration", 6, update, update_text, 4)
+    second = edit(again, second_text, 5)
+    u.profile_pending_merge_id = second.id
+    db.session.commit()
+    rows = _set_of(u, 10)
+    _corpus_for(world, rows)
+    return u, first, second
+
+
+def _final_texts(world):
+    msgs = _merge_reqs(world)[0]["messages"]
+    return [m["content"][0]["text"] for m in msgs[:-1]]
+
+
+def test_421c_a_rebuilds_final_merges_an_older_round_reduced(world):
+    """Round 1 corrects WRONG GUESS and adds a sentence, the update keeps
+    both, round 2 deletes the sentence. The final reads round 1 at its
+    date (after day 3) without the sentence and with the correction, and
+    round 2 whole at its date (after day 6)."""
+    first_text = BASE421.replace("WRONG GUESS", "RIGHT GUESS") \
+        + f"\n{CELLO421}"
+    update_text = first_text.replace("RIGHT GUESS", "Right guess, reworded.")
+    u, first, second = _rebuild_with_two_rounds(
+        world, first_text, update_text,
+        update_text.replace(f"\n{CELLO421}", ""))
+
+    _advance(u)
+
+    texts = _final_texts(world)
+    mine = [i for i, t in enumerate(texts) if "Written by the user" in t]
+    assert mine == [3, 7]
+    assert texts[3].endswith(
+        "\n\n### SURFACE MAP\nLikes long walks.\nRIGHT GUESS\n\n"
+        "### SHADOW MAP\nAvoids crowds.")
+    assert texts[7].endswith(f"\n\n{second.get_content()}")
+    assert all(CELLO421 not in t for t in texts)
+    final_item = _items("final")[0]
+    assert final_item["user_version_id"] == second.id
+    assert first.id in final_item["inputs"]
+    _poll()
+    final = _rows(u, "integration")[-1]
+    assert final.window_set == "set1" and final.merged_profile_id == second.id
+    db.session.refresh(u)
+    assert u.profile_pending_merge_id is None
+
+
+def test_421c_a_rebuilds_final_leaves_out_a_round_with_nothing_left(world):
+    with_cello = f"{BASE421}\n{CELLO421}"
+    u, first, second = _rebuild_with_two_rounds(
+        world, with_cello, with_cello, BASE421)
+
+    _advance(u)
+
+    texts = _final_texts(world)
+    assert [i for i, t in enumerate(texts)
+            if "Written by the user" in t] == [6]
+    assert all(CELLO421 not in t for t in texts)
+    assert first.id not in _items("final")[0]["inputs"]
+
+
+def test_421c_the_seeders_check_reads_no_profile_text(world, monkeypatch):
+    """set_work_due runs for every window-set user on the seeder's ticks:
+    it plans the final from metadata, and the older rounds are read only
+    when the final goes out."""
+    first_text = BASE421.replace("WRONG GUESS", "RIGHT GUESS")
+    u, first, second = _rebuild_with_two_rounds(
+        world, first_text, first_text, first_text + "\nA NEW LINE")
+
+    def no_text(*a, **k):
+        raise AssertionError("read a version's text")
+    monkeypatch.setattr(pw._exports, "user_merge_input", no_text)
+    tip = _rows(u, "window")[-1]
+    assert pw.set_work_due(u, tip)
+    plan = pw.merge_plan(u, pw.set_state(u, "set1", None))
+    assert plan.older_versions == [first.id]
+    assert plan.user_version.id == second.id
+
+
 # ── 13. spend ─────────────────────────────────────────────────────────────
 # Peter, 2026-10-22: "send it and let the cap stop it halfway. It will
 # self-heal the following month": the per-user cap holds the next
@@ -1299,6 +1410,81 @@ def test_a_user_without_a_limit_is_not_gated(world, monkeypatch):
     _spend(u, 50.0)
     assert _advance(u) == "submitted"
     assert len(world.provider.submits) == 1
+
+
+@pytest.mark.parametrize("limit, sent", [(4.99, False), (5.00, True)])
+def test_the_headroom_is_the_limit_less_the_carry(world, monkeypatch,
+                                                  limit, sent):
+    """#594: $2 of last month's overflow carried into this month, nothing
+    spent yet, and an estimate of $3: a limit of $5 leaves exactly enough;
+    $4.99 leaves a cent too little, and the note names the carry."""
+    from backend.utils.spend import current_month
+    _fixed_estimate(monkeypatch, 3.00)
+    world.corpus = _windows_corpus(4)
+    u = _user(profile_needs_full_regen=True, monthly_spend_limit_usd=limit,
+              spend_carry_month=current_month(),
+              spend_carry_microdollars=2_000_000)
+    outcome = _advance(u)
+    db.session.refresh(u)
+    if sent:
+        assert outcome == "submitted"
+        assert len(world.provider.submits) == 1
+        assert u.profile_seed_error is None
+    else:
+        assert outcome == "held"
+        assert world.provider.submits == []
+        assert u.profile_seed_error == (
+            f"{pw.HOLD_NOTE}: the build needs about $3.00; "
+            "$2.00 of $4.99 used this month ($2.00 carried over)")
+
+
+def test_a_build_held_at_the_cap_stays_held_while_the_carry_fills_the_limit(
+        app, world, monkeypatch):
+    """#594: a build held at the cap is not resumed when the month turns
+    while last month's overflow alone fills the new month's limit: the
+    hourly seeder rolls the carry first. Clearing the carry (the admin's
+    action) resumes it on the next pass."""
+    from backend.utils.spend import (
+        clear_spend_carry, current_month, month_start)
+    _block_email(monkeypatch)
+    world.corpus = _windows_corpus(4)
+    u = _user(profile_needs_full_regen=True, monthly_spend_limit_usd=1)
+    _advance(u)
+    _poll()                                      # the windows are saved
+    _spend(u, 1.0)                               # the cap is reached
+    assert _advance(u) == "held"
+    n = len(world.provider.submits)
+
+    # The month turns: everything so far was last month's, $2.50 over the
+    # $1 limit, and the carry was last rolled then.
+    last = _last_month()
+    APICostLog.query.filter_by(user_id=u.id).update({"created_at": last})
+    _spend(u, 1.5, created_at=last)
+    u = db.session.get(User, u.id)
+    u.spend_blocked_month = current_month(last)
+    u.spend_carry_month = current_month(last)
+    u.spend_carry_microdollars = 0
+    db.session.commit()
+
+    dispatches = pw.advance_profile_windows.apply_async.call_count
+    pb._seed_profile_batches()                   # hourly pass
+    assert pw.advance_profile_windows.apply_async.call_count == dispatches
+    assert len(world.provider.submits) == n
+    u = db.session.get(User, u.id)
+    assert u.spend_carry_month == current_month()
+    assert u.spend_carry_microdollars >= 1_000_000
+    assert u.spend_blocked_month == current_month()
+    assert u.profile_cap_held is True
+    assert month_start() > last
+
+    clear_spend_carry(u, app.config)
+    db.session.commit()
+    pb._seed_profile_batches()                   # the next hourly pass
+    assert (pw.advance_profile_windows.apply_async.call_count
+            == dispatches + 1)
+    u = db.session.get(User, u.id)
+    assert pw.advance(u.id, u.profile_generation_task_id) == "submitted"
+    assert len(world.provider.submits) == n + 1
 
 
 @pytest.mark.parametrize("lift", ["next_month", "raised_limit"])
@@ -1583,15 +1769,59 @@ def test_progress_labels_for_the_three_kinds(app):
         assert (out["message"], out["progress"]) == (message, progress)
 
 
-def test_held_writing_drops_window_results(world, monkeypatch):
+def test_groups_and_the_final_carry_a_read_time_taken_before_the_read(
+        world, monkeypatch):
+    """Review of #630: a group's or the final's read time must not come
+    after the read (the job's submission and a stamp after the build both
+    do), or work that read content deleted meanwhile is saved. The pass
+    stamps it before it reads anything."""
+    u = _user()
+    rows = _set_of(u, 65)
+    _corpus_for(world, rows)
+    built = []
+    real = pw._merge_messages
+
+    def merge_messages(*a, **k):
+        built.append(datetime.utcnow())
+        return real(*a, **k)
+    monkeypatch.setattr(pw, "_merge_messages", merge_messages)
+    _advance(u)
+    groups = _items("group")
+    assert len(groups) == 3 and built
+    assert all(datetime.fromisoformat(g["read_at"]) <= min(built)
+               for g in groups)
+    _poll()
+    built.clear()
+    _advance(u)
+    final = _items("final")[0]
+    assert datetime.fromisoformat(final["built_at"]) <= min(built)
+
+
+def test_windows_read_before_a_content_deletion_are_dropped_and_costed(
+        world, monkeypatch):
+    """#590: the windows were rendered before "Delete all my content": no
+    row is saved, each billed result gets its cost row, and the items
+    are marked dropped for the window pipeline's history."""
+    from backend.models import APICostLog, ProfileBatchJob, UserDataPurge
     world.corpus = _windows_corpus(2)
     u = _user(profile_needs_full_regen=True)
     _advance(u)
-    monkeypatch.setattr(pb, "writing_on_hold", lambda uid: True)
+    now = datetime.utcnow() + timedelta(seconds=1)
+    db.session.add(UserDataPurge(
+        user_id=u.id, source="self", scope="hidden", status="scheduled",
+        requested_at=now, first_requested_at=now,
+        scheduled_for=now + timedelta(days=30)))
+    db.session.commit()
+    sent = [i for j in ProfileBatchJob.query.all() for i in j.items
+            if i.get("user_id") == u.id]
     _poll()
     assert _rows(u, "window") == []
     db.session.refresh(u)
     assert u.profile_batch_pending is False
+    assert APICostLog.query.filter_by(user_id=u.id).count() == len(sent)
+    outcomes = [i.get("outcome") for j in ProfileBatchJob.query.all()
+                for i in j.items if i.get("user_id") == u.id]
+    assert outcomes and set(outcomes) == {"dropped"}
 
 
 def test_kill_switch_off_bases_updates_outside_any_set(app, world):

@@ -41,7 +41,7 @@ def _upsert_items(user_id, source, items):
     from backend.models import TWEET_SOURCES
     from backend.utils.hidden_rows import reclaim_external_items
     from backend.utils.reference_rows import pick_rows_by_tweet, save_pick_row
-    # A reference "Delete all my writing" hid and the user imports again
+    # A reference "Delete all my content" hid and the user imports again
     # is theirs again (#268), not a duplicate of a hidden row.
     items = list(items)
     reclaim_external_items(user_id, [i["external_id"] for i in items])
@@ -278,11 +278,13 @@ def sync_twitter_bookmarks(self, user_id, max_items=800):
 
 def _sync_twitter_bookmarks(user_id, max_items):
     """The sync itself; runs in an app context, under bookmark_sync_lock."""
-    from backend.utils.hidden_rows import writing_on_hold
-    if writing_on_hold(user_id):
-        # "Delete all my writing" is waiting or running (#268): the
-        # sync would bring back the saved references it hid.
+    from backend.utils.hidden_rows import account_on_hold, read_before_deletion
+    if account_on_hold(user_id):
+        # The account is being deleted (#269). "Delete all my content"
+        # ends the X connection at once (#590), so a sync after it runs
+        # only on a connection the user made since.
         return {"status": "on_hold"}
+    started = datetime.utcnow()
     account = ExternalAccount.query.filter_by(
         user_id=user_id, provider="twitter").first()
     if account is None or not account.get_access_token():
@@ -401,6 +403,17 @@ def _sync_twitter_bookmarks(user_id, max_items):
                 break
             requests_made += 1
             posts_read += returned
+            if read_before_deletion(user_id, started):
+                # "Delete all my content" was asked while this sync ran
+                # (#590): it ended the connection, and storing this page
+                # would bring back saved references it hid. X billed the
+                # pages read, so the cost row is written.
+                _log_cost()
+                db.session.commit()
+                logger.info("X bookmarks sync for user %s stopped: content "
+                            "deleted while it ran", user_id)
+                return {"status": "content_deleted", "created": created,
+                        "requests": requests_made, "posts_read": posts_read}
             if page:
                 # Rides _upsert_items' commit, so it is stored with
                 # the page's rows: an exception or a killed worker
@@ -495,13 +508,13 @@ def sync_all_twitter_bookmarks():
             ExternalAccount.revoked_at.is_(None),
         ).all()
         dispatched = 0
-        from backend.utils.hidden_rows import writing_on_hold
+        from backend.utils.hidden_rows import account_on_hold
         for account in accounts:
             if account.user is None or account.user.deleted_at is not None:
                 continue   # a deleted account in its grace period (#269)
             if user_local_hour(account.user) != NIGHTLY_SYNC_LOCAL_HOUR:
                 continue
-            if writing_on_hold(account.user_id):   # #268
+            if account_on_hold(account.user_id):   # #269
                 continue
             if (account.last_synced_at
                     and now - account.last_synced_at < NIGHTLY_SYNC_MIN_GAP):

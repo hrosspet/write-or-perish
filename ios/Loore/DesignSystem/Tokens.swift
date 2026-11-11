@@ -30,6 +30,7 @@ enum LooreColor {
     static let bgSurfaceUI = UIColor.looreDynamic(dark: 0x181714, light: 0xEBE4D6)
     static let bgCardUI = UIColor.looreDynamic(dark: 0x211F1B, light: 0xE0D8C7)
     static let textPrimaryUI = UIColor.looreDynamic(dark: 0xEDE8DD, light: 0x1F1C17)
+    static let textSecondaryUI = UIColor.looreDynamic(dark: 0xA89F91, light: 0x5D564A)
     static let textMutedUI = UIColor.looreDynamic(dark: 0x736B5F, light: 0x857C6C)
     static let accentUI = UIColor.looreDynamic(dark: 0xC4956A, light: 0xA87547)
     static let borderUI = UIColor.looreDynamic(dark: 0x302C27, light: 0xCDC4B1)
@@ -45,7 +46,7 @@ enum LooreColor {
     static let bgInput = Color(UIColor.looreDynamic(dark: 0x151311, light: 0xFBF7EE))
 
     static let textPrimary = Color(textPrimaryUI)
-    static let textSecondary = Color(UIColor.looreDynamic(dark: 0xA89F91, light: 0x5D564A))
+    static let textSecondary = Color(textSecondaryUI)
     static let textMuted = Color(textMutedUI)
 
     /// Amber: active items, primary outline buttons, links, error lines.

@@ -103,13 +103,13 @@ test('Keep my account and Escape close the dialog without sending', () => {
   expect(mockPost).not.toHaveBeenCalled();
 });
 
-test('the dialog says a waiting writing deletion is replaced, and how to remove X', () => {
+test('the dialog says a waiting content deletion is replaced, and how to remove X', () => {
   renderPage({
     data_deletion: { status: 'scheduled', grace_days: 30, purge_at: '2026-10-20T12:00:00Z', x_connected: true },
   });
   openDialog();
-  expect(screen.getByText(/This replaces your request to delete all your writing/).textContent)
-    .toMatch(/everything is deleted forever on .+ instead\. If you restore\s+your account, your writing comes back too\./);
+  expect(screen.getByText(/This replaces your request to delete all your content/).textContent)
+    .toMatch(/everything is deleted forever on .+ instead\. If you restore\s+your account, your content comes back too\./);
   expect(screen.getByText(/forgets your X connection/).textContent)
     .toMatch(/removes\s+its access on X. If X still lists Loore afterwards, remove it\s+yourself: on X/);
 });
@@ -172,5 +172,5 @@ test('after a settings change the dialog still has the email version and the del
   openDialog();
   expect(screen.getByRole('button', { name: /email me the confirmation link/i })).toBeTruthy();
   expect(screen.queryByText(/Signs you out now/)).toBeNull();
-  expect(screen.getByRole('dialog').textContent).toMatch(/replaces your request to delete all your writing/);
+  expect(screen.getByRole('dialog').textContent).toMatch(/replaces your request to delete all your content/);
 });

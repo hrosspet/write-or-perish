@@ -1,8 +1,5 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
-
-const DEFAULT_MESSAGE =
-  "You've reached your monthly usage limit for the free alpha. " +
-  "It resets at the start of next month.";
+import { spendCapBannerMessage } from '../utils/spendCap';
 
 /**
  * Fixed top banner shown when a cost-incurring action is refused because the
@@ -10,6 +7,9 @@ const DEFAULT_MESSAGE =
  * the global "loore:spend-capped" event dispatched from the api.js response
  * interceptor, so every cost action (LLM, TTS, profile generation) surfaces it
  * uniformly. Persists until dismissed — the cap holds for the rest of the month.
+ * The text is the server's; raised here without one, it is the same wording,
+ * with the date the server sent when the cap lifts later than the start of
+ * next month (#594).
  */
 export default function SpendCapBanner() {
   const [message, setMessage] = useState(null);
@@ -17,7 +17,7 @@ export default function SpendCapBanner() {
 
   useEffect(() => {
     const onCapped = (e) =>
-      setMessage((e.detail && e.detail.message) || DEFAULT_MESSAGE);
+      setMessage((e.detail && e.detail.message) || spendCapBannerMessage());
     window.addEventListener('loore:spend-capped', onCapped);
     return () => window.removeEventListener('loore:spend-capped', onCapped);
   }, []);
