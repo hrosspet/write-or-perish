@@ -72,6 +72,9 @@ const NodeForm = forwardRef(
     const [audienceInfo, setAudienceInfo] = useState(
       { readers: [], error: '', pending: false, circles: [] });
     const [threadAudience, setThreadAudience] = useState(null);
+    // A reply under the user's own node that only they read, in a thread
+    // someone else shared (GET /nodes/<parent> reply_only_private).
+    const [replyOnlyPrivate, setReplyOnlyPrivate] = useState(false);
     // An entry of the user's own that has something above it in its
     // thread. Sharing the entry shares only the entry; `sharePath` is
     // the box "Share also the discussion leading up to this node?",
@@ -209,6 +212,11 @@ const NodeForm = forwardRef(
             setParentPrivacy(parent.privacy_level || "private");
             // A shared thread (Circles): the reply is read by its people.
             setThreadAudience(parent.audience || null);
+            // The user's own node that only they read, in a thread
+            // someone else shared: a reply under it is Only me (the
+            // server refuses anything else there).
+            const onlyMe = !!parent.reply_only_private;
+            setReplyOnlyPrivate(onlyMe);
             // The user's own node, in a thread that is not shared: a new
             // entry under it can be shared together with what is above it.
             const parentIsMine = myId != null && (
@@ -216,7 +224,7 @@ const NodeForm = forwardRef(
               || (parent.node_type === "llm" && (parent.human_owner_username
                 ? parent.human_owner_username === myUsername
                 : parent.parent_user_id === myId)));
-            setThreadPath(parentIsMine && !parent.audience
+            setThreadPath(parentIsMine && !parent.audience && !onlyMe
               ? { shared: false } : null);
             if (!initialPrivacyLevel && !initialAiUsage) {
               // Set privacy settings to match parent's settings. AI usage
@@ -252,6 +260,14 @@ const NodeForm = forwardRef(
         setPrivacyLevel("circles");
       }
     }, [threadAudience, privacyLevel, editMode]);
+
+    // Under the user's own Only-me node in someone else's shared thread
+    // the reply is Only me: pinned like the cases above.
+    useEffect(() => {
+      if (!editMode && replyOnlyPrivate && privacyLevel !== "private") {
+        setPrivacyLevel("private");
+      }
+    }, [replyOnlyPrivate, privacyLevel, editMode]);
 
     // Editing: what the entry is shared with now, to seed the picker; or,
     // for a reply in a shared thread, the thread's people.
@@ -1048,6 +1064,7 @@ const NodeForm = forwardRef(
             // An AI reply in a shared thread: Only me, or the thread's
             // people. Never Everyone, and no other circle.
             hidePublic={editMode && !!threadAudience && aiReply}
+            onlyMe={replyOnlyPrivate && !editMode}
             pathShare={threadPath && !threadAudience
               ? { checked: sharePath, onChange: setSharePath } : null}
             pickerKey={pickerKey}

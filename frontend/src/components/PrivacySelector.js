@@ -39,6 +39,10 @@ const PrivacySelector = ({
   // { checked, onChange } for "Share also the discussion leading up to
   // this node?". Null: no such box.
   pathShare = null,
+  // A reply under the user's own node that only they read, in a thread
+  // someone else shared: Only me is the one choice (the server refuses
+  // Everyone and any other audience there).
+  onlyMe = false,
   pickerKey,
 }) => {
   // No provider in some tests and embeds: then Circles is off.
@@ -102,7 +106,17 @@ const PrivacySelector = ({
   ];
 
   let privacyPart;
-  if (lockPrivacy && threadAudience) {
+  if (onlyMe) {
+    privacyPart = (
+      <div style={{ marginBottom: '12px' }}>
+        <label style={labelStyle}>Who can read this</label>
+        <div style={descStyle}>
+          Only you. You are replying under a node only you can read, in a
+          thread someone else shared.
+        </div>
+      </div>
+    );
+  } else if (lockPrivacy && threadAudience) {
     // A reply in a shared thread is read by the thread's people.
     privacyPart = (
       <div style={{ marginBottom: '12px' }}>
