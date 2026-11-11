@@ -29,7 +29,8 @@ import DeleteConfirmDialog from "./DeleteConfirmDialog";
 import { SharedMark } from "./CircleReaders";
 import { CircleReplyDialog } from "./CircleDialogs";
 import {
-  replyAckKey, replyAudienceNames, sharedBannerText,
+  aiReadsSentence, aiReplyAckKey, aiReplyOffReason, aiReplyPrivacyKey,
+  replyAudienceNames, sharedBannerText,
 } from "../utils/circles";
 
 
@@ -213,18 +214,27 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // deliberate act — auto-generate is forced off (and its toggle hidden),
   // and the explicit LLM Response bar shows for the node's owner instead.
   const isPublicThread = node?.privacy_level === 'public';
-  // Someone else's SHARED thread (Circles) follows the same rule: a
-  // model answers there only when the reader asks ("Ask my AI"), and
-  // the answer is a reply in the thread. On the author's own shared
-  // entry nothing changes: what her AI, a Voice session or a gleaning
-  // writes under it stays hers (only a person's reply and an Ask my AI
-  // answer join the thread's audience).
+  // A SHARED thread (Circles): an AI reply is generated the way it is in
+  // a private thread, and the thread's people see it. Any member, the
+  // author or a reader, can press LLM Response on any node of the thread
+  // they can read; the reply is written by that member's own AI and
+  // carries their name. This holds for the author's replies too, the
+  // automatic ones included. The requester can keep a reply to
+  // themselves (privacy_level "private"), never make it public.
+  // In someone else's shared thread auto-generate is off, as in a public
+  // thread: an AI reply is generated there only when the reader presses
+  // LLM Response.
   const audience = node?.audience || null;
   const isSharedThread = !!audience;
   const isForeignShared = isSharedThread && !audience.is_author;
-  const [showAskAiDialog, setShowAskAiDialog] = useState(false);
   const autoGenerateActive = (isPublicThread || isForeignShared)
     ? false : autoGenerate;
+  // The "Generate an AI reply?" dialog while it is open: { resolve }.
+  const [aiReplyDialog, setAiReplyDialog] = useState(null);
+  // Craft mode, shared thread: "AI reply: Shared with this thread / Only
+  // me". The choice is kept in localStorage per thread and user; this
+  // counter only makes the page read it again after a change.
+  const [, setAiReplyPrivacyVersion] = useState(0);
 
   // LLM completion polling - enabled automatically when llmTaskNodeId is set
   // Batch stage ({ca_tweets}): the synchronous part is done and the turn
@@ -600,9 +610,14 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // Mirror the focal isOwner derivation (same as NodeDetail.js:216) for
   // any ancestor or child node, using the user_id / parent_user_id
   // fields added in the matching backend change.
+  // An AI reply in a shared thread (Circles) names who asked for it
+  // (human_owner_username): there the reply is that person's, whoever
+  // wrote the node it stands under.
   const ownedByMe = (n) => !!currentUser && (
     n.user_id === currentUser.id
-    || (n.node_type === "llm" && n.parent_user_id === currentUser.id)
+    || (n.node_type === "llm" && (n.human_owner_username
+      ? n.human_owner_username === currentUser.username
+      : n.parent_user_id === currentUser.id))
   );
 
   // "Glean for this reflection" (#435): in a thread NOT started from the
@@ -666,9 +681,13 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
 
   // For user-typed nodes: owner must match current user
   // For LLM nodes: parent node's owner must match current user (they requested the response)
+  // (In a shared thread the server names the requester of an AI reply,
+  // human_owner_username; see ownedByMe.)
   const isOwner = node.user && currentUser && (
     node.user.id === currentUser.id ||
-    (node.node_type === "llm" && node.parent_user_id === currentUser.id)
+    (node.node_type === "llm" && (node.human_owner_username
+      ? node.human_owner_username === currentUser.username
+      : node.parent_user_id === currentUser.id))
   );
 
   const canPin = isOwner && node.privacy_level !== "private";
@@ -816,12 +835,43 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
       });
   };
 
+  // Craft mode in a shared thread: is the next AI reply for its requester
+  // only? Read only while the control is on the page (Craft mode), so a
+  // choice the user cannot see never decides who reads a reply.
+  const aiReplyPrivacyStoreKey = isSharedThread
+    ? aiReplyPrivacyKey(audience.entry_id, currentUser?.id) : null;
+  const aiReplyPrivate = craftMode && isSharedThread
+    && localStorage.getItem(aiReplyPrivacyStoreKey) === 'private';
+  const setAiReplyPrivate = (isPrivate) => {
+    localStorage.setItem(aiReplyPrivacyStoreKey, isPrivate ? 'private' : 'shared');
+    setAiReplyPrivacyVersion((v) => v + 1);
+  };
+
+  // Before an AI reply is generated in a shared thread, the people who
+  // will see it are named ("Generate an AI reply?"), unless "Don't ask
+  // again in this thread" was ticked for AI replies, nobody else reads
+  // the thread, or the reply is going to be private. Resolves true to go
+  // on, false when the user cancels.
+  const confirmAiReply = () => new Promise((resolve) => {
+    if (!isSharedThread || aiReplyPrivate
+        || replyAudienceNames(audience, currentUser?.username).length === 0
+        || localStorage.getItem(
+          aiReplyAckKey(audience.entry_id, currentUser?.id)) === "true") {
+      resolve(true);
+      return;
+    }
+    setAiReplyDialog({ resolve });
+  });
+
   const requestLlmFor = async (parentNodeId, { sourceMode = 'textmode' } = {}) => {
-    // In someone else's shared thread the request is "Ask my AI": the
-    // reader's own model (the server picks it; none is sent).
-    const response = await api.post(`/nodes/${parentNodeId}/llm`, isForeignShared
-      ? { circle_ask: true, source_mode: sourceMode }
-      : { model: selectedModel, source_mode: sourceMode });
+    // The same request in every thread. The model is the requester's own
+    // (the picker's default comes from /suggested-model, which never
+    // suggests the model of another member's reply). In a shared thread
+    // the reply joins the thread's audience unless "Only me" is chosen.
+    const response = await api.post(`/nodes/${parentNodeId}/llm`, {
+      model: selectedModel, source_mode: sourceMode,
+      ...(aiReplyPrivate && { privacy_level: 'private' }),
+    });
     const newNodeId = response.data.node_id;
     if (!newNodeId) throw new Error("Failed to get a task ID for the new LLM node.");
     return newNodeId;
@@ -844,7 +894,8 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
 
   // The reply is watched on its own node from the start (#367): the
   // model thinking, then the text as it is written.
-  const handleLLMResponse = () => {
+  const handleLLMResponse = async () => {
+    if (!(await confirmAiReply())) return;
     setError("");
     setLlmRequesting(true);
     requestLlmFor(id)
@@ -852,18 +903,6 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
                                     { state: FROM_PARENT }))
       .catch(handleLlmRequestError)
       .finally(() => setLlmRequesting(false));
-  };
-
-  // "Ask my AI" (Circles): the answer is a reply in the thread, so the
-  // people who will see it are named first, unless "Don't ask again in
-  // this thread" was ticked (the same memory as the reply dialog).
-  const askMyAi = () => {
-    if (localStorage.getItem(
-      replyAckKey(audience.entry_id, currentUser?.id)) === "true") {
-      handleLLMResponse();
-    } else {
-      setShowAskAiDialog(true);
-    }
   };
 
   // Gate + fire a child LLM generation under `parentNodeId`. Returns the
@@ -883,6 +922,9 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
       );
       return null;
     }
+    // The author's automatic reply in her shared thread is seen by its
+    // readers too: she is asked first, like for a pressed one.
+    if (!(await confirmAiReply())) return null;
     return await requestLlmFor(parentNodeId);
   };
 
@@ -1134,7 +1176,8 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
 
   // Determine humanOwnerUsername for LLM nodes in NodeDetail
   // node.parent_user_id is the human owner's user_id for LLM nodes
-  const humanOwnerUsername = node.node_type === "llm" && node.parent_user_id
+  const humanOwnerUsername = node.human_owner_username
+    || (node.node_type === "llm" && node.parent_user_id
     ? (node.ancestors && node.ancestors.length > 0
       ? (() => {
           // Walk ancestors to find the human owner username
@@ -1145,8 +1188,15 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
           return null;
         })()
       : null)
-    : null;
+    : null);
 
+  // The artifacts a node's placeholders are filled from, as the server
+  // sends them. For the owner they are the versions pinned to the node.
+  // For a reader of a prompt shared in a circle the server sends the
+  // READER's own latest artifacts (no version numbers), never the
+  // author's; an artifact the reader does not have is absent, and its
+  // placeholder is then shown as written ({user_memory}).
+  const shownContextArtifacts = node.context_artifacts || null;
   const isLlmNode = node.node_type === "llm" || !!node.llm_model;
   const isLlmPending = isLlmNode && (
     node.llm_task_status === 'pending'
@@ -1261,10 +1311,17 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     && !['pending', 'processing', 'failed'].includes(node.transcription_status)
     && !(entryEnd.children || []).some(c => !c.deleted
       && !['failed', 'cancelled'].includes(c.llm_task_status));
-  const showCraftBar = isOwner && !isForeignShared
-    && (craftMode || isPublicThread)
+  // In a shared thread (Circles) every member has LLM Response on every
+  // node they can read, other people's included. In someone else's
+  // shared thread it shows without Craft mode, as in a public thread:
+  // auto-generate is off there, so it is the only way to get an AI
+  // reply. Where no AI may read the entry the control stays, disabled,
+  // with the reason next to it (aiOffReason).
+  const aiOffReason = aiReplyOffReason(audience, node, currentUser);
+  const showCraftBar = (isOwner || isSharedThread)
+    && (craftMode || isPublicThread || isForeignShared)
     && (!autoGenerateActive || awaitsReply)
-    && node.ai_usage !== 'none' && !isLlmPending;
+    && (node.ai_usage !== 'none' || isSharedThread) && !isLlmPending;
   // In a thread started from the Glean card (#435) the action row under
   // every node carries the Glean button, next to LLM Response — the
   // conversation can get long and nothing is pinned to the viewport
@@ -1296,6 +1353,10 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // generic LLM Response is not offered at all: the row is "Read" and
   // its model picker.
   const showLlmResponse = showCraftBar && !(inReadThread && !readReplyAbove);
+  // Craft mode, shared thread: who reads the next AI reply. Shown with
+  // LLM Response, and also where auto-generate will ask for the reply.
+  const showAiReplyPrivacy = craftMode && isSharedThread && !isLlmPending
+    && !aiOffReason && (showLlmResponse || autoGenerateActive);
   // Without craft mode there is no LLM Response, so an entry whose
   // automatic reply failed left the user no way to ask again. Everyone
   // gets a plain Try again there (Peter, 2026-11-10): the same request
@@ -1316,7 +1377,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     && ['failed', 'cancelled'].includes(c.llm_task_status));
   const showTryAgain = isOwner && !craftMode && autoGenerateActive
     && awaitsReply && replyAttemptFailed
-    && node.ai_usage !== 'none' && !isLlmPending
+    && node.ai_usage !== 'none' && !aiOffReason && !isLlmPending
     && !(inReadThread && !readReplyAbove);
   // While the reply is being requested or written, both buttons say so.
   const llmBusyLabel = (llmRequesting || llmTaskNodeId) ? (
@@ -1458,13 +1519,6 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     </span>
   );
   const nodeAllowsAi = node.ai_usage !== 'none';
-  // Why "Ask my AI" is off, in a sentence, or null when it can be asked.
-  const askAiOffReason = !isForeignShared ? null
-    : audience.entry_ai_usage === 'none'
-      ? `${audience.author} set this entry's AI usage to None, so no AI can read it.`
-      : currentUser?.default_ai_usage === 'none'
-        ? 'Your own AI usage is set to None in Account settings.'
-        : null;
   const topRightControls = isOwner && !isPublicThread && !isForeignShared && (
     <div style={{
       display: 'flex',
@@ -1558,14 +1612,14 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
             gap: "0.5em",
           }}>
             <span>{node.prompt_title}{node.prompt_version_number ? ` v${node.prompt_version_number}` : ''}</span>
-            {node.context_artifacts?.profile && (
+            {shownContextArtifacts?.profile?.version_number && (
               <span style={{ opacity: 0.7 }}>
-                {'\u00B7'} Profile v{node.context_artifacts.profile.version_number}
+                {'\u00B7'} Profile v{shownContextArtifacts.profile.version_number}
               </span>
             )}
-            {node.context_artifacts?.todo && (
+            {shownContextArtifacts?.todo?.version_number && (
               <span style={{ opacity: 0.7 }}>
-                {'\u00B7'} TODO v{node.context_artifacts.todo.version_number}
+                {'\u00B7'} TODO v{shownContextArtifacts.todo.version_number}
               </span>
             )}
           </div>
@@ -1602,7 +1656,8 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
               quotes={{}}
               externalQuotes={{}}
               nodeId={node.id}
-              contextArtifacts={node.context_artifacts || null}
+              contextArtifacts={shownContextArtifacts}
+              barePlaceholders={!isOwner && !!audience}
               onQuoteClick={handleBubbleClick}
             />
             <span aria-label="Still writing" style={{
@@ -1677,7 +1732,8 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
                 onExternalIntroVerdictChange={handleExternalIntroVerdictChange}
                 showRecommendationFeedback={isLlmNode}
                 referenceBackLabel={isReadReply ? GLEANINGS_TITLE : undefined}
-                contextArtifacts={node.context_artifacts || null}
+                contextArtifacts={shownContextArtifacts}
+              barePlaceholders={!isOwner && !!audience}
                 onQuoteClick={handleBubbleClick}
                 onCheckboxToggle={isOwner ? handleCheckboxToggle : undefined}
                 onAddTask={isOwner ? handleTaskInsert : undefined}
@@ -1718,7 +1774,8 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
               onExternalIntroVerdictChange={handleExternalIntroVerdictChange}
               showRecommendationFeedback={isLlmNode}
               referenceBackLabel={isReadReply ? GLEANINGS_TITLE : undefined}
-              contextArtifacts={node.context_artifacts || null}
+              contextArtifacts={shownContextArtifacts}
+              barePlaceholders={!isOwner && !!audience}
               onQuoteClick={handleBubbleClick}
             />
           </div>
@@ -1760,6 +1817,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
           childrenCount={highlightedChildrenCount}
           humanOwnerUsername={humanOwnerUsername}
           llmModel={node.llm_model}
+          llmLabel={node.llm_label}
           origin={node.origin}
           publicPage={node.privacy_level === 'public'}
           audience={audience}
@@ -1789,7 +1847,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
           <SpeakerIcon nodeId={node.id} content={node.content} isPublic={node.privacy_level === 'public'} aiUsage={node.ai_usage} onTtsGenerated={() => setNode(prev => prev ? { ...prev, has_tts: true } : prev)} />
           <DownloadAudioIcon nodeId={node.id} isPublic={node.privacy_level === 'public'} aiUsage={node.ai_usage} />
         </NodeFooter>
-        {(showCraftBar || showTryAgain || readActions) && (
+        {(showCraftBar || showTryAgain || readActions || showAiReplyPrivacy) && (
           <div
             ref={actionRowRef}
             style={actionsStacked
@@ -1807,8 +1865,8 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
               <span data-action-group title={llmResponseTitle} style={actionGroupStyle}>
                 <button
                   onClick={handleLLMResponse}
-                  disabled={llmRequesting || !!llmTaskNodeId || underReadReply || moving}
-                  aria-disabled={underReadReply || undefined}
+                  disabled={llmRequesting || !!llmTaskNodeId || underReadReply || moving || !!aiOffReason}
+                  aria-disabled={underReadReply || !!aiOffReason || undefined}
                   style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', ...joinedButtonStyle }}
                 >
                   {llmBusyLabel || 'LLM Response'}
@@ -1817,9 +1875,67 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
                   nodeId={node.id}
                   selectedModel={selectedModel}
                   onModelChange={setSelectedModel}
-                  disabled={llmRequesting || !!llmTaskNodeId || underReadReply || moving}
+                  disabled={llmRequesting || !!llmTaskNodeId || underReadReply || moving || !!aiOffReason}
                   style={joinedPickerStyle}
                 />
+              </span>
+            )}
+            {/* Shared thread: why no AI reply can be generated here. */}
+            {showLlmResponse && aiOffReason && (
+              <span style={{
+                gridColumn: '1 / -1',
+                fontFamily: 'var(--sans)', fontWeight: 300, fontSize: '0.8rem',
+                lineHeight: 1.5, color: 'var(--text-secondary)',
+              }}>
+                {aiOffReason}
+              </span>
+            )}
+            {showAiReplyPrivacy && (
+              <span
+                role="group" aria-label="AI reply"
+                style={{
+                  gridColumn: '1 / -1',
+                  display: 'inline-flex', alignItems: 'center', gap: '6px',
+                  flexWrap: 'wrap',
+                  fontFamily: 'var(--sans)', fontWeight: 300, fontSize: '0.8rem',
+                  color: 'var(--text-secondary)',
+                }}
+              >
+                <span>AI reply:</span>
+                {[
+                  { isPrivate: false, label: 'Shared with this thread' },
+                  { isPrivate: true, label: 'Only me' },
+                ].map((choice) => {
+                  const selected = aiReplyPrivate === choice.isPrivate;
+                  return (
+                    <button
+                      key={choice.label} type="button"
+                      aria-pressed={selected}
+                      onClick={() => setAiReplyPrivate(choice.isPrivate)}
+                      style={{
+                        minHeight: '32px', padding: '0 10px', borderRadius: '6px',
+                        border: `1px solid ${selected ? 'var(--accent)' : 'var(--border)'}`,
+                        background: selected ? 'var(--bg-card)' : 'transparent',
+                        color: selected ? 'var(--text-primary)' : 'var(--text-secondary)',
+                        fontFamily: 'var(--sans)', fontWeight: selected ? 400 : 300,
+                        fontSize: '0.8rem', cursor: 'pointer',
+                      }}
+                    >
+                      {choice.label}
+                    </button>
+                  );
+                })}
+              </span>
+            )}
+            {/* What the reply's prompt reads of the requester's own
+                artifacts (audience.ai_reads), when it reads any. */}
+            {showAiReplyPrivacy && aiReadsSentence(audience.ai_reads) && (
+              <span style={{
+                gridColumn: '1 / -1', flexBasis: '100%',
+                fontFamily: 'var(--sans)', fontWeight: 300, fontSize: '0.8rem',
+                lineHeight: 1.5, color: 'var(--text-secondary)',
+              }}>
+                {aiReadsSentence(audience.ai_reads)}
               </span>
             )}
             {/* A lone button, not an action group: it has no picker, so
@@ -1855,40 +1971,12 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
       {isForeignShared && !isLlmPending && (
         <div style={{
           width: '95%', maxWidth: '1500px', marginLeft: '20px',
-          marginTop: '10px', display: 'flex', justifyContent: 'space-between',
-          alignItems: 'center', gap: '16px', flexWrap: 'wrap',
+          marginTop: '10px',
+          fontFamily: 'var(--sans)', fontWeight: 300, fontSize: '0.8rem',
+          lineHeight: 1.5, color: 'var(--text-secondary)',
         }}>
-          <div style={{
-            fontFamily: 'var(--sans)', fontWeight: 300, fontSize: '0.8rem',
-            lineHeight: 1.5, color: 'var(--text-secondary)', maxWidth: '430px',
-          }}>
-            Before your reply is sent, Loore names the people who will see
-            it. No AI answers here unless you ask for it.
-            {askAiOffReason && (
-              <span style={{ display: 'block', marginTop: '4px' }}>
-                {askAiOffReason}
-              </span>
-            )}
-          </div>
-          <button
-            type="button"
-            onClick={askMyAi}
-            disabled={!!askAiOffReason || llmRequesting || !!llmTaskNodeId || moving}
-            style={{
-              minHeight: '46px', padding: '0 18px', borderRadius: '6px',
-              border: '1px solid var(--border-hover)', background: 'transparent',
-              color: 'var(--text-primary)', fontFamily: 'var(--sans)',
-              fontWeight: 300, fontSize: '0.94rem',
-              cursor: askAiOffReason ? 'not-allowed' : 'pointer',
-              opacity: askAiOffReason ? 0.4 : 1,
-              display: 'inline-flex', alignItems: 'center', gap: '8px',
-            }}
-          >
-            {(llmRequesting || llmTaskNodeId) && (
-              <FaSpinner className="spin" aria-hidden="true" />
-            )}
-            Ask my AI
-          </button>
+          Before your reply is sent, Loore names the people who will see
+          it. No AI reply is generated here unless you press LLM Response.
         </div>
       )}
       {showInlineInput && (
@@ -1974,17 +2062,21 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
       {childrenSection}
 
       <CircleReplyDialog
-        open={showAskAiDialog}
-        askAi
+        open={!!aiReplyDialog}
+        ai
+        aiReads={audience?.ai_reads}
         names={replyAudienceNames(audience, currentUser?.username)}
-        onClose={() => setShowAskAiDialog(false)}
+        onClose={() => {
+          aiReplyDialog?.resolve(false);
+          setAiReplyDialog(null);
+        }}
         onConfirm={(dontAskAgain) => {
-          setShowAskAiDialog(false);
           if (dontAskAgain && audience) {
             localStorage.setItem(
-              replyAckKey(audience.entry_id, currentUser?.id), "true");
+              aiReplyAckKey(audience.entry_id, currentUser?.id), "true");
           }
-          handleLLMResponse();
+          aiReplyDialog?.resolve(true);
+          setAiReplyDialog(null);
         }}
       />
       {showPromptEditConfirm && (
@@ -2064,6 +2156,9 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
             initialAiUsage: editTarget.ai_usage,
             detachPrompt: !!editTarget.context_artifacts?.prompt,
             hasGeneratedTts: !!editTarget.has_tts,
+            // An AI reply in a shared thread: Only me or the thread's
+            // people, never Everyone.
+            aiReply: editTarget.node_type === "llm" || !!editTarget.llm_model,
             // Drives the "apply to replies too?" choice on a privacy /
             // AI-usage change (same test as the delete dialog).
             hasChildren: !!(

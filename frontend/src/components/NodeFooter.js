@@ -5,17 +5,20 @@ import { useUser } from '../contexts/UserContext';
 import { formatDateTime } from '../utils/date';
 import CircleReaders from './CircleReaders';
 
-const NodeFooter = ({ username, createdAt, childrenCount, humanOwnerUsername, llmModel, origin, onReplyClick, publicPage = false, audience = null, children }) => {
+const NodeFooter = ({ username, createdAt, childrenCount, humanOwnerUsername, llmModel, llmLabel = null, origin, onReplyClick, publicPage = false, audience = null, children }) => {
   const { user } = useUser();
 
   // LLM nodes: private threads show just the model — whose thread it is
   // needs no announcing in your own diary. PUBLIC nodes attribute the
   // human who generated it ("model · via human"), matching the Commons
-  // and the funnel.
-  const displayUsername = llmModel
+  // and the funnel. An AI reply in a shared thread (Circles) comes with
+  // a label built by the server, the model's name and who asked for it
+  // ("Claude Fable 5.2 via @hrosspet"): it is shown in place of the
+  // model id, and links to that person like any AI reply.
+  const displayUsername = llmLabel || (llmModel
     ? (publicPage && humanOwnerUsername
         ? `${llmModel} · via ${humanOwnerUsername}` : llmModel)
-    : username;
+    : username);
 
   // Link goes to human owner's dashboard for LLM nodes. On PUBLIC posts
   // (#228) the handle links to the author's public page instead — the

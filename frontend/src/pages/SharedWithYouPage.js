@@ -4,7 +4,7 @@ import api from '../api';
 import { useUser } from '../contexts/UserContext';
 import { CircleConfirmDialog } from '../components/CircleDialogs';
 import { parseTimestamp } from '../utils/date';
-import { possessive } from '../utils/circles';
+import { atName, possessive } from '../utils/circles';
 
 // "Shared with you": the entries people chose to show the user, grouped
 // by person, newest first. Nothing here counts or tracks reading: no
@@ -104,7 +104,7 @@ function SharedWithYouPage() {
   const meta = (entry) => {
     const when = sharedDate(entry.created_at);
     if (!entry.last_reply_by) return when;
-    const who = entry.last_reply_by_me ? 'You' : entry.last_reply_by;
+    const who = entry.last_reply_by_me ? 'You' : atName(entry.last_reply_by);
     return `${when}. ${who} replied.`;
   };
 
@@ -160,7 +160,7 @@ function SharedWithYouPage() {
               margin: 0, fontFamily: 'var(--sans)', fontWeight: 400,
               fontSize: '0.94rem', color: 'var(--accent)',
             }}>
-              {person.username}
+              {atName(person.username)}
             </h2>
             <button type="button" style={quietButton}
               onClick={() => setHiding(person.username)}>
@@ -232,7 +232,7 @@ function SharedWithYouPage() {
                 display: 'flex', justifyContent: 'space-between',
                 alignItems: 'center', gap: '12px', minHeight: '44px',
               }}>
-                <span style={{ fontSize: '0.94rem' }}>{name}</span>
+                <span style={{ fontSize: '0.94rem' }}>{atName(name)}</span>
                 <button type="button" style={quietButton} onClick={() => show(name)}>
                   Show {possessive(name)} entries again
                 </button>
@@ -245,7 +245,7 @@ function SharedWithYouPage() {
       <CircleConfirmDialog
         open={!!hiding}
         title={`Stop showing ${hiding ? possessive(hiding) : ''} entries?`}
-        body={`You will get no notes about ${hiding ? possessive(hiding) : ''} entries and will not see them here. ${hiding} is not told what you choose. You can undo this at the bottom of this page.`}
+        body={`You will get no notes about ${hiding ? possessive(hiding) : ''} entries and will not see them here. ${atName(hiding)} is not told what you choose. You can undo this at the bottom of this page.`}
         confirmLabel={`Don't show ${hiding ? possessive(hiding) : ''} entries`}
         busy={busy}
         onClose={() => setHiding(null)}

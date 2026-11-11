@@ -4,6 +4,7 @@ import api from "../api";
 import MarkdownBody from "./MarkdownBody";
 import { useIsMobile } from "../hooks/useIsMobile";
 import { formatDate } from "../utils/date";
+import { atName, possessive } from "../utils/circles";
 
 /**
  * The dev-update channel surface (#207): shows unread changelog sections,
@@ -268,11 +269,11 @@ function CircleShareItem({ notification, onDone, onDoneFrom, onCloseModal }) {
       </p>
       <p style={{ ...mutedNoteStyle, fontSize: "0.875rem", margin: "0.6rem 0 0",
                   color: "var(--text-secondary)" }}>
-        {name} is not told what you choose.
+        {atName(name)} is not told what you choose.
       </p>
       <div style={buttonRowStyle}>
         <button style={ghostButtonStyle} onClick={hide} disabled={busy}>
-          Don't show {name}'s entries
+          Don't show {possessive(name)} entries
         </button>
         <button style={accentButtonStyle} onClick={readIt} disabled={busy}>
           Read it

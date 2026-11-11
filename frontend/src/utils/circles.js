@@ -10,11 +10,36 @@ export function countWord(n) {
   return n >= 0 && n < NUMBER_WORDS.length ? NUMBER_WORDS[n] : String(n);
 }
 
-// ["a", "b", "c"] → "a, b and c"
+// A person's Loore name as it is written in Circles copy: "@ben". A
+// name that already carries "@" is not given a second one.
+export function atName(name) {
+  const bare = String(name || '').replace(/^@+/, '');
+  return bare ? `@${bare}` : '';
+}
+
+// ["a", "b", "c"] → "@a, @b and @c"
 export function joinNames(names) {
-  const list = (names || []).filter(Boolean);
+  const list = (names || []).map(atName).filter(Boolean);
   if (list.length <= 1) return list.join('');
   return `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}`;
+}
+
+// Things, not people: ["profile", "memory", "to-do list"] →
+// "profile, memory and to-do list".
+export function joinPlain(items) {
+  const list = (items || []).filter(Boolean);
+  if (list.length <= 1) return list.join('');
+  return `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}`;
+}
+
+// What an AI reply in a shared thread reads of its requester's own
+// artifacts (audience.ai_reads, from the server), as a sentence; ''
+// when it reads none.
+export function aiReadsSentence(aiReads) {
+  const list = joinPlain(aiReads);
+  return list
+    ? `Your AI reads your ${list} for this reply and could share private information from them.`
+    : '';
 }
 
 // Names typed into "for this entry only": commas or spaces, @ optional.
@@ -60,7 +85,7 @@ export function replyAudienceNames(audience, myUsername) {
 
 // The banner over a shared entry, for a reader.
 export function sharedBannerText(audience) {
-  const author = audience.author;
+  const author = atName(audience.author);
   const others = Math.max((audience.readers || []).length - 1, 0);
   const whom = others === 0
     ? 'you'
@@ -77,10 +102,41 @@ export function replyAckKey(entryId, userId) {
   return `loore_circle_reply_ack_${userId}_${entryId}`;
 }
 
+// The same for the dialog before an AI reply. It has its own key, so
+// ticking the box for typed replies does not skip the AI dialog.
+export function aiReplyAckKey(entryId, userId) {
+  return `loore_circle_ai_reply_ack_${userId}_${entryId}`;
+}
+
+// Craft mode, in a shared thread: whether the next AI reply is shared
+// with the thread ("shared", the default) or only its requester reads
+// it ("private"). Kept per thread, per user, on this device.
+export function aiReplyPrivacyKey(entryId, userId) {
+  return `loore_circle_ai_reply_privacy_${userId}_${entryId}`;
+}
+
+// Why no AI reply can be generated on `node` in a shared thread, in one
+// sentence, or null when it can.
+export function aiReplyOffReason(audience, node, user) {
+  if (!audience) return null;
+  const closed = "This entry's AI usage is None, so no AI can read it.";
+  if (audience.entry_ai_usage === 'none') {
+    return audience.is_author
+      ? closed
+      : `${atName(audience.author)} set this entry's AI usage to None, so no AI can read it.`;
+  }
+  if (node?.ai_usage === 'none') return closed;
+  if (user?.default_ai_usage === 'none') {
+    return 'Your own AI usage is set to None in Account settings.';
+  }
+  return null;
+}
+
 // The "Remove <name>" dialog. A person reads an entry through any of
 // its circles or by being named for it, so the dialog says what removing
 // them from this one circle does, and what it does not.
-export function removeMemberBody(name, circleName) {
+export function removeMemberBody(rawName, circleName) {
+  const name = atName(rawName);
   return `From this moment ${name} no longer reads your entries through `
     + `${circleName}. An entry you also shared with ${name} another way `
     + `(another circle ${name} is in, or by name) stays open to ${name}. `
@@ -91,5 +147,5 @@ export const NO_READERS_MESSAGE = "Nobody could read this entry yet. Choose "
   + "a circle with people in it, or name a person.";
 
 export function possessive(name) {
-  return `${name}'s`;
+  return `${atName(name)}'s`;
 }

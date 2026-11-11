@@ -1,4 +1,5 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
+import { atName } from '../utils/circles';
 
 // Two overlapping rings, stroke only: the mark of a shared entry.
 export function CirclesIcon({ size = 18, color = 'var(--accent)' }) {
@@ -52,11 +53,10 @@ function CircleReaders({ audience, myUsername }) {
   }, [pinned]);
 
   if (!audience) return null;
-  const line = (name) => (name === myUsername ? 'You' : name);
   const people = [
     audience.author === myUsername
-      ? 'You, the author' : `${audience.author}, the author`,
-    ...(audience.readers || []).filter((n) => n !== myUsername),
+      ? 'You, the author' : `${atName(audience.author)}, the author`,
+    ...(audience.readers || []).filter((n) => n !== myUsername).map(atName),
     ...((audience.readers || []).includes(myUsername) ? ['You'] : []),
   ];
 
@@ -103,7 +103,7 @@ function CircleReaders({ audience, myUsername }) {
           <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
             Can read this entry and its replies
           </span>
-          {people.map((p) => <span key={p}>{line(p)}</span>)}
+          {people.map((p) => <span key={p}>{p}</span>)}
         </span>
       )}
     </span>

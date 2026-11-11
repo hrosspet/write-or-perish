@@ -26,7 +26,7 @@ import useSubmitShortcut from "../hooks/useSubmitShortcut";
 
 const NodeForm = forwardRef(
   (
-    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt, hidePowerFeatures = false, placeholder, onSubmitOverride, uploadReplyOptions, compact = false, hideAudioUpload = false, allowAgenticPrompt = false, hasGeneratedTts = false, aiUsageFromGlobalDefault = false, hasChildren = false },
+    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt, hidePowerFeatures = false, placeholder, onSubmitOverride, uploadReplyOptions, compact = false, hideAudioUpload = false, allowAgenticPrompt = false, hasGeneratedTts = false, aiUsageFromGlobalDefault = false, hasChildren = false, aiReply = false },
     ref
   ) => {
     const { user } = useUser();
@@ -72,6 +72,18 @@ const NodeForm = forwardRef(
     const [audienceInfo, setAudienceInfo] = useState(
       { readers: [], error: '', pending: false, circles: [] });
     const [threadAudience, setThreadAudience] = useState(null);
+    // An entry of the user's own that has something above it in its
+    // thread. Sharing the entry shares only the entry; `sharePath` is
+    // the box "Share also the discussion leading up to this node?",
+    // which shares everything from the start of the thread down to it.
+    // `threadPath` is { count, shared } from GET /nodes/<id>/audience
+    // when editing, { shared: false } for a new reply under the user's
+    // own node in a thread that is not shared, and null when there is
+    // nothing above the node (then the box is not offered).
+    const [threadPath, setThreadPath] = useState(null);
+    const myId = user?.id;
+    const myUsername = user?.username;
+    const [sharePath, setSharePath] = useState(false);
     const [pickerKey, setPickerKey] = useState(0);
     const [showCircleReplyDialog, setShowCircleReplyDialog] = useState(false);
     const audienceKey = (a) =>
@@ -197,6 +209,15 @@ const NodeForm = forwardRef(
             setParentPrivacy(parent.privacy_level || "private");
             // A shared thread (Circles): the reply is read by its people.
             setThreadAudience(parent.audience || null);
+            // The user's own node, in a thread that is not shared: a new
+            // entry under it can be shared together with what is above it.
+            const parentIsMine = myId != null && (
+              parent.user?.id === myId
+              || (parent.node_type === "llm" && (parent.human_owner_username
+                ? parent.human_owner_username === myUsername
+                : parent.parent_user_id === myId)));
+            setThreadPath(parentIsMine && !parent.audience
+              ? { shared: false } : null);
             if (!initialPrivacyLevel && !initialAiUsage) {
               // Set privacy settings to match parent's settings. AI usage
               // is the backend's reply default (#362): the parent's, but
@@ -211,7 +232,7 @@ const NodeForm = forwardRef(
             // If we can't fetch parent, keep the defaults
           });
       }
-    }, [parentId, editMode, initialPrivacyLevel, initialAiUsage]);
+    }, [parentId, editMode, initialPrivacyLevel, initialAiUsage, myId, myUsername]);
 
     // Replies in a public thread are public (#228): pin the STATE, not just
     // the display — a remembered 'private' from loore_last_privacy_level
@@ -240,6 +261,9 @@ const NodeForm = forwardRef(
       api.get(`/nodes/${nodeId}/audience`)
         .then((res) => {
           if (!alive) return;
+          const path = res.data.thread_path || null;
+          setThreadPath(path);
+          setSharePath(!!path?.shared);
           const own = res.data.audience;
           if (own && own.is_entry && own.is_author) {
             const seeded = {
@@ -490,9 +514,14 @@ const NodeForm = forwardRef(
     // named people (not a reply in a shared thread, whose readers are
     // the thread's).
     const sharesEntry = circlesOn && privacyLevel === "circles" && !threadAudience;
+    // share_path goes along when the box is ticked (true), or when a
+    // path that was shared is unticked (false: the server takes it back
+    // to only the author). Otherwise it is left out.
     const audienceFields = () => ({
       circle_ids: audience.circleIds || [],
       circle_usernames: splitNames(audience.namesText),
+      ...(threadPath && (sharePath || threadPath.shared)
+        && { share_path: sharePath }),
     });
     const audienceChanged = sharesEntry
       && savedAudienceKey !== audienceKey(audience);
@@ -504,8 +533,8 @@ const NodeForm = forwardRef(
     const shareCreated = async (createdId) => {
       if (!sharesEntry || !createdId) return;
       try {
-        // The entry only: an AI reply made along with it stays the
-        // author's own until they choose to share it.
+        // This sets who reads the entry. An AI reply under a shared
+        // entry is read by the same people (the server applies that).
         await api.put(`/nodes/${createdId}/audience`, audienceFields());
       } catch (err) {
         addToast(
@@ -1016,6 +1045,11 @@ const NodeForm = forwardRef(
             threadAudience={threadAudience
               ? replyAudienceNames(threadAudience, user?.username) : null}
             lockPublic={editMode && !!threadAudience && !threadAudience.is_author}
+            // An AI reply in a shared thread: Only me, or the thread's
+            // people. Never Everyone, and no other circle.
+            hidePublic={editMode && !!threadAudience && aiReply}
+            pathShare={threadPath && !threadAudience
+              ? { checked: sharePath, onChange: setSharePath } : null}
             pickerKey={pickerKey}
           />
         )}

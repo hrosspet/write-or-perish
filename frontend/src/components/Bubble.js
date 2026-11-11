@@ -252,6 +252,7 @@ const Bubble = ({
               childrenCount={childrenCount}
               humanOwnerUsername={node.human_owner_username}
               llmModel={node.llm_model}
+              llmLabel={node.llm_label}
               origin={node.origin}
               publicPage={node.privacy_level === 'public'}
               onReplyClick={

@@ -17,6 +17,9 @@ import { readersSentence, splitNames } from '../utils/circles';
  */
 function CircleAudiencePicker({
   circleIds, namesText, onChange, onResolved, disabled = false,
+  // { checked, onChange }: the entry has something above it in its
+  // thread, which is shared only when this box is ticked.
+  pathShare = null,
 }) {
   const [circles, setCircles] = useState(null);
   const [loadError, setLoadError] = useState('');
@@ -189,6 +192,34 @@ function CircleAudiencePicker({
                 ? 'Looking up who can read this…'
                 : 'Nobody is in this circle yet. Add a person to it, or name someone.')}
       </div>
+      {pathShare && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+          <label style={{
+            display: 'flex', alignItems: 'center', gap: '12px', minHeight: '44px',
+            fontFamily: 'var(--sans)', fontWeight: 300, fontSize: '0.94rem',
+            color: 'var(--text-primary)', cursor: disabled ? 'default' : 'pointer',
+          }}>
+            <input
+              type="checkbox"
+              checked={!!pathShare.checked}
+              disabled={disabled}
+              onChange={(e) => pathShare.onChange(e.target.checked)}
+              style={{ width: '20px', height: '20px', accentColor: 'var(--accent)', margin: 0 }}
+            />
+            Share also the discussion leading up to this node?
+          </label>
+          <div style={{
+            fontSize: '0.8rem', lineHeight: 1.5, color: 'var(--text-secondary)',
+            fontFamily: 'var(--sans)', fontWeight: 300,
+          }}>
+            Everything from the start of this thread down to this entry
+            is then shared with the same people, including the thread's
+            prompt and the AI replies on the way. People's AI replies use
+            the prompt with their own artifacts, never yours. Without it,
+            only this entry is shared.
+          </div>
+        </div>
+      )}
       <div style={{
         fontSize: '0.8rem', lineHeight: 1.5, color: 'var(--text-secondary)',
         fontFamily: 'var(--sans)', fontWeight: 300,

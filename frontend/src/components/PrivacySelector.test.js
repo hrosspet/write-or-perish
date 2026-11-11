@@ -68,7 +68,7 @@ test('Circles opens the picker and names the readers before saving', async () =>
     .toHaveAttribute('aria-pressed', 'true');
   expect(screen.getByLabelText('Or name people for this entry only')).toBeInTheDocument();
   expect(await screen.findByText(
-    'ben and chidi can read this entry and reply to it. Nobody else can.',
+    '@ben and @chidi can read this entry and reply to it. Nobody else can.',
   )).toBeInTheDocument();
   expect(api.post).toHaveBeenCalledWith('/circles/audience-preview',
     { circle_ids: [1], usernames: [] });
@@ -97,9 +97,69 @@ test('a reply in a shared thread shows the people, not a choice', () => {
     threadAudience: ['anna', 'chidi'],
   });
   expect(screen.getByText(
-    'anna and chidi will see it, with your name. Nobody else can.',
+    '@anna and @chidi will see it, with your name. Nobody else can.',
   )).toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Only me' })).toBeNull();
+});
+
+test('an AI reply in a shared thread: Only me or the thread, not Everyone, no circle picker', () => {
+  const { onPrivacyChange } = renderSelector({
+    privacyLevel: 'circles', threadAudience: ['anna', 'chidi'], hidePublic: true,
+  });
+  expect(screen.getByRole('button', { name: 'Only me' })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Circles' }))
+    .toHaveAttribute('aria-pressed', 'true');
+  expect(screen.queryByRole('button', { name: 'Everyone' })).toBeNull();
+  expect(screen.getByText('@anna and @chidi can read this reply. Nobody else can.'))
+    .toBeInTheDocument();
+  expect(screen.queryByLabelText('Or name people for this entry only')).toBeNull();
+  expect(api.get).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: 'Only me' }));
+  expect(onPrivacyChange).toHaveBeenCalledWith('private');
+});
+
+test('an entry with something above it: the picker offers to share the discussion too', async () => {
+  api.get.mockResolvedValue({ data: { circles: [] } });
+  const onChange = jest.fn();
+  renderSelector({
+    privacyLevel: 'circles',
+    audience: { circleIds: [], namesText: '' },
+    onAudienceChange: () => {},
+    pathShare: { checked: false, onChange },
+  });
+  const box = await screen.findByLabelText('Share also the discussion leading up to this node?');
+  expect(box).not.toBeChecked();
+  expect(screen.getByText(
+    'Everything from the start of this thread down to this entry is then '
+    + "shared with the same people, including the thread's prompt and the AI "
+    + "replies on the way. People's AI replies use the prompt with their own "
+    + 'artifacts, never yours. Without it, only this entry is shared.',
+  )).toBeInTheDocument();
+  fireEvent.click(box);
+  expect(onChange).toHaveBeenCalledWith(true);
+});
+
+test('a discussion that is already shared shows the box ticked', async () => {
+  api.get.mockResolvedValue({ data: { circles: [] } });
+  renderSelector({
+    privacyLevel: 'circles',
+    audience: { circleIds: [], namesText: '' },
+    onAudienceChange: () => {},
+    pathShare: { checked: true, onChange: () => {} },
+  });
+  expect(await screen.findByLabelText('Share also the discussion leading up to this node?'))
+    .toBeChecked();
+});
+
+test('an entry with nothing above it has no such box', async () => {
+  api.get.mockResolvedValue({ data: { circles: [] } });
+  renderSelector({
+    privacyLevel: 'circles',
+    audience: { circleIds: [], namesText: '' },
+    onAudienceChange: () => {},
+  });
+  await screen.findByLabelText('Or name people for this entry only');
+  expect(screen.queryByLabelText('Share also the discussion leading up to this node?')).toBeNull();
 });
 
 test('imports keep two choices', () => {

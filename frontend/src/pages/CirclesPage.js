@@ -5,7 +5,7 @@ import { useUser } from '../contexts/UserContext';
 import {
   AddCircleMemberDialog, CircleConfirmDialog, accentButton, plainButton,
 } from '../components/CircleDialogs';
-import { removeMemberBody } from '../utils/circles';
+import { atName, joinNames, removeMemberBody } from '../utils/circles';
 
 // "Your circles": the lists of people the user shares entries with.
 // Create, rename and delete a circle; add a person by their exact Loore
@@ -78,7 +78,7 @@ function CircleCard({ circle, open, onToggle, onChanged, onDeleted }) {
       const res = await api.post(`/circles/${circle.id}/members/preview`,
         { username: typed });
       if (res.data.already_member) {
-        setAddError(`${res.data.username} is already in ${circle.name}.`);
+        setAddError(`${atName(res.data.username)} is already in ${circle.name}.`);
       } else {
         setPreview(res.data);
       }
@@ -155,7 +155,7 @@ function CircleCard({ circle, open, onToggle, onChanged, onDeleted }) {
           <h2 style={{ ...h2Style, fontSize: '1.5rem' }}>{circle.name}</h2>
           <div style={{ fontSize: '0.875rem', color: 'var(--text-secondary)' }}>
             {circle.members.length > 0
-              ? circle.members.map((m) => m.username).join(', ')
+              ? joinNames(circle.members.map((m) => m.username))
               : 'Nobody yet. Add a person to share with this circle.'}
           </div>
         </div>
@@ -215,7 +215,7 @@ function CircleCard({ circle, open, onToggle, onChanged, onDeleted }) {
           }}>
             <div style={{ display: 'flex', gap: '10px', alignItems: 'baseline', minWidth: 0 }}>
               <span style={{ fontSize: '1rem', fontWeight: 400, color: 'var(--text-primary)' }}>
-                {m.username}
+                {atName(m.username)}
               </span>
               {m.only_new && (
                 <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
@@ -273,9 +273,9 @@ function CircleCard({ circle, open, onToggle, onChanged, onDeleted }) {
       />
       <CircleConfirmDialog
         open={!!removing}
-        title={`Remove ${removing} from ${circle.name}?`}
+        title={`Remove ${atName(removing)} from ${circle.name}?`}
         body={removeMemberBody(removing, circle.name)}
-        confirmLabel={`Remove ${removing}`}
+        confirmLabel={`Remove ${atName(removing)}`}
         busy={busy}
         onClose={() => setRemoving(null)}
         onConfirm={() => remove(removing)}

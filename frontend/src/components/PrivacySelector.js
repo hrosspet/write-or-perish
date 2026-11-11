@@ -32,6 +32,13 @@ const PrivacySelector = ({
   // An existing reply in someone's shared thread: Everyone is not its
   // writer's to choose.
   lockPublic = false,
+  // An AI reply in a shared thread is read by the thread's people or
+  // only by the person who asked for it: Everyone is not shown at all.
+  hidePublic = false,
+  // An entry of the author's own with something above it in its thread:
+  // { checked, onChange } for "Share also the discussion leading up to
+  // this node?". Null: no such box.
+  pathShare = null,
   pickerKey,
 }) => {
   // No provider in some tests and embeds: then Circles is off.
@@ -91,7 +98,7 @@ const PrivacySelector = ({
   const choices = [
     { value: 'private', label: 'Only me' },
     ...(allowCircles ? [{ value: 'circles', label: 'Circles' }] : []),
-    { value: 'public', label: 'Everyone', off: lockPublic },
+    ...(hidePublic ? [] : [{ value: 'public', label: 'Everyone', off: lockPublic }]),
   ];
 
   let privacyPart;
@@ -155,6 +162,7 @@ const PrivacySelector = ({
               namesText={audience?.namesText || ''}
               onChange={onAudienceChange || (() => {})}
               onResolved={onAudienceResolved}
+              pathShare={pathShare}
               disabled={disabled}
             />
           )

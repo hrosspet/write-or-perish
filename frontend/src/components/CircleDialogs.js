@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { joinNames } from '../utils/circles';
+import { aiReadsSentence, atName, joinNames } from '../utils/circles';
 
 // The dialogs of Circles, in the shape of the app's other dialogs
 // (PublicReplyDialog, DeleteConfirmDialog).
@@ -86,25 +86,28 @@ function Shell({ onClose, labelledBy, children }) {
 
 /**
  * Before a reply is sent into a shared thread: "Send this reply? <names>
- * will see it, with your name." With `askAi` it stands before "Ask my
- * AI", whose answer is a reply in the thread too. "Don't ask again in
- * this thread" is remembered by the caller (per thread, per user, on
- * this device).
+ * will see it, with your name." With `ai` it is shown before an AI
+ * reply is generated in the thread: the same people will see that
+ * reply, and `aiReads` names the requester's own artifacts the reply's
+ * prompt reads (none: no such sentence). "Don't ask again in this thread" is remembered by the caller
+ * (per thread, per user, on this device; typed replies and AI replies
+ * are remembered separately).
  */
-export function CircleReplyDialog({ open, names, askAi = false, onClose, onConfirm }) {
+export function CircleReplyDialog({ open, names, ai = false, aiReads = null, onClose, onConfirm }) {
   const [skip, setSkip] = useState(false);
   useEscape(open, onClose);
   useEffect(() => { if (open) setSkip(false); }, [open]);
   if (!open) return null;
   const who = joinNames(names);
+  const reads = ai ? aiReadsSentence(aiReads) : '';
   return (
     <Shell onClose={onClose} labelledBy="circle-reply-title">
       <h2 id="circle-reply-title" style={titleStyle}>
-        {askAi ? 'Ask your AI here?' : 'Send this reply?'}
+        {ai ? 'Generate an AI reply?' : 'Send this reply?'}
       </h2>
       <p style={bodyStyle}>
-        {askAi
-          ? `Your AI reads this thread and answers in it. ${who} will see the answer, with your name.`
+        {ai
+          ? `${who} will see it, marked with your name.${reads ? ` ${reads}` : ''}`
           : `${who} will see it, with your name.`}
       </p>
       <label style={{
@@ -123,7 +126,7 @@ export function CircleReplyDialog({ open, names, askAi = false, onClose, onConfi
       <div style={rowStyle}>
         <button type="button" style={quietButton} onClick={onClose}>Cancel</button>
         <button type="button" style={accentButton} onClick={() => onConfirm(skip)}>
-          {askAi ? 'Ask my AI' : 'Send reply'}
+          {ai ? 'Generate' : 'Send reply'}
         </button>
       </div>
     </Shell>
@@ -131,22 +134,27 @@ export function CircleReplyDialog({ open, names, askAi = false, onClose, onConfi
 }
 
 /**
- * Adding a person to a circle: Cancel, "Only new entries", "Add <name>"
- * (= also the entries already shared with the circle; the real count is
- * stated). onChoice(includeExisting: boolean).
+ * Adding a person to a circle: Cancel, "Also show earlier entries",
+ * "Add <name>". The default (the accent button) is new entries only:
+ * the person reads what is shared with the circle from now on. "Also
+ * show earlier entries" opens the entries already shared with the
+ * circle too (the real count is stated); it is offered only when there
+ * are such entries. onChoice(includeExisting: boolean).
  */
-export function AddCircleMemberDialog({ open, name, circleName, sharedCount = 0, busy = false, onClose, onChoice }) {
+export function AddCircleMemberDialog({ open, name: rawName, circleName, sharedCount = 0, busy = false, onClose, onChoice }) {
   useEscape(open, onClose);
   if (!open) return null;
-  const already = sharedCount === 0
-    ? `${name} will be able to read every entry you share with ${circleName} from now on. You have not shared anything with it yet.`
-    : `${name} will be able to read the ${sharedCount === 1 ? 'entry' : `${sharedCount} entries`} you have already shared with ${circleName}, and every entry you share with it from now on.`;
+  const name = atName(rawName);
+  const fromNowOn = `${name} will read every entry you share with ${circleName} from now on.`;
+  const earlier = sharedCount === 0
+    ? 'You have not shared anything with it yet.'
+    : `The ${sharedCount === 1 ? 'entry' : `${sharedCount} entries`} you have already shared with it ${sharedCount === 1 ? 'stays' : 'stay'} closed to ${name} unless you choose "Also show earlier entries".`;
   return (
     <Shell onClose={onClose} labelledBy="circle-add-title">
       <h2 id="circle-add-title" style={titleStyle}>
         Add {name} to {circleName}?
       </h2>
-      <p style={bodyStyle}>{already}</p>
+      <p style={bodyStyle}>{`${fromNowOn} ${earlier}`}</p>
       <p style={smallStyle}>
         {name} gets a note in Loore the first time there is something to
         read. You can remove {name} at any time; the entries are closed
@@ -156,12 +164,14 @@ export function AddCircleMemberDialog({ open, name, circleName, sharedCount = 0,
         <button type="button" style={quietButton} onClick={onClose} disabled={busy}>
           Cancel
         </button>
-        <button type="button" style={plainButton} disabled={busy}
-          onClick={() => onChoice(false)}>
-          Only new entries
-        </button>
+        {sharedCount > 0 && (
+          <button type="button" style={plainButton} disabled={busy}
+            onClick={() => onChoice(true)}>
+            Also show earlier entries
+          </button>
+        )}
         <button type="button" style={accentButton} disabled={busy}
-          onClick={() => onChoice(true)}>
+          onClick={() => onChoice(false)}>
           Add {name}
         </button>
       </div>
