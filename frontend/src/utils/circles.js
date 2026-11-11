@@ -155,6 +155,18 @@ export function removeMemberBody(rawName, circleName) {
 export const NO_READERS_MESSAGE = "Nobody could read this entry yet. Choose "
   + "a circle with people in it, or name a person.";
 
+// The check before sharing found readers the sentence on the screen did
+// not name (a name typed and not yet looked up): nothing is shared, and
+// the sentence is brought up to date.
+export const READERS_CHANGED_MESSAGE = "Who can read this has changed. "
+  + "Check the names above, then share again.";
+
+// The same people, in any order, case ignored.
+export function sameNames(a, b) {
+  const norm = (list) => (list || []).map((n) => String(n).toLowerCase()).sort().join(',');
+  return norm(a) === norm(b);
+}
+
 export function possessive(name) {
   return `${atName(name)}'s`;
 }

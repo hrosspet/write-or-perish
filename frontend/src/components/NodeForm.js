@@ -11,8 +11,8 @@ import SplitContentDialog, { NODE_CHAR_CAP } from "./SplitContentDialog";
 import PublicReplyDialog, { PUBLIC_REPLY_ACK_KEY } from "./PublicReplyDialog";
 import { CircleReplyDialog } from "./CircleDialogs";
 import {
-  NO_READERS_MESSAGE, replyAckKey, replyAudienceNames, shareButtonLabel,
-  splitNames,
+  NO_READERS_MESSAGE, READERS_CHANGED_MESSAGE, replyAckKey,
+  replyAudienceNames, sameNames, shareButtonLabel, splitNames,
 } from "../utils/circles";
 import { useOnlineStatus } from "../hooks/useOnlineStatus";
 import { useToast } from "../contexts/ToastContext";
@@ -72,6 +72,9 @@ const NodeForm = forwardRef(
     const [audienceInfo, setAudienceInfo] = useState(
       { readers: [], error: '', pending: false, circles: [] });
     const [threadAudience, setThreadAudience] = useState(null);
+    // Raised to have the picker look the typed names up now (the check
+    // before sharing found readers its sentence did not name).
+    const [audienceCommitSignal, setAudienceCommitSignal] = useState(0);
     // A reply under the user's own node that only they read, in a thread
     // someone else shared (GET /nodes/<parent> reply_only_private).
     const [replyOnlyPrivate, setReplyOnlyPrivate] = useState(false);
@@ -591,9 +594,20 @@ const NodeForm = forwardRef(
           const res = await api.post('/circles/audience-preview', {
             circle_ids: audience.circleIds || [],
             usernames: splitNames(audience.namesText),
+            ...(editMode && nodeId && { node_id: nodeId }),
           });
-          if (!(res.data.readers || []).length) {
+          const fresh = res.data.readers || [];
+          if (!fresh.length) {
             setError(NO_READERS_MESSAGE);
+            return;
+          }
+          // Nobody is shared with unless the sentence on the screen names
+          // them: when the readers differ from the ones it names (a name
+          // typed and not yet looked up, a lookup not back yet) the save
+          // stops, and the sentence is brought up to date to be checked.
+          if (!sameNames(audienceInfo.readers || [], fresh)) {
+            setAudienceCommitSignal((n) => n + 1);
+            setError(READERS_CHANGED_MESSAGE);
             return;
           }
         } catch (err) {
@@ -1065,6 +1079,8 @@ const NodeForm = forwardRef(
             // people. Never Everyone, and no other circle.
             hidePublic={editMode && !!threadAudience && aiReply}
             onlyMe={replyOnlyPrivate && !editMode}
+            audienceNodeId={editMode ? nodeId : null}
+            audienceCommitSignal={audienceCommitSignal}
             pathShare={threadPath && !threadAudience
               ? { checked: sharePath, onChange: setSharePath } : null}
             pickerKey={pickerKey}

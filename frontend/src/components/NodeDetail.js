@@ -227,6 +227,12 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // LLM Response.
   const audience = node?.audience || null;
   const isSharedThread = !!audience;
+  // The user's own Only-me node in a shared thread (their AI reply kept
+  // to themselves, or a node of their Only-me branch): an AI reply under
+  // it is an Only-me reply in that thread, and the server says what it
+  // reads of the user's data and the key the request must carry
+  // ({ entry_id, ai_reads, ai_reads_key }).
+  const threadReads = (!audience && node?.thread_ai_reads) || null;
   const isForeignShared = isSharedThread && !audience.is_author;
   const autoGenerateActive = (isPublicThread || isForeignShared)
     ? false : autoGenerate;
@@ -860,9 +866,13 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // key of exactly that list (audience.ai_reads / ai_reads_key; "" when
   // no prompt shared by someone else fills in the requester's data).
   const aiReads = aiReadsChanged
-    ? aiReadsChanged.ai_reads : audience?.ai_reads;
+    ? aiReadsChanged.ai_reads : (audience || threadReads)?.ai_reads;
   const aiReadsKey = (aiReadsChanged
-    ? aiReadsChanged.ai_reads_key : audience?.ai_reads_key) || '';
+    ? aiReadsChanged.ai_reads_key
+    : (audience || threadReads)?.ai_reads_key) || '';
+  // The shared entry whose thread the next AI reply is written in, for
+  // what "Don't ask again in this thread" stores.
+  const aiReplyEntryId = audience?.entry_id ?? threadReads?.entry_id;
 
   // Before an AI reply is generated in a shared thread, the people who
   // will see it are named, and what the reply reads of the requester's
@@ -882,7 +892,10 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   const confirmAiReply = (changed = null) => new Promise((resolve) => {
     const reads = changed ? changed.ai_reads : aiReads;
     const key = (changed ? changed.ai_reads_key : aiReadsKey) || '';
-    if (!isSharedThread || (aiReplyPrivate && !key)) {
+    // Under the user's own Only-me node the reply is Only me whatever
+    // the craft-mode choice: the private dialog, when there is a key.
+    const onlyMeHere = aiReplyPrivate || !!threadReads;
+    if ((!isSharedThread && !threadReads) || (onlyMeHere && !key)) {
       resolve({ ack: null });
       return;
     }
@@ -892,9 +905,9 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     // private replies. One given in the private dialog, which names
     // nobody, is "private:<key>": it covers private replies only.
     const stored = localStorage.getItem(
-      aiReplyAckKey(audience.entry_id, currentUser?.id)) || '';
+      aiReplyAckKey(aiReplyEntryId, currentUser?.id)) || '';
     const storedIsShared = !!stored && !stored.startsWith('private:');
-    if (aiReplyPrivate) {
+    if (onlyMeHere) {
       const privateAck = `private:${key}`;
       if (!changed && stored === key) {
         resolve({ ack: key });
@@ -941,14 +954,18 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // (409 circle_ai_reads_changed), the dialog is shown again with the
   // server's new list and the request repeated with its key. Returns the
   // new node's id, or null when the user cancels.
+  // The request is repeated at most once after such a refusal: refused
+  // again, for whatever reason, the server's message is shown (the
+  // caller's error handling) and nothing more is sent.
   const requestConfirmedLlmFor = async (parentNodeId) => {
     let agreed = await confirmAiReply();
+    let retried = false;
     while (agreed) {
       try {
         return await requestLlmFor(parentNodeId, { ack: agreed.ack });
       } catch (err) {
         const data = err?.response?.data;
-        if (err?.response?.status !== 409
+        if (retried || err?.response?.status !== 409
             || data?.code !== 'circle_ai_reads_changed') {
           throw err;
         }
@@ -957,9 +974,10 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
           ai_reads_key: data.ai_reads_key || '',
         };
         // The server refused the very key it now names (or names none):
-        // asking again would send the same request again, without end.
-        // The refusal is shown instead.
+        // asking again would send the same request again. The refusal
+        // is shown instead.
         if (changed.ai_reads_key === (agreed.ack || '').replace(/^private:/, '')) throw err;
+        retried = true;
         setAiReadsChanged(changed);
         agreed = await confirmAiReply(changed);
       }
@@ -2171,9 +2189,9 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
         onConfirm={(dontAskAgain) => {
           // "Don't ask again" holds for the list that was shown, and for
           // the kind of reply the dialog was about (see confirmAiReply).
-          if (dontAskAgain && audience && aiReplyDialog) {
+          if (dontAskAgain && aiReplyEntryId != null && aiReplyDialog) {
             localStorage.setItem(
-              aiReplyAckKey(audience.entry_id, currentUser?.id),
+              aiReplyAckKey(aiReplyEntryId, currentUser?.id),
               aiReplyDialog.store);
           }
           aiReplyDialog?.resolve({ ack: aiReplyDialog?.ack || null });

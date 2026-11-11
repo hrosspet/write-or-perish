@@ -43,6 +43,11 @@ const PrivacySelector = ({
   // someone else shared: Only me is the one choice (the server refuses
   // Everyone and any other audience there).
   onlyMe = false,
+  // The entry being edited (its readers sentence follows the time each
+  // circle was shared with it), and a counter the form raises to have
+  // the typed names looked up now (see CircleAudiencePicker).
+  audienceNodeId = null,
+  audienceCommitSignal = 0,
   pickerKey,
 }) => {
   // No provider in some tests and embeds: then Circles is off.
@@ -178,6 +183,8 @@ const PrivacySelector = ({
               onResolved={onAudienceResolved}
               pathShare={pathShare}
               disabled={disabled}
+              nodeId={audienceNodeId}
+              commitSignal={audienceCommitSignal}
             />
           )
         )}

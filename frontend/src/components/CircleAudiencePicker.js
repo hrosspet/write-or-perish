@@ -20,6 +20,13 @@ function CircleAudiencePicker({
   // { checked, onChange }: the entry has something above it in its
   // thread, which is shared only when this box is ticked.
   pathShare = null,
+  // The entry being edited: a circle it is already shared with keeps the
+  // time of that share, so a person added to it since with "Only new
+  // entries" does not read it and is not named. Null for a new entry.
+  nodeId = null,
+  // Raised by the form when the names typed so far must be looked up now
+  // (its check before sharing found readers the sentence did not name).
+  commitSignal = 0,
 }) {
   const [circles, setCircles] = useState(null);
   const [loadError, setLoadError] = useState('');
@@ -58,7 +65,9 @@ function CircleAudiencePicker({
     const request = ++requestRef.current;
     setPending(true);
     const timer = setTimeout(() => {
-      api.post('/circles/audience-preview', { circle_ids: ids, usernames: names })
+      api.post('/circles/audience-preview', {
+        circle_ids: ids, usernames: names, ...(nodeId && { node_id: nodeId }),
+      })
         .then((res) => {
           if (request !== requestRef.current) return;
           setReaders(res.data.readers || []);
@@ -75,7 +84,14 @@ function CircleAudiencePicker({
         });
     }, 200);
     return () => clearTimeout(timer);
-  }, [idsKey, namesKey]);
+  }, [idsKey, namesKey, nodeId]);
+
+  // The form asks for the typed names to be looked up now.
+  const namesTextRef = useRef(namesText);
+  useEffect(() => { namesTextRef.current = namesText; });
+  useEffect(() => {
+    if (commitSignal) setCommitted(splitNames(namesTextRef.current));
+  }, [commitSignal]);
 
   useEffect(() => {
     onResolvedRef.current?.({ readers, error, pending, circles: circles || [] });
@@ -169,6 +185,14 @@ function CircleAudiencePicker({
           disabled={disabled}
           onChange={(e) => onNames(e.target.value)}
           onBlur={() => setCommitted(splitNames(namesText))}
+          // Enter finishes the names: they are looked up and named in
+          // the sentence below. It does not share the entry.
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              setCommitted(splitNames(namesText));
+            }
+          }}
           style={{
             minHeight: '46px', boxSizing: 'border-box', padding: '0 14px',
             borderRadius: '8px', border: '1px solid var(--border-hover)',

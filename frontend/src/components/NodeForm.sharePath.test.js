@@ -160,12 +160,14 @@ describe('a new entry under the user\'s own node', () => {
     return { ref, onSuccess };
   };
 
-  // Write the entry, choose Circles and the one circle.
+  // Write the entry, choose Circles and the one circle, and wait for the
+  // sentence that names the readers (nobody is shared with before it).
   const writeAndShare = async () => {
     await waitFor(() => expect(mockGet).toHaveBeenCalledWith('/nodes/40'));
     fireEvent.change(screen.getAllByRole('textbox')[0], { target: { value: 'A new entry.' } });
     fireEvent.click(await screen.findByRole('button', { name: 'Circles' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Close friends' }));
+    await screen.findByText('@ben can read this entry and reply to it. Nobody else can.');
   };
 
   const createdBody = async (ref) => {
