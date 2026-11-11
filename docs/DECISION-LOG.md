@@ -3173,6 +3173,16 @@ Kinds (one per entry and per table row):
 - **Source:** Claude Code session 2026-11-10 (Opus 5.5)
 - **Applies to:** #580, #331
 
+### 2026-11-10 · The two users the Account page may have moved to Anthropic stay there
+
+- **Kind:** provider
+- **Situation:** #555's second count found two users with Opus 5.5 saved whose last reply before 2026-09-24 ran on OpenAI (GPT-6 Astra, GPT-6 Luna). The Account page bug only overwrote a retired saved model, and both of those models were still offered, so the counts don't show the page made the switch. Recommended: leave both on Anthropic.
+- **Prediction:** leave them (55 %); ask the two users 35 %; restore 10 %.
+- **Peter:** "yes, leave as they are"
+- **Score:** hit.
+- **Source:** Loore voice review, node 201654, 2026-11-10; Claude Code session 2026-11-10 (Opus 5.5)
+- **Applies to:** #555, #487
+
 ## Decided by the builder
 
 Choices that agents flagged in PRs and that the builder decided because a rule above already covers them (Peter, 2026-10-02: decide what the log supports, raise only real judgement calls). Each is also recorded on its PR, or in the session where Peter asked. The Decided column holds only the builder's part; a rule or decision of Peter's goes in the Rule column. Questions raised to Peter instead are not listed; his answers become entries. Model is the model that wrote the PR (its Co-Authored-By line). Result is "accepted by merge (PR #N, date)" once the PR has merged and Peter didn't correct the choice, "pending" until it merges, and "corrected → entry <title>" when he overrules it; the entry is then scored as a miss.
@@ -3523,6 +3533,11 @@ Choices that agents flagged in PRs and that the builder decided because a rule a
 | 2026-11-09 | #581 | user-facing text | A Glean reply the provider's content filter blocked, after the merge with main | Shows the plain failure text, like every failed reply; the block's code goes only to the report. Main showed the exception's text there; a message saying the provider blocked it would be new wording for Peter | Owners never read raw exception text (#582) | Opus 5.5 | accepted by merge (PR #581, 2026-11-10) |
 | 2026-11-09 | #581 | reliability | Where #566's batch rules and main's later ones disagree | Main's: an unreadable OpenAI error file gets the batch polled again instead of its results collected, and a job's age is checked before each poll | Main's version is the later decision on the same code | Opus 5.5 | accepted by merge (PR #581, 2026-11-10) |
 | 2026-11-09 | #581 | data safety | #558's audio work, which main's #608 and #610 already do | Dropped whole, including two extras main lacks: removing a voice session's drafts folder when its entry is finalised, and the sweep script's wrong-database guard; #558's helpers would have replaced main's with a different signature | Main's versions win where #558 duplicates them | Opus 5.5 | accepted by merge (PR #581, 2026-11-10) |
+| 2026-11-10 | #622 | UX | Where Try again shows for a user without craft mode | Only under an entry whose automatic reply was tried and did not succeed (its latest reply failed or was cancelled, and no reply succeeded); never on entries with no reply, such as pre-filled tweets, imports and old entries. Narrowed by the coordinator after the review | The decision's scope, "a user whose automatic reply failed" (Peter, 2026-11-10) | Opus 5.5 | pending |
+| 2026-11-10 | #622 | provider | The model Try again asks | The automatic reply's own request: the user's saved model, or the server's choice for any reply | A user's model is theirs | Opus 5.5 | pending |
+| 2026-11-10 | #622 | UX | Try again with auto-generate off | Not shown: no automatic reply was asked for | The decision's scope | Opus 5.5 | pending |
+| 2026-11-10 | #622 | UX | Try again in public threads and before a Glean thread's first picks | Not shown, as for LLM Response; public threads' owners already have LLM Response | The same situations as LLM Response | Opus 5.5 | pending |
+| 2026-11-10 | #622 | product scope | Try again on the iPhone | Left out: the app shows no button after a failed automatic reply even in craft mode, because #561's rule never reached it | The decision covers the web's missing button; the app gets it with #561's rule | Opus 5.5 | pending |
 
 ## Backfilled decisions
 
