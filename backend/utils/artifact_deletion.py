@@ -64,7 +64,7 @@ def deletion_stamp(user_id):
     The #192 render cache keys the rendered system prompt by it, so a
     render built before a delete (its artifacts index still lists the
     artifact) is never served after it. It reads the rows a waiting
-    "Delete all my writing" hid too (#268), so hiding them does not move
+    "Delete all my content" hid too (#268), so hiding them does not move
     the stamp back to one an older render was stored under."""
     from backend.utils.hidden_rows import including_hidden_rows
     with including_hidden_rows():
@@ -88,7 +88,7 @@ def purge_deleted_artifacts(cutoff):
     their content. When no live version of the kind is left, its view
     pings (ArtifactView, admin Activity) go too: they name the artifact.
 
-    Rows a waiting "Delete all my writing" hid (#268) are the purge's:
+    Rows a waiting "Delete all my content" hid (#268) are the purge's:
     the hidden-rows hook leaves them out of the SELECT below.
     Returns {"purged": versions deleted, "errors": groups that failed}.
     """

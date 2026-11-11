@@ -40,7 +40,7 @@ Never touched:
 
 * a live row's folder beyond its superseded speech;
 * a node deleted within the grace period (it can still be restored);
-* a row a waiting "Delete all my writing" hid: the request's purge
+* a row a waiting "Delete all my content" hid: the request's purge
   deletes it, and a restore needs it (the cleanup skips these too);
 * a folder with anything changed in the last 24 hours (RECENT_SECONDS).
   A recording is moved into its node's folder, and an upload's folder is
@@ -105,7 +105,7 @@ SESSION_UNUSED = "no node or draft uses the session"
 TO_DELETE = (ROW_GONE, SPEECH_ONLY, PAST_GRACE, SUPERSEDED, SESSION_UNUSED)
 LIVE = "live (kept)"
 IN_GRACE = "node deleted, within grace period (kept)"
-HIDDEN = "hidden by a waiting 'Delete all my writing' (kept)"
+HIDDEN = "hidden by a waiting 'Delete all my content' (kept)"
 SHARED = "row gone, files used by another row (kept)"
 RECORDING_HELD = "row gone, recording younger than grace period (kept)"
 SESSION_IN_USE = "session of a node or draft (kept)"
@@ -242,7 +242,7 @@ def _add_refs(refs, *urls):
 
 class Rows(NamedTuple):
     rows: dict     # kind -> {row id: (deleted_at, user_id)}
-    hidden: dict   # kind -> {row id} a waiting "Delete all my writing" hid
+    hidden: dict   # kind -> {row id} a waiting "Delete all my content" hid
     refs: dict     # ("node", node id) / (kind, user id) -> {path keys}
     sessions: set = frozenset()   # streaming session ids still in use
 

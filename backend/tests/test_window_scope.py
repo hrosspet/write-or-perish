@@ -523,7 +523,7 @@ def _capture(provider, user):
     for job in ProfileBatchJob.query.order_by(ProfileBatchJob.id).all():
         for item in job.items or []:
             items.append({k: v for k, v in item.items()
-                          if k not in ("rendered_at", "built_at")})
+                          if k not in ("rendered_at", "built_at", "read_at")})
     rows = [(p.generation_type, p.window_set, p.covers_start,
              p.source_data_cutoff, p.source_tokens_used,
              p.source_origin_stats, p.generated_by, p.parent_profile_id,

@@ -144,7 +144,7 @@ final class AccountRestoreModel {
             let message = "You deleted @\(offer.username). You can restore it until \(date); after that it is deleted "
                 + "forever, with everything in it. Restore it to keep using Loore, or keep it deleted."
             return offer.writingComesBack
-                ? message + " Restoring it also brings back the writing you deleted." : message
+                ? message + " Restoring it also brings back the content you deleted." : message
         }
     }
 }

@@ -72,15 +72,15 @@ test('an account deletion already waiting is shown instead of a delete button', 
   expect(screen.queryByLabelText(/type the username/i)).toBeNull();
 });
 
-test('a waiting writing deletion is taken over, and the dialog says so', async () => {
+test('a waiting content deletion is taken over, and the dialog says so', async () => {
   mockPost.mockResolvedValue({ data: {
     counts: { node: 2 }, identity: { user: 1 }, blast_radius: {}, grace_days: 30,
     job: { id: 9, status: 'scheduled', delete_account: false, source: 'self',
            scope: 'hidden', scheduled_for: '2026-11-12T12:00:00Z' },
   } });
   render(<AdminDeleteAccountDialog user={user} onClose={() => {}} />);
-  await waitFor(() => expect(screen.getByText(/The user already deleted\s+all their writing/)).toBeTruthy());
-  expect(screen.getByText(/puts that writing deletion back as it was/)).toBeTruthy();
+  await waitFor(() => expect(screen.getByText(/The user already deleted\s+all their content/)).toBeTruthy());
+  expect(screen.getByText(/puts that content deletion back as it was/)).toBeTruthy();
   expect(screen.getByRole('button', { name: /^delete account$/i })).toBeTruthy();
 });
 
@@ -98,9 +98,9 @@ test('the Users row tells an account deletion from a data purge, and who asked',
   expect(purgeLabel({ status: 'scheduled', delete_account: true, source: 'admin', scheduled_for: '2026-11-08T12:00:00Z' }))
     .toMatch(/^Account deleted by an admin, hidden until/);
   expect(purgeLabel({ status: 'scheduled', scope: 'hidden', source: 'self', scheduled_for: '2026-11-08T12:00:00Z' }))
-    .toMatch(/^Writing hidden by the user, deleted on/);
+    .toMatch(/^Content hidden by the user, deleted on/);
   expect(purgeLabel({ status: 'scheduled', scope: 'hidden', source: 'admin', scheduled_for: '2026-11-08T12:00:00Z' }))
-    .toMatch(/^Writing hidden by an admin, deleted on/);
+    .toMatch(/^Content hidden by an admin, deleted on/);
   expect(purgeLabel({ status: 'running', delete_account: true })).toBe('Deleting account…');
   expect(purgeLabel({ status: 'running', delete_account: false })).toBe('Purging data…');
 });

@@ -1,7 +1,7 @@
 // Admin "Purge data" (#268): the dry run is shown before anything
 // happens, the purge needs the username typed, and a refusal (AI or
 // system account) is shown instead of a purge button. It works like the
-// user's own "Delete all my writing" (Peter, 2026-10-13): the dialog says
+// user's own "Delete all my content" (Peter, 2026-10-13): the dialog says
 // so, and a request already waiting is shown instead of a purge button.
 const mockPost = jest.fn();
 jest.mock('../api', () => ({
@@ -53,7 +53,7 @@ test('shows the dry-run counts, then purges only after the username is typed', a
 
   await waitFor(() => expect(onStarted).toHaveBeenCalledWith(started));
   expect(mockPost).toHaveBeenLastCalledWith('/admin/users/7/purge_data', { confirm_username: 'alice' });
-  expect(screen.getByText(/The writing of @alice is hidden now \(job 3\)\. It is\s+deleted forever on/)).toBeTruthy();
+  expect(screen.getByText(/The content of @alice is hidden now \(job 3\)\. It is\s+deleted forever on/)).toBeTruthy();
   expect(screen.getByText(/you can undo it in the Users table\.$/)).toBeTruthy();
 });
 
@@ -63,7 +63,7 @@ test('a request already waiting is shown instead of a purge button', async () =>
     scheduled_for: '2026-11-12T12:00:00Z',
   } } });
   render(<PurgeDataDialog user={user} onClose={() => {}} />);
-  await waitFor(() => expect(screen.getByText(/The user already deleted all their writing\. It is deleted forever on/)).toBeTruthy());
+  await waitFor(() => expect(screen.getByText(/The user already deleted all their content\. It is deleted forever on/)).toBeTruthy());
   expect(screen.getByText(/only they can restore it/)).toBeTruthy();
   expect(screen.queryByRole('button', { name: /^purge data$/i })).toBeNull();
   expect(screen.queryByLabelText(/type the username/i)).toBeNull();

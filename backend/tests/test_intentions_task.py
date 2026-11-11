@@ -80,6 +80,10 @@ def test_small_corpus_submits_batch_directly_and_persists_job(app, wired, monkey
     assert "EXPORT[" in req["messages"][0]["content"][0]["text"]
     # The flight is persisted — a worker restart loses nothing.
     job = ProfileBatchJob.query.filter_by(batch_id="b-1", status="pending").one()
+    # When the export was read, taken before the read (#590).
+    from datetime import datetime
+    read_at = datetime.fromisoformat(job.items[0].pop("read_at"))
+    assert read_at <= job.submitted_at
     assert job.items == [{"custom_id": f"int-u{u.id}", "user_id": u.id,
                           "kind": "intentions", "model_id": "claude-opus-5.5",
                           "budget": 1000000, "resubmitted": False}]
@@ -624,3 +628,52 @@ def test_backfill_script_skips_and_keeps_a_user_version(app, wired, monkeypatch,
     assert _current(u).id == mine.id
     assert APICostLog.query.filter_by(
         user_id=u.id, request_type="intentions_backfill").one().request_ref == KEPT_USER_EDIT_REF
+
+
+def test_intentions_read_before_a_content_deletion_are_not_saved(
+        app, wired, monkeypatch):  # noqa: F811
+    """Review of #630, finding 2: "Delete all my content" commits while the
+    batch uploads, after _prepare read the export. The item's read time is
+    taken before that read, so the result is dropped (its cost row
+    written) instead of becoming her intentions and outliving the purge."""
+    from datetime import datetime, timedelta
+    import backend.tasks.intentions as it
+    import backend.tasks.profile_batch as pb
+    import backend.utils.llm_batch as lb
+    from backend.models import UserDataPurge
+
+    u = _make_user("racer")
+    _db.session.commit()
+    uid = u.id
+    marks = {}
+    real_submit = lb.batch_submit
+
+    def submit_then_request(by_provider, keys, kind):
+        now = datetime.utcnow()
+        marks["requested_at"] = now
+        _db.session.add(UserDataPurge(
+            user_id=uid, source="self", scope="hidden", status="scheduled",
+            requested_at=now, first_requested_at=now,
+            scheduled_for=now + timedelta(days=30)))
+        _db.session.commit()
+        return real_submit(by_provider, keys, kind)
+
+    monkeypatch.setattr(lb, "batch_submit", submit_then_request)
+    _kind, ref = it.start_infer_intentions_impl(uid)
+    job = ProfileBatchJob.query.filter_by(batch_id=ref["batch_id"]).one()
+    item = job.items[0]
+    assert job.submitted_at > marks["requested_at"]
+    assert datetime.fromisoformat(item["read_at"]) < marks["requested_at"]
+
+    monkeypatch.setattr(pb, "batch_check_and_collect", lambda ids, keys: (
+        {item["custom_id"]: {"content": "# Endorsed\n- from deleted writing",
+                             "input_tokens": 100, "output_tokens": 50}},
+        {}, {}))
+    monkeypatch.setattr(pb, "get_api_keys_for_usage", lambda cfg, usage: {})
+    monkeypatch.setattr(pb, "apply_batch_key_override",
+                        lambda keys, cfg: keys)
+    pb._poll_profile_batches()
+    _db.session.expire_all()
+    assert UserArtifact.query.filter_by(user_id=uid,
+                                        kind="intentions").count() == 0
+    assert APICostLog.query.filter_by(user_id=uid).count() == 1

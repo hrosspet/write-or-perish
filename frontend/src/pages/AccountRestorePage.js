@@ -76,7 +76,7 @@ export default function AccountRestorePage() {
         {date}; after that it is deleted forever, with everything in it.
         Restore it to keep using Loore, or keep it deleted.
         {state.offer.writing_comes_back && (
-          <> Restoring it also brings back the writing you deleted.</>
+          <> Restoring it also brings back the content you deleted.</>
         )}
       </>
     );

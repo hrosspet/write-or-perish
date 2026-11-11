@@ -1,5 +1,5 @@
-// The status notice shown while "Delete all my writing" (#268) waits or
-// runs: the writing is hidden at once, and the notice offers the restore.
+// The status notice shown while "Delete all my content" (#268) waits or
+// runs: the content is hidden at once, and the notice offers the restore.
 let mockUserCtx;
 jest.mock('../contexts/UserContext', () => ({
   useUser: () => mockUserCtx,
@@ -47,19 +47,19 @@ beforeEach(() => {
 
 test('a waiting deletion is a status with the restore action, not a dismissible toast', () => {
   renderAt('/', scheduled);
-  const status = screen.getByRole('status', { name: 'Writing deleted' });
-  expect(status.textContent).toMatch(/Writing deleted/);
+  const status = screen.getByRole('status', { name: 'Content deleted' });
+  expect(status.textContent).toMatch(/Content deleted/);
   expect(status.textContent).toMatch(
-    /You can restore your writing safely until .+\. After that it is deleted forever\./);
-  expect(screen.getByRole('button', { name: 'Restore my writing' })).toBeTruthy();
+    /You can restore your content safely until .+\. After that it is deleted forever\./);
+  expect(screen.getByRole('button', { name: 'Restore my content' })).toBeTruthy();
   expect(screen.queryByRole('button', { name: /dismiss/i })).toBeNull();
   expect(screen.queryByText(/cancel/i)).toBeNull();
 });
 
-test('Restore my writing calls the restore route', async () => {
+test('Restore my content calls the restore route', async () => {
   mockPost.mockResolvedValue({ data: { status: null } });
   renderAt('/log', scheduled);
-  fireEvent.click(screen.getByRole('button', { name: 'Restore my writing' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Restore my content' }));
   await waitFor(() => expect(mockPost).toHaveBeenCalledWith('/account/data/restore'));
   await waitFor(() => expect(mockUserCtx.setUser).toHaveBeenCalled());
   // The page is loaded again, so what came back shows.
@@ -67,11 +67,11 @@ test('Restore my writing calls the restore route', async () => {
 });
 
 test('a failed restore says so and keeps the button', async () => {
-  mockPost.mockRejectedValue({ response: { data: { error: 'Your writing is being deleted now and can no longer be restored.' } } });
+  mockPost.mockRejectedValue({ response: { data: { error: 'Your content is being deleted now and can no longer be restored.' } } });
   renderAt('/', scheduled);
-  fireEvent.click(screen.getByRole('button', { name: 'Restore my writing' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Restore my content' }));
   await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/can no longer be restored/));
-  expect(screen.getByRole('button', { name: 'Restore my writing' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Restore my content' })).toBeTruthy();
 });
 
 test('while the purge runs there is no restore', () => {

@@ -1,6 +1,8 @@
 """
 Celery tasks for asynchronous data export operations.
 """
+import contextvars
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from celery.utils.log import get_task_logger
 import os
@@ -450,13 +452,36 @@ def _call_llm_with_retries(self, model_id, prompt_text, user_id,
             prompt_text = prompt_text[:int(len(prompt_text) * ratio)]
 
 
+# When the synchronous profile run in this context started reading the
+# user's writing (``profile_read_started``): every version it saves was
+# built from what it read from then on (#590, _save_profile's check).
+_profile_read_at = contextvars.ContextVar("profile_read_at", default=None)
+
+
+@contextmanager
+def profile_read_started():
+    """A synchronous profile run reads from now on: the versions it saves
+    are checked against a "Delete all my content" requested since."""
+    token = _profile_read_at.set(datetime.utcnow())
+    try:
+        yield
+    finally:
+        _profile_read_at.reset(token)
+
+
 def _save_profile(user, model_id, profile_text, response,
                    source_tokens_used, source_data_cutoff,
                    generation_type, parent_profile_id=None, batch=False,
                    source_origin_stats=None, source_rendered_at=None, merged_profile_id=None,
                    window_set=None, covers_start=None, date_line_start=None,
-                   date_line_tokens=None):
+                   date_line_tokens=None, read_at=None):
     """Save a new UserProfile and log API cost. Returns the profile.
+
+    read_at: when the step read its input (a batch item's render, a
+    synchronous run's start, ``profile_read_started``). A version whose
+    input was read before a "Delete all my content" is not saved: the
+    cost is logged and ReadBeforeDeletion raised (#590). Unknown falls
+    back to ``source_rendered_at``, then counts as before.
 
     batch=True records the Batch API discount in the cost log (issue #173).
     source_rendered_at: when the window this version covers was rendered
@@ -468,17 +493,25 @@ def _save_profile(user, model_id, profile_text, response,
     A being ``date_line_start`` and N ``date_line_tokens`` (the window's
     own units, where source_tokens_used is cumulative)."""
     from backend.utils.privacy import PrivacyLevel
-    from backend.utils.hidden_rows import WritingOnHold, writing_on_hold
+    from backend.utils.hidden_rows import (
+        ReadBeforeDeletion, corpus_changed,
+    )
 
     total_tokens = response["total_tokens"]
 
     _add_profile_cost_log(user, model_id, response, batch=batch)
-    if writing_on_hold(user.id):
-        # "Delete all my writing" hid the writing this version was built
-        # from while it was being generated (#268): the cost is logged,
-        # the version is not saved.
+    if read_at is None:
+        read_at = _profile_read_at.get() or source_rendered_at
+    if corpus_changed(user.id, read_at):
+        # "Delete all my content" hid the content this version was built
+        # from while it was being generated, or the version read during a
+        # deletion that has been restored since (#590): the cost is
+        # logged, the version is not saved. A restore makes the restored
+        # profile the one in use, so a from-scratch step of the new
+        # writing alone must not replace it (review of #630).
         db.session.commit()
-        raise WritingOnHold(f"user {user.id}: writing on hold for deletion")
+        raise ReadBeforeDeletion(
+            f"user {user.id}: read content deleted since")
     # A saved version ends a refusal streak (#368) and whatever error the
     # admin column showed for it.
     if user.profile_seed_error:
@@ -982,7 +1015,8 @@ def build_merge_messages(user_id, base, version):
     return _integration_messages(user_id, [base, version], cumulative=True)
 
 
-def save_merge(user, model_id, response, base, version, batch=False):
+def save_merge(user, model_id, response, base, version, batch=False,
+               read_at=None):
     """Save the merge as the chain's next version: the rebuilt version is
     its parent and it carries that version's coverage, so the rebuild goes
     on from it as from the version it merged. The merge of the pending
@@ -998,7 +1032,7 @@ def save_merge(user, model_id, response, base, version, batch=False):
         parent_profile_id=base.id, batch=batch,
         source_origin_stats=base.source_origin_stats,
         source_rendered_at=base.source_rendered_at,
-        merged_profile_id=version.id)
+        merged_profile_id=version.id, read_at=read_at)
     if (user.profile_pending_merge_id == version.id
             and merged.ai_usage in AI_ALLOWED):
         user.profile_pending_merge_id = None
@@ -1270,96 +1304,102 @@ def update_user_profile(self, user_id: int, model_id: str,
                 "User %s has opted out of AI usage; skipping profile update",
                 user_id)
             return
-        from backend.utils.hidden_rows import WritingOnHold, writing_on_hold
-        if writing_on_hold(user_id):
-            logger.info("User %s: writing on hold for deletion; skipping "
-                        "profile update", user_id)
+        from backend.utils.hidden_rows import (
+            ReadBeforeDeletion, account_on_hold,
+        )
+        if account_on_hold(user_id):
+            logger.info("User %s: account being deleted; skipping profile "
+                        "update", user_id)
             return
-        handed_off = window_hand_off(user, self.request.id, integrate_only)
-        if handed_off is not None:
-            return handed_off
-        previous_profile_id = ai_readable_base_id(user_id, previous_profile_id)
+        # Every version this run saves was built from what it reads from
+        # now on: one saved after a "Delete all my content" requested
+        # meanwhile is dropped (#590, _save_profile).
+        with profile_read_started():
+            handed_off = window_hand_off(user, self.request.id, integrate_only)
+            if handed_off is not None:
+                return handed_off
+            previous_profile_id = ai_readable_base_id(user_id, previous_profile_id)
 
-        # Set concurrency guard
-        user.profile_generation_task_id = self.request.id
-        user.profile_generation_task_dispatched_at = datetime.utcnow()
-        db.session.commit()
+            # Set concurrency guard
+            user.profile_generation_task_id = self.request.id
+            user.profile_generation_task_dispatched_at = datetime.utcnow()
+            db.session.commit()
 
-        success = False
-        try:
-            if model_id not in flask_app.config["SUPPORTED_MODELS"]:
-                raise ValueError(f"Unsupported model: {model_id}")
+            success = False
+            try:
+                if model_id not in flask_app.config["SUPPORTED_MODELS"]:
+                    raise ValueError(f"Unsupported model: {model_id}")
 
-            model_cfg = flask_app.config["SUPPORTED_MODELS"][model_id]
-            context_window = model_cfg.get("context_window", 200000)
-            max_output_tokens = min(
-                model_cfg.get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS),
-                DEFAULT_MAX_OUTPUT_TOKENS)
-            api_keys = get_api_keys_for_usage(flask_app.config, 'chat')
+                model_cfg = flask_app.config["SUPPORTED_MODELS"][model_id]
+                context_window = model_cfg.get("context_window", 200000)
+                max_output_tokens = min(
+                    model_cfg.get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS),
+                    DEFAULT_MAX_OUTPUT_TOKENS)
+                api_keys = get_api_keys_for_usage(flask_app.config, 'chat')
 
-            if integrate_only and previous_profile_id:
-                result = _do_integration(
-                    self, user, model_id, previous_profile_id, api_keys
-                ) or {'user_id': user.id, 'profile_id': None,
-                      'status': 'completed',
-                      'message': 'Nothing to integrate'}
-            elif previous_profile_id:
-                result = _do_incremental_update(
-                    self, user, model_id, previous_profile_id,
-                    context_window, max_output_tokens, api_keys
+                if integrate_only and previous_profile_id:
+                    result = _do_integration(
+                        self, user, model_id, previous_profile_id, api_keys
+                    ) or {'user_id': user.id, 'profile_id': None,
+                          'status': 'completed',
+                          'message': 'Nothing to integrate'}
+                elif previous_profile_id:
+                    result = _do_incremental_update(
+                        self, user, model_id, previous_profile_id,
+                        context_window, max_output_tokens, api_keys
+                    )
+                else:
+                    result = _do_initial_generation(
+                        self, user, model_id, max_output_tokens, api_keys
+                    )
+
+                success = True
+                if result and result.get('profile_id'):
+                    from backend.utils.notifications import notify_profile_ready
+                    notify_profile_ready(user_id)
+                return result
+
+            except ReadBeforeDeletion:
+                logger.info("User %s: content deleted during the profile "
+                            "update; nothing saved from it", user_id)
+                return None
+            except ProfileBaseMoved:
+                # The versions saved before the step stay; the next scheduled
+                # run builds on the newest version (#183).
+                logger.info("User %s: profile run ended early: a newer version "
+                            "was saved while it ran", user_id)
+                return None
+            except Exception as e:
+                code = policy_block_code(e)
+                if code:
+                    # Final (Peter, 2026-11-04): the block's cost row stops
+                    # the hourly trigger for this user; already reported by
+                    # the provider call.
+                    db.session.rollback()
+                    stopped = User.query.get(user_id)
+                    if stopped:
+                        stopped.profile_seed_error = (
+                            f"Stopped: the provider's content-policy filter "
+                            f"blocked the profile update ({code}); runs again "
+                            f"only after Build profile with the override"
+                        )[:255]
+                    refusal_backoff.record_policy_block(
+                        user_id, "profile", model_id, code, "profile update",
+                        report=False)
+                logger.error(
+                    f"Profile update error for user {user_id}: {e}",
+                    exc_info=True
                 )
-            else:
-                result = _do_initial_generation(
-                    self, user, model_id, max_output_tokens, api_keys
-                )
-
-            success = True
-            if result and result.get('profile_id'):
-                from backend.utils.notifications import notify_profile_ready
-                notify_profile_ready(user_id)
-            return result
-
-        except WritingOnHold:
-            logger.info("User %s: writing put on hold for deletion during "
-                        "the profile update; nothing saved", user_id)
-            return None
-        except ProfileBaseMoved:
-            # The versions saved before the step stay; the next scheduled
-            # run builds on the newest version (#183).
-            logger.info("User %s: profile run ended early: a newer version "
-                        "was saved while it ran", user_id)
-            return None
-        except Exception as e:
-            code = policy_block_code(e)
-            if code:
-                # Final (Peter, 2026-11-04): the block's cost row stops
-                # the hourly trigger for this user; already reported by
-                # the provider call.
-                db.session.rollback()
-                stopped = User.query.get(user_id)
-                if stopped:
-                    stopped.profile_seed_error = (
-                        f"Stopped: the provider's content-policy filter "
-                        f"blocked the profile update ({code}); runs again "
-                        f"only after Build profile with the override"
-                    )[:255]
-                refusal_backoff.record_policy_block(
-                    user_id, "profile", model_id, code, "profile update",
-                    report=False)
-            logger.error(
-                f"Profile update error for user {user_id}: {e}",
-                exc_info=True
-            )
-            raise
-        finally:
-            # Clear concurrency guard; only clear full-regen flag on success
-            user = User.query.get(user_id)
-            if user:
-                user.profile_generation_task_id = None
-                user.profile_generation_task_dispatched_at = None
-                if success:
-                    user.profile_needs_full_regen = False
-                db.session.commit()
+                raise
+            finally:
+                # Clear concurrency guard; only clear full-regen flag on success
+                user = User.query.get(user_id)
+                if user:
+                    user.profile_generation_task_id = None
+                    user.profile_generation_task_dispatched_at = None
+                    if success:
+                        user.profile_needs_full_regen = False
+                    db.session.commit()
 
 
 def _do_incremental_update(self, user, model_id, previous_profile_id,
@@ -2465,10 +2505,10 @@ def maybe_trigger_profile_update(user_id, model_id=None,
         logger.info(
             f"Skipping profile update for user {user_id}: opted out of AI usage")
         return None
-    from backend.utils.hidden_rows import writing_on_hold
-    if writing_on_hold(user_id):
-        logger.info(f"Skipping profile update for user {user_id}: writing "
-                    "on hold for deletion")
+    from backend.utils.hidden_rows import account_on_hold
+    if account_on_hold(user_id):
+        logger.info(f"Skipping profile update for user {user_id}: account "
+                    "being deleted")
         return None
     # A content-policy block stops it for good, the import hand-off
     # included: the blocked writing would go out again (Peter, 2026-11-04).

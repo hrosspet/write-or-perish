@@ -96,7 +96,9 @@ from backend.utils.chunk_plan import (
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.error_privacy import describe_exception
 from backend.utils.heavy_slot import HeavyTask
-from backend.utils.hidden_rows import WritingOnHold, writing_on_hold
+from backend.utils.hidden_rows import (
+    ReadBeforeDeletion, account_on_hold, item_read_at,
+)
 from backend.utils.llm_batch import apply_batch_key_override, blocked_items
 from backend.utils.privacy import AI_ALLOWED, account_allows_ai
 from backend.utils.profile_versions import (
@@ -1177,6 +1179,9 @@ class _Submission:
     PROFILE_BATCH_MAX_BYTES, every slice in the same run."""
 
     def __init__(self, keys, providers, recheck=None, own=None):
+        # When the pass began reading (next_work sets it before its
+        # first read).
+        self.read_at = datetime.utcnow()
         self.keys = keys
         # The providers this user's writing may reach in this pass.
         self.providers = set(providers)
@@ -1637,6 +1642,7 @@ def _merge_requests(user, state, models, sub, keys, history):
             "cumulative": last.source_tokens_used,
             "origin_stats": last.source_origin_stats,
             "parent_id": last.id, "model_id": models.merge,
+            "read_at": _iso(sub.read_at),
         })
     if plan.final_inputs is None:
         return False
@@ -1662,7 +1668,7 @@ def _merge_requests(user, state, models, sub, keys, history):
         "tip_id": tip.id, "inputs": [p.id for p in inputs],
         "user_version_id": (plan.user_version.id
                             if plan.user_version is not None else None),
-        "built_at": _iso(datetime.utcnow()),
+        "built_at": _iso(sub.read_at),
         "cumulative": tip.source_tokens_used,
         "origin_stats": tip.source_origin_stats, "model_id": models.merge,
     })
@@ -1678,6 +1684,11 @@ def next_work(user, keys, deadline, wait_for_imports=True):
     content-policy block of a group or final stops the account's build) or
     "failed"."""
     run_locks.beat()
+    # Before anything of the user's is read: the read time of the groups
+    # and the final this pass builds (#590, review of #630). A "Delete all
+    # my content" after it drops them; a version the user saves after it
+    # supersedes the final.
+    read_at = datetime.utcnow()
     code = _policy_blocked(user)
     if code:
         # A blocked group or final (a blocked window is skipped instead):
@@ -1780,6 +1791,7 @@ def next_work(user, keys, deadline, wait_for_imports=True):
                 len(state.windows_in_flight), len(state.due),
                 plan_windows[0], estimate)
     sub = _Submission(keys, providers, recheck, own=models.provider)
+    sub.read_at = read_at
     outcome = None
     if state.due:
         outcome = _render_windows(user, state, models, sub, history,
@@ -2158,7 +2170,7 @@ def advance(user_id, task_id, wait_for_imports=True):
     lost = False
     try:
         with run_locks.holding(lock):
-            if not account_allows_ai(user) or writing_on_hold(user_id):
+            if not account_allows_ai(user) or account_on_hold(user_id):
                 outcome = "off"
             else:
                 cfg = current_app.config
@@ -2322,7 +2334,8 @@ def _collect_window(user, item, result, job, history, template, notes,
         window_set=item["set"], covers_start=start,
         date_line_start=(None if chained
                          else start or _dt(item.get("earliest"))),
-        date_line_tokens=None if chained else item.get("units"))
+        date_line_tokens=None if chained else item.get("units"),
+        read_at=item_read_at(item))
     _exports.record_token_ratio(user, item["model_id"], item.get("units"),
                                 response.get("input_tokens"))
     if item.get("base_id") is None and user.profile_needs_full_regen:
@@ -2379,7 +2392,8 @@ def _collect_merge(user, item, result, job, gen_template, history, notes):
                 source_origin_stats=item.get("origin_stats"),
                 window_set=item["set"], covers_start=start,
                 date_line_start=_dt(item.get("start_day")),
-                date_line_tokens=item.get("units"))
+                date_line_tokens=item.get("units"),
+                read_at=item_read_at(item))
         user.profile_batch_attempts = 0
         db.session.commit()
         return "saved"
@@ -2403,7 +2417,8 @@ def _collect_merge(user, item, result, job, gen_template, history, notes):
         source_tokens_used=item.get("cumulative"), source_data_cutoff=cutoff,
         generation_type="integration", parent_profile_id=item.get("tip_id"),
         batch=True, source_origin_stats=item.get("origin_stats"),
-        merged_profile_id=version_id, window_set=item["set"])
+        merged_profile_id=version_id, window_set=item["set"],
+        read_at=item_read_at(item))
     if (version_id and user.profile_pending_merge_id == version_id
             and final.ai_usage in AI_ALLOWED):
         user.profile_pending_merge_id = None
@@ -2498,7 +2513,7 @@ def collect(job, items, results, queue_full=False):
                 else:
                     outcome = _collect_merge(user, item, result, job,
                                              gen_template, history, notes)
-            except WritingOnHold:
+            except ReadBeforeDeletion:
                 outcome = "dropped"
             except Exception as e:
                 db.session.rollback()
