@@ -582,7 +582,7 @@ def test_one_note_per_shared_entry_per_reader(app):
     second = _share(app, circle_ids=[cid], names=["ben"], content="second")
     notes = _notes(app, "ben")
     assert sorted(n["node_id"] for n in notes) == [first, second]
-    assert notes[0]["title"] == "anna shared an entry with you."
+    assert notes[0]["title"] == "@anna shared an entry with you."
     assert notes[0]["actor_username"] == "anna"
     assert notes[0]["link"].startswith("/node/")
     assert "first" not in json.dumps(notes) and "second" not in json.dumps(notes)
@@ -1243,7 +1243,7 @@ def test_the_discussion_leading_up_to_an_entry_is_shared_only_when_asked(app):
     # The request for a reply the thread will read carries the key of
     # what the dialog named; without it, or with another, nothing is made.
     key = data["audience"]["ai_reads_key"]
-    assert key and data["audience"]["ai_reads"][-1].endswith("turns on")
+    assert key and data["audience"]["ai_reads"][-1].startswith("anything else")
     before = Node.query.count()
     for body in ({}, {"ai_reads_ack": "something-else"}):
         r = _client(app, "ben").post(f"/api/nodes/{entry}/llm", json=body)

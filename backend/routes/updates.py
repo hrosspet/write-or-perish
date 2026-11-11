@@ -96,7 +96,7 @@ def _circle_notes(rows):
         out.append({
             "id": n.id,
             "type": n.type,
-            "title": f"{actor.username} shared an entry with you.",
+            "title": f"@{actor.username} shared an entry with you.",
             "body": n.body,
             "link": n.link,
             "created_at": iso_utc(n.created_at),

@@ -168,6 +168,10 @@ final class AppState {
             for key in [DefaultsKey.theme, DefaultsKey.craftMode, DefaultsKey.homeReflectMode, DefaultsKey.homeGleanMode] {
                 defaults.removeObject(forKey: key)
             }
+            // Circles: the per-thread "Don't ask again" and "AI reply: Only me" choices.
+            for key in defaults.dictionaryRepresentation().keys where key.hasPrefix("loore_circle_") {
+                defaults.removeObject(forKey: key)
+            }
             theme.forget()
             for cookie in api.cookieStorage.cookies ?? [] { api.cookieStorage.deleteCookie(cookie) }
         }

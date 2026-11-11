@@ -77,6 +77,10 @@ final class CirclesModelTests: XCTestCase {
          "entry_ai_usage":"chat","ai_reads":["profile","memory","to-do list"]}
         """)
         XCTAssertEqual(reads.aiReads, ["profile", "memory", "to-do list"])
+        XCTAssertEqual(reads.aiReadsKey, "", "absent: no key")
+        let keyed = try decode(NodeAudience.self, #"{"entry_id":4,"author":"anna","ai_reads":["profile"],"ai_reads_key":"abc"}"#)
+        XCTAssertEqual(keyed.aiReadsKey, "abc")
+        XCTAssertEqual(try decode(NodeAudience.self, #"{"entry_id":4,"author":"anna","ai_reads_key":7}"#).aiReadsKey, "")
         let odd = try decode(NodeAudience.self, #"{"entry_id":4,"author":"anna","ai_reads":"profile"}"#)
         XCTAssertEqual(odd.aiReads, [])
         // The edit form's answer: the prompt the thread starts from, for the author.
@@ -707,7 +711,127 @@ final class CirclesFormTests: StubbedAppTestCase {
         XCTAssertEqual(sent?["model"] as? String, "gpt-6-luna", "the requester's own model")
         XCTAssertEqual(sent?["source_mode"] as? String, "textmode")
         XCTAssertNil(sent?["privacy_level"], "shared with the thread: the server gives it the thread's audience")
-        XCTAssertEqual(UserDefaults.standard.string(forKey: DefaultsKey.circleAiReplyAck(entryId: 31, userId: 5)), "true")
+        XCTAssertNil(sent?["ai_reads_ack"], "the thread has no ai_reads_key: nothing to acknowledge")
+        // Without a key "Don't ask again" stores a marker, and the next reply is not asked about.
+        XCTAssertEqual(UserDefaults.standard.string(forKey: DefaultsKey.circleAiReplyAck(entryId: 31, userId: 5)), "1")
+        let again = await thread(sharedParent)
+        let go = await again.confirmAIReply()
+        XCTAssertEqual(go, ThreadModel.AIReplyGo(ack: nil))
+        XCTAssertFalse(again.showAIReplyDialog)
+    }
+
+    /// The shared entry with a prompt someone else shared that fills in the reader's data.
+    private func keyedParent(_ key: String, reads: String = #"["profile"]"#) -> String {
+        sharedParent.replacingOccurrences(of: #""entry_ai_usage": "chat""#,
+                                          with: #""entry_ai_usage": "chat", "ai_reads": \#(reads), "ai_reads_key": "\#(key)""#)
+    }
+
+    func testTheAcknowledgedKeyGoesWithTheRequest() async throws {
+        clearAIReplyMemory()
+        defer { clearAIReplyMemory() }
+        let model = await thread(keyedParent("k1"))
+        XCTAssertEqual(model.audience?.aiReadsKey, "k1")
+        XCTAssertEqual(model.audience?.aiReads, ["profile"])
+        model.aiReplyPressed()
+        await waitForDialog(model)
+        XCTAssertTrue(model.showAIReplyDialog)
+        XCTAssertFalse(calls.contains("POST /api/nodes/31/llm"), "no key is sent before the user saw the list")
+        model.aiReplyConfirmed(dontAskAgain: true)
+        await waitFor("POST /api/nodes/31/llm")
+        XCTAssertEqual(body(of: "POST /api/nodes/31/llm")?["ai_reads_ack"] as? String, "k1")
+        // "Don't ask again" stores the key that was shown, not a yes.
+        XCTAssertEqual(UserDefaults.standard.string(forKey: DefaultsKey.circleAiReplyAck(entryId: 31, userId: 5)), "k1")
+        // The same key later: not asked, and the stored key is sent.
+        let same = await thread(keyedParent("k1"))
+        let go = await same.confirmAIReply()
+        XCTAssertEqual(go, ThreadModel.AIReplyGo(ack: "k1"))
+        XCTAssertFalse(same.showAIReplyDialog)
+        XCTAssertEqual(same.llmRequestBody(ack: go?.ack)["ai_reads_ack"], .string("k1"))
+    }
+
+    func testAStoredKeyThatDiffersShowsTheDialogAgain() async {
+        clearAIReplyMemory()
+        defer { clearAIReplyMemory() }
+        let key = DefaultsKey.circleAiReplyAck(entryId: 31, userId: 5)
+        for stored in ["k1", "1", "true"] {
+            UserDefaults.standard.set(stored, forKey: key)
+            let model = await thread(keyedParent("k2", reads: #"["profile","memory"]"#))
+            model.aiReplyPressed()
+            await waitForDialog(model)
+            XCTAssertTrue(model.showAIReplyDialog, "stored \(stored) is not the thread's key")
+            XCTAssertFalse(calls.contains("POST /api/nodes/31/llm"))
+            model.showAIReplyDialog = false
+        }
+        XCTAssertTrue(ThreadModel.aiReplyAcknowledged(stored: "k2", key: "k2"))
+        XCTAssertFalse(ThreadModel.aiReplyAcknowledged(stored: "k1", key: "k2"))
+        XCTAssertFalse(ThreadModel.aiReplyAcknowledged(stored: nil, key: ""))
+        // A marker (or an older key) skips the dialog only when the thread has no key.
+        XCTAssertTrue(ThreadModel.aiReplyAcknowledged(stored: "1", key: ""))
+        XCTAssertFalse(ThreadModel.aiReplyAcknowledged(stored: "1", key: "k2"))
+    }
+
+    func testAChangedListReopensTheDialogAndTheRetryCarriesTheNewKey() async {
+        clearAIReplyMemory()
+        defer { clearAIReplyMemory() }
+        // The user ticked "Don't ask again" for k1; the server's list has changed since.
+        UserDefaults.standard.set("k1", forKey: DefaultsKey.circleAiReplyAck(entryId: 31, userId: 5))
+        let parent = keyedParent("k1")
+        StubURLProtocol.install { [self] request in
+            if path(request) == "/api/nodes/31" { return .json(200, parent) }
+            if path(request) == "/api/nodes/31/llm" {
+                let sent = (try? JSONSerialization.jsonObject(with: request.httpBody ?? Data())) as? [String: Any]
+                if (sent?["ai_reads_ack"] as? String) != "k2" {
+                    return .json(409, """
+                    {"code":"circle_ai_reads_changed","error":"What your AI reads for this reply has changed.",
+                     "ai_reads":["profile","whole archive of writing"],"ai_reads_key":"k2"}
+                    """)
+                }
+                return .json(202, #"{"node_id":77,"status":"pending"}"#)
+            }
+            return .json(200, "{}")
+        }
+        let model = ThreadModel(nodeId: 31, awaitLLM: nil, app: app)
+        await model.load()
+        model.aiReplyPressed()          // k1 is stored: no dialog, the request carries k1
+        await waitForDialog(model)      // 409: the dialog comes with the new list
+        XCTAssertTrue(model.showAIReplyDialog)
+        XCTAssertEqual(model.audience?.aiReads, ["profile", "whole archive of writing"])
+        XCTAssertEqual(model.audience?.aiReadsKey, "k2")
+        XCTAssertEqual(body(of: "POST /api/nodes/31/llm")?["ai_reads_ack"] as? String, "k1")
+        XCTAssertEqual(calls.filter { $0 == "POST /api/nodes/31/llm" }.count, 1, "no retry before the user agrees")
+        XCTAssertTrue(app.toasts.toasts.isEmpty, "this answer is not an error to show")
+        XCTAssertEqual(CircleReplyDialog.body(names: model.aiReplyNames, aiReply: true, aiReads: model.audience?.aiReads ?? []),
+                       "@anna, @ben and @chidi will see it, marked with your name. Your AI reads your profile and whole archive of writing for this reply and could share private information from them.")
+        model.aiReplyConfirmed(dontAskAgain: false)
+        for _ in 0..<40 where calls.filter({ $0 == "POST /api/nodes/31/llm" }).count < 2 {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertEqual(body(of: "POST /api/nodes/31/llm")?["ai_reads_ack"] as? String, "k2")
+        XCTAssertFalse(model.llmRequesting)
+        // Not ticked this time: the stored key stays the old one, so the next reply asks again.
+        XCTAssertEqual(UserDefaults.standard.string(forKey: DefaultsKey.circleAiReplyAck(entryId: 31, userId: 5)), "k1")
+    }
+
+    func testCancellingAfterAChangedListSendsNoSecondRequest() async {
+        clearAIReplyMemory()
+        defer { clearAIReplyMemory() }
+        UserDefaults.standard.set("k1", forKey: DefaultsKey.circleAiReplyAck(entryId: 31, userId: 5))
+        let parent = keyedParent("k1")
+        StubURLProtocol.install { [self] request in
+            if path(request) == "/api/nodes/31" { return .json(200, parent) }
+            if path(request) == "/api/nodes/31/llm" {
+                return .json(409, #"{"code":"circle_ai_reads_changed","error":"changed","ai_reads":["memory"],"ai_reads_key":"k2"}"#)
+            }
+            return .json(200, "{}")
+        }
+        let model = ThreadModel(nodeId: 31, awaitLLM: nil, app: app)
+        await model.load()
+        model.aiReplyPressed()
+        await waitForDialog(model)
+        model.showAIReplyDialog = false
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(calls.filter { $0 == "POST /api/nodes/31/llm" }.count, 1)
+        XCTAssertFalse(model.llmRequesting)
     }
 
     func testCancellingTheAIDialogSendsNothing() async {
@@ -729,7 +853,7 @@ final class CirclesFormTests: StubbedAppTestCase {
         XCTAssertFalse(model.aiReplyOnlyMe, "shared with the thread by default")
         XCTAssertTrue(model.showAIReplyPrivacy(craftBar: true, autoGenerate: false))
         model.setAIReplyOnlyMe(true)
-        XCTAssertEqual(model.llmRequestBody["privacy_level"], .string("private"))
+        XCTAssertEqual(model.llmRequestBody()["privacy_level"], .string("private"))
         model.aiReplyPressed()
         await waitFor("POST /api/nodes/31/llm")
         XCTAssertFalse(model.showAIReplyDialog, "only the requester reads it: nobody to name")
@@ -740,7 +864,18 @@ final class CirclesFormTests: StubbedAppTestCase {
         let again = await thread(sharedParent)
         XCTAssertTrue(again.aiReplyOnlyMe)
         again.setAIReplyOnlyMe(false)
-        XCTAssertNil(again.llmRequestBody["privacy_level"])
+        XCTAssertNil(again.llmRequestBody()["privacy_level"])
+        // Only me with a keyed thread: no dialog, and no acknowledgement is sent.
+        clearAIReplyMemory()
+        let keyed = await thread(keyedParent("k1"))
+        keyed.setAIReplyOnlyMe(true)
+        XCTAssertNil(keyed.llmRequestBody(ack: "k1")["ai_reads_ack"])
+        keyed.aiReplyPressed()
+        await waitFor("POST /api/nodes/31/llm")
+        XCTAssertFalse(keyed.showAIReplyDialog)
+        XCTAssertNil(body(of: "POST /api/nodes/31/llm")?["ai_reads_ack"])
+        XCTAssertEqual(body(of: "POST /api/nodes/31/llm")?["privacy_level"] as? String, "private")
+        keyed.setAIReplyOnlyMe(false)
         XCTAssertEqual(UserDefaults.standard.string(forKey: DefaultsKey.circleAiReplyPrivacy(entryId: 31, userId: 5)), "shared")
     }
 

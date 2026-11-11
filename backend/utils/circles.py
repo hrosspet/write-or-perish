@@ -456,8 +456,10 @@ _PLACEHOLDER_NAMES = (
     ("{user_artifacts_index}", "list of artifacts"),
     ("{user_export", "whole archive of writing"),
 )
-TOOLS_NAME = ("artifacts, to-do list and writing, through the tools the "
-              "thread's prompt turns on")
+# Last in the list: "Your AI reads your profile, memory and anything
+# else its tools look up (...) for this reply ...".
+TOOLS_NAME = ("anything else its tools look up (your artifacts, to-do list "
+              "and writing)")
 AI_READS_MARKER = "_circle_ai_reads"
 AI_READS_CHANGED_CODE = "circle_ai_reads_changed"
 AI_READS_CHANGED = (

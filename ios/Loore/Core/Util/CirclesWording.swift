@@ -131,8 +131,10 @@ enum CirclesWording {
     }
 
     static func aiReplyDialogBody(names: [String], aiReads: [String] = []) -> String {
-        let first = "\(joinNames(names)) will see it, marked with your name."
-        return aiReadsSentence(aiReads).map { "\(first) \($0)" } ?? first
+        let who = joinNames(names)
+        let first = who.isEmpty ? "" : "\(who) will see it, marked with your name."
+        guard let reads = aiReadsSentence(aiReads) else { return first }
+        return first.isEmpty ? reads : "\(first) \(reads)"
     }
 
     // MARK: Sharing the discussion above an entry

@@ -127,10 +127,16 @@ struct NodeAudience: Decodable, Hashable, Sendable {
     /// their plain names ("profile", "memory", "to-do list"). Empty when the
     /// thread has no prompt that reads artifacts of the viewer's.
     var aiReads: [String]
+    /// Identifies exactly the shared prompts (and their text) that fill in
+    /// the viewer's data. "" when no prompt someone else shared does. The
+    /// server takes a shared AI reply only with the current key as
+    /// `ai_reads_ack`, so the agreement is to the list the user was shown.
+    var aiReadsKey: String
 
     enum CodingKeys: String, CodingKey {
         case author, readers, usernames
         case aiReads = "ai_reads"
+        case aiReadsKey = "ai_reads_key"
         case entryId = "entry_id"
         case isAuthor = "is_author"
         case isEntry = "is_entry"
@@ -140,7 +146,7 @@ struct NodeAudience: Decodable, Hashable, Sendable {
 
     init(entryId: Int, author: String, isAuthor: Bool, readers: [String], isEntry: Bool = true,
          entryAIUsage: AIUsage = .chat, circleIds: [Int]? = nil, usernames: [String]? = nil,
-         aiReads: [String] = []) {
+         aiReads: [String] = [], aiReadsKey: String = "") {
         self.entryId = entryId
         self.author = author
         self.isAuthor = isAuthor
@@ -150,6 +156,7 @@ struct NodeAudience: Decodable, Hashable, Sendable {
         self.circleIds = circleIds
         self.usernames = usernames
         self.aiReads = aiReads
+        self.aiReadsKey = aiReadsKey
     }
 
     init(from decoder: Decoder) throws {
@@ -163,6 +170,7 @@ struct NodeAudience: Decodable, Hashable, Sendable {
         circleIds = c.tolerant(.circleIds)
         usernames = c.tolerant(.usernames)
         aiReads = c.tolerant(.aiReads, default: [])
+        aiReadsKey = c.tolerant(.aiReadsKey, default: "")
     }
 }
 

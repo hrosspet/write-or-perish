@@ -1029,7 +1029,7 @@ Peter: "currently it's not possible to select text in the app and copy it. Could
   `SelectCopyUITests` (local backend): a selection across two paragraphs copied and pasted back, no
   keyboard, a tap outside clears it, a link still opens, in an expanded reply card a 0.7 s press
   selects and a 0.4 s press opens the reply, the profile.
-## Circles (2026-11-10; built and unit-tested, not yet run in a simulator or on a phone)
+## Circles (2026-11-10, rebuilt 2026-11-11 after the voice review; run in the simulator, not yet on a phone)
 
 Everything shows only with `circles_enabled` in the current user (`UserCapabilities.circlesEnabled`,
 default off, absent on an older server). Off: today's app, except that the Circles option of the
@@ -1079,6 +1079,28 @@ privacy select is greyed out (`SelectField.unavailable`), as on the web.
 - **Screens** `Features/Circles/`: `CirclesView` ("Your circles", route `.circles`, `/circles`) and
   `SharedWithYouView` (`.sharedWithYou`, `/shared`); linked from Account ("Circles" row), More ("Shared
   with you") and each other. **Updates**: `CircleShareItemView` ("Read it" / "Don't show <name>'s entries").
-- Tests: `CirclesTests.swift` (37: decoding from hand-written fixtures, wording, routes, the form's
-  submit paths, the thread's rules). No UI test yet: the screens have not been opened in a simulator.
+- **The agreement before an AI reply**: `audience.ai_reads` names what the thread's prompts fill from
+  the requester's own data, `ai_reads_key` identifies the shared prompts as they are. A shared AI reply
+  sends `ai_reads_ack: <key>` (only a key the user was shown); "Don't ask again in this thread" stores
+  the key (`DefaultsKey.circleAiReplyAck`), so it stops applying when a prompt changes. On 409
+  `circle_ai_reads_changed` the dialog opens again with the response's list and Generate retries with
+  the new key. "Only me" sends `privacy_level: "private"` and no key.
+- **The discussion above an entry**: `thread_path` from `GET /nodes/<id>/audience`, the toggle "Share
+  also the discussion leading up to this node?" (off by default), `share_path` in the requests.
+- **A shared prompt** is shown to a reader with the `context_artifacts` the server sends (the reader's
+  own); a placeholder without one shows as its own text.
+- The footer of a labelled AI reply ("GPT-6 Luna via @ben") puts the label on its own line: in one row
+  with the date and the icons it was cut to "GPT-6 Luna…" (found in the simulator run).
+- `-LooreResetState YES` also forgets the per-thread Circles choices (keys starting `loore_circle_`).
+- Tests: `CirclesTests.swift` (41: decoding from hand-written fixtures, wording, routes, the form's
+  submit paths, the thread's rules, the agreement key). `CirclesUITests` (8 methods) walks the screens
+  against a scratch backend (native Flask on sqlite on its own port, fake users, the model call
+  stubbed): the add-person dialog, rename, new circle, the picker's readers sentence and Share button,
+  the discussion toggle in the edit form, the readers popover, the reply dialog, the AI dialog with
+  and without the artifacts sentence, a generated reply with its label, "Only me", a shared prompt
+  with the reader's own profile and bare placeholders, the Updates note. Inputs: `TEST_RUNNER_LOORE_E2E_DIR`
+  (folder with `cookies.json` and `ids.json`), `TEST_RUNNER_LOORE_BACKEND_URL`,
+  `TEST_RUNNER_LOORE_FRONTEND_URL`, `TEST_RUNNER_LOORE_SCREENSHOT_DIR`. Run 2026-11-11 on the
+  "Loore Circles iPhone 17" simulator: 8 of 8 pass.
+- Not checked: a phone; light theme; Dynamic Type at accessibility sizes on the Circles screens.
 

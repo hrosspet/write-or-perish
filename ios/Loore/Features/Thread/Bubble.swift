@@ -305,9 +305,11 @@ struct NodeFooterView<Extras: View>: View {
 
     var body: some View {
         Group {
-            if typeSize.isAccessibilitySize {
-                // One row cannot hold author, date and the icons at these sizes:
-                // author (and origin) on top, the rest wrapping below.
+            if stacked {
+                // One row cannot hold author, date and the icons at these sizes,
+                // nor the label of an AI reply in a shared thread ("<model> via
+                // @<name>", which must be read in full): author (and origin) on
+                // top, the rest wrapping below.
                 VStack(alignment: .leading, spacing: 4) {
                     author
                     if let origin, !origin.isEmpty { originText(origin) }
@@ -340,9 +342,14 @@ struct NodeFooterView<Extras: View>: View {
         .padding(.top, 12)
     }
 
+    /// Author on its own line: at accessibility sizes, and for a labelled AI reply.
+    private var stacked: Bool {
+        typeSize.isAccessibilitySize || !(llmLabel ?? "").isEmpty
+    }
+
     private var author: some View {
         Button(action: openAuthor) {
-            Text(displayName).lineLimit(typeSize.isAccessibilitySize ? 2 : 1)
+            Text(displayName).lineLimit(stacked ? 2 : 1)
         }
         .buttonStyle(.plain)
     }
