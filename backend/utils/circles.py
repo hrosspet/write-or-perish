@@ -443,7 +443,7 @@ def share_thread_path(node, user, data):
 
 
 # What each personal placeholder of a prompt reads, in the words the
-# dialog before an AI reply uses.
+# dialog before an AI reply uses ("Your AI reads your ...").
 _PLACEHOLDER_NAMES = (
     ("{user_profile}", "profile"),
     ("{user_memory}", "memory"),
@@ -451,38 +451,91 @@ _PLACEHOLDER_NAMES = (
     ("{user_intentions}", "intentions"),
     ("{user_todo}", "to-do list"),
     ("{user_recent}", "summary of recent writing"),
-    ("{user_recent_raw}", "recent writing"),
+    ("{user_recent_raw}", "recent writing, word for word"),
     ("{user_ai_preferences}", "AI preferences"),
     ("{user_artifacts_index}", "list of artifacts"),
-    ("{user_export", "archive"),
+    ("{user_export", "whole archive of writing"),
 )
+TOOLS_NAME = ("artifacts, to-do list and writing, through the tools the "
+              "thread's prompt turns on")
+AI_READS_MARKER = "_circle_ai_reads"
+AI_READS_CHANGED_CODE = "circle_ai_reads_changed"
+AI_READS_CHANGED = (
+    "The prompt of this thread asks for more of your own data than you "
+    "agreed to. Check what your AI would read, then ask again.")
 
 
-def ai_reads(node, user_id):
-    """The artifacts of *user_id*'s own that an AI reply under *node*
-    would read, by name ("profile", "memory", ...), for the dialog shown
-    before the reply is generated in a shared thread: the personal
-    placeholders of every prompt node in the chain the reply is built
-    from that resolves for the user (their own prompt, or one shared
-    with them in a circle). Empty when there is none. Decrypts only
-    prompt nodes the user can read."""
-    from backend.utils.privacy import can_user_access_node
-    found = []
+def is_shared_prompt_for(node, user_id) -> bool:
+    """*node* is a prompt someone else shared in a circle: in a reply
+    *user_id* asks for in the thread, its personal placeholders are
+    filled with *user_id*'s own data."""
+    return (node.privacy_level == CIRCLES
+            and node.audience_root_id is not None
+            and (node.human_owner_id or node.user_id) != user_id
+            and node.is_system_prompt)
+
+
+def prompts_key(prompts):
+    """The key of what a set of shared prompt nodes asks of a requester:
+    it changes when a prompt is added to the chain or its text changes
+    (and with the text, its placeholders and whether it turns tools
+    on). "" for no prompt."""
+    import hashlib
+    parts = sorted(
+        f"{n.id}:{hashlib.sha256((n.get_content() or '').encode()).hexdigest()}"
+        for n in prompts)
+    if not parts:
+        return ""
+    return hashlib.sha256("|".join(parts).encode()).hexdigest()[:32]
+
+
+def ai_reply_reads(node, user_id):
+    """What an AI reply under *node* would read of *user_id*'s own data,
+    for the dialog shown before it is generated in a shared thread:
+    ``(names, key)``.
+
+    *names*: the personal placeholders of every prompt node in the chain
+    the reply is built from that resolves for the user (their own
+    prompt, or one shared with them in a circle), by plain name, and the
+    tools when a prompt someone else shared turns them on.
+
+    *key*: prompts_key of the prompts someone ELSE shared. The request
+    for the reply carries the key the user saw; the route and the task
+    work it out again and refuse when it differs, so a prompt edited
+    after the dialog fills nothing the user did not agree to. "" when
+    only the user's own prompts fill anything (own data, own prompt:
+    nothing to agree to).
+
+    The walk is the task's: up from *node* through what the user can
+    read, without the nodes AI may not read. Decrypts only prompt
+    nodes."""
+    from backend.utils.privacy import AI_ALLOWED, can_user_access_node
+    from backend.utils.session_helpers import chain_has_agentic_prompt
+    found, theirs = [], []
     current = node
     for _ in range(THREAD_PATH_HOPS):
         if current is None or not can_user_access_node(current, user_id):
             break
-        if current.is_system_prompt and (
-                (current.human_owner_id or current.user_id) == user_id
-                or (current.privacy_level == CIRCLES
-                    and current.audience_root_id is not None)):
+        shared = is_shared_prompt_for(current, user_id)
+        mine = (current.human_owner_id or current.user_id) == user_id
+        if (current.ai_usage in AI_ALLOWED and current.is_system_prompt
+                and (shared or mine)):
             text = current.get_content() or ""
             for placeholder, name in _PLACEHOLDER_NAMES:
                 if placeholder in text and name not in found:
                     found.append(name)
+            if shared:
+                theirs.append(current)
         current = current.parent
     order = [name for _, name in _PLACEHOLDER_NAMES]
-    return sorted(found, key=order.index)
+    names = sorted(found, key=order.index)
+    if theirs and chain_has_agentic_prompt(theirs):
+        names.append(TOOLS_NAME)
+    return names, prompts_key(theirs)
+
+
+def ai_reads(node, user_id):
+    return ai_reply_reads(node, user_id)[0]
 
 
 class ThreadSource:

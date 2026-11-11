@@ -229,8 +229,14 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   const isForeignShared = isSharedThread && !audience.is_author;
   const autoGenerateActive = (isPublicThread || isForeignShared)
     ? false : autoGenerate;
-  // The "Generate an AI reply?" dialog while it is open: { resolve }.
+  // The "Generate an AI reply?" dialog while it is open:
+  // { resolve, reads, key } (the list it shows and that list's key).
   const [aiReplyDialog, setAiReplyDialog] = useState(null);
+  // What the server last said an AI reply here reads of the requester's
+  // data, when a request was refused because it had changed (409
+  // circle_ai_reads_changed): { ai_reads, ai_reads_key }. It replaces
+  // the values the page was loaded with.
+  const [aiReadsChanged, setAiReadsChanged] = useState(null);
   // Craft mode, shared thread: "AI reply: Shared with this thread / Only
   // me". The choice is kept in localStorage per thread and user; this
   // counter only makes the page read it again after a change.
@@ -847,34 +853,84 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     setAiReplyPrivacyVersion((v) => v + 1);
   };
 
+  // What an AI reply here reads of the requester's own data, and the
+  // key of exactly that list (audience.ai_reads / ai_reads_key; "" when
+  // no prompt shared by someone else fills in the requester's data).
+  const aiReads = aiReadsChanged
+    ? aiReadsChanged.ai_reads : audience?.ai_reads;
+  const aiReadsKey = (aiReadsChanged
+    ? aiReadsChanged.ai_reads_key : audience?.ai_reads_key) || '';
+
   // Before an AI reply is generated in a shared thread, the people who
-  // will see it are named ("Generate an AI reply?"), unless "Don't ask
-  // again in this thread" was ticked for AI replies, nobody else reads
-  // the thread, or the reply is going to be private. Resolves true to go
-  // on, false when the user cancels.
-  const confirmAiReply = () => new Promise((resolve) => {
-    if (!isSharedThread || aiReplyPrivate
-        || replyAudienceNames(audience, currentUser?.username).length === 0
-        || localStorage.getItem(
-          aiReplyAckKey(audience.entry_id, currentUser?.id)) === "true") {
-      resolve(true);
+  // will see it are named, and what the reply reads of the requester's
+  // data ("Generate an AI reply?"). The dialog is skipped when the reply
+  // is going to be private, when nobody else reads the thread and
+  // nothing is read, or when "Don't ask again in this thread" was ticked
+  // for exactly this list: with a key, the stored value must equal the
+  // key; without one, any stored value counts (an older tick included).
+  // `changed` is the server's new list after a refused request: the
+  // dialog is then shown whatever is stored.
+  // Resolves false when the user cancels, else { ack }: the key the user
+  // agreed to (to send as ai_reads_ack), or null when there is none.
+  const confirmAiReply = (changed = null) => new Promise((resolve) => {
+    if (!isSharedThread || aiReplyPrivate) {
+      resolve({ ack: null });
       return;
     }
-    setAiReplyDialog({ resolve });
+    const reads = changed ? changed.ai_reads : aiReads;
+    const key = (changed ? changed.ai_reads_key : aiReadsKey) || '';
+    const stored = localStorage.getItem(
+      aiReplyAckKey(audience.entry_id, currentUser?.id));
+    const nobodyElse = replyAudienceNames(
+      audience, currentUser?.username).length === 0;
+    if (!changed && (key ? stored === key : (nobodyElse || !!stored))) {
+      resolve({ ack: key || null });
+      return;
+    }
+    setAiReplyDialog({ resolve, reads, key });
   });
 
-  const requestLlmFor = async (parentNodeId, { sourceMode = 'textmode' } = {}) => {
+  const requestLlmFor = async (parentNodeId, { sourceMode = 'textmode', ack = null } = {}) => {
     // The same request in every thread. The model is the requester's own
     // (the picker's default comes from /suggested-model, which never
     // suggests the model of another member's reply). In a shared thread
-    // the reply joins the thread's audience unless "Only me" is chosen.
+    // the reply joins the thread's audience unless "Only me" is chosen;
+    // a shared reply carries the key of the list the user agreed to.
     const response = await api.post(`/nodes/${parentNodeId}/llm`, {
       model: selectedModel, source_mode: sourceMode,
       ...(aiReplyPrivate && { privacy_level: 'private' }),
+      ...(ack && !aiReplyPrivate && { ai_reads_ack: ack }),
     });
     const newNodeId = response.data.node_id;
     if (!newNodeId) throw new Error("Failed to get a task ID for the new LLM node.");
     return newNodeId;
+  };
+
+  // Ask the user (when needed), then request the reply. When the server
+  // answers that what the reply reads has changed since the user agreed
+  // (409 circle_ai_reads_changed), the dialog is shown again with the
+  // server's new list and the request repeated with its key. Returns the
+  // new node's id, or null when the user cancels.
+  const requestConfirmedLlmFor = async (parentNodeId) => {
+    let agreed = await confirmAiReply();
+    while (agreed) {
+      try {
+        return await requestLlmFor(parentNodeId, { ack: agreed.ack });
+      } catch (err) {
+        const data = err?.response?.data;
+        if (err?.response?.status !== 409
+            || data?.code !== 'circle_ai_reads_changed') {
+          throw err;
+        }
+        const changed = {
+          ai_reads: data.ai_reads || [],
+          ai_reads_key: data.ai_reads_key || '',
+        };
+        setAiReadsChanged(changed);
+        agreed = await confirmAiReply(changed);
+      }
+    }
+    return null;
   };
 
   // Shared handling for a failed LLM-request (the /nodes/:id/llm POST),
@@ -895,12 +951,14 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // The reply is watched on its own node from the start (#367): the
   // model thinking, then the text as it is written.
   const handleLLMResponse = async () => {
-    if (!(await confirmAiReply())) return;
     setError("");
     setLlmRequesting(true);
-    requestLlmFor(id)
-      .then((newNodeId) => navigate(`/node/${newNodeId}?awaitLlm=${newNodeId}`,
-                                    { state: FROM_PARENT }))
+    requestConfirmedLlmFor(id)
+      .then((newNodeId) => {
+        if (newNodeId) {
+          navigate(`/node/${newNodeId}?awaitLlm=${newNodeId}`, { state: FROM_PARENT });
+        }
+      })
       .catch(handleLlmRequestError)
       .finally(() => setLlmRequesting(false));
   };
@@ -924,8 +982,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     }
     // The author's automatic reply in her shared thread is seen by its
     // readers too: she is asked first, like for a pressed one.
-    if (!(await confirmAiReply())) return null;
-    return await requestLlmFor(parentNodeId);
+    return await requestConfirmedLlmFor(parentNodeId);
   };
 
   // Called by NodeForm after it successfully POSTs /nodes/.
@@ -1928,14 +1985,14 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
               </span>
             )}
             {/* What the reply's prompt reads of the requester's own
-                artifacts (audience.ai_reads), when it reads any. */}
-            {showAiReplyPrivacy && aiReadsSentence(audience.ai_reads) && (
+                data (audience.ai_reads), when it reads any. */}
+            {showAiReplyPrivacy && aiReadsSentence(aiReads) && (
               <span style={{
                 gridColumn: '1 / -1', flexBasis: '100%',
                 fontFamily: 'var(--sans)', fontWeight: 300, fontSize: '0.8rem',
                 lineHeight: 1.5, color: 'var(--text-secondary)',
               }}>
-                {aiReadsSentence(audience.ai_reads)}
+                {aiReadsSentence(aiReads)}
               </span>
             )}
             {/* A lone button, not an action group: it has no picker, so
@@ -2064,18 +2121,21 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
       <CircleReplyDialog
         open={!!aiReplyDialog}
         ai
-        aiReads={audience?.ai_reads}
+        aiReads={aiReplyDialog?.reads}
         names={replyAudienceNames(audience, currentUser?.username)}
         onClose={() => {
           aiReplyDialog?.resolve(false);
           setAiReplyDialog(null);
         }}
         onConfirm={(dontAskAgain) => {
+          // "Don't ask again" holds for the list that was shown: its
+          // key is what is stored ("1" when the list has no key).
           if (dontAskAgain && audience) {
             localStorage.setItem(
-              aiReplyAckKey(audience.entry_id, currentUser?.id), "true");
+              aiReplyAckKey(audience.entry_id, currentUser?.id),
+              aiReplyDialog?.key || "1");
           }
-          aiReplyDialog?.resolve(true);
+          aiReplyDialog?.resolve({ ack: aiReplyDialog?.key || null });
           setAiReplyDialog(null);
         }}
       />

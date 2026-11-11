@@ -1159,12 +1159,45 @@ def shared_prompt_ids(llm_node, node_chain, user_id):
     prompt keeps its placeholders empty (#483)."""
     if llm_node.audience_root_id is None:
         return frozenset()
+    from backend.utils.circles import is_shared_prompt_for
     return frozenset(
-        n.id for n in node_chain
-        if n.privacy_level == "circles"
-        and n.audience_root_id is not None
-        and not node_is_users(n, user_id)
-        and n.is_system_prompt)
+        n.id for n in node_chain if is_shared_prompt_for(n, user_id))
+
+
+def _acknowledged_reads_key(llm_node):
+    """The key of the shared prompts the requester agreed to when asking
+    for *llm_node* (circles.ai_reply_reads), "" when none was recorded."""
+    from backend.utils.circles import AI_READS_MARKER
+    try:
+        meta = json.loads(llm_node.tool_calls_meta or "[]") or []
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    for entry in meta:
+        if isinstance(entry, dict) and entry.get("name") == AI_READS_MARKER:
+            return entry.get("key") or ""
+    return ""
+
+
+def _quotable_for_thread(node):
+    """For the text of *node*, which someone other than the requester
+    wrote into a circle-shared thread: the test a {quote:ID} in it must
+    pass to be resolved. The quoted node must be readable by every
+    reader of that thread: public, or shared with the same audience.
+    Any other quote stays as written, as the thread page shows it to a
+    reader who cannot open the quoted node; the requester's own access
+    to it does not count."""
+    thread = node.audience_root_id
+
+    def ok(node_id):
+        quoted = db.session.get(Node, node_id)
+        if quoted is None or quoted.deleted_at is not None:
+            return False
+        if quoted.privacy_level == "public":
+            return True
+        return (quoted.privacy_level == "circles"
+                and quoted.audience_root_id is not None
+                and quoted.audience_root_id == thread)
+    return ok
 
 
 def _others_circle_reply_label(node, user_id):
@@ -3877,6 +3910,27 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 parent_node, user_id,
                 in_shared_thread=llm_node.audience_root_id is not None)
             circle_prompts = shared_prompt_ids(llm_node, node_chain, user_id)
+            if circle_prompts and batch_entry is None:
+                # The requester agreed to exactly these prompts, as they
+                # were (the dialog named what they fill). One edited or
+                # added since fills nothing: the reply is not made, and
+                # the requester is asked again.
+                from backend.utils import circles as _cz
+                if _acknowledged_reads_key(llm_node) != _cz.prompts_key(
+                        [n for n in node_chain if n.id in circle_prompts]):
+                    logger.warning(
+                        "Node %s: the shared prompt changed after the "
+                        "requester agreed; reply not made", llm_node_id)
+                    llm_node.llm_task_status = 'failed'
+                    llm_node.llm_task_error = _cz.AI_READS_CHANGED
+                    llm_node.llm_task_progress = 100
+                    db.session.commit()
+                    return {
+                        'parent_node_id': parent_node_id,
+                        'llm_node_id': llm_node_id,
+                        'status': 'refused',
+                        'reason': _cz.AI_READS_CHANGED_CODE,
+                    }
 
             def _fills(n):
                 """*n*'s personal placeholders resolve in this reply:
@@ -4768,7 +4822,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             message_text = (
                                 f"{time_prefix} {others_reply_label}: "
                                 f"{node_content}")
-                        if has_ext_quotes(node_content):
+                        if has_ext_quotes(node_content) and (
+                                not others_reply_label):
                             quoted_ext_ids.extend(
                                 find_ext_quote_ids(node_content))
                             if node.id in ca_reply_ids:
@@ -4930,15 +4985,28 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             replaced_recent_raw
                             or USER_RECENT_RAW_PLACEHOLDER in filled)
                         # Resolve {quote:ID} placeholders if present
+                        # Circles: in text another person wrote into
+                        # a shared thread, a quote resolves only when
+                        # every reader of the thread can read the quoted
+                        # node; a saved reference (the requester's own)
+                        # never does. In the requester's own nodes, and
+                        # outside shared threads, as before.
+                        others_circle_text = (
+                            node.audience_root_id is not None
+                            and not node_is_users(node, user_id))
                         if needs_quotes and has_quotes(message_text):
                             message_text, resolved_ids = resolve_quotes(
-                                message_text, user_id, for_llm=True, tz_name=user_tz)
+                                message_text, user_id, for_llm=True,
+                                tz_name=user_tz,
+                                only=(_quotable_for_thread(node)
+                                      if others_circle_text else None))
                             if resolved_ids:
                                 logger.info(f"Resolved quotes for node IDs: {resolved_ids}")
                                 licence.note_nodes(resolved_ids)
                         # Resolve {quote_ext:ID} (saved references) inline —
                         # small, non-recursive, owner-only.
-                        if has_ext_quotes(message_text):
+                        if has_ext_quotes(message_text) and (
+                                not others_circle_text):
                             message_text, ext_ids = resolve_ext_quotes(
                                 message_text, user_id, for_llm=True)
                             licence.note_external(ext_ids)

@@ -274,7 +274,9 @@ def _last_repliers(entry_ids):
     rows = (db.session.query(Node.audience_root_id, User.username)
             .join(User, User.id == Node.user_id)
             .filter(Node.audience_root_id.in_(entry_ids),
-                    Node.audience_root_id != Node.id,
+                    # Written after the entry: the discussion leading up
+                    # to an entry may point at it too, and is no reply.
+                    Node.id > Node.audience_root_id,
                     Node.privacy_level == cz.CIRCLES,
                     Node.deleted_at.is_(None),
                     Node.node_type != "llm")

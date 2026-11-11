@@ -1407,7 +1407,11 @@ def _focal_own_fields(node, viewer_id):
             if audience is not None:
                 # The viewer's own artifacts an AI reply here would read
                 # (the dialog before the reply names them).
-                audience["ai_reads"] = cz.ai_reads(node, viewer_id)
+                # ai_reads_key: what the viewer agrees to in that
+                # dialog; sent back with the request for the reply.
+                (audience["ai_reads"],
+                 audience["ai_reads_key"]) = cz.ai_reply_reads(
+                    node, viewer_id)
                 data["audience"] = audience
     # A Community Archive read reply: the thread page shows what the read
     # covered (the window, from the pinned render) and offers to read
@@ -2074,11 +2078,33 @@ def request_llm_response(node_id):
         privacy_level = parent_node.privacy_level
         if in_thread and data.get("privacy_level") == "private":
             privacy_level = "private"
+        # A prompt someone else shared in the thread is filled with the
+        # requester's own data. A reply the thread will read is made
+        # only for exactly what the requester saw named in the dialog:
+        # the request carries that key, and it is checked again here and
+        # when the task runs (a prompt can be edited in between). A
+        # reply the requester keeps private needs no dialog.
+        reads_meta = None
+        if in_thread:
+            reads, reads_key = cz.ai_reply_reads(
+                parent_node, current_user.id)
+            if reads_key:
+                if (privacy_level != "private"
+                        and data.get("ai_reads_ack") != reads_key):
+                    return jsonify({
+                        "error": cz.AI_READS_CHANGED,
+                        "code": cz.AI_READS_CHANGED_CODE,
+                        "ai_reads": reads,
+                        "ai_reads_key": reads_key,
+                    }), 409
+                reads_meta = [{"name": cz.AI_READS_MARKER,
+                               "key": reads_key}]
         llm_node, task_id = create_llm_placeholder(
             parent_node.id, model_id, current_user.id,
             privacy_level=privacy_level,
             ai_usage=parent_node.ai_usage,
             source_mode=source_mode,
+            meta=reads_meta,
         )
     except ParentDeletedError as e:
         # Race A: parent was soft-deleted between the route's auth check

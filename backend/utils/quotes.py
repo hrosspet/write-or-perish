@@ -278,9 +278,15 @@ def resolve_quotes(
     _seen_ids: Optional[Set[int]] = None,
     tz_name: Optional[str] = None,
     block_ai_none: Optional[bool] = None,
+    only=None,
 ) -> Tuple[str, List[int]]:
     """
     Replace {quote:ID} placeholders with quoted node content, recursively.
+
+    *only* (a callable taking a node id): a quote whose id it refuses is
+    left as written, at every depth. Used for text another person wrote
+    into a shared thread, where a quote resolves only when every reader
+    of the thread can read the quoted node (llm_completion).
 
     Args:
         content: Text containing {quote:ID} placeholders
@@ -322,6 +328,8 @@ def resolve_quotes(
 
     def replace_quote(match):
         node_id = int(match.group(1))
+        if only is not None and not only(node_id):
+            return match.group(0)
         data = quote_data.get(node_id)
 
         if data is None:
@@ -368,6 +376,7 @@ def resolve_quotes(
                 _seen_ids=new_seen,
                 tz_name=tz_name,
                 block_ai_none=block_ai_none,
+                only=only,
             )
             resolved_ids.extend(nested_ids)
 

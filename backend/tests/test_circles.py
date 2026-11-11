@@ -1239,7 +1239,32 @@ def test_the_discussion_leading_up_to_an_entry_is_shared_only_when_asked(app):
     assert _shared_ids(app, "ben") == [alone, entry] or _shared_ids(
         app, "ben") == [entry, alone]
     data = _client(app, "ben").get(f"/api/nodes/{entry}").get_json()
-    assert data["audience"]["ai_reads"] == ["profile", "memory"]
+    assert data["audience"]["ai_reads"][:2] == ["profile", "memory"]
+    # The request for a reply the thread will read carries the key of
+    # what the dialog named; without it, or with another, nothing is made.
+    key = data["audience"]["ai_reads_key"]
+    assert key and data["audience"]["ai_reads"][-1].endswith("turns on")
+    before = Node.query.count()
+    for body in ({}, {"ai_reads_ack": "something-else"}):
+        r = _client(app, "ben").post(f"/api/nodes/{entry}/llm", json=body)
+        assert r.status_code == 409, body
+        assert r.get_json()["code"] == "circle_ai_reads_changed"
+        assert r.get_json()["ai_reads_key"] == key
+        assert r.get_json()["ai_reads"] == data["audience"]["ai_reads"]
+    assert Node.query.count() == before
+    r = _client(app, "ben").post(f"/api/nodes/{entry}/llm",
+                                 json={"ai_reads_ack": key})
+    assert r.status_code == 202
+    # A reply ben keeps to himself needs no dialog.
+    r = _client(app, "ben").post(f"/api/nodes/{entry}/llm",
+                                 json={"privacy_level": "private"})
+    assert r.status_code == 202
+    # anna's own prompt asks nothing of her to agree to.
+    hers = _client(app, "anna").get(f"/api/nodes/{entry}").get_json()
+    assert hers["audience"]["ai_reads_key"] == ""
+    assert hers["audience"]["ai_reads"][:2] == ["profile", "memory"]
+    assert _client(app, "anna").post(
+        f"/api/nodes/{entry}/llm", json={}).status_code == 202
     # anna's AI reply on the path is named as hers.
     shown = _client(app, "ben").get(f"/api/nodes/{t['ai']}").get_json()
     assert shown["llm_label"] == "gpt-5 via @anna"

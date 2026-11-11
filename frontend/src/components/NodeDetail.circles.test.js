@@ -179,7 +179,7 @@ describe('a reader in someone else\'s shared thread', () => {
     fireEvent.click(screen.getByLabelText("Don't ask again in this thread"));
     await press('Generate');
     await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
-    expect(localStorage.getItem('loore_circle_ai_reply_ack_2_10')).toBe('true');
+    expect(localStorage.getItem('loore_circle_ai_reply_ack_2_10')).toBe('1');
   });
 
   test('with the AI tick stored, the request goes out without the dialog', async () => {
@@ -245,6 +245,133 @@ describe('a reader in someone else\'s shared thread', () => {
     await press('Generate');
     await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
     expect(mockPost.mock.calls[0][1]).not.toHaveProperty('privacy_level');
+  });
+});
+
+describe('what the reply reads is agreed to exactly (ai_reads_key)', () => {
+  const READS = ['profile', 'memory'];
+  const withKey = (key = 'key-1', reads = READS) => sharedEntry(BEN, {
+    audience: audienceFor(BEN, { ai_reads: reads, ai_reads_key: key }),
+  });
+  const changedAnswer = { response: { status: 409, data: {
+    code: 'circle_ai_reads_changed', error: 'What your AI reads here has changed.',
+    ai_reads: ['profile', 'whole archive of writing'], ai_reads_key: 'key-2',
+  } } };
+
+  test('the key of the list that was shown is sent, and "Don\'t ask again" stores that key', async () => {
+    routes['/nodes/10'] = withKey();
+    renderAt('/node/10');
+    await screen.findByText('A shared entry.');
+    await press('LLM Response');
+    expect(screen.getByText(/Your AI reads your profile and memory for this reply/))
+      .toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("Don't ask again in this thread"));
+    await press('Generate');
+    await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
+    expect(mockPost.mock.calls[0]).toEqual(['/nodes/10/llm', {
+      model: 'ben-model', source_mode: 'textmode', ai_reads_ack: 'key-1',
+    }]);
+    expect(localStorage.getItem('loore_circle_ai_reply_ack_2_10')).toBe('key-1');
+  });
+
+  test('a stored key equal to the current one: no dialog, and the key is sent', async () => {
+    localStorage.setItem('loore_circle_ai_reply_ack_2_10', 'key-1');
+    routes['/nodes/10'] = withKey();
+    renderAt('/node/10');
+    await screen.findByText('A shared entry.');
+    await press('LLM Response');
+    expect(screen.queryByRole('heading', { name: 'Generate an AI reply?' })).toBeNull();
+    await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
+    expect(mockPost.mock.calls[0][1].ai_reads_ack).toBe('key-1');
+  });
+
+  test('a stored key that differs from the current one shows the dialog again', async () => {
+    localStorage.setItem('loore_circle_ai_reply_ack_2_10', 'key-0');
+    routes['/nodes/10'] = withKey();
+    renderAt('/node/10');
+    await screen.findByText('A shared entry.');
+    await press('LLM Response');
+    expect(screen.getByRole('heading', { name: 'Generate an AI reply?' })).toBeInTheDocument();
+    expect(mockPost).not.toHaveBeenCalled();
+    await press('Generate');
+    await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
+    expect(mockPost.mock.calls[0][1].ai_reads_ack).toBe('key-1');
+    // Not ticked this time: the old tick is left as it was.
+    expect(localStorage.getItem('loore_circle_ai_reply_ack_2_10')).toBe('key-0');
+  });
+
+  test('an older tick (no key) does not cover a list that has a key', async () => {
+    localStorage.setItem('loore_circle_ai_reply_ack_2_10', 'true');
+    routes['/nodes/10'] = withKey();
+    renderAt('/node/10');
+    await screen.findByText('A shared entry.');
+    await press('LLM Response');
+    expect(screen.getByRole('heading', { name: 'Generate an AI reply?' })).toBeInTheDocument();
+    expect(mockPost).not.toHaveBeenCalled();
+  });
+
+  test('without a key an older tick still skips the dialog, and no ack is sent', async () => {
+    localStorage.setItem('loore_circle_ai_reply_ack_2_10', 'true');
+    routes['/nodes/10'] = withKey('', []);
+    renderAt('/node/10');
+    await screen.findByText('A shared entry.');
+    await press('LLM Response');
+    expect(screen.queryByRole('heading', { name: 'Generate an AI reply?' })).toBeNull();
+    await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
+    expect(mockPost.mock.calls[0][1]).not.toHaveProperty('ai_reads_ack');
+  });
+
+  test('the server says the list changed: the dialog opens again with the new list, and the retry carries the new key', async () => {
+    // The stored tick is for the list the page was loaded with.
+    localStorage.setItem('loore_circle_ai_reply_ack_2_10', 'key-1');
+    routes['/nodes/10'] = withKey();
+    mockPost.mockRejectedValueOnce(changedAnswer);
+    renderAt('/node/10');
+    await screen.findByText('A shared entry.');
+    await press('LLM Response');
+
+    expect(await screen.findByRole('heading', { name: 'Generate an AI reply?' }))
+      .toBeInTheDocument();
+    expect(mockPost).toHaveBeenCalledTimes(1);
+    expect(mockPost.mock.calls[0][1].ai_reads_ack).toBe('key-1');
+    expect(screen.getByText(
+      '@anna and @chidi will see it, marked with your name. '
+      + 'Your AI reads your profile and whole archive of writing for this reply '
+      + 'and could share private information from them.',
+    )).toBeInTheDocument();
+
+    await press('Generate');
+    await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(2));
+    expect(mockPost.mock.calls[1]).toEqual(['/nodes/10/llm', {
+      model: 'ben-model', source_mode: 'textmode', ai_reads_ack: 'key-2',
+    }]);
+  });
+
+  test('Cancel after the list changed sends nothing more', async () => {
+    localStorage.setItem('loore_circle_ai_reply_ack_2_10', 'key-1');
+    routes['/nodes/10'] = withKey();
+    mockPost.mockRejectedValueOnce(changedAnswer);
+    renderAt('/node/10');
+    await screen.findByText('A shared entry.');
+    await press('LLM Response');
+    await screen.findByRole('heading', { name: 'Generate an AI reply?' });
+    await press('Cancel');
+    expect(mockPost).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: 'LLM Response' })).toBeEnabled();
+  });
+
+  test('"Only me": no dialog and no ack, whatever the key', async () => {
+    mockUser = { ...BEN, craft_mode: true };
+    routes['/nodes/10'] = withKey();
+    renderAt('/node/10');
+    await screen.findByText('A shared entry.');
+    await press('Only me');
+    await press('LLM Response');
+    expect(screen.queryByRole('heading', { name: 'Generate an AI reply?' })).toBeNull();
+    await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
+    expect(mockPost.mock.calls[0]).toEqual(['/nodes/10/llm', {
+      model: 'ben-model', source_mode: 'textmode', privacy_level: 'private',
+    }]);
   });
 });
 
