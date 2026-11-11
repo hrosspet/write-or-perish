@@ -262,8 +262,8 @@ def test_sync_and_batch_send_the_same_bytes(app, monkeypatch,
 
 
 def test_the_replies_keep_their_place_in_the_thread(app):
-    """The system node renders nothing; its replies keep their index
-    paths, so the thread reads as the session it was."""
+    """The system node renders nothing; its replies keep their labels,
+    so the thread reads as the session it was."""
     from backend.tasks.exports import render_profile_window
     alice, _base = _corpus()
 
@@ -272,7 +272,7 @@ def test_the_replies_keep_their_place_in_the_thread(app):
     thread1 = content[content.index("# Thread 1"):content.index("# Thread 2")]
     assert "[1]" not in thread1
     assert thread1.index("[1.1] User (alice)") < thread1.index("ENTRYONE")
-    assert "[1.1.1] AI (gpt-5)" in thread1
+    assert "## [1.2] AI (gpt-5)" in thread1
     assert thread1.index("ENTRYONE") < thread1.index("AIREPLYONE") \
         < thread1.index("AIANSWERONE") < thread1.index("ENTRYTWO")
 

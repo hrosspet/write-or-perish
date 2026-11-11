@@ -231,7 +231,8 @@ def test_a_run_of_deleted_entries_between_two_kept_ones_is_one_line(app, alice):
     assert "FIRST ENTRY" in window and "LAST ENTRY" in window
     assert window.count("deleted by author") == 1
     assert "[40 nodes deleted by author]" in window
-    assert "[1.1.1.1] User (alice)" in window   # the last entry, one level down
+    # The last entry: the run of deleted entries takes one number (#592).
+    assert "## [1.3] User (alice)" in window
     assert "GONE" not in window
 
 

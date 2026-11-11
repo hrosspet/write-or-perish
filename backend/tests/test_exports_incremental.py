@@ -1172,10 +1172,14 @@ class TestFormatNodeTreeDeepChain:
         i_b1 = text.index("UNDER-TOMBSTONE")
         assert i_root < i_a < i_a1 < i_tomb < i_b1
         assert "CHILD-B" not in text  # deleted content never renders
-        assert text.count("---\n**BRANCH**\n---") == 1
-        # index paths: A=1.1, A1=1.1.1, B(tombstone)=1.2, B1=1.2.1
-        assert "[1.1] " in text and "[1.1.1] " in text
-        assert "[1.2] " in text and "[1.2.1] " in text
+        assert text.count("**BRANCH") == 1
+        assert "---\n**BRANCH: another reply to 1**\n---" in text
+        # Labels (#592): the root's two replies start branches a and b;
+        # A1 continues branch a, B1 continues branch b under B's
+        # placeholder. One heading level per branch point.
+        assert "## [1] " in text
+        assert "### [1a.1] " in text and "### [1a.2] " in text
+        assert "### [1b.1] " in text and "### [1b.2] " in text
         assert b1.id is not None  # silence unused warnings
 
 
