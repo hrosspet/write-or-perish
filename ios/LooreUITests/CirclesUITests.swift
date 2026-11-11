@@ -44,7 +44,8 @@ final class CirclesUITests: XCTestCase {
 
     private func id(_ key: String) throws -> Int { try XCTUnwrap(try json("ids.json")[key] as? Int, "no id \(key)") }
 
-    private func launch(as user: String, route: String?, skipUpdates: Bool = true) throws -> XCUIApplication {
+    private func launch(as user: String, route: String?, skipUpdates: Bool = true,
+                        autoGenerateOff: Bool = false) throws -> XCUIApplication {
         let cookie = try XCTUnwrap(try json("cookies.json")[user] as? String, "no cookie for \(user)")
         let backend = try XCTUnwrap(env["LOORE_BACKEND_URL"].flatMap { $0.isEmpty ? nil : $0 },
                                     "set TEST_RUNNER_LOORE_BACKEND_URL (the scratch backend, not :5010)")
@@ -56,6 +57,8 @@ final class CirclesUITests: XCTestCase {
             app.launchArguments += ["-loore.debug.localFrontendURL", frontend]
         }
         if let route { app.launchArguments += ["-LooreRoute", route] }
+        // On one's own node LLM Response shows with auto-generate off (as on main).
+        if autoGenerateOff { app.launchArguments += ["-loore_auto_generate", "NO"] }
         app.launch()
         return app
     }
@@ -141,7 +144,8 @@ final class CirclesUITests: XCTestCase {
         bringIntoView(app, chip)
         chip.tap()
         let sentence = element(app, "circles.sentence")
-        let named = NSPredicate(format: "label == %@", "@ben can read this entry and reply to it. Nobody else can.")
+        // dana joined Close friends with "Only new entries": a new entry is hers to read.
+        let named = NSPredicate(format: "label == %@", "@ben and @dana can read this entry and reply to it. Nobody else can.")
         wait(for: [expectation(for: named, evaluatedWith: sentence)], timeout: 10)
         bringIntoView(app, sentence)
         let send = element(app, "nodeForm.send.new")
@@ -323,6 +327,87 @@ final class CirclesUITests: XCTestCase {
         XCTAssertFalse(app.buttons["privacy.choice.public"].exists, "Everyone is offered where the server refuses it")
         sleep(1)
         snapshot("29-ben-reply-under-own-private-ai")
+    }
+
+    // MARK: 10–13. Second review: Only-me branches, the sentence before sharing
+
+    /// An AI reply under one's own Only-me AI reply in a thread whose prompt
+    /// reads the member's data: asked about in the private wording, then made.
+    private func onlyMeAIReply(on key: String, shot: String) throws {
+        let app = try launch(as: "ben", route: "/node/\(try id(key))", autoGenerateOff: true)
+        waitForFocal(app)
+        let llm = app.buttons["thread.llmResponse"]
+        bringIntoView(app, llm)
+        XCTAssertTrue(llm.exists, "no LLM Response under ben's own Only-me node")
+        llm.tap()
+        let confirm = app.buttons["circles.replyConfirm"]
+        XCTAssertTrue(confirm.waitForExistence(timeout: 10), "the private AI dialog did not open")
+        XCTAssertTrue(app.staticTexts["Generate an AI reply?"].exists)
+        XCTAssertTrue(text(app, containing: "Only you will see it. Your AI reads your profile").exists)
+        XCTAssertFalse(text(app, containing: "will see it, marked with your name").exists)
+        snapshot("\(shot)a-dialog")
+        confirm.tap()
+        XCTAssertTrue(text(app, containing: "Stub reply from").waitForExistence(timeout: 30), "no AI reply was made")
+        XCTAssertFalse(element(app, "thread.readers").exists, "an Only-me reply has no readers")
+        sleep(2)
+        snapshot("\(shot)b-reply")
+    }
+
+    func test10AnAIReplyUnderOnesOwnOnlyMeAIReply() throws {
+        try onlyMeAIReply(on: "bens_agentic_private_ai", shot: "30")
+    }
+
+    func test11AnAIReplyInOnesOnlyMeBranch() throws {
+        try onlyMeAIReply(on: "bens_private_note", shot: "31")
+    }
+
+    func test12TheEditSentenceNamesOnlyWhoCanReadTheEntry() throws {
+        let app = try launch(as: "anna", route: "/node/\(try id("entry"))")
+        waitForFocal(app)
+        element(app, "thread.focalKebab").tap()
+        app.buttons["Edit"].firstMatch.tap()
+        let sentence = element(app, "circles.sentence")
+        XCTAssertTrue(sentence.waitForExistence(timeout: 15), "no readers sentence in the edit form")
+        bringIntoView(app, sentence)
+        let named = NSPredicate(format: "label == %@", "@ben and @chidi can read this entry and reply to it. Nobody else can.")
+        wait(for: [expectation(for: named, evaluatedWith: sentence)], timeout: 10)
+        XCTAssertFalse(sentence.label.contains("@dana"), "dana was added after the entry was shared: she does not read it")
+        snapshot("32-anna-edit-sentence")
+    }
+
+    func test13ANameTheSentenceDidNotNameStopsTheShare() throws {
+        let app = try launch(as: "anna", route: "/textmode")
+        let editor = element(app, "nodeForm.text.new")
+        XCTAssertTrue(editor.waitForExistence(timeout: 20), "no new entry form")
+        editor.tap()
+        editor.typeText("An entry for the people the sentence names.")
+        let circles = app.buttons["privacy.choice.circles"]
+        bringIntoView(app, circles)
+        circles.tap()
+        let chip = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'circles.chip.'")).firstMatch
+        XCTAssertTrue(chip.waitForExistence(timeout: 10))
+        bringIntoView(app, chip)
+        chip.tap()
+        let sentence = element(app, "circles.sentence")
+        let before = NSPredicate(format: "label == %@", "@ben and @dana can read this entry and reply to it. Nobody else can.")
+        wait(for: [expectation(for: before, evaluatedWith: sentence)], timeout: 10)
+        let names = element(app, "circles.names")
+        bringIntoView(app, names)
+        names.tap()
+        names.typeText("@chidi")      // not finished: the sentence does not name chidi yet
+        let send = element(app, "nodeForm.send.new")
+        bringIntoView(app, send)
+        send.tap()
+        let stopped = text(app, containing: "Who can read this has changed. Check the names above, then share again.")
+        XCTAssertTrue(stopped.waitForExistence(timeout: 10), "a reader the sentence did not name was shared with")
+        let after = NSPredicate(format: "label == %@",
+                                "@ben, @chidi and @dana can read this entry and reply to it. Nobody else can.")
+        wait(for: [expectation(for: after, evaluatedWith: sentence)], timeout: 10)
+        sleep(1)
+        snapshot("33-anna-share-stopped")
+        // Nothing was saved: the draft is discarded so no entry or draft stays.
+        let discard = element(app, "nodeForm.discardDraft")
+        if discard.exists && discard.isHittable { discard.tap() }
     }
 
     // MARK: 8. The note about a shared entry
