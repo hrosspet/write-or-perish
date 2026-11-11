@@ -288,7 +288,8 @@ def test_streamed_text_is_the_legacy_text(app, ex, alice, bob, monkeypatch,
     # The fixture renders what it is meant to.
     assert "# Tweets by alice (imported from Twitter/X) — 3 tweets" in legacy
     assert "# Tweets by alice (imported from Twitter/X) — 2 tweets" in legacy
-    assert "**BRANCH**" in legacy
+    # #592's separator names the entry the branch replies to.
+    assert "**BRANCH: another reply to " in legacy
     assert "[Node deleted by author]" in legacy
     assert "[Reply not accessible]" in legacy
     assert "BOB PUBLIC REPLY" in legacy

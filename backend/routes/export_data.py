@@ -2869,8 +2869,10 @@ def _render_order(roots, user_id):
             seen.add(n.id)
             if can_user_access_node(n, user_id):
                 order.append(n)
+            # Replies in the render's order: oldest first, the id
+            # settling a tie (_filtered_children, #592).
             stack.extend(reversed(sorted(
-                n.children, key=attrgetter("created_at"))))
+                n.children, key=attrgetter("created_at", "id"))))
     return order
 
 
