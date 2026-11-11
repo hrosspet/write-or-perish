@@ -1120,6 +1120,23 @@ def _load_node_chain(parent_node, user_id):
     return node_chain
 
 
+def _quotable_for_thread(node):
+    """For the text of *node*, which someone other than the requester
+    wrote into the thread: the test a {quote:ID} in it must pass to be
+    resolved. The quoted node must be readable by every reader of
+    *node*. Another person's node that the requester reads is public,
+    so the quoted node must be public too. Any other quote stays as
+    written, as the thread page shows it to a reader who cannot open
+    the quoted node; the requester's own access to it does not count."""
+
+    def ok(node_id):
+        quoted = db.session.get(Node, node_id)
+        if quoted is None or quoted.deleted_at is not None:
+            return False
+        return quoted.privacy_level == "public"
+    return ok
+
+
 def _turn_still_readable(node_ids):
     """True while every alive node in *node_ids* lets AI read it (chat /
     train), read from the database rather than the session's copies: the
@@ -4610,7 +4627,12 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     if is_llm_node:
                         role = "assistant"
                         message_text = f"{time_prefix} {node_content}"
-                        if has_ext_quotes(node_content):
+                        # Saved references resolve against the requester:
+                        # only in their own replies. Another person's
+                        # reply keeps its markers as written and names
+                        # none of the requester's marks.
+                        if has_ext_quotes(node_content) and (
+                                node_is_users(node, user_id)):
                             quoted_ext_ids.extend(
                                 find_ext_quote_ids(node_content))
                             if node.id in ca_reply_ids:
@@ -4772,15 +4794,25 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             replaced_recent_raw
                             or USER_RECENT_RAW_PLACEHOLDER in filled)
                         # Resolve {quote:ID} placeholders if present
+                        # In text another person wrote (a public thread),
+                        # a quote resolves only when every reader of that
+                        # text can read the quoted node; a saved reference
+                        # (the requester's own) never does. In the
+                        # requester's own nodes, as before.
+                        others_text = not node_is_users(node, user_id)
                         if needs_quotes and has_quotes(message_text):
                             message_text, resolved_ids = resolve_quotes(
-                                message_text, user_id, for_llm=True, tz_name=user_tz)
+                                message_text, user_id, for_llm=True,
+                                tz_name=user_tz,
+                                only=(_quotable_for_thread(node)
+                                      if others_text else None))
                             if resolved_ids:
                                 logger.info(f"Resolved quotes for node IDs: {resolved_ids}")
                                 licence.note_nodes(resolved_ids)
                         # Resolve {quote_ext:ID} (saved references) inline —
                         # small, non-recursive, owner-only.
-                        if has_ext_quotes(message_text):
+                        if has_ext_quotes(message_text) and (
+                                not others_text):
                             message_text, ext_ids = resolve_ext_quotes(
                                 message_text, user_id, for_llm=True)
                             licence.note_external(ext_ids)
