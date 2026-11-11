@@ -311,6 +311,20 @@ final class CirclesUITests: XCTestCase {
         snapshot("27-ben-shared-prompt-placeholders")
     }
 
+    // MARK: 9. A reply under one's own Only-me AI reply
+
+    func test9AReplyUnderOnesOwnPrivateAIReplyIsOnlyMe() throws {
+        let app = try launch(as: "ben", route: "/node/\(try id("bens_private_ai"))")
+        waitForFocal(app)
+        let note = text(app, containing: "You are replying under a node only you can read")
+        bringIntoView(app, note, swipes: 10)
+        XCTAssertTrue(note.exists, "the reply form does not say the reply is Only me")
+        XCTAssertFalse(app.buttons["privacy.choice.circles"].exists, "Circles is offered where the server refuses it")
+        XCTAssertFalse(app.buttons["privacy.choice.public"].exists, "Everyone is offered where the server refuses it")
+        sleep(1)
+        snapshot("29-ben-reply-under-own-private-ai")
+    }
+
     // MARK: 8. The note about a shared entry
 
     func test8TheUpdatesSheetHasTheShareNote() throws {
