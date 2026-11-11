@@ -1094,16 +1094,25 @@ privacy select is greyed out (`SelectField.unavailable`), as on the web.
   own); a placeholder without one shows as its own text.
 - The footer of a labelled AI reply ("GPT-6 Luna via @ben") puts the label on its own line: in one row
   with the date and the icons it was cut to "GPT-6 Luna…" (found in the simulator run).
+- **A reply under one's own Only-me node in someone else's shared thread** (2026-11-11, third review):
+  `NodeDetail.replyOnlyPrivate` (`reply_only_private`, sent by `GET /nodes/<id>` for such a node);
+  `NodeFormModel.onlyMe` then sends `private`, offers no discussion share, and `PrivacySelectorView(onlyMe:)`
+  shows "Only you. You are replying under a node only you can read, in a thread someone else shared."
+  instead of the three choices (the server refuses Everyone and another audience there).
+- A shared prompt for a reader also carries the reader's own `recent` summary and `recent_raw` window
+  (server side; the views already show both).
 - `-LooreResetState YES` also forgets the per-thread Circles choices (keys starting `loore_circle_`).
-- Tests: `CirclesTests.swift` (44: decoding from hand-written fixtures, wording, routes, the form's
-  submit paths, the thread's rules, the agreement key). `CirclesUITests` (8 methods) walks the screens
+- Tests: `CirclesTests.swift` (45: decoding from hand-written fixtures, wording, routes, the form's
+  submit paths, the thread's rules, the agreement key, the Only-me reply form). `CirclesUITests` (9 methods) walks the screens
   against a scratch backend (native Flask on sqlite on its own port, fake users, the model call
   stubbed): the add-person dialog, rename, new circle, the picker's readers sentence and Share button,
   the discussion toggle in the edit form, the readers popover, the reply dialog, the AI dialog with
   and without the artifacts sentence, a generated reply with its label, "Only me", a shared prompt
-  with the reader's own profile and bare placeholders, the Updates note. Inputs: `TEST_RUNNER_LOORE_E2E_DIR`
-  (folder with `cookies.json` and `ids.json`), `TEST_RUNNER_LOORE_BACKEND_URL`,
+  with the reader's own profile and bare placeholders, the Updates note, the reply form under one's own
+  Only-me AI reply. Inputs: `TEST_RUNNER_LOORE_E2E_DIR`
+  (folder with `cookies.json` and `ids.json`, which also needs `bens_private_ai`), `TEST_RUNNER_LOORE_BACKEND_URL`,
   `TEST_RUNNER_LOORE_FRONTEND_URL`, `TEST_RUNNER_LOORE_SCREENSHOT_DIR`. Run 2026-11-11 on the
-  "Loore Circles iPhone 17" simulator: 8 of 8 pass.
+  "Loore Circles iPhone 17" simulator: 8 of 8 pass; after the third review 9 of 9 (a fresh scratch
+  backend on its own port, three fake users, the model call stubbed).
 - Not checked: a phone; light theme; Dynamic Type at accessibility sizes on the Circles screens.
 
