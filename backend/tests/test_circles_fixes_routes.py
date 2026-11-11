@@ -52,7 +52,7 @@ def test_a_public_agentic_prompt_needs_the_agreement_on_the_route(app):  # noqa:
     assert r.status_code == 200, r.get_json()
     ben = _client(app, "ben")
     audience = ben.get(f"/api/nodes/{entry}").get_json()["audience"]
-    assert audience["ai_reads"] == [cz.TOOLS_NAME]
+    assert audience["ai_reads"] == [cz.TOOLS_ONLY_NAME]
     key = audience["ai_reads_key"]
     assert key
     r = ben.post(f"/api/nodes/{entry}/llm", json={})

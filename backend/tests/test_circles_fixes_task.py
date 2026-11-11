@@ -69,7 +69,7 @@ def test_a_public_agentic_prompt_needs_the_agreement(app, circles):  # noqa: F81
     w = _public_prompt_world()
     ben, anna, entry = w["ben"], w["anna"], w["entry"]
     names, key = cz.ai_reply_reads(entry, ben.id)
-    assert names == [cz.TOOLS_NAME]
+    assert names == [cz.TOOLS_ONLY_NAME]
     assert key
     # No agreement: no model call, the reply fails with the message.
     assert _ask(w, ben, entry, key="") is None

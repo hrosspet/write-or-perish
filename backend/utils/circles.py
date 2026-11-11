@@ -513,6 +513,10 @@ _PLACEHOLDER_NAMES = (
 # else its tools look up (...) for this reply ...".
 TOOLS_NAME = ("anything else its tools look up (your artifacts, to-do list "
               "and writing)")
+# The same when the tools are all a prompt asks for (a public agentic
+# prompt someone else wrote): "Your AI reads your artifacts, to-do list
+# and writing through its tools for this reply ...".
+TOOLS_ONLY_NAME = "artifacts, to-do list and writing through its tools"
 AI_READS_MARKER = "_circle_ai_reads"
 AI_READS_CHANGED_CODE = "circle_ai_reads_changed"
 AI_READS_CHANGED = (
@@ -621,7 +625,7 @@ def ai_reply_reads(node, user_id):
     names = sorted(found, key=order.index)
     theirs = agreement_prompts(chain, user_id)
     if theirs and chain_has_agentic_prompt(theirs):
-        names.append(TOOLS_NAME)
+        names.append(TOOLS_NAME if names else TOOLS_ONLY_NAME)
     return names, prompts_key({n.id: n.get_content() or "" for n in theirs})
 
 
