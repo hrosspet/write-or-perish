@@ -1165,6 +1165,26 @@ def _is_agentic_prompt(node_chain):
     return chain_has_agentic_prompt(node_chain)
 
 
+def _reply_in_others_thread(llm_node, parent_node, node_chain, system_node,
+                            user_id):
+    """True for a reply other people can read, asked for in a thread
+    whose root or prompt *user_id* does not own. Like the profile (#483:
+    an AI reply in someone else's public thread uses no profile), the
+    tools that read or write the user's own data stay out of it: it
+    works with the thread alone. A private reply, and every reply in
+    the user's own threads, keep them."""
+    if llm_node.privacy_level == "private":
+        return False
+    if system_node is not None and not node_is_users(system_node, user_id):
+        return True
+    from backend.utils.thread_tree import thread_root_of
+    root_id = thread_root_of([parent_node.id]).get(parent_node.id)
+    root = db.session.get(Node, root_id) if root_id is not None else None
+    if root is None:
+        root = node_chain[0] if node_chain else parent_node
+    return not node_is_users(root, user_id)
+
+
 def _find_pending_todo_draft(node_chain, user_id):
     """Walk the node chain to find a pending todo draft."""
     for node in reversed(node_chain):
@@ -4162,6 +4182,10 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
             # Detect if this is an agentic session (enables tools)
             is_agentic = _is_agentic_prompt(node_chain)
+            # A reply others can read, in someone else's thread: no tool,
+            # no earlier tool result delivered again, no proposal (#483).
+            in_others_thread = _reply_in_others_thread(
+                llm_node, parent_node, node_chain, system_node, user_id)
             # semantic_search / read_full are on for everyone under the env
             # killswitch (#329); the "External references" Account toggle
             # only decides, inside the handler, whether the search also
@@ -4169,12 +4193,12 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # config-only list so the cached tool prefix matches (#187).
             agentic_tools = (
                 gated_voice_tools(flask_app.config)
-                if is_agentic else None)
+                if is_agentic and not in_others_thread else None)
 
             # Check for pending drafts and inject context notes: only
             # proposals the user can accept (utils/proposals).
             pending_draft_note = None
-            if is_agentic:
+            if is_agentic and not in_others_thread:
                 pending = _find_pending_todo_draft(node_chain, user_id)
                 if pending and is_own_live_proposal(
                         Node.query.get(pending.parent_id), user_id,
@@ -4305,7 +4329,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             proposal_notes = []
             proposal_to_mark = []
             inline_shown = set()
-            if is_agentic:
+            if is_agentic and not in_others_thread:
                 proposal_notes, proposal_to_mark = (
                     _scan_proposal_statuses(
                         node_chain, user_id, licence=licence)
@@ -4661,6 +4685,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                             f"{node.id}]"
                                         )
                                     elif (ename == "update_artifact"
+                                          and not in_others_thread
                                           and (node.human_owner_id
                                                or node.user_id) == user_id):
                                         # The user's own replies only: on
@@ -5171,7 +5196,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
                 # Step 5b: Execute tool calls if any
                 f_tool_meta = None
-                if f_tool_calls:
+                if f_tool_calls and in_others_thread:
+                    # None was offered (#483); a call is not run.
+                    logger.warning(
+                        "Node %s: ignoring %d tool call(s) in a reply in "
+                        "someone else's thread", target_node.id,
+                        len(f_tool_calls))
+                elif f_tool_calls:
                     logger.info(
                         f"Executing {len(f_tool_calls)} tool calls")
                     tool_results = _execute_tool_calls(
@@ -5190,7 +5221,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # is_agentic): its verdict is no proposal, and the todo
                 # merge would run on the read's model, which may be read
                 # only (2026-10-02).
-                if is_agentic and not needs_ca and not resp.get("cut_off"):
+                if (is_agentic and not needs_ca and not in_others_thread
+                        and not resp.get("cut_off")):
                     auto_drafts = _auto_create_drafts(
                         f_llm_text, target_node, node_chain, user_id
                     )
@@ -5300,7 +5332,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # preambles ("noting this in memory") as the whole answer.
             rounds_done = 0
             while True:
-                response_tool_calls = response.get("tool_calls", [])
+                # In someone else's thread no tool was offered, so a call
+                # is not run (#483; ignored again at the final step).
+                response_tool_calls = (
+                    [] if in_others_thread
+                    else response.get("tool_calls", []))
                 # Quote markers ({quote:...} / {quote_ext:...}) are PURE
                 # PRESENTATION — they render as cards and never trigger a
                 # round. Query intent is a separate explicit act: the
