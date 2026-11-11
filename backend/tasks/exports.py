@@ -1272,6 +1272,19 @@ def _window_set_under(lineage):
     return None
 
 
+def _profile_run_active(user):
+    """Whether a profile run of ``user``'s is under way: an advance holds
+    the user's run lock, or a profile task holds the user's guard and is
+    not stale. An advance renders its windows for minutes before anything
+    is in the batch, into the set it chose when it started; a re-tip made
+    meanwhile would be left behind by the windows it saves later (review
+    of #637)."""
+    from backend.tasks import profile_windows as pw
+    if pw._running_run(user.id) is not None:
+        return True
+    return bool(user.profile_generation_task_id) and not _is_task_stale(user)
+
+
 def _copy_set_row(row, set_id, created_at, parent_id):
     """A copy of the window set row ``row`` (a window or a group) in set
     ``set_id``. The stored text is copied as stored, encrypted when the
@@ -1315,14 +1328,15 @@ def _retip_window_set(user_id, set_id, earliest):
 
     Returns ``("revert", copy)``, or None when the set is not re-tipped:
     the window path is off, something of the user's set is in the batch
-    (a set in flight does not see an import, a known limit of #545), or
+    or a profile run of the user's is under way (``_profile_run_active``;
+    a set in flight does not see an import, a known limit of #545), or
     nothing before the date can be kept. The caller then flags a rebuild
     from scratch, as before."""
     from backend.tasks import profile_windows as pw
     from backend.utils.profile_versions import latest_set_final
     user = db.session.get(User, user_id)
     if (user is None or not set_id or not pw.enabled()
-            or pw.inflight_items(user_id)):
+            or pw.inflight_items(user_id) or _profile_run_active(user)):
         return None
     windows = pw.set_windows(user_id, set_id)
     kept = [w for w in windows if w.source_data_cutoff is not None

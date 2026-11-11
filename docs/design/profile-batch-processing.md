@@ -683,8 +683,13 @@ The versions of the user's the profile in use carries are recorded for
 the new final (`plan_user_version_merge`), and a version the user saved on
 the set's final is re-tipped the same way (`_window_set_under`). No window
 ends before the date: the set's base is re-tipped as a chain, when the set
-has a final. Anything of the user's set in the batch, or the window path
-off: the rebuild from scratch, as before.
+has a final (that copy is written through `retip_profile_chain`, which
+decrypts and encrypts the version it copies, as main's chain re-tip
+does). Anything of the user's set in the batch, a profile run under way
+(an advance holding the user's run lock renders into the set it chose
+before anything is in the batch; or a profile task holding the guard),
+the window path off, or a set built on the user's edit of an older set's
+final with nothing to keep: the rebuild from scratch, as before.
 
 **Known limits.** An import older than a set's windows while the set is in
 flight is not seen by that set (as for a chained build's first chunk); its

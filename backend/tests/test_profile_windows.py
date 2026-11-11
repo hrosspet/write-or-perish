@@ -1789,6 +1789,54 @@ def test_an_import_inside_a_sets_first_window_retips_its_base(world):
     assert ex.profile_update_base(u.id).id == copy.id
 
 
+def test_an_import_while_an_advance_renders_is_read_by_a_rebuild(
+        world, redis, monkeypatch):
+    """Review of #637: an advance renders its windows into the set it chose
+    for minutes before anything is in the batch. An import that arrives
+    then is not re-tipped into a new set the advance would leave behind:
+    the rebuild from scratch, as before, and it reads the import."""
+    u = _user()
+    base = _profile(u, gen_type="update", cutoff=T0, units=WINDOW_UNITS)
+    rows = _set_of(u, 6, base=base)
+    _corpus_for(world, rows)
+    _finish(world, u)
+    world.corpus.add(200)                 # new writing after the set
+    real = pw._render_windows
+    race = {}
+
+    def import_while_rendering(user, state, *a, **k):
+        if not race:
+            race["inside"] = _import_inside(world, rows, 2)
+            race["action"] = ex.revert_profile_for_import(
+                user.id, race["inside"])[0]
+        return real(user, state, *a, **k)
+
+    monkeypatch.setattr(pw, "_render_windows", import_while_rendering)
+    before = len(_items("window"))
+    _build(world, u, rounds=10)
+    assert race["action"] == "full"
+    inside = race["inside"]
+    covering = [i for i in _items("window")[before:]
+                if (i["start"] is None or pw._dt(i["start"]) < inside)
+                and pw._dt(i["cutoff"]) >= inside]
+    assert covering                     # a window read the imported entry
+    assert db.session.get(User, u.id).profile_needs_full_regen is False
+
+
+def test_an_import_while_a_profile_task_runs_rebuilds_from_scratch(
+        world, monkeypatch):
+    u = _user()
+    rows = _set_of(u, 6)
+    _corpus_for(world, rows)
+    _finish(world, u)
+    u.profile_generation_task_id = "t-running"
+    db.session.commit()
+    monkeypatch.setattr(pw._exports, "_is_task_stale", lambda user: False)
+    action, _v = ex.revert_profile_for_import(
+        u.id, rows[3].source_data_cutoff - timedelta(hours=2))
+    assert action == "full" and u.profile_needs_full_regen is True
+
+
 def test_an_import_while_the_set_is_in_flight_rebuilds_from_scratch(world):
     """A set with work in the batch does not see an import (a known limit
     of #545): the rebuild from scratch, as before #625."""

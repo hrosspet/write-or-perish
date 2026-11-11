@@ -474,3 +474,34 @@ def test_a_rerun_with_other_settings_keeps_what_the_first_run_changed(
     public = dict(chat, privacy_level="public")
     import_data.run_conversation_import(u.id, token, "t-second", public)
     assert [ts for _u, ts, _t in hand_offs] == [datetime(2021, 2, 1, 10, 0)]
+
+
+@pytest.mark.parametrize("covered", [False, True])
+def test_a_rerun_with_none_after_a_chat_run_asks_and_starts_nothing(
+        app, hand_offs, covered):
+    """Review of #637: the earlier run created entries with Chat and was
+    never handed off; the import confirmed again with None moves them out
+    of what AI reads. No rebuild starts; the question follows the Chat to
+    None rule (asked only when the profile in use reaches those entries)."""
+    from backend.routes import import_data
+    from backend.utils import conversation_stash as cs
+    u, _client = _user(app, f"rerun_none_{covered}")
+    if covered:
+        _covered_by_a_profile(u, datetime(2024, 1, 1))
+    convs = [_conversation("a", "2021-02-01"), _conversation("b", "2022-02-01")]
+    token = import_data._stash_conversations(u.id, "chatgpt", convs, 4)
+    chat = {"privacy_level": "private", "ai_usage": "chat", "on_deleted": None}
+    state = import_data.create_conversation_nodes(
+        u.id, "chatgpt", enumerate(convs[:1]), "private", "chat", None,
+        state=import_data._new_conversation_state(chat))
+    cs.write_state(u.id, token, dict(state, task_id="t-first"))
+    result = import_data.run_conversation_import(
+        u.id, token, "t-second", dict(chat, ai_usage="none"))
+    assert hand_offs == []
+    assert {n.ai_usage for n in Node.query.filter_by(
+        human_owner_id=u.id).all()} == {"none"}
+    question = result["ask_profile_rebuild"]
+    if covered:
+        assert question["entries"] == 2      # the earlier run's two entries
+    else:
+        assert question is None

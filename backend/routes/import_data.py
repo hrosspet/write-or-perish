@@ -2827,13 +2827,16 @@ def _run_conversation_import(user_id, token, task_id, options, *,
     if not state or state.get("options") != options:
         earlier = state
         state = _new_conversation_state(options)
-        if earlier:
+        earlier_usage = ((earlier or {}).get("options") or {}).get("ai_usage")
+        if earlier and ((earlier_usage in AI_ALLOWED)
+                        == (options.get("ai_usage", "none") in AI_ALLOWED)):
             # The entries an earlier run of this import changed are in
             # Loore and were never handed to the profile (#625): this run
-            # skips them as they are now, so they count here.
-            _ProfileChanges.from_state(
-                earlier, (earlier.get("options") or {}).get("ai_usage")
-            ).to_state(state)
+            # skips them as they are now, so they count here. Only when
+            # both runs are on the same side of None: otherwise this run
+            # moves those entries across it and counts them itself (Chat
+            # to None then asks; review of #637).
+            _ProfileChanges.from_state(earlier, earlier_usage).to_state(state)
 
     def save(st):
         cs.write_state(user_id, token, dict(st, task_id=task_id))
