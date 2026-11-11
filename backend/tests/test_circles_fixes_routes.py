@@ -269,12 +269,12 @@ def test_a_members_only_me_branch_works_like_his_private_thread(app):  # noqa: F
                privacy="private")
     assert r.status_code == 201, r.get_json()
     note = r.get_json()["id"]
-    data = ben.get(f"/api/nodes/{note}").get_json()
-    assert data["reply_only_private"] is True
-    assert data["thread_ai_reads"]["ai_reads_key"] == key
     r = ben.post(f"/api/nodes/{note}/llm", json=ack)
     assert r.status_code == 202, r.get_json()
     deeper = r.get_json()["node_id"]
+    data = ben.get(f"/api/nodes/{note}").get_json()
+    assert data["reply_only_private"] is True
+    assert data["thread_ai_reads"]["ai_reads_key"] == key
     node = _node(deeper)
     assert node.privacy_level == "private" and node.audience_root_id == entry
     assert not _can_read(app, "anna", deeper)
