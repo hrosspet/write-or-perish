@@ -1095,7 +1095,7 @@ privacy select is greyed out (`SelectField.unavailable`), as on the web.
 - The footer of a labelled AI reply ("GPT-6 Luna via @ben") puts the label on its own line: in one row
   with the date and the icons it was cut to "GPT-6 Luna…" (found in the simulator run).
 - `-LooreResetState YES` also forgets the per-thread Circles choices (keys starting `loore_circle_`).
-- Tests: `CirclesTests.swift` (43: decoding from hand-written fixtures, wording, routes, the form's
+- Tests: `CirclesTests.swift` (44: decoding from hand-written fixtures, wording, routes, the form's
   submit paths, the thread's rules, the agreement key). `CirclesUITests` (8 methods) walks the screens
   against a scratch backend (native Flask on sqlite on its own port, fake users, the model call
   stubbed): the add-person dialog, rename, new circle, the picker's readers sentence and Share button,

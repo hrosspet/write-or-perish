@@ -128,6 +128,8 @@ enum DefaultsKey {
     /// own memory, apart from the typed reply's (web `aiReplyAckKey`). The
     /// value is the `ai_reads_key` the dialog showed (it counts only while
     /// the thread's key is still that one), or "1" when the thread had none.
+    /// An agreement given in the "Only me" dialog, which names no readers, is
+    /// stored as `private:<key>` and counts for "Only me" replies only.
     static func circleAiReplyAck(entryId: Int, userId: Int?) -> String {
         "loore_circle_ai_reply_ack_\(userId.map(String.init) ?? "")_\(entryId)"
     }

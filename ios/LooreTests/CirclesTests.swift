@@ -767,12 +767,25 @@ final class CirclesFormTests: StubbedAppTestCase {
             XCTAssertFalse(calls.contains("POST /api/nodes/31/llm"))
             model.showAIReplyDialog = false
         }
-        XCTAssertTrue(ThreadModel.aiReplyAcknowledged(stored: "k2", key: "k2"))
-        XCTAssertFalse(ThreadModel.aiReplyAcknowledged(stored: "k1", key: "k2"))
-        XCTAssertFalse(ThreadModel.aiReplyAcknowledged(stored: nil, key: ""))
+        typealias Go = ThreadModel.AIReplyGo
+        func standing(_ stored: String?, _ key: String, onlyMe: Bool = false) -> Go? {
+            ThreadModel.aiReplyStanding(stored: stored, key: key, onlyMe: onlyMe)
+        }
+        XCTAssertEqual(standing("k2", "k2"), Go(ack: "k2"))
+        XCTAssertNil(standing("k1", "k2"))
+        XCTAssertNil(standing(nil, ""))
+        // A shared agreement covers an "Only me" reply too, and sends the bare key.
+        XCTAssertEqual(standing("k2", "k2", onlyMe: true), Go(ack: "k2"))
+        // A private agreement covers "Only me" replies only.
+        XCTAssertEqual(standing("private:k2", "k2", onlyMe: true), Go(ack: "private:k2"))
+        XCTAssertNil(standing("private:k2", "k2"))
+        XCTAssertNil(standing("private:k1", "k2", onlyMe: true))
+        XCTAssertNil(standing("private:k2", ""), "a private value never holds in the no-key shared case")
         // A marker (or an older key) skips the dialog only when the thread has no key.
-        XCTAssertTrue(ThreadModel.aiReplyAcknowledged(stored: "1", key: ""))
-        XCTAssertFalse(ThreadModel.aiReplyAcknowledged(stored: "1", key: "k2"))
+        XCTAssertEqual(standing("1", ""), Go(ack: nil))
+        XCTAssertEqual(standing("true", ""), Go(ack: nil))
+        XCTAssertNil(standing("1", "k2"))
+        XCTAssertNil(standing("1", "k2", onlyMe: true))
     }
 
     func testAChangedListReopensTheDialogAndTheRetryCarriesTheNewKey() async {
@@ -894,16 +907,48 @@ final class CirclesFormTests: StubbedAppTestCase {
         await waitFor("POST /api/nodes/31/llm")
         let sent = body(of: "POST /api/nodes/31/llm")
         XCTAssertEqual(sent?["privacy_level"] as? String, "private")
-        XCTAssertEqual(sent?["ai_reads_ack"] as? String, "k1")
-        // The same stored key as for shared replies: neither kind is asked about again.
-        XCTAssertEqual(UserDefaults.standard.string(forKey: DefaultsKey.circleAiReplyAck(entryId: 31, userId: 5)), "k1")
-        let again = await thread(keyedParent("k1"))
+        XCTAssertEqual(sent?["ai_reads_ack"] as? String, "private:k1", "the agreement given in the private dialog")
+        // The private dialog named no readers: its agreement is stored as private.
+        let ackKey = DefaultsKey.circleAiReplyAck(entryId: 31, userId: 5)
+        XCTAssertEqual(UserDefaults.standard.string(forKey: ackKey), "private:k1")
+        // The next private reply is not asked about, and sends the same value.
+        let again = await thread(keyedParent("k1", reads: #"["profile","memory"]"#))
+        XCTAssertTrue(again.aiReplyPrivate)
         let privateGo = await again.confirmAIReply()
-        XCTAssertEqual(privateGo, ThreadModel.AIReplyGo(ack: "k1"))
-        again.setAIReplyOnlyMe(false)
-        let sharedGo = await again.confirmAIReply()
-        XCTAssertEqual(sharedGo, ThreadModel.AIReplyGo(ack: "k1"))
+        XCTAssertEqual(privateGo, ThreadModel.AIReplyGo(ack: "private:k1"))
         XCTAssertFalse(again.showAIReplyDialog)
+        // A shared reply is asked about in the full dialog, naming the readers.
+        again.setAIReplyOnlyMe(false)
+        again.aiReplyPressed()
+        await waitForDialog(again)
+        XCTAssertTrue(again.showAIReplyDialog, "a private agreement must not skip the shared dialog")
+        XCTAssertFalse(again.aiReplyDialogOnlyMe)
+        XCTAssertEqual(calls.filter { $0 == "POST /api/nodes/31/llm" }.count, 0, "no bare key is sent before the shared dialog")
+        XCTAssertEqual(CircleReplyDialog.body(names: again.aiReplyNames, aiReply: true, aiReads: again.audience?.aiReads ?? [],
+                                              onlyMe: again.aiReplyDialogOnlyMe),
+                       "@anna, @ben and @chidi will see it, marked with your name. Your AI reads your profile and memory for this reply and could share private information from them.")
+        again.aiReplyConfirmed(dontAskAgain: true)
+        await waitFor("POST /api/nodes/31/llm")
+        let shared = body(of: "POST /api/nodes/31/llm")
+        XCTAssertEqual(shared?["ai_reads_ack"] as? String, "k1", "the bare key, after the shared dialog was confirmed")
+        XCTAssertNil(shared?["privacy_level"])
+        // Ticking the box there overwrites the private value with the bare key.
+        XCTAssertEqual(UserDefaults.standard.string(forKey: ackKey), "k1")
+    }
+
+    func testASharedAgreementSkipsThePrivateDialog() async {
+        clearAIReplyMemory()
+        defer { clearAIReplyMemory() }
+        UserDefaults.standard.set("k1", forKey: DefaultsKey.circleAiReplyAck(entryId: 31, userId: 5))
+        let model = await thread(keyedParent("k1"))
+        model.setAIReplyOnlyMe(true)
+        model.aiReplyPressed()
+        await waitFor("POST /api/nodes/31/llm")
+        XCTAssertFalse(model.showAIReplyDialog, "the shared dialog said more than the private one would")
+        let sent = body(of: "POST /api/nodes/31/llm")
+        XCTAssertEqual(sent?["privacy_level"] as? String, "private")
+        XCTAssertEqual(sent?["ai_reads_ack"] as? String, "k1", "the shared-scope agreement covers it: the bare key")
+        XCTAssertEqual(UserDefaults.standard.string(forKey: DefaultsKey.circleAiReplyAck(entryId: 31, userId: 5)), "k1")
     }
 
     func testAChangedListReopensThePrivateDialogToo() async {
@@ -916,7 +961,7 @@ final class CirclesFormTests: StubbedAppTestCase {
             if path(request) == "/api/nodes/31" { return .json(200, parent) }
             if path(request) == "/api/nodes/31/llm" {
                 let sent = (try? JSONSerialization.jsonObject(with: request.httpBody ?? Data())) as? [String: Any]
-                if (sent?["ai_reads_ack"] as? String) != "k2" {
+                if (sent?["ai_reads_ack"] as? String) != "private:k2" {
                     return .json(409, #"{"code":"circle_ai_reads_changed","error":"changed","ai_reads":["memory"],"ai_reads_key":"k2"}"#)
                 }
                 return .json(202, #"{"node_id":77,"status":"pending"}"#)
@@ -936,7 +981,7 @@ final class CirclesFormTests: StubbedAppTestCase {
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
         let sent = body(of: "POST /api/nodes/31/llm")
-        XCTAssertEqual(sent?["ai_reads_ack"] as? String, "k2")
+        XCTAssertEqual(sent?["ai_reads_ack"] as? String, "private:k2", "agreed in the private dialog")
         XCTAssertEqual(sent?["privacy_level"] as? String, "private")
         XCTAssertTrue(app.toasts.toasts.isEmpty)
     }

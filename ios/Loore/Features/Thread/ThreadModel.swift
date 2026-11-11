@@ -176,32 +176,49 @@ final class ThreadModel {
         var ack: String?
     }
 
-    /// "Don't ask again in this thread" holds for this thread as it is now:
-    /// with an `ai_reads_key`, only when the stored value is that key (the
-    /// list the user agreed to); without one, when anything is stored.
-    static func aiReplyAcknowledged(stored: String?, key: String) -> Bool {
-        guard let stored, !stored.isEmpty else { return false }
-        return key.isEmpty ? true : stored == key
+    /// The prefix of an agreement given in the "Only me" dialog. That dialog
+    /// names no readers, so its agreement covers "Only me" replies only.
+    static let aiReplyPrivateAckPrefix = "private:"
+
+    /// What the "Only me" dialog stores and sends for a key.
+    static func aiReplyPrivateAck(_ key: String) -> String { aiReplyPrivateAckPrefix + key }
+
+    /// Whether "Don't ask again in this thread" holds for the reply about to
+    /// be generated, and what it then sends as `ai_reads_ack`. nil: the
+    /// dialog is due.
+    /// - With an `ai_reads_key`: an agreement given in the shared dialog (the
+    ///   bare key is stored) covers shared and "Only me" replies and sends
+    ///   the bare key. One given in the "Only me" dialog (`private:<key>`)
+    ///   covers "Only me" replies only and sends `private:<key>`.
+    /// - Without a key: what the shared dialog stored ("1", or an older
+    ///   value) holds; a `private:` value never does.
+    static func aiReplyStanding(stored: String?, key: String, onlyMe: Bool) -> AIReplyGo? {
+        guard let stored, !stored.isEmpty else { return nil }
+        if key.isEmpty { return stored.hasPrefix(aiReplyPrivateAckPrefix) ? nil : AIReplyGo(ack: nil) }
+        if stored == key { return AIReplyGo(ack: key) }
+        if onlyMe && stored == aiReplyPrivateAck(key) { return AIReplyGo(ack: stored) }
+        return nil
     }
 
     /// Before an AI reply is generated in a shared thread the people who
     /// will see it are named ("Generate an AI reply?"), with what the
     /// requester's AI reads of their own. Not asked when "Don't ask again in
-    /// this thread" holds (`aiReplyAcknowledged`), or, in a thread with no
+    /// this thread" holds (`aiReplyStanding`), or, in a thread with no
     /// `ai_reads_key`, when the reply stays with the one generating it
     /// ("Only me") or nobody else reads the thread. With a key an "Only me"
     /// reply is asked about too, in the dialog's private variant: a prompt
     /// someone else shared still reads the requester's data. `force` asks
     /// whatever is stored (the server said the list changed). nil when the
-    /// user cancels.
+    /// user cancels. The `ack` is what the user agreed to in that scope: the
+    /// bare key from the shared dialog, `private:<key>` from the "Only me" one.
     func confirmAIReply(force: Bool = false) async -> AIReplyGo? {
         guard let audience else { return AIReplyGo(ack: nil) }
         let key = audience.aiReadsKey
-        let ack = key.isEmpty ? nil : key
         let onlyMe = aiReplyPrivate
+        let ack = key.isEmpty ? nil : (onlyMe ? Self.aiReplyPrivateAck(key) : key)
         if key.isEmpty && (onlyMe || aiReplyNames.isEmpty) { return AIReplyGo(ack: nil) }
         let stored = UserDefaults.standard.string(forKey: DefaultsKey.circleAiReplyAck(entryId: audience.entryId, userId: me?.id))
-        if !force && Self.aiReplyAcknowledged(stored: stored, key: key) { return AIReplyGo(ack: ack) }
+        if !force, let standing = Self.aiReplyStanding(stored: stored, key: key, onlyMe: onlyMe) { return standing }
         answerAIReplyDialog(false)
         let go = await withCheckedContinuation { continuation in
             aiReplyAnswer = continuation
@@ -230,11 +247,14 @@ final class ThreadModel {
     }
 
     /// The dialog's Generate button. "Don't ask again in this thread" stores
-    /// the key of the list that was shown, so it stops holding when the list changes.
+    /// the key of the list that was shown, so it stops holding when the list
+    /// changes; from the "Only me" dialog as `private:<key>`, so it never
+    /// stands in for the shared dialog, which names the readers.
     func aiReplyConfirmed(dontAskAgain: Bool) {
         if dontAskAgain, let audience {
-            UserDefaults.standard.set(aiReplyDialogKey.isEmpty ? Self.aiReplyAckMarker : aiReplyDialogKey,
-                                      forKey: DefaultsKey.circleAiReplyAck(entryId: audience.entryId, userId: me?.id))
+            let value = aiReplyDialogKey.isEmpty ? Self.aiReplyAckMarker
+                : (aiReplyDialogOnlyMe ? Self.aiReplyPrivateAck(aiReplyDialogKey) : aiReplyDialogKey)
+            UserDefaults.standard.set(value, forKey: DefaultsKey.circleAiReplyAck(entryId: audience.entryId, userId: me?.id))
         }
         answerAIReplyDialog(true)
         showAIReplyDialog = false
