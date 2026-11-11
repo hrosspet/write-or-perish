@@ -642,3 +642,96 @@ class TestVoiceTimingAdmin:
         _login(other_client, other.id)
         assert other_client.get(
             "/api/admin/voice-timing").status_code == 403
+
+
+class TestSpendCarry:
+    """#594: the Users tab shows the carry next to this month's spend,
+    which stays the real spend; the admin can clear it, and a limit of 0
+    clears it too."""
+
+    def _carried_user(self, users, carried_usd=30.0, spent_usd=25.0):
+        from backend.utils.spend import current_month
+        user = users["impostor"]
+        user.monthly_spend_limit_usd = 50.0
+        user.spend_carry_month = current_month()
+        user.spend_carry_microdollars = int(carried_usd * 1_000_000)
+        user.spend_blocked_month = current_month()   # $55 counted >= $50
+        _db.session.add(APICostLog(
+            user_id=user.id, model_id="claude-opus-4.6",
+            request_type="conversation",
+            cost_microdollars=int(spent_usd * 1_000_000)))
+        _db.session.commit()
+        return user
+
+    def _row(self, client, user_id):
+        rows = client.get("/api/admin/users").get_json()["users"]
+        return {u["id"]: u for u in rows}[user_id]
+
+    def test_the_list_shows_the_carry_and_the_real_spend(self, app, users):
+        user = self._carried_user(users)
+        client = app.test_client()
+        _login(client, users["renamed_admin"].id)
+        row = self._row(client, user.id)
+        assert row["spend_carried_usd"] == 30.0
+        assert row["current_month_spending_usd"] == 25.0
+        assert row["spend_blocked"] is True
+        assert self._row(client, users["renamed_admin"].id)[
+            "spend_carried_usd"] == 0
+
+    def test_clear_action(self, app, users):
+        user = self._carried_user(users)
+        client = app.test_client()
+        _login(client, users["renamed_admin"].id)
+        resp = client.post(f"/api/admin/users/{user.id}/clear_spend_carry")
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert body["spend_carried_usd"] == 0
+        assert body["spend_blocked"] is False
+        assert body["current_month_spending_usd"] == 25.0
+        row = self._row(client, user.id)
+        assert row["spend_carried_usd"] == 0
+        assert row["spend_blocked"] is False
+        assert APICostLog.query.filter_by(user_id=user.id).count() == 1
+
+    def test_clear_is_admin_only(self, app, users):
+        user = self._carried_user(users)
+        client = app.test_client()
+        _login(client, user.id)
+        resp = client.post(f"/api/admin/users/{user.id}/clear_spend_carry")
+        assert resp.status_code == 403
+        assert _db.session.get(User, user.id).spend_carry_microdollars \
+            == 30_000_000
+
+    def test_a_limit_of_zero_clears_the_carry(self, app, users):
+        user = self._carried_user(users)
+        client = app.test_client()
+        _login(client, users["renamed_admin"].id)
+        resp = client.put(f"/api/admin/users/{user.id}/update_spend_limit",
+                          json={"limit_usd": 0})
+        assert resp.get_json()["spend_carried_usd"] == 0
+        resp = client.put(f"/api/admin/users/{user.id}/update_spend_limit",
+                          json={"limit_usd": 50})
+        body = resp.get_json()
+        assert body["spend_carried_usd"] == 0
+        assert body["spend_blocked"] is False        # $25 of $50
+
+    def test_a_limit_set_after_none_carries_nothing(self, app, users):
+        """Last month the user had no limit and spent $500; the month has
+        not been rolled yet. A $50 limit set now starts from 0: the carry
+        is rolled with the limit in force when the month began."""
+        from backend.utils.spend import current_month, month_start
+        user = users["impostor"]
+        last = month_start() - timedelta(days=1)
+        user.monthly_spend_limit_usd = 0.0
+        user.spend_carry_month = current_month(last)
+        _db.session.add(APICostLog(
+            user_id=user.id, model_id="claude-opus-4.6",
+            request_type="conversation", cost_microdollars=500_000_000,
+            created_at=last))
+        _db.session.commit()
+        client = app.test_client()
+        _login(client, users["renamed_admin"].id)
+        body = client.put(f"/api/admin/users/{user.id}/update_spend_limit",
+                          json={"limit_usd": 50}).get_json()
+        assert body["spend_carried_usd"] == 0
+        assert body["spend_blocked"] is False

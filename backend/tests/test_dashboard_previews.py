@@ -55,7 +55,8 @@ USER_FIELDS = {
     "default_privacy_level", "default_ai_usage", "twitter_login",
     "twitter_handle", "pending_email", "pending_email_expired",
     "prefill_consent", "prefilled_handle", "has_own_entries", "timezone",
-    "spend_blocked", "share_v1_enabled", "share_v1_available",
+    "spend_blocked", "spend_cap_lifts_on", "share_v1_enabled",
+    "share_v1_available",
     "public_sharing_enabled", "external_content_available",
     "external_content_enabled",
 }
@@ -150,6 +151,29 @@ def test_without_a_profile_nothing_is_decrypted(app):  # noqa: F811
 
     assert decryptions == 0
     assert body["latest_profile"] is None
+
+
+def test_a_capped_user_gets_the_date_the_cap_lifts(app):  # noqa: F811
+    """#594: $110 carried into a $50 limit leaves $60 to carry into next
+    month, which holds the cap through it, so it lifts on the first of the
+    month after; the web shows that date. Not capped, the field is null."""
+    from backend.utils.spend import _month_first_day, current_month
+    alice, bob, _root = _world()
+    month = current_month()
+    alice.monthly_spend_limit_usd = 50.0
+    alice.spend_carry_month = month
+    alice.spend_carry_microdollars = 110_000_000
+    alice.spend_blocked_month = month
+    _db.session.commit()
+    user = _get(app, alice, APP_LOAD)["user"]
+    assert user["spend_blocked"] is True
+    assert user["spend_cap_lifts_on"] == _month_first_day(month, 2).isoformat()
+
+    from flask import g
+    g.pop("_login_user", None)   # the fixture's app context caches it
+    user = _get(app, bob, APP_LOAD)["user"]
+    assert user["spend_blocked"] is False
+    assert user["spend_cap_lifts_on"] is None
 
 
 def test_no_cards_on_either_request(app):  # noqa: F811

@@ -226,7 +226,8 @@ def _intentions_status_map():
 @admin_required
 def list_users():
     from backend.utils.spend import (
-        get_user_spend_limit_usd, month_start, user_is_capped,
+        get_user_spend_limit_usd, month_start, rolled_spend_carry,
+        user_is_capped,
     )
 
     config = current_app.config
@@ -309,6 +310,11 @@ def list_users():
             "spend_limit_usd": get_user_spend_limit_usd(user, config),
             "spend_limit_is_override": user.monthly_spend_limit_usd is not None,
             "spend_blocked": user_is_capped(user, now),
+            # The overflow of earlier months counted this month (#594),
+            # next to current_month_spending_usd, which stays the real
+            # spend. Rolled from the stored carry without writing it (a
+            # query per user only before the month's first roll).
+            "spend_carried_usd": rolled_spend_carry(user, config, now) / 1_000_000,
             "profile_batch_pending": bool(user.profile_batch_pending),
             "profile_force_batch": bool(user.profile_force_batch),
             "prefilled_handle": user.prefilled_handle,
@@ -807,8 +813,9 @@ def update_user_spend_limit(user_id):
     """Set a user's per-user monthly spend cap (USD) and immediately reconcile
     their block flag against current month-to-date spend: raising the limit
     above their spend unblocks them; lowering it at/below their spend blocks
-    them. 0 = uncapped for this user."""
-    from backend.utils.spend import reconcile_user_spend_block
+    them. 0 = uncapped for this user, and clears the carry (#594): a month
+    with no limit at some time carries nothing (set_user_spend_limit)."""
+    from backend.utils.spend import set_user_spend_limit
 
     data = request.get_json() or {}
     raw = data.get("limit_usd")
@@ -820,14 +827,34 @@ def update_user_spend_limit(user_id):
         return jsonify({"error": "limit_usd must be >= 0."}), 400
 
     user = User.query.get_or_404(user_id)
-    user.monthly_spend_limit_usd = limit
-    state = reconcile_user_spend_block(user, current_app.config)
+    state = set_user_spend_limit(user, limit, current_app.config)
     db.session.commit()
     return jsonify({
         "message": "Spend limit updated",
         "limit_usd": user.monthly_spend_limit_usd,
         "spend_blocked": state["blocked"],
         "current_month_spending_usd": state["spend_usd"],
+        "spend_carried_usd": state["carried_usd"],
+    }), 200
+
+
+@admin_bp.route("/users/<int:user_id>/clear_spend_carry", methods=["POST"])
+@login_required
+@admin_required
+def clear_user_spend_carry(user_id):
+    """Forgive the overflow of earlier months counted this month (#594):
+    the carry goes to 0 and the block follows this month's own spend.
+    Cost records are not changed."""
+    from backend.utils.spend import clear_spend_carry
+
+    user = User.query.get_or_404(user_id)
+    state = clear_spend_carry(user, current_app.config)
+    db.session.commit()
+    return jsonify({
+        "message": "Carry cleared",
+        "spend_blocked": state["blocked"],
+        "current_month_spending_usd": state["spend_usd"],
+        "spend_carried_usd": state["carried_usd"],
     }), 200
 
 _UNRESOLVED_STATUS = {

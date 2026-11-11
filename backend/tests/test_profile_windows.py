@@ -1301,6 +1301,81 @@ def test_a_user_without_a_limit_is_not_gated(world, monkeypatch):
     assert len(world.provider.submits) == 1
 
 
+@pytest.mark.parametrize("limit, sent", [(4.99, False), (5.00, True)])
+def test_the_headroom_is_the_limit_less_the_carry(world, monkeypatch,
+                                                  limit, sent):
+    """#594: $2 of last month's overflow carried into this month, nothing
+    spent yet, and an estimate of $3: a limit of $5 leaves exactly enough;
+    $4.99 leaves a cent too little, and the note names the carry."""
+    from backend.utils.spend import current_month
+    _fixed_estimate(monkeypatch, 3.00)
+    world.corpus = _windows_corpus(4)
+    u = _user(profile_needs_full_regen=True, monthly_spend_limit_usd=limit,
+              spend_carry_month=current_month(),
+              spend_carry_microdollars=2_000_000)
+    outcome = _advance(u)
+    db.session.refresh(u)
+    if sent:
+        assert outcome == "submitted"
+        assert len(world.provider.submits) == 1
+        assert u.profile_seed_error is None
+    else:
+        assert outcome == "held"
+        assert world.provider.submits == []
+        assert u.profile_seed_error == (
+            f"{pw.HOLD_NOTE}: the build needs about $3.00; "
+            "$2.00 of $4.99 used this month ($2.00 carried over)")
+
+
+def test_a_build_held_at_the_cap_stays_held_while_the_carry_fills_the_limit(
+        app, world, monkeypatch):
+    """#594: a build held at the cap is not resumed when the month turns
+    while last month's overflow alone fills the new month's limit: the
+    hourly seeder rolls the carry first. Clearing the carry (the admin's
+    action) resumes it on the next pass."""
+    from backend.utils.spend import (
+        clear_spend_carry, current_month, month_start)
+    _block_email(monkeypatch)
+    world.corpus = _windows_corpus(4)
+    u = _user(profile_needs_full_regen=True, monthly_spend_limit_usd=1)
+    _advance(u)
+    _poll()                                      # the windows are saved
+    _spend(u, 1.0)                               # the cap is reached
+    assert _advance(u) == "held"
+    n = len(world.provider.submits)
+
+    # The month turns: everything so far was last month's, $2.50 over the
+    # $1 limit, and the carry was last rolled then.
+    last = _last_month()
+    APICostLog.query.filter_by(user_id=u.id).update({"created_at": last})
+    _spend(u, 1.5, created_at=last)
+    u = db.session.get(User, u.id)
+    u.spend_blocked_month = current_month(last)
+    u.spend_carry_month = current_month(last)
+    u.spend_carry_microdollars = 0
+    db.session.commit()
+
+    dispatches = pw.advance_profile_windows.apply_async.call_count
+    pb._seed_profile_batches()                   # hourly pass
+    assert pw.advance_profile_windows.apply_async.call_count == dispatches
+    assert len(world.provider.submits) == n
+    u = db.session.get(User, u.id)
+    assert u.spend_carry_month == current_month()
+    assert u.spend_carry_microdollars >= 1_000_000
+    assert u.spend_blocked_month == current_month()
+    assert u.profile_cap_held is True
+    assert month_start() > last
+
+    clear_spend_carry(u, app.config)
+    db.session.commit()
+    pb._seed_profile_batches()                   # the next hourly pass
+    assert (pw.advance_profile_windows.apply_async.call_count
+            == dispatches + 1)
+    u = db.session.get(User, u.id)
+    assert pw.advance(u.id, u.profile_generation_task_id) == "submitted"
+    assert len(world.provider.submits) == n + 1
+
+
 @pytest.mark.parametrize("lift", ["next_month", "raised_limit"])
 def test_a_build_waiting_on_its_estimate_goes_out_when_there_is_room(
         app, world, monkeypatch, lift):

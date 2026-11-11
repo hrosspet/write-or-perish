@@ -1,4 +1,53 @@
-import { spendCapResetDate, spendCapToastMessage, isSpendCapError } from './spendCap';
+import {
+  spendCapResetDate, spendCapToastMessage, isSpendCapError,
+  markSpendBlocked, notifySpendBlocked, spendCapBannerMessage,
+  resetSpendCapForTests,
+  SPEND_CAP_DEFAULT_MESSAGE,
+} from './spendCap';
+
+afterEach(() => resetSpendCapForTests());
+
+// #594: a carry over a whole month's limit holds the cap past the start of
+// next month; the server sends the date (user.spend_cap_lifts_on, a 402's
+// lifts_on).
+const NOV_20 = new Date(Date.UTC(2026, 10, 20));
+
+test('a later lift date from the server names that date', () => {
+  markSpendBlocked('2027-01-01');
+  expect(spendCapResetDate(NOV_20)).toMatch(/January/);
+  expect(spendCapToastMessage('record', NOV_20)).toMatch(/until it resets on January 1\./);
+  expect(spendCapBannerMessage(NOV_20)).toBe(
+    "You've reached your monthly usage limit for the free alpha. It resets on January 1.");
+});
+
+test('the usual lift date keeps the usual text', () => {
+  markSpendBlocked('2026-12-01');
+  expect(spendCapResetDate(NOV_20)).toMatch(/December/);
+  expect(spendCapBannerMessage(NOV_20)).toBe(SPEND_CAP_DEFAULT_MESSAGE);
+});
+
+test('without a date from the server the cap resets next month', () => {
+  markSpendBlocked();
+  expect(spendCapResetDate(NOV_20)).toMatch(/December/);
+  expect(spendCapBannerMessage(NOV_20)).toBe(SPEND_CAP_DEFAULT_MESSAGE);
+});
+
+test('a lift date already past is ignored', () => {
+  markSpendBlocked('2026-12-01');
+  expect(spendCapResetDate(new Date(Date.UTC(2027, 0, 5)))).toMatch(/February/);
+});
+
+test('a saved entry whose reply the cap skipped passes its lift date', () => {
+  notifySpendBlocked('2027-01-01');
+  expect(spendCapBannerMessage(NOV_20)).toMatch(/It resets on January 1\./);
+});
+
+test("a 402's lift date reaches the toasts", () => {
+  window.dispatchEvent(new CustomEvent('loore:spend-capped', {
+    detail: { message: 'x', liftsOn: '2027-01-01' },
+  }));
+  expect(spendCapResetDate(NOV_20)).toMatch(/January/);
+});
 
 // The cap resets at the start of the server's (UTC) month.
 test('reset date is the first of the next UTC month', () => {

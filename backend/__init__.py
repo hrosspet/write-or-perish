@@ -499,14 +499,9 @@ def create_app():
 
     @app.errorhandler(SpendCapExceeded)
     def _handle_spend_cap(_exc):
-        from flask import jsonify
-        return jsonify({
-            "error": "monthly_spend_limit_reached",
-            "message": (
-                "You've reached your monthly usage limit for the free "
-                "alpha. It resets at the start of next month."
-            ),
-        }), 402
+        from flask_login import current_user
+        from backend.utils.spend import spend_cap_response
+        return spend_cap_response(current_user)
 
     # A reply (or a Voice turn) where AI may not read: create_llm_placeholder
     # raises AIUsageRefused before any write. Routes answer it themselves

@@ -121,6 +121,19 @@ class User(db.Model, UserMixin):
     # global env var. See backend/utils/spend.get_user_spend_limit_usd.
     monthly_spend_limit_usd = db.Column(db.Float, nullable=True)
 
+    # The spend cap's carry (#594): what earlier months spent above the
+    # user's limit, counted toward the month in spend_carry_month ("YYYY-MM",
+    # UTC), in microdollars. Rolled forward one month at a time at the
+    # rollover (backend/utils/spend.roll_spend_carry); NULL month = never
+    # rolled, which starts the carry at 0. Cost records are never changed.
+    spend_carry_microdollars = db.Column(
+        db.BigInteger, nullable=False, default=0, server_default="0")
+    spend_carry_month = db.Column(db.String(7), nullable=True)
+    # A month ("YYYY-MM") in which the user had no limit at some time: its
+    # spending carries nothing into the next month (a limit of 0 clears
+    # the carry, also when a limit is set again later in the month).
+    spend_carry_free_month = db.Column(db.String(7), nullable=True)
+
     # Per-user defaults for new nodes (overridable per-node)
     default_privacy_level = db.Column(
         db.String(16), nullable=False, default="private",

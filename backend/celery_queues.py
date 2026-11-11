@@ -68,6 +68,9 @@ TASK_QUEUES = {
     # and a late check lets spending run past the cap.
     "backend.tasks.spend_monitor.enforce_user_cap": _I,
     "backend.tasks.spend_monitor.check_api_spend": _B,
+    # The carry into the new month (#594): hourly, a no-op after the
+    # month's first run but for new accounts.
+    "backend.tasks.spend_monitor.roll_carries": _B,
 
     # Profiles, recent context, intentions, digests, poll drafts.
     "backend.tasks.exports.update_user_profile": _B,

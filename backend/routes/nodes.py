@@ -713,7 +713,7 @@ def create_node():
         # opens, but its flag can be stale within a session.
         from backend.utils.spend import spend_cap_response, user_is_capped
         if user_is_capped(current_user):
-            return spend_cap_response()
+            return spend_cap_response(current_user)
 
         if "audio_file" not in request.files:
             return jsonify({"error": "Field 'audio_file' is required"}), 400

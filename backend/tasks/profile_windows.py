@@ -1012,14 +1012,15 @@ def estimate_cost_usd(user, state, models, plan_windows, plan=None):
     return cost / 1e6
 
 
-def _hold(user, needed=None, spent=None, limit=None):
+def _hold(user, needed=None, spent=None, limit=None, carried=0):
     """Hold the set's next submission: the user is over their monthly
     limit (the spend cap), or, with ``needed``, the windows due and the
     merges after them are estimated at more than what is left of the limit.
     Nothing is submitted; the hourly seeder resumes the set once there is
     room (profile_cap_held: the month turns or the admin raises the limit).
     What is in flight is collected and saved meanwhile. A wait on the
-    estimate says so in the admin Profile column, with the amount."""
+    estimate says so in the admin Profile column, with the amount; ``spent``
+    includes ``carried``, the overflow of earlier months (#594)."""
     _batch._hold_for_cap(user)
     if needed is None:
         logger.warning("User %s: spend-capped; no profile window step",
@@ -1027,27 +1028,34 @@ def _hold(user, needed=None, spent=None, limit=None):
         return "held"
     note = (f"{HOLD_NOTE}: the build needs about ${needed:.2f}; "
             f"${spent:.2f} of ${limit:.2f} used this month")
+    if carried:
+        note += f" (${carried:.2f} carried over)"
     first = not (user.profile_seed_error or "").startswith(HOLD_NOTE)
     user.profile_seed_error = note[:255]
     db.session.commit()
     (logger.error if first else logger.info)(
         "User %s: profile build waits: needs about $%.2f, $%.2f of $%.2f "
-        "used this month", user.id, needed, spent, limit)
+        "used this month, $%.2f of it carried over", user.id, needed, spent,
+        limit, carried)
     return "held"
 
 
 def _short_of_headroom(user, estimate):
-    """(spent, limit) in dollars when ``estimate`` does not fit into what
-    is left of the user's monthly spend limit this month, else None. A user
-    with no limit (0) is never short."""
+    """(counted, limit, carried) in dollars when ``estimate`` does not fit
+    into what is left of the user's monthly spend limit this month, else
+    None. What is left is the limit less this month's spend and the carry
+    from earlier months (#594). A user with no limit (0) is never short."""
     from backend.utils.spend import (
-        get_user_month_spend_microdollars, get_user_spend_limit_usd)
-    limit = get_user_spend_limit_usd(user, current_app.config) or 0
+        get_user_month_spend_microdollars, get_user_spend_limit_usd,
+        rolled_spend_carry)
+    config = current_app.config
+    limit = get_user_spend_limit_usd(user, config) or 0
     if limit <= 0:
         return None
-    spent = get_user_month_spend_microdollars(user.id) / 1e6
-    if estimate > limit - spent:
-        return spent, limit
+    carried = rolled_spend_carry(user, config) / 1e6
+    counted = carried + get_user_month_spend_microdollars(user.id) / 1e6
+    if estimate > limit - counted:
+        return counted, limit, carried
     return None
 
 
