@@ -201,11 +201,13 @@ def has_ext_quotes(content: str) -> bool:
     return bool(re.search(EXT_QUOTE_PLACEHOLDER_PATTERN, content))
 
 
-# A {quote_ext:ID} inside quoted text that someone other than the reader
-# wrote, held so the saved-reference pass that runs over the reader's
-# whole text afterwards cannot reach it. release_ext_quotes puts it back
-# as written once that pass is done.
+# A marker in text that someone other than the reader wrote, held so a
+# later pass over the reader's whole text (the saved-reference pass, or
+# the prompt's quote passes over an archive filled into it) cannot
+# resolve it with the reader's access. release_quotes puts it back as
+# written once those passes are done.
 _HELD_EXT_QUOTE = "{quote_ext\ue000:"
+_HELD_QUOTE = "{quote\ue000:"
 
 
 def hold_ext_quotes(text: str) -> str:
@@ -213,9 +215,19 @@ def hold_ext_quotes(text: str) -> str:
     return text.replace("{quote_ext:", _HELD_EXT_QUOTE) if text else text
 
 
-def release_ext_quotes(text: str) -> str:
-    """*text* with every held {quote_ext:ID} back as written."""
-    return text.replace(_HELD_EXT_QUOTE, "{quote_ext:") if text else text
+def hold_quotes(text: str) -> str:
+    """*text* with every {quote:ID} and {quote_ext:ID} held."""
+    if not text:
+        return text
+    return hold_ext_quotes(text).replace("{quote:", _HELD_QUOTE)
+
+
+def release_quotes(text: str) -> str:
+    """*text* with every held marker back as written."""
+    if not text:
+        return text
+    return text.replace(_HELD_EXT_QUOTE, "{quote_ext:").replace(
+        _HELD_QUOTE, "{quote:")
 
 
 def written_by(node, user_id) -> bool:
@@ -345,10 +357,11 @@ def resolve_quotes(
     *inside* (quotes_inside): for each quoted node, None when the user
     wrote it, else the test the quotes in its text must pass. Text the
     user did not write, and everything quoted below it, then resolves
-    its quotes only through that test (or *only*), and its
-    {quote_ext:ID} markers are held (hold_ext_quotes): the caller's
-    saved-reference pass skips them, and release_ext_quotes puts them
-    back as written. A caller passing *only* or *inside* releases.
+    its quotes only through that test (or *only*). A quote it refuses,
+    and every marker left in such text, comes back held (hold_quotes):
+    no later pass over the caller's text resolves it, and
+    release_quotes puts it back as written. A caller passing *only* or
+    *inside* releases.
 
     Args:
         content: Text containing {quote:ID} placeholders
@@ -389,7 +402,7 @@ def resolve_quotes(
     def replace_quote(match):
         node_id = int(match.group(1))
         if only is not None and not only(node_id):
-            return match.group(0)
+            return hold_quotes(match.group(0))
         data = quote_data.get(node_id)
 
         if data is None:
@@ -449,6 +462,9 @@ def resolve_quotes(
                 inside=inside,
             )
             resolved_ids.extend(nested_ids)
+        if inner_only is not None:
+            # Whatever the depth left unresolved stays as written.
+            node_content = hold_quotes(node_content)
 
         stamp = quote_stamp(data.get("created_at"), tz_name)
         if for_llm:
@@ -1072,10 +1088,10 @@ def resolve_quotes_for_export(
                    with the quoted entry's position label once the whole
                    document is rendered (#592); without it the text
                    names the node id.
-        only, inside: as in resolve_quotes: a quote *only* refuses stays
-                   as written, and embedded text the user did not write
-                   resolves its quotes only through its test and has its
-                   {quote_ext:ID} held (the caller releases).
+        only, inside: as in resolve_quotes: a quote *only* refuses comes
+                   back held, and embedded text the user did not write
+                   resolves its quotes only through its test and has
+                   every marker left in it held (the caller releases).
 
     Returns:
         Content with quotes resolved (embedded or marked as reference)
@@ -1094,7 +1110,7 @@ def resolve_quotes_for_export(
     def replace_quote(match):
         quoted_id = int(match.group(1))
         if only is not None and not only(quoted_id):
-            return match.group(0)
+            return hold_quotes(match.group(0))
 
         # Prevent infinite loops
         if quoted_id in _resolving:
@@ -1127,6 +1143,8 @@ def resolve_quotes_for_export(
                     only=inner_only,
                     inside=inside,
                 )
+            if inner_only is not None:
+                embedded_content = hold_quotes(embedded_content)
 
             # Get username for formatting
             from backend.models import Node

@@ -37,7 +37,7 @@ from backend.utils.tokens import (
 from backend.utils.quotes import (
     resolve_quotes, has_quotes,
     resolve_ext_quotes, has_ext_quotes, find_ext_quote_ids,
-    quotes_inside, release_ext_quotes,
+    quotes_inside, release_quotes,
 )
 from backend.utils.node_split import NODE_CHAR_CAP
 from backend.utils.session_helpers import (
@@ -2843,6 +2843,10 @@ def get_user_recent_raw_content(user_id, created_before=None, usage=None):
         usage: A ContextUsage; every entry, quote and reference the window
             renders reports to it (#326).
 
+    The markers left as written in other people's text come back held
+    (quotes.hold_quotes); the caller releases them (quotes.release_quotes)
+    after any quote pass it runs over the filled text.
+
     Returns:
         dict with keys (content, earliest, latest) or None if no data.
     """
@@ -2863,6 +2867,7 @@ def get_user_recent_raw_content(user_id, created_before=None, usage=None):
         collapse_artifacts=True,
         licence=(usage.licence(USER_RECENT_RAW_PLACEHOLDER)
                  if usage is not None else None),
+        hold_others_markers=True,
     )
     if not result:
         return None
@@ -3491,7 +3496,9 @@ def render_system_message(system_node, user_id, usage=None):
         text = blank_personal_placeholders(text)
         values = {}
     values.update(_guidance_values(user_id))
-    return system_block_text(fill_placeholders(text, values))
+    # Markers held in the recent raw window come back as written, as the
+    # generation loop releases them (the same bytes).
+    return system_block_text(release_quotes(fill_placeholders(text, values)))
 
 
 def system_block_text(text):
@@ -3502,6 +3509,25 @@ def system_block_text(text):
     trailing newline the warm's cache entry ends one token short of the
     position generation looks up, and every ongoing-thread warm missed."""
     return text.rstrip()
+
+
+def _note_in_render(usage, sys_text, node_ids, item_ids):
+    """Report what the quote passes resolved inside the system message to
+    *usage* (the ContextUsage its cached render's verdict is stored
+    from, #326), under a placeholder of the prompt's text *sys_text*. A
+    cached prompt's own text carries no marker, so whatever resolved
+    came out of a placeholder's content, and a later turn served from
+    the cache must carry that verdict too."""
+    if not (node_ids or item_ids):
+        return
+    placeholder = next(
+        (p for p in PERSONAL_PLACEHOLDERS if p in sys_text), None)
+    if placeholder is None:
+        return
+    collector = usage.licence(placeholder)
+    collector.note_nodes(node_ids, what="quoted node in the system prompt")
+    collector.note_external(item_ids,
+                            what="saved reference in the system prompt")
 
 
 @celery.task(name='backend.tasks.llm_completion.prewarm_anthropic_cache')
@@ -4523,6 +4549,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             chronological_order=chronological,
                             include_strategy="engaged_threads",
                             licence=licence,
+                            # Markers in other people's text stay held
+                            # through the quote passes below.
+                            hold_others_markers=True,
                         )
                         requested_max = export_params.get('max_export_tokens')
                         logger.info(
@@ -4804,6 +4833,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         # text of someone else's they quote: there, at
                         # every depth, the same rule (quotes_inside).
                         others_text = not node_is_users(node, user_id)
+                        resolved_ids, ext_ids = [], []
                         if needs_quotes and has_quotes(message_text):
                             message_text, resolved_ids = resolve_quotes(
                                 message_text, user_id, for_llm=True,
@@ -4823,7 +4853,10 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             message_text, ext_ids = resolve_ext_quotes(
                                 message_text, user_id, for_llm=True)
                             licence.note_external(ext_ids)
-                        message_text = release_ext_quotes(message_text)
+                        if node is system_node:
+                            _note_in_render(context_usage, _sys_text,
+                                            resolved_ids, ext_ids)
+                        message_text = release_quotes(message_text)
 
                     if (node.id == parent_node_id and not is_llm_node
                             and cache_split_offset

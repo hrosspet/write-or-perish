@@ -15,7 +15,7 @@ from backend.utils.quotes import (
     resolve_quotes, has_quotes, ExportQuoteResolver,
     resolve_quotes_for_export, resolve_ext_quotes, has_ext_quotes,
     ai_blocked_artifact, AI_BLOCKED_ARTIFACT_TEXT,
-    quotes_inside, release_ext_quotes,
+    quotes_inside, hold_quotes, release_quotes,
 )
 from backend.utils.timefmt import iso_utc
 from backend.utils.encryption import dek_cached, prefetch_deks
@@ -532,7 +532,8 @@ def _add_artifact_free_entry(resolver, node):
 
 def _format_node_text(node, label, user_id, embedded_quotes,
                       ai_blocked_ids, licence=None, filter_ai_usage=False,
-                      artifact_refs=True, quote_reference=None):
+                      artifact_refs=True, quote_reference=None,
+                      hold_others_markers=False):
     """The node's own text block: header, any pinned-artifact refs, then
     content. System-prompt nodes emit refs only (their content IS the
     prompt, shown as a ref). The node, the entries its quotes embed and
@@ -543,7 +544,12 @@ def _format_node_text(node, label, user_id, embedded_quotes,
     nothing at all ("").
 
     *quote_reference* (node id -> text) writes a quote resolved by
-    reference (_QuoteReferences.marker, #592)."""
+    reference (_QuoteReferences.marker, #592).
+
+    *hold_others_markers*: the markers left as written in text the user
+    did not write stay held (quotes.hold_quotes) for a caller that runs
+    its own quote passes over the export (an AI reply's prompt) and
+    releases them after; otherwise they are released here."""
     if not artifact_refs and _is_system_prompt_node(node):
         return ""
     result = _node_header_line(node, label)
@@ -603,7 +609,11 @@ def _format_node_text(node, label, user_id, embedded_quotes,
         content, ext_ids = resolve_ext_quotes(content, user_id, for_llm=False)
         if licence is not None:
             licence.note_external(ext_ids, what="archive reference")
-    content = release_ext_quotes(content)
+    if not hold_others_markers:
+        content = release_quotes(content)
+    elif only is not None:
+        # Someone else's text: every marker left in it stays as written.
+        content = hold_quotes(content)
 
     result += content
     result += "\n\n"
@@ -624,6 +634,7 @@ def format_node_tree(
     artifact_refs=True,
     prune_tombstones=False,
     references=None,
+    hold_others_markers=False,
 ):
     """
     Format a node and its descendants into a human-readable tree structure
@@ -636,7 +647,8 @@ def format_node_tree(
         created_before=created_before, embedded_quotes=embedded_quotes,
         included_ids=included_ids, ai_blocked_ids=ai_blocked_ids,
         licence=licence, artifact_refs=artifact_refs,
-        prune_tombstones=prune_tombstones, references=references))
+        prune_tombstones=prune_tombstones, references=references,
+        hold_others_markers=hold_others_markers))
 
 
 def iter_node_tree(
@@ -654,6 +666,7 @@ def iter_node_tree(
     prune_tombstones=False,
     references=None,
     before_entry=None,
+    hold_others_markers=False,
 ):
     """
     Yield the text of a node and its descendants piece by piece, in
@@ -713,6 +726,7 @@ def iter_node_tree(
         references: Optional _QuoteReferences of the whole export
                  (#592): each rendered entry's label is recorded in it,
                  and quotes resolved by reference leave its markers.
+        hold_others_markers: see _format_node_text.
 
     Yields:
         str: pieces of the formatted text of the node tree, nothing for
@@ -831,7 +845,8 @@ def iter_node_tree(
                 current, path, user_id, embedded_quotes, ai_blocked_ids,
                 licence=licence, filter_ai_usage=filter_ai_usage,
                 artifact_refs=artifact_refs,
-                quote_reference=quote_reference)
+                quote_reference=quote_reference,
+                hold_others_markers=hold_others_markers)
             if text and references is not None:
                 references.labels[current.id] = path
             stack.extend(_reply_frames(path, _children(current, True)))
@@ -1743,6 +1758,7 @@ def _build_user_export_incremental(
     user, max_tokens, filter_ai_usage, created_before, created_after,
     chronological_order, return_metadata, collapse_artifacts,
     licence=None, omit_artifacts=False, whole_window=False, scope=None,
+    hold_others_markers=False,
 ):
     """Incremental export path (created_after is set). See
     `build_user_export_content` docstring for behavior. The CTE row
@@ -2049,6 +2065,7 @@ def _build_user_export_incremental(
             licence=licence,
             artifact_refs=not omit_artifacts,
             references=references,
+            hold_others_markers=hold_others_markers,
         )
         if omit_artifacts and not thread_text:
             # Nothing of this thread in the window but its system
@@ -2305,6 +2322,7 @@ def build_user_export_content(
     omit_artifacts=False,
     whole_window=False,
     scope=None,
+    hold_others_markers=False,
 ):
     """
     Core export logic: Build a human-readable text export of threads for a user.
@@ -2412,6 +2430,11 @@ def build_user_export_content(
                call, the same rows. Needs max_tokens and the
                incremental path; the selected rows are checked against
                the database first (ScopeChanged when one changed).
+        hold_others_markers: If True, the {quote:ID} / {quote_ext:ID}
+               markers left as written in text the user did not write
+               come back held (quotes.hold_quotes), for an AI reply's
+               prompt, which runs its own quote passes over the text
+               and then releases them (quotes.release_quotes).
 
     Returns:
         str or dict: Formatted export content (or None if no threads found).
@@ -2436,6 +2459,7 @@ def build_user_export_content(
             omit_artifacts=omit_artifacts,
             whole_window=whole_window,
             scope=scope,
+            hold_others_markers=hold_others_markers,
         )
     if whole_window:
         raise ValueError(
@@ -2666,6 +2690,7 @@ def build_user_export_content(
             # below it (#525).
             prune_tombstones=bool(max_tokens),
             references=references,
+            hold_others_markers=hold_others_markers,
         )
         if not thread_text:
             # Only a system prompt (#550), or nothing alive (#525).
