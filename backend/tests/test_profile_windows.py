@@ -1831,7 +1831,11 @@ def test_an_import_while_a_profile_task_runs_rebuilds_from_scratch(
     _finish(world, u)
     u.profile_generation_task_id = "t-running"
     db.session.commit()
-    monkeypatch.setattr(pw._exports, "_is_task_stale", lambda user: False)
+    # The module revert_profile_for_import runs in (``ex``), which may be
+    # another object than ``pw._exports`` after other test files reloaded
+    # the package.
+    for module in (ex, pw._exports):
+        monkeypatch.setattr(module, "_is_task_stale", lambda user: False)
     action, _v = ex.revert_profile_for_import(
         u.id, rows[3].source_data_cutoff - timedelta(hours=2))
     assert action == "full" and u.profile_needs_full_regen is True
