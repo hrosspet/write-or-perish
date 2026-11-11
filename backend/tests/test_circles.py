@@ -1255,10 +1255,18 @@ def test_the_discussion_leading_up_to_an_entry_is_shared_only_when_asked(app):
     r = _client(app, "ben").post(f"/api/nodes/{entry}/llm",
                                  json={"ai_reads_ack": key})
     assert r.status_code == 202
-    # A reply ben keeps to himself needs no dialog.
+    # A reply ben keeps to himself needs the same agreement: the shared
+    # prompt reads his data and its tools act on his account.
+    before = Node.query.count()
     r = _client(app, "ben").post(f"/api/nodes/{entry}/llm",
                                  json={"privacy_level": "private"})
+    assert r.status_code == 409
+    assert r.get_json()["code"] == "circle_ai_reads_changed"
+    assert Node.query.count() == before
+    r = _client(app, "ben").post(f"/api/nodes/{entry}/llm", json={
+        "privacy_level": "private", "ai_reads_ack": key})
     assert r.status_code == 202
+    assert not _can_read(app, "anna", r.get_json()["node_id"])
     # anna's own prompt asks nothing of her to agree to.
     hers = _client(app, "anna").get(f"/api/nodes/{entry}").get_json()
     assert hers["audience"]["ai_reads_key"] == ""
@@ -1742,3 +1750,43 @@ def test_in_a_shared_thread_only_my_own_replies_set_my_default(app):
     assert resolve_chat_model(bens_answer, anna) == ("gpt-5", "default")
     # ben's own earlier reply does count for him.
     assert resolve_chat_model(bens_answer, ben) == ("claude-x", "predecessor")
+
+
+def test_a_cascade_never_puts_a_prompt_in_an_audience(app):
+    """"Apply to my replies" and the second sharing step share the
+    author's replies below an entry. A prompt node below it (a Voice or
+    Text-mode session started there) and what was written under that
+    prompt stay private: a prompt joins an audience only through "Share
+    also the discussion leading up to this node?"."""
+    anna = _user("anna")
+    entry = _client(app, "anna").post("/api/nodes/", json={
+        "content": SECRET, "ai_usage": "chat"}).get_json()["id"]
+
+    def add(parent, content, **kw):
+        n = Node(user_id=anna.id, human_owner_id=anna.id, parent_id=parent,
+                 privacy_level="private", ai_usage="chat", node_type="user",
+                 **kw)
+        n.set_content(content)
+        _db.session.add(n)
+        _db.session.commit()
+        return n.id
+
+    reply = add(entry, "anna's own reply")
+    prompt = add(entry, "A PROMPT {user_profile}", prompt_key="textmode")
+    turn = add(prompt, "a turn of the session under the prompt")
+    for route, body in (
+            (f"/api/nodes/{entry}/audience",
+             {"circle_usernames": ["ben"], "apply_to_descendants": True}),
+            (f"/api/nodes/{entry}",
+             {"content": SECRET, "privacy_level": "circles",
+              "circle_usernames": ["ben", "chidi"],
+              "apply_to_descendants": True})):
+        r = _client(app, "anna").put(route, json=body)
+        assert r.status_code == 200, r.get_json()
+        _db.session.expire_all()
+        assert _can_read(app, "ben", entry) and _can_read(app, "ben", reply)
+        for node_id in (prompt, turn):
+            node = _db.session.get(Node, node_id)
+            assert node.privacy_level == "private", node_id
+            assert node.audience_root_id is None, node_id
+            assert not _can_read(app, "ben", node_id), node_id

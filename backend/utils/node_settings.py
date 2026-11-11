@@ -40,6 +40,7 @@ def apply_settings_to_descendants(root, user_id, *, privacy_level=None,
              or (root_source.entry_id if root_source is not None else None)}
     source_of = {}
     editable = []
+    under_prompt = set()
     seen = {root.id}
     frontier = [root.id]
     while frontier:
@@ -54,6 +55,12 @@ def apply_settings_to_descendants(root, user_id, *, privacy_level=None,
             else:
                 source_of[n.id] = inherited
             below[n.id] = own if own is not None else inherited
+            # Circles: a prompt node, and the session written below it,
+            # never join an audience through a cascade. A prompt is
+            # shared only with the whole discussion leading up to an
+            # entry (circles.share_thread_path).
+            if n.parent_id in under_prompt or n.is_system_prompt:
+                under_prompt.add(n.id)
         editable.extend(
             n for n in level
             if n.deleted_at is None and can_user_edit_node(n, user_id))
@@ -88,7 +95,9 @@ def apply_settings_to_descendants(root, user_id, *, privacy_level=None,
                    and written_into_someone_elses_thread(n, user_id))
         if foreign and privacy_level == "public":
             continue
-        if privacy_level is not None and n.privacy_level != privacy_level:
+        kept_out = privacy_level == "circles" and n.id in under_prompt
+        if (privacy_level is not None and not kept_out
+                and n.privacy_level != privacy_level):
             n.set_privacy_level(privacy_level)
             # Same rule as the focal node: a private node can't stay pinned.
             if privacy_level == "private" and n.pinned_at is not None:
@@ -103,7 +112,7 @@ def apply_settings_to_descendants(root, user_id, *, privacy_level=None,
                 n.ai_usage = ai_usage
                 touched = True
         if (audience_from is not None and privacy_level is not None
-                and not foreign):
+                and not foreign and not kept_out):
             entry_id = (audience_from.audience_root_id
                         if audience_from.privacy_level == "circles" else None)
             if n.privacy_level == "circles" and entry_id is not None:

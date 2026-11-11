@@ -2082,15 +2082,15 @@ def request_llm_response(node_id):
         # requester's own data. A reply the thread will read is made
         # only for exactly what the requester saw named in the dialog:
         # the request carries that key, and it is checked again here and
-        # when the task runs (a prompt can be edited in between). A
-        # reply the requester keeps private needs no dialog.
+        # when the task runs (a prompt can be edited in between). The
+        # same for a reply the requester keeps private: the prompt
+        # still reads their data and its tools act on their account.
         reads_meta = None
         if in_thread:
             reads, reads_key = cz.ai_reply_reads(
                 parent_node, current_user.id)
             if reads_key:
-                if (privacy_level != "private"
-                        and data.get("ai_reads_ack") != reads_key):
+                if data.get("ai_reads_ack") != reads_key:
                     return jsonify({
                         "error": cz.AI_READS_CHANGED,
                         "code": cz.AI_READS_CHANGED_CODE,
