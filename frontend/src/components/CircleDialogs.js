@@ -1,5 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { aiReadsSentence, atName, joinNames } from '../utils/circles';
+import {
+  aiReadsPrivateSentence, aiReadsSentence, atName, joinNames,
+} from '../utils/circles';
 
 // The dialogs of Circles, in the shape of the app's other dialogs
 // (PublicReplyDialog, DeleteConfirmDialog).
@@ -89,26 +91,35 @@ function Shell({ onClose, labelledBy, children }) {
  * will see it, with your name." With `ai` it is shown before an AI
  * reply is generated in the thread: the same people will see that
  * reply, and `aiReads` names the requester's own artifacts the reply's
- * prompt reads (none: no such sentence). "Don't ask again in this thread" is remembered by the caller
+ * prompt reads (none: no such sentence). With `onlyMe` the reply is for
+ * its requester only: nobody is named, and the dialog says what the
+ * prompt shared in the thread reads. "Don't ask again in this thread" is remembered by the caller
  * (per thread, per user, on this device; typed replies and AI replies
  * are remembered separately).
  */
-export function CircleReplyDialog({ open, names, ai = false, aiReads = null, onClose, onConfirm }) {
+export function CircleReplyDialog({ open, names, ai = false, aiReads = null, onlyMe = false, onClose, onConfirm }) {
   const [skip, setSkip] = useState(false);
   useEscape(open, onClose);
   useEffect(() => { if (open) setSkip(false); }, [open]);
   if (!open) return null;
   const who = joinNames(names);
   const reads = ai ? aiReadsSentence(aiReads) : '';
+  const privateReads = aiReadsPrivateSentence(aiReads);
+  let body;
+  if (ai && onlyMe) {
+    body = `Only you will see it.${privateReads ? ` ${privateReads}` : ''}`;
+  } else if (ai) {
+    body = `${who} will see it, marked with your name.${reads ? ` ${reads}` : ''}`;
+  } else {
+    body = `${who} will see it, with your name.`;
+  }
   return (
     <Shell onClose={onClose} labelledBy="circle-reply-title">
       <h2 id="circle-reply-title" style={titleStyle}>
         {ai ? 'Generate an AI reply?' : 'Send this reply?'}
       </h2>
       <p style={bodyStyle}>
-        {ai
-          ? `${who} will see it, marked with your name.${reads ? ` ${reads}` : ''}`
-          : `${who} will see it, with your name.`}
+        {body}
       </p>
       <label style={{
         display: 'flex', alignItems: 'center', gap: '12px', minHeight: '44px',

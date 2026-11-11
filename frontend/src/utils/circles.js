@@ -42,6 +42,15 @@ export function aiReadsSentence(aiReads) {
     : '';
 }
 
+// The same for a reply only its requester will read ("Only me"): the
+// prompt someone else shared still reads the requester's data.
+export function aiReadsPrivateSentence(aiReads) {
+  const list = joinPlain(aiReads);
+  return list
+    ? `Your AI reads your ${list} for this reply, as the prompt shared in this thread asks.`
+    : '';
+}
+
 // Names typed into "for this entry only": commas or spaces, @ optional.
 export function splitNames(text) {
   const seen = new Set();

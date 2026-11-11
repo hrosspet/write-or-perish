@@ -2,7 +2,7 @@ import {
   countWord, joinNames, splitNames, readersSentence, shareButtonLabel,
   replyAudienceNames, sharedBannerText, replyAckKey, removeMemberBody,
   atName, aiReplyAckKey, aiReplyPrivacyKey, aiReplyOffReason, possessive,
-  joinPlain, aiReadsSentence,
+  joinPlain, aiReadsSentence, aiReadsPrivateSentence,
 } from './circles';
 
 test('removing a person says what stays open', () => {
@@ -102,6 +102,9 @@ test('what an AI reply reads of its requester\'s artifacts', () => {
     'Your AI reads your profile for this reply and could share private information from them.');
   expect(aiReadsSentence([])).toBe('');
   expect(aiReadsSentence(undefined)).toBe('');
+  expect(aiReadsPrivateSentence(['profile', 'memory'])).toBe(
+    'Your AI reads your profile and memory for this reply, as the prompt shared in this thread asks.');
+  expect(aiReadsPrivateSentence([])).toBe('');
 });
 
 test('why no AI reply can be generated in a shared thread', () => {

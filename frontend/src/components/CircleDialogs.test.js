@@ -138,6 +138,25 @@ describe('the dialog before a reply in a shared thread', () => {
     expect(screen.queryByText(/Your AI reads/)).toBeNull();
   });
 
+  test('an AI reply for its requester only names nobody and says what the shared prompt reads', () => {
+    const onConfirm = jest.fn();
+    render(
+      <CircleReplyDialog open ai onlyMe names={['anna', 'chidi']}
+        aiReads={['profile', 'memory', 'to-do list']}
+        onClose={() => {}} onConfirm={onConfirm} />,
+    );
+    expect(screen.getByRole('heading', { name: 'Generate an AI reply?' })).toBeInTheDocument();
+    expect(screen.getByText(
+      'Only you will see it. Your AI reads your profile, memory and to-do list '
+      + 'for this reply, as the prompt shared in this thread asks.',
+    )).toBeInTheDocument();
+    expect(screen.queryByText(/@anna/)).toBeNull();
+    expect(screen.queryByText(/could share private information/)).toBeNull();
+    fireEvent.click(screen.getByLabelText("Don't ask again in this thread"));
+    fireEvent.click(screen.getByRole('button', { name: 'Generate' }));
+    expect(onConfirm).toHaveBeenCalledWith(true);
+  });
+
   test('a typed reply never carries the artifacts sentence', () => {
     render(
       <CircleReplyDialog open names={['anna']} aiReads={['profile']}

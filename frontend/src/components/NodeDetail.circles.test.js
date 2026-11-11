@@ -347,6 +347,34 @@ describe('what the reply reads is agreed to exactly (ai_reads_key)', () => {
     }]);
   });
 
+  test('a refusal that names the key just sent is not retried', async () => {
+    localStorage.setItem('loore_circle_ai_reply_ack_2_10', 'key-1');
+    routes['/nodes/10'] = withKey();
+    mockPost.mockRejectedValue({ response: { status: 409, data: {
+      code: 'circle_ai_reads_changed', error: 'What your AI reads here has changed.',
+      ai_reads: ['profile', 'memory'], ai_reads_key: 'key-1',
+    } } });
+    renderAt('/node/10');
+    await screen.findByText('A shared entry.');
+    await press('LLM Response');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'LLM Response' })).toBeEnabled());
+    expect(mockPost).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('heading', { name: 'Generate an AI reply?' })).toBeNull();
+  });
+
+  test('a refusal that names no key is not retried', async () => {
+    routes['/nodes/10'] = withKey('', []);
+    localStorage.setItem('loore_circle_ai_reply_ack_2_10', '1');
+    mockPost.mockRejectedValue({ response: { status: 409, data: {
+      code: 'circle_ai_reads_changed', error: 'What your AI reads here has changed.',
+    } } });
+    renderAt('/node/10');
+    await screen.findByText('A shared entry.');
+    await press('LLM Response');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'LLM Response' })).toBeEnabled());
+    expect(mockPost).toHaveBeenCalledTimes(1);
+  });
+
   test('Cancel after the list changed sends nothing more', async () => {
     localStorage.setItem('loore_circle_ai_reply_ack_2_10', 'key-1');
     routes['/nodes/10'] = withKey();
@@ -360,17 +388,132 @@ describe('what the reply reads is agreed to exactly (ai_reads_key)', () => {
     expect(screen.getByRole('button', { name: 'LLM Response' })).toBeEnabled();
   });
 
-  test('"Only me": no dialog and no ack, whatever the key', async () => {
+  test('"Only me" without a key: no dialog and no ack', async () => {
     mockUser = { ...BEN, craft_mode: true };
-    routes['/nodes/10'] = withKey();
+    routes['/nodes/10'] = withKey('', ['profile']);
     renderAt('/node/10');
     await screen.findByText('A shared entry.');
     await press('Only me');
+    expect(screen.queryByText(/Your AI reads/)).toBeNull();
     await press('LLM Response');
     expect(screen.queryByRole('heading', { name: 'Generate an AI reply?' })).toBeNull();
     await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
     expect(mockPost.mock.calls[0]).toEqual(['/nodes/10/llm', {
       model: 'ben-model', source_mode: 'textmode', privacy_level: 'private',
+    }]);
+  });
+
+  test('"Only me" with a key: the dialog in its private wording, and the ack goes with privacy_level "private"', async () => {
+    mockUser = { ...BEN, craft_mode: true };
+    routes['/nodes/10'] = withKey();
+    renderAt('/node/10');
+    await screen.findByText('A shared entry.');
+    await press('Only me');
+    // The note under the choice is worded for a private reply.
+    expect(screen.getByText(
+      'Your AI reads your profile and memory for this reply, as the prompt shared in this thread asks.',
+    )).toBeInTheDocument();
+    await press('LLM Response');
+    const dialog = screen.getByRole('dialog');
+    expect(screen.getByRole('heading', { name: 'Generate an AI reply?' })).toBeInTheDocument();
+    expect(dialog).toHaveTextContent(
+      'Only you will see it. Your AI reads your profile and memory for this reply, '
+      + 'as the prompt shared in this thread asks.');
+    expect(dialog).not.toHaveTextContent('@anna');
+    expect(dialog).not.toHaveTextContent('could share private information');
+    expect(mockPost).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByLabelText("Don't ask again in this thread"));
+    await press('Generate');
+    await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
+    // Agreed to in the private dialog: the ack and the stored value say so.
+    expect(mockPost.mock.calls[0]).toEqual(['/nodes/10/llm', {
+      model: 'ben-model', source_mode: 'textmode', privacy_level: 'private',
+      ai_reads_ack: 'private:key-1',
+    }]);
+    expect(localStorage.getItem('loore_circle_ai_reply_ack_2_10')).toBe('private:key-1');
+  });
+
+  test('a private agreement stored for the current key: no private dialog, "private:<key>" is sent', async () => {
+    mockUser = { ...BEN, craft_mode: true };
+    localStorage.setItem('loore_circle_ai_reply_ack_2_10', 'private:key-1');
+    localStorage.setItem('loore_circle_ai_reply_privacy_2_10', 'private');
+    routes['/nodes/10'] = withKey();
+    renderAt('/node/10');
+    await screen.findByText('A shared entry.');
+    await press('LLM Response');
+    expect(screen.queryByRole('dialog')).toBeNull();
+    await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
+    expect(mockPost.mock.calls[0][1]).toEqual({
+      model: 'ben-model', source_mode: 'textmode', privacy_level: 'private',
+      ai_reads_ack: 'private:key-1',
+    });
+  });
+
+  test('a private agreement does not skip the shared dialog; the bare key goes out only after it is confirmed', async () => {
+    mockUser = { ...BEN, craft_mode: true };
+    localStorage.setItem('loore_circle_ai_reply_ack_2_10', 'private:key-1');
+    routes['/nodes/10'] = withKey();
+    renderAt('/node/10');
+    await screen.findByText('A shared entry.');
+    await press('LLM Response');
+    const dialog = screen.getByRole('dialog');
+    expect(dialog).toHaveTextContent('@anna and @chidi will see it, marked with your name.');
+    expect(dialog).toHaveTextContent('could share private information from them.');
+    expect(mockPost).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByLabelText("Don't ask again in this thread"));
+    await press('Generate');
+    await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
+    expect(mockPost.mock.calls[0]).toEqual(['/nodes/10/llm', {
+      model: 'ben-model', source_mode: 'textmode', ai_reads_ack: 'key-1',
+    }]);
+    // Ticked in the shared dialog: the bare key replaces the private one.
+    expect(localStorage.getItem('loore_circle_ai_reply_ack_2_10')).toBe('key-1');
+  });
+
+  test('without a key, a private agreement left from an earlier key does not skip the shared dialog', async () => {
+    localStorage.setItem('loore_circle_ai_reply_ack_2_10', 'private:key-0');
+    routes['/nodes/10'] = withKey('', []);
+    renderAt('/node/10');
+    await screen.findByText('A shared entry.');
+    await press('LLM Response');
+    expect(screen.getByRole('heading', { name: 'Generate an AI reply?' })).toBeInTheDocument();
+    expect(mockPost).not.toHaveBeenCalled();
+  });
+
+  test('a shared agreement skips the private dialog too, and the bare key is sent', async () => {
+    mockUser = { ...BEN, craft_mode: true };
+    localStorage.setItem('loore_circle_ai_reply_ack_2_10', 'key-1');
+    localStorage.setItem('loore_circle_ai_reply_privacy_2_10', 'private');
+    routes['/nodes/10'] = withKey();
+    renderAt('/node/10');
+    await screen.findByText('A shared entry.');
+    await press('LLM Response');
+    expect(screen.queryByRole('heading', { name: 'Generate an AI reply?' })).toBeNull();
+    await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
+    expect(mockPost.mock.calls[0][1]).toEqual({
+      model: 'ben-model', source_mode: 'textmode', privacy_level: 'private',
+      ai_reads_ack: 'key-1',
+    });
+  });
+
+  test('"Only me": the server says the list changed, the private dialog opens again and the retry carries the new key', async () => {
+    mockUser = { ...BEN, craft_mode: true };
+    localStorage.setItem('loore_circle_ai_reply_ack_2_10', 'key-1');
+    localStorage.setItem('loore_circle_ai_reply_privacy_2_10', 'private');
+    routes['/nodes/10'] = withKey();
+    mockPost.mockRejectedValueOnce(changedAnswer);
+    renderAt('/node/10');
+    await screen.findByText('A shared entry.');
+    await press('LLM Response');
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog).toHaveTextContent(
+      'Only you will see it. Your AI reads your profile and whole archive of writing '
+      + 'for this reply, as the prompt shared in this thread asks.');
+    await press('Generate');
+    await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(2));
+    expect(mockPost.mock.calls[1]).toEqual(['/nodes/10/llm', {
+      model: 'ben-model', source_mode: 'textmode', privacy_level: 'private',
+      ai_reads_ack: 'private:key-2',
     }]);
   });
 });
