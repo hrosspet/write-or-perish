@@ -11,6 +11,9 @@ import { useToast } from '../contexts/ToastContext';
 import api from '../api';
 import * as voiceTiming from '../utils/voiceTiming';
 import { isAiUsageRefusedError, aiUsageRefusalScope } from '../utils/aiUsage';
+import {
+  THREAD_LIMIT_SPOKEN, THREAD_TOO_LONG_CODE, isThreadTooLong, speakSentence,
+} from '../utils/threadLength';
 import { onPageReturn } from '../utils/pageReturn';
 import { playErrorSound } from '../utils/errorSound';
 
@@ -236,6 +239,15 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   useEffect(() => {
     onAiUsageRefusedRef.current = onAiUsageRefused;
   }, [onAiUsageRefused]);
+  // The thread is too long for another reply (#648): a refused record
+  // press, a recording whose reply was skipped, or a reply refused before
+  // its first call. The sentence is said aloud (the user may not be
+  // looking), with the browser's own speech: no server call. The page then
+  // shows the limit ('too_long') with the way to a new thread.
+  const refuseForThreadLength = useCallback(() => {
+    speakSentence(THREAD_LIMIT_SPOKEN);
+    if (onAiUsageRefusedRef.current) onAiUsageRefusedRef.current('too_long');
+  }, []);
   // The server confirmed the recording is saved as an entry (#391): the
   // page learns that without waiting for a reply, which can fail or be
   // skipped after the entry exists.
@@ -327,6 +339,15 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
         }
         return;
       }
+      // Refused because the thread is too long for another reply (#648):
+      // no recording started.
+      if (err?.threadTooLong) {
+        stopSilentAudio();
+        setIsStopping(false);
+        setPhase('ready');
+        refuseForThreadLength();
+        return;
+      }
 
       const name = err?.name || err?.error?.name;
       let message;
@@ -383,6 +404,8 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
         }
         addToast(data.warning, 8000);
         setPhase('ready');
+        // The thread grew past the limit with this recording (#648).
+        if (data.warningCode === THREAD_TOO_LONG_CODE) refuseForThreadLength();
         return;
       }
 
@@ -429,6 +452,16 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
         if (isAiUsageRefusedError(err) && onAiUsageRefusedRef.current) {
           setPhase('ready');
           onAiUsageRefusedRef.current(aiUsageRefusalScope(err));
+          return;
+        }
+        // Too long for another reply (#648): said, and shown, not failed.
+        if (isThreadTooLong(err)) {
+          if (err?.response?.data?.user_node_id) {
+            lastUserNodeIdRef.current = err.response.data.user_node_id;
+            if (onEntrySavedRef.current) onEntrySavedRef.current();
+          }
+          setPhase('ready');
+          refuseForThreadLength();
           return;
         }
         // The reply could not start.
@@ -806,6 +839,16 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       // took the last reply's failure for the next one's.
       if (failureToastedForNodeRef.current === llmNodeId) return;
       failureToastedForNodeRef.current = llmNodeId;
+      // Refused before any call for the thread's length (#648): said
+      // aloud instead of the error sound, and the screen shows the limit
+      // with the way to a new thread.
+      if (llmData.error_code === THREAD_TOO_LONG_CODE) {
+        if (onLLMFailedRef.current) onLLMFailedRef.current(llmNodeId);
+        finishGenerating();
+        setPhase('ready');
+        refuseForThreadLength();
+        return;
+      }
       // The red dot alone didn't say why; the server's error is written
       // for the user (e.g. "break the request into smaller steps").
       addToast(llmError || 'Response generation failed', 8000);
@@ -825,7 +868,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     // (llm-status polling already stopped on 'completed', so no other dep
     // changes).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [llmStatus, llmData, llmNodeId, audio, ttsTitle, stopSilentAudio, advanceChain, deliverFullTts, ttsRetriggerNonce, soundReplyFailure, finishGenerating]);
+  }, [llmStatus, llmData, llmNodeId, audio, ttsTitle, stopSilentAudio, advanceChain, deliverFullTts, ttsRetriggerNonce, soundReplyFailure, finishGenerating, refuseForThreadLength]);
 
   // Safety net: TTS is being generated (POST /tts returned 202) but no
   // chunk arrived within 60s — SSE is probably dead; transition to
