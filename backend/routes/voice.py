@@ -110,6 +110,13 @@ def create_voice_from_node(node_id):
     # thread's length, as at streaming init: the change needs a decision
     # first, and the length is asked at the next Record press.
     if not is_llm:
+        # Payments on and no AI replies for this account (#438): refused
+        # before the waiting change and the length, as in the other Voice
+        # entry points, so nothing is written.
+        from backend.utils.subscriptions import (
+            ai_replies_allowed, subscription_required_response)
+        if not ai_replies_allowed(current_user):
+            return subscription_required_response(current_user)
         from backend.utils.tool_approvals import waiting_in_thread
         if waiting_in_thread(current_user.id, node):
             return _ready_under(node, has_prompt, ai_usage)
