@@ -37,8 +37,8 @@ from backend.utils.tokens import (
 from backend.utils.quotes import (
     resolve_quotes, has_quotes,
     resolve_ext_quotes, has_ext_quotes, find_ext_quote_ids,
-    quotes_inside, release_quotes, reference_id_from_name,
-    REFERENCE_LINE, REFERENCE_LINE_NAMED,
+    quotes_inside, release_quotes, reference_id_from_name, reference_name,
+    REFERENCE_LINE, REFERENCE_LINE_NAMED, ReferenceLines,
 )
 from backend.utils.node_split import NODE_CHAR_CAP
 from backend.utils.session_helpers import (
@@ -456,7 +456,10 @@ def _dispatch_voice_tts(node_id, user_id):
 # BEFORE the text is stored or scanned for pulls — the stored lore is
 # self-contained, and the model never copies a multi-digit id (which it
 # reliably typos; labels it doesn't).
-_LABEL_QUOTE_RE = re.compile(r'\{quote:([A-Za-z]{1,2})\}')
+# A saved reference read or named this turn is quoted by its name too,
+# {quote:reference N} (quotes.reference_name).
+_LABEL_QUOTE_RE = re.compile(
+    r'\{quote:([A-Za-z]{1,2}|reference\s*#?\s*\d+)\}', re.IGNORECASE)
 
 
 def _quote_label(n):
@@ -469,15 +472,36 @@ def _quote_label(n):
     return label
 
 
+def _next_quote_label(quote_labels):
+    """The next search-result label of the turn: the letter labels
+    count, the saved references' names ("REFERENCE 12") do not."""
+    return _quote_label(sum(1 for k in quote_labels if k.isalpha()))
+
+
+def _label_key(label):
+    """The quote_labels key of *label*: a letter label upper-cased, a
+    saved reference's name in its one written form ("REFERENCE 12")."""
+    ref_id = reference_id_from_name(label)
+    if ref_id is not None:
+        return reference_name(ref_id).upper()
+    return label.upper()
+
+
 def _canonicalize_quote_labels(text, quote_labels):
     """Rewrite {quote:<label>} markers to absolute references using this
     turn's label map ({label: ("node"|"external", id)}). Unknown labels are
-    left as-is (they render as literal text — visible, not wrong)."""
+    left as-is (they render as literal text — visible, not wrong).
+
+    A saved reference's name is a label too, {quote:reference N}, for a
+    reference of the user's this turn read by name or its recent raw
+    window names (both put it in the map); any other N stays as written.
+    A bare {quote:N} is an entry's id and is never rewritten: nothing in
+    it says whether the model meant reference N."""
     if not text or not quote_labels:
         return text
 
     def repl(match):
-        target = quote_labels.get(match.group(1).upper())
+        target = quote_labels.get(_label_key(match.group(1)))
         if target is None:
             return match.group(0)
         kind, ref_id = target
@@ -796,7 +820,8 @@ VOICE_TOOLS = [
             "or building your answer on anything longer than its preview "
             "(previews mark themselves truncated). The full text comes "
             "back the next step; then write your final reply — with "
-            "{quote:<label>} if you want the user to see it quoted. Always "
+            "{quote:<label>}, or {quote:reference N} for a saved reference "
+            "read by name, if you want the user to see it quoted. Always "
             "produce a text response alongside the call."
         ),
         "input_schema": {
@@ -1404,8 +1429,17 @@ def _retrieval_injection_text(tr, user_id, with_labels=False, licence=None):
             q_text = (q_text[:MAX_QUOTE_PULL_CHARS]
                       + "\n[…content truncated to fit the context window…]")
         what = "reference" if kind == "external" else "entry"
+        how = ""
+        if (kind == "external"
+                and reference_id_from_name(tr.get("ref")) is not None):
+            # Read by name: within the turn the name quotes it
+            # (_canonicalize_quote_labels); a later turn's map may not
+            # hold it, so there the absolute marker does.
+            how = (f" To quote it, write {{quote:{reference_name(ref_id)}}}."
+                   if with_labels else
+                   f" To quote it, write {{quote_ext:{ref_id}}}.")
         return (f"[Full content of the {what} you asked to read "
-                f"([{tr.get('ref', '?')}]):\n{q_text}]")
+                f"([{tr.get('ref', '?')}]):{how}\n{q_text}]")
     if name == "semantic_search":
         # Re-resolve each matched node from its id (content never stored in
         # meta); re-check ai_usage, soft-delete and the user's access at
@@ -2583,23 +2617,29 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                 ref = (inp.get("ref") or "").strip()
                 target = None
                 # A saved reference by the name the recent raw window
-                # gives it ("reference 12", quotes.reference_title_lines):
-                # only one of the user's own. The window shows it to
-                # every user who quoted it, so its name opens it whatever
-                # the "External references" toggle says: the toggle
-                # decides what a search returns (#329), and the window
-                # carried the text itself before 2026-11-12.
+                # gives it ("reference 12", quotes.reference_title_lines),
+                # only one of the user's own. With the "External
+                # references" toggle on, any of them; with it off, only
+                # the ones this call's window names (in the turn's map,
+                # seeded from the window): the user's setting keeps the
+                # rest out, and any other id reads as a missing one. A
+                # reference opened by name joins the map, so the reply
+                # can quote it as {quote:reference N}.
                 named_id = reference_id_from_name(ref)
-                if quote_labels and ref.upper() in quote_labels:
+                if named_id is not None:
+                    key = reference_name(named_id).upper()
+                    item = db.session.get(ExternalItem, named_id)
+                    if (item is not None and item.user_id == user_id
+                            and ((quote_labels and key in quote_labels)
+                                 or _external_references_for_user(
+                                     user_id))):
+                        target = ("external", item.id)
+                        if quote_labels is not None:
+                            quote_labels[key] = target
+                elif quote_labels and ref.upper() in quote_labels:
                     target = quote_labels[ref.upper()]
                 elif ref.isdigit():
                     target = ("node", int(ref))
-                elif named_id is not None:
-                    item = db.session.get(ExternalItem, named_id)
-                    if item is not None and item.user_id == user_id:
-                        target = ("external", item.id)
-                    else:
-                        named_id = None
                 if target is None:
                     result["status"] = "error"
                     result["error"] = (
@@ -2899,7 +2939,9 @@ def get_user_recent_raw_content(user_id, created_before=None, usage=None,
             (title or author, source; NAMED adds the name read_full
             opens it by) instead of giving its text; see
             _recent_raw_reference_lines. A window that quotes none is
-            the same bytes either way.
+            the same bytes either way. The ids of the references named
+            by the name read_full opens them by go into
+            *usage*.named_references.
 
     The markers left as written in other people's text come back held
     (quotes.hold_quotes); the caller releases them (quotes.release_quotes)
@@ -2915,6 +2957,8 @@ def get_user_recent_raw_content(user_id, created_before=None, usage=None,
     if not user:
         return None
 
+    lines = (ReferenceLines(named=reference_titles == REFERENCE_LINE_NAMED)
+             if reference_titles else None)
     result = _build_export(
         user,
         max_tokens=10000,
@@ -2926,10 +2970,12 @@ def get_user_recent_raw_content(user_id, created_before=None, usage=None,
         licence=(usage.licence(USER_RECENT_RAW_PLACEHOLDER)
                  if usage is not None else None),
         hold_others_markers=True,
-        reference_titles=reference_titles,
+        reference_titles=lines,
     )
     if not result:
         return None
+    if lines is not None and usage is not None:
+        usage.named_references.update(lines.ids)
 
     return {
         "content": result["content"],
@@ -3673,7 +3719,7 @@ def _prewarm_anthropic_cache(system_node_id, user_id, model_id,
             cached = get_cached_render(
                 flask_app.config, system_node, render_variant)
             if cached is not None:
-                sys_text, unlicensed = cached
+                sys_text, unlicensed = cached.text, cached.unlicensed
             else:
                 usage = ContextUsage()
                 sys_text = render_system_message(
@@ -3684,7 +3730,8 @@ def _prewarm_anthropic_cache(system_node_id, user_id, model_id,
                 unlicensed = usage.reason(sys_content)
                 store_render(flask_app.config, system_node, sys_text,
                              render_variant, unlicensed=unlicensed,
-                             rows=usage.rows(sys_content))
+                             rows=usage.rows(sys_content),
+                             references=usage.named_references)
 
             key_type = determine_api_key_type([system_node], logger=logger)
             # The render carries the user's own rows, each licensed by
@@ -4145,6 +4192,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # Why the cached render's own rows are not licensed for
             # training, or None (#326) — replayed into the licence below.
             cached_system_unlicensed = None
+            # The saved references a cached render's window names
+            # (prompt_cache.CachedRender.references).
+            cached_system_references = ()
             if system_node is not None:
                 _sys_text = system_node.get_content() or ""
                 # Exclude prompts carrying per-call volatile placeholders.
@@ -4163,8 +4213,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     _cached = get_cached_render(
                         flask_app.config, system_node, render_variant)
                     if _cached is not None:
-                        cached_system_render, cached_system_unlicensed = (
-                            _cached)
+                        cached_system_render = _cached.text
+                        cached_system_unlicensed = _cached.unlicensed
+                        cached_system_references = _cached.references
 
             def _placeholder_node(placeholder):
                 """The first of the user's own nodes carrying
@@ -4551,6 +4602,14 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # text is stored or shown (the streamed partial text too, so
             # it lives from the first call on).
             quote_labels = {}
+            # The saved references this call's recent raw window names
+            # ("reference N", fresh or from the cached render): read_full
+            # opens them by that name, and {quote:reference N} quotes
+            # them (_canonicalize_quote_labels).
+            for _ref_id in (set(context_usage.named_references)
+                            | set(cached_system_references)):
+                quote_labels[reference_name(_ref_id).upper()] = (
+                    "external", _ref_id)
             streaming_replies = flask_app.config.get(
                 "STREAMING_REPLIES", True)
 
@@ -4968,7 +5027,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                 flask_app.config, system_node, message_text,
                                 render_variant,
                                 unlicensed=context_usage.reason(_verdict_text),
-                                rows=context_usage.rows(_verdict_text))
+                                rows=context_usage.rows(_verdict_text),
+                                references=(
+                                    context_usage.named_references
+                                    if USER_RECENT_RAW_PLACEHOLDER
+                                    in _verdict_text else ()))
                     if role == "assistant":
                         last_assistant_index = len(messages)
                     messages.append({
@@ -5510,11 +5573,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                 or tr.get("status") != "success"):
                             continue
                         for m in tr.get("matches") or []:
-                            label = _quote_label(len(quote_labels))
+                            label = _next_quote_label(quote_labels)
                             m["label"] = label
                             quote_labels[label] = ("node", m["node_id"])
                         for m in tr.get("ext_matches") or []:
-                            label = _quote_label(len(quote_labels))
+                            label = _next_quote_label(quote_labels)
                             m["label"] = label
                             quote_labels[label] = ("external", m["item_id"])
 

@@ -237,6 +237,20 @@ def release_quotes(text: str) -> str:
 REFERENCE_LINE = "line"
 REFERENCE_LINE_NAMED = "named line"
 
+
+class ReferenceLines:
+    """One rendering of the recent raw window with reference lines
+    (the export's *reference_titles*): whether the lines carry the name
+    read_full opens a reference by (*named*), and the ids of the
+    references named that way (*ids*), filled in as the window renders.
+    With the "External references" toggle off, read_full opens only
+    these by name."""
+
+    def __init__(self, named: bool):
+        self.named = named
+        self.ids: Set[int] = set()
+
+
 # A saved reference named in the recent raw window is opened by this
 # name with the read_full tool (reference_title_lines).
 _REFERENCE_NAME_RE = re.compile(r"reference\s*#?\s*(\d+)", re.IGNORECASE)

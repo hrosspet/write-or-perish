@@ -16,7 +16,6 @@ from backend.utils.quotes import (
     resolve_quotes_for_export, resolve_ext_quotes, has_ext_quotes,
     ai_blocked_artifact, AI_BLOCKED_ARTIFACT_TEXT,
     quotes_inside, hold_quotes, release_quotes, reference_title_lines,
-    REFERENCE_LINE_NAMED,
 )
 from backend.utils.timefmt import iso_utc
 from backend.utils.encryption import dek_cached, prefetch_deks
@@ -552,11 +551,11 @@ def _format_node_text(node, label, user_id, embedded_quotes,
     its own quote passes over the export (an AI reply's prompt) and
     releases them after; otherwise they are released here.
 
-    *reference_titles* (quotes.REFERENCE_LINE or REFERENCE_LINE_NAMED):
-    a quoted saved reference is one line naming it (title or author,
-    source; NAMED adds the name read_full opens it by) instead of its
-    text (quotes.reference_title_lines), for the recent raw window of a
-    call with tools. None keeps the text."""
+    *reference_titles* (a quotes.ReferenceLines): a quoted saved
+    reference is one line naming it (title or author, source; with
+    ``named`` the name read_full opens it by, and its id goes into
+    ``ids``) instead of its text (quotes.reference_title_lines), for the
+    recent raw window of a call with tools. None keeps the text."""
     if not artifact_refs and _is_system_prompt_node(node):
         return ""
     result = _node_header_line(node, label)
@@ -617,9 +616,10 @@ def _format_node_text(node, label, user_id, embedded_quotes,
             # A line without a title carries no words of the reference,
             # only its author and source, so only a title reports
             # (Training licence; as a quote by author and time, #626).
-            content, _named, titled = reference_title_lines(
-                content, user_id,
-                named=reference_titles == REFERENCE_LINE_NAMED)
+            content, named_ids, titled = reference_title_lines(
+                content, user_id, named=reference_titles.named)
+            if reference_titles.named:
+                reference_titles.ids.update(named_ids)
             if licence is not None:
                 licence.note_external(titled,
                                       what="archive reference title")
@@ -2461,12 +2461,12 @@ def build_user_export_content(
                come back held (quotes.hold_quotes), for an AI reply's
                prompt, which runs its own quote passes over the text
                and then releases them (quotes.release_quotes).
-        reference_titles: quotes.REFERENCE_LINE or REFERENCE_LINE_NAMED:
-               a saved reference quoted in the user's own text is one
-               line naming it (its title, or its author; its source;
-               NAMED adds the name read_full opens it by), not its text
-               (quotes.reference_title_lines). Only for the recent raw
-               window of a call with tools (Peter, voice review
+        reference_titles: a quotes.ReferenceLines: a saved reference
+               quoted in the user's own text is one line naming it (its
+               title, or its author; its source; with ``named`` the name
+               read_full opens it by, collected in ``ids``), not its
+               text (quotes.reference_title_lines). Only for the recent
+               raw window of a call with tools (Peter, voice review
                2026-11-12); None, for the data download, {user_export}
                and the background jobs, keeps the text.
 

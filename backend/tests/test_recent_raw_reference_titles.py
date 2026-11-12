@@ -414,33 +414,66 @@ def test_an_author_and_source_line_leaves_the_training_key(app, keys):  # noqa: 
 
 # ── read_full opens a reference by its name ──────────────────────────────
 
-def test_read_full_opens_a_reference_by_its_name(app):  # noqa: F811
-    """Also with the "External references" toggle off (the default): the
-    toggle decides what a search returns."""
+def _chain_with_window(toggle):
+    """A textmode chain whose prompt carries the window; the clip is
+    quoted in an older entry, another clip is quoted nowhere."""
     alice, system, user_node, llm_node = _build_chain("textmode")  # noqa: F811
-    alice.external_content_enabled = False
+    alice.external_content_enabled = toggle
+    _set_prompt(system, "system prompt body\n{user_recent_raw}")
     clip = _clip(alice)
+    unquoted = _item(alice, "web_clip", "AN UNQUOTED PAGE BODY",
+                     title="Elsewhere", url="https://example.com/b")
+    old = _entry(alice, "MY NOTE on {quote_ext:%d}" % clip.id, "chat")
+    old.created_at = datetime(2020, 1, 1)
     _db.session.commit()
-    clip_id = clip.id
+    return alice, user_node, llm_node, clip, unquoted
 
+
+def _read_then_reply(alice, user_node, llm_node, ref, reply):  # noqa: F811
     _ScriptedProvider.reset([
         _resp("Opening that page.",
               tool_calls=[{"id": "t1", "name": "read_full",
-                           "input": {"ref": reference_name(clip_id)}}]),
-        _resp("It argues for curiosity."),
+                           "input": {"ref": ref}}]),
+        _resp(reply),
     ])
     generate_llm_response(_FakeSelf(), user_node.id, llm_node.id, "gpt-5",
                           alice.id, source_mode="textmode")
-
-    assert len(_ScriptedProvider.calls) == 2
-    round2 = "\n".join(
-        m["text"] for m in _ScriptedProvider.calls[1]["messages"])
-    assert "THE CLIPPED PAGE BODY" in round2
-    tools = [t["name"] for t in _ScriptedProvider.calls[0]["tools"]]
-    assert "read_full" in tools
     _db.session.expire_all()
+    first = Node.query.get(llm_node.id)
+    final = Node.query.get(first.continuation_node_id or first.id)
+    round2 = "\n".join(
+        m["text"] for m in _ScriptedProvider.calls[-1]["messages"])
+    return final.get_content(), round2
+
+
+@pytest.mark.parametrize("toggle", [False, True])
+def test_read_full_opens_a_reference_the_window_names(app, toggle):  # noqa: F811
+    alice, user_node, llm_node, clip, _ = _chain_with_window(toggle)  # noqa: F811
+
+    _final, round2 = _read_then_reply(
+        alice, user_node, llm_node, reference_name(clip.id), "Read it.")
+
+    assert "THE CLIPPED PAGE BODY" in round2
+    assert ("To quote it, write {quote:%s}." % reference_name(clip.id)
+            in round2)
     meta = Node.query.get(llm_node.id).tool_calls_meta
     assert '"kind": "external"' in meta
+
+
+@pytest.mark.parametrize("toggle, opens", [(False, False), (True, True)])
+def test_a_reference_the_window_does_not_name_opens_only_with_the_toggle(app, toggle, opens):  # noqa: F811,E501
+    """With the "External references" toggle off, the user's setting
+    wins: the name opens only what this call's window names, and any
+    other id reads as a missing one. With it on, any of the user's own
+    references."""
+    alice, user_node, llm_node, _clip_item, unquoted = (  # noqa: F811
+        _chain_with_window(toggle))
+
+    _final, round2 = _read_then_reply(
+        alice, user_node, llm_node, reference_name(unquoted.id), "Done.")
+
+    assert ("AN UNQUOTED PAGE BODY" in round2) is opens
+    assert ("Unknown reference" in round2) is (not opens)
 
 
 def test_read_full_by_name_opens_only_the_users_own_reference(app):  # noqa: F811
@@ -457,3 +490,118 @@ def test_read_full_by_name_opens_only_the_users_own_reference(app):  # noqa: F81
     assert results[0]["status"] == "error"
     assert "Unknown reference" in results[0]["error"]
     assert "url" not in results[0]
+
+
+# ── quoting a reference read by name ─────────────────────────────────────
+
+def test_quote_by_name_becomes_the_reference(app):  # noqa: F811
+    alice, user_node, llm_node, clip, _ = _chain_with_window(False)  # noqa: F811
+
+    final, _round2 = _read_then_reply(
+        alice, user_node, llm_node, reference_name(clip.id),
+        "Here: {quote:%s} and why." % reference_name(clip.id))
+
+    assert final == "Here: {quote_ext:%d} and why." % clip.id
+
+
+def test_quote_ext_stays_the_reference(app):  # noqa: F811
+    alice, user_node, llm_node, clip, _ = _chain_with_window(False)  # noqa: F811
+
+    final, _round2 = _read_then_reply(
+        alice, user_node, llm_node, reference_name(clip.id),
+        "Here: {quote_ext:%d}." % clip.id)
+
+    assert final == "Here: {quote_ext:%d}." % clip.id
+
+
+def test_a_bare_number_is_left_as_written(app):  # noqa: F811
+    """{quote:N} is an entry's id, and nothing in it says the model meant
+    reference N, so it is not rewritten (it quotes entry N, if the user
+    may read one; the description and the read result name the reference
+    forms)."""
+    alice, user_node, llm_node, clip, _ = _chain_with_window(False)  # noqa: F811
+
+    final, _round2 = _read_then_reply(
+        alice, user_node, llm_node, reference_name(clip.id),
+        "Here: {quote:%d}." % clip.id)
+
+    assert final == "Here: {quote:%d}." % clip.id
+
+
+def test_quote_by_name_without_a_read_or_a_window_name_stays(app):  # noqa: F811
+    """A name the window gives quotes its reference without a read;
+    one it does not give, never read this turn, stays as written."""
+    alice, user_node, llm_node, clip, unquoted = _chain_with_window(False)  # noqa: F811
+    _ScriptedProvider.reset([_resp(
+        "{quote:%s} {quote:%s}" % (reference_name(clip.id),
+                                   reference_name(unquoted.id)))])
+    generate_llm_response(_FakeSelf(), user_node.id, llm_node.id, "gpt-5",
+                          alice.id, source_mode="textmode")
+    _db.session.expire_all()
+
+    assert Node.query.get(llm_node.id).get_content() == (
+        "{quote_ext:%d} {quote:%s}" % (clip.id, reference_name(unquoted.id)))
+
+
+def test_search_labels_still_start_at_a(app):  # noqa: F811
+    labels = {"REFERENCE 12": ("external", 12)}
+    assert _llm_task_mod._next_quote_label(labels) == "A"
+    labels["A"] = ("node", 1)
+    assert _llm_task_mod._next_quote_label(labels) == "B"
+    assert _llm_task_mod._canonicalize_quote_labels(
+        "{quote:A} {quote:Reference #12} {quote:reference 13}", labels) == (
+        "{quote:1} {quote_ext:12} {quote:reference 13}")
+
+
+# ── the render cache ─────────────────────────────────────────────────────
+
+def test_a_turn_served_from_the_cache_knows_the_window_names(
+        app, alice, frozen_export_time, fake_redis):  # noqa: F811
+    """Turn two reads the system render from the cache: the names its
+    window gives still open (toggle off) and still quote."""
+    from backend.tests.test_training_key_own_rows import _next_turn
+    alice.external_content_enabled = False
+    clip = _clip(alice)
+    _earlier_session_quoting(alice, clip)
+    system, entry, reply = _new_session(alice)
+
+    _ScriptedProvider.reset([_resp("First.")])
+    generate_llm_response(_FakeSelf(), entry.id, reply.id, "gpt-5",
+                          alice.id, source_mode="textmode")
+    first = _ScriptedProvider.calls[-1]["messages"][0]["text"]
+    assert fake_redis.store
+    follow, nxt = _next_turn(alice, reply.id)
+
+    _ScriptedProvider.reset([
+        _resp("Opening.", tool_calls=[{"id": "t1", "name": "read_full",
+                                       "input": {"ref": reference_name(
+                                           clip.id)}}]),
+        _resp("{quote:%s}" % reference_name(clip.id)),
+    ])
+    generate_llm_response(_FakeSelf(), follow.id, nxt.id, "gpt-5",
+                          alice.id, source_mode="textmode")
+
+    assert _ScriptedProvider.calls[0]["messages"][0]["text"] == first
+    round2 = "\n".join(
+        m["text"] for m in _ScriptedProvider.calls[-1]["messages"])
+    assert "THE CLIPPED PAGE BODY" in round2
+    _db.session.expire_all()
+    cont = Node.query.get(Node.query.get(nxt.id).continuation_node_id)
+    assert cont.get_content() == "{quote_ext:%d}" % clip.id
+
+
+def test_a_render_cached_under_the_old_prefix_is_not_read(
+        app, alice, fake_redis):  # noqa: F811
+    """A render stored before the window named references (v4) still
+    carries their text: it is never read, so no call with tools sends it
+    for the rest of its TTL."""
+    import backend.utils.prompt_cache as prompt_cache
+    system, _entry, _reply = _new_session(alice)
+    prompt_cache.store_render(app.config, system, "A V4 RENDER", "v")
+    (key, blob), = fake_redis.store.items()
+    fake_redis.store.clear()
+    fake_redis.store[key.replace(prompt_cache._KEY_PREFIX,
+                                 "wop:sysprompt:v4:")] = blob
+
+    assert prompt_cache._KEY_PREFIX == "wop:sysprompt:v5:"
+    assert prompt_cache.get_cached_render(app.config, system, "v") is None
