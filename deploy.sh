@@ -352,12 +352,19 @@ if [ -f "$NGINX_CONFIG_SOURCE" ]; then
 
         # Test configuration
         log "Testing Nginx configuration..."
-        if sudo nginx -t 2>&1 | tee -a "$LOG_FILE"; then
+        # Capture the test's own exit status (a pipe into tee would report
+        # tee's), then log its output either way.
+        if NGINX_TEST_OUTPUT=$(sudo nginx -t 2>&1); then
+            echo "$NGINX_TEST_OUTPUT" | tee -a "$LOG_FILE"
             log "Nginx configuration test passed"
         else
-            error "Nginx configuration test failed! Rolling back..."
-            sudo cp "$NGINX_CONFIG_TARGET.backup."* "$NGINX_CONFIG_TARGET" 2>/dev/null || true
-            exit 1
+            echo "$NGINX_TEST_OUTPUT" | tee -a "$LOG_FILE"
+            # Restore the previous config before error(), which exits.
+            NGINX_BACKUP=$(ls -t "$NGINX_CONFIG_TARGET".backup.* 2>/dev/null | head -1 || true)
+            if [ -n "$NGINX_BACKUP" ]; then
+                sudo cp "$NGINX_BACKUP" "$NGINX_CONFIG_TARGET" 2>/dev/null || true
+            fi
+            error "Nginx configuration test failed! Previous config restored."
         fi
     else
         log "Nginx configuration unchanged, skipping update"
