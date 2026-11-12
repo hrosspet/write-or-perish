@@ -3,13 +3,108 @@
 These are isolated unit tests that don't require a full Flask app or database.
 They test the privacy utility functions in isolation.
 """
+import os
 import sys
 import types
 
 import pytest
 
+from backend.config import Config
+from backend.tests import network_guard
+
 # Each test file handles its own mocking and imports
 # to avoid triggering the full backend initialization
+
+# No test connects outside this machine (#633, #656): installed before any
+# test module is imported, so it covers collection too.
+network_guard.install()
+
+# No test holds a real provider key (#633). By the time this file runs,
+# importing backend has loaded the developer's .env into the environment
+# and into Config. A key that is set becomes empty, not unset, so that a
+# later load_dotenv (a subprocess a test starts imports backend again)
+# cannot fill it back in from .env; Config gets None, as in CI, where no
+# key is set. The SDKs' base-URL variables go: the SDKs' defaults are
+# outside hosts, which the guard refuses by name, where a local proxy
+# could pass a request on.
+_PROVIDER_KEY_PREFIXES = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+                          "OPENAI_API_KEY")
+for _name in list(os.environ):
+    if _name.startswith(_PROVIDER_KEY_PREFIXES):
+        os.environ[_name] = ""
+for _name in list(vars(Config)):
+    if _name.startswith(_PROVIDER_KEY_PREFIXES):
+        setattr(Config, _name, None)
+for _name in ("ANTHROPIC_BASE_URL", "OPENAI_BASE_URL"):
+    os.environ.pop(_name, None)
+
+
+def align_package_attributes():
+    """Point every backend package's attribute for a submodule at the
+    module in sys.modules.
+
+    Many test files import a module afresh (delete it from sys.modules,
+    import it again) and restore sys.modules afterwards. The import also
+    set the package's attribute to the fresh copy, which nothing restored.
+    ``import backend.x as x`` and ``patch("backend.x.name")`` resolve
+    through that attribute, so a later test patched the stale copy while
+    the code under test, which imported from sys.modules, kept the real
+    function: test_window_scope's token-count stub missed and the real
+    count went to the provider (#633), and test_privacy_utils failed
+    after such a file. Only a module is replaced by a module: an attribute
+    or a sys.modules entry that a test set to a stand-in is left alone."""
+    for name, module in list(sys.modules.items()):
+        if not name.startswith("backend.") or not isinstance(
+                module, types.ModuleType):
+            continue
+        parent_name, _, child = name.rpartition(".")
+        parent = sys.modules.get(parent_name)
+        if not isinstance(parent, types.ModuleType):
+            continue
+        current = parent.__dict__.get(child)
+        if isinstance(current, types.ModuleType) and current is not module:
+            setattr(parent, child, module)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item):
+    """Before any fixture of the test is set up (module-scoped ones too)."""
+    align_package_attributes()
+
+
+# Refusals made outside a test's call (a fixture, an import, a thread that
+# outlived its test), reported when the session ends.
+_refused_outside_tests = []
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_call(item):
+    """A test that tried to connect outside fails, also when the code under
+    test caught the refusal (network_guard)."""
+    _refused_outside_tests.extend(network_guard.take())
+    try:
+        result = yield
+    finally:
+        refused = network_guard.take()
+    if refused:
+        pytest.fail("This test tried to connect outside this machine: "
+                    + ", ".join(refused) + ". Stub the call "
+                    "(backend/tests/network_guard.py).", pytrace=False)
+    return result
+
+
+def pytest_sessionfinish(session, exitstatus):
+    refused = _refused_outside_tests + network_guard.take()
+    if not refused:
+        return
+    reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+    if reporter is not None:
+        reporter.write_line(
+            "Outside connections refused outside a test's call (a fixture, "
+            "an import or a leftover thread): " + ", ".join(refused),
+            red=True)
+    session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
 
 # Every module-level copy of the audio storage root. The cleanup, the
 # audio sweep and the reference delete route delete files under it, so no
