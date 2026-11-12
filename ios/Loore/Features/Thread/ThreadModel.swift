@@ -60,11 +60,26 @@ final class ThreadModel {
     @ObservationIgnored private var quotesKey = ""
     @ObservationIgnored private var quotesVersion = 0
 
+    /// Write tool calls waiting for the user's approval in this thread (2026-11-12).
+    @ObservationIgnored let approvals: ToolApprovalsModel
+    /// The approval dialog opens by itself on the screen's first load only.
+    @ObservationIgnored private var firstLoadDone = false
+
     init(nodeId: Int, awaitLLM: Int?, app: AppState) {
         self.nodeId = nodeId
         self.initialAwaitLLM = awaitLLM
         self.app = app
         selectedModel = app.user?.preferredModel
+        approvals = ToolApprovalsModel(api: app.api, nodeId: nodeId)
+        approvals.onApproved = { [weak app] item in
+            // What the call wrote shows where it lives.
+            if item.isArtifactWrite { app?.signals.post(.artifactsChanged) }
+            if item.tool == "apply_todo_changes" { app?.signals.post(.todoChanged) }
+        }
+        approvals.onGroupDone = { [weak self] in
+            // The reply's Actions taken (and what it changed) are new.
+            Task { await self?.reload() }
+        }
     }
 
     // MARK: Derived
@@ -176,6 +191,8 @@ final class ThreadModel {
             node = fetched
             pageError = nil
             loading = false
+            approvals.update(fetched.pendingApprovals, autoOpen: !firstLoadDone)
+            firstLoadDone = true
             refreshQuotesIfNeeded()
             resumePendingIfNeeded()
         } catch let error as APIError {
@@ -390,6 +407,7 @@ final class ThreadModel {
         streamTask?.cancel()
         streamTask = nil
         llmTaskNodeId = nil
+        approvals.stop()
     }
 
     /// Completion, failure or cancellation of the tracked reply (map D §5.5–5.6).
@@ -427,6 +445,8 @@ final class ThreadModel {
                 streamTask = nil
                 refreshQuotesIfNeeded()
                 if isReadReply { reloadFinishedGleaning() }
+                // Its write tool calls were kept while it was written: ask now.
+                Task { [approvals] in await approvals.refresh(autoOpen: true) }
             } else {
                 openThread(completedId, awaitLLM: nil)
             }
