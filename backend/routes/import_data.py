@@ -319,23 +319,78 @@ def _requested_ai_usage(data):
     return data.get('ai_usage') or current_user.default_ai_usage or 'none'
 
 
+def _split_item_nodes(tip_ids):
+    """Map every node of the imported items keyed on ``tip_ids`` to its
+    item's tip (#638).
+
+    A Word or PDF document is saved as one entry per chapter, and an
+    entry or message above the per-entry cap as a chain of parts; the
+    dedup key sits on the chain's last node only (_import_file_nodes,
+    _add_imported_message_nodes). A re-import matches that node, so the
+    rest of the item is found by walking up from it: a parent with no
+    key of its own, by the same author, of the same type and origin,
+    belongs to the same item. The walk stops at the thread's root or at
+    a keyed node, which is the tip of the file or message before it.
+    Deleted nodes are walked through, so a chapter deleted on its own
+    does not hide the chapters before it. Reads no content."""
+    cols = (Node.id, Node.parent_id, Node.source_key, Node.user_id,
+            Node.human_owner_id, Node.node_type, Node.origin)
+
+    def rows(ids):
+        ids = list(ids)
+        found = {}
+        for start in range(0, len(ids), 1000):
+            for r in db.session.query(*cols).filter(
+                    Node.id.in_(ids[start:start + 1000])):
+                found[r.id] = r
+        return found
+
+    def same_item(parent, tip):
+        return (parent.source_key is None
+                and parent.user_id == tip.user_id
+                and parent.human_owner_id == tip.human_owner_id
+                and parent.node_type == tip.node_type
+                and parent.origin == tip.origin)
+
+    tips = rows({i for i in tip_ids if i is not None})
+    item_of = {i: i for i in tips}
+    walking = [(tip, tip) for tip in tips.values()]
+    while walking:
+        parents = rows({cur.parent_id for _, cur in walking
+                        if cur.parent_id is not None})
+        step = []
+        for tip, cur in walking:
+            parent = parents.get(cur.parent_id)
+            if (parent is not None and parent.id not in item_of
+                    and same_item(parent, tip)):
+                item_of[parent.id] = tip.id
+                step.append((tip, parent))
+        walking = step
+    return item_of
+
+
 def _apply_settings_to_skipped(node_ids, privacy_level, ai_usage, dek=None,
                                changes=None):
-    """Apply this import's privacy/ai_usage to already-imported nodes.
+    """Apply this import's privacy/ai_usage to already-imported items.
 
     Re-importing an archive is also how users change their mind about
-    import settings, so dedup-skipped (alive) nodes adopt the values
-    chosen for this import instead of being a pure no-op. Returns the
-    number of nodes whose settings actually changed; callers report it
-    as ``updated`` and keep it disjoint from ``skipped``. Provenance is
-    NOT touched: how a node first arrived is a fact, not a setting.
+    import settings, so the entries a re-import matches adopt the values
+    chosen for this import instead of being a pure no-op. ``node_ids``
+    are the matched (keyed) nodes; every alive entry of their items
+    takes the settings, all chapters of a document and all parts of a
+    long message (#638), also when the keyed node itself was deleted.
+    Returns the number of items in which an entry actually changed;
+    callers report it as ``updated`` and keep it disjoint from
+    ``skipped``. Provenance is NOT touched: how a node first arrived is
+    a fact, not a setting.
 
     ``changes`` (a _ProfileChanges) records the nodes whose new AI usage
     moves them into or out of what the profile reads (#625).
     """
     from sqlalchemy import or_
-    ids = [i for i in node_ids if i is not None]
-    updated = 0
+    item_of = _split_item_nodes(node_ids)
+    ids = list(item_of)
+    updated_items = set()
     # Chunked so a huge archive doesn't produce an unbounded IN clause.
     # Goes through the ORM (not a bulk UPDATE) because a privacy change
     # moves content across the encryption boundary (#257) — only the
@@ -344,6 +399,7 @@ def _apply_settings_to_skipped(node_ids, privacy_level, ai_usage, dek=None,
         chunk = ids[start:start + 1000]
         for node in Node.query.filter(
             Node.id.in_(chunk),
+            Node.deleted_at.is_(None),
             or_(
                 Node.privacy_level != privacy_level,
                 Node.ai_usage != ai_usage,
@@ -353,9 +409,9 @@ def _apply_settings_to_skipped(node_ids, privacy_level, ai_usage, dek=None,
                 changes.setting_changed(node)
             node.set_privacy_level(privacy_level, dek=dek)
             node.ai_usage = ai_usage
-            updated += 1
+            updated_items.add(item_of[node.id])
         db.session.flush()
-    return updated
+    return len(updated_items)
 
 
 def _release_deleted_docx_key(file_data, source_key, key_index,
@@ -364,14 +420,17 @@ def _release_deleted_docx_key(file_data, source_key, key_index,
     import: the dedup key sits on the last node of its chapter chain, so
     refilling that node would bring back only the last chapter. The
     deleted tip gives up the key and the document is imported again in
-    full."""
+    full. Returns the old tip's id (its chapters still alive take this
+    import's settings, #638), or None."""
     if (file_data.get('source_format') in CHAPTER_FORMATS
             and on_deleted == 'restore' and source_key in deleted_keys):
         old = Node.query.get(key_index.pop(source_key))
+        deleted_keys.discard(source_key)
         if old is not None:
             old.source_key = None
             db.session.flush()
-        deleted_keys.discard(source_key)
+            return old.id
+    return None
 
 
 def _errors_summary(errors, max_names=3):
@@ -896,7 +955,9 @@ def confirm_import():
         nodes_skipped = 0
         nodes_restored = 0
         thread_count = 0
-        skipped_alive_ids = []
+        # Keyed nodes this import matched: skipped, or restored (#638)
+        skipped_ids = []
+        restored_ids = []
         changes = _ProfileChanges(ai_usage)
         key_index, deleted_keys = _load_source_key_index(current_user.id)
 
@@ -931,8 +992,9 @@ def confirm_import():
 
                 source_key = _file_source_key(
                     filename, content, file_data.get('source_format'))
-                _release_deleted_docx_key(file_data, source_key, key_index,
-                                          deleted_keys, on_deleted)
+                restored_ids.append(_release_deleted_docx_key(
+                    file_data, source_key, key_index, deleted_keys,
+                    on_deleted))
                 if source_key in key_index:
                     # Chain the next new file onto the existing copy so
                     # partially-skipped imports don't orphan new nodes.
@@ -945,10 +1007,10 @@ def confirm_import():
                                             restored.token_count)
                         deleted_keys.discard(source_key)
                         nodes_restored += 1
+                        restored_ids.append(restored.id)
                     else:
                         nodes_skipped += 1
-                        if source_key not in deleted_keys:
-                            skipped_alive_ids.append(key_index[source_key])
+                        skipped_ids.append(key_index[source_key])
                     parent_id = key_index[source_key]
                     continue
 
@@ -988,8 +1050,9 @@ def confirm_import():
 
                 source_key = _file_source_key(
                     filename, content, file_data.get('source_format'))
-                _release_deleted_docx_key(file_data, source_key, key_index,
-                                          deleted_keys, on_deleted)
+                restored_ids.append(_release_deleted_docx_key(
+                    file_data, source_key, key_index, deleted_keys,
+                    on_deleted))
                 if source_key in key_index:
                     if source_key in deleted_keys and on_deleted == 'restore':
                         restored = _restore_node(
@@ -1000,10 +1063,10 @@ def confirm_import():
                                             restored.token_count)
                         deleted_keys.discard(source_key)
                         nodes_restored += 1
+                        restored_ids.append(restored.id)
                     else:
                         nodes_skipped += 1
-                        if source_key not in deleted_keys:
-                            skipped_alive_ids.append(key_index[source_key])
+                        skipped_ids.append(key_index[source_key])
                     continue
                 key_index[source_key] = None  # id not needed: no chaining
 
@@ -1030,9 +1093,13 @@ def confirm_import():
             thread_count = threads_created
 
         nodes_updated = _apply_settings_to_skipped(
-            skipped_alive_ids, privacy_level, ai_usage, changes=changes
+            skipped_ids, privacy_level, ai_usage, changes=changes
         )
         nodes_skipped -= nodes_updated
+        # A restored item's other entries take the settings too; the
+        # item is counted as restored, not updated.
+        _apply_settings_to_skipped(
+            restored_ids, privacy_level, ai_usage, changes=changes)
 
         # Commit all nodes
         db.session.commit()
@@ -1535,7 +1602,8 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
     nodes_skipped = 0
     nodes_restored = 0
     nodes_empty = 0
-    skipped_alive_ids = []
+    skipped_ids = []
+    restored_ids = []
     key_index, deleted_keys = _load_source_key_index(user_id)
     parent_id = None
     changes = _ProfileChanges(ai_usage)
@@ -1574,10 +1642,10 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
                 changes.entry_added(restored.created_at, token_count)
                 deleted_keys.discard(source_key)
                 nodes_restored += 1
+                restored_ids.append(restored.id)
             else:
                 nodes_skipped += 1
-                if source_key not in deleted_keys:
-                    skipped_alive_ids.append(key_index[source_key])
+                skipped_ids.append(key_index[source_key])
             if import_type == 'single_thread':
                 # Chain the next new tweet onto the existing copy so
                 # partially-skipped imports don't orphan new nodes.
@@ -1618,9 +1686,11 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
                 on_progress(done)
 
     nodes_updated = _apply_settings_to_skipped(
-        skipped_alive_ids, privacy_level, ai_usage, changes=changes
+        skipped_ids, privacy_level, ai_usage, changes=changes
     )
     nodes_skipped -= nodes_updated
+    _apply_settings_to_skipped(
+        restored_ids, privacy_level, ai_usage, changes=changes)
     db.session.commit()
     if on_progress:
         on_progress(total)
@@ -2631,17 +2701,22 @@ def create_conversation_nodes(user_id, source, conversations, privacy_level,
         db.session.flush()
 
     data_key = _ChunkDataKey(privacy_level)
-    skipped_alive_ids = []
+    # Keyed nodes this chunk matched: skipped, or restored (#638)
+    skipped_ids = []
+    restored_ids = []
     since_commit = 0
     last_progress = time.monotonic()
 
     def commit():
-        nonlocal skipped_alive_ids
+        nonlocal skipped_ids, restored_ids
+        dek = data_key.get() if skipped_ids or restored_ids else None
         state["updated"] += _apply_settings_to_skipped(
-            skipped_alive_ids, privacy_level, ai_usage,
-            dek=data_key.get() if skipped_alive_ids else None,
-            changes=changes)
-        skipped_alive_ids = []
+            skipped_ids, privacy_level, ai_usage, dek=dek, changes=changes)
+        # A restored message's other parts take the settings too; it is
+        # counted as restored, not updated.
+        _apply_settings_to_skipped(
+            restored_ids, privacy_level, ai_usage, dek=dek, changes=changes)
+        skipped_ids, restored_ids = [], []
         changes.to_state(state)
         db.session.commit()
         data_key.rotate()
@@ -2685,10 +2760,10 @@ def create_conversation_nodes(user_id, source, conversations, privacy_level,
                                         restored.token_count)
                     deleted_keys.discard(source_key)
                     state["restored"] += 1
+                    restored_ids.append(restored.id)
                 else:
                     state["skipped"] += 1
-                    if source_key not in deleted_keys:
-                        skipped_alive_ids.append(key_index[source_key])
+                    skipped_ids.append(key_index[source_key])
                 parent_id = key_index[source_key]
                 since_commit += 1  # a skip or restore is work to checkpoint
                 continue
