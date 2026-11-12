@@ -171,6 +171,18 @@ def start_conversation():
             "tip_id": tip_node.id,
             **spend_capped_fields(current_user),
         }), 202
+    # Payments on and no AI replies for this account (#438): the same
+    # stance, the writing is kept and only the reply is skipped.
+    from backend.utils.subscriptions import subscription_required_fields
+    skipped = subscription_required_fields(current_user)
+    if auto_generate and skipped:
+        db.session.commit()
+        return jsonify({
+            "conversation_id": system_node.id,
+            "user_node_id": user_node.id,
+            "tip_id": tip_node.id,
+            **skipped,
+        }), 202
 
     # 3. Placeholder LLM node and enqueue task — unless the caller
     # explicitly opted out (Agentic Reply ON + Auto-generate OFF).
@@ -300,6 +312,14 @@ def add_message(conversation_id):
     user_node.set_content(content)
     db.session.add(user_node)
     db.session.flush()
+
+    # Payments on and no AI replies for this account (#438): the message
+    # is kept, the reply skipped, as /start does.
+    from backend.utils.subscriptions import subscription_required_fields
+    skipped = subscription_required_fields(current_user)
+    if skipped:
+        db.session.commit()
+        return jsonify({"user_node_id": user_node.id, **skipped}), 202
 
     # Create placeholder LLM node and enqueue task. Same stance as
     # /start: a refused {user_export} keeps the message, skips the reply.
@@ -476,6 +496,12 @@ def continue_from_node(node_id):
     if auto_generate and user_is_capped(current_user):
         db.session.commit()
         response.update(spend_capped_fields(current_user))
+        return jsonify(response), 202
+    from backend.utils.subscriptions import subscription_required_fields
+    skipped = subscription_required_fields(current_user)
+    if auto_generate and skipped:
+        db.session.commit()
+        response.update(skipped)
         return jsonify(response), 202
     if auto_generate:
         try:

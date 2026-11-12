@@ -6,6 +6,8 @@ import os
 enum APIEvent: Sendable, Equatable {
     case unauthorized
     case spendCapped(message: String)
+    /// Payments on, no AI replies on this account (#438).
+    case subscriptionRequired(message: String)
     case notApproved
 }
 
@@ -205,6 +207,7 @@ final class APIClient: @unchecked Sendable {
         switch error {
         case .unauthorized: emit(.unauthorized)
         case .spendCap(let message): emit(.spendCapped(message: message))
+        case .subscriptionRequired(let message): emit(.subscriptionRequired(message: message))
         case .notApproved: emit(.notApproved)
         default: break
         }
@@ -319,6 +322,7 @@ final class APIClient: @unchecked Sendable {
         switch error {
         case .unauthorized: emit(.unauthorized)
         case .spendCap(let message): emit(.spendCapped(message: message))
+        case .subscriptionRequired(let message): emit(.subscriptionRequired(message: message))
         case .notApproved: emit(.notApproved)
         default: break
         }

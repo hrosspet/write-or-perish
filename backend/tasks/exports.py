@@ -2581,8 +2581,8 @@ def maybe_trigger_incremental_profile_update(user, ignore_backoff=False):
     if not account_allows_ai(user):
         return None
 
-    # Only for paid plans
-    if (user.plan or "free") not in User.VOICE_MODE_PLANS:
+    # Only for paid plans (set by hand, or a subscription, #438)
+    if not user.on_paid_plan:
         return None
 
     # Batch-selected users are driven by the batch pipeline

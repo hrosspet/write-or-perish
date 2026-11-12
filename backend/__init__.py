@@ -463,9 +463,14 @@ def create_app():
     from backend.routes.updates import updates_bp
     app.register_blueprint(updates_bp, url_prefix="/api/updates")
 
-    # Inbound webhooks (GitHub issue-close → fix_ready notification).
+    # Inbound webhooks (GitHub issue-close → fix_ready notification;
+    # Stripe subscription events, #438).
     from backend.routes.webhooks import webhooks_bp
     app.register_blueprint(webhooks_bp, url_prefix="/api/webhooks")
+
+    # The signed-in user's subscription (#438): 404 unless PAYMENTS_ENABLED.
+    from backend.routes.billing import billing_bp
+    app.register_blueprint(billing_bp, url_prefix="/api/billing")
 
     # AI preferences folded into the artifact model (#158 Slice 5): managed via
     # the generic /api/artifacts CRUD (kind="ai_preferences"); the dedicated
@@ -502,6 +507,21 @@ def create_app():
         from flask_login import current_user
         from backend.utils.spend import spend_cap_response
         return spend_cap_response(current_user)
+
+    # Payments on (#438): a reply for an account without AI replies (no
+    # subscription, or one that ended) raises SubscriptionRequired in
+    # create_llm_placeholder before any write; any route that lets it
+    # escape answers 402 {"error": "subscription_required", "message"}.
+    # Whatever the route flushed before the call is not kept.
+    from backend.utils.subscriptions import SubscriptionRequired
+
+    @app.errorhandler(SubscriptionRequired)
+    def _handle_subscription_required(exc):
+        from flask import jsonify as _jsonify
+        from backend.extensions import db
+        db.session.rollback()
+        return _jsonify({"error": "subscription_required",
+                         "message": exc.message}), 402
 
     # A reply (or a Voice turn) where AI may not read: create_llm_placeholder
     # raises AIUsageRefused before any write. Routes answer it themselves
@@ -548,6 +568,8 @@ def create_app():
     )
     app.cli.add_command(pgvector_enable_command)
     app.cli.add_command(pgvector_compare_command)
+    from backend.billing_cli import stripe_sync_catalog_command
+    app.cli.add_command(stripe_sync_catalog_command)
 
     try:
         from experiments.prompt_rct.run_rct import rct_cli

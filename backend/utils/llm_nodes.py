@@ -687,6 +687,9 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
 
     Raises ReadOnlyModelRefused, also before any write, when a reply that
     is not a read asks for a read-only model ("chat": False).
+
+    Raises SubscriptionRequired, also before any write, while payments
+    are on and the owner has no AI replies (utils/subscriptions).
     """
     # Spend-cap guard: a blocked user must never get an LLM placeholder node
     # (and never incur generation spend). Raised before any DB write so no
@@ -696,6 +699,12 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     from backend.utils.spend import SpendCapExceeded, user_is_capped
     if user_is_capped(human_owner_id):
         raise SpendCapExceeded()
+    # Payments on (#438): no reply for an account without AI replies (no
+    # subscription, or one that ended), also before any write. Off: a
+    # no-op without a query.
+    from backend.utils.subscriptions import check_ai_replies, payments_enabled
+    if payments_enabled():
+        check_ai_replies(db.session.get(User, human_owner_id))
 
     # Race A guard: lock the parent row and reject if soft-deleted. The
     # locking is what closes the create-vs-soft-delete race under READ

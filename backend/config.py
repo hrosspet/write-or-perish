@@ -138,6 +138,73 @@ class Config:
         os.environ.get("PER_USER_MONTHLY_LIMIT_USD", "0") or "0"
     )
 
+    # --- Payments (#438): Stripe subscriptions, Managed Payments ---
+    # The one switch. Off (default): no billing route answers, no
+    # subscription text or control shows, and AI replies are not gated by
+    # plan, exactly as before. On: new accounts start on the "free" plan
+    # and get AI replies, Voice mode and profile updates from a trialing
+    # or active subscription (backend/utils/subscriptions.py). Accounts
+    # whose plan was set by hand (alpha, pro) are not affected by it.
+    PAYMENTS_ENABLED = os.environ.get(
+        "PAYMENTS_ENABLED", "false").lower() in ("1", "true", "yes")
+    # Stripe keys. The sandbox names are local development's fallback;
+    # the server sets the STRIPE_* names. The publishable key is read for
+    # completeness: Stripe-hosted Checkout needs no Stripe.js.
+    STRIPE_SECRET_KEY = (os.environ.get("STRIPE_SECRET_KEY")
+                         or os.environ.get("STRIPE_SANDBOX_PRIVKEY") or None)
+    STRIPE_PUBLISHABLE_KEY = (os.environ.get("STRIPE_PUBLISHABLE_KEY")
+                              or os.environ.get("STRIPE_SANDBOX_PUBKEY")
+                              or None)
+    # Signing secret of the webhook endpoint (/api/webhooks/stripe). Unset:
+    # the endpoint answers 404 while the switch is off, 503 while it is on.
+    STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET") or None
+    # The monthly prices, in cents of SUBSCRIPTION_CURRENCY (Peter,
+    # 2026-11-12): Standard about 30 USD, "that most people will choose";
+    # Supporter 99 USD, "mostly as an anchor", the same product for now;
+    # a discounted 12 USD opened by a code, shown nowhere. `flask
+    # stripe-sync-catalog` writes them to Stripe; a changed amount makes a
+    # new price there, and subscriptions already running keep theirs.
+    SUBSCRIPTION_PRICE_CENTS_STANDARD = int(
+        os.environ.get("SUBSCRIPTION_PRICE_CENTS_STANDARD") or "3000")
+    SUBSCRIPTION_PRICE_CENTS_SUPPORTER = int(
+        os.environ.get("SUBSCRIPTION_PRICE_CENTS_SUPPORTER") or "9900")
+    SUBSCRIPTION_PRICE_CENTS_DISCOUNTED = int(
+        os.environ.get("SUBSCRIPTION_PRICE_CENTS_DISCOUNTED") or "1200")
+    SUBSCRIPTION_CURRENCY = (
+        os.environ.get("SUBSCRIPTION_CURRENCY") or "usd").lower()
+    # "inclusive": the amounts above include the VAT or sales tax Stripe
+    # collects as merchant of record, so a buyer pays the price shown.
+    # "exclusive": tax is added on top at checkout. Stripe cannot change
+    # a price's tax behaviour later; the sync makes a new price instead.
+    SUBSCRIPTION_TAX_BEHAVIOR = (
+        os.environ.get("SUBSCRIPTION_TAX_BEHAVIOR") or "inclusive").lower()
+    # Managed Payments sells only products with an eligible tax code:
+    # AI as a Service, cloud based, personal use.
+    STRIPE_PRODUCT_TAX_CODE = (
+        os.environ.get("STRIPE_PRODUCT_TAX_CODE") or "txcd_10105001")
+    # Free days before the first payment, with a card (Peter, 2026-11-12:
+    # two weeks). Once per account: a second subscription has none.
+    SUBSCRIPTION_TRIAL_DAYS = int(
+        os.environ.get("SUBSCRIPTION_TRIAL_DAYS") or "14")
+    # Monthly model-cost ceiling of a subscribed account, in USD (Peter,
+    # 2026-11-12): the per-user spend cap for an account whose access
+    # comes from its subscription. An admin's per-user limit still wins;
+    # accounts set by hand keep PER_USER_MONTHLY_LIMIT_USD.
+    SUBSCRIPTION_SPEND_LIMIT_USD_STANDARD = float_from_env(
+        "SUBSCRIPTION_SPEND_LIMIT_USD_STANDARD", 50.0)
+    SUBSCRIPTION_SPEND_LIMIT_USD_SUPPORTER = float_from_env(
+        "SUBSCRIPTION_SPEND_LIMIT_USD_SUPPORTER", 100.0)
+    SUBSCRIPTION_SPEND_LIMIT_USD_DISCOUNTED = float_from_env(
+        "SUBSCRIPTION_SPEND_LIMIT_USD_DISCOUNTED", 50.0)
+    # Wrong discount codes one account may try per hour before the code
+    # field answers "try again later". 10: a typo or two is never
+    # refused, guessing an 8-character code is out of reach.
+    DISCOUNT_CODE_ATTEMPTS_PER_HOUR = int(
+        os.environ.get("DISCOUNT_CODE_ATTEMPTS_PER_HOUR") or "10")
+    # Where the Subscribe view tells a user to ask for the lower price.
+    SUBSCRIPTION_CONTACT_EMAIL = (
+        os.environ.get("SUBSCRIPTION_CONTACT_EMAIL") or "info@loore.org")
+
     # --- Profile-generation batch processing (issue #173, Part A) ---
     # A user takes the Batch API path if the global switch is on OR their id
     # is in the canary allowlist. Both default off → batch ships dark.

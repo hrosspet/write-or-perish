@@ -236,6 +236,12 @@ def create_voice_session():
     refused = read_only_model_refusal(model_id, parent_node, new_entry=True)
     if refused is not None:
         return read_only_model_response(refused)
+    # Nor while payments are on for an account without AI replies (#438):
+    # Voice mode stops with the subscription.
+    from backend.utils.subscriptions import (
+        ai_replies_allowed, subscription_required_response)
+    if not ai_replies_allowed(current_user):
+        return subscription_required_response(current_user)
 
     if not parent_id:
         prompt_record = get_user_prompt_record(current_user.id, PROMPT_KEY)

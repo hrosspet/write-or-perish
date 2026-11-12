@@ -10,6 +10,7 @@ import OfflineBanner from '../components/OfflineBanner';
 import ProposalInline from '../components/ProposalInline';
 import { useToast } from '../contexts/ToastContext';
 import { isSpendBlocked, notifySpendBlocked, spendCapToastMessage } from '../utils/spendCap';
+import { isSubscriptionRequired, notifySubscriptionRequired } from '../utils/subscription';
 import { isAiAllowed } from '../utils/aiUsage';
 import api from '../api';
 import { entryQuestion, EVERYDAY_QUESTION } from '../utils/entryPrompt';
@@ -520,6 +521,10 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
       addToast(spendCapToastMessage('glean'), 8000);
       return;
     }
+    if (isSubscriptionRequired()) {
+      notifySubscriptionRequired();
+      return;
+    }
     // The voice reply stops, its queue too (the player is global, so a
     // paused queue would follow the user to the gleaning's page).
     audio.stop();
@@ -773,6 +778,11 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
               if (isSpendBlocked()) {
                 notifySpendBlocked();
                 addToast(spendCapToastMessage('record'), 8000);
+                return;
+              }
+              // Payments on, no AI replies (#438): Voice mode is paused.
+              if (isSubscriptionRequired()) {
+                notifySubscriptionRequired();
                 return;
               }
               handleStart();
@@ -1076,6 +1086,10 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
           if (isSpendBlocked()) {
             notifySpendBlocked();
             addToast(spendCapToastMessage('record'), 8000);
+            return;
+          }
+          if (isSubscriptionRequired()) {
+            notifySubscriptionRequired();
             return;
           }
           handleContinue(voiceReset);

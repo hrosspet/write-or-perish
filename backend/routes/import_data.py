@@ -943,8 +943,7 @@ def confirm_import():
         if ai_usage in AI_ALLOWED:
             try:
                 user_obj = User.query.get(current_user.id)
-                if (user_obj and (user_obj.plan or "free")
-                        in User.VOICE_MODE_PLANS):
+                if user_obj and user_obj.on_paid_plan:
                     earliest_ts = None
                     for f in files_sorted:
                         raw_ts = f.get('modified_at', '')
@@ -1586,7 +1585,7 @@ def _maybe_update_profile_after_import(user_id, earliest_ts, imported_tokens):
     """Twitter path: same hand-off as every other importer. Best-effort."""
     try:
         user_obj = User.query.get(user_id)
-        if not user_obj or (user_obj.plan or "free") not in User.VOICE_MODE_PLANS:
+        if not user_obj or not user_obj.on_paid_plan:
             return None
         return _hand_off_profile_update_after_import(
             user_obj, earliest_ts, imported_tokens)
@@ -1677,7 +1676,7 @@ def _profile_waits_for_imports(user_id):
     try:
         user = db.session.get(User, user_id)
         if (user is None or user.profile_import_quiet_from is None
-                or (user.plan or "free") not in User.VOICE_MODE_PLANS
+                or not user.on_paid_plan
                 or not use_batch_for_user(user, current_app.config)):
             return False
         return bool(_should_seed(user, ignore_backoff=True))

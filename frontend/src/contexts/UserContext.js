@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from "react";
 import api from "../api";
 import { markSpendBlocked } from "../utils/spendCap";
+import { rememberSubscription } from "../utils/subscription";
 
 // Create a new context
 const UserContext = createContext(null);
@@ -25,6 +26,8 @@ export const UserProvider = ({ children }) => {
         if (fetchedUser?.spend_blocked) {
           markSpendBlocked(fetchedUser.spend_cap_lifts_on);
         }
+        // Payments (#438): inert unless the server sends payments_enabled.
+        rememberSubscription(fetchedUser);
 
         // Persist the browser timezone so the LLM context can render absolute
         // local-time stamps (#130). Only PATCH when it differs from what the

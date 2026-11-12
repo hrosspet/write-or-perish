@@ -352,6 +352,12 @@ def get_user_spend_limit_usd(user, config):
     override = getattr(user, "monthly_spend_limit_usd", None)
     if override is not None:
         return override
+    # An account whose access comes from its subscription has the level's
+    # ceiling (#438); one set by hand keeps the global default.
+    from backend.utils.subscriptions import subscription_spend_limit_usd
+    level_limit = subscription_spend_limit_usd(user, config)
+    if level_limit is not None:
+        return level_limit
     return config.get("PER_USER_MONTHLY_LIMIT_USD") or 0
 
 
@@ -478,15 +484,20 @@ def enforce_user_spend_cap(user_id, config, now=None, send_email=None):
 
 SPEND_CAP_MESSAGE = ("You've reached your monthly usage limit for the free "
                      "alpha.")
+# While payments are on (#438) the limit is not the free alpha's.
+SPEND_CAP_MESSAGE_PAID = "You've reached your monthly usage limit."
 
 
 def spend_cap_message(lifts_on=None, now=None):
     """The 402's text. It names the date only when the cap lifts later than
     the start of next month (a carry over a whole month's limit, #594)."""
+    from backend.utils.subscriptions import payments_enabled
+    first = SPEND_CAP_MESSAGE_PAID if payments_enabled() else \
+        SPEND_CAP_MESSAGE
     next_start = _month_first_day(current_month(now), 1)
     if lifts_on is None or lifts_on <= next_start:
-        return f"{SPEND_CAP_MESSAGE} It resets at the start of next month."
-    return (f"{SPEND_CAP_MESSAGE} It resets on "
+        return f"{first} It resets at the start of next month."
+    return (f"{first} It resets on "
             f"{lifts_on.strftime('%B')} {lifts_on.day}.")
 
 
@@ -549,7 +560,10 @@ def _dispatch_user_cap_check(mapper, connection, target):
         from flask import current_app, has_app_context
         if not has_app_context():
             return
-        if (current_app.config.get("PER_USER_MONTHLY_LIMIT_USD") or 0) <= 0:
+        # Payments on (#438): a subscription has a ceiling of its own even
+        # when the global default is 0.
+        if ((current_app.config.get("PER_USER_MONTHLY_LIMIT_USD") or 0) <= 0
+                and not current_app.config.get("PAYMENTS_ENABLED")):
             return
         if target.user_id is None:
             return

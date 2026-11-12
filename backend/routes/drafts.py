@@ -1588,8 +1588,13 @@ def save_streaming_as_node(session_id):
         # writing is never blocked by the cap or by a placeholder error,
         # only the reply is skipped — same stance as /textmode/start.
         from backend.utils.spend import spend_capped_fields, user_is_capped
+        from backend.utils.subscriptions import subscription_required_fields
+        skipped = subscription_required_fields(current_user)
         if user_is_capped(current_user):
             response.update(spend_capped_fields(current_user))
+        elif skipped:
+            # Payments on, no AI replies for this account (#438).
+            response.update(skipped)
         else:
             from backend.utils.llm_nodes import create_llm_placeholder
             from backend.utils.placeholders import UserExportValidationError

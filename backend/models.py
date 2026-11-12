@@ -1,13 +1,38 @@
 from datetime import datetime
 from flask_login import UserMixin
 import logging
-from sqlalchemy import event, or_
+from sqlalchemy import and_, event, or_
 from backend.extensions import db
 from backend.utils.encryption import (
     encrypt_content, decrypt_content, encrypt_with_dek, is_encrypted,
     is_encryption_enabled)
 
 logger = logging.getLogger(__name__)
+
+
+def _default_plan():
+    """A new account's plan: "alpha" as always, or "free" while payments
+    are on (PAYMENTS_ENABLED, #438), where a subscription gives what
+    alpha gave. Read when the row is inserted; no app context (a bare
+    script) keeps "alpha"."""
+    try:
+        from flask import current_app, has_app_context
+        if has_app_context() and current_app.config.get("PAYMENTS_ENABLED"):
+            return "free"
+    except Exception:  # noqa: BLE001 - never fail an insert over this
+        pass
+    return "alpha"
+
+
+# Subscription levels (#438), their order in the Subscribe view. The
+# discounted level is opened by a code and is never offered.
+SUBSCRIPTION_LEVELS = ("standard", "supporter", "discounted")
+# Subscription states a Stripe status maps to (utils/stripe_billing). The
+# first three give the paid feature set: past_due keeps it while Stripe
+# retries the payment.
+SUBSCRIPTION_STATUSES = ("none", "trialing", "active", "past_due", "ended")
+SUBSCRIPTION_GRANTING_STATUSES = ("trialing", "active", "past_due")
+
 
 class User(db.Model, UserMixin):
     id = db.Column(db.Integer, primary_key=True)
@@ -105,8 +130,39 @@ class User(db.Model, UserMixin):
         db.String(64), nullable=True, default="UTC", server_default="UTC"
     )
 
-    # Subscription plan ("free", "alpha", "pro", etc.).
-    plan = db.Column(db.String(16), nullable=False, default="alpha")
+    # Subscription plan ("free", "alpha", "pro", etc.). Set by hand (the
+    # admin's plan editor) or by the default above; never by a Stripe
+    # event (#438): a subscription gives a "free" account the paid
+    # feature set through the columns below (on_paid_plan).
+    plan = db.Column(db.String(16), nullable=False, default=_default_plan)
+
+    # --- Stripe subscription (#438) ---
+    # Written only from Stripe (utils/stripe_billing.apply_subscription,
+    # which re-reads the subscription from Stripe for every event), never
+    # by hand. The Customer holds the buyer's details at Stripe; Loore
+    # keeps the ids and the state, no payment details.
+    stripe_customer_id = db.Column(db.String(255), nullable=True,
+                                   unique=True)
+    stripe_subscription_id = db.Column(db.String(255), nullable=True,
+                                       index=True)
+    # SUBSCRIPTION_LEVELS, from the subscription's price; NULL: none.
+    subscription_level = db.Column(db.String(16), nullable=True)
+    # SUBSCRIPTION_STATUSES.
+    subscription_status = db.Column(
+        db.String(16), nullable=False, default="none",
+        server_default="none")
+    # When the paid period (or the trial) ends, UTC: the next payment, or
+    # the end of a subscription cancelled at period end.
+    subscription_period_end = db.Column(db.DateTime, nullable=True)
+    subscription_trial_end = db.Column(db.DateTime, nullable=True)
+    subscription_cancel_at_period_end = db.Column(
+        db.Boolean, nullable=False, default=False,
+        server_default=db.text("false"))
+    # Set for good once a subscription of this account had a trial: the
+    # next checkout has none.
+    subscription_trial_used = db.Column(
+        db.Boolean, nullable=False, default=False,
+        server_default=db.text("false"))
 
     # Per-user monthly spend hard cap (issue: free-alpha guardrail). Stores the
     # "YYYY-MM" (UTC) in which the user crossed PER_USER_MONTHLY_LIMIT_USD. While
@@ -264,11 +320,30 @@ class User(db.Model, UserMixin):
     VOICE_MODE_PLANS = {"alpha", "pro"}
 
     @property
+    def plan_set_by_hand(self):
+        """A plan that gives the paid feature set by itself (alpha, pro):
+        a subscription neither adds to it nor takes from it (#438)."""
+        return (self.plan or "free") in self.VOICE_MODE_PLANS
+
+    @property
+    def subscription_grants_access(self):
+        """A trialing, active or past-due subscription at a known level."""
+        return (self.subscription_status in SUBSCRIPTION_GRANTING_STATUSES
+                and self.subscription_level in SUBSCRIPTION_LEVELS)
+
+    @property
+    def on_paid_plan(self):
+        """The paid feature set (Voice mode, profile and recent-context
+        updates): a plan set by hand, or a subscription that grants it.
+        Without a subscription this is the plan check it replaces."""
+        return self.plan_set_by_hand or self.subscription_grants_access
+
+    @property
     def has_voice_mode(self):
         """Whether this user can access Voice-Mode features."""
         if self.is_admin:
             return True
-        return (self.plan or "free") in self.VOICE_MODE_PLANS
+        return self.on_paid_plan
 
     # Plans that may run {user_export} with no token budget (the full
     # archive on every reply). Others must cap it — see
@@ -337,7 +412,13 @@ class User(db.Model, UserMixin):
         purging = account_on_hold_user_ids()
         return cls.query.filter(
             cls.approved.is_(True),
-            cls.plan.in_(list(cls.VOICE_MODE_PLANS)),
+            # on_paid_plan in SQL: a plan set by hand, or a subscription
+            # that grants the paid feature set (#438).
+            or_(cls.plan.in_(list(cls.VOICE_MODE_PLANS)),
+                and_(cls.subscription_status.in_(
+                         list(SUBSCRIPTION_GRANTING_STATUSES)),
+                     cls.subscription_level.in_(
+                         list(SUBSCRIPTION_LEVELS)))),
             cls.default_ai_usage.in_(list(AI_ALLOWED)),
             ~cls.id.in_(llm_authors),
             ~cls.id.in_(purging),
@@ -2346,6 +2427,74 @@ class UserDataPurgeHidden(db.Model):
     __table_args__ = (
         db.Index("ix_user_data_purge_hidden_kind_row", "kind", "row_id"),
     )
+
+
+class StripeEvent(db.Model):
+    """A Stripe webhook event already applied (#438): its id is the key,
+    so a redelivered event is answered without being applied again
+    (routes/webhooks.stripe_webhook). Ids and the type only."""
+    __tablename__ = "stripe_event"
+
+    id = db.Column(db.String(255), primary_key=True)
+    type = db.Column(db.String(128), nullable=False)
+    received_at = db.Column(db.DateTime, nullable=False,
+                            default=datetime.utcnow)
+
+
+class DiscountCode(db.Model):
+    """A code that opens the discounted price (#438; Peter, 2026-11-12:
+    "opened by a code, no proof asked"). Loore's own, not a Stripe
+    promotion code: redeemed in Loore, it makes the backend start the
+    checkout with the discounted price. Created in the admin panel."""
+    __tablename__ = "discount_code"
+
+    id = db.Column(db.Integer, primary_key=True)
+    # Stored upper-case without spaces (utils/discount_codes.normalize).
+    code = db.Column(db.String(64), nullable=False, unique=True)
+    # NULL: no limit. Counts checkouts in progress and completed ones.
+    max_uses = db.Column(db.Integer, nullable=True)
+    expires_at = db.Column(db.DateTime, nullable=True)
+    note = db.Column(db.String(255), nullable=True)
+    active = db.Column(db.Boolean, nullable=False, default=True,
+                       server_default=db.text("true"))
+    created_at = db.Column(db.DateTime, nullable=False,
+                           default=datetime.utcnow)
+    created_by_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                              nullable=True)
+
+
+class DiscountRedemption(db.Model):
+    """One account's use of a discount code: "pending" from the checkout
+    it started until Stripe reports the checkout completed ("redeemed")
+    or expired ("expired"). An account deletion keeps the row without
+    the account, so a code's use count stays right."""
+    __tablename__ = "discount_redemption"
+
+    id = db.Column(db.Integer, primary_key=True)
+    code_id = db.Column(db.Integer, db.ForeignKey("discount_code.id"),
+                        nullable=False, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=True, index=True)
+    checkout_session_id = db.Column(db.String(255), nullable=True,
+                                    index=True)
+    state = db.Column(db.String(16), nullable=False, default="pending")
+    created_at = db.Column(db.DateTime, nullable=False,
+                           default=datetime.utcnow)
+    redeemed_at = db.Column(db.DateTime, nullable=True)
+
+
+class DiscountCodeAttempt(db.Model):
+    """A code an account tried, for the code field's rate limit
+    (DISCOUNT_CODE_ATTEMPTS_PER_HOUR). Only who and when, never the text
+    tried."""
+    __tablename__ = "discount_code_attempt"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=False, index=True)
+    created_at = db.Column(db.DateTime, nullable=False,
+                           default=datetime.utcnow, index=True)
+    ok = db.Column(db.Boolean, nullable=False, default=False)
 
 
 # The per-user tables whose rows a waiting "Delete all my content" hides

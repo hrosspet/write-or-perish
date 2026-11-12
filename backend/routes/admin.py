@@ -9,7 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from backend.models import User, APICostLog
 from backend.extensions import db
 from backend.utils.timefmt import iso_utc
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from backend.utils.magic_link import generate_magic_link_token, hash_token
 from backend.utils.email import send_welcome_email, is_valid_email
 from backend.utils.reserved_usernames import validate_username
@@ -1463,3 +1463,112 @@ def voice_timing_all():
         "users": users,
         "turns": records,
     }), 200
+
+
+# ── Subscriptions and discount codes (#438) ─────────────────────────────
+# 404 while PAYMENTS_ENABLED is off. The list shows the state Loore keeps
+# (level, status, dates), never payment details: those stay at Stripe.
+
+def _payments_off():
+    from backend.utils.subscriptions import payments_enabled
+    return not payments_enabled()
+
+
+@admin_bp.route("/subscriptions", methods=["GET"])
+@login_required
+@admin_required
+def list_subscriptions():
+    if _payments_off():
+        abort(404)
+    users = User.query.filter(or_(
+        User.stripe_customer_id.isnot(None),
+        User.subscription_status != "none")).order_by(User.id).all()
+    rows = [{
+        "user_id": u.id,
+        "username": u.username,
+        "plan": u.plan,
+        "level": u.subscription_level,
+        "status": u.subscription_status,
+        "current_period_end": iso_utc(u.subscription_period_end),
+        "trial_end": iso_utc(u.subscription_trial_end),
+        "cancel_at_period_end": bool(u.subscription_cancel_at_period_end),
+        "trial_used": bool(u.subscription_trial_used),
+    } for u in users]
+    return jsonify({"subscriptions": rows}), 200
+
+
+def _code_row(code, now):
+    from backend.utils.discount_codes import uses
+    return {
+        "id": code.id,
+        "code": code.code,
+        "max_uses": code.max_uses,
+        "uses": uses(code, now),
+        "expires_at": iso_utc(code.expires_at),
+        # The last day the code works (it stops at the end of it, UTC).
+        "expires_on": ((code.expires_at - timedelta(seconds=1)).strftime(
+            "%Y-%m-%d") if code.expires_at else None),
+        "note": code.note,
+        "active": bool(code.active),
+        "created_at": iso_utc(code.created_at),
+    }
+
+
+@admin_bp.route("/discount-codes", methods=["GET"])
+@login_required
+@admin_required
+def list_discount_codes():
+    from backend.models import DiscountCode
+    if _payments_off():
+        abort(404)
+    now = datetime.utcnow()
+    codes = DiscountCode.query.order_by(DiscountCode.id.desc()).all()
+    return jsonify({"codes": [_code_row(c, now) for c in codes]}), 200
+
+
+@admin_bp.route("/discount-codes", methods=["POST"])
+@login_required
+@admin_required
+def create_discount_code():
+    """Body: {code?, max_uses?, expires_at? ("YYYY-MM-DD", UTC, the code
+    works until the end of that day), note?}. An empty code is generated."""
+    from backend.utils.discount_codes import create_code
+    if _payments_off():
+        abort(404)
+    data = request.get_json(silent=True) or {}
+    max_uses = data.get("max_uses")
+    expires_at = None
+    try:
+        max_uses = int(max_uses) if max_uses not in (None, "") else None
+        raw = (data.get("expires_at") or "").strip()
+        if raw:
+            expires_at = datetime.strptime(raw[:10], "%Y-%m-%d") + \
+                timedelta(days=1)
+    except (TypeError, ValueError):
+        return jsonify({"error": "Max uses is a number and the expiry a "
+                                 "date (YYYY-MM-DD)."}), 400
+    note = (data.get("note") or "").strip()[:255]
+    try:
+        code = create_code(code=(data.get("code") or "").strip() or None,
+                           max_uses=max_uses, expires_at=expires_at,
+                           note=note, created_by_id=current_user.id)
+    except ValueError as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"code": _code_row(code, datetime.utcnow())}), 201
+
+
+@admin_bp.route("/discount-codes/<int:code_id>", methods=["PATCH"])
+@login_required
+@admin_required
+def update_discount_code(code_id):
+    """Body: {active: bool}: switch a code off (or on again)."""
+    from backend.models import DiscountCode
+    if _payments_off():
+        abort(404)
+    code = DiscountCode.query.get_or_404(code_id)
+    data = request.get_json(silent=True) or {}
+    if "active" in data:
+        code.active = bool(data["active"])
+    db.session.commit()
+    return jsonify({"code": _code_row(code, datetime.utcnow())}), 200

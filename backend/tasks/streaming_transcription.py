@@ -61,6 +61,17 @@ VOICE_REPLY_SKIPPED_AI_USAGE = (
     "Your recording is saved. Loore didn't reply because AI usage is set "
     "to None."
 )
+
+
+def _ai_replies_allowed(user_id):
+    """Payments on (#438): whether the account gets AI replies. True
+    while payments are off, without a query."""
+    from backend.utils.subscriptions import (
+        ai_replies_allowed, payments_enabled)
+    if not payments_enabled():
+        return True
+    from backend.models import User
+    return ai_replies_allowed(db.session.get(User, user_id))
 # The same when the turn asked for a read-only model: the reply is not
 # moved to another model (Peter, 2026-10-02), so there is none.
 VOICE_REPLY_SKIPPED_READ_ONLY = (
@@ -1091,6 +1102,7 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
         if (user_id and model and label == 'Voice'
                 and is_chat_model(model)
                 and not user_is_capped(user_id)
+                and _ai_replies_allowed(user_id)
                 and _voice_reply_refusal(user_id, parent_id, draft) is None):
             try:
                 model_cfg = flask_app.config["SUPPORTED_MODELS"].get(model)
@@ -1578,18 +1590,24 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     # ReadOnlyModelRefused the same way: the client sent a read-only model
     # (an app whose picker does not filter on "chat"); the recording is
     # kept and the reply is not moved to another model.
+    # SubscriptionRequired the same way (#438): payments are on and the
+    # account has no AI replies; the recording is kept.
     from backend.utils.placeholders import UserExportValidationError
     from backend.utils.node_deletion import ParentDeletedError
     from backend.utils.spend import SpendCapExceeded
+    from backend.utils.subscriptions import SubscriptionRequired
     try:
         llm_node, _ = create_llm_placeholder(
             tip_node.id, model, user_id, enqueue=False,
             ai_usage=ai_usage, client=client,
         )
     except (UserExportValidationError, ParentDeletedError,
-            SpendCapExceeded, AIUsageRefused, ReadOnlyModelRefused) as e:
+            SpendCapExceeded, AIUsageRefused, ReadOnlyModelRefused,
+            SubscriptionRequired) as e:
         if isinstance(e, SpendCapExceeded):
             message = VOICE_REPLY_SKIPPED_SPEND_CAP
+        elif isinstance(e, SubscriptionRequired):
+            message = e.message
         elif isinstance(e, AIUsageRefused):
             message = VOICE_REPLY_SKIPPED_AI_USAGE
         elif isinstance(e, ReadOnlyModelRefused):

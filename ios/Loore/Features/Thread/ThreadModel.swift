@@ -527,7 +527,8 @@ final class ThreadModel {
                 "model": .optional(selectedModel),
             ]))
             return NodeFormResult(id: answer.id, userNodeId: answer.userNodeId, llmNodeId: answer.llmNodeId,
-                                  spendCapped: answer.spendCapped, llmError: answer.llmError)
+                                  spendCapped: answer.spendCapped, llmError: answer.llmError,
+                                  subscriptionMessage: answer.subscriptionNotice)
         }
         if submission.aiUsage == .off {
             let created: NodeCreateResponse = try await app.api.post(APIPath.nodes, json: .object([
@@ -541,7 +542,8 @@ final class ThreadModel {
             "model": .optional(selectedModel), "auto_generate": .bool(auto),
         ]))
         return NodeFormResult(id: answer.userNodeId, userNodeId: answer.userNodeId, llmNodeId: answer.llmNodeId,
-                              promptNodeId: answer.promptNodeId, spendCapped: answer.spendCapped, llmError: answer.llmError)
+                              promptNodeId: answer.promptNodeId, spendCapped: answer.spendCapped, llmError: answer.llmError,
+                                  subscriptionMessage: answer.subscriptionNotice)
     }
 
     func readReplySent(_ result: NodeFormResult) {

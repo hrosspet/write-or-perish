@@ -42,6 +42,18 @@ api.interceptors.response.use(
         // Ignore — CustomEvent unavailable; the rejection below still flows.
       }
     }
+    // Payments on (#438): a reply refused for an account without AI
+    // replies raises SubscriptionBanner, which links to Settings.
+    if (error.response && error.response.status === 402 &&
+        data && data.error === "subscription_required") {
+      try {
+        window.dispatchEvent(new CustomEvent("loore:subscription-required", {
+          detail: { message: data.message },
+        }));
+      } catch (e) {
+        // Ignore — CustomEvent unavailable.
+      }
+    }
     return Promise.reject(error);
   }
 );
