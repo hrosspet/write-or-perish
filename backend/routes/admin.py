@@ -1576,3 +1576,45 @@ def update_discount_code(code_id):
         code.active = bool(data["active"])
     db.session.commit()
     return jsonify({"code": _code_row(code, datetime.utcnow())}), 200
+
+
+# ── Referrals (#439) ────────────────────────────────────────────────────
+# Who invited whom, and the free week each side got. Admins only, 404
+# while PAYMENTS_ENABLED is off. Names and dates; no payment details.
+
+@admin_bp.route("/referrals", methods=["GET"])
+@login_required
+@admin_required
+def list_referrals():
+    from backend.models import Referral
+    if _payments_off():
+        abort(404)
+    referrals = Referral.query.order_by(Referral.id.desc()).all()
+    ids = {r.inviter_id for r in referrals} | {r.friend_id for r in referrals}
+    ids.discard(None)
+    users = {u.id: u for u in User.query.filter(User.id.in_(ids)).all()} \
+        if ids else {}
+
+    def name(user_id):
+        user = users.get(user_id)
+        return user.username if user else None
+
+    rows = []
+    for r in referrals:
+        friend = users.get(r.friend_id)
+        rows.append({
+            "id": r.id,
+            # None: the account was deleted since.
+            "inviter": name(r.inviter_id),
+            "friend": name(r.friend_id),
+            "friend_approved": bool(friend.approved) if friend else None,
+            "created_at": iso_utc(r.created_at),
+            "rewarded_at": iso_utc(r.rewarded_at),
+            "inviter_reward": r.inviter_reward,
+            "inviter_credit_cents": r.inviter_credit_cents,
+            "inviter_credit_currency": r.inviter_credit_currency,
+            "friend_reward": r.friend_reward,
+            "friend_credit_cents": r.friend_credit_cents,
+            "friend_credit_currency": r.friend_credit_currency,
+        })
+    return jsonify({"referrals": rows}), 200

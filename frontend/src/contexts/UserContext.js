@@ -2,6 +2,7 @@ import React, { createContext, useContext, useState, useEffect, useCallback } fr
 import api from "../api";
 import { markSpendBlocked } from "../utils/spendCap";
 import { rememberSubscription } from "../utils/subscription";
+import { forgetInvite } from "../utils/invite";
 
 // Create a new context
 const UserContext = createContext(null);
@@ -28,6 +29,9 @@ export const UserProvider = ({ children }) => {
         }
         // Payments (#438): inert unless the server sends payments_enabled.
         rememberSubscription(fetchedUser);
+        // Signed in: an invite code kept in this browser (#439) has done
+        // its work, or was never this account's.
+        if (fetchedUser) forgetInvite();
 
         // Persist the browser timezone so the LLM context can render absolute
         // local-time stamps (#130). Only PATCH when it differs from what the

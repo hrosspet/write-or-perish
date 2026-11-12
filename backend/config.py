@@ -231,6 +231,15 @@ class Config:
     # Where the Subscribe view tells a user to ask for the lower price.
     SUBSCRIPTION_CONTACT_EMAIL = (
         os.environ.get("SUBSCRIPTION_CONTACT_EMAIL") or "info@loore.org")
+    # Referrals (#439): an invite link per account; on the friend's first
+    # payment both get a free week as Stripe customer credit. On only
+    # while PAYMENTS_ENABLED is on; this switch turns the link and new
+    # referrals off by itself (a free week already earned is still given).
+    REFERRALS_ENABLED = os.environ.get(
+        "REFERRALS_ENABLED", "true").lower() in ("1", "true", "yes")
+    # Days of the free week (Peter, 2026-10-09: "a free week for both"):
+    # credit worth this many thirtieths of the next invoice.
+    REFERRAL_REWARD_DAYS = int(os.environ.get("REFERRAL_REWARD_DAYS") or "7")
 
     # Long threads (#648; Peter, 2026-11-12): every AI reply sends the
     # whole thread above it. A reply whose prompt would be over

@@ -485,6 +485,10 @@ def create_app():
     from backend.routes.billing import billing_bp
     app.register_blueprint(billing_bp, url_prefix="/api/billing")
 
+    # The invite link (#439): 404 unless payments and referrals are on.
+    from backend.routes.referrals import referrals_bp
+    app.register_blueprint(referrals_bp, url_prefix="/api/referrals")
+
     # AI preferences folded into the artifact model (#158 Slice 5): managed via
     # the generic /api/artifacts CRUD (kind="ai_preferences"); the dedicated
     # /api/ai-preferences blueprint was removed.
