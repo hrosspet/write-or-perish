@@ -473,3 +473,52 @@ def test_only_the_users_own_voice_reply(app, thread, clips):
     assert _client(app, ben).get(
         "/api/voice/approval-announcement/loud.mp3").status_code == 404
     assert clips["calls"] == []
+
+
+# Who gets the clip: the access checks of the other routes that serve
+# speech (POST /nodes/<id>/tts): Voice mode on the account and, while
+# payments are on, the paid feature set.
+
+def _set_plan(user, plan="free", **subscription):
+    user.plan = plan
+    for name, value in subscription.items():
+        setattr(user, name, value)
+    _db.session.commit()
+
+
+@pytest.mark.parametrize("payments", [False, True])
+def test_an_account_without_voice_mode_gets_no_clip(app, thread, clips,
+                                                     payments):
+    """Switch off: a free plan. Switch on: a subscription that ended."""
+    ben, anna, nodes, reply, pending_id = thread
+    _voice_reply(reply)
+    app.config["PAYMENTS_ENABLED"] = payments
+    _set_plan(ben, subscription_status="ended", subscription_level="standard")
+    client = _client(app, ben)
+
+    for resp in (_announcement(client, reply),
+                 client.get("/api/voice/approval-announcement/one.mp3"),
+                 client.get("/api/voice/approval-announcement/several.mp3")):
+        assert resp.status_code == 403, resp.get_data(as_text=True)
+        assert resp.get_json() == {
+            "error": "Voice mode not enabled for this account"}
+    assert clips["calls"] == [] and clips["costs"] == []
+
+
+@pytest.mark.parametrize("payments", [False, True])
+def test_an_account_with_voice_mode_gets_the_clip(app, thread, clips,
+                                                  payments):
+    """Switch off: alpha, as before. Switch on: a live subscription."""
+    ben, anna, nodes, reply, pending_id = thread
+    _voice_reply(reply)
+    app.config["PAYMENTS_ENABLED"] = payments
+    if payments:
+        _set_plan(ben, subscription_status="active",
+                  subscription_level="standard")
+    client = _client(app, ben)
+
+    data = _announcement(client, reply).get_json()
+    assert data["count"] == 1 and data["url"]
+    audio = client.get(data["url"])
+    assert audio.status_code == 200 and audio.mimetype == "audio/mpeg"
+    assert len(clips["calls"]) == 1
