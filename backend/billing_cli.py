@@ -57,6 +57,35 @@ def stripe_sync_catalog_command():
         "fail' must be 'Cancel the subscription'.")
 
 
+def _change_date_consequences(users, given, begin, now):
+    """What --change-date does not change, one plain sentence each: it
+    only rewrites the dates on the accounts, never anything at Stripe."""
+    from backend.models import SUBSCRIPTION_GRANTING_STATUSES
+    lines = []
+    subscribed = [u for u in users
+                  if u.subscription_status in SUBSCRIPTION_GRANTING_STATUSES]
+    if subscribed:
+        lines.append(f"{len(subscribed)} of them have a subscription "
+                     "already:")
+        for u in subscribed:
+            when = (u.subscription_trial_end
+                    if u.subscription_status == "trialing"
+                    else u.subscription_period_end)
+            day = f"{when:%Y-%m-%d}" if when else "unknown"
+            lines.append(f"  {u.username}: Stripe charges them next on "
+                         f"{day}")
+        lines.append("Their first charge stays on that date: this command "
+                     "changes nothing at Stripe.")
+    if given is not None and given[0] <= now and begin > given[0]:
+        lines.append("The model cost counted since the present start no "
+                     "longer counts: the free month's count starts again "
+                     "at the new start.")
+    if given is not None and given[0] <= now < begin:
+        lines.append("Until the new start, the testers return to the "
+                     "alpha plan's access.")
+    return lines
+
+
 @click.command("alpha-free-month")
 @click.option("--start", "start_raw", metavar="YYYY-MM-DD",
               help="The first day of the free month, 00:00 UTC: the Beta "
@@ -67,13 +96,16 @@ def stripe_sync_catalog_command():
 @click.option("--change-date", is_flag=True,
               help="Move the month of accounts that have it already to "
                    "--start.")
+@click.option("--month-already-started", "started_ok", is_flag=True,
+              help="With --change-date: go ahead although the present "
+                   "month has started.")
 @click.option("--undo", is_flag=True,
               help="Put alpha testers back on the alpha plan.")
 @click.option("--user", "usernames", multiple=True,
               help="Only this username (repeatable).")
 @with_appcontext
-def alpha_free_month_command(start_raw, apply_, change_date, undo,
-                             usernames):
+def alpha_free_month_command(start_raw, apply_, change_date, started_ok,
+                             undo, usernames):
     """The alpha free month (#438): every approved account on the "alpha"
     plan moves to "free" with a free month from --start (00:00 UTC) for
     ALPHA_FREE_MONTH_DAYS days, the same dates for everyone, then the
@@ -143,9 +175,17 @@ def alpha_free_month_command(start_raw, apply_, change_date, undo,
                    f"{u.alpha_free_until:%Y-%m-%d}"
                    if u.alpha_free_start and u.alpha_free_until else "none")
             click.echo(f"  {u.username} (now {old})")
+        started = given is not None and given[0] <= now
+        for line in _change_date_consequences(users, given, begin, now):
+            click.echo(line)
         if not apply_:
             click.echo("Nothing changed. Run again with --apply.")
             return
+        if started and not started_ok:
+            raise click.ClickException(
+                f"The present month started on {given[0]:%Y-%m-%d}. Moving "
+                "it now has the consequences above. Run again with "
+                "--month-already-started to go ahead.")
         n = move_alpha_free_month(users, start)
         click.echo(f"Done: the free month of {n} account(s) moved.")
         return

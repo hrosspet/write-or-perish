@@ -466,22 +466,71 @@ class TestCommand:
         assert subs.access_state(
             _db.session.get(User, a["alpha"].id)) == "lapsed"
 
+    @staticmethod
+    def _day(n):
+        return _days(n).strftime("%Y-%m-%d")
+
     def test_change_date_moves_the_month(self, app):
+        """A month that has not started moves without the extra flag."""
         a = self._accounts()
-        self._run(app, "--apply", "--start", "2026-12-01")
-        r = self._run(app, "--change-date", "--start", "2027-01-15")
+        old, new = self._day(10), self._day(40)
+        self._run(app, "--apply", "--start", old)
+        r = self._run(app, "--change-date", "--start", new)
         assert r.exit_code == 0, r.output
-        assert "now 2026-12-01 to 2026-12-31" in r.output
+        assert f"now {old} to" in r.output
         u = _db.session.get(User, a["alpha"].id)
-        assert u.alpha_free_start == datetime(2026, 12, 1)   # not yet
-        r = self._run(app, "--change-date", "--start", "2027-01-15",
-                      "--apply")
+        assert u.alpha_free_start == datetime.strptime(old, "%Y-%m-%d")
+        r = self._run(app, "--change-date", "--start", new, "--apply")
         assert r.exit_code == 0, r.output
         _db.session.expire_all()
         u = _db.session.get(User, a["alpha"].id)
-        assert u.alpha_free_start == datetime(2027, 1, 15)
-        assert u.alpha_free_until == datetime(2027, 2, 14)
+        begin = datetime.strptime(new, "%Y-%m-%d")
+        assert u.alpha_free_start == begin
+        assert u.alpha_free_until == begin + timedelta(days=30)
         assert u.plan == "free"
+
+    def _started_with_a_subscriber(self, app):
+        a = self._accounts()
+        self._run(app, "--apply", "--start", self._day(-5))
+        paying = _db.session.get(User, a["alpha2"].id)
+        paying.subscription_status = "trialing"
+        paying.subscription_level = "discounted"
+        paying.subscription_trial_end = datetime(2027, 3, 4, 12)
+        _db.session.commit()
+        return a
+
+    def test_change_date_says_what_it_does_not_change(self, app):
+        self._started_with_a_subscriber(app)
+        r = self._run(app, "--change-date", "--start", self._day(20))
+        assert r.exit_code == 0, r.output
+        assert "1 of them have a subscription already:" in r.output
+        assert "al2: Stripe charges them next on 2027-03-04" in r.output
+        assert ("Their first charge stays on that date: this command "
+                "changes nothing at Stripe.") in r.output
+        assert "the free month's count starts again at the new start" in \
+            r.output
+        assert ("Until the new start, the testers return to the alpha "
+                "plan's access.") in r.output
+        assert "Nothing changed" in r.output
+
+    def test_a_started_month_moves_only_with_the_extra_flag(self, app):
+        a = self._started_with_a_subscriber(app)
+        before = _db.session.get(User, a["alpha"].id).alpha_free_start
+        r = self._run(app, "--change-date", "--start", self._day(20),
+                      "--apply")
+        assert r.exit_code != 0
+        assert "--month-already-started" in r.output
+        _db.session.expire_all()
+        assert _db.session.get(User, a["alpha"].id).alpha_free_start == \
+            before
+        r = self._run(app, "--change-date", "--start", self._day(20),
+                      "--apply", "--month-already-started")
+        assert r.exit_code == 0, r.output
+        # The same sentences on --apply.
+        assert "Their first charge stays on that date" in r.output
+        _db.session.expire_all()
+        assert _db.session.get(User, a["alpha"].id).alpha_free_start == \
+            datetime.strptime(self._day(20), "%Y-%m-%d")
 
     def test_one_user(self, app):
         a = self._accounts()
@@ -682,6 +731,47 @@ class TestOneCeiling:
             "id": "in_t", "subscription": "sub_t", "customer": "cus_t",
             "amount_paid": 11781}, event_id="e2"))
         assert not self._capped(u.id)
+
+
+class TestCapAcrossANewSubscription:
+    @pytest.fixture(autouse=True)
+    def _ceilings(self, app):
+        app.config["SUBSCRIPTION_SPEND_LIMIT_USD_STANDARD"] = 55.0
+
+    def test_a_capped_tester_stays_capped_on_subscribing(self, app, gateway):
+        from backend.utils.spend import enforce_user_spend_cap, user_is_capped
+        u = _tester(stripe_customer_id="cus_t")
+        tp._cost(u.id, 56, datetime.utcnow() - timedelta(minutes=1))
+        enforce_user_spend_cap(u.id, app.config,
+                               send_email=lambda **_k: None)
+        assert user_is_capped(_db.session.get(User, u.id))
+        gateway.subscriptions["sub_t"] = tp.subscription(
+            "sub_t", customer="cus_t", status="trialing", trial=True,
+            level="discounted")
+        r = tp._post_event(app, tp._event("customer.subscription.created",
+                                          {"id": "sub_t"}))
+        assert r.status_code == 200
+        _db.session.expire_all()
+        u = _db.session.get(User, u.id)
+        assert u.subscription_trial_capped
+        assert user_is_capped(u)
+
+    def test_a_non_tester_as_before(self, app, gateway):
+        """Control: #649's rule for an account that is not a tester: a new
+        subscription starts its own trial count."""
+        u = _user("plain", stripe_customer_id="cus_p",
+                  stripe_subscription_id="sub_old",
+                  subscription_status="trialing",
+                  subscription_level="standard",
+                  subscription_trial_capped=True)
+        gateway.subscriptions["sub_p"] = tp.subscription(
+            "sub_p", customer="cus_p", status="active", level="standard")
+        gateway.subscriptions["sub_old"] = tp.subscription(
+            "sub_old", customer="cus_p", status="canceled", level="standard")
+        tp._post_event(app, tp._event("customer.subscription.created",
+                                      {"id": "sub_p"}))
+        _db.session.expire_all()
+        assert not _db.session.get(User, u.id).subscription_trial_capped
 
 
 class TestAdmin:

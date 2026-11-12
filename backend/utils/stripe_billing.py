@@ -574,13 +574,20 @@ def _apply_payment_state(user, sub, status):
     makes a subscription active when its trial ends and charges the
     first invoice about an hour later, so active is not proof of a
     payment. Only a paid invoice above zero sets it (handle_event)."""
+    # An alpha tester before their first paid invoice (#438) has one
+    # ceiling from the free month's start; a subscription that arrives
+    # meanwhile does not start it again.
+    from backend.utils.spend import alpha_unpaid_since
+    alpha_unpaid = alpha_unpaid_since(user) is not None
     if user.stripe_subscription_id != sub.get("id"):
         user.subscription_revoked = None
-        user.subscription_trial_capped = False
+        if not alpha_unpaid:
+            user.subscription_trial_capped = False
     first_payment_pending = (status == "active"
                              and not user.subscription_ever_paid
                              and bool(sub.get("trial_start")))
-    if status != "trialing" and not first_payment_pending:
+    if (status != "trialing" and not first_payment_pending
+            and not alpha_unpaid):
         user.subscription_trial_capped = False
     details = sub.get("cancellation_details") or {}
     user.subscription_end_reason = (details.get("reason")
