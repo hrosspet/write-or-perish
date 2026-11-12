@@ -1630,6 +1630,11 @@ class ExternalAccount(db.Model):
     # to the end, when no sync has finished yet). Committed together
     # with the first stored page, so a killed worker leaves it set too.
     sync_incomplete = db.Column(db.Boolean, nullable=True)
+    # When the nightly sync first skipped this account because its owner
+    # had not used Loore for UNUSED_ACCOUNT_PAUSE_DAYS (#647); NULL while
+    # the nightly sync runs. Once the owner is back, the hourly gate sends
+    # one catch-up sync at once, whatever their local hour, and clears it.
+    sync_paused_at = db.Column(db.DateTime, nullable=True)
 
     user = db.relationship("User", backref="external_accounts")
 
