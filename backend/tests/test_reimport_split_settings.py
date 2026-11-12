@@ -217,15 +217,22 @@ def test_long_chatgpt_message_reimport_changes_every_part(
 
 # ── entries that are not part of the document keep their settings ───────
 
+@pytest.mark.parametrize("gap", [timedelta(seconds=1),
+                                 timedelta(milliseconds=1)],
+                         ids=["1s", "1ms"])
 @pytest.mark.parametrize("legacy", LEGACY)
-def test_unrelated_entry_above_the_document_keeps_its_setting(app, legacy):
+def test_unrelated_entry_above_the_document_keeps_its_setting(
+        app, legacy, gap):
     """An entry of the same author, type and origin, with no key, right
-    above the document's first chapter."""
-    u, client = _user(app, f"unrelated_above_{legacy}")
+    above the document's first chapter and dated exactly a chapter or a
+    part step before it: the dates alone would take it for one more
+    chapter, the re-imported text says the document has no more."""
+    u, client = _user(app, f"unrelated_above_{legacy}_{gap.seconds}")
     doc = _analyze(client, "Thesis.docx", _thesis(3))
     _confirm(client, [doc], "none")
     first = _entries(u)[0]
     other = _unrelated(u, "none")
+    other.created_at = first.created_at - gap
     first.parent_id = other.id
     _db.session.commit()
     _imported(u, legacy)
@@ -389,8 +396,8 @@ def test_legacy_restore_leaves_the_old_chapters(app):
 
 
 def test_legacy_walk_stops_at_a_deleted_chapter(app):
-    """Control: main changes only the last chapter as well (the first
-    version of this fix walked through the deleted one)."""
+    """Only the keyed entry changes, and the result says the document was
+    updated only in part."""
     u, client = _user(app, "legacy_deleted_middle")
     doc = _analyze(client, "Thesis.docx", _thesis(3))
     _confirm(client, [doc], "chat")
@@ -398,7 +405,8 @@ def test_legacy_walk_stops_at_a_deleted_chapter(app):
     _delete(nodes[2])
     _make_legacy(u)
 
-    _confirm(client, [doc], "none")
+    body = _confirm(client, [doc], "none").get_json()
+    assert body["partly_updated"] == 1 and body["updated"] == 1
     _db.session.expire_all()
     assert _usages(Node.query.get(n.id) for n in (nodes[0], nodes[1],
                                                   nodes[3])) == [
@@ -407,7 +415,8 @@ def test_legacy_walk_stops_at_a_deleted_chapter(app):
 
 def test_legacy_walk_stops_where_the_dates_do_not_prove_a_chapter(app):
     """A chapter dated one second and a moment before the next one is not
-    proven to be the chapter before it."""
+    proven to be the chapter before it: no entry before the keyed one
+    changes."""
     u, client = _user(app, "legacy_dates")
     doc = _analyze(client, "Thesis.docx", _thesis(3))
     _confirm(client, [doc], "chat")
@@ -416,9 +425,84 @@ def test_legacy_walk_stops_where_the_dates_do_not_prove_a_chapter(app):
     _db.session.commit()
     _make_legacy(u)
 
-    _confirm(client, [doc], "none")
+    body = _confirm(client, [doc], "none").get_json()
+    assert body["partly_updated"] == 1
     _db.session.expire_all()
-    assert _usages(_entries(u)) == ["chat", "chat", "none", "none"]
+    assert _usages(_entries(u)) == ["chat", "chat", "chat", "none"]
+
+
+@pytest.mark.parametrize("user_edited", [False, True])
+def test_legacy_walk_compares_token_counts(app, user_edited):
+    """A chapter whose size differs from what the re-imported text gives
+    is not proven, unless the user edited its text (it has a version)."""
+    from backend.models import NodeVersion
+    u, client = _user(app, f"legacy_tokens_{user_edited}")
+    doc = _analyze(client, "Thesis.docx", _thesis(3))
+    _confirm(client, [doc], "chat")
+    nodes = _entries(u)
+    nodes[1].token_count += 7
+    if user_edited:
+        v = NodeVersion(node_id=nodes[1].id)
+        v.set_content("synthetic earlier text")
+        _db.session.add(v)
+    _db.session.commit()
+    _make_legacy(u)
+
+    body = _confirm(client, [doc], "none").get_json()
+    _db.session.expire_all()
+    if user_edited:
+        assert body["partly_updated"] == 0
+        assert _usages(_entries(u)) == ["none"] * 4
+    else:
+        assert body["partly_updated"] == 1
+        assert _usages(_entries(u)) == ["chat"] * 3 + ["none"]
+
+
+def _thesis_with_a_long_chapter():
+    """Three chapters, the middle one above the per-entry cap."""
+    from backend.tests.test_docx_import import _docx, _p
+    body = ["synthetic words of a long chapter " * 6 + str(i)
+            for i in range(600)]
+    return _docx([_p("Opening", "Heading1"), "short opening",
+                  _p("Long chapter", "Heading1"), *body,
+                  _p("Closing", "Heading1"), "short closing"])
+
+
+@pytest.mark.parametrize("legacy", LEGACY)
+def test_chapter_split_into_parts_changes_too(app, legacy):
+    """The re-imported text gives the step between a chapter's last part
+    and the next chapter, so an older document whose chapter was split
+    into parts is proven too."""
+    u, client = _user(app, f"long_chapter_{legacy}")
+    doc = _analyze(client, "Long.docx", _thesis_with_a_long_chapter())
+    _confirm(client, [doc], "chat")
+    n = len(_entries(u))
+    assert n == 4  # opening, the long chapter in 2 parts, closing
+    _imported(u, legacy)
+
+    body = _confirm(client, [doc], "none").get_json()
+    assert body["partly_updated"] == 0
+    _db.session.expire_all()
+    assert _usages(_entries(u)) == ["none"] * n
+
+
+def test_legacy_parts_without_an_origin_are_reported(app):
+    """Imports before 2026-08-27 recorded no origin on the parts before
+    the last: not proven, so only the last part changes and the result
+    says so; the count script for prod sees the part left open."""
+    from backend.scripts.count_split_items_left_open import count
+    u, _client = _user(app, "no_origin")
+    _import_conversations(u.id, [_long_conversation()], "chat")
+    nodes = _entries(u)
+    _make_legacy(u)
+    nodes[0].origin = None
+    _db.session.commit()
+
+    result = _import_conversations(u.id, [_long_conversation()], "none")
+    assert result["partly_updated"] == 1
+    _db.session.expire_all()
+    assert _usages(_entries(u)) == ["chat", "none", "none"]
+    assert count() == (1, 1, 1)
 
 
 # ── the user's own change of one chapter ─────────────────────────────────
