@@ -12,8 +12,8 @@ import pytest
 
 from backend.utils.audio_processing import section_aware_chunk_text
 from backend.utils.spoken_links import (
-    MAX_ADDRESS, MAX_BRACKET_DEPTH, MAX_LINE_HEAD, MAX_LINK_SOURCE,
-    MAX_LINK_TEXT, LinkSpeaker, speak_address, speak_links)
+    CODE_BLOCK_SPOKEN, MAX_ADDRESS, MAX_BRACKET_DEPTH, MAX_LINE_HEAD,
+    MAX_LINK_SOURCE, MAX_LINK_TEXT, LinkSpeaker, speak_address, speak_links)
 from backend.utils.tts_stream_text import (
     AUDIO_PER_CHAR, GEN_RATE, OVERHEAD, ChunkPlanner, SpeechSchedule,
     SpokenTextProjector)
@@ -69,23 +69,56 @@ def test_spoken(text, spoken):
     assert speak_links(text) == spoken
 
 
-def test_code_is_left_as_written():
+def test_inline_code_is_read_as_written_and_a_code_block_is_one_phrase():
+    """#646: a fenced code block is spoken as CODE_BLOCK_SPOKEN, once,
+    nothing of its content; inline code is read as written."""
     text = ("Inline `[x](https://a.com)` and ``a ` [y](https://b.com)`` "
             "then [z](https://c.com).\n"
-            "```python\n[x](https://a.com) https://b.com\n# comment\n```\n"
-            "~~~\nhttps://d.com\n~~~\n"
+            "```python\n[x](https://a.com) https://b.com\n# comment\n"
+            "def f():\n    return 1\n```\n"
+            "~~~\nhttps://d.com\n\n~~~\n"
             "after [y](https://c.com)")
     assert speak_links(text) == (
         "Inline `[x](https://a.com)` and ``a ` [y](https://b.com)`` "
         "then z.\n"
-        "```python\n[x](https://a.com) https://b.com\n# comment\n```\n"
-        "~~~\nhttps://d.com\n~~~\n"
+        f"{CODE_BLOCK_SPOKEN}\n"
+        f"{CODE_BLOCK_SPOKEN}\n"
         "after y")
 
 
 def test_unclosed_code_block_runs_to_the_end():
     text = "Before [a](https://a.com).\n```\n[b](https://b.com)\n"
-    assert speak_links(text) == "Before a.\n```\n[b](https://b.com)\n"
+    assert speak_links(text) == f"Before a.\n{CODE_BLOCK_SPOKEN}\n"
+
+
+@pytest.mark.parametrize("text, spoken", [
+    # In a list item, indented by 3, 4 or more spaces, or a tab; the
+    # closing fence indented as the opening one.
+    ("1. Install:\n   ```bash\n   pip install x\n   ```\n2. Run it.",
+     f"1. Install:\n{CODE_BLOCK_SPOKEN}\n2. Run it."),
+    ("10. Install:\n    ```bash\n    pip install x\n    ```\n11. Run it.",
+     f"10. Install:\n{CODE_BLOCK_SPOKEN}\n11. Run it."),
+    ("- a\n    - b\n        ```\n        x = 1\n        ```\n    - c",
+     f"- a\n    - b\n{CODE_BLOCK_SPOKEN}\n    - c"),
+    ("Run:\n\t```\n\tls\n\t```\nDone.", f"Run:\n{CODE_BLOCK_SPOKEN}\nDone."),
+    # A closing run must be as long as the opening one, of the same
+    # character, with nothing after it but spaces.
+    ("````md\n```\nnot closed\n```\n````\nAfter.",
+     f"{CODE_BLOCK_SPOKEN}\nAfter."),
+    ("~~~\n```\n~~~\nAfter.", f"{CODE_BLOCK_SPOKEN}\nAfter."),
+    ("```\nx\n``` not a close\n```  \nAfter.",
+     f"{CODE_BLOCK_SPOKEN}\nAfter."),
+    # Each block once; the text between them is spoken.
+    ("A:\n```\none\n```\nB:\n```\ntwo\n```\n",
+     f"A:\n{CODE_BLOCK_SPOKEN}\nB:\n{CODE_BLOCK_SPOKEN}\n"),
+    # Not a fence: backticks in the info string (inline code), or fewer
+    # than three. Controls: read as before #646.
+    ("```js``` is inline code.", "```js``` is inline code."),
+    ("``\nnot code\n``", "``\nnot code\n``"),
+])
+def test_code_blocks(text, spoken):
+    assert speak_links(text) == spoken
+    assert "".join(_stream(list(text))) == spoken
 
 
 def test_chapter_heading_lines():
@@ -278,6 +311,48 @@ def test_chapters_keep_their_sections_and_get_spoken_titles():
                               proposals=False))[0] == batch
 
 
+def test_a_comment_in_a_code_block_is_no_chapter():
+    """#646: a ``# comment`` line in a code block is code: batch drops it
+    with the block, and a streamed reply cuts no chapter there (before,
+    both made it a chapter and spoke the comment as its title)."""
+    text = ("Preamble.\n\n## Setup\nInstall it:\n\n```python\n# step one\n"
+            "import x\n## not a chapter\n# step two\nx.run()\n```\n\n"
+            "Then run it.\n\n## Use\nCall it.")
+    batch = section_aware_chunk_text(speak_links(text))
+    assert batch == [
+        ("Preamble.", None, 0),
+        (f"Setup.\n\nInstall it:\n\n{CODE_BLOCK_SPOKEN}\n\nThen run it.",
+         "Setup", 1),
+        ("Use.\n\nCall it.", "Use", 2)]
+    events = _project([text], proposals=False)
+    assert [v for k, v in events if k == "heading"] == ["Setup", "Use"]
+    assert _plan(events)[0] == batch
+    rng = random.Random(646)
+    for _ in range(40):
+        assert _plan(_project(_random_splits(text, rng),
+                              proposals=False))[0] == batch
+    assert _plan(_project(list(text), proposals=False))[0] == batch
+
+
+def test_a_split_code_block_speaks_its_phrase_once_the_fence_line_ends():
+    speaker = LinkSpeaker()
+    assert speaker.feed("Run:\n``") == "Run:\n"
+    assert speaker.feed("`py") == ""
+    assert speaker.feed("thon\nprint(1)") == f"{CODE_BLOCK_SPOKEN}\n"
+    assert speaker.feed("\n# a comment\n``") == ""
+    assert speaker.feed("`\nDone.") == "Done."
+    assert speaker.close() == ""
+
+
+_CODE_BLOCKS = [
+    "```\n[raw](https://raw.com) https://raw.com\n```",
+    "```python\n# a comment\nx = 1\n## also code\n```",
+    "~~~\n# tilde\n```\nstill code\n~~~",
+    "1. Step:\n    ```bash\n    # install\n    pip install x\n    ```\n2. Next.",
+    "```\nunclosed\n# to the end",
+]
+
+
 def _linky_prose(rng, words):
     vocab = ("the a loore voice chunk reply model audio user text "
              "when where how what").split()
@@ -320,8 +395,10 @@ def test_parity_with_batch_on_random_replies():
             parts.append(f"{'#' * rng.randint(1, 3)} {title}")
             if rng.random() < 0.9:
                 parts.append(_linky_prose(rng, rng.randint(1, 600)))
-        if rng.random() < 0.3:
-            parts.append("```\n[raw](https://raw.com) https://raw.com\n```")
+        for _ in range(rng.choice([0, 0, 1, 2])):
+            # Code blocks (#646), with "# comment" lines that are no
+            # chapter, anywhere among the sections.
+            parts.insert(rng.randint(0, len(parts)), rng.choice(_CODE_BLOCKS))
         text = "\n\n".join(parts)
         pieces = _random_splits(text, rng) if len(text) > 1 else [text]
         streamed, stalled = _plan(_project(pieces, proposals=False))
@@ -376,11 +453,12 @@ def test_over_long_address_starts_no_address_in_the_rest_of_its_run():
 
 def test_long_heading_and_fence_lines_are_ordinary_lines():
     pad = "x" * MAX_LINE_HEAD
+    # The last line, a fence alone, opens a block that runs to the end.
     assert speak_links(f"```{pad}\n[a](https://x.com)\n```") == \
-        f"```{pad}\na\n```"
+        f"```{pad}\na\n{CODE_BLOCK_SPOKEN}"
     fence = "```" + "x" * (MAX_LINE_HEAD - 3)
-    assert speak_links(f"{fence}\n[a](https://x.com)\n```") == \
-        f"{fence}\n[a](https://x.com)\n```"
+    assert speak_links(f"{fence}\n[a](https://x.com)\n```\nb") == \
+        f"{CODE_BLOCK_SPOKEN}\nb"
 
 
 _N = 200_000

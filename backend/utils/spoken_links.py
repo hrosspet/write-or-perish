@@ -1,12 +1,17 @@
-"""What Listen says for links (#461).
+"""What Listen says for links (#461) and code blocks (#646).
 
 A Markdown link ``[text](url)`` is spoken as its text, an image
 ``![alt](url)`` as its alt text (nothing when the alt text is empty). An
 address — bare (``https://…``, ``www.…``), an autolink (``<https://…>``) or
 a link whose text is its own address — is spoken short: a GitHub pull
 request or issue as "PR 460" / "issue 423", any other address as "a link
-to example.com". Code is left as written: fenced code blocks and inline
-code spans. Only the text sent to TTS changes; the stored node does not.
+to example.com". A fenced code block (```` ``` ```` or ``~~~``, at any
+indentation, so also one inside a list item) is spoken as
+CODE_BLOCK_SPOKEN, once, in place of its opening line; its content and
+closing line are not spoken, and a ``#`` line inside it is no chapter.
+An inline code span is read as written, links in it included (it is
+usually one name inside a sentence). Only the text sent to TTS changes;
+the stored node does not.
 
 LinkSpeaker does this on a stream of text: it releases text as soon as no
 later text can change it and holds back an undecided tail (a ``[`` whose
@@ -43,6 +48,10 @@ MAX_LINK_SOURCE = 2 * MAX_LINK_TEXT + MAX_ADDRESS + 32
 # A ``#``/``##`` heading line or a code-fence line is read as one only up
 # to this length (a longer one is an ordinary line here).
 MAX_LINE_HEAD = 500
+# What is spoken in place of a fenced code block (#646), once per block:
+# the listener hears that something was left out and can look at the
+# text. The issue's own suggestion.
+CODE_BLOCK_SPOKEN = "Code omitted."
 
 _SCHEMES = ("http://", "https://")
 _ADDRESS_STARTS = _SCHEMES + ("www.",)
@@ -56,8 +65,10 @@ _SCHEME_RE = re.compile(r"[a-z][a-z0-9+.\-]*://", re.IGNORECASE)
 _GITHUB_REF_RE = re.compile(
     r"(?:www\.)?github\.com/[^/?#\s]+/[^/?#\s]+/(pull|issues)/(\d+)"
     r"(?:[/?#]\S*)?", re.IGNORECASE)
-_FENCE_OPEN_RE = re.compile(r" {0,3}(`{3,}|~{3,})")
-_FENCE_PREFIX_RE = re.compile(r" {0,3}(?:`{0,2}|~{0,2})")
+# Any indentation: a fence indented 4 or more spaces is still code where
+# it renders (inside a list item, or as an indented code block).
+_FENCE_OPEN_RE = re.compile(r"[ \t]*(`{3,}|~{3,})")
+_FENCE_PREFIX_RE = re.compile(r"[ \t]*(?:`{0,2}|~{0,2})")
 _CHAPTER_START_RE = re.compile(r"#{1,2}[ \t]")
 _CHAPTER_LINE_RE = re.compile(r"(#{1,2}[ \t]+)(.*)", re.DOTALL)
 # Characters that may start something this module rewrites; anything else
@@ -145,15 +156,14 @@ def _escape_step(s, base, k):
 
 def _closer_step(state, piece, fence):
     """Track whether a code-block line can still be the closing fence
-    (up to 3 spaces, the fence character at least as many times as the
-    opening run, then only spaces). *state* is (phase, count), or None
-    once the line can't close the block."""
+    (any indentation, as the opening fence; the fence character at least
+    as many times as the opening run, then only spaces). *state* is
+    (phase, count), or None once the line can't close the block."""
     char, length = fence
     phase, count = state
     for ch in piece:
         if phase == 0:
-            if ch == " " and count < 3:
-                count += 1
+            if ch in " \t":
                 continue
             if ch == char:
                 phase, count = 1, 1
@@ -252,7 +262,8 @@ class LinkSpeaker:
 
     def heading(self, title):
         """A chapter heading taken out of the text: its title as spoken.
-        Inside a code block it stays as written, as its line would."""
+        Inside a code block it is a line of code (a ``# comment``): None,
+        no chapter and nothing spoken, as its line would be."""
         self._line_start = True
         self._code = self._ticks = 0
         self._long_token = False
@@ -260,7 +271,7 @@ class LinkSpeaker:
         if self._fence:
             self._closer = (0, 0)
         self._prev = "\n"
-        return title if self._fence else _speak_title(title)
+        return None if self._fence else _speak_title(title)
 
     # ── the loop ────────────────────────────────────────────────────────
     def _run(self, final):
@@ -301,8 +312,8 @@ class LinkSpeaker:
         return None
 
     def _fenced(self, s, i):
-        """Inside a code block: release as is, up to the end of the line,
-        and see whether that line closes the block."""
+        """Inside a code block: drop the text up to the end of the line
+        (#646), and see whether that line closes the block."""
         nl = s.find("\n", i)
         end = len(s) if nl < 0 else nl + 1
         if self._closer is not None:
@@ -315,7 +326,7 @@ class LinkSpeaker:
                 self._fence = None
             self._closer = (0, 0)
             self._line_start = True
-        return s[i:end], end
+        return "", end
 
     def _line_head(self, s, i, final):
         """At the start of a line: a code fence, a chapter heading line,
@@ -342,9 +353,10 @@ class LinkSpeaker:
                     return _WAIT   # a fence line is decided once it ends
                 char = m.group(1)[0]
                 if char == "~" or "`" not in line[m.end():]:
+                    # The block is spoken as one short phrase (#646).
                     self._fence = (char, len(m.group(1)))
                     self._closer = (0, 0)
-                    return line + newline, end
+                    return CODE_BLOCK_SPOKEN + newline, end
             elif not complete and _FENCE_PREFIX_RE.fullmatch(line):
                 return _WAIT
         self._line_start = False
