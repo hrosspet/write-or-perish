@@ -118,7 +118,15 @@ def _script(monkeypatch, tmp_path, collect, render=None, cancel=None):
     # The harness stubs llm_providers, which makes this constant a mock.
     monkeypatch.setattr(_llm_task_mod, "DEFAULT_MAX_OUTPUT_TOKENS", 10000)
     calls = {"collect": [], "submit": [], "cancel": [], "chain": 0,
-             "render": 0, "submit_user_ids": []}
+             "render": 0, "submit_user_ids": [], "delete_files": []}
+
+    # The batch's files at OpenAI, deleted once its outcome is saved
+    # (#667): recorded, never sent.
+    def _delete_files(key, batch_id):
+        calls["delete_files"].append(batch_id)
+        return 0
+    monkeypatch.setattr(llm_batch, "delete_openai_batch_files_by_id",
+                        _delete_files)
 
     def _cancel(key, batch_id):
         calls["cancel"].append((key, batch_id))
@@ -257,12 +265,14 @@ def test_poll_error_keeps_the_node_processing_and_polls_again(app, monkeypatch, 
     assert node.llm_task_status == "processing"
     assert node.llm_task_error is None
     assert _entry(node)["status"] == "submitted"
+    # Polled again: its files stay (#667).
+    assert calls["delete_files"] == []
 
 
 def test_provider_verdict_fails_the_node(app, monkeypatch, tmp_path):  # noqa: F811
     def expired():
         raise BatchItemFailed("OpenAI batch batch_1 expired")
-    _script(monkeypatch, tmp_path, collect=expired)
+    calls = _script(monkeypatch, tmp_path, collect=expired)
     alice, read, llm_node = _read_thread()
     task = _Task()
 
@@ -273,6 +283,8 @@ def test_provider_verdict_fails_the_node(app, monkeypatch, tmp_path):  # noqa: F
     node = _reload(llm_node.id)
     assert node.llm_task_status == "failed"
     assert node.llm_task_error == REPLY_FAILED_TEXT
+    # The verdict is saved: the batch's files go (#667).
+    assert calls["delete_files"] == ["batch_1"]
 
 
 def test_policy_block_fails_the_node_is_reported_and_not_resubmitted(
@@ -308,7 +320,8 @@ def test_policy_block_fails_the_node_is_reported_and_not_resubmitted(
 
 def test_poll_cap_fails_the_node(app, monkeypatch, tmp_path):  # noqa: F811
     """The batch still running when retry() reports the cap."""
-    _script(monkeypatch, tmp_path, collect=lambda: ("in_progress", None))
+    calls = _script(monkeypatch, tmp_path,
+                    collect=lambda: ("in_progress", None))
     alice, read, llm_node = _read_thread()
 
     with pytest.raises(_llm_task_mod.MaxRetriesExceededError):
@@ -317,6 +330,8 @@ def test_poll_cap_fails_the_node(app, monkeypatch, tmp_path):  # noqa: F811
     node = _reload(llm_node.id)
     assert node.llm_task_status == "failed"
     assert node.llm_task_error == _llm_task_mod.CA_BATCH_GAVE_UP_TEXT
+    # The batch may still be running: its files stay (#667).
+    assert calls["delete_files"] == []
 
 
 def test_poll_error_at_the_cap_fails_the_node_with_the_last_error(app, monkeypatch, tmp_path):  # noqa: F811
@@ -610,6 +625,8 @@ def test_capped_user_still_collects_an_ended_batch(app, monkeypatch, tmp_path): 
     node = _reload(llm_node.id)
     assert node.llm_task_status == "completed"
     assert APICostLog.query.count() == 1
+    # The reply is saved: the batch's files go (#667).
+    assert calls["delete_files"] == ["batch_1"]
 
     # A first run for the capped user does not submit.
     llm_user = Node.query.get(llm_node.id).user_id
@@ -776,6 +793,8 @@ def test_withdrawn_batch_that_never_ran_is_cancelled_unbilled(app, monkeypatch, 
     assert APICostLog.query.count() == 0
     assert FeedPick.query.count() == 0
     assert ExternalItem.query.count() == 0
+    # The withdrawal is saved: the batch's files go (#667).
+    assert calls["delete_files"] == ["batch_1"]
 
 
 def test_withdrawn_batch_that_ran_anyway_is_collected_and_billed(app, monkeypatch, tmp_path):  # noqa: F811

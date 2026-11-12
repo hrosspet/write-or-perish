@@ -205,6 +205,21 @@ class TestOneItemBatches:
 
         client.files.delete.assert_not_called()
 
+    def test_an_account_purge_cancels_with_the_files(self, monkeypatch):
+        from flask import Flask
+        from backend.utils import user_purge
+        calls = []
+        monkeypatch.setattr(
+            llm_batch, "openai_batch_cancel_one",
+            lambda key, batch_id, delete_files=False: calls.append(
+                (batch_id, delete_files)))
+        app = Flask(__name__)
+        app.config["OPENAI_API_KEY"] = "k"
+        with app.app_context():
+            assert user_purge._cancel_provider_batch(
+                "openai:gpt-x", "b-1") is None
+        assert calls == [("b-1", True)]
+
     def test_a_refused_cancel_still_deletes_an_ended_batchs_files(
             self, monkeypatch):
         client = _fake_openai(monkeypatch, _batch(
