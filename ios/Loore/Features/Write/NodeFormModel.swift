@@ -60,6 +60,9 @@ struct NodeFormResult {
     var descendantsUpdated = 0
     var spendCapped = false
     var llmError: String?
+    /// Why the reply was skipped, as a code. `thread_too_long` (#648) is not
+    /// toasted: the entry's page shows the thread's limit and offers a new thread.
+    var llmErrorCode: String?
     /// The saved entry's privacy (the answer's, else what was sent): a public or
     /// circles entry gets no automatic reply from the host.
     var privacy: PrivacyLevel?
@@ -466,7 +469,9 @@ final class NodeFormModel {
             await clearAfterSend()
             streamingSessionId = nil
             if result.spendCapped { app.notifySpendBlocked() }
-            if let llmError = result.llmError { app.toasts.show(llmError, duration: 10) }
+            if let llmError = result.llmError, !ThreadLength.isRefusal(result.llmErrorCode) {
+                app.toasts.show(llmError, duration: 10)
+            }
             return result
         }
 
@@ -481,10 +486,13 @@ final class NodeFormModel {
             let answer: TextmodeStartResponse = try await api.post(APIPath.textmodeStart, json: body)
             await clearAfterSend()
             if answer.spendCapped { app.notifySpendBlocked() }
-            if let llmError = answer.llmError { app.toasts.show(llmError, duration: 10) }
+            // A first entry too large for a reply (#648): its page shows the limit.
+            if let llmError = answer.llmError, !ThreadLength.isRefusal(answer.llmErrorCode) {
+                app.toasts.show(llmError, duration: 10)
+            }
             return NodeFormResult(id: answer.userNodeId, awaitLLM: answer.llmNodeId, userNodeId: answer.userNodeId,
                                   llmNodeId: answer.llmNodeId, tipId: answer.tipId, spendCapped: answer.spendCapped,
-                                  llmError: answer.llmError)
+                                  llmError: answer.llmError, llmErrorCode: answer.llmErrorCode)
         }
 
         // A recorded transcript: the streaming draft becomes the node.
@@ -499,7 +507,7 @@ final class NodeFormModel {
             if answer.spendCapped { app.notifySpendBlocked() }
             return NodeFormResult(id: answer.id, awaitLLM: answer.llmNodeId, userNodeId: answer.userNodeId,
                                   llmNodeId: answer.llmNodeId, tipId: answer.tipId, spendCapped: answer.spendCapped,
-                                  llmError: answer.llmError)
+                                  llmError: answer.llmError, llmErrorCode: answer.llmErrorCode)
         }
 
         if let edit = config.edit {

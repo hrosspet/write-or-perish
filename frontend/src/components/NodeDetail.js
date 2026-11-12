@@ -21,13 +21,16 @@ import {
 } from "../utils/sharedThread";
 import { useCheckboxToggle, useTaskInsert } from "../utils/markdown";
 import { contextAllowsAi, isAiUsageRefusedError } from "../utils/aiUsage";
+import { THREAD_TOO_LONG_CODE, isThreadTooLong } from "../utils/threadLength";
+import ThreadLengthNotice from "./ThreadLengthNotice";
 import NodeFormModal from "./NodeFormModal";
 import Bubble from "./Bubble";
 import BubbleKebabMenu from "./BubbleKebabMenu";
 import QuotedContent from "./QuotedContent";
 import FeedPicks from "./FeedPicks";
 import ToolActionsTaken from "./ToolActionsTaken";
-import ToolApprovalDialog, { groupByTurn } from "./ToolApprovalDialog";
+import ToolApprovalDialog from "./ToolApprovalDialog";
+import { useToolApprovals } from "../hooks/useToolApprovals";
 import { ReadWindowLine, ReadReplyTail, ReadCancelledLine } from "./ReadReply";
 
 import DeleteConfirmDialog from "./DeleteConfirmDialog";
@@ -213,20 +216,14 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // approval (Peter, 2026-11-12): the server's pending_approvals for this
   // thread. The dialog shows one reply's calls at a time, opens by itself
   // when calls are found, and closing it decides nothing.
-  const [pendingApprovals, setPendingApprovals] = useState([]);
-  const [approvalsOpen, setApprovalsOpen] = useState(false);
-  const [approvalBusy, setApprovalBusy] = useState({});
-  const [approvalErrors, setApprovalErrors] = useState({});
-  const showApprovals = useCallback((items) => {
-    const list = items || [];
-    setPendingApprovals(list);
-    if (list.length) setApprovalsOpen(true);
-  }, []);
+  const approvals = useToolApprovals();
+  const {
+    pending: pendingApprovals, open: approvalsOpen, setOpen: setApprovalsOpen,
+    show: showApprovals, refresh: refreshThreadApprovals,
+  } = approvals;
   const refreshApprovals = useCallback(() => {
-    api.get('/tool-approvals', { params: { node: id } })
-      .then((res) => showApprovals(res.data?.pending))
-      .catch(() => {});
-  }, [id, showApprovals]);
+    refreshThreadApprovals(id);
+  }, [id, refreshThreadApprovals]);
 
   // `autoGenerate` is the single source of truth. Defaults to true on
   // a fresh install (see useState initializer) and persists across
@@ -475,6 +472,13 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
           tool_calls_meta: llmData.tool_calls_meta ?? prev.tool_calls_meta,
           feed_picks_count: llmData.feed_picks_count ?? prev.feed_picks_count,
           llm_task_status: 'completed',
+          // How long the thread is with this reply in it (#648): the
+          // notice or the limit shows on this turn, not the next.
+          thread_length: llmData.thread_length !== undefined
+            ? llmData.thread_length : prev.thread_length,
+          thread_length_message: llmData.thread_length !== undefined
+            ? (llmData.thread_length_message || null)
+            : prev.thread_length_message,
         } : prev);
         // Calls the reply made that wait for the user's approval.
         refreshApprovals();
@@ -516,9 +520,20 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
       }
       setLlmTaskNodeId(null);
     } else if (llmStatus === 'failed') {
-      // Toast, never setError — setError replaces the entire thread view
-      // with the raw failure text, hiding the thread and the inline form.
-      addToast(llmError || 'LLM response generation failed', 8000);
+      if (llmData?.error_code === THREAD_TOO_LONG_CODE) {
+        // Refused for the thread's length (#648): the reply form of the
+        // entry says so, with the way to a new thread, instead of a toast.
+        if (String(llmTaskNodeId) !== String(id)) {
+          setNode(prev => (prev ? {
+            ...prev, thread_length: 'limit',
+            thread_length_message: llmError || null,
+          } : prev));
+        }
+      } else {
+        // Toast, never setError — setError replaces the entire thread view
+        // with the raw failure text, hiding the thread and the inline form.
+        addToast(llmError || 'LLM response generation failed', 8000);
+      }
       // awaitLlm flows can park the view on the pending LLM node itself;
       // on failure that's an empty dead node — hop to its parent (the
       // user's entry). Arrived from the parent: go back to it. Otherwise
@@ -870,45 +885,30 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     if (status === 402) return;
     // No automatic reply under a shared node: LLM Response stays offered.
     if (isAutoGenerateOff(err)) return;
+    // The thread is too long for another reply (#648): the reply form
+    // says so, with the way to a new thread, in place of LLM Response.
+    if (isThreadTooLong(err)) {
+      markThreadTooLong(apiErr);
+      return;
+    }
     addToast(apiErr || err.message || "Error requesting LLM response.", 8000);
+  };
+
+  // The server refused a reply for the thread's length: the page shows the
+  // limit as if the thread had come with `thread_length: "limit"`.
+  const markThreadTooLong = (message) => {
+    setNode((prev) => (prev ? {
+      ...prev, thread_length: 'limit', thread_length_message: message || null,
+    } : prev));
   };
 
   // The reply is watched on its own node from the start (#367): the
   // model thinking, then the text as it is written.
-  // Approve or reject one waiting call. The answer lists the reply's calls
-  // still waiting; a call another device decided (404) just goes.
-  const decideApproval = async (item, approve) => {
-    setApprovalBusy((b) => ({ ...b, [item.id]: true }));
-    setApprovalErrors((e) => ({ ...e, [item.id]: null }));
-    const replaceTurn = (rest) => setPendingApprovals((all) => [
-      ...all.filter((p) => p.turn_node_id !== item.turn_node_id),
-      ...(rest || []),
-    ]);
-    try {
-      const res = await api.post(
-        `/tool-approvals/${item.id}/${approve ? 'approve' : 'reject'}`);
-      replaceTurn(res.data?.pending);
-      if (res.data?.outcome === 'failed') {
-        setApprovalErrors((e) => ({ ...e, [item.id]: res.data.error }));
-      } else {
-        // The reply's Actions taken now say what happened.
-        api.get(`/nodes/${id}`).then((r) => setNode(r.data)).catch(() => {});
-      }
-    } catch (err) {
-      if (err?.response?.status === 404) {
-        setPendingApprovals((all) => all.filter((p) => p.id !== item.id));
-      } else {
-        setApprovalErrors((e) => ({
-          ...e,
-          [item.id]: err?.response?.data?.error
-            || "Loore couldn't make this change. It still waits for your approval.",
-        }));
-      }
-    } finally {
-      setApprovalBusy((b) => ({ ...b, [item.id]: false }));
-    }
-  };
-  const approvalGroups = groupByTurn(pendingApprovals);
+  // Approve or reject one waiting call; then the reply's Actions taken
+  // say what happened.
+  const decideApproval = (item, approve) => approvals.decide(item, approve, () => {
+    api.get(`/nodes/${id}`).then((r) => setNode(r.data)).catch(() => {});
+  });
 
   const handleLLMResponse = () => {
     setError("");
@@ -933,6 +933,9 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   const tryAutoGenerateFor = async (parentNodeId, chainNodes, privacyLevel) => {
     if (!autoGenerateActive) return null;
     if (isSharedPrivacy(privacyLevel)) return null;
+    // Too long for another reply already (#648): the entry is written, no
+    // reply is asked for (the server would refuse it).
+    if (chainNodes?.[0]?.thread_length === 'limit') return null;
     if (!contextAllowsAi(chainNodes)) {
       setAutoGenerate(false);
       addToast(
@@ -1107,9 +1110,11 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
         // 402 = spend cap, surfaced globally by SpendCapBanner; don't echo
         // the raw error code into the view.
         if (err?.response?.status === 402) return;
-        // AI usage keeps this thread away from AI: the Voice screen says
-        // so, and where to change it, in place of the record button.
-        if (sessionType === 'voice' && isAiUsageRefusedError(err)) {
+        // AI usage keeps this thread away from AI, or it is too long for
+        // another reply (#648): the Voice screen says so, and what to do,
+        // in place of the record button.
+        if (sessionType === 'voice'
+            && (isAiUsageRefusedError(err) || isThreadTooLong(err))) {
           navigate(`/voice?parent=${id}`);
           return;
         }
@@ -1148,6 +1153,12 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
       .catch((err) => {
         setReadLoading(false);
         if (err?.response?.status === 402) return;
+        // A glean reads the thread too: refused when it is too long for
+        // another reply (#648). The reply form says so.
+        if (isThreadTooLong(err) && String(targetId) === String(id)) {
+          markThreadTooLong(err.response?.data?.error);
+          return;
+        }
         const msg = err.response?.data?.error || 'Could not start the glean.';
         addToast(msg, 6000);
       });
@@ -1352,15 +1363,22 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // prompt has no reflection to glean from.
   const isGleanEntry = !!node.is_system_prompt
     && ['read', 'read_thread'].includes(node.prompt_key);
+  // How long the next AI reply's prompt would be (#648): "notice" from 90 %
+  // of the limit, "limit" at it, where no AI reply is offered (LLM
+  // Response, Try again, Glean); writing an entry still works. The server
+  // sends it to the node's owner only.
+  const threadLength = isOwner ? node.thread_length : null;
+  const atThreadLimit = threadLength === 'limit';
   const readActions = isOwner && gleanEnabled
     && (gleanThread || isGleanEntry)
     && node.ai_usage !== 'none' && !isLlmPending
-    && (!node.is_system_prompt || isGleanEntry);
+    && (!node.is_system_prompt || isGleanEntry) && !atThreadLimit;
   // Before the first picks (the read prompt itself, or a note typed
   // under it) a reply asked for here would be that first read, so the
   // generic LLM Response is not offered at all: the row is "Read" and
   // its model picker.
-  const showLlmResponse = showCraftBar && !(inReadThread && !readReplyAbove);
+  const showLlmResponse = showCraftBar && !(inReadThread && !readReplyAbove)
+    && !atThreadLimit;
   // Without craft mode there is no LLM Response, so an entry whose
   // automatic reply failed left the user no way to ask again. Everyone
   // gets a plain Try again there (Peter, 2026-11-10): the same request
@@ -1382,7 +1400,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   const showTryAgain = isOwner && !craftMode && autoGenerateActive
     && awaitsReply && replyAttemptFailed
     && node.ai_usage !== 'none' && !isLlmPending
-    && !(inReadThread && !readReplyAbove);
+    && !(inReadThread && !readReplyAbove) && !atThreadLimit;
   // While the reply is being requested or written, both buttons say so.
   const llmBusyLabel = (llmRequesting || llmTaskNodeId) ? (
     <>
@@ -1875,10 +1893,16 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
           >
             <FaThumbtack />
           </button>
-          <SpeakerIcon nodeId={node.id} content={node.content} isPublic={node.privacy_level === 'public'} aiUsage={node.ai_usage} onTtsGenerated={() => setNode(prev => prev ? { ...prev, has_tts: true } : prev)} />
+          {/* A reply in a thread where a change waits: its audio may be
+              followed by the spoken announcement (asked when it plays). */}
+          <SpeakerIcon
+            nodeId={node.id} content={node.content} isPublic={node.privacy_level === 'public'} aiUsage={node.ai_usage}
+            onTtsGenerated={() => setNode(prev => prev ? { ...prev, has_tts: true } : prev)}
+            announce={pendingApprovals.length > 0 && (node.node_type === 'llm' || !!node.llm_model)}
+          />
           <DownloadAudioIcon nodeId={node.id} isPublic={node.privacy_level === 'public'} aiUsage={node.ai_usage} />
         </NodeFooter>
-        {(showCraftBar || showTryAgain || readActions) && (
+        {(showLlmResponse || showTryAgain || readActions) && (
           <div
             ref={actionRowRef}
             style={actionsStacked
@@ -1950,6 +1974,12 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
           marginTop: '4px',
           marginBottom: '12px',
         }}>
+          {threadLength && (
+            <ThreadLengthNotice
+              state={threadLength}
+              message={node.thread_length_message}
+            />
+          )}
           <NodeForm
             key={`inline-${id}`}
             parentId={parseInt(id, 10)}
@@ -2098,10 +2128,10 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
         />
       )}
       <ToolApprovalDialog
-        open={approvalsOpen && approvalGroups.length > 0}
-        items={approvalGroups[0]}
-        busy={approvalBusy}
-        errors={approvalErrors}
+        open={approvalsOpen && approvals.groups.length > 0}
+        items={approvals.groups[0]}
+        busy={approvals.busy}
+        errors={approvals.errors}
         onDecide={decideApproval}
         onClose={() => setApprovalsOpen(false)}
       />

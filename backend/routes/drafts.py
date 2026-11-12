@@ -612,7 +612,17 @@ def init_streaming():
     mic never opens: a fresh thread when the account's Default AI usage
     or the ai_usage sent is 'none', a continued one (parent_id) when the
     thread is not AI-readable (voice_turn_refusal). Voice mode exists to
-    get a reply, and that reply would send the recording to a model.
+    get a reply, and that reply would send the recording to a model. A
+    Voice recording that continues a thread already too long for another
+    reply gets 409 ``{"error", "code": "thread_too_long"}`` and no draft
+    (#648); a dictation (no label) records there as before.
+
+    A Voice recording continuing a thread where a change the AI proposed
+    waits for the user's approval gets 409 ``{"error", "code":
+    "approval_pending", "pending": <count>}`` and no draft
+    (utils/tool_approvals.waiting_in_thread). When both apply, the
+    waiting change answers first: it needs a decision before anything
+    else, and the thread's length is asked once it is decided.
 
     400 for a label a recording doesn't carry (_RECORDING_LABELS), 410
     for a parent that has been deleted.
@@ -653,6 +663,27 @@ def init_streaming():
             current_user, parent, None if parent else ai_usage)
         if refused is not None:
             return ai_usage_refused_response(refused)
+        # A change the AI proposed in this thread waits for the user's
+        # approval: no Voice turn continues it until they decide (Peter,
+        # 2026-11-12). Dictation and Text mode are not affected. Asked
+        # before the thread's length: the change needs a decision first,
+        # and the Voice screen opens its dialog on this 409.
+        from backend.utils.tool_approvals import (
+            approval_pending_response, waiting_in_thread,
+        )
+        waiting = waiting_in_thread(current_user.id, parent)
+        if waiting:
+            return approval_pending_response(waiting)
+        # A thread already too long for another reply (#648): 409
+        # ``code: thread_too_long`` and no draft, so the mic never opens.
+        if parent is not None:
+            from backend.utils.thread_size import (
+                thread_length_refusal, thread_too_long_response,
+            )
+            too_long = thread_length_refusal(parent, current_user.id,
+                                             user=current_user)
+            if too_long is not None:
+                return thread_too_long_response(too_long)
 
     # Generate session ID
     session_id = str(uuid.uuid4())
@@ -1389,6 +1420,11 @@ def get_streaming_status(session_id):
     # a skipped reply as "no server-side chain" and saves the entry again.
     if draft.streaming_warning:
         status_data["warning"] = draft.streaming_warning
+        # A reply skipped for the thread's length (#648): Voice says it.
+        from backend.utils.thread_size import skipped_reply_code
+        code = skipped_reply_code(draft.streaming_warning)
+        if code:
+            status_data["warning_code"] = code
     return jsonify(status_data)
 
 
@@ -1615,6 +1651,7 @@ def save_streaming_as_node(session_id):
             from backend.utils.llm_nodes import create_llm_placeholder
             from backend.utils.placeholders import UserExportValidationError
             from backend.utils.node_deletion import ParentDeletedError
+            from backend.utils.thread_size import ThreadTooLong
             try:
                 llm_node, task_id = create_llm_placeholder(
                     tip_node.id, model_id, current_user.id,
@@ -1625,10 +1662,12 @@ def save_streaming_as_node(session_id):
                 response["llm_node_id"] = llm_node.id
                 response["task_id"] = task_id
             except (UserExportValidationError, ParentDeletedError,
-                    AIUsageRefused, ReadOnlyModelRefused) as e:
-                # A thread above that keeps AI out (AIUsageRefused), or a
+                    AIUsageRefused, ReadOnlyModelRefused,
+                    ThreadTooLong) as e:
+                # A thread above that keeps AI out (AIUsageRefused), a
                 # read-only model asked to reply (ReadOnlyModelRefused),
-                # skips the reply the same way: the entry is saved.
+                # or a thread too long for another reply (ThreadTooLong,
+                # #648) skips the reply the same way: the entry is saved.
                 db.session.rollback()
                 # The message is written for the user (llm_error); the
                 # log keeps the type
@@ -1636,7 +1675,8 @@ def save_streaming_as_node(session_id):
                     "save-as-node: LLM reply skipped for node %s: %s",
                     node.id, describe_exception(e))
                 response["llm_error"] = str(e)
-                if isinstance(e, (AIUsageRefused, ReadOnlyModelRefused)):
+                if isinstance(e, (AIUsageRefused, ReadOnlyModelRefused,
+                                  ThreadTooLong)):
                     response["llm_error_code"] = e.code
 
     return jsonify(response), 201

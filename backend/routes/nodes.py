@@ -62,6 +62,7 @@ from backend.utils.llm_nodes import (
     resolve_read_model, shared_with_others,
 )
 from backend.utils.placeholders import UserExportValidationError
+from backend.utils.thread_size import ThreadTooLong, thread_too_long_response
 
 # ---------------------------------------------------------------------------
 # Voice‑Mode helpers
@@ -1597,10 +1598,12 @@ def get_node(node_id):
     # further". Two queries over the chain (ca_feed.read_reply_ids), only
     # in a read thread.
     read_reply_above = False
+    chain_reads = frozenset()
     if in_read_thread:
         from backend.utils.ca_feed import read_reply_ids
         alive = [n for n in ancestor_nodes if n.deleted_at is None] + [node]
-        read_reply_above = bool(read_reply_ids(alive))
+        chain_reads = read_reply_ids(alive)
+        read_reply_above = bool(chain_reads)
     # What a new reply under this node starts with (#362): the reply form
     # pre-selects it. The node's own ai_usage, except in the owner's read
     # thread, where the walk looks through the read (reply_ai_usage; only
@@ -1613,6 +1616,20 @@ def get_node(node_id):
     # A thread started from the Glean card (#435): its root carries the
     # stamp, and every turn offers the Glean button. The chain is in hand.
     from backend.utils.glean import is_glean_root
+    # How long the next AI reply under this node would be (#648): null,
+    # "notice" from 90 % of the limit (the reply form says the thread is
+    # getting long), or "limit" (no AI reply here; the form offers a new
+    # thread), with ``thread_length_message`` at the limit (the text for
+    # why: the thread's length, or an entry or what it quotes). Only for
+    # the node's owner, the one who asks for replies under it. No content
+    # read, no provider called (utils/thread_size).
+    length_fields = {"thread_length": None}
+    if is_node_owner(node, current_user.id):
+        from backend.utils.thread_size import PathChain, thread_length_fields
+        length_fields = thread_length_fields(
+            node, current_user.id,
+            chain=PathChain([node] + ancestor_nodes, chain_reads),
+            user=current_user)
     node_data = {
         **focal,
         "child_count": len(serialized_children),
@@ -1623,6 +1640,7 @@ def get_node(node_id):
         "reply_ai_usage": reply_usage,
         "glean_thread": is_glean_root(
             ancestor_nodes[-1] if ancestor_nodes else node),
+        **length_fields,
     }
     # Write tool calls of the viewer's replies in this thread that wait
     # for their approval (utils/tool_approvals, Peter 2026-11-12): one
@@ -1916,6 +1934,16 @@ def request_llm_response(node_id):
 
     if source_mode is not None and source_mode not in ("voice", "textmode"):
         return jsonify({"error": f"Invalid source_mode: {source_mode}"}), 400
+    # A Voice reply asked for here (no client does today) waits like any
+    # Voice turn while a change the AI proposed in the thread waits for the
+    # user's approval (Peter, 2026-11-12). LLM Response itself does not.
+    if source_mode == "voice":
+        from backend.utils.tool_approvals import (
+            approval_pending_response, waiting_in_thread,
+        )
+        waiting = waiting_in_thread(current_user.id, parent_node)
+        if waiting:
+            return approval_pending_response(waiting)
 
     if not model_id:
         # Walks ancestry from parent_node → user.preferred_model → DEFAULT.
@@ -1956,6 +1984,11 @@ def request_llm_response(node_id):
         # A chat reply asked for on a read-only model: refused, never
         # moved to another model. Nothing created.
         return read_only_model_response(e)
+    except ThreadTooLong as e:
+        # The thread's next prompt would be over the limit (#648): no
+        # reply, nothing created. The form then shows the limit's message.
+        db.session.rollback()
+        return thread_too_long_response(e)
 
     current_app.logger.info(f"Enqueued LLM completion task {task_id} for parent node {parent_node.id}, new node {llm_node.id}")
 
@@ -2480,12 +2513,28 @@ def get_llm_status(node_id):
         "tts_task_status": node.tts_task_status,
         "tts_streaming": node.tts_task_id == "voice-stream",
     }
+    # Why a refused reply failed, as a code the clients act on
+    # ("thread_too_long", #648: the completion task measured the prompt
+    # over the limit). Owner only, like the error text.
+    if owner and node.llm_task_status == "failed":
+        from backend.utils.thread_size import REFUSED_MARKER
+        from backend.utils.tool_meta import get_tool_meta_entry
+        refused = get_tool_meta_entry(node, REFUSED_MARKER)
+        if refused and refused.get("code"):
+            response_data["error_code"] = refused["code"]
 
     # Include content when completed (needed by VoicePage polling) and
     # when cancelled (a withdrawn read: the text says only that it was
     # cancelled; why is in "error", for the owner only).
     if node.llm_task_status in ('completed', 'cancelled'):
         response_data["content"] = node.get_content()
+    # A finished reply: how long the thread is with it in it (#648), for
+    # its owner, so the reply form and Voice show the notice or the limit
+    # on this turn. Not on an interim step: its turn goes on.
+    if (owner and node.llm_task_status == 'completed'
+            and not node.continuation_node_id):
+        from backend.utils.thread_size import thread_length_fields
+        response_data.update(thread_length_fields(node, current_user.id))
 
     # Include tool call metadata if present: in full for the reply's
     # owner, each action's name and outcome for anyone else.

@@ -1,0 +1,185 @@
+// Merge train 2026-11-12 (2): a Voice turn is refused while a change the AI
+// proposed waits for approval (409 `approval_pending`) and in a thread too
+// long for another reply (409 `thread_too_long`, #648). The server asks the
+// waiting change first, so where both apply the first press shows the change
+// (no sound, nothing said) and, once it is decided, the next press meets the
+// length (the error sound, then the sentence, then the limit).
+let mockStreamingOptions;
+jest.mock('./useStreamingTranscription', () => ({
+  useStreamingTranscription: (options) => {
+    mockStreamingOptions = options;
+    return {
+      duration: 0, isPaused: false, isInterrupted: false,
+      startStreaming: jest.fn(), stopStreaming: jest.fn(() => Promise.resolve()),
+      cancelStreaming: jest.fn(), resumeStreaming: jest.fn(),
+      pauseRecording: jest.fn(), resumeRecording: jest.fn(),
+    };
+  },
+}));
+jest.mock('./useLongRecordingWarning', () => {
+  const armAlertContext = jest.fn();
+  return { useLongRecordingWarning: () => ({ armAlertContext }) };
+});
+jest.mock('./useAsyncTaskPolling', () => ({
+  useAsyncTaskPolling: () => ({ data: null, status: 'idle', error: null }),
+}));
+jest.mock('./useLlmTaskWarnings', () => ({ useLlmTaskWarnings: () => {} }));
+jest.mock('./useSSE', () => {
+  const sse = { reset: jest.fn(), disconnect: jest.fn() };
+  return { useTTSStreamSSE: () => sse };
+});
+jest.mock('./useMediaSession', () => ({ useMediaSession: () => {} }));
+jest.mock('./useOnlineStatus', () => ({ useOnlineStatus: () => true }));
+jest.mock('../contexts/AudioContext', () => {
+  const audio = {
+    stop: jest.fn(), setGeneratingTTS: jest.fn(), loadAudioQueue: jest.fn(),
+    appendChunkToQueue: jest.fn(), renameChapter: jest.fn(),
+    waitingForChunks: false,
+  };
+  return { useAudio: () => audio };
+});
+const mockAddToast = jest.fn();
+jest.mock('../contexts/ToastContext', () => ({
+  useToast: () => ({ addToast: mockAddToast, removeToast: jest.fn() }),
+}));
+const mockPost = jest.fn();
+jest.mock('../api', () => ({
+  __esModule: true,
+  default: { post: (...args) => mockPost(...args), get: jest.fn(), delete: jest.fn() },
+}));
+const mockPlayErrorSound = jest.fn();
+jest.mock('../utils/errorSound', () => ({
+  playErrorSound: (...args) => mockPlayErrorSound(...args),
+}));
+
+import { renderHook, act } from '@testing-library/react';
+import { useVoiceSession } from './useVoiceSession';
+import {
+  SENTENCE_AFTER_SOUND_MS, THREAD_LIMIT_SPOKEN, resetSpeechForTests,
+} from '../utils/threadLength';
+
+const APPROVAL_SKIPPED = "Your recording is saved. Loore didn't reply because a "
+  + 'change to your data waits for your approval. Approve or reject it, then continue.';
+
+let spoken;
+let onAiUsageRefused;
+let onApprovalPending;
+const renderSession = () => renderHook(() => useVoiceSession({
+  apiEndpoint: '/voice', aiUsage: 'chat', onAiUsageRefused, onApprovalPending,
+  onEntrySaved: jest.fn(),
+}));
+const afterSound = () => act(() => {
+  jest.advanceTimersByTime(SENTENCE_AFTER_SOUND_MS);
+});
+const said = () => spoken.filter(Boolean);
+const refusal = (code, extra = {}) => ({
+  response: { status: 409, data: { code, error: `refused: ${code}`, ...extra } },
+});
+
+beforeEach(() => {
+  mockPost.mockReset();
+  mockAddToast.mockReset();
+  mockPlayErrorSound.mockReset();
+  onAiUsageRefused = jest.fn();
+  onApprovalPending = jest.fn();
+  resetSpeechForTests();
+  jest.useFakeTimers();
+  spoken = [];
+  window.speechSynthesis = {
+    cancel: jest.fn(),
+    speak: (u) => { spoken.push(u.text); },
+  };
+  window.SpeechSynthesisUtterance = function Utterance(text) { this.text = text; };
+});
+
+afterEach(() => {
+  jest.useRealTimers();
+  delete window.speechSynthesis;
+  delete window.SpeechSynthesisUtterance;
+});
+
+test('both: the first press shows the waiting change, the next one meets the length', () => {
+  const { result } = renderSession();
+
+  // The server answers approval_pending first.
+  act(() => {
+    mockStreamingOptions.onError({ startup: true, approvalPending: true });
+  });
+  afterSound();
+  expect(onApprovalPending).toHaveBeenCalledTimes(1);
+  expect(onAiUsageRefused).not.toHaveBeenCalled();
+  expect(mockPlayErrorSound).not.toHaveBeenCalled();
+  expect(said()).toEqual([]);
+  expect(result.current.phase).toBe('ready');
+  expect(result.current.hasError).toBe(false);
+
+  // Decided: the next press is refused for the length.
+  act(() => {
+    mockStreamingOptions.onError({ startup: true, threadTooLong: true });
+  });
+  expect(mockPlayErrorSound).toHaveBeenCalledTimes(1);
+  afterSound();
+  expect(said()).toEqual([THREAD_LIMIT_SPOKEN]);
+  expect(onAiUsageRefused.mock.calls[0][0]).toBe('too_long');
+  expect(onApprovalPending).toHaveBeenCalledTimes(1);
+  expect(result.current.phase).toBe('ready');
+});
+
+test('the waiting change alone: shown, nothing said', () => {
+  renderSession();
+  act(() => {
+    mockStreamingOptions.onError({ startup: true, approvalPending: true });
+  });
+  afterSound();
+  expect(onApprovalPending).toHaveBeenCalledTimes(1);
+  expect(said()).toEqual([]);
+  expect(mockPlayErrorSound).not.toHaveBeenCalled();
+});
+
+test('the length alone: said and shown, no dialog asked for', () => {
+  renderSession();
+  act(() => {
+    mockStreamingOptions.onError({ startup: true, threadTooLong: true });
+  });
+  afterSound();
+  expect(said()).toEqual([THREAD_LIMIT_SPOKEN]);
+  expect(onAiUsageRefused.mock.calls[0][0]).toBe('too_long');
+  expect(onApprovalPending).not.toHaveBeenCalled();
+});
+
+test('the fallback POST: approval_pending shows the change, thread_too_long is said', async () => {
+  renderSession();
+
+  mockPost.mockRejectedValueOnce(refusal('approval_pending', { pending: 1 }));
+  await act(async () => {
+    await mockStreamingOptions.onComplete({ sessionId: 's1', content: 'my words', llmNodeId: null });
+  });
+  afterSound();
+  expect(onApprovalPending).toHaveBeenCalledTimes(1);
+  expect(mockAddToast).toHaveBeenCalledWith('refused: approval_pending', 8000);
+  expect(said()).toEqual([]);
+  expect(mockPlayErrorSound).not.toHaveBeenCalled();
+
+  mockPost.mockRejectedValueOnce(refusal('thread_too_long', { user_node_id: 8 }));
+  await act(async () => {
+    await mockStreamingOptions.onComplete({ sessionId: 's2', content: 'more words', llmNodeId: null });
+  });
+  afterSound();
+  expect(said()).toEqual([THREAD_LIMIT_SPOKEN]);
+  expect(onAiUsageRefused.mock.calls[0][0]).toBe('too_long');
+  expect(onApprovalPending).toHaveBeenCalledTimes(1);
+});
+
+test('a recording saved without a reply for a waiting change is not said as the length', async () => {
+  renderSession();
+  await act(async () => {
+    await mockStreamingOptions.onComplete({
+      sessionId: 's1', content: 'my words', llmNodeId: null,
+      warning: APPROVAL_SKIPPED, warningCode: null,
+    });
+  });
+  afterSound();
+  expect(mockAddToast).toHaveBeenCalledWith(APPROVAL_SKIPPED, 8000);
+  expect(said()).toEqual([]);
+  expect(onAiUsageRefused).not.toHaveBeenCalled();
+});

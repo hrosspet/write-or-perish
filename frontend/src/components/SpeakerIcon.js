@@ -30,10 +30,13 @@ const extractMarkdownHeader = (content) => {
  * a saved reference (itemId). Shows loading spinner, play/pause state.
  * `buttonStyle` overrides the button's own style (its spacing, where a
  * row needs a larger tap target).
+ * `announce`: the node may be a Voice reply whose changes wait for the
+ * user's approval; its audio is then followed by the spoken announcement
+ * while they wait (asked when it plays).
  */
-const SpeakerIcon = ({ nodeId, profileId, itemId, content, isPublic, aiUsage, onTtsGenerated, buttonStyle }) => {
+const SpeakerIcon = ({ nodeId, profileId, itemId, content, isPublic, aiUsage, onTtsGenerated, buttonStyle, announce = false }) => {
   const { user } = useUser();
-  const { loadAudio, loadAudioQueue, updateChapters, appendChunkToQueue, setGeneratingTTS, currentAudio, isPlaying, warmup, waitingForChunks, queueFinishedCount } = useAudio();
+  const { loadAudio, loadAudioQueue, updateChapters, appendChunkToQueue, appendAnnouncement, setGeneratingTTS, currentAudio, isPlaying, warmup, waitingForChunks, queueFinishedCount } = useAudio();
   const { addToast } = useToast();
   const [loading, setLoading] = useState(false);
   const [audioSrc, setAudioSrc] = useState(null);
@@ -76,6 +79,39 @@ const SpeakerIcon = ({ nodeId, profileId, itemId, content, isPublic, aiUsage, on
       return [];
     }
   }, [baseUrl]);
+
+  // The approval announcement (Peter, 2026-11-12: "the announcement should
+  // be TTSed as a separate chunk and appended to the queue. So that when
+  // it's not pending, it's not voiced out anymore"): asked each time the
+  // reply plays, so a replay after the user decided has none. null when
+  // none is due (or the clip can't be had).
+  const fetchAnnouncement = useCallback(async () => {
+    if (!announce || !isNode) return null;
+    try {
+      const res = await api.get('/voice/approval-announcement', { params: { node: id } });
+      if (!res?.data?.url) return null;
+      const url = res.data.url.startsWith('http')
+        ? res.data.url
+        : `${process.env.REACT_APP_BACKEND_URL || ''}${res.data.url}`;
+      return { url, duration: res.data.duration };
+    } catch (e) {
+      return null;
+    }
+  }, [announce, isNode, id]);
+
+  // Play one audio file, followed by the announcement when it is due. With
+  // it the file plays as a queue of two; its chapters keep their start
+  // times (not chunk positions, which the clip would shift).
+  const playFile = useCallback(async (url, chapters) => {
+    const announcement = await fetchAnnouncement();
+    if (!announcement) {
+      await loadAudio({ url, title: fullTitle, id, type: entityType, chapters });
+      return;
+    }
+    const byTime = (chapters || []).map(({ chunk_index: _chunk, ...rest }) => rest);
+    await loadAudioQueue([url], { title: fullTitle, id, type: entityType, chapters: byTime }, null);
+    await appendAnnouncement(announcement.url, announcement.duration, id);
+  }, [fetchAnnouncement, loadAudio, loadAudioQueue, appendAnnouncement, fullTitle, id, entityType]);
 
   // SSE streaming for TTS chunks
   const handleChunkReady = useCallback((data) => {
@@ -125,8 +161,15 @@ const SpeakerIcon = ({ nodeId, profileId, itemId, content, isPublic, aiUsage, on
 
   const handleAllComplete = useCallback((data) => {
     setSseActive(false);
-    setGeneratingTTS(false);
     sseChunkCountRef.current = 0;
+    // The queue ends once the announcement is in (or not due).
+    if (announce && isNode) {
+      fetchAnnouncement()
+        .then((a) => (a ? appendAnnouncement(a.url, a.duration, id) : null))
+        .finally(() => setGeneratingTTS(false));
+    } else {
+      setGeneratingTTS(false);
+    }
 
     // Cache the final TTS URL for future replay
     if (data.tts_url) {
@@ -149,7 +192,7 @@ const SpeakerIcon = ({ nodeId, profileId, itemId, content, isPublic, aiUsage, on
     // what makes the edit "regenerate audio?" prompt (#66) fire without a
     // page refresh.
     if (onTtsGenerated) onTtsGenerated();
-  }, [setGeneratingTTS, onTtsGenerated, fetchChapters, updateChapters, id, entityType]);
+  }, [setGeneratingTTS, onTtsGenerated, fetchChapters, updateChapters, id, entityType, announce, isNode, fetchAnnouncement, appendAnnouncement]);
 
   // A failed generation is announced as a failed voice reply is (#504):
   // the error sound, here with a toast, after the audio that did arrive
@@ -293,7 +336,7 @@ const SpeakerIcon = ({ nodeId, profileId, itemId, content, isPublic, aiUsage, on
       // If we already have a single audio source, play it (same: preserve
       // the cached chapters on replay — #145)
       if (audioSrc) {
-        await loadAudio({ url: audioSrc, title: fullTitle, id, type: entityType, chapters: chaptersRef.current });
+        await playFile(audioSrc, chaptersRef.current);
         return;
       }
 
@@ -403,7 +446,11 @@ const SpeakerIcon = ({ nodeId, profileId, itemId, content, isPublic, aiUsage, on
       // recorded-original playback has no section structure, #145)
       const chapters = (!original_url && tts_url) ? await fetchChapters() : [];
       chaptersRef.current = chapters;
-      await loadAudio({ url: srcUrl, title: fullTitle, id, type: entityType, chapters });
+      if (original_url) {
+        await loadAudio({ url: srcUrl, title: fullTitle, id, type: entityType, chapters });
+      } else {
+        await playFile(srcUrl, chapters);
+      }
       setLoading(false);
     } catch (err) {
       console.error('Error playing audio:', err);

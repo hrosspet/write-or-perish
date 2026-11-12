@@ -1426,6 +1426,12 @@ class APICostLog(db.Model):
     cache_diag_baseline = db.Column(db.String(16), nullable=True)
     cache_diag_gap_s = db.Column(db.Integer, nullable=True)
     system_prefix_hash = db.Column(db.String(16), nullable=True)
+    # Conversation calls (#648): characters of the prompt sent (the
+    # messages' text and the tool definitions). With input_tokens it gives
+    # the thread's tokens per character, which sizes the next reply's
+    # prompt before it is sent (utils/thread_size). NULL on other rows and
+    # on rows from before the column.
+    prompt_chars = db.Column(db.Integer, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
 
     user = db.relationship("User", backref="api_cost_logs")
