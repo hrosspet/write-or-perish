@@ -97,7 +97,7 @@ def _start_upload_reply(node, tip, model_id):
             "Upload reply skipped for node %s: %s", node.id,
             describe_exception(e))
         from backend.utils.thread_size import (
-            ENTRY_REPLY_SKIPPED_MESSAGE, ThreadTooLong,
+            ThreadTooLong,
         )
         if isinstance(e, AIUsageRefused):
             message = UPLOAD_REPLY_SKIPPED_AI_USAGE
@@ -105,7 +105,7 @@ def _start_upload_reply(node, tip, model_id):
             message = f"Your entry is saved. {e.message}"
         elif isinstance(e, ThreadTooLong):
             # The thread's next prompt would be over the limit (#648).
-            message = ENTRY_REPLY_SKIPPED_MESSAGE
+            message = e.entry_message
         else:
             message = REPLY_NOT_STARTED_TEXT
         record_task_warning(node, message)

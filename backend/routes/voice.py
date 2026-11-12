@@ -12,7 +12,7 @@ from backend.utils.llm_nodes import (
 )
 from backend.utils.placeholders import UserExportValidationError
 from backend.utils.thread_size import (
-    thread_length, thread_length_refusal, thread_too_long_response,
+    thread_length_refusal, thread_size, thread_too_long_response,
 )
 from backend.utils.audio_storage import is_storage_id
 from backend.utils.context_artifacts import attach_context_artifacts
@@ -359,10 +359,9 @@ def voice_availability():
     # a way to start a new thread. Near it, ``thread_length: "notice"``.
     if parent is not None:
         from backend.utils.thread_size import LIMIT, ThreadTooLong
-        _tokens, state = thread_length(parent, current_user.id,
-                                       user=current_user)
+        size, state = thread_size(parent, current_user.id, user=current_user)
         if state == LIMIT:
-            too_long = ThreadTooLong()
+            too_long = ThreadTooLong(reason=size.reason)
             return jsonify({"allowed": False, "code": too_long.code,
                             "error": too_long.message})
         if state is not None:

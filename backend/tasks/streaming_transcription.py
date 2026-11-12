@@ -1605,7 +1605,7 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     from backend.utils.node_deletion import ParentDeletedError
     from backend.utils.spend import SpendCapExceeded
     from backend.utils.thread_size import (
-        RECORDING_REPLY_SKIPPED_MESSAGE, ThreadTooLong,
+        ThreadTooLong,
     )
     try:
         llm_node, _ = create_llm_placeholder(
@@ -1622,7 +1622,7 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
         elif isinstance(e, ReadOnlyModelRefused):
             message = VOICE_REPLY_SKIPPED_READ_ONLY.format(model=e.model_name)
         elif isinstance(e, ThreadTooLong):
-            message = RECORDING_REPLY_SKIPPED_MESSAGE
+            message = e.recording_message
         else:
             message = str(e)
         logger.warning(

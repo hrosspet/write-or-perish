@@ -66,11 +66,17 @@ def _measure(reply, user, tokens, chars=None, model="gpt-5",
 
 
 def _thread(user, measured, entry_units=200, reply_units=100):
-    """prompt root -> entry -> AI reply (measured: its first call's prompt
-    held *measured* tokens, at 1 token per unit: 4 characters a token)
-    -> the user's next entry, the node a reply is asked under."""
+    """prompt root -> ten earlier entries (holding most of what was
+    measured, as a long thread's entries do) -> entry -> AI reply
+    (measured: its first call's prompt held *measured* tokens, at 1 token
+    per unit: 4 characters a token) -> the user's next entry, the node a
+    reply is asked under."""
     root = _prompt_root(user, "textmode")
-    first = _units(_node(user, root, content="first words"), 50)
+    earlier = root
+    for i in range(10):
+        earlier = _units(_node(user, earlier, content=f"earlier {i}"),
+                         max(measured - 1_000, 0) // 10)
+    first = _units(_node(user, earlier, content="first words"), 50)
     reply = _units(_reply(first, user, content="an answer"), reply_units)
     _measure(reply, user, measured, chars=measured * 4)
     entry = _units(_node(user, reply, content="more words"), entry_units)
@@ -82,7 +88,11 @@ def _refused(resp):
     assert resp.status_code == 409, resp.get_data(as_text=True)
     data = resp.get_json()
     assert data["code"] == CODE
-    assert "too long for another AI reply" in data["error"]
+    from backend.utils.thread_size import (
+        CONTENT_TOO_LARGE_MESSAGE, THREAD_TOO_LONG_MESSAGE,
+    )
+    assert data["error"] in (THREAD_TOO_LONG_MESSAGE,
+                             CONTENT_TOO_LARGE_MESSAGE)
     return data
 
 
@@ -124,8 +134,9 @@ class TestEstimate:
         """A 3-entry thread holding one large document is over the limit
         before any reply measured it; a deep thread of small entries is
         not (Peter's data: a 6-entry thread was larger than a 280-entry
-        one)."""
-        from backend.utils.thread_size import thread_length
+        one). With no measured reply the estimate is not certain: it shows
+        the notice, and the completion task decides with a count."""
+        from backend.utils.thread_size import SIZE, thread_size
         alice = _user()
         root = _prompt_root(alice, "textmode")
         doc = _units(_node(alice, root, content="a very large document"),
@@ -135,8 +146,12 @@ class TestEstimate:
         for i in range(40):
             deep = _units(_node(alice, deep, content=f"entry {i}"), 20)
         _db.session.commit()
-        assert thread_length(ask, alice.id, "gpt-5")[1] == "limit"
-        assert thread_length(deep, alice.id, "gpt-5")[1] is None
+        size, state = thread_size(ask, alice.id, "gpt-5")
+        assert size.tokens > LIMIT
+        assert not size.certain
+        assert state == "notice"
+        assert size.reason == SIZE  # one entry is most of it
+        assert thread_size(deep, alice.id, "gpt-5")[1] is None
 
     def test_a_tool_round_is_measured_from_the_turns_first_call(self, limited):
         """A continuation's prompt held the round's tool results, which
@@ -251,7 +266,10 @@ class TestThreadPage:
         alice = _user()
         bob = _user("bob")
         root = _node(alice, privacy_level="public")
-        _units(root, 20_000)
+        reply = _reply(root, alice)
+        reply.privacy_level = "public"
+        _measure(reply, alice, 9_990, chars=9_990 * 4)
+        root = _units(_node(alice, reply, privacy_level="public"), 100)
         _db.session.commit()
         assert _client(limited, alice).get(
             f"/api/nodes/{root.id}").get_json()["thread_length"] == "limit"
@@ -314,18 +332,40 @@ class TestRefusedEverywhere:
         assert Node.query.get(data["user_node_id"]) is not None
         task_mod.generate_llm_response.delay.assert_not_called()
 
-    def test_a_new_thread_with_one_huge_document(self, limited, task_mod):
-        """The big-document case on a fresh thread: the entry is kept (in
-        parts), the reply is skipped, the message says so."""
+    def test_a_new_thread_with_one_huge_document_goes_to_the_task(
+            self, limited, task_mod):
+        """The big-document case on a fresh thread: nothing measured it
+        yet, so the route does not refuse on a guess; the completion task
+        counts the prompt and decides (test_thread_size_task)."""
         alice = _user()
         _db.session.commit()
         resp = _client(limited, alice).post("/api/textmode/start", json={
             "content": "word " * 12_000, "ai_usage": "chat"})
         assert resp.status_code == 202, resp.get_json()
-        data = resp.get_json()
-        assert data["llm_error_code"] == CODE
-        assert "including what it quotes" in data["llm_error"]
-        assert Node.query.get(data["user_node_id"]) is not None
+        assert resp.get_json()["llm_node_id"]
+        task_mod.generate_llm_response.delay.assert_called_once()
+
+    def test_a_counted_refusal_on_a_huge_document_says_what_to_do(
+            self, limited, task_mod):
+        """Once the task counted the entry over the limit, asking again is
+        refused before any write, with the text for a large entry: a new
+        thread with the same text would not help."""
+        from backend.utils.thread_size import (
+            CONTENT_TOO_LARGE_MESSAGE, record_refusal,
+        )
+        alice = _user()
+        root = _prompt_root(alice, "textmode")
+        doc = _units(_node(alice, root, content="the whole document"),
+                     11_000)
+        record_refusal(alice.id, "gpt-5", doc.id, 12_000, chars=44_000)
+        _db.session.commit()
+        data = _refused(_client(limited, alice).post(
+            f"/api/nodes/{doc.id}/llm", json={"model": "gpt-5"}))
+        assert data["error"] == CONTENT_TOO_LARGE_MESSAGE
+        assert "split" in data["error"] and "new thread" not in data["error"]
+        page = _client(limited, alice).get(f"/api/nodes/{doc.id}").get_json()
+        assert page["thread_length"] == "limit"
+        assert page["thread_length_message"] == CONTENT_TOO_LARGE_MESSAGE
         task_mod.generate_llm_response.delay.assert_not_called()
 
     def test_saved_recording_kept_reply_skipped(self, limited, task_mod):
@@ -352,12 +392,13 @@ class TestRefusedEverywhere:
         from backend.utils.thread_size import ENTRY_REPLY_SKIPPED_MESSAGE
         st.flask_app.config["THREAD_PROMPT_TOKEN_LIMIT"] = LIMIT
         alice = _user()
-        entry = _units(_node(alice, content="transcribed words"), 20_000)
+        _root, _reply_, entry = _thread(alice, measured=9_700)
         _db.session.commit()
+        before = _llm_count()
         assert tr._start_upload_reply(entry, entry, "gpt-5") is None
         assert json.loads(Node.query.get(entry.id).llm_task_warnings) == [
             ENTRY_REPLY_SKIPPED_MESSAGE]
-        assert _llm_count() == 0
+        assert _llm_count() == before
 
 
 class TestVoice:
@@ -463,8 +504,8 @@ class TestVoiceFinalize:
         alice = _user()
         _root, _reply_, entry = _thread(alice, measured=9_700)
         _db.session.commit()
-        assert st._voice_thread_too_long(alice.id, entry.id, "claude-test")
-        assert not st._voice_thread_too_long(alice.id, None, "claude-test")
+        assert st._voice_thread_too_long(alice.id, entry.id, "gpt-5")
+        assert not st._voice_thread_too_long(alice.id, None, "gpt-5")
 
     def test_under_the_limit_the_turn_gets_its_reply(self, st):  # noqa: F811
         st.flask_app.config["THREAD_PROMPT_TOKEN_LIMIT"] = LIMIT
@@ -521,13 +562,51 @@ class TestLlmStatus:
         assert "error_code" not in other
 
 
+class TestAfterAReply:
+    def test_a_finished_reply_brings_the_threads_length(self, limited):
+        """llm-status of a finished reply carries thread_length (and at
+        the limit its text), so the form and Voice show it on this turn."""
+        from backend.utils.thread_size import THREAD_TOO_LONG_MESSAGE
+        alice = _user()
+        _root, reply, _entry = _thread(alice, measured=9_990)
+        reply.llm_task_status = "completed"
+        _db.session.commit()
+        data = _client(limited, alice).get(
+            f"/api/nodes/{reply.id}/llm-status").get_json()
+        assert data["thread_length"] == "limit"
+        assert data["thread_length_message"] == THREAD_TOO_LONG_MESSAGE
+
+    def test_not_on_an_interim_step(self, limited):
+        alice = _user()
+        _root, reply, entry = _thread(alice, measured=9_990)
+        reply.llm_task_status = "completed"
+        reply.continuation_node_id = entry.id
+        _db.session.commit()
+        data = _client(limited, alice).get(
+            f"/api/nodes/{reply.id}/llm-status").get_json()
+        assert "thread_length" not in data
+
+
 class TestWording:
     def test_no_price_no_numbers(self):
         from backend.utils import thread_size as ts
         for text in (ts.THREAD_TOO_LONG_MESSAGE,
                      ts.RECORDING_REPLY_SKIPPED_MESSAGE,
-                     ts.ENTRY_REPLY_SKIPPED_MESSAGE):
+                     ts.ENTRY_REPLY_SKIPPED_MESSAGE,
+                     ts.CONTENT_TOO_LARGE_MESSAGE,
+                     ts.RECORDING_REPLY_SKIPPED_SIZE_MESSAGE,
+                     ts.ENTRY_REPLY_SKIPPED_SIZE_MESSAGE):
             assert not any(ch.isdigit() for ch in text)
             assert "$" not in text and "%" not in text
             assert "token" not in text.lower()
-            assert "new thread" in text
+
+    def test_the_way_on_matches_the_reason(self):
+        """A long thread: a new thread. An entry too large: shorten or
+        split it (a new thread with the same text would be refused too)."""
+        from backend.utils import thread_size as ts
+        assert "start a new thread" in ts.THREAD_TOO_LONG_MESSAGE
+        assert "new thread" not in ts.CONTENT_TOO_LARGE_MESSAGE
+        assert "split" in ts.CONTENT_TOO_LARGE_MESSAGE
+        assert "split" in ts.ENTRY_REPLY_SKIPPED_SIZE_MESSAGE
+        assert ts.skipped_reply_code(
+            ts.RECORDING_REPLY_SKIPPED_SIZE_MESSAGE) == "thread_too_long"

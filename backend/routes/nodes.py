@@ -1619,14 +1619,14 @@ def get_node(node_id):
     # How long the next AI reply under this node would be (#648): null,
     # "notice" from 90 % of the limit (the reply form says the thread is
     # getting long), or "limit" (no AI reply here; the form offers a new
-    # thread). Only for the node's owner, the one who asks for replies
-    # under it. No content read, no provider called (utils/thread_size).
-    thread_length = None
+    # thread), with ``thread_length_message`` at the limit (the text for
+    # why: the thread's length, or an entry or what it quotes). Only for
+    # the node's owner, the one who asks for replies under it. No content
+    # read, no provider called (utils/thread_size).
+    length_fields = {"thread_length": None}
     if is_node_owner(node, current_user.id):
-        from backend.utils.thread_size import (
-            PathChain, thread_length as _thread_length,
-        )
-        _, thread_length = _thread_length(
+        from backend.utils.thread_size import PathChain, thread_length_fields
+        length_fields = thread_length_fields(
             node, current_user.id,
             chain=PathChain([node] + ancestor_nodes, chain_reads),
             user=current_user)
@@ -1640,7 +1640,7 @@ def get_node(node_id):
         "reply_ai_usage": reply_usage,
         "glean_thread": is_glean_root(
             ancestor_nodes[-1] if ancestor_nodes else node),
-        "thread_length": thread_length,
+        **length_fields,
     }
     # Write tool calls of the viewer's replies in this thread that wait
     # for their approval (utils/tool_approvals, Peter 2026-11-12): one
@@ -2518,6 +2518,13 @@ def get_llm_status(node_id):
     # cancelled; why is in "error", for the owner only).
     if node.llm_task_status in ('completed', 'cancelled'):
         response_data["content"] = node.get_content()
+    # A finished reply: how long the thread is with it in it (#648), for
+    # its owner, so the reply form and Voice show the notice or the limit
+    # on this turn. Not on an interim step: its turn goes on.
+    if (owner and node.llm_task_status == 'completed'
+            and not node.continuation_node_id):
+        from backend.utils.thread_size import thread_length_fields
+        response_data.update(thread_length_fields(node, current_user.id))
 
     # Include tool call metadata if present: in full for the reply's
     # owner, each action's name and outcome for anyone else.
