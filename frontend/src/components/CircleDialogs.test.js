@@ -96,54 +96,13 @@ describe('the dialog before a reply in a shared thread', () => {
     expect(onConfirm).toHaveBeenCalledWith(false);
   });
 
-  test('an AI reply', () => {
+  test('an AI reply is its requester\'s alone: nobody is named', () => {
     const onConfirm = jest.fn();
     const onClose = jest.fn();
     render(
       <CircleReplyDialog open ai names={['anna', 'chidi']}
+        aiReads={['profile', 'memory', 'to-do list']}
         onClose={onClose} onConfirm={onConfirm} />,
-    );
-    expect(screen.getByRole('heading', { name: 'Generate an AI reply?' }))
-      .toBeInTheDocument();
-    expect(screen.getByText('@anna and @chidi will see it, marked with your name.'))
-      .toBeInTheDocument();
-    expect(screen.queryByText(/Your AI reads/)).toBeNull();
-    fireEvent.click(screen.getByLabelText("Don't ask again in this thread"));
-    fireEvent.click(screen.getByRole('button', { name: 'Generate' }));
-    expect(onConfirm).toHaveBeenCalledWith(true);
-    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
-    expect(onClose).toHaveBeenCalled();
-  });
-
-  test('an AI reply whose prompt reads the requester\'s artifacts says which', () => {
-    render(
-      <CircleReplyDialog open ai names={['anna', 'chidi']}
-        aiReads={['profile', 'memory', 'to-do list']}
-        onClose={() => {}} onConfirm={() => {}} />,
-    );
-    expect(screen.getByText(
-      '@anna and @chidi will see it, marked with your name. '
-      + 'Your AI reads your profile, memory and to-do list for this reply '
-      + 'and could share private information from them.',
-    )).toBeInTheDocument();
-  });
-
-  test('an empty list of artifacts adds no sentence', () => {
-    render(
-      <CircleReplyDialog open ai names={['anna']} aiReads={[]}
-        onClose={() => {}} onConfirm={() => {}} />,
-    );
-    expect(screen.getByText('@anna will see it, marked with your name.'))
-      .toBeInTheDocument();
-    expect(screen.queryByText(/Your AI reads/)).toBeNull();
-  });
-
-  test('an AI reply for its requester only names nobody and says what the shared prompt reads', () => {
-    const onConfirm = jest.fn();
-    render(
-      <CircleReplyDialog open ai onlyMe names={['anna', 'chidi']}
-        aiReads={['profile', 'memory', 'to-do list']}
-        onClose={() => {}} onConfirm={onConfirm} />,
     );
     expect(screen.getByRole('heading', { name: 'Generate an AI reply?' })).toBeInTheDocument();
     expect(screen.getByText(
@@ -155,6 +114,17 @@ describe('the dialog before a reply in a shared thread', () => {
     fireEvent.click(screen.getByLabelText("Don't ask again in this thread"));
     fireEvent.click(screen.getByRole('button', { name: 'Generate' }));
     expect(onConfirm).toHaveBeenCalledWith(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  test('an AI reply with an empty list of artifacts adds no sentence', () => {
+    render(
+      <CircleReplyDialog open ai names={['anna']} aiReads={[]}
+        onClose={() => {}} onConfirm={() => {}} />,
+    );
+    expect(screen.getByText('Only you will see it.')).toBeInTheDocument();
+    expect(screen.queryByText(/Your AI reads/)).toBeNull();
   });
 
   test('a typed reply never carries the artifacts sentence', () => {

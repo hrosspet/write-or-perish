@@ -75,12 +75,19 @@ def _start_upload_reply(node, tip, model_id):
         record_task_warning(node, UPLOAD_REPLY_SKIPPED_SPEND_CAP)
         return None
     from backend.utils.llm_nodes import (
-        AIUsageRefused, ReadOnlyModelRefused, create_llm_placeholder,
+        AIUsageRefused, ReadOnlyModelRefused, auto_generate_refusal,
+        create_llm_placeholder,
     )
+    # The entry may have been made public (or shared with circles) while
+    # it was transcribed: no automatic reply there (Peter, 2026-11-12).
+    auto_off = auto_generate_refusal(tip)
+    if auto_off is not None:
+        record_task_warning(node, f"Your entry is saved. {auto_off.message}")
+        return None
     try:
         llm_node, _ = create_llm_placeholder(
             tip.id, model_id, node.user_id,
-            privacy_level=node.privacy_level, ai_usage=node.ai_usage,
+            ai_usage=node.ai_usage,
             source_mode="textmode",
         )
         return llm_node

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import {
-  aiReadsPrivateSentence, aiReadsSentence, atName, joinNames,
+  aiReadsPrivateSentence, atName, joinNames,
 } from '../utils/circles';
 
 // The dialogs of Circles, in the shape of the app's other dialogs
@@ -89,30 +89,22 @@ function Shell({ onClose, labelledBy, children }) {
 /**
  * Before a reply is sent into a shared thread: "Send this reply? <names>
  * will see it, with your name." With `ai` it is shown before an AI
- * reply is generated in the thread: the same people will see that
- * reply, and `aiReads` names the requester's own artifacts the reply's
- * prompt reads (none: no such sentence). With `onlyMe` the reply is for
- * its requester only: nobody is named, and the dialog says what the
- * prompt shared in the thread reads. "Don't ask again in this thread" is remembered by the caller
- * (per thread, per user, on this device; typed replies and AI replies
- * are remembered separately).
+ * reply is generated in the thread whose prompt, written by someone
+ * else, reads the requester's own data: the reply is the requester's
+ * alone (every AI reply is created private, Peter 2026-11-12), so nobody
+ * is named, and `aiReads` names what that prompt reads. "Don't ask again
+ * in this thread" is remembered by the caller (per thread, per user, on
+ * this device; typed replies and AI replies are remembered separately).
  */
-export function CircleReplyDialog({ open, names, ai = false, aiReads = null, onlyMe = false, onClose, onConfirm }) {
+export function CircleReplyDialog({ open, names, ai = false, aiReads = null, onClose, onConfirm }) {
   const [skip, setSkip] = useState(false);
   useEscape(open, onClose);
   useEffect(() => { if (open) setSkip(false); }, [open]);
   if (!open) return null;
-  const who = joinNames(names);
-  const reads = ai ? aiReadsSentence(aiReads) : '';
   const privateReads = aiReadsPrivateSentence(aiReads);
-  let body;
-  if (ai && onlyMe) {
-    body = `Only you will see it.${privateReads ? ` ${privateReads}` : ''}`;
-  } else if (ai) {
-    body = `${who} will see it, marked with your name.${reads ? ` ${reads}` : ''}`;
-  } else {
-    body = `${who} will see it, with your name.`;
-  }
+  const body = ai
+    ? `Only you will see it.${privateReads ? ` ${privateReads}` : ''}`
+    : `${joinNames(names)} will see it, with your name.`;
   return (
     <Shell onClose={onClose} labelledBy="circle-reply-title">
       <h2 id="circle-reply-title" style={titleStyle}>

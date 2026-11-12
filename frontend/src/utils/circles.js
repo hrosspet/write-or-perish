@@ -32,18 +32,11 @@ export function joinPlain(items) {
   return `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}`;
 }
 
-// What an AI reply in a shared thread reads of its requester's own
-// artifacts (audience.ai_reads, from the server), as a sentence; ''
-// when it reads none.
-export function aiReadsSentence(aiReads) {
-  const list = joinPlain(aiReads);
-  return list
-    ? `Your AI reads your ${list} for this reply and could share private information from them.`
-    : '';
-}
-
-// The same for a reply only its requester will read ("Only me"): the
-// prompt someone else shared still reads the requester's data.
+// What an AI reply in a shared thread reads of its requester's own data
+// (audience.ai_reads, from the server) when a prompt someone else wrote
+// asks for it, as a sentence; '' when it reads none. The reply is the
+// requester's alone (every AI reply is created private, Peter
+// 2026-11-12).
 export function aiReadsPrivateSentence(aiReads) {
   const list = joinPlain(aiReads);
   return list
@@ -115,13 +108,6 @@ export function replyAckKey(entryId, userId) {
 // ticking the box for typed replies does not skip the AI dialog.
 export function aiReplyAckKey(entryId, userId) {
   return `loore_circle_ai_reply_ack_${userId}_${entryId}`;
-}
-
-// Craft mode, in a shared thread: whether the next AI reply is shared
-// with the thread ("shared", the default) or only its requester reads
-// it ("private"). Kept per thread, per user, on this device.
-export function aiReplyPrivacyKey(entryId, userId) {
-  return `loore_circle_ai_reply_privacy_${userId}_${entryId}`;
 }
 
 // Why no AI reply can be generated on `node` in a shared thread, in one

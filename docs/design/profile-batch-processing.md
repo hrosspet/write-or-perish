@@ -667,10 +667,34 @@ dispatches the advance; the hourly seeder routes builds to it
 no live task carries (R7). The synchronous task hands such builds to the
 same advance (`window_hand_off`), so accounts off the batch path use it too.
 
+**An import inside a set (#625, Peter 2026-11-11).** "Only the second
+part since the new conversation should be regenerated": an import whose
+oldest change (``routes/import_data._ProfileChanges``: entries created or
+restored for AI to read, or moved across None and Chat/Train) is older
+than the set's tip re-tips the set (`exports._retip_window_set`). The
+windows that end before that date, and the groups that merge only them and
+are newer than each of them, are copied into a new set as stored (the
+encrypted column is copied; nothing is decrypted); the copy of the last
+one gets the present moment as its render time, so the continue rule
+reads everything after it as the set's unfinished range, and the new
+set's final merges the kept windows with the new ones. The profile in use
+stays as it is until that final is saved; the old set stays as history.
+The versions of the user's the profile in use carries are recorded for
+the new final (`plan_user_version_merge`), and a version the user saved on
+the set's final is re-tipped the same way (`_window_set_under`). No window
+ends before the date: the set's base is re-tipped as a chain, when the set
+has a final (that copy is written through `retip_profile_chain`, which
+decrypts and encrypts the version it copies, as main's chain re-tip
+does). Anything of the user's set in the batch, a profile run under way
+(an advance holding the user's run lock renders into the set it chose
+before anything is in the batch; or a profile task holding the guard),
+the window path off, or a set built on the user's edit of an older set's
+final with nothing to keep: the rebuild from scratch, as before.
+
 **Known limits.** An import older than a set's windows while the set is in
-flight is not seen by that set (as for a chained build's first chunk). A
-revert from the history during a build is merged into the final as a full
-profile.
+flight is not seen by that set (as for a chained build's first chunk); its
+hand-off flags a rebuild from scratch. A revert from the history during a
+build is merged into the final as a full profile.
 
 ### One-chunk builds as one window (2026-11-03)
 

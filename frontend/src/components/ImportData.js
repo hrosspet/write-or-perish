@@ -13,6 +13,7 @@ import { FaSpinner } from "react-icons/fa";
 import api from "../api";
 import PrivacySelector from "./PrivacySelector";
 import { BothProvidersQuestion } from "./BothProvidersDialog";
+import ProfileRebuildQuestion from "./ProfileRebuildQuestion";
 import { noteBothProvidersLater } from "../hooks/useBothProvidersQuestion";
 import { useUser } from "../contexts/UserContext";
 
@@ -890,6 +891,14 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
                   stopped importing for 30 minutes, so anything else you
                   import now goes into the same build.
                 </p>
+              )}
+              {/* The rebuild question (#625): entries already in Loore set
+                  to None by this import may be in the profile. OK without
+                  an answer changes nothing. */}
+              {importResult.ask_profile_rebuild && (
+                <div style={{ borderTop: "1px solid var(--border)", paddingTop: "1.3rem", margin: "0 0 1.4rem" }}>
+                  <ProfileRebuildQuestion question={importResult.ask_profile_rebuild} />
+                </div>
               )}
               {/* The both-providers question (#599): the server asks after
                   an import that added entries AI may read, for a user who

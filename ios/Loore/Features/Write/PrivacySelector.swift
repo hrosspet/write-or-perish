@@ -242,6 +242,9 @@ struct LabeledPillToggle: View {
     let onText: String
     let offText: String
     var disabled = false
+    /// The toggle can't be turned on here (Auto-generate in a public or circles
+    /// entry): dimmed and inert, with this as its hint.
+    var lockedHint: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -255,9 +258,11 @@ struct LabeledPillToggle: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .disabled(disabled)
+            .disabled(disabled || lockedHint != nil)
+            .opacity(lockedHint != nil ? 0.5 : 1)
             .accessibilityLabel(label)
             .accessibilityValue(isOn ? "On" : "Off")
+            .accessibilityHint(lockedHint ?? "")
             FieldDescription(text: isOn ? onText : offText)
         }
         .padding(.vertical, 12)

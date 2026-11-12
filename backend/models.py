@@ -203,6 +203,11 @@ class User(db.Model, UserMixin):
     # the imports to stop (#598): the batch seeder builds only after
     # MIN_INACTIVITY with no import and no new entry, and clears it then.
     profile_import_quiet_from = db.Column(db.DateTime, nullable=True)
+    # The id of the open "Rebuild your profile?" question an import asked
+    # after it set entries to None (#625); its signed token carries the id.
+    # A yes clears it in the same UPDATE that checks it, so one question
+    # starts at most one rebuild; a newer question replaces it.
+    profile_rebuild_offer_id = db.Column(db.String(32), nullable=True)
     # The user agreed that their writing may reach both providers' models
     # for a large profile build (Peter, 2026-11-05). Set only by the user's
     # own answer to the question of #599 (the dialog, or Account), through

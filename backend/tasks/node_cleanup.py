@@ -93,6 +93,12 @@ def _full_purge(node):
     TTSChunk.query.filter_by(node_id=node.id).delete()
 
     Draft.query.filter_by(node_id=node.id).update({"node_id": None})
+    # A write call of the reply still waiting for approval goes with it
+    # (utils/tool_approvals): with no reply there is nothing to approve.
+    Draft.query.filter(
+        Draft.parent_id == node.id,
+        Draft.label.in_(("tool_pending", "tool_deciding")),
+    ).delete(synchronize_session=False)
     Draft.query.filter_by(parent_id=node.id).update({"parent_id": None})
     Draft.query.filter_by(llm_node_id=node.id).delete()
 

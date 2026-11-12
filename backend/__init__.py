@@ -479,6 +479,11 @@ def create_app():
     from backend.routes.artifacts import artifacts_bp
     app.register_blueprint(artifacts_bp, url_prefix="/api/artifacts")
 
+    # Write tool calls waiting for the user's approval (Peter, 2026-11-12).
+    from backend.routes.tool_approvals import tool_approvals_bp
+    app.register_blueprint(tool_approvals_bp,
+                           url_prefix="/api/tool-approvals")
+
     from backend.routes.external import external_bp
     app.register_blueprint(external_bp, url_prefix="/api/external")
 

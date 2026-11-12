@@ -21,6 +21,9 @@ final class CircleAudienceState {
     private(set) var readers: [String] = []
     private(set) var error: String?
     private(set) var pending = false
+    /// The last check before saving refused the text: it quotes an entry one
+    /// of these people cannot read (the server's answer, for the dialog).
+    private(set) var quotesRefusal: QuotesNotPublic?
     /// The audience the entry was saved with (edit): nil = not shared before.
     private(set) var savedKey: String?
     /// An entry of the author's own with something above it in its thread:
@@ -182,20 +185,28 @@ final class CircleAudienceState {
         }
     }
 
-    struct PreviewFailure: Error { var message: String }
+    struct PreviewFailure: Error {
+        var message: String
+        /// The text quotes an entry one of these people cannot read (409
+        /// `quotes_not_shared`, asked only with the text before saving).
+        var quotes: QuotesNotPublic? = nil
+    }
 
-    private func preview(circleIds: [Int], names: [String]) async -> Result<[String], PreviewFailure> {
+    private func preview(circleIds: [Int], names: [String],
+                         content: String? = nil) async -> Result<[String], PreviewFailure> {
         do {
             var body: [String: JSONValue] = [
                 "circle_ids": .array(circleIds.map(JSONValue.int)),
                 "usernames": .array(names.map(JSONValue.string)),
             ]
             if let entryId { body["node_id"] = .int(entryId) }
+            if let content { body["content"] = .string(content) }
             let answer: AudiencePreview = try await api.post(APIPath.circlesAudiencePreview, json: .object(body))
             return .success(answer.readers)
         } catch {
             return .failure(PreviewFailure(
-                message: (error as? APIError)?.userMessage(fallback: Self.previewFailed) ?? Self.previewFailed))
+                message: (error as? APIError)?.userMessage(fallback: Self.previewFailed) ?? Self.previewFailed,
+                quotes: QuotesNotPublic(error)))
         }
     }
 
@@ -205,13 +216,16 @@ final class CircleAudienceState {
     /// Nobody is shared with unless the sentence named them: when the readers
     /// differ from the ones it named (a name not yet looked up, a lookup not
     /// back yet), the sentence is brought up to date and the save stops. The
-    /// server refuses the no-readers cases too.
-    func refusalBeforeSaving() async -> String? {
+    /// server refuses the no-readers cases too. With `content`, the text is
+    /// checked as well: a quote of an entry one of these people cannot read
+    /// stops the save, and `quotesRefusal` holds the server's answer.
+    func refusalBeforeSaving(content: String? = nil) async -> String? {
         let shown = readers
         committed = names
+        quotesRefusal = nil
         previewTask?.cancel()
         request += 1
-        switch await preview(circleIds: circleIds, names: committed) {
+        switch await preview(circleIds: circleIds, names: committed, content: content) {
         case .success(let found):
             readers = found
             error = nil
@@ -220,6 +234,7 @@ final class CircleAudienceState {
             return Self.sameNames(shown, found) ? nil : Self.readersChangedMessage
         case .failure(let failure):
             pending = false
+            quotesRefusal = failure.quotes
             return failure.message
         }
     }

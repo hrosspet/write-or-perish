@@ -43,6 +43,12 @@ enum APIPath {
     static func pollSend(_ id: Int) -> String { "/api/updates/polls/\(id)/send" }
     static func pollDecline(_ id: Int) -> String { "/api/updates/polls/\(id)/decline" }
 
+    // MARK: Write tool calls waiting for the user's approval (2026-11-12)
+    /// `?node=<id>`: the waiting calls in that node's thread.
+    static let toolApprovals = "/api/tool-approvals"
+    static func toolApprovalApprove(_ id: Int) -> String { "/api/tool-approvals/\(id)/approve" }
+    static func toolApprovalReject(_ id: Int) -> String { "/api/tool-approvals/\(id)/reject" }
+
     // MARK: Nodes
     static let nodes = "/api/nodes/"
     static let nodeModels = "/api/nodes/models"
@@ -186,6 +192,8 @@ enum APIPath {
     static let importTwitterAnalyze = "/api/import/twitter/analyze"
     static let importTwitterConfirm = "/api/import/twitter/confirm"
     static func importStatus(_ taskId: String) -> String { "/api/import/status/\(escape(taskId))" }
+    /// The yes to an import's rebuild question (#625).
+    static let importProfileRebuild = "/api/import/profile-rebuild"
 
     // MARK: Server-sent events
     static func sseLLMStream(_ nodeId: Int) -> String { "/api/sse/nodes/\(nodeId)/llm-stream" }
@@ -203,7 +211,7 @@ enum APIPath {
     ]
 
     /// Registered as `""`: a trailing slash is a 404.
-    static let noSlashRoots: Set<String> = ["/api/updates", "/api/share", "/api/circles"]
+    static let noSlashRoots: Set<String> = ["/api/updates", "/api/share", "/api/circles", "/api/tool-approvals"]
 
     /// Returns the canonical form of `path` (query string untouched).
     static func canonical(_ path: String) -> String {

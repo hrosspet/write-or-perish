@@ -126,18 +126,11 @@ enum DefaultsKey {
     }
     /// Circles, the same for an AI reply generated in a shared thread: its
     /// own memory, apart from the typed reply's (web `aiReplyAckKey`). The
-    /// value is the `ai_reads_key` the dialog showed (it counts only while
-    /// the thread's key is still that one), or "1" when the thread had none.
-    /// An agreement given in the "Only me" dialog, which names no readers, is
-    /// stored as `private:<key>` and counts for "Only me" replies only.
+    /// value is `private:<key>` of the `ai_reads_key` the dialog showed (it
+    /// counts only while the thread's key is still that one; a bare key
+    /// stored by an earlier version counts too).
     static func circleAiReplyAck(entryId: Int, userId: Int?) -> String {
         "loore_circle_ai_reply_ack_\(userId.map(String.init) ?? "")_\(entryId)"
-    }
-    /// Circles, "AI reply: Shared with this thread / Only me" in a shared
-    /// thread ("shared" | "private"; absent = shared): per thread and per
-    /// user, on this device (web `aiReplyPrivacyKey`).
-    static func circleAiReplyPrivacy(entryId: Int, userId: Int?) -> String {
-        "loore_circle_ai_reply_privacy_\(userId.map(String.init) ?? "")_\(entryId)"
     }
     /// The Voice / Text choice of each home card by purpose ("voice" | "text";
     /// absent = Voice). Each card remembers its own (Peter, 2026-10-13).

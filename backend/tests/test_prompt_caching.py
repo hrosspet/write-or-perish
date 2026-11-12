@@ -323,11 +323,11 @@ def test_render_cache_roundtrip_and_key_busting(app, monkeypatch):
         assert prompt_cache.get_cached_render(app.config, node) is None
         prompt_cache.store_render(app.config, node, "rendered bytes")
         assert prompt_cache.get_cached_render(
-            app.config, node) == ("rendered bytes", None)
+            app.config, node)[:2] == ("rendered bytes", None)
         # The training-key verdict travels with the text (#326).
         prompt_cache.store_render(app.config, node, "rendered bytes",
                                   unlicensed="the memory artifact is 'chat'")
-        assert prompt_cache.get_cached_render(app.config, node) == (
+        assert prompt_cache.get_cached_render(app.config, node)[:2] == (
             "rendered bytes", "the memory artifact is 'chat'")
         # An entry that is not a text + verdict pair is a miss, never a
         # verdict-less hit.

@@ -238,9 +238,13 @@ struct NodeDetail: Decodable, Identifiable, Sendable {
     /// Circles: the viewer's own Only-me node in a shared thread; what an AI
     /// reply under it reads of their data and the key it must carry.
     var threadAIReads: ThreadAIReads?
+    /// The viewer's write tool calls waiting for approval anywhere in the thread
+    /// shown (ancestors, this node, every reply below); empty when none.
+    var pendingApprovals: [ToolApproval]
 
     enum CodingKeys: String, CodingKey {
         case id, content, permalink, user, origin, ancestors, children
+        case pendingApprovals = "pending_approvals"
         case nodeType = "node_type"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
@@ -307,6 +311,7 @@ struct NodeDetail: Decodable, Identifiable, Sendable {
         readReplyAbove = c.tolerant(.readReplyAbove, default: false)
         replyAIUsage = c.tolerant(.replyAIUsage)
         gleanThread = c.tolerant(.gleanThread, default: false)
+        pendingApprovals = ToolApproval.decodeList(c, .pendingApprovals)
     }
 
     var isLLM: Bool { nodeType == .llm }

@@ -238,6 +238,11 @@ class ContextUsage:
 
     def __init__(self):
         self._licences = {}
+        # The saved references the recent raw window names by the name
+        # read_full opens them by (quotes.ReferenceLines.ids): with the
+        # "External references" toggle off, the only ones it opens. A
+        # cached render stores them with its text.
+        self.named_references = set()
 
     def licence(self, placeholder: str) -> PayloadLicence:
         """The collector *placeholder*'s rows report to."""

@@ -661,6 +661,83 @@ def reply_refusal(parent_node, user_id, ai_usage=None, chain=None):
     return None
 
 
+# ── AI replies in shared threads (Peter, 2026-11-12) ─────────────────────
+# "all AI replies in a public thread are private by default, autogenerate
+# is off in public threads and circles and can't be turned on, and only
+# the user can change an AI reply to that circle/public (after the reply
+# being generated and the user supposedly having read it and decided it
+# to share it)". Every AI reply is created private (create_llm_placeholder;
+# a thread that is not shared is private all the way, so its replies were
+# private anyway). Auto-generate asks shared_with_others about the node
+# the reply would answer.
+AUTO_GENERATE_OFF_CODE = "auto_generate_off"
+AUTO_GENERATE_OFF_MESSAGE = (
+    "Auto-generate is off in public threads. Ask for a reply with LLM "
+    "Response: it stays private until you change it.")
+
+
+class AutoGenerateOff(Exception):
+    """An automatic reply was asked for under a node other people can
+    read (shared_with_others). HTTP callers answer 409 ``{"error",
+    "code": "auto_generate_off"}``, or keep the entry they wrote and
+    report the skipped reply as ``llm_error`` / ``llm_error_code``."""
+
+    code = AUTO_GENERATE_OFF_CODE
+
+    def __init__(self, message=AUTO_GENERATE_OFF_MESSAGE):
+        super().__init__(message)
+        self.message = message
+
+
+def auto_generate_off_response(exc=None):
+    """The 409 answer for a refused automatic reply."""
+    from flask import jsonify
+    exc = exc or AutoGenerateOff()
+    return jsonify({"error": exc.message, "code": exc.code}), 409
+
+
+def shared_with_others(node=None, privacy_level=None):
+    """True when people other than its owner can read *node* (or a node
+    created with *privacy_level*): its privacy is anything but private,
+    i.e. public, or shared with circles. A reply asked for under such a
+    node is in a shared thread, where Loore never replies by itself.
+
+    This is the one test of "a shared thread" (auto_generate_refusal,
+    the node pages' ``shared_thread`` flag). A sharing that does not
+    show in the node's own privacy_level (a circle audience inherited
+    from the entry a reply was written under) has to be added here."""
+    level = privacy_level
+    if node is not None:
+        level = node.privacy_level
+    return (level or "private") != "private"
+
+
+def auto_generate_refusal(parent_node=None, privacy_level=None):
+    """Why no automatic reply may be made under *parent_node* (or under a
+    new entry created with *privacy_level*), as an AutoGenerateOff, or
+    None. Asked by every path that replies without the user asking for
+    that reply: the auto-generate flag of Text mode, uploads and
+    recorded entries, and the clients' automatic request to
+    POST /nodes/<id>/llm. A reply the user asks for (LLM Response,
+    Voice, Glean) is not automatic."""
+    if shared_with_others(parent_node, privacy_level):
+        return AutoGenerateOff()
+    return None
+
+
+REPLY_IN_PROGRESS_CODE = "reply_in_progress"
+REPLY_IN_PROGRESS_MESSAGE = (
+    "This reply is still being written. You can change who sees it once "
+    "it's done.")
+
+
+def reply_in_progress(node):
+    """True for an AI reply that is still being generated: its owner
+    shares it only once it is written (Peter, 2026-11-12)."""
+    return ((node.node_type == "llm" or bool(node.llm_model))
+            and node.llm_task_status in ("pending", "processing"))
+
+
 def voice_turn_refusal(user, parent_node=None, ai_usage=None):
     """Why a Voice turn may not start or get its reply (an AIUsageRefused
     carrying the Voice screen's message), or None. Voice mode exists to
@@ -775,7 +852,7 @@ def enqueue_reply_job(llm_node, dispatch, record_task_id=True):
 
 
 def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
-                           privacy_level="private", ai_usage="chat",
+                           ai_usage="chat",
                            placeholder_text="[LLM response generation pending...]",
                            enqueue=True, source_mode=None, meta=None,
                            client=None, read_live=True):
@@ -784,6 +861,11 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     Returns (llm_node, task_id) -- task_id is None if enqueue=False, and
     when the job could not be queued: the node is then already marked
     failed (enqueue_reply_job, #385).
+
+    The reply is created private, in every thread: only its owner reads
+    it until they change its privacy (Peter, 2026-11-12, "all AI replies
+    in a public thread are private by default"). A thread that is private
+    all the way gave its replies private anyway.
     *meta* seeds the node's tool_calls_meta (a list of entries) in the
     same commit that creates it, so a marker the task reads (the read
     thread's "_read", routes/read.py) is there before the task can start.
@@ -943,7 +1025,8 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
         node_type="llm",
         llm_model=model_id,
         llm_task_status="pending",
-        privacy_level=privacy_level,
+        # Private at creation in every thread (Peter, 2026-11-12).
+        privacy_level="private",
         ai_usage=ai_usage,
         token_count=approximate_token_count(placeholder_text),
     )

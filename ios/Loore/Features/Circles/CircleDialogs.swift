@@ -30,17 +30,17 @@ private struct CircleDialogNote: View {
 
 /// Before a reply is sent into a shared thread: "Send this reply? <names> will
 /// see it, with your name." With `aiReply` it stands before an AI reply is
-/// generated in the thread, which the same people see. "Don't ask again in
-/// this thread" is remembered by the caller (per thread, per user, on this
-/// device; typed replies and AI replies each have their own memory).
+/// generated in the thread whose prompt, written by someone else, reads the
+/// requester's own data: the reply is the requester's alone (every AI reply is
+/// created private, Peter 2026-11-12), so it names nobody and says what that
+/// prompt reads. "Don't ask again in this thread" is remembered by the caller
+/// (per thread, per user, on this device; typed replies and AI replies each
+/// have their own memory).
 struct CircleReplyDialog: View {
     let names: [String]
     var aiReply = false
     /// With `aiReply`: the requester's own artifacts the reply's prompt reads.
     var aiReads: [String] = []
-    /// With `aiReply`: the reply is for its requester only ("Only me"). The
-    /// dialog then names no readers and says what the shared prompt reads.
-    var onlyMe = false
     /// `dontAskAgain`
     let onConfirm: (Bool) -> Void
     let onCancel: () -> Void
@@ -48,17 +48,16 @@ struct CircleReplyDialog: View {
 
     static func title(aiReply: Bool) -> String { aiReply ? CirclesWording.aiReplyDialogTitle : "Send this reply?" }
 
-    static func body(names: [String], aiReply: Bool, aiReads: [String] = [], onlyMe: Bool = false) -> String {
+    static func body(names: [String], aiReply: Bool, aiReads: [String] = []) -> String {
         guard aiReply else { return "\(CirclesWording.joinNames(names)) will see it, with your name." }
-        return onlyMe ? CirclesWording.aiReplyPrivateDialogBody(aiReads: aiReads)
-            : CirclesWording.aiReplyDialogBody(names: names, aiReads: aiReads)
+        return CirclesWording.aiReplyPrivateDialogBody(aiReads: aiReads)
     }
 
     static func confirmLabel(aiReply: Bool) -> String { aiReply ? CirclesWording.aiReplyDialogConfirm : "Send reply" }
 
     var body: some View {
         LooreDialogCard(title: Self.title(aiReply: aiReply)) {
-            CircleDialogBody(text: Self.body(names: names, aiReply: aiReply, aiReads: aiReads, onlyMe: onlyMe))
+            CircleDialogBody(text: Self.body(names: names, aiReply: aiReply, aiReads: aiReads))
             Button {
                 dontAskAgain.toggle()
             } label: {

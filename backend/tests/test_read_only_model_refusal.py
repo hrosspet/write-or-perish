@@ -308,7 +308,7 @@ class TestUploadReply:
         alice = _user()
         _db.session.commit()
         with ro.test_request_context():
-            agentic, model, err = _upload_reply_options(
+            agentic, model, err, _off = _upload_reply_options(
                 {"auto_generate": "true", "model": "gpt-6.1-sol"}, None,
                 "chat")
             assert model is None
@@ -317,7 +317,7 @@ class TestUploadReply:
             assert resp.get_json()["code"] == CODE
             assert _upload_reply_options(
                 {"auto_generate": "true", "model": "gpt-5"}, None,
-                "chat") == (False, "gpt-5", None)
+                "chat") == (False, "gpt-5", None, None)
         assert alice.id  # nothing else to check: no node exists yet
 
     def test_the_transcription_task_names_the_reason(self, st):  # noqa: F811

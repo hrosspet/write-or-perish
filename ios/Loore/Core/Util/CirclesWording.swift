@@ -110,7 +110,7 @@ enum CirclesWording {
     }
 
     /// For a reader, over the reply form of someone else's shared thread.
-    static let foreignSharedNote = "Before your reply is sent, Loore names the people who will see it. No AI reply is generated here unless you press LLM Response."
+    static let foreignSharedNote = "Before your reply is sent, Loore names the people who will see it. An AI reply is generated here only when you press LLM Response, and only you see it until you share it."
 
     static let aiReplyDialogTitle = "Generate an AI reply?"
     static let aiReplyDialogConfirm = "Generate"
@@ -122,30 +122,17 @@ enum CirclesWording {
         return list.dropLast().joined(separator: ", ") + " and " + list[list.count - 1]
     }
 
-    /// What the requester's AI reads of their own for a reply in this thread
-    /// (`audience.ai_reads`), in a sentence; nil when it reads none.
-    static func aiReadsSentence(_ aiReads: [String]) -> String? {
-        let list = joinPlain(aiReads)
-        guard !list.isEmpty else { return nil }
-        return "Your AI reads your \(list) for this reply and could share private information from them."
-    }
-
-    static func aiReplyDialogBody(names: [String], aiReads: [String] = []) -> String {
-        let who = joinNames(names)
-        let first = who.isEmpty ? "" : "\(who) will see it, marked with your name."
-        guard let reads = aiReadsSentence(aiReads) else { return first }
-        return first.isEmpty ? reads : "\(first) \(reads)"
-    }
-
-    /// The same for a reply only its requester reads ("Only me"), where a
-    /// prompt someone else shared still reads the requester's data.
+    /// What the requester's AI reads of their own data for a reply in a
+    /// shared thread when a prompt someone else wrote asks for it
+    /// (`ai_reads`), in a sentence; nil when it reads none. The reply is the
+    /// requester's alone (every AI reply is created private, Peter 2026-11-12).
     static func aiReadsPrivateSentence(_ aiReads: [String]) -> String? {
         let list = joinPlain(aiReads)
         guard !list.isEmpty else { return nil }
         return "Your AI reads your \(list) for this reply, as the prompt shared in this thread asks."
     }
 
-    /// The dialog before an "Only me" AI reply in a thread with an `ai_reads_key`.
+    /// The dialog before an AI reply in a thread with an `ai_reads_key`.
     static func aiReplyPrivateDialogBody(aiReads: [String]) -> String {
         let first = "Only you will see it."
         return aiReadsPrivateSentence(aiReads).map { "\(first) \($0)" } ?? first
@@ -155,11 +142,6 @@ enum CirclesWording {
 
     static let sharePathLabel = "Share also the discussion leading up to this node?"
     static let sharePathNote = "Everything from the start of this thread down to this entry is then shared with the same people, including the thread's prompt and the AI replies on the way. People's AI replies use the prompt with their own artifacts, never yours. Without it, only this entry is shared."
-
-    /// The two-choice control beside the AI-reply control.
-    static let aiReplyPrivacyLabel = "AI reply:"
-    static let aiReplyShared = "Shared with this thread"
-    static let aiReplyOnlyMe = "Only me"
 
     // MARK: The add dialog
 

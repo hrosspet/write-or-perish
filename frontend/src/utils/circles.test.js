@@ -1,8 +1,8 @@
 import {
   countWord, joinNames, splitNames, readersSentence, shareButtonLabel,
   replyAudienceNames, sharedBannerText, replyAckKey, removeMemberBody,
-  atName, aiReplyAckKey, aiReplyPrivacyKey, aiReplyOffReason, possessive,
-  joinPlain, aiReadsSentence, aiReadsPrivateSentence,
+  atName, aiReplyAckKey, aiReplyOffReason, possessive,
+  joinPlain, aiReadsPrivateSentence,
 } from './circles';
 
 test('removing a person says what stays open', () => {
@@ -86,25 +86,18 @@ test('"Don\'t ask again" is kept per thread and per user', () => {
   expect(replyAckKey(31, 6)).not.toBe(replyAckKey(31, 5));
 });
 
-test('AI replies have their own "Don\'t ask again" and their own privacy choice', () => {
+test('AI replies have their own "Don\'t ask again"', () => {
   expect(aiReplyAckKey(31, 5)).toBe('loore_circle_ai_reply_ack_5_31');
   expect(aiReplyAckKey(31, 5)).not.toBe(replyAckKey(31, 5));
-  expect(aiReplyPrivacyKey(31, 5)).toBe('loore_circle_ai_reply_privacy_5_31');
 });
 
 test('what an AI reply reads of its requester\'s artifacts', () => {
   expect(joinPlain(['profile', 'memory', 'to-do list'])).toBe('profile, memory and to-do list');
   expect(joinPlain(['profile'])).toBe('profile');
-  expect(aiReadsSentence(['profile', 'memory', 'to-do list'])).toBe(
-    'Your AI reads your profile, memory and to-do list for this reply '
-    + 'and could share private information from them.');
-  expect(aiReadsSentence(['profile'])).toBe(
-    'Your AI reads your profile for this reply and could share private information from them.');
-  expect(aiReadsSentence([])).toBe('');
-  expect(aiReadsSentence(undefined)).toBe('');
   expect(aiReadsPrivateSentence(['profile', 'memory'])).toBe(
     'Your AI reads your profile and memory for this reply, as the prompt shared in this thread asks.');
   expect(aiReadsPrivateSentence([])).toBe('');
+  expect(aiReadsPrivateSentence(undefined)).toBe('');
 });
 
 test('why no AI reply can be generated in a shared thread', () => {

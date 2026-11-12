@@ -15,13 +15,14 @@ from backend.utils.quotes import (
     resolve_quotes, has_quotes, ExportQuoteResolver,
     resolve_quotes_for_export, resolve_ext_quotes, has_ext_quotes,
     ai_blocked_artifact, AI_BLOCKED_ARTIFACT_TEXT,
+    quotes_inside, hold_quotes, release_quotes, reference_title_lines,
 )
 from backend.utils.timefmt import iso_utc
 from backend.utils.encryption import dek_cached, prefetch_deks
 from backend.utils.task_owner import failure_text, task_owned_by
 from backend.utils.thread_tree import ancestor_chains
 from sqlalchemy import and_, case, exists, func, or_
-from sqlalchemy.orm import subqueryload
+from sqlalchemy.orm import selectinload, subqueryload
 from bisect import bisect_left, bisect_right
 from collections import namedtuple
 from datetime import datetime
@@ -541,7 +542,8 @@ def _add_artifact_free_entry(resolver, node):
 
 def _format_node_text(node, label, user_id, embedded_quotes,
                       ai_blocked_ids, licence=None, filter_ai_usage=False,
-                      artifact_refs=True, quote_reference=None):
+                      artifact_refs=True, quote_reference=None,
+                      hold_others_markers=False, reference_titles=None):
     """The node's own text block: header, any pinned-artifact refs, then
     content. System-prompt nodes emit refs only (their content IS the
     prompt, shown as a ref). The node, the entries its quotes embed and
@@ -552,7 +554,18 @@ def _format_node_text(node, label, user_id, embedded_quotes,
     nothing at all ("").
 
     *quote_reference* (node id -> text) writes a quote resolved by
-    reference (_QuoteReferences.marker, #592)."""
+    reference (_QuoteReferences.marker, #592).
+
+    *hold_others_markers*: the markers left as written in text the user
+    did not write stay held (quotes.hold_quotes) for a caller that runs
+    its own quote passes over the export (an AI reply's prompt) and
+    releases them after; otherwise they are released here.
+
+    *reference_titles* (a quotes.ReferenceLines): a quoted saved
+    reference is one line naming it (title or author, source; with
+    ``named`` the name read_full opens it by, and its id goes into
+    ``ids``) instead of its text (quotes.reference_title_lines), for the
+    recent raw window of a call with tools. None keeps the text."""
     if not artifact_refs and _is_system_prompt_node(node):
         return ""
     result = _node_header_line(node, label)
@@ -573,8 +586,16 @@ def _format_node_text(node, label, user_id, embedded_quotes,
     for line in ref_lines:
         result += line + "\n"
 
-    # Resolve {quote:ID} placeholders in content
+    # Resolve {quote:ID} placeholders in content. In text the user did
+    # not write (someone else's reply in their thread, or quoted text of
+    # someone else's at any depth), a quote resolves only when every
+    # reader of that text can read the quoted node, and a saved
+    # reference stays as written (quotes_inside).
     content = node.get_content()
+    inside = only = None
+    if user_id and (has_quotes(content) or has_ext_quotes(content)):
+        inside = quotes_inside(user_id)
+        only = inside(node.id)
     if has_quotes(content):
         if embedded_quotes is not None:
             # Use smart resolution from ExportQuoteResolver
@@ -585,6 +606,7 @@ def _format_node_text(node, label, user_id, embedded_quotes,
                 content, node.id, embedded_quotes, user_id,
                 ai_blocked_ids=ai_blocked_ids,
                 reference=quote_reference,
+                only=only, inside=inside,
             )
         elif user_id:
             # Fallback to simple resolution (depth 1). The unbudgeted
@@ -593,15 +615,34 @@ def _format_node_text(node, label, user_id, embedded_quotes,
             # nodes marked 'none' like the resolver path does.
             content, quoted_ids = resolve_quotes(
                 content, user_id, for_llm=False, max_depth=1,
-                block_ai_none=filter_ai_usage)
+                block_ai_none=filter_ai_usage, only=only, inside=inside)
             if licence is not None:
                 licence.note_nodes(quoted_ids, what="archive quoted entry")
     # {quote_ext:ID} (saved references) resolve inline unconditionally —
     # they're small and never nest, so no dedup machinery is needed.
-    if user_id and has_ext_quotes(content):
-        content, ext_ids = resolve_ext_quotes(content, user_id, for_llm=False)
-        if licence is not None:
-            licence.note_external(ext_ids, what="archive reference")
+    # Only in the user's own text: they resolve against the user.
+    if user_id and only is None and has_ext_quotes(content):
+        if reference_titles:
+            # A line without a title carries no words of the reference,
+            # only its author and source, so only a title reports
+            # (Training licence; as a quote by author and time, #626).
+            content, named_ids, titled = reference_title_lines(
+                content, user_id, named=reference_titles.named)
+            if reference_titles.named:
+                reference_titles.ids.update(named_ids)
+            if licence is not None:
+                licence.note_external(titled,
+                                      what="archive reference title")
+        else:
+            content, ext_ids = resolve_ext_quotes(
+                content, user_id, for_llm=False)
+            if licence is not None:
+                licence.note_external(ext_ids, what="archive reference")
+    if not hold_others_markers:
+        content = release_quotes(content)
+    elif only is not None:
+        # Someone else's text: every marker left in it stays as written.
+        content = hold_quotes(content)
 
     result += content
     result += "\n\n"
@@ -622,6 +663,8 @@ def format_node_tree(
     artifact_refs=True,
     prune_tombstones=False,
     references=None,
+    hold_others_markers=False,
+    reference_titles=None,
 ):
     """
     Format a node and its descendants into a human-readable tree structure
@@ -634,7 +677,9 @@ def format_node_tree(
         created_before=created_before, embedded_quotes=embedded_quotes,
         included_ids=included_ids, ai_blocked_ids=ai_blocked_ids,
         licence=licence, artifact_refs=artifact_refs,
-        prune_tombstones=prune_tombstones, references=references))
+        prune_tombstones=prune_tombstones, references=references,
+        hold_others_markers=hold_others_markers,
+        reference_titles=reference_titles))
 
 
 def iter_node_tree(
@@ -652,6 +697,8 @@ def iter_node_tree(
     prune_tombstones=False,
     references=None,
     before_entry=None,
+    hold_others_markers=False,
+    reference_titles=None,
 ):
     """
     Yield the text of a node and its descendants piece by piece, in
@@ -711,6 +758,8 @@ def iter_node_tree(
         references: Optional _QuoteReferences of the whole export
                  (#592): each rendered entry's label is recorded in it,
                  and quotes resolved by reference leave its markers.
+        hold_others_markers: see _format_node_text.
+        reference_titles: see _format_node_text.
 
     Yields:
         str: pieces of the formatted text of the node tree, nothing for
@@ -829,7 +878,9 @@ def iter_node_tree(
                 current, path, user_id, embedded_quotes, ai_blocked_ids,
                 licence=licence, filter_ai_usage=filter_ai_usage,
                 artifact_refs=artifact_refs,
-                quote_reference=quote_reference)
+                quote_reference=quote_reference,
+                hold_others_markers=hold_others_markers,
+                reference_titles=reference_titles)
             if text and references is not None:
                 references.labels[current.id] = path
             stack.extend(_reply_frames(path, _children(current, True)))
@@ -1371,40 +1422,57 @@ def _thread_has_alive_node(root_id):
 
 # Ids per IN list of the export's batched queries (#591): the threads
 # per query of the deleted-thread check (a query per thread was 84 of
-# the 120 s a 42k-entry export took), and the entries per query the
-# download loads by id. INTRODUCED CONSTANT.
+# the 120 s a 42k-entry export took), the parents per query of the
+# level-by-level thread walks, and the entries per query the download
+# loads by id. INTRODUCED CONSTANT.
 IDS_PER_QUERY = 500
 
 
 def _threads_with_alive_node(root_ids, batch=None):
     """The ids among *root_ids* whose subtree holds a node with
     deleted_at IS NULL: the per-thread skip rule (§5a) of
-    ``_thread_has_alive_node``, in one recursive query per *batch*
-    threads (default IDS_PER_QUERY, #591).
+    ``_thread_has_alive_node``.
 
-    Every node of a thread is visited, so a caller with many threads
-    passes only those whose root is deleted: a thread with a live root is
-    kept without a query.
+    A caller with many threads passes only those whose root is deleted:
+    a thread with a live root is kept without a query.
 
-    Recursive CTE for portability across PostgreSQL and SQLite.
+    The threads are walked level by level, *batch* ids (default
+    IDS_PER_QUERY) per ``IN (...)`` query, and a thread's walk stops at
+    its first live node. This was one recursive query per batch of
+    threads (#591), which Postgres planned as a full scan of ``node`` for
+    every level of the deepest thread (it cannot estimate a recursive
+    work table; see _foreign_thread_node_ids): on a 1M-row table, 400
+    deleted threads up to 130 levels deep took 38 s, and 19 took 1.2 s
+    (local measurement, 2026-11-11).
     """
     batch = batch or IDS_PER_QUERY
     ids = list(root_ids)
     alive = set()
+    root_of = {}     # a deleted node still walked -> the thread it is in
     for start in range(0, len(ids), batch):
-        chunk = ids[start:start + batch]
-        base = db.session.query(
-            Node.id.label("root_id"), Node.id.label("id"),
-        ).filter(Node.id.in_(chunk)).cte(
-            name="thread_alive_batch", recursive=True)
-        desc = db.aliased(Node, flat=True)
-        recursive = db.session.query(base.c.root_id, desc.id).join(
-            base, desc.parent_id == base.c.id)
-        cte = base.union_all(recursive)
-        rows = db.session.query(cte.c.root_id).join(
-            Node, Node.id == cte.c.id,
-        ).filter(Node.deleted_at.is_(None)).distinct()
-        alive.update(root_id for (root_id,) in rows)
+        for node_id, deleted_at in db.session.query(
+                Node.id, Node.deleted_at).filter(
+                Node.id.in_(ids[start:start + batch])):
+            if deleted_at is None:
+                alive.add(node_id)
+            else:
+                root_of[node_id] = node_id
+    level = list(root_of)
+    while level:
+        next_level = []
+        for start in range(0, len(level), batch):
+            for node_id, parent_id, deleted_at in db.session.query(
+                    Node.id, Node.parent_id, Node.deleted_at).filter(
+                    Node.parent_id.in_(level[start:start + batch])):
+                root = root_of[parent_id]
+                if root in alive or node_id in root_of:
+                    continue
+                if deleted_at is None:
+                    alive.add(root)
+                else:
+                    root_of[node_id] = root
+                    next_level.append(node_id)
+        level = [n for n in next_level if root_of[n] not in alive]
     return alive
 
 
@@ -1741,6 +1809,7 @@ def _build_user_export_incremental(
     user, max_tokens, filter_ai_usage, created_before, created_after,
     chronological_order, return_metadata, collapse_artifacts,
     licence=None, omit_artifacts=False, whole_window=False, scope=None,
+    hold_others_markers=False, reference_titles=None,
 ):
     """Incremental export path (created_after is set). See
     `build_user_export_content` docstring for behavior. The CTE row
@@ -1851,6 +1920,7 @@ def _build_user_export_incremental(
             # A collapsed export emits no preamble, so the budget counts
             # only the entries it does emit (#518).
             with_preamble=not collapse_artifacts,
+            inside=quotes_inside(user.id),
         )
         for node in selected_nodes:
             if node.deleted_at is not None:
@@ -2046,6 +2116,8 @@ def _build_user_export_incremental(
             licence=licence,
             artifact_refs=not omit_artifacts,
             references=references,
+            hold_others_markers=hold_others_markers,
+            reference_titles=reference_titles,
         )
         if omit_artifacts and not thread_text:
             # Nothing of this thread in the window but its system
@@ -2302,6 +2374,8 @@ def build_user_export_content(
     omit_artifacts=False,
     whole_window=False,
     scope=None,
+    hold_others_markers=False,
+    reference_titles=None,
 ):
     """
     Core export logic: Build a human-readable text export of threads for a user.
@@ -2409,6 +2483,19 @@ def build_user_export_content(
                call, the same rows. Needs max_tokens and the
                incremental path; the selected rows are checked against
                the database first (ScopeChanged when one changed).
+        hold_others_markers: If True, the {quote:ID} / {quote_ext:ID}
+               markers left as written in text the user did not write
+               come back held (quotes.hold_quotes), for an AI reply's
+               prompt, which runs its own quote passes over the text
+               and then releases them (quotes.release_quotes).
+        reference_titles: a quotes.ReferenceLines: a saved reference
+               quoted in the user's own text is one line naming it (its
+               title, or its author; its source; with ``named`` the name
+               read_full opens it by, collected in ``ids``), not its
+               text (quotes.reference_title_lines). Only for the recent
+               raw window of a call with tools (Peter, voice review
+               2026-11-12); None, for the data download, {user_export}
+               and the background jobs, keeps the text.
 
     Returns:
         str or dict: Formatted export content (or None if no threads found).
@@ -2433,6 +2520,8 @@ def build_user_export_content(
             omit_artifacts=omit_artifacts,
             whole_window=whole_window,
             scope=scope,
+            hold_others_markers=hold_others_markers,
+            reference_titles=reference_titles,
         )
     if whole_window:
         raise ValueError(
@@ -2533,6 +2622,7 @@ def build_user_export_content(
             filter_ai_usage=filter_ai_usage,
             chronological=chronological_order,
             with_preamble=not collapse_artifacts,
+            inside=quotes_inside(user.id),
         )
 
         # Add only the pre-selected nodes to the resolver (decrypts here)
@@ -2662,6 +2752,8 @@ def build_user_export_content(
             # below it (#525).
             prune_tombstones=bool(max_tokens),
             references=references,
+            hold_others_markers=hold_others_markers,
+            reference_titles=reference_titles,
         )
         if not thread_text:
             # Only a system prompt (#550), or nothing alive (#525).
@@ -2738,11 +2830,19 @@ def build_user_export_content(
 # up after 60 s without a byte. iter_user_export sends the same text a
 # few threads at a time instead. Every wait between two pieces stays far
 # below that limit: the first piece (the header) goes out after a few
-# metadata queries; the preamble's artifact versions come from one query
-# over the pins instead of a walk of every entry; the deleted-thread
-# check is one query per batch of threads; data keys are unwrapped a
-# window of entries at a time, also inside one very large thread; and a
-# thread is sent piece by piece as it renders.
+# metadata queries; the preamble's artifact versions come from the pins
+# found by a level-by-level walk of the threads instead of a render of
+# every entry; the deleted-thread check walks only threads with a
+# deleted root; data keys are unwrapped a window of entries at a time,
+# also inside one very large thread; and a thread is sent piece by piece
+# as it renders.
+#
+# The response's headers go out before any of that work
+# (_send_user_export), and they say "nosniff": a browser sniffs a
+# text/plain response's first 1 KiB before it starts a download (Chrome
+# waits for those bytes, measured 2026-11-11), so without it the save
+# dialog waited until the export had sent 1 KiB, ~30 s into a large
+# account's export.
 
 # What the download holds when the user has no thread to export.
 NO_THREADS_TEXT = "No threads found to export."
@@ -2837,30 +2937,52 @@ def _export_roots(user_id):
     return rows
 
 
-def _pinning_entries(user_id, thread_ids):
-    """The entries of the threads *thread_ids* (roots of the user's) that
-    pin a context artifact and that the user can access: the only ones
-    that add to the full export's preamble (_ArtifactVersions, which
-    the legacy path feeds every entry _collect_all_nodes_in_tree
-    returns). One recursive query over the user's threads finds them
-    (#591)."""
-    base = db.session.query(
-        Node.id.label("root_id"), Node.id.label("id"),
-    ).filter(
-        Node.user_id == user_id, Node.parent_id.is_(None),
-    ).cte(name="export_threads", recursive=True)
-    desc = db.aliased(Node, flat=True)
-    cte = base.union_all(db.session.query(base.c.root_id, desc.id).join(
-        base, desc.parent_id == base.c.id))
-    rows = db.session.query(cte.c.root_id, cte.c.id).join(
-        NodeContextArtifact, NodeContextArtifact.node_id == cte.c.id,
-    ).distinct()
-    ids = sorted({node_id for root_id, node_id in rows
-                  if root_id in thread_ids})
-    entries = []
+def _thread_entry_ids(roots):
+    """The ids of every entry of the threads *roots* (rows of
+    _export_roots), the roots included. Walked level by level from the
+    roots that have a reply, IDS_PER_QUERY parents per query: about one
+    query per level of the deepest thread, each a seek on the parent_id
+    index, so the cost follows the size of the threads, not of the
+    table."""
+    ids = [r.id for r in roots]
+    level = [r.id for r in roots if r.has_reply]
+    while level:
+        next_level = []
+        for start in range(0, len(level), IDS_PER_QUERY):
+            next_level.extend(node_id for (node_id,) in db.session.query(
+                Node.id).filter(
+                Node.parent_id.in_(level[start:start + IDS_PER_QUERY])))
+        ids.extend(next_level)
+        level = next_level
+    return ids
+
+
+def _pinning_entries(user_id, roots):
+    """The entries of the threads *roots* (rows of _export_roots: the
+    threads the download shows) that pin a context artifact and that the
+    user can access: the only ones that add to the full export's preamble
+    (_ArtifactVersions, which the legacy path feeds every entry
+    _collect_all_nodes_in_tree returns), their pins loaded with them.
+
+    This was one recursive query over the user's threads (#591), which
+    Postgres planned as a full scan and sort of ``node`` for every level
+    of the deepest thread: 68 s on a 1M-row table with a 130-level
+    thread (local measurement, 2026-11-11), the wait before the
+    download's second piece. The threads are walked level by level
+    instead (_thread_entry_ids)."""
+    ids = _thread_entry_ids(roots)
+    pinning = set()
     for start in range(0, len(ids), IDS_PER_QUERY):
-        entries.extend(Node.query.filter(
-            Node.id.in_(ids[start:start + IDS_PER_QUERY])))
+        pinning.update(node_id for (node_id,) in db.session.query(
+            NodeContextArtifact.node_id).filter(
+            NodeContextArtifact.node_id.in_(
+                ids[start:start + IDS_PER_QUERY])).distinct())
+    pinning = sorted(pinning)
+    entries = []
+    for start in range(0, len(pinning), IDS_PER_QUERY):
+        entries.extend(Node.query.options(
+            selectinload(Node.context_artifacts)).filter(
+            Node.id.in_(pinning[start:start + IDS_PER_QUERY])))
     return [n for n in entries if can_user_access_node(n, user_id)]
 
 
@@ -3011,7 +3133,7 @@ def iter_user_export(user):
     yield out.take()
 
     versions = _ArtifactVersions(user, filter_ai_usage=False)
-    for n in _pinning_entries(user.id, {r.id for r in kept}):
+    for n in _pinning_entries(user.id, kept):
         versions.add_node(n)
         out.turn()
     for line in versions.iter_lines(
@@ -3084,12 +3206,20 @@ def iter_user_export(user):
 
 
 def _send_user_export(user):
-    """iter_user_export, logging a failure before it ends the response.
+    """iter_user_export after an empty piece, logging a failure before
+    it ends the response.
 
-    A failure after the first piece cannot become an error status: the
-    exception propagates, the app server closes the connection without
-    the response's last chunk, and the browser (or the iPhone app) marks
-    the download failed. The file never ends as if it were complete."""
+    The empty piece comes before any query: the app server sends the
+    response's headers on it (it writes no body chunk for it), so the
+    browser starts the download and shows its save dialog at once,
+    whatever the account's size. The first piece of the file follows
+    when iter_user_export has it.
+
+    So a failure cannot become an error status: the exception
+    propagates, the app server closes the connection without the
+    response's last chunk, and the browser (or the iPhone app) marks the
+    download failed. The file never ends as if it were complete."""
+    yield ""
     sent = 0
     try:
         for piece in iter_user_export(user):
@@ -3130,6 +3260,10 @@ def export_threads():
             "Cache-Control": "no-store",
             # Pass each piece on as it comes (see sse.py).
             "X-Accel-Buffering": "no",
+            # Start the download on the headers: without it a browser
+            # waits for the first 1 KiB of a text/plain body to sniff its
+            # type before it shows the save dialog.
+            "X-Content-Type-Options": "nosniff",
         },
     )
 

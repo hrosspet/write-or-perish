@@ -15,6 +15,10 @@ import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
 import { useLlmTextStream } from "../hooks/useSSE";
 import { peekPrefetchedNode, takePrefetchedNode } from "../hooks/useNodePrefetch";
 import api from "../api";
+import {
+  AUTO_GENERATE_OFF_HINT, ONLY_YOU_SEE_REPLY, isAutoGenerateOff,
+  isSharedPrivacy, onlyYouSeeReply,
+} from "../utils/sharedThread";
 import { useCheckboxToggle, useTaskInsert } from "../utils/markdown";
 import { contextAllowsAi, isAiUsageRefusedError } from "../utils/aiUsage";
 import NodeFormModal from "./NodeFormModal";
@@ -23,15 +27,15 @@ import BubbleKebabMenu from "./BubbleKebabMenu";
 import QuotedContent from "./QuotedContent";
 import FeedPicks from "./FeedPicks";
 import ToolActionsTaken from "./ToolActionsTaken";
+import ToolApprovalDialog, { groupByTurn } from "./ToolApprovalDialog";
 import { ReadWindowLine, ReadReplyTail, ReadCancelledLine } from "./ReadReply";
 
 import DeleteConfirmDialog from "./DeleteConfirmDialog";
 import { SharedMark } from "./CircleReaders";
 import { CircleReplyDialog } from "./CircleDialogs";
 import {
-  aiReadsPrivateSentence, aiReadsSentence, aiReplyAckKey, aiReplyOffReason,
-  aiReplyPrivacyKey,
-  replyAudienceNames, sharedBannerText,
+  aiReplyAckKey, aiReplyOffReason,
+  sharedBannerText,
 } from "../utils/circles";
 
 
@@ -60,7 +64,7 @@ function findInSubtree(node, targetId) {
 }
 
 // Recursive component to render children nodes.
-function RenderChildTree({ nodes, onBubbleClick, buildActions }) {
+function RenderChildTree({ nodes, onBubbleClick, buildActions, parentPrivacy, privateNoteFor }) {
   return (
     <div>
       {nodes.map((child, index) => {
@@ -76,9 +80,16 @@ function RenderChildTree({ nodes, onBubbleClick, buildActions }) {
                 onClick={onBubbleClick}
                 leftAlign={true}
                 actions={buildActions ? buildActions(child) : null}
+                privateNote={!!privateNoteFor && privateNoteFor(child, parentPrivacy)}
               />
               {child.children && child.children.length > 0 &&
-                <RenderChildTree nodes={child.children} onBubbleClick={onBubbleClick} buildActions={buildActions} />
+                <RenderChildTree
+                  nodes={child.children}
+                  onBubbleClick={onBubbleClick}
+                  buildActions={buildActions}
+                  parentPrivacy={child.privacy_level}
+                  privateNoteFor={privateNoteFor}
+                />
               }
             </div>
             {index < nodes.length - 1 && (
@@ -204,6 +215,24 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     });
   }, []);
   const highlightedNodeRef = useRef(null);
+  // The AI's calls that change the user's data and wait for their
+  // approval (Peter, 2026-11-12): the server's pending_approvals for this
+  // thread. The dialog shows one reply's calls at a time, opens by itself
+  // when calls are found, and closing it decides nothing.
+  const [pendingApprovals, setPendingApprovals] = useState([]);
+  const [approvalsOpen, setApprovalsOpen] = useState(false);
+  const [approvalBusy, setApprovalBusy] = useState({});
+  const [approvalErrors, setApprovalErrors] = useState({});
+  const showApprovals = useCallback((items) => {
+    const list = items || [];
+    setPendingApprovals(list);
+    if (list.length) setApprovalsOpen(true);
+  }, []);
+  const refreshApprovals = useCallback(() => {
+    api.get('/tool-approvals', { params: { node: id } })
+      .then((res) => showApprovals(res.data?.pending))
+      .catch(() => {});
+  }, [id, showApprovals]);
 
   // `autoGenerate` is the single source of truth. Defaults to true on
   // a fresh install (see useState initializer) and persists across
@@ -214,17 +243,18 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // PUBLIC threads (#228) are the exception: generation there is always a
   // deliberate act — auto-generate is forced off (and its toggle hidden),
   // and the explicit LLM Response bar shows for the node's owner instead.
+  // The same holds for a node shared with circles (Peter, 2026-11-12:
+  // "autogenerate is off in public threads and circles and can't be
+  // turned on"); there the toggle shows, off and disabled.
   const isPublicThread = node?.privacy_level === 'public';
   // A SHARED thread (Circles): an AI reply is generated the way it is in
-  // a private thread, and the thread's people see it. Any member, the
-  // author or a reader, can press LLM Response on any node of the thread
-  // they can read; the reply is written by that member's own AI and
-  // carries their name. This holds for the author's replies too, the
-  // automatic ones included. The requester can keep a reply to
-  // themselves (privacy_level "private"), never make it public.
-  // In someone else's shared thread auto-generate is off, as in a public
-  // thread: an AI reply is generated there only when the reader presses
-  // LLM Response.
+  // a private thread. Any member, the author or a reader, can press LLM
+  // Response on any node of the thread they can read; the reply is
+  // written by that member's own AI and carries their name. Like every
+  // AI reply it is created private (Peter, 2026-11-12): only its
+  // requester reads it until they share it with the thread through Edit.
+  // Auto-generate is off in the thread, for the author too, as in a
+  // public thread.
   const audience = node?.audience || null;
   const isSharedThread = !!audience;
   // The user's own Only-me node in a shared thread (their AI reply kept
@@ -234,22 +264,17 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // ({ entry_id, ai_reads, ai_reads_key }).
   const threadReads = (!audience && node?.thread_ai_reads) || null;
   const isForeignShared = isSharedThread && !audience.is_author;
-  const autoGenerateActive = (isPublicThread || isForeignShared)
-    ? false : autoGenerate;
+  const autoGenerateLocked = isSharedPrivacy(node?.privacy_level);
+  const autoGenerateActive = autoGenerateLocked ? false : autoGenerate;
   // The "Generate an AI reply?" dialog while it is open:
-  // { resolve, reads, onlyMe, ack, store }: the list it shows, whether
-  // it is the private wording, what to send as ai_reads_ack once the
-  // user agrees, and what "Don't ask again" stores.
+  // { resolve, reads, ack, store }: the list it shows, what to send as
+  // ai_reads_ack once the user agrees, and what "Don't ask again" stores.
   const [aiReplyDialog, setAiReplyDialog] = useState(null);
   // What the server last said an AI reply here reads of the requester's
   // data, when a request was refused because it had changed (409
   // circle_ai_reads_changed): { ai_reads, ai_reads_key }. It replaces
   // the values the page was loaded with.
   const [aiReadsChanged, setAiReadsChanged] = useState(null);
-  // Craft mode, shared thread: "AI reply: Shared with this thread / Only
-  // me". The choice is kept in localStorage per thread and user; this
-  // counter only makes the page read it again after a change.
-  const [, setAiReplyPrivacyVersion] = useState(0);
 
   // LLM completion polling - enabled automatically when llmTaskNodeId is set
   // Batch stage ({ca_tweets}): the synchronous part is done and the turn
@@ -303,6 +328,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
       .then((response) => {
         setNode(response.data);
         setLoading(false);
+        showApprovals(response.data?.pending_approvals);
         // /node/<id> is server-rendered: a private node arrives in the
         // "Not found" shell (404 for private-or-missing alike, so ids can't
         // be probed), so the tab title has to be set here once the
@@ -332,7 +358,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     return () => {
       document.title = 'Loore';
     };
-  }, [id]);
+  }, [id, showApprovals]);
 
   // Keep the tab title with the content: a pending reply loads as its
   // placeholder text and is patched in place when the batch lands, so
@@ -482,6 +508,8 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
           feed_picks_count: llmData.feed_picks_count ?? prev.feed_picks_count,
           llm_task_status: 'completed',
         } : prev);
+        // Calls the reply made that wait for the user's approval.
+        refreshApprovals();
         // A finished gleaning also has its render now (which day it read,
         // how many tweets: the window line and the empty day's count),
         // which the poll does not carry: fetch the node once more.
@@ -698,6 +726,11 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // For LLM nodes: parent node's owner must match current user (they requested the response)
   // (In a shared thread the server names the requester of an AI reply,
   // human_owner_username; see ownedByMe.)
+  // "Only you see this reply": the viewer's own AI reply, private, under
+  // a node other people can read (public, or shared with circles).
+  const privateNoteFor = (n, parentPrivacy) => onlyYouSeeReply(
+    n, parentPrivacy, ownedByMe(n));
+
   const isOwner = node.user && currentUser && (
     node.user.id === currentUser.id ||
     (node.node_type === "llm" && (node.human_owner_username
@@ -850,21 +883,10 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
       });
   };
 
-  // Craft mode in a shared thread: is the next AI reply for its requester
-  // only? Read only while the control is on the page (Craft mode), so a
-  // choice the user cannot see never decides who reads a reply.
-  const aiReplyPrivacyStoreKey = isSharedThread
-    ? aiReplyPrivacyKey(audience.entry_id, currentUser?.id) : null;
-  const aiReplyPrivate = craftMode && isSharedThread
-    && localStorage.getItem(aiReplyPrivacyStoreKey) === 'private';
-  const setAiReplyPrivate = (isPrivate) => {
-    localStorage.setItem(aiReplyPrivacyStoreKey, isPrivate ? 'private' : 'shared');
-    setAiReplyPrivacyVersion((v) => v + 1);
-  };
-
   // What an AI reply here reads of the requester's own data, and the
   // key of exactly that list (audience.ai_reads / ai_reads_key; "" when
-  // no prompt shared by someone else fills in the requester's data).
+  // no prompt someone else wrote fills in the requester's data or turns
+  // tools on).
   const aiReads = aiReadsChanged
     ? aiReadsChanged.ai_reads : (audience || threadReads)?.ai_reads;
   const aiReadsKey = (aiReadsChanged
@@ -874,17 +896,15 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // what "Don't ask again in this thread" stores.
   const aiReplyEntryId = audience?.entry_id ?? threadReads?.entry_id;
 
-  // Before an AI reply is generated in a shared thread, the people who
-  // will see it are named, and what the reply reads of the requester's
-  // data ("Generate an AI reply?"). The dialog is skipped when nobody
-  // else reads the thread and nothing is read, or when "Don't ask again
-  // in this thread" was ticked for exactly this list: with a key, the
-  // stored value must equal the key; without one, any stored value
-  // counts (an older tick included).
-  // A reply for its requester only ("Only me") is not asked about when
-  // there is no key. With a key it is: a prompt someone else shared
-  // still reads the requester's data, and the server wants the key for
-  // every AI reply. The dialog then says "Only you will see it.".
+  // Before an AI reply is generated in a shared thread whose prompt
+  // someone else wrote reads the requester's data or turns tools on, the
+  // dialog says what the reply reads ("Generate an AI reply?", in the
+  // private wording: every AI reply is created private, Peter
+  // 2026-11-12). With no such prompt (no key) nothing is asked: the reply
+  // is the requester's alone. "Don't ask again in this thread" holds for
+  // exactly the list it was ticked for: the stored value must carry the
+  // key (an agreement stored for a shared reply, the bare key, counts
+  // too).
   // `changed` is the server's new list after a refused request: the
   // dialog is then shown whatever is stored.
   // Resolves false when the user cancels, else { ack }: the key the user
@@ -892,56 +912,32 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   const confirmAiReply = (changed = null) => new Promise((resolve) => {
     const reads = changed ? changed.ai_reads : aiReads;
     const key = (changed ? changed.ai_reads_key : aiReadsKey) || '';
-    // Under the user's own Only-me node the reply is Only me whatever
-    // the craft-mode choice: the private dialog, when there is a key.
-    const onlyMeHere = aiReplyPrivate || !!threadReads;
-    if ((!isSharedThread && !threadReads) || (onlyMeHere && !key)) {
+    if ((!isSharedThread && !threadReads) || !key) {
       resolve({ ack: null });
       return;
     }
-    // What "Don't ask again in this thread" stored. An agreement given
-    // in the shared dialog (which names the readers) is the bare key, or
-    // "1" / an older "true" when there was no key: it covers shared and
-    // private replies. One given in the private dialog, which names
-    // nobody, is "private:<key>": it covers private replies only.
     const stored = localStorage.getItem(
       aiReplyAckKey(aiReplyEntryId, currentUser?.id)) || '';
-    const storedIsShared = !!stored && !stored.startsWith('private:');
-    if (onlyMeHere) {
-      const privateAck = `private:${key}`;
-      if (!changed && stored === key) {
-        resolve({ ack: key });
-        return;
-      }
-      if (!changed && stored === privateAck) {
-        resolve({ ack: privateAck });
-        return;
-      }
-      setAiReplyDialog({
-        resolve, reads, onlyMe: true, ack: privateAck, store: privateAck,
-      });
+    const privateAck = `private:${key}`;
+    if (!changed && (stored === privateAck || stored === key)) {
+      resolve({ ack: stored });
       return;
     }
-    const nobodyElse = replyAudienceNames(
-      audience, currentUser?.username).length === 0;
-    if (!changed && (key ? stored === key : (nobodyElse || storedIsShared))) {
-      resolve({ ack: key || null });
-      return;
-    }
-    setAiReplyDialog({
-      resolve, reads, onlyMe: false, ack: key || null, store: key || '1',
-    });
+    setAiReplyDialog({ resolve, reads, ack: privateAck, store: privateAck });
   });
 
-  const requestLlmFor = async (parentNodeId, { sourceMode = 'textmode', ack = null } = {}) => {
+  // *auto*: the request auto-generate makes after an entry, which the
+  // server refuses under a node other people can read (409
+  // auto_generate_off); LLM Response is the user's own request.
+  // *ack*: the key of the list the user agreed to (confirmAiReply).
+  const requestLlmFor = async (parentNodeId, { sourceMode = 'textmode', auto = false, ack = null } = {}) => {
     // The same request in every thread. The model is the requester's own
     // (the picker's default comes from /suggested-model, which never
-    // suggests the model of another member's reply). In a shared thread
-    // the reply joins the thread's audience unless "Only me" is chosen.
-    // Either way it carries the key of the list the user agreed to.
+    // suggests the model of another member's reply).
     const response = await api.post(`/nodes/${parentNodeId}/llm`, {
-      model: selectedModel, source_mode: sourceMode,
-      ...(aiReplyPrivate && { privacy_level: 'private' }),
+      model: selectedModel,
+      source_mode: sourceMode,
+      ...(auto && { auto_generate: true }),
       ...(ack && { ai_reads_ack: ack }),
     });
     const newNodeId = response.data.node_id;
@@ -957,12 +953,12 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // The request is repeated at most once after such a refusal: refused
   // again, for whatever reason, the server's message is shown (the
   // caller's error handling) and nothing more is sent.
-  const requestConfirmedLlmFor = async (parentNodeId) => {
+  const requestConfirmedLlmFor = async (parentNodeId, { auto = false } = {}) => {
     let agreed = await confirmAiReply();
     let retried = false;
     while (agreed) {
       try {
-        return await requestLlmFor(parentNodeId, { ack: agreed.ack });
+        return await requestLlmFor(parentNodeId, { ack: agreed.ack, auto });
       } catch (err) {
         const data = err?.response?.data;
         if (retried || err?.response?.status !== 409
@@ -997,12 +993,49 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     const status = err?.response?.status;
     const apiErr = err?.response?.data?.error;
     if (status === 402) return;
+    // No automatic reply under a shared node: LLM Response stays offered.
+    if (isAutoGenerateOff(err)) return;
     addToast(apiErr || err.message || "Error requesting LLM response.", 8000);
   };
 
   // The reply is watched on its own node from the start (#367): the
   // model thinking, then the text as it is written.
-  const handleLLMResponse = async () => {
+  // Approve or reject one waiting call. The answer lists the reply's calls
+  // still waiting; a call another device decided (404) just goes.
+  const decideApproval = async (item, approve) => {
+    setApprovalBusy((b) => ({ ...b, [item.id]: true }));
+    setApprovalErrors((e) => ({ ...e, [item.id]: null }));
+    const replaceTurn = (rest) => setPendingApprovals((all) => [
+      ...all.filter((p) => p.turn_node_id !== item.turn_node_id),
+      ...(rest || []),
+    ]);
+    try {
+      const res = await api.post(
+        `/tool-approvals/${item.id}/${approve ? 'approve' : 'reject'}`);
+      replaceTurn(res.data?.pending);
+      if (res.data?.outcome === 'failed') {
+        setApprovalErrors((e) => ({ ...e, [item.id]: res.data.error }));
+      } else {
+        // The reply's Actions taken now say what happened.
+        api.get(`/nodes/${id}`).then((r) => setNode(r.data)).catch(() => {});
+      }
+    } catch (err) {
+      if (err?.response?.status === 404) {
+        setPendingApprovals((all) => all.filter((p) => p.id !== item.id));
+      } else {
+        setApprovalErrors((e) => ({
+          ...e,
+          [item.id]: err?.response?.data?.error
+            || "Loore couldn't make this change. It still waits for your approval.",
+        }));
+      }
+    } finally {
+      setApprovalBusy((b) => ({ ...b, [item.id]: false }));
+    }
+  };
+  const approvalGroups = groupByTurn(pendingApprovals);
+
+  const handleLLMResponse = () => {
     setError("");
     setLlmRequesting(true);
     requestConfirmedLlmFor(id)
@@ -1022,8 +1055,12 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // train}, auto-generate silently skips and toasts the user. Prevents
   // firing an LLM call that would omit parts of the thread from context
   // and produce partial / confusing replies.
-  const tryAutoGenerateFor = async (parentNodeId, chainNodes) => {
+  // *privacyLevel* is the new entry's: a public (or circles) entry gets
+  // no automatic reply, whatever the page it was written on (Peter,
+  // 2026-11-12).
+  const tryAutoGenerateFor = async (parentNodeId, chainNodes, privacyLevel) => {
     if (!autoGenerateActive) return null;
+    if (isSharedPrivacy(privacyLevel)) return null;
     if (!contextAllowsAi(chainNodes)) {
       setAutoGenerate(false);
       addToast(
@@ -1032,9 +1069,14 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
       );
       return null;
     }
-    // The author's automatic reply in her shared thread is seen by its
-    // readers too: she is asked first, like for a pressed one.
-    return await requestConfirmedLlmFor(parentNodeId);
+    // Under the user's own Only-me node in a shared thread the automatic
+    // reply asks first too, when the thread's prompt reads their data.
+    try {
+      return await requestConfirmedLlmFor(parentNodeId, { auto: true });
+    } catch (err) {
+      if (isAutoGenerateOff(err)) return null;
+      throw err;
+    }
   };
 
   // Called by NodeForm after it successfully POSTs /nodes/.
@@ -1047,7 +1089,8 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     setError("");
     try {
       const chain = [node, ...(node.ancestors || [])];
-      const llmNodeId = await tryAutoGenerateFor(newNodeId, chain);
+      const llmNodeId = await tryAutoGenerateFor(
+        newNodeId, chain, data?.privacy_level);
       if (llmNodeId) {
         // Through the NEW USER node so it gets its own URL/history step
         // (a back press then walks the actual entries); ?awaitLlm takes
@@ -1155,7 +1198,8 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     if (editedIsLlm) return;
     try {
       const chain = [updated, ...(updated.ancestors || [])];
-      const llmNodeId = await tryAutoGenerateFor(updated.id, chain);
+      const llmNodeId = await tryAutoGenerateFor(
+        updated.id, chain, updated.privacy_level);
       // The edited node keeps its history entry; the response is watched
       // on its own node from the start (#367).
       if (llmNodeId) {
@@ -1242,13 +1286,14 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // Ancestors section rendered as a list of bubbles.
   const ancestorsSection = node.ancestors && node.ancestors.length > 0 && (
     <div style={{ display: "flex", flexDirection: "column", marginBottom: "10px" }}>
-      {node.ancestors.map((ancestor) => (
+      {node.ancestors.map((ancestor, i) => (
         <Bubble
           key={ancestor.id}
           node={ancestor}
           onClick={handleBubbleClick}
           leftAlign={true}
           actions={buildActions(ancestor)}
+          privateNote={privateNoteFor(ancestor, node.ancestors[i - 1]?.privacy_level)}
         />
       ))}
     </div>
@@ -1421,14 +1466,14 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     && !(entryEnd.children || []).some(c => !c.deleted
       && !['failed', 'cancelled'].includes(c.llm_task_status));
   // In a shared thread (Circles) every member has LLM Response on every
-  // node they can read, other people's included. In someone else's
-  // shared thread it shows without Craft mode, as in a public thread:
-  // auto-generate is off there, so it is the only way to get an AI
-  // reply. Where no AI may read the entry the control stays, disabled,
-  // with the reason next to it (aiOffReason).
+  // node they can read, other people's included. It shows without Craft
+  // mode, as in a public thread: auto-generate is off there (Peter,
+  // 2026-11-12), so it is the only way to get an AI reply, for the author
+  // too. Where no AI may read the entry the control stays, disabled, with
+  // the reason next to it (aiOffReason).
   const aiOffReason = aiReplyOffReason(audience, node, currentUser);
   const showCraftBar = (isOwner || isSharedThread)
-    && (craftMode || isPublicThread || isForeignShared)
+    && (craftMode || autoGenerateLocked)
     && (!autoGenerateActive || awaitsReply)
     && (node.ai_usage !== 'none' || isSharedThread) && !isLlmPending;
   // In a thread started from the Glean card (#435) the action row under
@@ -1462,16 +1507,10 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // generic LLM Response is not offered at all: the row is "Read" and
   // its model picker.
   const showLlmResponse = showCraftBar && !(inReadThread && !readReplyAbove);
-  // Craft mode, shared thread: who reads the next AI reply. Shown with
-  // LLM Response, and also where auto-generate will ask for the reply.
-  const showAiReplyPrivacy = craftMode && isSharedThread && !isLlmPending
-    && !aiOffReason && (showLlmResponse || autoGenerateActive);
-  // The note under that choice: what the reply reads of the requester's
-  // data, worded for the choice made. For "Only me" it is shown only
-  // when a prompt someone else shared asks for the data (a key).
-  const aiReadsNote = aiReplyPrivate
-    ? (aiReadsKey ? aiReadsPrivateSentence(aiReads) : '')
-    : aiReadsSentence(aiReads);
+  // An AI reply in a shared thread is its requester's alone until they
+  // share it (Peter, 2026-11-12): there is no choice of who reads it
+  // before it is generated. What it reads of the requester's data is
+  // named in the dialog before it (confirmAiReply).
   // Without craft mode there is no LLM Response, so an entry whose
   // automatic reply failed left the user no way to ask again. Everyone
   // gets a plain Try again there (Peter, 2026-11-10): the same request
@@ -1663,15 +1702,21 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
         <button
           type="button"
           onClick={() => setAutoGenerate(v => !v)}
-          title={autoGenerate ? 'Auto-generate is on — click to turn off' : 'Auto-generate is off — click to turn on'}
-          style={{ ...topRightButtonStyle, justifyContent: 'space-between' }}
+          disabled={autoGenerateLocked}
+          aria-pressed={autoGenerateActive}
+          title={autoGenerateLocked ? AUTO_GENERATE_OFF_HINT
+            : autoGenerate ? 'Auto-generate is on — click to turn off' : 'Auto-generate is off — click to turn on'}
+          style={{
+            ...topRightButtonStyle, justifyContent: 'space-between',
+            ...(autoGenerateLocked && { opacity: 0.5, cursor: 'not-allowed' }),
+          }}
         >
           <span>Auto-generate</span>
           <span style={{
             width: '32px',
             height: '18px',
             borderRadius: '9px',
-            background: autoGenerate ? 'var(--accent)' : 'var(--border)',
+            background: autoGenerateActive ? 'var(--accent)' : 'var(--border)',
             position: 'relative',
             transition: 'background 0.2s ease',
             flexShrink: 0,
@@ -1683,7 +1728,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
               background: 'var(--text-primary)',
               position: 'absolute',
               top: '2px',
-              left: autoGenerate ? '16px' : '2px',
+              left: autoGenerateActive ? '16px' : '2px',
               transition: 'left 0.2s ease',
             }} />
           </span>
@@ -1924,6 +1969,32 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
           expanded={toolActionsExpanded}
           onToggle={() => setToolActionsExpanded(!toolActionsExpanded)}
         />
+        {onlyYouSeeReply(
+          node, node.ancestors?.[node.ancestors.length - 1]?.privacy_level,
+          isOwner) && (
+          <div style={{
+            marginTop: '10px', fontFamily: 'var(--sans)', fontSize: '0.75rem',
+            fontWeight: 300, color: 'var(--text-muted)',
+          }}>
+            🔒 {ONLY_YOU_SEE_REPLY}
+          </div>
+        )}
+        {pendingApprovals.length > 0 && !approvalsOpen && (
+          <button
+            type="button"
+            onClick={() => setApprovalsOpen(true)}
+            style={{
+              marginTop: '10px', background: 'none', border: 'none', padding: 0,
+              cursor: 'pointer', fontFamily: 'var(--sans)', fontSize: '0.8rem',
+              fontWeight: 300, color: 'var(--accent)', textAlign: 'left',
+            }}
+          >
+            {pendingApprovals.length === 1
+              ? '1 change waits for your approval'
+              : `${pendingApprovals.length} changes wait for your approval`}
+            {' · Review'}
+          </button>
+        )}
       </div>
       <div style={actionContainerStyle}>
         <NodeFooter
@@ -1962,7 +2033,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
           <SpeakerIcon nodeId={node.id} content={node.content} isPublic={node.privacy_level === 'public'} aiUsage={node.ai_usage} onTtsGenerated={() => setNode(prev => prev ? { ...prev, has_tts: true } : prev)} />
           <DownloadAudioIcon nodeId={node.id} isPublic={node.privacy_level === 'public'} aiUsage={node.ai_usage} />
         </NodeFooter>
-        {(showCraftBar || showTryAgain || readActions || showAiReplyPrivacy) && (
+        {(showCraftBar || showTryAgain || readActions) && (
           <div
             ref={actionRowRef}
             style={actionsStacked
@@ -2005,54 +2076,6 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
                 {aiOffReason}
               </span>
             )}
-            {showAiReplyPrivacy && (
-              <span
-                role="group" aria-label="AI reply"
-                style={{
-                  gridColumn: '1 / -1',
-                  display: 'inline-flex', alignItems: 'center', gap: '6px',
-                  flexWrap: 'wrap',
-                  fontFamily: 'var(--sans)', fontWeight: 300, fontSize: '0.8rem',
-                  color: 'var(--text-secondary)',
-                }}
-              >
-                <span>AI reply:</span>
-                {[
-                  { isPrivate: false, label: 'Shared with this thread' },
-                  { isPrivate: true, label: 'Only me' },
-                ].map((choice) => {
-                  const selected = aiReplyPrivate === choice.isPrivate;
-                  return (
-                    <button
-                      key={choice.label} type="button"
-                      aria-pressed={selected}
-                      onClick={() => setAiReplyPrivate(choice.isPrivate)}
-                      style={{
-                        minHeight: '32px', padding: '0 10px', borderRadius: '6px',
-                        border: `1px solid ${selected ? 'var(--accent)' : 'var(--border)'}`,
-                        background: selected ? 'var(--bg-card)' : 'transparent',
-                        color: selected ? 'var(--text-primary)' : 'var(--text-secondary)',
-                        fontFamily: 'var(--sans)', fontWeight: selected ? 400 : 300,
-                        fontSize: '0.8rem', cursor: 'pointer',
-                      }}
-                    >
-                      {choice.label}
-                    </button>
-                  );
-                })}
-              </span>
-            )}
-            {/* What the reply's prompt reads of the requester's own
-                data (audience.ai_reads), when it reads any. */}
-            {showAiReplyPrivacy && aiReadsNote && (
-              <span style={{
-                gridColumn: '1 / -1', flexBasis: '100%',
-                fontFamily: 'var(--sans)', fontWeight: 300, fontSize: '0.8rem',
-                lineHeight: 1.5, color: 'var(--text-secondary)',
-              }}>
-                {aiReadsNote}
-              </span>
-            )}
             {/* A lone button, not an action group: it has no picker, so
                 it takes no part in the stacked two-column grid. */}
             {showTryAgain && (
@@ -2091,7 +2114,8 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
           lineHeight: 1.5, color: 'var(--text-secondary)',
         }}>
           Before your reply is sent, Loore names the people who will see
-          it. No AI reply is generated here unless you press LLM Response.
+          it. An AI reply is generated here only when you press LLM
+          Response, and only you see it until you share it.
         </div>
       )}
       {showInlineInput && (
@@ -2106,6 +2130,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
           <NodeForm
             key={`inline-${id}`}
             parentId={parseInt(id, 10)}
+            parentPrivacyLevel={node.privacy_level}
             hidePowerFeatures={!craftMode}
             hideAudioUpload={!craftMode}
             compact
@@ -2127,6 +2152,8 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
       {node.children && node.children.length > 0 && (
         <RenderChildTree
           nodes={node.children}
+          parentPrivacy={node.privacy_level}
+          privateNoteFor={privateNoteFor}
           onBubbleClick={handleBubbleClick}
           buildActions={buildActions}
         />
@@ -2180,8 +2207,6 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
         open={!!aiReplyDialog}
         ai
         aiReads={aiReplyDialog?.reads}
-        onlyMe={!!aiReplyDialog?.onlyMe}
-        names={replyAudienceNames(audience, currentUser?.username)}
         onClose={() => {
           aiReplyDialog?.resolve(false);
           setAiReplyDialog(null);
@@ -2288,6 +2313,14 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
           }}
         />
       )}
+      <ToolApprovalDialog
+        open={approvalsOpen && approvalGroups.length > 0}
+        items={approvalGroups[0]}
+        busy={approvalBusy}
+        errors={approvalErrors}
+        onDecide={decideApproval}
+        onClose={() => setApprovalsOpen(false)}
+      />
       <DeleteConfirmDialog
         open={!!deleteTarget}
         mode="single"

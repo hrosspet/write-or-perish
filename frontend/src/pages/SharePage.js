@@ -6,6 +6,8 @@ import useSubmitShortcut from '../hooks/useSubmitShortcut';
 import useEscapeKey from '../hooks/useEscapeKey';
 import { useUser } from '../contexts/UserContext';
 import { formatDate } from '../utils/date';
+import QuotesNotPublicDialog from '../components/QuotesNotPublicDialog';
+import { quotesNotPublicError } from '../utils/sharedThread';
 
 const SHARE_TYPES = ['need', 'offering', 'insight', 'exploration', 'intention', 'other'];
 
@@ -55,6 +57,9 @@ export default function SharePage() {
   // Inline confirms — at most one open at a time.
   const [confirmPublishId, setConfirmPublishId] = useState(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  // A share that quotes an entry that isn't public stays a draft: the
+  // server's answer, shown as a dialog (Peter, 2026-11-12).
+  const [quotesRefusal, setQuotesRefusal] = useState(null);
 
   const editTextareaRef = useRef(null);
 
@@ -116,6 +121,8 @@ export default function SharePage() {
       await fetchShares();
     } catch (err) {
       console.error('Failed to publish share:', err);
+      const quotesErr = quotesNotPublicError(err);
+      if (quotesErr) setQuotesRefusal(quotesErr);
     }
   };
 
@@ -448,6 +455,12 @@ export default function SharePage() {
           </div>
         )
       ))}
+      <QuotesNotPublicDialog
+        open={!!quotesRefusal}
+        message={quotesRefusal?.message}
+        quoted={quotesRefusal?.quoted}
+        onClose={() => setQuotesRefusal(null)}
+      />
     </div>
   );
 }

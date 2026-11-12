@@ -158,8 +158,7 @@ def _start(prompt_key, parent, model_id, auto_generate=True, read_live=True):
     try:
         llm_node, task_id = create_llm_placeholder(
             prompt_node.id, model_id, current_user.id,
-            privacy_level=READ_PRIVACY, ai_usage=FEED_AI_USAGE,
-            read_live=read_live,
+            ai_usage=FEED_AI_USAGE, read_live=read_live,
         )
     except (UserExportValidationError, GleanModelUnavailable) as e:
         db.session.rollback()
@@ -274,7 +273,7 @@ def _glean_again(node, model_id):
     try:
         llm_node, task_id = create_llm_placeholder(
             node.id, model_id, current_user.id,
-            privacy_level=READ_PRIVACY, ai_usage=FEED_AI_USAGE,
+            ai_usage=FEED_AI_USAGE,
             meta=[{"name": READ_FURTHER_MARKER}],
         )
     except (UserExportValidationError, GleanModelUnavailable) as e:
