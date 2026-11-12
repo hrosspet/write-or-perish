@@ -610,6 +610,25 @@ def test_collect_that_dies_inside_the_finalize_counts_once(app, monkeypatch, tmp
     assert item.surfaced_count == 1
 
 
+def test_soft_limit_while_deleting_the_files_leaves_the_reply_saved(app, monkeypatch, tmp_path):  # noqa: F811
+    """#667 review: the delete lets the task's soft time limit through,
+    and it runs after the error handler, so the saved reply stays
+    completed."""
+    from backend.utils.soft_limit import SoftTimeLimitExceeded
+    _script(monkeypatch, tmp_path, collect=lambda: ("completed", _batch_resp()))
+
+    def _soft_limit(key, batch_id):
+        raise SoftTimeLimitExceeded()
+    monkeypatch.setattr(llm_batch, "delete_openai_batch_files_by_id",
+                        _soft_limit)
+    alice, read, llm_node = _read_thread()
+
+    with pytest.raises(SoftTimeLimitExceeded):
+        _run(_Task(), alice, read, llm_node)
+
+    assert _reload(llm_node.id).llm_task_status == "completed"
+
+
 def test_capped_user_still_collects_an_ended_batch(app, monkeypatch, tmp_path):  # noqa: F811
     """The batch ended before a poll saw the cap: the provider processed
     and billed it, so the reply is collected and its cost row written.

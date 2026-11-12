@@ -39,7 +39,7 @@ from backend.utils import refusal_backoff, soft_limit
 from backend.utils.llm_batch import (
     BATCH_JOB_MAX_AGE, batch_submit, batch_check_and_collect,
     apply_batch_key_override, batch_ended, blocked_items,
-    delete_collected_batch_files, list_batches)
+    delete_collected_batch_files, drop_openai_batch, list_batches)
 # Module reference, not `from ... import names`: exports imports
 # celery_app, which imports this module to register its tasks. When a
 # web request touches backend.tasks.exports FIRST (e.g. POST
@@ -1367,6 +1367,10 @@ def _poll_profile_batches():
     for job in jobs:
         if datetime.utcnow() - job.submitted_at > BATCH_STALE_AFTER:
             _fail_job(job, "stale")
+            # Given up: nothing reads the batch again, so it is cancelled
+            # if it still runs and its files go (#667).
+            if (job.provider_key or "").startswith("openai:"):
+                drop_openai_batch(keys.get("openai"), job.batch_id)
             continue
         batch = listed.get(job.batch_id)
         try:

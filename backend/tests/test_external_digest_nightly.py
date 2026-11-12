@@ -720,6 +720,27 @@ def test_collector_abandons_a_batch_it_cannot_close_past_max_age(
     assert _digest.digest_is_stale(user.id) is True
 
 
+def test_an_abandoned_openai_batch_is_dropped_with_its_files(
+        app, monkeypatch):
+    """#667: nothing reads an abandoned batch again, so it is cancelled
+    if it still runs and its files are deleted."""
+    user = User.query.first()
+    _mk_item(user.id, "a")
+    _pending_job(
+        user, datetime.utcnow(), provider_key="openai:gpt-6-astra",
+        batch_id="stuck-oai", model_id="gpt-6-astra",
+        submitted_at=datetime.utcnow() - _digest.BATCH_JOB_MAX_AGE
+        - timedelta(minutes=1))
+    monkeypatch.setattr(_digest, "batch_check_and_collect", _raise_not_found)
+    dropped = []
+    monkeypatch.setattr(_digest, "drop_openai_batch",
+                        lambda key, batch_id: dropped.append(batch_id))
+
+    assert _digest._collect_digest_batches() == {"collected": 0,
+                                                 "abandoned": 1}
+    assert dropped == ["stuck-oai"]
+
+
 def test_collector_keeps_a_young_unreadable_batch_pending(app, monkeypatch):
     """A transient read failure on a fresh batch is retried next tick,
     not written off."""

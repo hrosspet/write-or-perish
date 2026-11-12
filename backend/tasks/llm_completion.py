@@ -3282,10 +3282,10 @@ def _delete_batch_files(entry):
     """Delete the files of the ended one-item OpenAI batch in *entry* once
     its outcome is saved on the node (#667): its input, output and error
     files at OpenAI. Best effort, never raises. An Anthropic batch has no
-    uploaded files."""
+    uploaded files. The task's soft time limit is let through."""
     if not entry or (entry.get("provider") or "anthropic") != "openai":
         return
-    from backend.utils import llm_batch
+    from backend.utils import llm_batch, soft_limit
     try:
         keys = llm_batch.apply_batch_key_override(
             get_api_keys_for_usage(flask_app.config,
@@ -3294,6 +3294,7 @@ def _delete_batch_files(entry):
         llm_batch.delete_openai_batch_files_by_id(
             keys.get("openai"), entry.get("batch_id"))
     except Exception as e:  # noqa: BLE001 - never fails the reply
+        soft_limit.reraise(e)
         logger.warning("Deleting the files of batch %s failed (%s)",
                        entry.get("batch_id"), type(e).__name__)
 
@@ -3317,7 +3318,6 @@ def _withdraw_batch_reply(llm_node, meta, entry):
     logger.warning("Node %s: batch %s withdrawn before it ran (%s); "
                    "not billed", llm_node.id, entry.get("batch_id"),
                    entry.get("cancel_reason"))
-    _delete_batch_files(entry)
 
 
 def _ca_batch_poll(task, llm_node, parent_node, meta, entry, user_id):
@@ -4029,6 +4029,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
         # the error handler below re-queues instead of failing the node.
         batch_meta, batch_entry = _batch_meta(llm_node)
         batch_resp = None
+        # The batch entries whose outcome this run saved: their files at
+        # OpenAI are deleted in the finally below, outside the error
+        # handler, so the task's soft limit striking during a delete
+        # cannot mark a saved reply failed (#667).
+        saved_batches = []
         # #367: a voice turn's TTS worker, speaking replies as they stream.
         speech_turn = None
         # The app the turn was asked from (create_llm_placeholder stamps
@@ -4049,6 +4054,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     self, llm_node, parent_node, batch_meta, batch_entry,
                     user_id)
                 if outcome == "withdrawn":
+                    saved_batches.append(batch_entry)
                     return {
                         'parent_node_id': parent_node_id,
                         'llm_node_id': llm_node_id,
@@ -4823,7 +4829,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 logger.info("Node %s: Read result dropped, the owner's "
                             "writing is on hold for deletion", llm_node.id)
                 if resp.get("batch"):
-                    _delete_batch_files(batch_entry)   # #667
+                    saved_batches.append(batch_entry)   # #667
                 return {
                     'parent_node_id': parent_node_id,
                     'llm_node_id': llm_node.id,
@@ -5771,7 +5777,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     _dispatch_voice_tts(target_node.id, user_id)
                 if resp.get("batch"):
                     # The reply is saved: the batch's files can go (#667).
-                    _delete_batch_files(batch_entry)
+                    saved_batches.append(batch_entry)
 
                 logger.info(
                     f"LLM completion successful, updated node "
@@ -6231,7 +6237,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # The batch has ended and its outcome is saved on the
                 # node: its files can go (#667). Not after the poll cap,
                 # when the batch may still be running.
-                _delete_batch_files(batch_entry)
+                saved_batches.append(batch_entry)
             if speech_turn is not None:
                 speech_turn.abort()
             raise error
@@ -6240,3 +6246,5 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # generated before the task ends.
             if speech_turn is not None:
                 speech_turn.finish()
+            for saved_entry in saved_batches:
+                _delete_batch_files(saved_entry)

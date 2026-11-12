@@ -208,6 +208,8 @@ class CollectedResults(dict):
 # A delete that fails is logged (ids and the error's type) and left: it
 # never fails the batch or its job. The SDK itself retries a delete that
 # meets a connection error, a 429 or a 5xx (max_retries, 2 by default).
+# The one exception the helpers let through is the task's soft time limit
+# (utils/soft_limit): the task must stop.
 
 class _NeverRaised(Exception):
     """Stands in for openai.NotFoundError where the SDK lacks it."""
@@ -235,7 +237,7 @@ def openai_batch_file_ids(batch):
 
 def delete_openai_files(client, file_ids):
     """Delete *file_ids* at OpenAI. One already gone counts as deleted.
-    Returns how many are gone; never raises."""
+    Returns how many are gone; never raises but the soft limit."""
     not_found = _openai_not_found()
     gone = 0
     for file_id in file_ids or ():
@@ -245,6 +247,7 @@ def delete_openai_files(client, file_ids):
         except not_found:
             gone += 1
         except Exception as e:  # noqa: BLE001 - never fails the batch
+            soft_limit.reraise(e)
             log.warning("Deleting OpenAI batch file %s failed (%s); left",
                         file_id, type(e).__name__)
     return gone
@@ -263,6 +266,7 @@ def delete_collected_batch_files(results, api_keys):
         client = OpenAI(api_key=(api_keys or {}).get("openai"))
         gone = delete_openai_files(client, file_ids)
     except Exception as e:  # noqa: BLE001 - never fails the batch
+        soft_limit.reraise(e)
         log.warning("Deleting OpenAI batch files failed (%s); left",
                     type(e).__name__)
         return 0
@@ -285,9 +289,28 @@ def delete_openai_batch_files_by_id(api_key, batch_id):
             return 0
         return delete_openai_files(client, openai_batch_file_ids(batch))
     except Exception as e:  # noqa: BLE001 - never fails the batch
+        soft_limit.reraise(e)
         log.warning("Deleting the files of OpenAI batch %s failed (%s); "
                     "left", batch_id, type(e).__name__)
         return 0
+
+
+def drop_openai_batch(api_key, batch_id):
+    """A batch whose results nothing will read any more (a job given up as
+    stale or abandoned, an admin's cancel): cancel it if it still runs and
+    delete its files, as the purge's and the rerun's cancel do
+    (openai_batch_cancel_one with delete_files). Best effort: returns
+    None, or the error's type name; never raises but the soft limit."""
+    if not api_key or not batch_id:
+        return None
+    try:
+        openai_batch_cancel_one(api_key, batch_id, delete_files=True)
+        return None
+    except Exception as e:  # noqa: BLE001 - a batch already ended refuses
+        soft_limit.reraise(e)
+        log.info("OpenAI batch %s dropped; the cancel answered %s",
+                 batch_id, type(e).__name__)
+        return type(e).__name__
 
 
 def blocked_items(results):
@@ -544,6 +567,9 @@ def batch_submit(requests_by_provider, api_keys, phase=None):
 
         for (oai_model, endpoint), reqs in by_model.items():
             tmp_path = None
+            # The uploaded file until a batch owns it: deleted when the
+            # create fails (#667).
+            unused_upload = None
             try:
                 with soft_limit.passes():
                     # Write JSONL to a temp file
@@ -598,6 +624,7 @@ def batch_submit(requests_by_provider, api_keys, phase=None):
                     with open(tmp_path, "rb") as f:
                         uploaded = client.files.create(file=f,
                                                        purpose="batch")
+                    unused_upload = uploaded.id
                     os.unlink(tmp_path)
                     tmp_path = None
 
@@ -606,6 +633,7 @@ def batch_submit(requests_by_provider, api_keys, phase=None):
                         endpoint=endpoint,
                         completion_window="24h",
                     )
+                    unused_upload = None
                 key = openai_batch_key(oai_model, endpoint)
                 batch_ids[key] = batch.id
                 log.info(f"OpenAI batch submitted for {oai_model}: "
@@ -613,6 +641,16 @@ def batch_submit(requests_by_provider, api_keys, phase=None):
             except Exception as e:
                 if tmp_path and os.path.exists(tmp_path):
                     os.unlink(tmp_path)
+                if unused_upload and soft_limit.found_in(e) is None:
+                    # The create was refused (a full queue, a rate limit,
+                    # the account): the uploaded requests go; a later
+                    # pass uploads its own. Never masks the error below,
+                    # except the task's soft limit striking meanwhile.
+                    try:
+                        with soft_limit.passes():
+                            delete_openai_files(client, [unused_upload])
+                    except Exception as cleanup_error:
+                        _stop_on_soft_limit(cleanup_error, batch_ids)
                 _stop_on_soft_limit(e, batch_ids)
                 if _note_account_failure(e, "OpenAI", oai_model,
                                          api_key=api_keys.get("openai")):
@@ -1191,9 +1229,16 @@ def openai_batch_submit_one(api_key, custom_id, api_model, messages,
                 uploaded = client.files.create(file=f, purpose="batch")
         finally:
             os.unlink(tmp_path)
-        batch = client.batches.create(
-            input_file_id=uploaded.id, endpoint="/v1/responses",
-            completion_window="24h")
+        try:
+            batch = client.batches.create(
+                input_file_id=uploaded.id, endpoint="/v1/responses",
+                completion_window="24h")
+        except Exception as e:
+            # Refused: the uploaded request goes (#667); the error is
+            # raised as it was.
+            if soft_limit.found_in(e) is None:
+                delete_openai_files(client, [uploaded.id])
+            raise
     log.info("OpenAI one-item batch submitted: %s (%s)", batch.id, custom_id)
     return batch.id
 

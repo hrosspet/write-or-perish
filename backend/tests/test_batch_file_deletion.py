@@ -22,9 +22,12 @@ import pytest  # noqa: E402
 from backend.utils import llm_batch  # noqa: E402
 from backend.utils.llm_batch import (  # noqa: E402
     BatchItemFailed, CollectedResults, batch_check_and_collect,
-    delete_collected_batch_files, delete_openai_batch_files_by_id,
+    batch_submit, delete_collected_batch_files,
+    delete_openai_batch_files_by_id, delete_openai_files, drop_openai_batch,
     openai_batch_cancel_one, openai_batch_collect_one,
+    openai_batch_submit_one,
 )
+from backend.utils.soft_limit import SoftTimeLimitExceeded  # noqa: E402
 
 KEYS = {"anthropic": "k-ant", "openai": "k-oai"}
 KEY = "openai:gpt-x"
@@ -232,3 +235,113 @@ class TestOneItemBatches:
 
         assert [c.args[0] for c in client.files.delete.call_args_list] == [
             "file-in", "file-out"]
+
+
+# ── Review of #671: uploads a refused create leaves, given-up batches, ──
+# ── and the task's soft time limit ────────────────────────────────────
+
+REQ = {"custom_id": "c-1", "model_id": "gpt", "api_model": "gpt-x",
+       "messages": [{"role": "user", "content": "hi"}], "max_tokens": 50}
+
+
+class TestARefusedCreateDeletesItsUpload:
+    def _client(self, monkeypatch, create_error, delete_error=None):
+        client = _fake_openai(monkeypatch)
+        client.files.create.return_value = SimpleNamespace(id="file-up")
+        client.batches.create.side_effect = create_error
+        if delete_error is not None:
+            client.files.delete.side_effect = delete_error
+        return client
+
+    def test_batch_submit(self, monkeypatch):
+        client = self._client(monkeypatch, RuntimeError("rate limited"))
+
+        out = batch_submit({"openai": [REQ]}, KEYS, "test")
+
+        assert out == {}
+        client.files.delete.assert_called_once_with("file-up")
+
+    def test_batch_submit_a_failed_delete_masks_nothing(self, monkeypatch):
+        client = self._client(monkeypatch, RuntimeError("rate limited"),
+                              delete_error=RuntimeError("503"))
+
+        out = batch_submit({"openai": [REQ]}, KEYS, "test")
+
+        assert out == {} and not out.account_refused and not out.queue_full
+        client.files.delete.assert_called_once_with("file-up")
+
+    def test_a_created_batch_keeps_its_upload(self, monkeypatch):
+        client = _fake_openai(monkeypatch)
+        client.files.create.return_value = SimpleNamespace(id="file-up")
+        client.batches.create.return_value = SimpleNamespace(id="b-9")
+
+        assert batch_submit({"openai": [REQ]}, KEYS, "test") == {KEY: "b-9"}
+        client.files.delete.assert_not_called()
+
+    @pytest.mark.parametrize("delete_error", [None, RuntimeError("503")])
+    def test_one_item_submit(self, monkeypatch, delete_error):
+        client = self._client(monkeypatch, RuntimeError("rate limited"),
+                              delete_error=delete_error)
+
+        with pytest.raises(RuntimeError, match="rate limited"):
+            openai_batch_submit_one("k", "node-1", "gpt-x",
+                                    REQ["messages"], 50)
+
+        client.files.delete.assert_called_once_with("file-up")
+
+
+class TestGivenUpBatches:
+    def test_a_running_batch_is_cancelled_and_its_input_deleted(
+            self, monkeypatch):
+        client = _fake_openai(monkeypatch, _batch(
+            status="cancelling", input_file_id="file-in"))
+
+        assert drop_openai_batch("k", "b-1") is None
+
+        client.batches.cancel.assert_called_once_with("b-1")
+        client.files.delete.assert_called_once_with("file-in")
+
+    def test_an_ended_batch_refuses_the_cancel_and_loses_its_files(
+            self, monkeypatch):
+        client = _fake_openai(monkeypatch, _batch(
+            status="expired", input_file_id="file-in",
+            error_file_id="file-err"))
+        client.batches.cancel.side_effect = RuntimeError("already ended")
+
+        assert drop_openai_batch("k", "b-1") == "RuntimeError"
+
+        assert [c.args[0] for c in client.files.delete.call_args_list] == [
+            "file-in", "file-err"]
+
+    def test_no_key_no_call(self, monkeypatch):
+        _fake_openai(monkeypatch)
+        assert drop_openai_batch(None, "b-1") is None
+        sys.modules["openai"].OpenAI.assert_not_called()
+
+
+class TestTheSoftTimeLimitIsLetThrough:
+    def test_delete_openai_files(self, monkeypatch):
+        client = _fake_openai(monkeypatch)
+        client.files.delete.side_effect = SoftTimeLimitExceeded()
+
+        with pytest.raises(SoftTimeLimitExceeded):
+            delete_openai_files(client, ["file-in"])
+
+    def test_delete_collected_batch_files(self, monkeypatch):
+        client = _fake_openai(monkeypatch)
+        client.files.delete.side_effect = SoftTimeLimitExceeded()
+        results = CollectedResults()
+        results.batch_files.append("file-in")
+
+        with pytest.raises(SoftTimeLimitExceeded):
+            delete_collected_batch_files(results, KEYS)
+
+    def test_delete_by_id_and_drop(self, monkeypatch):
+        client = _fake_openai(monkeypatch)
+        client.batches.retrieve.side_effect = SoftTimeLimitExceeded()
+        client.batches.cancel.side_effect = SoftTimeLimitExceeded()
+
+        with pytest.raises(SoftTimeLimitExceeded):
+            delete_openai_batch_files_by_id("k", "b-1")
+        with pytest.raises(SoftTimeLimitExceeded):
+            drop_openai_batch("k", "b-1")
