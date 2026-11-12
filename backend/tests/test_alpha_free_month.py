@@ -328,6 +328,13 @@ class TestCeiling:
         tp._post_event(app, tp._event("customer.subscription.created",
                                       {"id": "sub_t"}, event_id="e1"))
         assert self._limit(app, _db.session.get(User, u.id)) == 55.0
+        # Blocked for the month at Standard's ceiling (56 of 55 spent).
+        from backend.utils.spend import current_month, user_is_capped
+        tp._cost(u.id, 56, datetime.utcnow() - timedelta(minutes=1))
+        user = _db.session.get(User, u.id)
+        user.spend_blocked_month = current_month()
+        _db.session.commit()
+        assert user_is_capped(user)
         gateway.subscriptions["sub_t"]["status"] = "active"
         tp._post_event(app, tp._event("invoice.paid", {
             "id": "in_t", "subscription": "sub_t", "customer": "cus_t",
@@ -336,6 +343,8 @@ class TestCeiling:
         u = _db.session.get(User, u.id)
         assert u.subscription_ever_paid
         assert self._limit(app, u) == 100.0
+        # Paid for Supporter: the block is lifted at once.
+        assert not user_is_capped(u)
 
     def test_before_the_start_the_alpha_cap(self, app):
         """Control: nothing changes before the start, the cap included."""
@@ -346,12 +355,14 @@ class TestCeiling:
         without a subscription."""
         assert self._limit(app, _ended()) == 20.0
 
-    def test_no_trial_ceiling_for_the_rest_of_the_month(self, app):
+    def test_standards_ceiling_in_all_not_the_trials(self, app):
+        """The stretch to the first payment is counted once against
+        Standard's ceiling, not against the 14-day trial's 30 USD."""
         from backend.utils.spend import trial_limit_usd
         u = _tester(subscription_status="trialing",
                     subscription_level="discounted",
                     subscription_trial_start=datetime.utcnow())
-        assert trial_limit_usd(u, app.config) == 0
+        assert trial_limit_usd(u, app.config) == 55.0
 
     def test_a_plain_trial_keeps_its_ceiling(self, app):
         """Control: #649's trial ceiling for an account that is not a
@@ -427,10 +438,24 @@ class TestCommand:
                           ("deleting", "alpha")):
             u = _db.session.get(User, a[key].id)
             assert u.plan == plan and u.alpha_free_granted_at is None
-        # Run again: nothing left to give; it points at --change-date.
+        # Run again: nothing left to give, and no second date.
         again = self._run(app, "--apply", "--start", start)
+        assert again.exit_code == 0, again.output
         assert "0 account(s)" in again.output
-        assert "--change-date" in again.output
+        other = self._run(app, "--apply", "--start", "2027-03-01")
+        assert other.exit_code != 0
+        assert "--change-date" in other.output
+
+    def test_the_dry_run_after_the_grant_lists_who_is_left(self, app):
+        """After the grant the date is known: the dry run needs no
+        --start and lists the "alpha" accounts it would still convert."""
+        self._accounts()
+        self._run(app, "--apply", "--start", "2026-12-01", "--user", "al")
+        r = self._run(app)
+        assert r.exit_code == 0, r.output
+        assert "from 2026-12-01 00:00 UTC" in r.output
+        assert "1 account(s) on the alpha plan get it" in r.output
+        assert "al2" in r.output
 
     def test_a_start_in_the_past(self, app):
         a = self._accounts()
@@ -473,12 +498,190 @@ class TestCommand:
         assert u.plan == "alpha" and u.alpha_free_granted_at is None
         assert u.alpha_free_start is None and u.plan_set_by_hand
 
+    def test_undo_leaves_a_changed_plan_and_a_live_subscription(self, app):
+        a = self._accounts()
+        self._run(app, "--apply", "--start", "2026-12-01")
+        pro = _db.session.get(User, a["alpha"].id)
+        pro.plan = "pro"
+        paying = _db.session.get(User, a["alpha2"].id)
+        paying.subscription_status = "active"
+        paying.subscription_level = "discounted"
+        _db.session.commit()
+        r = self._run(app, "--undo", "--apply")
+        assert r.exit_code == 0, r.output
+        assert "0 account(s) back" in r.output
+        assert "left as it is: al (its plan is pro now)" in r.output
+        assert "left as it is: al2 (it has a live subscription)" in r.output
+        assert _db.session.get(User, a["alpha"].id).plan == "pro"
+        assert _db.session.get(User, a["alpha2"].id).plan == "free"
+
+    def test_undo_works_with_payments_off(self, app):
+        """The way back after turning payments off."""
+        a = self._accounts()
+        self._run(app, "--apply", "--start", "2026-12-01")
+        app.config["PAYMENTS_ENABLED"] = False
+        r = self._run(app, "--undo", "--apply")
+        assert r.exit_code == 0, r.output
+        assert _db.session.get(User, a["alpha"].id).plan == "alpha"
+
     def test_refused_while_payments_are_off(self, app_off):
         _user("al", plan="alpha")
         r = self._run(app_off, "--apply", "--start", "2026-12-01")
         assert r.exit_code != 0
         assert _db.session.query(User).filter_by(
             username="al").one().plan == "alpha"
+
+
+class TestNeverSignedIn:
+    def test_after_the_end_no_paid_cohort_at_all(self, app):
+        """A tester given the month who never signed in: once the fixed
+        end has passed, nothing counts them as paid, for any gate or
+        background cohort."""
+        u = _ended("ghost")
+        assert u.last_seen_at is None
+        assert not u.on_paid_plan and not u.has_voice_mode
+        assert not subs.ai_replies_allowed(u)
+        assert subs.refuse_billed_call(u) is not None
+        assert u.id not in {x.id for x in User.query.filter(
+            User.paid_features_clause()).all()}
+        assert u.id not in {x.id for x in User.profile_eligible_query().all()}
+
+    def test_dates_missing_count_as_nothing(self, app):
+        """Only stored dates count: a marked account without them is never
+        read as inside a month."""
+        u = _tester("half")
+        u.alpha_free_start = None
+        u.alpha_free_until = None
+        _db.session.commit()
+        assert not u.alpha_free_month_active
+        assert not u.alpha_free_month_upcoming
+        assert u.id not in {x.id for x in User.query.filter(
+            User.paid_features_clause()).all()}
+
+
+class TestLateAlphaAccounts:
+    """Accounts on "alpha" that the command skipped get the same month
+    when they come in later."""
+
+    def test_approved_after_the_grant(self, app):
+        given = _tester("given", start=datetime(2026, 12, 1),
+                        until=datetime(2026, 12, 31))
+        late = _user("late", plan="alpha")
+        late.approved = False
+        _db.session.commit()
+        admin = _client(app, _user("root", is_admin=True))
+        r = admin.post(f"/api/admin/users/{late.id}/toggle")
+        assert r.status_code == 200
+        late = _db.session.get(User, late.id)
+        assert late.plan == "free"
+        assert (late.alpha_free_start, late.alpha_free_until) == (
+            given.alpha_free_start, given.alpha_free_until)
+
+    def test_restored_after_the_grant(self, app):
+        from backend.utils.account_deletion import restore_account
+        _tester("given", start=datetime(2026, 12, 1),
+                until=datetime(2026, 12, 31))
+        back = _user("back", plan="alpha", deleted_at=datetime.utcnow())
+        assert restore_account(back)
+        back = _db.session.get(User, back.id)
+        assert back.plan == "free"
+        assert back.alpha_free_start == datetime(2026, 12, 1)
+
+    def test_nothing_before_the_grant(self, app):
+        """Control: before the command ran, approving an alpha account
+        changes nothing."""
+        late = _user("late", plan="alpha")
+        late.approved = False
+        _db.session.commit()
+        admin = _client(app, _user("root", is_admin=True))
+        admin.post(f"/api/admin/users/{late.id}/toggle")
+        assert _db.session.get(User, late.id).plan == "alpha"
+
+
+class TestOneCeiling:
+    """From the month's start to the first paid invoice, Standard's
+    ceiling once in all, whatever the calendar months."""
+
+    @pytest.fixture(autouse=True)
+    def _ceilings(self, app):
+        app.config["SUBSCRIPTION_SPEND_LIMIT_USD_STANDARD"] = 55.0
+        app.config["SUBSCRIPTION_SPEND_LIMIT_USD_SUPPORTER"] = 100.0
+
+    def _enforce(self, app, user_id):
+        from backend.utils.spend import enforce_user_spend_cap
+        return enforce_user_spend_cap(user_id, app.config,
+                                      send_email=lambda **_k: None)
+
+    def _capped(self, user_id):
+        from backend.utils.spend import user_is_capped
+        _db.session.expire_all()
+        return user_is_capped(_db.session.get(User, user_id))
+
+    @staticmethod
+    def _first_of_month():
+        now = datetime.utcnow()
+        return datetime(now.year, now.month, 1)
+
+    def test_a_month_across_a_calendar_boundary(self, app):
+        start = self._first_of_month() - timedelta(days=3)
+        u = _tester(start=start, until=_days(10))
+        tp._cost(u.id, 30, start + timedelta(hours=1))   # last month
+        assert self._enforce(app, u.id).get("status") != "trial_capped"
+        tp._cost(u.id, 25, datetime.utcnow() - timedelta(minutes=1))
+        assert self._enforce(app, u.id)["status"] == "trial_capped"
+        assert self._capped(u.id)
+        from backend.utils.spend import spend_cap_payload
+        payload = spend_cap_payload(_db.session.get(User, u.id))
+        assert "free month" in payload["message"]
+
+    def test_a_month_starting_on_the_first(self, app):
+        start = self._first_of_month()
+        u = _tester(start=start, until=_days(10))
+        tp._cost(u.id, 30, start + timedelta(minutes=30))
+        tp._cost(u.id, 25, datetime.utcnow() - timedelta(minutes=1))
+        assert self._enforce(app, u.id)["status"] == "trial_capped"
+
+    def test_spend_after_the_end_before_the_first_charge_counts(self, app):
+        start = _days(-31)
+        u = _tester(start=start, until=_days(-1),
+                    subscription_status="active",
+                    subscription_level="supporter",
+                    subscription_trial_start=start)
+        tp._cost(u.id, 40, start + timedelta(days=1))
+        tp._cost(u.id, 15, datetime.utcnow() - timedelta(minutes=1))
+        assert self._enforce(app, u.id)["status"] == "trial_capped"
+        assert self._capped(u.id)
+
+    def test_spend_before_the_start_does_not_count(self, app):
+        """Control: the alpha weeks before the release date are not part
+        of the free month's total."""
+        start = _days(-2)
+        u = _tester(start=start, until=_days(28))
+        tp._cost(u.id, 54, start - timedelta(days=3))
+        tp._cost(u.id, 5, datetime.utcnow() - timedelta(minutes=1))
+        r = self._enforce(app, u.id)
+        assert r.get("status") != "trial_capped"
+
+    def test_the_first_paid_invoice_lifts_every_block(self, app, gateway):
+        from backend.utils.spend import current_month
+        u = _tester(stripe_customer_id="cus_t")
+        gateway.subscriptions["sub_t"] = tp.subscription(
+            "sub_t", customer="cus_t", status="trialing", trial=True,
+            level="supporter")
+        tp._post_event(app, tp._event("customer.subscription.created",
+                                      {"id": "sub_t"}, event_id="e1"))
+        tp._cost(u.id, 56, datetime.utcnow() - timedelta(minutes=1))
+        assert self._enforce(app, u.id)["status"] == "trial_capped"
+        # A monthly block at the old ceiling, too.
+        user = _db.session.get(User, u.id)
+        user.spend_blocked_month = current_month()
+        _db.session.commit()
+        assert self._capped(u.id)
+        gateway.subscriptions["sub_t"]["status"] = "active"
+        tp._post_event(app, tp._event("invoice.paid", {
+            "id": "in_t", "subscription": "sub_t", "customer": "cus_t",
+            "amount_paid": 11781}, event_id="e2"))
+        assert not self._capped(u.id)
 
 
 class TestAdmin:

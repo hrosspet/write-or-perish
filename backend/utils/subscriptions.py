@@ -357,6 +357,42 @@ def alpha_free_month_candidates(usernames=None):
     return q.order_by(User.id).all()
 
 
+def current_free_month():
+    """(start, end) of the free month the command gave, or None before it
+    ran (or after a full --undo). Every tester has the same dates: the
+    command refuses a second date (--change-date moves them all)."""
+    from backend.models import User
+    row = (User.query
+           .filter(User.alpha_free_granted_at.isnot(None),
+                   User.alpha_free_start.isnot(None),
+                   User.alpha_free_until.isnot(None))
+           .order_by(User.alpha_free_granted_at.desc(), User.id.desc())
+           .first())
+    return (row.alpha_free_start, row.alpha_free_until) if row else None
+
+
+def convert_if_alpha(user, config=None, now=None):
+    """Once the free month has been given, an account that comes in on
+    the "alpha" plan later (approved after a wait, or restored from a
+    deletion it was waiting on when the command ran) gets the same month,
+    with the same dates, as the command would have given it. Does not
+    commit: the caller's change and this go together. Returns True when
+    it converted the account."""
+    if user is None or not payments_enabled(config):
+        return False
+    if (user.plan != "alpha" or not user.approved or user.is_admin
+            or user.deleted_at is not None
+            or user.alpha_free_granted_at is not None):
+        return False
+    month = current_free_month()
+    if month is None:
+        return False
+    user.plan = "free"
+    user.alpha_free_granted_at = now or datetime.utcnow()
+    user.alpha_free_start, user.alpha_free_until = month
+    return True
+
+
 def alpha_testers(usernames=None):
     """Accounts given the free month already (*usernames* narrows)."""
     from backend.models import User
@@ -382,7 +418,7 @@ def grant_alpha_free_month(users, start, config=None, now=None):
 
 
 def move_alpha_free_month(users, start, config=None):
-    """Give *users* (alpha testers already) the free month from *start*
+    """Give *users* (every alpha tester) the free month from *start*
     instead. Their plan and anything they subscribed stay as they are.
     Commits. Returns how many changed."""
     from backend.extensions import db
@@ -396,17 +432,27 @@ def move_alpha_free_month(users, start, config=None):
 
 def undo_alpha_free_month(usernames=None):
     """Put alpha testers back on the hand-set "alpha" plan and forget
-    their free month (a subscription they started stays theirs and keeps
-    renewing until they cancel it). Commits. Returns how many changed."""
+    their free month. Left as they are: an account whose plan was changed
+    since (an admin's choice), and one with a live subscription (it would
+    keep being charged for what "alpha" gives free; cancel it first).
+    Commits. Returns (how many changed, [(username, why skipped)])."""
     from backend.extensions import db
-    users = alpha_testers(usernames)
-    for user in users:
+    from backend.models import SUBSCRIPTION_GRANTING_STATUSES
+    done, skipped = 0, []
+    for user in alpha_testers(usernames):
+        if user.plan != "free":
+            skipped.append((user.username, f"its plan is {user.plan} now"))
+            continue
+        if user.subscription_status in SUBSCRIPTION_GRANTING_STATUSES:
+            skipped.append((user.username, "it has a live subscription"))
+            continue
         user.plan = "alpha"
         user.alpha_free_granted_at = None
         user.alpha_free_start = None
         user.alpha_free_until = None
+        done += 1
     db.session.commit()
-    return len(users)
+    return done, skipped
 
 
 def checkout_levels(user):

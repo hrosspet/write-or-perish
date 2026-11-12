@@ -376,6 +376,28 @@ def test_a_lapsed_accounts_token_gets_what_its_session_gets(real_app):
     assert r.status_code == 200   # the same page again: a re-clip
 
 
+def test_an_alpha_testers_token_gets_what_its_session_gets(real_app):
+    """The alpha free month (#438) is the account's dates, nothing the
+    session holds: a tester who never signed in and whose month ended is
+    lapsed by token as by session, and makes no billed call."""
+    from datetime import datetime, timedelta
+    now = datetime.utcnow()
+    u = _user("ghost", plan="free", external_content_enabled=True,
+              alpha_free_granted_at=now - timedelta(days=50),
+              alpha_free_start=now - timedelta(days=40),
+              alpha_free_until=now - timedelta(days=10))
+    assert u.last_seen_at is None
+    token = _token_for(u)
+    headers = {"Authorization": f"Bearer {token}"}
+    by_token = _no_session_client(real_app).get(
+        "/api/external/clip/status", headers=headers)
+    by_session = _client(real_app, u).get("/api/external/clip/status")
+    assert by_token.status_code == by_session.status_code == 200
+    r = _client(real_app, u).get("/api/search/semantic?q=tea")
+    assert r.status_code == 402
+    assert r.get_json()["error"] == "subscription_required"
+
+
 # Decided under Peter's "no AI replies and background jobs": a lapsed
 # account makes no billed call at all. Every route that starts one
 # answers 402 subscription_required, with what stops and what still works.

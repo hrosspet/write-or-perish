@@ -996,9 +996,17 @@ def handle_event(gateway, event, config=None):
             and (obj.get("amount_paid") or 0) > 0
             and user.stripe_subscription_id == sub_id):
         # The only proof of a payment (see _apply_payment_state). The
-        # trial's ceiling ends with it.
+        # trial's ceiling ends with it, and the monthly ceiling may change
+        # with it (an alpha tester's is Standard's until the first payment,
+        # #438): a block that the new ceiling no longer warrants is lifted.
+        from backend.utils.spend import (
+            get_user_spend_limit_usd, reconcile_user_spend_block)
+        cfg = _config(config)
+        limit_before = get_user_spend_limit_usd(user, cfg)
         user.subscription_ever_paid = True
         user.subscription_trial_capped = False
+        if get_user_spend_limit_usd(user, cfg) != limit_before:
+            reconcile_user_spend_block(user, cfg)
     return "applied" if user is not None else "no_account"
 
 

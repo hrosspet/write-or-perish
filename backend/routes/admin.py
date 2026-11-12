@@ -365,6 +365,10 @@ def toggle_user_status(user_id):
         user.deactivated_at = datetime.utcnow()
     else:
         user.approved_at = datetime.utcnow()
+        # An "alpha" account let in after the alpha free month was given
+        # gets the same month (#438).
+        from backend.utils.subscriptions import convert_if_alpha
+        convert_if_alpha(user)
     db.session.commit()
     return jsonify({"message": "User status updated", "approved": user.approved}), 200
 
@@ -963,6 +967,10 @@ def activate_and_welcome(user_id):
     # Approve the user
     user.approved = True
     user.approved_at = datetime.utcnow()
+    # An "alpha" account let in after the alpha free month was given gets
+    # the same month (#438).
+    from backend.utils.subscriptions import convert_if_alpha
+    convert_if_alpha(user)
     db.session.commit()
 
     # Generate magic link pointing to /welcome (30-day expiry)

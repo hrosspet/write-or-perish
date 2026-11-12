@@ -83,28 +83,40 @@ def alpha_free_month_command(start_raw, apply_, change_date, undo,
     from datetime import datetime
 
     from backend.utils.subscriptions import (
-        alpha_free_month_candidates, alpha_testers, free_month_dates,
-        grant_alpha_free_month, move_alpha_free_month, parse_start_date,
-        payments_enabled, undo_alpha_free_month)
+        alpha_free_month_candidates, alpha_testers, current_free_month,
+        free_month_dates, grant_alpha_free_month, move_alpha_free_month,
+        parse_start_date, payments_enabled, undo_alpha_free_month)
     if undo:
+        # Works with payments off too: it is the way back after turning
+        # them off.
         if not apply_:
             raise click.ClickException("--undo needs --apply as well.")
-        n = undo_alpha_free_month(usernames or None)
+        n, skipped = undo_alpha_free_month(usernames or None)
         click.echo(f"{n} account(s) back on the alpha plan.")
+        for name, why in skipped:
+            click.echo(f"  left as it is: {name} ({why})")
         return
     if not payments_enabled():
         raise click.ClickException(
             "Payments are off: set PAYMENTS_ENABLED=true and restart "
             "first. The free month only means something while they are on.")
-    if not start_raw:
+    given = current_free_month()
+    if not start_raw and (change_date or given is None):
         raise click.ClickException(
             "--start YYYY-MM-DD is needed: the first day of the free month "
             "(the Beta release date), from 00:00 UTC.")
     try:
-        start = parse_start_date(start_raw)
+        start = parse_start_date(start_raw) if start_raw else given[0]
     except ValueError:
         raise click.ClickException(
             f"--start {start_raw!r} is not a date like 2026-12-01.")
+    if usernames and change_date:
+        raise click.ClickException(
+            "--change-date moves every tester's month; it takes no --user.")
+    if given is not None and not change_date and start != given[0]:
+        raise click.ClickException(
+            f"The free month was given from {given[0]:%Y-%m-%d}. To move "
+            "it, use --change-date.")
     begin, end = free_month_dates(start)
     now = datetime.utcnow()
     fmt = "%Y-%m-%d %H:%M UTC"
@@ -144,8 +156,8 @@ def alpha_free_month_command(start_raw, apply_, change_date, undo,
         click.echo(f"  {u.username}")
     already = alpha_testers(usernames or None)
     if already:
-        click.echo(f"{len(already)} account(s) have a free month already "
-                   "and are left as they are; --change-date moves it.")
+        click.echo(f"{len(already)} account(s) have this free month "
+                   "already and are left as they are.")
     if not apply_:
         click.echo("Nothing changed. Run again with --apply.")
         return
