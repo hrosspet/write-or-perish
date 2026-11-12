@@ -1452,10 +1452,11 @@ def test_an_answer_and_a_nested_reply_are_never_widened(app):
     assert _put(app, "ben", note, privacy_level="public").status_code == 403
     assert _put(app, "ben", note, privacy_level="circles",
                 circle_usernames=["dana"]).status_code == 400
-    # Also with Circles switched off for ben.
+    # Also with Circles switched off for ben: his AI reply is closed to
+    # him, so it is not his to change at all (as GET answers).
     app.config["CIRCLES_USER_IDS"] = app.config["CIRCLES_USER_IDS"] - {
         _user("ben").id}
-    assert _put(app, "ben", a, privacy_level="public").status_code == 403
+    assert _put(app, "ben", a, privacy_level="public").status_code == 404
     closed(a)
 
 
@@ -1576,8 +1577,10 @@ def test_an_answer_is_hidden_while_its_entry_is_deleted(app):
     assert "ANSWER-FROM-ANNAS-ENTRY" not in _export(ben, filter_ai_usage=False)
     thread = _client(app, "ben").get(f"/api/nodes/{r}").get_json()
     assert "ANSWER-FROM-ANNAS-ENTRY" not in json.dumps(thread)
-    # Still not his to widen.
-    assert _put(app, "ben", a, privacy_level="public").status_code == 403
+    # Closed to him: not his to change at all, let alone widen.
+    assert _put(app, "ben", a, privacy_level="public").status_code == 404
+    assert _client(app, "ben").put(f"/api/nodes/{a}/audience",
+                                   json={}).status_code == 404
     node.deleted_at = None
     _db.session.commit()
     assert can_user_access_node(_db.session.get(Node, a), ben.id)
@@ -1605,17 +1608,21 @@ def test_an_answer_whose_entry_is_gone_stays_someone_elses(app):
     assert not can_ai_access_node(answer, ben.id)
     assert not _can_read(app, "ben", a)
     assert a not in _corpus_ids(ben)
-    for node_id in (a, r):
-        assert _put(app, "ben", node_id,
-                    privacy_level="public").status_code == 403
-        assert _put(app, "ben", node_id, privacy_level="circles",
-                    circle_usernames=["dana"]).status_code == 400
-        assert _client(app, "ben").put(
-            f"/api/nodes/{node_id}/audience",
-            json={"circle_usernames": ["dana"]}).status_code == 400
+    # His AI reply is closed to him: not his to change (404, as GET).
+    # His typed reply stays his: not public, no new audience.
+    assert _put(app, "ben", a, privacy_level="public").status_code == 404
+    assert _client(app, "ben").put(
+        f"/api/nodes/{a}/audience",
+        json={"circle_usernames": ["dana"]}).status_code == 404
+    assert _put(app, "ben", r, privacy_level="public").status_code == 403
+    assert _put(app, "ben", r, privacy_level="circles",
+                circle_usernames=["dana"]).status_code == 400
+    assert _client(app, "ben").put(
+        f"/api/nodes/{r}/audience",
+        json={"circle_usernames": ["dana"]}).status_code == 400
     assert _put(app, "ben", r, privacy_level="private",
                 apply_to_descendants=True).status_code == 200
-    assert _put(app, "ben", a, privacy_level="public").status_code == 403
+    assert _put(app, "ben", a, privacy_level="public").status_code == 404
     assert not _can_read(app, "dana", a) and not _can_read(app, "dana", r)
 
 

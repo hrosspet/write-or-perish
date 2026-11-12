@@ -258,31 +258,75 @@ def audience_preview():
     # one of these people cannot read (Peter, 2026-11-12): the same 409
     # the save gives, before anything is saved, so the form shows the
     # dialog naming the quoted entry. For an entry already shared, a
-    # quote it had is checked against the people it gains only.
+    # quote it had is checked against the people it gains only. With
+    # ``share_path``, the discussion leading up to the entry (the edited
+    # entry's, or for a new entry the one from ``parent_id`` up) is
+    # checked the same way.
     content = data.get("content")
-    if isinstance(content, str) and content and readers:
-        from backend.utils.publish_quotes import (
-            circle_readers, quotes_not_public_response, unpublished_quotes,
-        )
-        from backend.utils.quotes import find_quote_ids
-        ids = {u.id for u in User.query.filter(User.username.in_(readers))}
-        ids.add(current_user.id)
-        before, old_ids = set(), set()
-        if entry is not None and entry.privacy_level == "circles":
-            before = circle_readers(entry)
-            old_ids = set(find_quote_ids(entry.get_content() or ""))
-        found = unpublished_quotes([content], current_user.id,
-                                   skip_ids=old_ids, readers=ids)
-        added = ids - before
-        if added and old_ids:
-            seen = {n.id for n in found}
-            found += [n for n in unpublished_quotes(
-                [content], current_user.id, readers=added)
-                if n.id not in seen]
+    if readers and ((isinstance(content, str) and content)
+                    or data.get("share_path")):
+        found = _quotes_unreadable_by(
+            readers, content if isinstance(content, str) else "", entry,
+            data)
         if found:
+            from backend.utils.publish_quotes import quotes_not_public_response
             return quotes_not_public_response(found, current_user.id,
                                               shared=True)
     return jsonify({"readers": readers}), 200
+
+
+def _quotes_unreadable_by(readers, content, entry, data):
+    """For audience_preview: the quoted nodes that the people named
+    *readers* (usernames) and the user cannot all read, in *content* and,
+    with ``share_path``, in the discussion that would be shared with the
+    entry (publish_quotes.unpublished_quotes, mute-free reader lists). A
+    quote an already shared node had is checked against the people it
+    gains only."""
+    from backend.utils.publish_quotes import circle_readers, unpublished_quotes
+    from backend.utils.quotes import find_quote_ids
+    ids = {u.id for u in User.query.filter(User.username.in_(readers))}
+    ids.add(current_user.id)
+    shared_now = entry is not None and cz.is_shared_entry(entry)
+    before = circle_readers(entry) if shared_now else set()
+    added = ids - before
+    checks = [(content, set(find_quote_ids(entry.get_content() or ""))
+               if shared_now else set())]
+    if data.get("share_path"):
+        if entry is not None:
+            path = cz.thread_path(entry, current_user.id)
+        else:
+            path = []
+            try:
+                parent_id = int(data.get("parent_id") or 0)
+            except (TypeError, ValueError):
+                parent_id = 0
+            current = db.session.get(Node, parent_id) if parent_id else None
+            for _ in range(cz.THREAD_PATH_HOPS):
+                if (current is None or cz.entry_owner_id(current)
+                        != current_user.id):
+                    break
+                path.append(current)
+                current = current.parent
+        for above in path:
+            if above.deleted_at is not None or above.privacy_level == "public":
+                continue
+            text = above.get_content() or ""
+            already = (shared_now and above.privacy_level == "circles"
+                       and above.audience_root_id == entry.id)
+            checks.append((text, set(find_quote_ids(text)) if already
+                           else set()))
+    found, seen = [], set()
+    for text, old_ids in checks:
+        nodes = unpublished_quotes([text], current_user.id,
+                                   skip_ids=old_ids, readers=ids)
+        if added and old_ids:
+            nodes += unpublished_quotes([text], current_user.id,
+                                        readers=added)
+        for n in nodes:
+            if n.id not in seen:
+                seen.add(n.id)
+                found.append(n)
+    return found
 
 
 # ── The reader's side ───────────────────────────────────────────────────

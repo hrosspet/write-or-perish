@@ -57,11 +57,16 @@ QUOTED_PREVIEW_CHARS = 120
 
 
 def _readable_by_all(node, readers):
-    """*node* is public, or every user in *readers* (ids) can open it."""
-    from backend.utils.privacy import can_user_access_node
+    """*node* is public, or every user in *readers* (ids) is among the
+    people who read it: its writer, and, for a node shared with a circle
+    audience, that audience (circle_readers). Decided from the audience
+    lists alone, the ones the pages show: what a reader chose to hide
+    for themselves plays no part, so the answer is the same whatever any
+    of them chose."""
     if node.privacy_level == "public":
         return True
-    return all(can_user_access_node(node, uid) for uid in readers)
+    from backend.utils.privacy import _node_owner_id
+    return set(readers) <= (circle_readers(node) | {_node_owner_id(node)})
 
 
 def unpublished_quotes(texts, user_id, becoming_public=(), skip_ids=(),
@@ -77,9 +82,9 @@ def unpublished_quotes(texts, user_id, becoming_public=(), skip_ids=(),
     quotes it already had).
 
     *readers* (Circles): the ids of the people the texts are shared with.
-    A quoted node then counts when one of them cannot open it (a public
-    one never does); *becoming_public* are then the nodes shared with
-    the same people by the same change.
+    A quoted node then counts when one of them is not among its readers
+    (_readable_by_all; a public one never counts); *becoming_public* are
+    then the nodes shared with the same people by the same change.
     """
     from backend.utils.privacy import can_user_access_node, owner_hidden
     becoming_public = set(becoming_public)
@@ -151,11 +156,15 @@ def publish_refusal(texts, user_id, becoming_public=(), skip_ids=()):
 
 def circle_readers(node):
     """The ids of the people who read *node* through the circle audience
-    it is shared with now, its entry's author included; an empty set when
-    it is not shared with circles (circles.shared_entry_of)."""
+    it is shared with now, its entry's author included: the entry's
+    reader list as the pages show it (circles.readers_of: no mutes). An
+    empty set when it is not shared with circles (circles.shared_entry_of)
+    or Circles is off for the entry's author, when nobody but its writer
+    reads it."""
     from backend.utils.circles import entry_owner_id, readers_of, shared_entry_of
+    from backend.utils.privacy import circles_enabled_for
     entry = shared_entry_of(node)
-    if entry is None:
+    if entry is None or not circles_enabled_for(entry_owner_id(entry)):
         return set()
     return {u.id for u in readers_of(entry)} | {entry_owner_id(entry)}
 

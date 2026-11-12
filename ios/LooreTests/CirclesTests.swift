@@ -664,6 +664,12 @@ final class CirclesFormTests: StubbedAppTestCase {
         await waitForSentence(model)
         await model.submit()
         XCTAssertEqual(result()?.id, 21)
+        // The check before saving carried the text, the parent and the
+        // discussion share, so the discussion's quotes are checked too.
+        let checked = body(of: "POST /api/circles/audience-preview")
+        XCTAssertEqual(checked?["content"] as? String, "the one I share")
+        XCTAssertEqual(checked?["parent_id"] as? Int, 20)
+        XCTAssertEqual(checked?["share_path"] as? Bool, true)
         let sent = body(of: "POST /api/nodes/")
         XCTAssertEqual(sent?["share_path"] as? Bool, true)
         XCTAssertEqual(sent?["circle_ids"] as? [Int], [3])

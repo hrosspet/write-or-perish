@@ -407,6 +407,15 @@ THREAD_PATH_HOPS = 500
 # A larger max_export_tokens in such a prompt is cut to it. INTRODUCED
 # HEURISTIC.
 OTHERS_PROMPT_EXPORT_TOKENS = 100_000
+PATH_REPLY_IN_PROGRESS = (
+    "An AI reply in the discussion above this entry is still being "
+    "written. Share the discussion once it is done.")
+# A node someone wrote into another person's shared thread is read by its
+# people only while its writer reads the thread too.
+THREAD_CLOSED = (
+    "This thread is no longer shared with you, so what you wrote in it "
+    "can't be changed or shared with its people. You can take it back to "
+    "Only me.")
 PROMPT_ALONE = (
     "A thread's prompt is shared together with the discussion below it. "
     "Share an entry of the thread and choose to share the discussion "
@@ -451,7 +460,15 @@ def share_thread_path(node, user, data):
     if not data.get("share_path"):
         release_thread_path(node)
         return
-    for above in thread_path(node, user.id):
+    from backend.utils.llm_nodes import reply_in_progress
+    path = thread_path(node, user.id)
+    # An AI reply is shared once it is written (Peter, 2026-11-12): the
+    # discussion waits while one of its replies is still being written.
+    if any(above.deleted_at is None and reply_in_progress(above)
+           for above in path):
+        raise AudienceError(PATH_REPLY_IN_PROGRESS, code="reply_in_progress",
+                            status=409)
+    for above in path:
         if above.deleted_at is not None:
             continue
         if above.privacy_level == PrivacyLevel.PUBLIC.value:
@@ -850,6 +867,30 @@ def leave_audience(node):
     forget_circle_access()
 
 
+def thread_write_refusal(source, user):
+    """Why *user* may not keep or put a node of theirs in the shared
+    thread *source* (a ThreadSource of someone else's) where its people
+    read it, as an AudienceError (403 ``circle_thread_closed``), or None.
+
+    Its people read what is written there only while the entry is shared
+    and the writer reads the thread as part of its audience (they were
+    not removed, did not hide its author, and Circles is on for them).
+    Otherwise the writer may take the node back to Only me but not change
+    what the thread's people read. Nothing is refused while nobody but
+    the writer reads the node: Circles off for the entry's author, or the
+    entry gone for good (as before Circles)."""
+    from backend.utils.privacy import in_audience
+    entry = (db.session.get(Node, source.entry_id)
+             if source is not None and source.entry_id is not None else None)
+    if entry is None or not circles_enabled_for(entry_owner_id(entry)):
+        return None
+    if (entry.deleted_at is None and is_shared_entry(entry)
+            and circles_enabled(user) and in_audience(entry.id, user.id)):
+        return None
+    return AudienceError(THREAD_CLOSED, code="circle_thread_closed",
+                         status=403)
+
+
 def apply_requested_sharing(node, user, data, *, old_privacy=None,
                             creating=False):
     """The Circles part of saving a node whose privacy_level has already
@@ -887,6 +928,9 @@ def apply_requested_sharing(node, user, data, *, old_privacy=None,
         if node.privacy_level != CIRCLES:
             leave_audience(node)
             return None
+        refused = thread_write_refusal(source, user)
+        if refused is not None:
+            raise refused
         if names_an_audience:
             raise AudienceError(REPLY_AUDIENCE, code="circle_reply_audience")
         _refuse_prompt_alone(node, source.entry_id, old_privacy)

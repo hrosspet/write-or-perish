@@ -133,6 +133,10 @@ def apply_settings_to_descendants(root, user_id, *, privacy_level=None,
     changed = []
     for n in editable:
         touched = False
+        # What the node was before this cascade (level, thread pointer),
+        # for the caller's quote check (a reply already read by the same
+        # people is checked only against the readers it gains).
+        n.settings_before = (n.privacy_level, n.audience_root_id)
         foreign = (privacy_level is not None
                    and written_into_someone_elses_thread(n, user_id))
         if foreign and privacy_level == "public":

@@ -524,9 +524,13 @@ def test_a_quote_in_another_members_node_needs_the_threads_audience(
     assert "{quote:%d}" % bens_private.id in chidis
     assert "BENS PRIVATE DIARY" not in chidis
     assert "{quote_ext:1}" in chidis
-    # ... the public node and the node of the same thread resolve.
+    # ... the public node resolves. A node of the same thread that
+    # another member wrote passes the thread's test, but a model acting
+    # for ben never reads another person's circle node: it reaches his
+    # model as inaccessible, with none of its text.
     assert "A PUBLIC NOTE" in chidis
-    assert "{quote:%d}" % w["c_chat"].id not in chidis
+    assert "[Quote #%d: inaccessible]" % w["c_chat"].id in chidis
+    assert "CHIDI SAYS CHAT" not in "\n".join(m["text"] for m in messages)
     # In ben's own node his quote resolves, as before.
     assert "BENS PRIVATE DIARY" in bens
     # The other direction: anna asks under chidi's node; a quote there

@@ -193,14 +193,21 @@ final class CircleAudienceState {
     }
 
     private func preview(circleIds: [Int], names: [String],
-                         content: String? = nil) async -> Result<[String], PreviewFailure> {
+                         content: String? = nil, parentId: Int? = nil) async -> Result<[String], PreviewFailure> {
         do {
             var body: [String: JSONValue] = [
                 "circle_ids": .array(circleIds.map(JSONValue.int)),
                 "usernames": .array(names.map(JSONValue.string)),
             ]
             if let entryId { body["node_id"] = .int(entryId) }
-            if let content { body["content"] = .string(content) }
+            if let content {
+                body["content"] = .string(content)
+                // A new entry's place in its thread, and whether the
+                // discussion leading up to it is shared with it: that
+                // discussion is checked too.
+                if let parentId, entryId == nil { body["parent_id"] = .int(parentId) }
+                if offersSharePath && sharePath { body["share_path"] = .bool(true) }
+            }
             let answer: AudiencePreview = try await api.post(APIPath.circlesAudiencePreview, json: .object(body))
             return .success(answer.readers)
         } catch {
@@ -219,13 +226,13 @@ final class CircleAudienceState {
     /// server refuses the no-readers cases too. With `content`, the text is
     /// checked as well: a quote of an entry one of these people cannot read
     /// stops the save, and `quotesRefusal` holds the server's answer.
-    func refusalBeforeSaving(content: String? = nil) async -> String? {
+    func refusalBeforeSaving(content: String? = nil, parentId: Int? = nil) async -> String? {
         let shown = readers
         committed = names
         quotesRefusal = nil
         previewTask?.cancel()
         request += 1
-        switch await preview(circleIds: circleIds, names: committed, content: content) {
+        switch await preview(circleIds: circleIds, names: committed, content: content, parentId: parentId) {
         case .success(let found):
             readers = found
             error = nil

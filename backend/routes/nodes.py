@@ -1035,13 +1035,14 @@ def create_node():
     except cz.AudienceError as e:
         db.session.rollback()
         return e.response()
-    # A new entry shared with a circle, or a reply that joined a shared
-    # thread, quotes only nodes all its readers can read (Peter,
-    # 2026-11-12, as for a public entry above). Nothing is saved.
+    # A new entry shared with a circle (with the discussion leading up to
+    # it when that is shared too), or a reply that joined a shared thread,
+    # quotes only nodes all its readers can read (Peter, 2026-11-12, as
+    # for a public entry above). Nothing is saved.
     if node.privacy_level == PrivacyLevel.CIRCLES:
-        from backend.utils.publish_quotes import circle_share_refusal
-        refusal = circle_share_refusal(
-            [(node, content, set(), None)], current_user.id)
+        refusal = _circle_quote_refusal(
+            node, current_user.id, content, None, set(),
+            old_path_ids=set() if data.get("share_path") else None)
         if refusal is not None:
             db.session.rollback()
             return refusal
@@ -1076,6 +1077,21 @@ def create_node():
         "tip_id": parts[-1].id if parts else node.id
     }), 201
 
+
+def _thread_write_refusal(node, user):
+    """Circles: why *user* may not change what the people of someone
+    else's shared thread read of *node*, a node of theirs written into it
+    (circles.thread_write_refusal), as an AudienceError, or None."""
+    from backend.utils import circles as cz
+    from backend.utils.privacy import pointers_may_exist
+    if not pointers_may_exist():
+        return None
+    source = cz.thread_source(node)
+    if source is None or not source.is_someone_elses(user.id):
+        return None
+    return cz.thread_write_refusal(source, user)
+
+
 def _shared_path_ids(node, user_id):
     """Circles: the ids of the nodes of the discussion leading up to
     *node* that are shared with it now (circles.share_thread_path), for
@@ -1100,7 +1116,9 @@ def _circle_quote_refusal(node, user_id, new_text, old_text, old_readers,
     leading up to it when ``share_path`` was sent (*old_path_ids*: those
     of its nodes shared with it before, None when not sent); and the
     replies an "apply to my replies" change carried along
-    (*shared_along*), which are new to their readers."""
+    (*shared_along*): one newly read by this audience against all its
+    readers, one it already read (node_settings marks what each was
+    before, ``settings_before``) against the readers it gains."""
     from backend.utils import circles as cz
     from backend.utils.publish_quotes import circle_share_refusal
     changes = []
@@ -1117,9 +1135,19 @@ def _circle_quote_refusal(node, user_id, new_text, old_text, old_readers,
                     changes.append((above, text, old_readers, text))
                 else:
                     changes.append((above, text, set(), None))
+    from backend.utils.publish_quotes import circle_readers
     for n in shared_along:
-        if n is not node and n.privacy_level == "circles":
-            changes.append((n, n.get_content(), set(), None))
+        if n is node or n.privacy_level != "circles":
+            continue
+        text = n.get_content()
+        level, pointer = getattr(n, "settings_before", (None, None))
+        if level == "circles" and pointer == n.audience_root_id:
+            # Already read by this audience: only the readers it gains.
+            before = (old_readers if pointer == node.audience_root_id
+                      else circle_readers(n))
+            changes.append((n, text, before, text))
+        else:
+            changes.append((n, text, set(), None))
     return circle_share_refusal(changes, user_id)
 
 
@@ -1132,6 +1160,13 @@ def update_node(node_id):
     # Check authorization: owner OR LLM requester (parent node owner)
     if not can_user_edit_node(node):
         return jsonify({"error": "Not authorized"}), 403
+    # Circles: an AI reply asked for in someone else's shared thread is
+    # open to its owner exactly while the thread is; while it is closed
+    # to them it is not theirs to change either (as GET /<id> answers).
+    from backend.utils.privacy import answer_open_to_owner, is_others_thread_answer
+    if (is_others_thread_answer(node)
+            and not answer_open_to_owner(node, current_user.id)):
+        return _node_not_found()
     data = request.get_json()
     new_content = data.get("content")
     if new_content is None:
@@ -1233,6 +1268,15 @@ def update_node(node_id):
     # the node verbatim and the Log then previewed the prompt instead of
     # the conversation.
     content_changed = (new_content or "").strip() != (old_content or "").strip()
+    # Circles: new text in a node written into someone else's shared
+    # thread reaches the thread's people only while its writer reads the
+    # thread (a change of its level is checked with the audience above).
+    if (content_changed and "privacy_level" not in data
+            and node.privacy_level == "circles"):
+        refused = _thread_write_refusal(node, current_user)
+        if refused is not None:
+            db.session.rollback()
+            return refused.response()
 
     # If this node has a prompt artifact and detach_prompt is requested
     # (and the text actually changed), remove the artifact so the edited
@@ -1405,9 +1449,12 @@ def set_node_audience(node_id):
     Editing an entry's audience otherwise goes through PUT /<id>."""
     from backend.utils import circles as cz
     node = Node.query.get(node_id)
+    from backend.utils.privacy import answer_open_to_owner, is_others_thread_answer
     if (node is None or node.deleted_at is not None
             or not cz.circles_enabled(current_user)
-            or not can_user_edit_node(node, current_user.id)):
+            or not can_user_edit_node(node, current_user.id)
+            or (is_others_thread_answer(node)
+                and not answer_open_to_owner(node, current_user.id))):
         return _node_not_found()
     data = request.get_json(silent=True) or {}
     old_privacy = node.privacy_level

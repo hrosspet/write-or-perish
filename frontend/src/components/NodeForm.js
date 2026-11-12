@@ -635,8 +635,11 @@ const NodeForm = forwardRef(
             usernames: splitNames(audience.namesText),
             ...(editMode && nodeId && { node_id: nodeId }),
             // The text is checked too: it may not quote an entry one of
-            // these people cannot read (409 quotes_not_shared).
+            // these people cannot read (409 quotes_not_shared); with the
+            // discussion leading up to it, that discussion as well.
             ...(!uploadedFile && { content }),
+            ...(!editMode && parentId && { parent_id: parentId }),
+            ...(threadPath && sharePath && { share_path: true }),
           });
           const fresh = res.data.readers || [];
           if (!fresh.length) {

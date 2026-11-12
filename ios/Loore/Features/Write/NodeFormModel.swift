@@ -520,7 +520,8 @@ final class NodeFormModel {
         if sharesEntry, !(edit != nil && !audienceChanged && edit?.initialPrivacy == .circles) {
             // The text goes along: it may not quote an entry one of these
             // people cannot read (nothing is saved, the dialog names it).
-            if let refusal = await audience.refusalBeforeSaving(content: uploadedFile == nil ? content : nil) {
+            if let refusal = await audience.refusalBeforeSaving(content: uploadedFile == nil ? content : nil,
+                                                                parentId: config.parentId) {
                 if let quotes = audience.quotesRefusal {
                     error = nil
                     dialog = .quotesNotPublic(quotes)
