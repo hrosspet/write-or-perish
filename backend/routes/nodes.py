@@ -83,6 +83,16 @@ def voice_mode_required(f):
     return wrapper
 
 
+def _own_recording(node):
+    """While payments are on (#438), the owner of a node may always play
+    and download its original recording, also without Voice mode: an
+    account whose subscription ended keeps reading what it said. New
+    speech stays behind Voice mode. Off: no exception, as before."""
+    from backend.utils.subscriptions import payments_enabled
+    return bool(payments_enabled() and node.user_id == current_user.id
+                and (node.audio_original_url or node.streaming_transcription))
+
+
 def _visible_node(node_id):
     """The node when the current user may see it (the rule GET /<id>
     applies), else None. Callers answer None with _node_not_found(), so a
@@ -1968,10 +1978,14 @@ def get_audio_urls(node_id):
         return _node_not_found()
 
     # Public nodes: any authenticated user can listen.
-    # Non-public nodes: require voice-mode (admin or paid plan).
+    # Non-public nodes: require voice-mode (admin or paid plan), except
+    # the owner's own recording while payments are on (#438).
+    own_only = False
     if node.privacy_level != "public":
         if not current_user.has_voice_mode:
-            return jsonify({"error": "Voice mode not enabled for this account"}), 403
+            if not _own_recording(node):
+                return jsonify({"error": "Voice mode not enabled for this account"}), 403
+            own_only = True
 
     def _media_file_exists(url):
         """Check if the file (or its .enc version) exists on disk."""
@@ -1987,6 +2001,9 @@ def get_audio_urls(node_id):
     # Only return URLs for files that actually exist on disk
     original_url = node.audio_original_url if _media_file_exists(node.audio_original_url) else None
     tts_url = node.audio_tts_url if _media_file_exists(node.audio_tts_url) else None
+    if own_only:
+        # The recording only: no speech for an account without Voice mode.
+        tts_url = None
 
     # Check if audio chunks exist (streaming transcription nodes)
     has_audio_chunks = False
@@ -2002,7 +2019,7 @@ def get_audio_urls(node_id):
         }), 200
 
     # Check if TTS generation is in progress
-    if node.tts_task_status in ['pending', 'processing']:
+    if not own_only and node.tts_task_status in ['pending', 'processing']:
         return jsonify({
             "status": "generating",
             "message": "TTS generation in progress",
@@ -2034,9 +2051,10 @@ def get_audio_chunks(node_id):
         return _node_not_found()
 
     # Public nodes: any authenticated user can listen.
-    # Non-public nodes: require voice-mode (admin or paid plan).
+    # Non-public nodes: require voice-mode (admin or paid plan), except
+    # the owner's own recording while payments are on (#438).
     if node.privacy_level != "public":
-        if not current_user.has_voice_mode:
+        if not current_user.has_voice_mode and not _own_recording(node):
             return jsonify({"error": "Voice mode not enabled for this account"}), 403
 
     # Check if this is a streaming transcription node with chunks
@@ -2119,7 +2137,7 @@ def download_audio(node_id):
         return _node_not_found()
 
     if node.privacy_level != "public":
-        if not current_user.has_voice_mode:
+        if not current_user.has_voice_mode and not _own_recording(node):
             return jsonify({"error": "Voice mode not enabled"}), 403
 
     if not node.streaming_transcription:

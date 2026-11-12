@@ -246,6 +246,17 @@ final class AppState {
         subscriptionRequired = newUser.aiRepliesPaused
     }
 
+    /// Payments (#438): read the user again when the app comes back to the
+    /// foreground or a reply was refused, so a subscription started or ended
+    /// on the web shows without a relaunch. Nothing while payments are off.
+    func refreshPayments() async {
+        guard phase == .signedIn, user?.paymentsEnabled == true else { return }
+        guard let dashboard: DashboardResponse = try? await api.get(
+            APIPath.dashboard, query: [URLQueryItem(name: "profile", value: "0")]) else { return }
+        replaceUser(dashboard.user)
+        if !dashboard.user.aiRepliesPaused { subscriptionBannerMessage = nil }
+    }
+
     func applyEmailState(_ state: EmailState) {
         user?.apply(state)
     }
@@ -485,6 +496,8 @@ final class AppState {
             spendCapBannerMessage = message
         case .subscriptionRequired(let message):
             notifySubscriptionRequired(message)
+            // The account's state changed since it was loaded: read it again.
+            Task { await refreshPayments() }
         case .notApproved:
             // Approval changed under us: re-check, which routes to the waitlist.
             Task { await loadUser() }

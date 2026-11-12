@@ -157,6 +157,11 @@ def _verified_stripe_event(config):
         return None, (jsonify({"error": "invalid signature"}), 400)
     if not isinstance(event, dict) or not event.get("id"):
         return None, (jsonify({"error": "invalid event"}), 400)
+    from backend.utils.subscriptions import is_production
+    if is_production(config) and event.get("livemode") is not True:
+        # Production takes live events only.
+        logger.warning("Stripe webhook: a test-mode event refused")
+        return None, (jsonify({"error": "test-mode event"}), 400)
     return event, None
 
 

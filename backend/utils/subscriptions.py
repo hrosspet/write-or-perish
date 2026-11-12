@@ -50,6 +50,45 @@ def payments_enabled(config=None):
     return bool(_config(config).get("PAYMENTS_ENABLED"))
 
 
+def is_production(config=None):
+    """Anything but development, testing and staging (FLASK_ENV)."""
+    env = (_config(config).get("DEPLOY_ENV") or "production").lower()
+    return env not in ("development", "testing", "staging")
+
+
+def key_mode(key):
+    """"live", "test" or None for a Stripe secret or restricted key."""
+    if not key:
+        return None
+    if key.startswith(("sk_live_", "rk_live_")):
+        return "live"
+    if key.startswith(("sk_test_", "rk_test_")):
+        return "test"
+    return None
+
+
+def check_payments_config(config):
+    """At boot: in production, payments stay off unless the key is a live
+    one (a sandbox key there would sell nothing real and take test events
+    as real). Returns why they were turned off, or None."""
+    if not config.get("PAYMENTS_ENABLED") or not is_production(config):
+        return None
+    if key_mode(config.get("STRIPE_SECRET_KEY")) == "live":
+        return None
+    config["PAYMENTS_ENABLED"] = False
+    return ("PAYMENTS_ENABLED is set, but the Stripe key is not a live "
+            "key; payments stay off in production.")
+
+
+def refuse_without_paid_features(user, config=None):
+    """For a route that starts an optional model call (new speech for a
+    profile or a reference): the 402 to answer while payments are on and
+    the account has no AI replies, else None."""
+    if ai_replies_allowed(user, config):
+        return None
+    return subscription_required_response(user)
+
+
 def ai_replies_allowed(user, config=None):
     """Whether *user* may get an AI reply. Always True while payments
     are off, for admins, and on a paid plan (set by hand or subscribed)."""
@@ -66,9 +105,13 @@ def subscription_required_message(user=None):
     """Why there is no reply, for the web and the iPhone alike: it names
     the state, never where or how to pay (the iPhone app shows it as it
     is). The web adds its link to Settings."""
-    if user is not None and getattr(user, "subscription_status", None) == "ended":
+    status = getattr(user, "subscription_status", None) if user else None
+    if status == "ended":
         return ("Your subscription has ended, so Loore doesn't reply. "
                 "Your writing is saved.")
+    if status == "past_due":
+        return ("Your last payment didn't go through, so Loore doesn't "
+                "reply. Your writing is saved.")
     return ("Loore doesn't reply on an account without a subscription. "
             "Your writing is saved.")
 
@@ -138,6 +181,9 @@ def subscription_state(user, config=None):
         "trial_days": int(cfg.get("SUBSCRIPTION_TRIAL_DAYS") or 0),
         "plan_set_by_hand": bool(user.plan_set_by_hand),
         "ai_replies": ai_replies_allowed(user, cfg),
+        # Live at Stripe (it renews) but giving nothing: a failed payment
+        # past its grace days, or withdrawn after a dispute or a refund.
+        "access": bool(user.subscription_grants_access),
         "has_customer": bool(user.stripe_customer_id),
     }
 

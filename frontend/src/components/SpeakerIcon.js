@@ -31,7 +31,7 @@ const extractMarkdownHeader = (content) => {
  * `buttonStyle` overrides the button's own style (its spacing, where a
  * row needs a larger tap target).
  */
-const SpeakerIcon = ({ nodeId, profileId, itemId, content, isPublic, aiUsage, onTtsGenerated, buttonStyle }) => {
+const SpeakerIcon = ({ nodeId, profileId, itemId, content, isPublic, aiUsage, onTtsGenerated, buttonStyle, ownRecording }) => {
   const { user } = useUser();
   const { loadAudio, loadAudioQueue, updateChapters, appendChunkToQueue, setGeneratingTTS, currentAudio, isPlaying, warmup, waitingForChunks, queueFinishedCount } = useAudio();
   const { addToast } = useToast();
@@ -269,7 +269,7 @@ const SpeakerIcon = ({ nodeId, profileId, itemId, content, isPublic, aiUsage, on
   }, [ttsStatus, ttsData, ttsError, entityType, id, loadAudio, fullTitle, onTtsGenerated]);
 
   // Show for voice-mode users, or for any authenticated user on public posts
-  if (!user || (!user.voice_mode_enabled && !isPublic)) {
+  if (!user || (!user.voice_mode_enabled && !isPublic && !ownRecording)) {
     return null;
   }
 

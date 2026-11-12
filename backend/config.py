@@ -17,6 +17,18 @@ def float_from_env(name, default):
         return default
 
 
+def stripe_key_from_env(name, sandbox_name, environ=None):
+    """A Stripe key (#438): *name*, or in development and testing only
+    (FLASK_ENV) the local sandbox key *sandbox_name*. Staging and
+    production never fall back to it."""
+    environ = os.environ if environ is None else environ
+    deploy_env = (environ.get("FLASK_ENV") or "production").lower()
+    value = environ.get(name)
+    if not value and deploy_env in ("development", "testing"):
+        value = environ.get(sandbox_name)
+    return value or None
+
+
 class Config:
     SECRET_KEY = os.environ.get("SECRET_KEY", "this-should-be-changed")
     # Make sure your DATABASE_URL looks something like
@@ -147,14 +159,18 @@ class Config:
     # whose plan was set by hand (alpha, pro) are not affected by it.
     PAYMENTS_ENABLED = os.environ.get(
         "PAYMENTS_ENABLED", "false").lower() in ("1", "true", "yes")
-    # Stripe keys. The sandbox names are local development's fallback;
-    # the server sets the STRIPE_* names. The publishable key is read for
-    # completeness: Stripe-hosted Checkout needs no Stripe.js.
-    STRIPE_SECRET_KEY = (os.environ.get("STRIPE_SECRET_KEY")
-                         or os.environ.get("STRIPE_SANDBOX_PRIVKEY") or None)
-    STRIPE_PUBLISHABLE_KEY = (os.environ.get("STRIPE_PUBLISHABLE_KEY")
-                              or os.environ.get("STRIPE_SANDBOX_PUBKEY")
-                              or None)
+    # Where this runs: FLASK_ENV ("development", "testing", "staging"; any
+    # other value or none at all counts as production).
+    DEPLOY_ENV = (os.environ.get("FLASK_ENV") or "production").lower()
+    # Stripe keys. The sandbox names are a fallback in development and
+    # testing only; staging and production set the STRIPE_* names. In
+    # production a test-mode key keeps payments off (create_app). The
+    # publishable key is read for completeness: Stripe-hosted Checkout
+    # needs no Stripe.js.
+    STRIPE_SECRET_KEY = stripe_key_from_env(
+        "STRIPE_SECRET_KEY", "STRIPE_SANDBOX_PRIVKEY")
+    STRIPE_PUBLISHABLE_KEY = stripe_key_from_env(
+        "STRIPE_PUBLISHABLE_KEY", "STRIPE_SANDBOX_PUBKEY")
     # Signing secret of the webhook endpoint (/api/webhooks/stripe). Unset:
     # the endpoint answers 404 while the switch is off, 503 while it is on.
     STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET") or None
@@ -196,6 +212,16 @@ class Config:
         "SUBSCRIPTION_SPEND_LIMIT_USD_SUPPORTER", 100.0)
     SUBSCRIPTION_SPEND_LIMIT_USD_DISCOUNTED = float_from_env(
         "SUBSCRIPTION_SPEND_LIMIT_USD_DISCOUNTED", 50.0)
+    # Model cost a trial may use in all, whatever the level: nothing has
+    # been paid yet. Counted from the trial's start, not per month. 0: no
+    # separate trial ceiling (the level's monthly one applies).
+    SUBSCRIPTION_TRIAL_SPEND_LIMIT_USD = float_from_env(
+        "SUBSCRIPTION_TRIAL_SPEND_LIMIT_USD", 10.0)
+    # Days a failed payment keeps the paid set, from when it is first
+    # seen, and only for a subscription that was paid before (a trial
+    # whose first payment fails gets the free set at once).
+    SUBSCRIPTION_PAST_DUE_GRACE_DAYS = float_from_env(
+        "SUBSCRIPTION_PAST_DUE_GRACE_DAYS", 7.0)
     # Wrong discount codes one account may try per hour before the code
     # field answers "try again later". 10: a typo or two is never
     # refused, guessing an 8-character code is out of reach.

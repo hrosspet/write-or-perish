@@ -29,8 +29,22 @@ def payments_required(fn):
     def wrapper(*args, **kwargs):
         if not payments_enabled():
             return jsonify({"error": "Not found"}), 404
+        if not current_user.approved:
+            # Waitlisted accounts subscribe once they are let in.
+            return jsonify({"error": "not_approved",
+                            "message": "Your account is not approved "
+                                       "yet."}), 403
         return fn(*args, **kwargs)
     return wrapper
+
+
+def _text(data, key):
+    """A string field of the body, stripped; None when it is something
+    else (a number, a list), which the routes answer with 400."""
+    value = data.get(key)
+    if value is None:
+        return ""
+    return value.strip() if isinstance(value, str) else None
 
 
 def _unavailable(exc):
@@ -62,7 +76,11 @@ def get_billing():
 def _checkout_level(user, data):
     """(level, code, None), or (None, None, the refusal). A code takes no
     use here: it is counted when its subscription is created."""
-    raw = (data.get("code") or "").strip()
+    raw = _text(data, "code")
+    if raw is None:
+        return None, None, (jsonify({"error": "code_not_valid",
+                                     "message": discount_codes.NOT_VALID_MESSAGE}),
+                            400)
     if not raw:
         level = data.get("level")
         if level not in OFFERED_LEVELS:
@@ -89,7 +107,8 @@ def start_checkout():
     """Body: {"level": "standard"|"supporter"} or {"code": "..."} (a code
     opens the discounted level). Answers {"url"} of the Stripe-hosted
     Checkout."""
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(silent=True)
+    data = data if isinstance(data, dict) else {}
     user = current_user
     if user.plan_set_by_hand:
         return jsonify({
@@ -144,8 +163,11 @@ def sync():
     """Read the account's subscription from Stripe now, without waiting
     for the webhook: the return page after Checkout calls it with the
     session id. A session of another account is ignored."""
-    data = request.get_json(silent=True) or {}
-    session_id = (data.get("session_id") or "").strip()
+    data = request.get_json(silent=True)
+    data = data if isinstance(data, dict) else {}
+    session_id = _text(data, "session_id")
+    if session_id is None:
+        return jsonify({"error": "invalid_session"}), 400
     user = current_user
     try:
         gateway = stripe_billing.get_gateway()

@@ -28,10 +28,26 @@ def _default_plan():
 # discounted level is opened by a code and is never offered.
 SUBSCRIPTION_LEVELS = ("standard", "supporter", "discounted")
 # Subscription states a Stripe status maps to (utils/stripe_billing). The
-# first three give the paid feature set: past_due keeps it while Stripe
-# retries the payment.
+# first three are live at Stripe; trialing and active give the paid
+# feature set, past_due only after a paid invoice and for a few days
+# (User.subscription_grants_access).
 SUBSCRIPTION_STATUSES = ("none", "trialing", "active", "past_due", "ended")
 SUBSCRIPTION_GRANTING_STATUSES = ("trialing", "active", "past_due")
+
+
+def past_due_cutoff():
+    """A failed payment first seen before this no longer keeps the paid
+    set (SUBSCRIPTION_PAST_DUE_GRACE_DAYS, default 7)."""
+    from datetime import timedelta
+    days = 7
+    try:
+        from flask import current_app, has_app_context
+        if has_app_context():
+            days = float(current_app.config.get(
+                "SUBSCRIPTION_PAST_DUE_GRACE_DAYS", 7))
+    except Exception:  # noqa: BLE001
+        pass
+    return datetime.utcnow() - timedelta(days=days)
 
 
 class User(db.Model, UserMixin):
@@ -166,6 +182,24 @@ class User(db.Model, UserMixin):
     # The subscription that used the trial: another subscription that
     # still arrives with a trial is cancelled (stripe_billing).
     subscription_trial_sub_id = db.Column(db.String(255), nullable=True)
+    subscription_trial_start = db.Column(db.DateTime, nullable=True)
+    # The trial's own usage ceiling was reached (SUBSCRIPTION_TRIAL_SPEND_
+    # LIMIT_USD over the whole trial): capped until the trial ends, also
+    # across a month boundary (utils/spend.user_is_capped).
+    subscription_trial_capped = db.Column(
+        db.Boolean, nullable=False, default=False,
+        server_default=db.text("false"))
+    # An invoice of the current subscription was paid: only then does a
+    # failed payment (past_due) keep the paid set, and for at most
+    # SUBSCRIPTION_PAST_DUE_GRACE_DAYS from when it was first seen.
+    subscription_paid = db.Column(
+        db.Boolean, nullable=False, default=False,
+        server_default=db.text("false"))
+    subscription_past_due_since = db.Column(db.DateTime, nullable=True)
+    # Why the current subscription gives nothing although Stripe has it
+    # live: "dispute" (a payment was disputed) or "refund" (its latest
+    # payment was refunded in full). NULL: nothing withdrawn.
+    subscription_revoked = db.Column(db.String(16), nullable=True)
 
     # Per-user monthly spend hard cap (issue: free-alpha guardrail). Stores the
     # "YYYY-MM" (UTC) in which the user crossed PER_USER_MONTHLY_LIMIT_USD. While
@@ -330,9 +364,20 @@ class User(db.Model, UserMixin):
 
     @property
     def subscription_grants_access(self):
-        """A trialing, active or past-due subscription at a known level."""
-        return (self.subscription_status in SUBSCRIPTION_GRANTING_STATUSES
-                and self.subscription_level in SUBSCRIPTION_LEVELS)
+        """A trialing or active subscription at a known level, or a
+        past-due one whose subscription was paid before, for the grace
+        days from the failed payment; never one withdrawn for a dispute
+        or a full refund."""
+        if (self.subscription_level not in SUBSCRIPTION_LEVELS
+                or self.subscription_revoked):
+            return False
+        if self.subscription_status in ("trialing", "active"):
+            return True
+        if self.subscription_status == "past_due":
+            since = self.subscription_past_due_since
+            return bool(self.subscription_paid and since
+                        and since > past_due_cutoff())
+        return False
 
     @property
     def on_paid_plan(self):
@@ -359,6 +404,17 @@ class User(db.Model, UserMixin):
         if self.is_admin:
             return True
         return (self.plan or "free") in self.UNRESTRICTED_EXPORT_PLANS
+
+    @classmethod
+    def subscription_grants_access_clause(cls):
+        """subscription_grants_access in SQL."""
+        return and_(
+            cls.subscription_level.in_(list(SUBSCRIPTION_LEVELS)),
+            cls.subscription_revoked.is_(None),
+            or_(cls.subscription_status.in_(["trialing", "active"]),
+                and_(cls.subscription_status == "past_due",
+                     cls.subscription_paid.is_(True),
+                     cls.subscription_past_due_since > past_due_cutoff())))
 
     def get_id(self):
         return str(self.id)
@@ -418,10 +474,7 @@ class User(db.Model, UserMixin):
             # on_paid_plan in SQL: a plan set by hand, or a subscription
             # that grants the paid feature set (#438).
             or_(cls.plan.in_(list(cls.VOICE_MODE_PLANS)),
-                and_(cls.subscription_status.in_(
-                         list(SUBSCRIPTION_GRANTING_STATUSES)),
-                     cls.subscription_level.in_(
-                         list(SUBSCRIPTION_LEVELS)))),
+                cls.subscription_grants_access_clause()),
             cls.default_ai_usage.in_(list(AI_ALLOWED)),
             ~cls.id.in_(llm_authors),
             ~cls.id.in_(purging),

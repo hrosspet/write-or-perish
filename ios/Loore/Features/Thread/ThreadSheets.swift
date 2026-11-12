@@ -120,10 +120,12 @@ struct NodeAudioControls: View {
     let hasTTS: Bool
     /// New TTS was generated from the speaker (web sets `has_tts` on the node).
     var onTtsGenerated: (() -> Void)?
+    /// The user's own recording, playable without voice mode (#438).
+    var ownRecording = false
 
     var body: some View {
         SpeakerButton(target: .node(nodeId), content: content, isPublic: isPublic, aiUsage: aiUsage,
-                      onTtsGenerated: onTtsGenerated)
-        DownloadAudioButton(nodeId: nodeId, isPublic: isPublic, aiUsage: aiUsage)
+                      ownRecording: ownRecording, onTtsGenerated: onTtsGenerated)
+        DownloadAudioButton(nodeId: nodeId, isPublic: isPublic, aiUsage: aiUsage, ownRecording: ownRecording)
     }
 }

@@ -146,6 +146,18 @@ test('a live subscription shows its state and the manage link', async () => {
   await waitFor(() => expect(assign).toHaveBeenCalledWith('https://billing.stripe.test/p'));
 });
 
+test('a live subscription on an account later set by hand can still be cancelled', async () => {
+  mockPost.mockResolvedValue({ data: { url: 'https://billing.stripe.test/p' } });
+  renderSection(sub({
+    plan_set_by_hand: true, ai_replies: true, level: 'standard', status: 'active',
+    current_period_end: '2026-12-12T10:00:00Z', has_customer: true,
+  }));
+  expect(await screen.findByText(/Standard\. Next payment on December 12, 2026\./)).toBeInTheDocument();
+  expect(screen.getByText(/not needed for them/)).toBeInTheDocument();
+  fireEvent.click(screen.getByText('Manage or cancel'));
+  expect(mockPost).toHaveBeenCalledWith('/billing/portal', {});
+});
+
 test('an account set by hand has nothing to pay', async () => {
   renderSection(sub({ plan_set_by_hand: true, ai_replies: true }));
   expect(await screen.findByText(/There is nothing to pay/)).toBeInTheDocument();

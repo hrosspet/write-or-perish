@@ -9,6 +9,7 @@ import SwiftUI
 /// shown after the user's own deletion.
 struct RootView: View {
     @Environment(AppState.self) private var app
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         @Bindable var router = app.router
@@ -35,6 +36,11 @@ struct RootView: View {
         .animation(LooreMotion.quick, value: app.phase)
         .animation(LooreMotion.quick, value: app.needsTerms)
         .task { await app.start() }
+        // Payments (#438): a subscription started or ended on the web shows
+        // when the app comes back, not only at the next launch.
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { Task { await app.refreshPayments() } }
+        }
     }
 
     @ViewBuilder private var content: some View {

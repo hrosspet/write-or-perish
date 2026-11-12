@@ -41,7 +41,11 @@ class FakeGateway:
         self.prices = []
         self.portal_configs = []
         self.invoices = {}
+        self.refunds = {}
+        self.charges = {}
         self.fail = False
+        self.fail_refunds = 0
+        self.cancel_error = None
         self._n = 0
 
     def _id(self, prefix):
@@ -145,7 +149,26 @@ class FakeGateway:
 
     def create_refund(self, params, idempotency_key=None):
         self._call("create_refund", params, idempotency_key)
-        return {"id": self._id("re"), **params}
+        if self.fail_refunds:
+            self.fail_refunds -= 1
+            raise RuntimeError("refund failed")
+        refund = {"id": self._id("re"), **params}
+        self.refunds.setdefault(params["payment_intent"], []).append(refund)
+        return refund
+
+    def list_refunds(self, payment_intent):
+        self._call("list_refunds", payment_intent)
+        return list(self.refunds.get(payment_intent, []))
+
+    def retrieve_charge(self, charge_id):
+        self._call("retrieve_charge", charge_id)
+        return self.charges[charge_id]
+
+    def delete_customer(self, customer_id):
+        self._call("delete_customer", customer_id)
+        if self.fail:
+            raise RuntimeError("stripe down")
+        return {"id": customer_id, "deleted": True}
 
     def create_portal_session(self, params):
         self._call("create_portal_session", params)
@@ -157,11 +180,18 @@ class FakeGateway:
 
     def update_subscription(self, sub_id, params):
         self._call("update_subscription", sub_id, params)
-        self.subscriptions[sub_id].update(params)
-        return self.subscriptions[sub_id]
+        sub = self.subscriptions[sub_id]
+        params = dict(params)
+        if "metadata" in params:  # Stripe merges metadata keys
+            sub["metadata"] = {**(sub.get("metadata") or {}),
+                               **params.pop("metadata")}
+        sub.update(params)
+        return sub
 
     def cancel_subscription(self, sub_id):
         self._call("cancel_subscription", sub_id)
+        if self.cancel_error is not None:
+            raise self.cancel_error
         self.subscriptions[sub_id]["status"] = "canceled"
         return self.subscriptions[sub_id]
 
@@ -190,10 +220,10 @@ def subscription(sub_id="sub_1", customer="cus_1", status="active",
     }
 
 
-def _make_app(payments=True, secret=SECRET):
+def _make_app(payments=True, secret=SECRET, db_uri="sqlite:///:memory:"):
     app = Flask(__name__)
     app.config.from_object(Config)
-    app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///:memory:"
+    app.config["SQLALCHEMY_DATABASE_URI"] = db_uri
     app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {}
     app.config["SECRET_KEY"] = "test-secret"
     app.config["TESTING"] = True
@@ -202,6 +232,7 @@ def _make_app(payments=True, secret=SECRET):
     app.config["STRIPE_WEBHOOK_SECRET"] = secret
     app.config["FRONTEND_URL"] = "https://loore.test"
     app.config["PER_USER_MONTHLY_LIMIT_USD"] = 20.0
+    app.config["DEPLOY_ENV"] = "testing"
     _db.init_app(app)
 
     from flask_login import LoginManager
@@ -393,7 +424,7 @@ class TestAccess:
         from backend.utils.subscriptions import ai_replies_allowed
         assert ai_replies_allowed(_user("root", is_admin=True))
 
-    @pytest.mark.parametrize("status", ["trialing", "active", "past_due"])
+    @pytest.mark.parametrize("status", ["trialing", "active"])
     def test_a_live_subscription_gives_the_paid_set(self, app, status):
         from backend.utils.subscriptions import ai_replies_allowed
         u = _user(subscription_status=status, subscription_level="standard")
@@ -658,7 +689,7 @@ class TestDiscountCodes:
         assert uses(code) == 1
         red = DiscountRedemption.query.one()
         assert red.stripe_subscription_id == "sub_1" and red.user_id == u.id
-        assert _db.session.get(CheckoutSession, sid).state == "complete"
+        assert _db.session.get(CheckoutSession, sid).state == "settled"
         user = _db.session.get(User, u.id)
         assert user.subscription_level == "discounted"
 
@@ -748,18 +779,28 @@ class TestOneSubscription:
         states = {row.id: row.state for row in CheckoutSession.query.all()}
         assert states == {s1: "expired", s2: "open"}
 
-    def test_a_completed_checkout_blocks_the_next(self, app, gateway):
-        # Completed in another tab; the webhook has not arrived yet.
+    def test_a_completed_checkout_blocks_every_next_press(self, app,
+                                                          gateway):
+        # Completed in another tab, the tab closed at Stripe, no webhook
+        # yet: the subscription is read from Stripe at the next press, and
+        # every later press is refused too.
         u = _user()
         c = _client(app, u)
         r1 = c.post("/api/billing/checkout", json={"level": "standard"})
         s1 = r1.get_json()["url"].rsplit("/")[-1]
-        gateway.sessions[s1]["status"] = "complete"
-        r2 = c.post("/api/billing/checkout", json={"level": "standard"})
-        assert r2.status_code == 409
-        assert r2.get_json()["error"] == "already_subscribed"
+        cus = _db.session.get(User, u.id).stripe_customer_id
+        gateway.sessions[s1].update(status="complete", subscription="sub_1")
+        gateway.subscriptions["sub_1"] = subscription(
+            "sub_1", cus, status="trialing", trial=True)
+        for _ in range(3):
+            r = c.post("/api/billing/checkout", json={"level": "standard"})
+            assert r.status_code == 409
+            assert r.get_json()["error"] == "already_subscribed"
         assert gateway.names().count("create_checkout_session") == 1
-        assert _db.session.get(CheckoutSession, s1).state == "complete"
+        assert _db.session.get(CheckoutSession, s1).state == "settled"
+        user = _db.session.get(User, u.id)
+        assert user.subscription_status == "trialing"
+        assert user.subscription_trial_used
 
     def test_stripe_down_while_closing_the_open_one(self, app, gateway):
         u = _user()
@@ -960,7 +1001,8 @@ class TestWebhook:
         _post_event(app, _event("invoice.payment_failed", inv))
         user = _db.session.get(User, u.id)
         assert user.subscription_status == "past_due"
-        assert user.on_paid_plan  # Stripe retries; access stays
+        # Never paid (a trial whose first payment failed): nothing.
+        assert not user.on_paid_plan
 
     @pytest.mark.parametrize("stripe_status,ours", [
         ("canceled", "ended"), ("unpaid", "ended"),
@@ -1030,6 +1072,380 @@ class TestWebhook:
         _post_event(app, _event("customer.subscription.created",
                                 {"id": "sub_1"}))
         assert _db.session.get(User, u.id).spend_blocked_month is None
+
+
+# ── Refunds, payments that fail, the trial ceiling, disputes ─────────────
+
+def _cost(user_id, usd, at):
+    """A cost row written with a Core insert, so no cap check is queued."""
+    from backend.models import APICostLog
+    _db.session.execute(APICostLog.__table__.insert().values(
+        user_id=user_id, model_id="m", request_type="chat",
+        cost_microdollars=int(usd * 1_000_000), created_at=at))
+    _db.session.commit()
+
+
+class TestDuplicateRefunds:
+    def _two(self, gateway):
+        gateway.subscriptions["sub_old"] = subscription(
+            "sub_old", created=NOW - 60)
+        gateway.subscriptions["sub_new"] = subscription(
+            "sub_new", created=NOW, latest_invoice="in_new")
+        gateway.invoices["in_new"] = {
+            "id": "in_new", "amount_paid": 3000,
+            "payments": {"data": [{"payment": {
+                "type": "payment_intent", "payment_intent": "pi_new"}}]}}
+
+    def test_a_failed_refund_cancels_nothing_and_the_retry_finishes(
+            self, app, gateway):
+        u = _user(stripe_customer_id="cus_1")
+        self._two(gateway)
+        _completed(app, u, "sub_old", "cs_x", "evt_1")
+        gateway.fail_refunds = 1
+        ev = _event("customer.subscription.created", {"id": "sub_new"},
+                    "evt_2")
+        assert _post_event(app, ev).status_code == 503
+        # Not cancelled without its refund; the event is sent again.
+        assert gateway.subscriptions["sub_new"]["status"] == "active"
+        assert _db.session.get(StripeEvent, "evt_2") is None
+        assert _post_event(app, ev).status_code == 200
+        assert gateway.subscriptions["sub_new"]["status"] == "canceled"
+        assert len(gateway.refunds["pi_new"]) == 1
+        assert gateway.subscriptions["sub_new"]["metadata"][
+            "loore_duplicate"] == "1"
+
+    def test_a_cancelled_duplicate_without_its_refund_gets_it(self, app,
+                                                              gateway):
+        u = _user(stripe_customer_id="cus_1")
+        self._two(gateway)
+        _completed(app, u, "sub_old", "cs_x", "evt_1")
+        # Cancelled as Loore's duplicate, refund missing (any cause).
+        gateway.subscriptions["sub_new"].update(
+            status="canceled", metadata={"loore_duplicate": "1"})
+        for n in (2, 3):
+            _post_event(app, _event("customer.subscription.updated",
+                                    {"id": "sub_new"}, f"evt_{n}"))
+        assert len(gateway.refunds["pi_new"]) == 1
+        user = _db.session.get(User, u.id)
+        assert user.stripe_subscription_id == "sub_old"
+
+    def test_an_old_subscription_that_ended_is_never_refunded(self, app,
+                                                              gateway):
+        u = _user(stripe_customer_id="cus_1")
+        self._two(gateway)
+        _completed(app, u, "sub_old", "cs_x", "evt_1")
+        gateway.subscriptions["sub_new"]["status"] = "canceled"
+        _post_event(app, _event("customer.subscription.deleted",
+                                {"id": "sub_new"}, "evt_2"))
+        assert "create_refund" not in gateway.names()
+
+
+class TestPastDue:
+    def test_a_paid_subscription_keeps_access_for_the_grace_days(
+            self, app, gateway):
+        u = _user(stripe_customer_id="cus_1")
+        gateway.subscriptions["sub_1"] = subscription(status="active")
+        _post_event(app, _event("customer.subscription.created",
+                                {"id": "sub_1"}, "evt_1"))
+        gateway.subscriptions["sub_1"]["status"] = "past_due"
+        _post_event(app, _event("invoice.payment_failed", {
+            "id": "in_2", "subscription": "sub_1"}, "evt_2"))
+        user = _db.session.get(User, u.id)
+        assert user.subscription_paid and user.on_paid_plan
+        ids = {x.id for x in User.profile_eligible_query().all()}
+        assert u.id in ids
+        # Past the grace days: nothing more.
+        user.subscription_past_due_since = datetime.utcnow() - timedelta(
+            days=7, hours=1)
+        _db.session.commit()
+        assert not user.on_paid_plan
+        assert u.id not in {x.id for x in User.profile_eligible_query()}
+        from backend.utils.subscriptions import subscription_required_message
+        assert "last payment" in subscription_required_message(user)
+        # Paid again: active, access back, the clock gone.
+        gateway.subscriptions["sub_1"]["status"] = "active"
+        _post_event(app, _event("invoice.paid", {
+            "id": "in_2", "subscription": "sub_1", "amount_paid": 3000},
+            "evt_3"))
+        user = _db.session.get(User, u.id)
+        assert user.on_paid_plan and user.subscription_past_due_since is None
+
+    def test_a_trial_whose_first_payment_fails_gets_nothing(self, app,
+                                                            gateway):
+        u = _user(stripe_customer_id="cus_1")
+        gateway.subscriptions["sub_1"] = subscription(
+            status="trialing", trial=True)
+        _post_event(app, _event("customer.subscription.created",
+                                {"id": "sub_1"}, "evt_1"))
+        assert _db.session.get(User, u.id).on_paid_plan
+        gateway.subscriptions["sub_1"]["status"] = "past_due"
+        _post_event(app, _event("invoice.payment_failed", {
+            "id": "in_1", "subscription": "sub_1"}, "evt_2"))
+        user = _db.session.get(User, u.id)
+        assert user.subscription_status == "past_due"
+        assert not user.subscription_paid and not user.on_paid_plan
+
+    def test_a_paid_invoice_event_marks_the_subscription_paid(self, app,
+                                                              gateway):
+        u = _user(stripe_customer_id="cus_1")
+        gateway.subscriptions["sub_1"] = subscription(status="past_due")
+        _post_event(app, _event("invoice.paid", {
+            "id": "in_1", "subscription": "sub_1", "amount_paid": 3000}))
+        assert _db.session.get(User, u.id).subscription_paid
+
+
+class TestTrialCeiling:
+    def _enforce(self, app, user_id, now=None):
+        from backend.utils.spend import enforce_user_spend_cap
+        return enforce_user_spend_cap(user_id, app.config, now=now,
+                                      send_email=lambda **_k: None)
+
+    def test_the_trial_has_its_own_ceiling_across_a_month(self, app):
+        from backend.utils.spend import spend_cap_payload, user_is_capped
+        start = datetime(2026, 11, 25)
+        u = _user(subscription_status="trialing",
+                  subscription_level="supporter",
+                  subscription_trial_start=start,
+                  subscription_trial_end=datetime(2026, 12, 9))
+        _cost(u.id, 6, datetime(2026, 11, 28))
+        r = self._enforce(app, u.id, now=datetime(2026, 11, 28, 12))
+        assert r.get("status") != "trial_capped"
+        assert not user_is_capped(_db.session.get(User, u.id))
+        # December: 4 more makes 10 over the whole trial, whatever the
+        # level's monthly ceiling (100 for Supporter).
+        _cost(u.id, 4, datetime(2026, 12, 2))
+        r = self._enforce(app, u.id, now=datetime(2026, 12, 2, 12))
+        assert r["status"] == "trial_capped"
+        user = _db.session.get(User, u.id)
+        assert user_is_capped(user, now=datetime(2026, 12, 3))
+        assert user_is_capped(user, now=datetime(2027, 1, 1))  # no reset
+        payload = spend_cap_payload(user)
+        assert payload["lifts_on"] == "2026-12-09"
+        assert "trial" in payload["message"]
+        assert "free alpha" not in payload["message"]
+
+    def test_the_ceiling_ends_with_the_trial(self, app, gateway):
+        from backend.utils.spend import user_is_capped
+        u = _user(stripe_customer_id="cus_1", stripe_subscription_id="sub_1",
+                  subscription_status="trialing",
+                  subscription_level="standard",
+                  subscription_trial_capped=True)
+        assert user_is_capped(u)
+        gateway.subscriptions["sub_1"] = subscription(status="active")
+        _post_event(app, _event("customer.subscription.updated",
+                                {"id": "sub_1"}))
+        user = _db.session.get(User, u.id)
+        assert not user.subscription_trial_capped
+        assert not user_is_capped(user)
+
+    def test_an_admins_limit_replaces_the_trial_ceiling(self, app):
+        from backend.utils.spend import user_is_capped
+        u = _user(subscription_status="trialing",
+                  subscription_level="standard",
+                  subscription_trial_start=datetime(2026, 11, 1),
+                  monthly_spend_limit_usd=200.0)
+        _cost(u.id, 15, datetime(2026, 11, 2))
+        self._enforce(app, u.id, now=datetime(2026, 11, 3))
+        assert not user_is_capped(_db.session.get(User, u.id),
+                                  now=datetime(2026, 11, 3))
+
+    def test_accounts_set_by_hand_have_no_trial_ceiling(self, app):
+        from backend.utils.spend import trial_limit_usd
+        u = _user(plan="alpha", subscription_status="trialing",
+                  subscription_level="standard")
+        assert trial_limit_usd(u, app.config) == 0
+
+
+class TestWithdrawn:
+    def _active(self, gateway):
+        u = _user(stripe_customer_id="cus_1", stripe_subscription_id="sub_1",
+                  subscription_status="active",
+                  subscription_level="standard", subscription_paid=True)
+        gateway.subscriptions["sub_1"] = subscription(
+            status="active", latest_invoice="in_1")
+        gateway.invoices["in_1"] = {
+            "id": "in_1", "amount_paid": 3000,
+            "payments": {"data": [{"payment": {"payment_intent": "pi_1"}}]}}
+        return u
+
+    def test_a_dispute_ends_access_and_the_subscription(self, app, gateway):
+        u = self._active(gateway)
+        gateway.charges["ch_1"] = {"id": "ch_1", "customer": "cus_1",
+                                   "payment_intent": "pi_1"}
+        r = _post_event(app, _event("charge.dispute.created", {
+            "id": "dp_1", "charge": "ch_1"}))
+        assert r.get_json()["status"] == "applied"
+        user = _db.session.get(User, u.id)
+        assert user.subscription_revoked == "dispute"
+        assert not user.on_paid_plan
+        assert gateway.subscriptions["sub_1"]["status"] == "canceled"
+        admin = _client(app, _user("root", is_admin=True))
+        row = admin.get("/api/admin/subscriptions").get_json()[
+            "subscriptions"][0]
+        assert row["revoked"] == "dispute" and row["access"] is False
+
+    def test_a_full_refund_of_the_latest_payment_ends_access(self, app,
+                                                             gateway):
+        u = self._active(gateway)
+        _post_event(app, _event("charge.refunded", {
+            "id": "ch_1", "customer": "cus_1", "payment_intent": "pi_1",
+            "amount": 3000, "amount_refunded": 3000, "refunded": True}))
+        user = _db.session.get(User, u.id)
+        assert user.subscription_revoked == "refund"
+        assert not user.on_paid_plan
+
+    @pytest.mark.parametrize("charge", [
+        {"payment_intent": "pi_1", "amount": 3000, "amount_refunded": 1000,
+         "refunded": False},
+        {"payment_intent": "pi_other", "amount": 3000,
+         "amount_refunded": 3000, "refunded": True}])
+    def test_a_partial_or_other_refund_changes_nothing(self, app, gateway,
+                                                       charge):
+        u = self._active(gateway)
+        _post_event(app, _event("charge.refunded", {
+            "id": "ch_1", "customer": "cus_1", **charge}))
+        user = _db.session.get(User, u.id)
+        assert user.subscription_revoked is None and user.on_paid_plan
+        assert "cancel_subscription" not in gateway.names()
+
+    def test_a_new_subscription_starts_clean(self, app, gateway):
+        u = _user(stripe_customer_id="cus_1", stripe_subscription_id="sub_1",
+                  subscription_status="ended", subscription_level="standard",
+                  subscription_revoked="dispute")
+        gateway.subscriptions["sub_1"] = subscription(status="canceled")
+        gateway.subscriptions["sub_2"] = subscription("sub_2")
+        _post_event(app, _event("customer.subscription.created",
+                                {"id": "sub_2"}))
+        user = _db.session.get(User, u.id)
+        assert user.subscription_revoked is None and user.on_paid_plan
+
+
+class TestKeysAndModes:
+    @pytest.mark.parametrize("env,expected", [
+        ("development", "sk_test_sandbox"), ("testing", "sk_test_sandbox"),
+        ("staging", None), ("production", None), (None, None)])
+    def test_the_sandbox_key_is_a_fallback_in_development_only(
+            self, env, expected):
+        from backend.config import stripe_key_from_env
+        environ = {"STRIPE_SANDBOX_PRIVKEY": "sk_test_sandbox"}
+        if env:
+            environ["FLASK_ENV"] = env
+        assert stripe_key_from_env(
+            "STRIPE_SECRET_KEY", "STRIPE_SANDBOX_PRIVKEY", environ) == expected
+        environ["STRIPE_SECRET_KEY"] = "sk_live_x"
+        assert stripe_key_from_env(
+            "STRIPE_SECRET_KEY", "STRIPE_SANDBOX_PRIVKEY",
+            environ) == "sk_live_x"
+
+    @pytest.mark.parametrize("env,key,stays_on", [
+        ("production", "sk_test_x", False), ("production", "rk_test_x", False),
+        ("production", None, False), ("production", "sk_live_x", True),
+        ("production", "rk_live_x", True), ("staging", "sk_test_x", True),
+        ("development", "sk_test_x", True)])
+    def test_production_needs_a_live_key(self, env, key, stays_on):
+        from backend.utils.subscriptions import check_payments_config
+        config = {"PAYMENTS_ENABLED": True, "DEPLOY_ENV": env,
+                  "STRIPE_SECRET_KEY": key}
+        reason = check_payments_config(config)
+        assert config["PAYMENTS_ENABLED"] is stays_on
+        assert (reason is None) is stays_on
+
+    @pytest.mark.parametrize("env,livemode,status", [
+        ("production", False, 400), ("production", None, 400),
+        ("production", True, 200), ("staging", False, 200),
+        ("testing", False, 200)])
+    def test_production_takes_live_events_only(self, app, gateway, env,
+                                               livemode, status):
+        app.config["DEPLOY_ENV"] = env
+        ev = _event("charge.refund.updated", {"id": "re_1"})
+        if livemode is not None:
+            ev["livemode"] = livemode
+        assert _post_event(app, ev).status_code == status
+
+
+class TestPurgeAndInputs:
+    def test_a_subscription_stripe_already_ended(self, app, gateway):
+        import stripe
+        u = _user(stripe_customer_id="cus_1", stripe_subscription_id="sub_1",
+                  subscription_status="active",
+                  subscription_level="standard")
+        gateway.subscriptions["sub_1"] = subscription(status="canceled")
+        gateway.cancel_error = stripe.InvalidRequestError(
+            "No such subscription", "id", code="resource_missing",
+            http_status=404)
+        assert stripe_billing.cancel_for_purge(u) is True
+        assert u.subscription_status == "ended"
+
+    def test_a_subscription_stripe_does_not_know(self, app, gateway):
+        import stripe
+        u = _user(stripe_customer_id="cus_1", stripe_subscription_id="sub_x",
+                  subscription_status="trialing",
+                  subscription_level="standard")
+        gateway.cancel_error = stripe.InvalidRequestError(
+            "No such subscription", "id", code="resource_missing",
+            http_status=404)
+
+        def missing(_sub_id):
+            raise stripe.InvalidRequestError(
+                "No such subscription", "id", code="resource_missing",
+                http_status=404)
+        gateway.retrieve_subscription = missing
+        assert stripe_billing.cancel_for_purge(u) is True
+        assert u.subscription_status == "ended"
+
+    def test_stripe_down_still_stops_the_purge(self, app, gateway):
+        u = _user(stripe_customer_id="cus_1", stripe_subscription_id="sub_1",
+                  subscription_status="active",
+                  subscription_level="standard")
+        gateway.subscriptions["sub_1"] = subscription(status="active")
+        gateway.cancel_error = RuntimeError("stripe down")
+        with pytest.raises(RuntimeError):
+            stripe_billing.cancel_for_purge(u)
+
+    def test_the_purge_deletes_the_customer(self, app, gateway):
+        import stripe
+        u = _user(stripe_customer_id="cus_1")
+        assert stripe_billing.delete_customer_for_purge(u) is True
+        assert ("delete_customer", "cus_1") in gateway.calls
+        assert u.stripe_customer_id is None
+        u2 = _user("b", stripe_customer_id="cus_gone")
+
+        def gone(_cid):
+            raise stripe.InvalidRequestError(
+                "No such customer", "id", code="resource_missing",
+                http_status=404)
+        gateway.delete_customer = gone
+        assert stripe_billing.delete_customer_for_purge(u2) is True
+        gateway.fail = True
+        del gateway.delete_customer
+        u3 = _user("c", stripe_customer_id="cus_3")
+        with pytest.raises(RuntimeError):
+            stripe_billing.delete_customer_for_purge(u3)
+
+    @pytest.mark.parametrize("body", [
+        {"code": 5}, {"code": ["a"]}, {"code": {"x": 1}}])
+    def test_a_code_that_is_not_text_is_a_400(self, app, gateway, body):
+        r = _client(app, _user()).post("/api/billing/checkout", json=body)
+        assert r.status_code == 400
+
+    def test_a_session_id_that_is_not_text_is_a_400(self, app, gateway):
+        r = _client(app, _user()).post("/api/billing/sync",
+                                       json={"session_id": 7})
+        assert r.status_code == 400
+
+    def test_a_body_that_is_not_an_object(self, app, gateway):
+        r = _client(app, _user()).post("/api/billing/checkout",
+                                       json=["standard"])
+        assert r.status_code == 400
+
+    def test_an_unapproved_account_cannot_check_out(self, app, gateway):
+        u = User(username="waiting", approved=False)
+        _db.session.add(u)
+        _db.session.commit()
+        c = _client(app, u)
+        assert c.post("/api/billing/checkout",
+                      json={"level": "standard"}).status_code == 403
+        assert "create_checkout_session" not in gateway.names()
 
 
 # ── The catalog ──────────────────────────────────────────────────────────
@@ -1114,7 +1530,7 @@ class TestAdmin:
         assert set(rows[0]) == {
             "user_id", "username", "plan", "level", "status",
             "current_period_end", "trial_end", "cancel_at_period_end",
-            "trial_used"}
+            "trial_used", "access", "revoked"}
 
 
 # ── Account deletion ─────────────────────────────────────────────────────

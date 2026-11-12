@@ -279,6 +279,11 @@ def create_app():
     app = Flask(__name__)
     app.config.from_object(Config)
     validate_default_model(app.config)
+    # Payments (#438): never on in production with a sandbox key.
+    from backend.utils.subscriptions import check_payments_config
+    _payments_off = check_payments_config(app.config)
+    if _payments_off:
+        app.logger.error(_payments_off)
 
     # Fix for running behind nginx reverse proxy - handles X-Forwarded-* headers
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)

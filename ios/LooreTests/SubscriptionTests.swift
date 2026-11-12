@@ -63,6 +63,10 @@ final class SubscriptionTests: XCTestCase {
         XCTAssertEqual(texts[1], "Standard, cancelled. It ends on January 5, 2027.")
         XCTAssertEqual(texts[4], "No subscription.")
         XCTAssertEqual(texts[5], "Included with your plan (Alpha).")
+        // A live subscription on a plan set by hand still shows: it renews.
+        XCTAssertEqual(SubscriptionState(level: "standard", status: "active", currentPeriodEnd: end,
+                                         planSetByHand: true).statusText(plan: "alpha"),
+                       "Standard. Renews on January 5, 2027.")
         for text in texts {
             let lower = text.lowercased()
             for word in ["subscribe", "buy", "price", "$", "usd", "http", "loore.org", "web", "stripe", "manage"] {

@@ -625,13 +625,18 @@ def delete_identity(user_id):
     # is tried again. Stripe keeps its own records of the purchase (it is
     # the merchant of record). A code's uses stay counted without the
     # account; the codes the account tried and its checkouts go.
-    from backend.utils.stripe_billing import cancel_for_purge
+    from backend.utils.stripe_billing import (
+        cancel_for_purge, delete_customer_for_purge)
     try:
         if cancel_for_purge(user):
             counts["stripe_subscription_cancelled"] += 1
+        # The Stripe customer goes too: the name, email and address
+        # Checkout asked for do not outlive the account.
+        if delete_customer_for_purge(user):
+            counts["stripe_customer_deleted"] += 1
     except Exception as e:  # noqa: BLE001 - retried with the purge
-        raise PurgeIncomplete("the subscription could not be cancelled "
-                              f"at Stripe ({type(e).__name__})")
+        raise PurgeIncomplete("the subscription or the customer could not "
+                              f"be removed at Stripe ({type(e).__name__})")
     counts["discount_redemption.user_id"] += DiscountRedemption.query.filter(
         DiscountRedemption.user_id == U).update(
         {DiscountRedemption.user_id: None}, synchronize_session=False)

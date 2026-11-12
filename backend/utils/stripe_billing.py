@@ -156,6 +156,17 @@ class StripeGateway:
         return plain(self.client.v1.refunds.create(params=params,
                                                    options=options))
 
+    def list_refunds(self, payment_intent):
+        page = self.client.v1.refunds.list(
+            params={"payment_intent": payment_intent, "limit": 100})
+        return [plain(r) for r in page.data]
+
+    def retrieve_charge(self, charge_id):
+        return plain(self.client.v1.charges.retrieve(charge_id))
+
+    def delete_customer(self, customer_id):
+        return plain(self.client.v1.customers.delete(customer_id))
+
     def create_portal_session(self, params):
         return plain(self.client.v1.billing_portal.sessions.create(
             params=params))
@@ -425,10 +436,17 @@ def create_checkout(gateway, user, level, config=None, code=None):
     # its subscription or used its trial.
     db.session.query(User).filter(User.id == user.id).with_for_update().one()
     db.session.refresh(user)
-    completed = user.subscription_grants_access
+    completed = user.subscription_status in SUBSCRIPTION_GRANTING_STATUSES
     for row in CheckoutSession.query.filter_by(user_id=user.id,
                                                state="open").all():
-        completed = expire_session(gateway, row) == "complete" or completed
+        expire_session(gateway, row)
+    # A completed checkout whose subscription the webhook has not brought
+    # yet (the buyer closed the tab at Stripe): read it from Stripe now,
+    # so it refuses this press and every later one.
+    for row in CheckoutSession.query.filter_by(user_id=user.id,
+                                               state="complete").all():
+        completed = settle_checkout_row(gateway, user, row, config) or \
+            completed
     if completed:
         db.session.commit()
         raise CheckoutAlreadyCompleted()
@@ -440,6 +458,21 @@ def create_checkout(gateway, user, level, config=None, code=None):
         code_id=code.id if code is not None else None, state="open"))
     db.session.commit()
     return session
+
+
+def settle_checkout_row(gateway, user, row, config=None):
+    """Bring the subscription of a completed checkout onto the account
+    and mark the row "settled". True when the account then has a live
+    subscription."""
+    session = gateway.retrieve_checkout_session(row.id) or {}
+    sub_id = session.get("subscription")
+    if isinstance(sub_id, dict):
+        sub_id = sub_id.get("id")
+    if sub_id:
+        settle_subscription(gateway, gateway.retrieve_subscription(sub_id),
+                            config, lock=False)
+    row.state = "settled"
+    return user.subscription_status in SUBSCRIPTION_GRANTING_STATUSES
 
 
 def create_portal(gateway, user, config=None):
@@ -482,6 +515,26 @@ def _first_item(sub):
     return items[0] if items else {}
 
 
+def _apply_payment_state(user, sub, status):
+    """The columns that belong to one subscription: start again with a
+    new one; paid once it was active; when a failed payment was first
+    seen; the trial ceiling ends with the trial."""
+    if user.stripe_subscription_id != sub.get("id"):
+        user.subscription_paid = False
+        user.subscription_past_due_since = None
+        user.subscription_revoked = None
+        user.subscription_trial_capped = False
+    if status != "trialing":
+        user.subscription_trial_capped = False
+    if status == "active":
+        # Active after a trial or a checkout means an invoice was paid.
+        user.subscription_paid = True
+    if status != "past_due":
+        user.subscription_past_due_since = None
+    elif user.subscription_past_due_since is None:
+        user.subscription_past_due_since = datetime.utcnow()
+
+
 def apply_subscription(sub, config=None):
     """Write the state of *sub* (a subscription just read from Stripe) on
     its account. Returns the account, or None when the subscription
@@ -500,7 +553,8 @@ def apply_subscription(sub, config=None):
     granting = status in SUBSCRIPTION_GRANTING_STATUSES
     if (user.stripe_subscription_id
             and user.stripe_subscription_id != sub.get("id")
-            and not granting and user.subscription_grants_access):
+            and not granting
+            and user.subscription_status in SUBSCRIPTION_GRANTING_STATUSES):
         # A late event about an older subscription: the one that gives
         # access now stays.
         logger.info("Stripe subscription %s ignored for user %s: %s is "
@@ -515,12 +569,14 @@ def apply_subscription(sub, config=None):
                      or sub.get("current_period_end"))
     cancel_at = _ts(sub.get("cancel_at"))
     cancelling = bool(sub.get("cancel_at_period_end")) or cancel_at is not None
+    _apply_payment_state(user, sub, status)
     user.stripe_subscription_id = sub.get("id")
     user.subscription_level = level
     user.subscription_status = status
     user.subscription_period_end = cancel_at or period_end
     user.subscription_trial_end = _ts(sub.get("trial_end"))
     user.subscription_cancel_at_period_end = cancelling and status != "ended"
+    user.subscription_trial_start = _ts(sub.get("trial_start"))
     if sub.get("trial_end") or sub.get("trial_start"):
         user.subscription_trial_used = True
         if not user.subscription_trial_sub_id:
@@ -555,34 +611,54 @@ def _payment_intent_of(invoice):
     return pi
 
 
-def refund_latest_payment(gateway, sub):
-    """Refund what the subscription's latest invoice charged, once (the
-    refund's idempotency key is the subscription). Returns the refund, or
-    None when nothing was charged."""
+def _latest_payment_intent(gateway, sub):
+    """(the latest invoice, its payment intent) of *sub*, or (invoice,
+    None) when it charged nothing."""
     invoice_id = sub.get("latest_invoice")
     if isinstance(invoice_id, dict):
         invoice_id = invoice_id.get("id")
     if not invoice_id:
-        return None
+        return None, None
     invoice = gateway.retrieve_invoice(invoice_id)
     if not invoice.get("amount_paid"):
+        return invoice, None
+    return invoice, _payment_intent_of(invoice)
+
+
+def refund_latest_payment(gateway, sub):
+    """Refund what the subscription's latest invoice charged, once: a
+    payment that has a refund already is left alone, and the refund's
+    idempotency key is the subscription. Returns the refund, or None when
+    nothing is to be refunded."""
+    invoice, pi = _latest_payment_intent(gateway, sub)
+    if invoice is None or not invoice.get("amount_paid"):
         return None
-    pi = _payment_intent_of(invoice)
     if not pi:
         logger.error("Duplicate subscription %s: paid invoice without a "
                      "payment to refund", sub.get("id"))
+        return None
+    if gateway.list_refunds(pi):
         return None
     return gateway.create_refund(
         {"payment_intent": pi, "reason": "duplicate"},
         idempotency_key=f"loore-duplicate-{sub.get('id')}")
 
 
+DUPLICATE_METADATA_KEY = "loore_duplicate"
+
+
 def cancel_duplicate(gateway, sub):
-    """Cancel a subscription the account must not keep, refund what it
-    charged, and give back the code use it took. Returns it cancelled."""
+    """End a subscription the account must not keep: mark it as Loore's
+    duplicate, refund what it charged, then cancel it, and give back the
+    code use it took. In that order, so a failure part way leaves it
+    live (the event is sent again and finishes the job) and never
+    cancelled without its refund. Returns it cancelled."""
     from backend.utils import discount_codes
-    cancelled = gateway.cancel_subscription(sub["id"])
+    if (sub.get("metadata") or {}).get(DUPLICATE_METADATA_KEY) != "1":
+        gateway.update_subscription(
+            sub["id"], {"metadata": {DUPLICATE_METADATA_KEY: "1"}})
     refund_latest_payment(gateway, sub)
+    cancelled = gateway.cancel_subscription(sub["id"])
     discount_codes.void_use(sub["id"])
     return cancelled
 
@@ -608,7 +684,7 @@ def _record_code_use(gateway, user, sub):
         expire_session(gateway, row)
 
 
-def settle_subscription(gateway, sub, config=None):
+def settle_subscription(gateway, sub, config=None, lock=True):
     """Apply *sub* (just read from Stripe) to its account, keeping one
     subscription and one trial per account:
 
@@ -619,6 +695,9 @@ def settle_subscription(gateway, sub, config=None):
       subscription used: cancelled (nothing was charged yet);
     * the code that opened a kept subscription takes its use now.
 
+    The account row is locked first (*lock*), so two events of one
+    account are settled one after the other, never side by side.
+
     Returns the account (None when the subscription belongs to none).
     Does not commit."""
     user = _user_for_subscription(sub)
@@ -626,7 +705,16 @@ def settle_subscription(gateway, sub, config=None):
         logger.warning("Stripe subscription %s belongs to no account",
                        sub.get("id"))
         return None
+    if lock:
+        db.session.query(User).filter(
+            User.id == user.id).with_for_update().one()
+        db.session.refresh(user)
     sub_id = sub.get("id")
+    if (not _granting(sub) and sub_id != user.stripe_subscription_id
+            and (sub.get("metadata") or {}).get(DUPLICATE_METADATA_KEY)
+            == "1"):
+        # A duplicate Loore cancelled: make sure its payment went back.
+        refund_latest_payment(gateway, sub)
     if _granting(sub):
         current_id = user.stripe_subscription_id
         if current_id and current_id != sub_id:
@@ -693,13 +781,78 @@ INVOICE_EVENTS = {
     "invoice.payment_action_required",
 }
 CHECKOUT_EVENTS = {"checkout.session.completed", "checkout.session.expired"}
-HANDLED_EVENTS = SUBSCRIPTION_EVENTS | INVOICE_EVENTS | CHECKOUT_EVENTS
+CHARGE_EVENTS = {"charge.dispute.created", "charge.refunded"}
+HANDLED_EVENTS = (SUBSCRIPTION_EVENTS | INVOICE_EVENTS | CHECKOUT_EVENTS
+                  | CHARGE_EVENTS)
+# What Peter registers on the webhook endpoint.
+REGISTERED_EVENTS = sorted(
+    (SUBSCRIPTION_EVENTS - {"customer.subscription.pending_update_applied",
+                            "customer.subscription.pending_update_expired"})
+    | {"invoice.paid", "invoice.payment_failed",
+       "invoice.payment_action_required"}
+    | CHECKOUT_EVENTS | CHARGE_EVENTS)
 
 
 def _set_checkout_state(session, state):
     row = db.session.get(CheckoutSession, session.get("id") or "")
-    if row is not None and row.state == "open":
+    if row is not None and row.state in ("open", "complete"):
         row.state = state
+
+
+def _withdraw(gateway, user, reason, config=None):
+    """A dispute, or a full refund of the latest payment: the subscription
+    gives nothing from now on, and it is cancelled so it charges nothing
+    more. Shown in the admin list as the reason."""
+    user.subscription_revoked = reason
+    sub_id = user.stripe_subscription_id
+    if sub_id and user.subscription_status in SUBSCRIPTION_GRANTING_STATUSES:
+        cancelled = gateway.cancel_subscription(sub_id)
+        apply_subscription(cancelled, config)
+        user.subscription_revoked = reason
+    logger.warning("Subscription of user %s withdrawn: %s", user.id, reason)
+
+
+def _handle_charge_event(gateway, etype, obj, config=None):
+    charge = obj
+    if etype == "charge.dispute.created":
+        charge_id = obj.get("charge")
+        if isinstance(charge_id, dict):
+            charge_id = charge_id.get("id")
+        if not charge_id:
+            return "ignored"
+        charge = gateway.retrieve_charge(charge_id)
+    customer = charge.get("customer")
+    if isinstance(customer, dict):
+        customer = customer.get("id")
+    user = User.query.filter_by(stripe_customer_id=customer).first() \
+        if customer else None
+    if user is None:
+        return "no_account"
+    db.session.query(User).filter(User.id == user.id).with_for_update().one()
+    db.session.refresh(user)
+    if etype == "charge.dispute.created":
+        _withdraw(gateway, user, "dispute", config)
+        return "applied"
+    if not _refunds_current_payment(gateway, user, charge):
+        return "ignored"
+    _withdraw(gateway, user, "refund", config)
+    return "applied"
+
+
+def _refunds_current_payment(gateway, user, charge):
+    """A full refund of the current subscription's latest payment (a
+    duplicate's refund belongs to another subscription)."""
+    if not charge.get("refunded") and \
+            charge.get("amount_refunded", 0) < charge.get("amount", 0):
+        return False
+    if not user.stripe_subscription_id:
+        return False
+    current = gateway.retrieve_subscription(user.stripe_subscription_id)
+    _invoice, pi = _latest_payment_intent(gateway, current)
+    charge_pi = charge.get("payment_intent")
+    if isinstance(charge_pi, dict):
+        charge_pi = charge_pi.get("id")
+    return bool(pi) and pi == charge_pi
 
 
 def _checkout_user(session):
@@ -724,6 +877,25 @@ def _checkout_user(session):
     return user
 
 
+def _handle_checkout_event(gateway, etype, obj, config=None):
+    if obj.get("mode") != "subscription":
+        return "ignored"
+    if etype == "checkout.session.expired":
+        _set_checkout_state(obj, "expired")
+        return "applied"
+    _set_checkout_state(obj, "settled")
+    user = _checkout_user(obj)
+    if user is None:
+        return "no_account"
+    sub_id = obj.get("subscription")
+    if isinstance(sub_id, dict):
+        sub_id = sub_id.get("id")
+    if sub_id:
+        settle_subscription(
+            gateway, gateway.retrieve_subscription(sub_id), config)
+    return "applied"
+
+
 def handle_event(gateway, event, config=None):
     """Apply one verified event. Returns what was done ("applied",
     "ignored", "no_account"). Raises on a failure worth a retry (Stripe
@@ -733,23 +905,10 @@ def handle_event(gateway, event, config=None):
     obj = ((event.get("data") or {}).get("object")) or {}
     if etype not in HANDLED_EVENTS:
         return "ignored"
+    if etype in CHARGE_EVENTS:
+        return _handle_charge_event(gateway, etype, obj, config)
     if etype in CHECKOUT_EVENTS:
-        if obj.get("mode") != "subscription":
-            return "ignored"
-        if etype == "checkout.session.expired":
-            _set_checkout_state(obj, "expired")
-            return "applied"
-        _set_checkout_state(obj, "complete")
-        user = _checkout_user(obj)
-        if user is None:
-            return "no_account"
-        sub_id = obj.get("subscription")
-        if isinstance(sub_id, dict):
-            sub_id = sub_id.get("id")
-        if sub_id:
-            settle_subscription(
-                gateway, gateway.retrieve_subscription(sub_id), config)
-        return "applied"
+        return _handle_checkout_event(gateway, etype, obj, config)
     if etype in INVOICE_EVENTS:
         sub_id = subscription_id_of_invoice(obj)
     else:
@@ -758,6 +917,11 @@ def handle_event(gateway, event, config=None):
         return "ignored"
     user = settle_subscription(
         gateway, gateway.retrieve_subscription(sub_id), config)
+    if (user is not None and etype in ("invoice.paid",
+                                       "invoice.payment_succeeded")
+            and (obj.get("amount_paid") or 0) > 0
+            and user.stripe_subscription_id == sub_id):
+        user.subscription_paid = True
     return "applied" if user is not None else "no_account"
 
 
@@ -784,15 +948,49 @@ def stop_renewal_for_deletion(user, config=None):
         return False
 
 
+def _missing(exc):
+    return (getattr(exc, "http_status", None) == 404
+            or getattr(exc, "code", None) == "resource_missing")
+
+
 def cancel_for_purge(user, config=None):
     """The account is about to be deleted: a subscription that still runs
-    is cancelled now. Raises when Stripe cannot be reached, so the purge
+    is cancelled now. One Stripe has already ended, or does not know, is
+    taken as ended. Raises when Stripe cannot be reached, so the purge
     waits and tries again rather than leave a subscription running for an
     account that no longer exists."""
     if not user.stripe_subscription_id or user.subscription_status in (
             "none", "ended"):
         return False
     gateway = get_gateway(config)
-    sub = gateway.cancel_subscription(user.stripe_subscription_id)
+    try:
+        sub = gateway.cancel_subscription(user.stripe_subscription_id)
+    except Exception as e:  # noqa: BLE001 - read what it is now
+        try:
+            sub = gateway.retrieve_subscription(user.stripe_subscription_id)
+        except Exception as e2:  # noqa: BLE001
+            if not _missing(e2):
+                raise
+            user.subscription_status = "ended"
+            return True
+        if sub.get("status") not in ("canceled", "incomplete_expired"):
+            raise e
     apply_subscription(sub, config)
+    return True
+
+
+def delete_customer_for_purge(user, config=None):
+    """The account is about to be deleted: its Stripe customer goes too,
+    with the name, email and address Checkout asked for (Stripe keeps
+    what it must as merchant of record). A customer Stripe does not know
+    is taken as gone. Raises when Stripe cannot be reached."""
+    if not user.stripe_customer_id:
+        return False
+    gateway = get_gateway(config)
+    try:
+        gateway.delete_customer(user.stripe_customer_id)
+    except Exception as e:  # noqa: BLE001
+        if not _missing(e):
+            raise
+    user.stripe_customer_id = None
     return True

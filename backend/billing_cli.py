@@ -44,3 +44,9 @@ def stripe_sync_catalog_command():
             click.echo(f"  {line}")
     else:
         click.echo("Nothing to change.")
+    # Stripe's API does not show what happens after the last failed retry
+    # of a payment, so this can't be checked here.
+    click.echo(
+        "Check by hand in the Dashboard (Billing > Revenue recovery > "
+        "Retries > Subscription status): 'If all retries for a payment "
+        "fail' must be 'Cancel the subscription'.")

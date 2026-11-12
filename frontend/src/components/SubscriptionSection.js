@@ -189,12 +189,15 @@ export default function SubscriptionSection({ user, setUser }) {
         </div>
       )}
 
-      {sub.plan_set_by_hand ? (
-        <div style={textStyle}>
-          Your account has the paid features already ({user.plan}). There is nothing to pay.
-        </div>
-      ) : live ? (
+      {/* A live subscription shows first, also on a plan set by hand:
+          it renews until it is cancelled. */}
+      {live ? (
         <>
+          {sub.plan_set_by_hand && (
+            <div style={{ ...textStyle, marginBottom: "6px" }}>
+              Your account has the paid features already ({user.plan}), so this subscription is not needed for them.
+            </div>
+          )}
           <div style={textStyle}>{statusLine}</div>
           <div style={{ marginTop: "10px" }}>
             <button type="button" onClick={manage} disabled={busy} style={buttonStyle(busy)}>
@@ -205,6 +208,10 @@ export default function SubscriptionSection({ user, setUser }) {
             Change your card, see invoices or cancel on Stripe's page. A cancelled subscription runs to the end of the period you paid for.
           </div>
         </>
+      ) : sub.plan_set_by_hand ? (
+        <div style={textStyle}>
+          Your account has the paid features already ({user.plan}). There is nothing to pay.
+        </div>
       ) : (
         <>
           {statusLine && <div style={{ ...textStyle, marginBottom: "8px" }}>{statusLine}</div>}

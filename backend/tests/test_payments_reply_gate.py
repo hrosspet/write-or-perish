@@ -61,9 +61,13 @@ def _make_app(payments):
     from backend.routes.nodes import nodes_bp
     from backend.routes.textmode import textmode_bp
     from backend.routes.voice import voice_bp
+    from backend.routes.profile import profile_bp
+    from backend.routes.external import external_bp
     app.register_blueprint(nodes_bp, url_prefix="/api/nodes")
     app.register_blueprint(textmode_bp, url_prefix="/api/textmode")
     app.register_blueprint(voice_bp, url_prefix="/api/voice")
+    app.register_blueprint(profile_bp, url_prefix="/api/profile")
+    app.register_blueprint(external_bp, url_prefix="/api/external")
 
     from backend.utils.subscriptions import SubscriptionRequired
 
@@ -272,3 +276,95 @@ class TestPaymentsOn:
         assert resp.status_code == 402
         assert resp.get_json()["error"] == "subscription_required"
         assert Node.query.count() == before
+
+
+# ── Reading stays, optional model calls stop ───────────────────────────────
+
+def _recorded_node(user, tmp_root):
+    """A private entry with its original recording (and a speech file)."""
+    n = _node(user)
+    n.audio_original_url = f"/media/nodes/{user.id}/{n.id}/original.webm"
+    n.audio_tts_url = f"/media/nodes/{user.id}/{n.id}/tts.mp3"
+    folder = tmp_root / "nodes" / str(user.id) / str(n.id)
+    folder.mkdir(parents=True)
+    (folder / "original.webm").write_bytes(b"webm")
+    (folder / "tts.mp3").write_bytes(b"mp3")
+    _db.session.commit()
+    return n
+
+
+@pytest.fixture
+def audio_root(tmp_path, monkeypatch):
+    import backend.routes.nodes as nodes_mod
+    monkeypatch.setattr(nodes_mod, "AUDIO_STORAGE_ROOT", tmp_path)
+    return tmp_path
+
+
+class TestOwnRecordings:
+    def test_payments_on_the_owner_plays_their_recording(self, on,
+                                                         audio_root):
+        alice = _user(subscription_status="ended",
+                      subscription_level="standard")
+        n = _recorded_node(alice, audio_root)
+        r = _client(on, alice).get(f"/api/nodes/{n.id}/audio")
+        assert r.status_code == 200, r.get_json()
+        data = r.get_json()
+        assert data["original_url"].endswith("original.webm")
+        # No speech for an account without Voice mode.
+        assert data["tts_url"] is None
+
+    def test_payments_off_unchanged(self, off, audio_root):
+        alice = _user()
+        n = _recorded_node(alice, audio_root)
+        assert _client(off, alice).get(
+            f"/api/nodes/{n.id}/audio").status_code == 403
+
+    def test_chunks_and_download_follow(self, on, audio_root):
+        alice = _user()
+        n = _node(alice)
+        n.streaming_transcription = True
+        _db.session.commit()
+        c = _client(on, alice)
+        # Not refused for Voice mode: there are simply no chunks here.
+        assert c.get(f"/api/nodes/{n.id}/audio-chunks").status_code == 404
+        assert c.get(f"/api/nodes/{n.id}/audio-download").status_code == 404
+
+    def test_chunks_and_download_refused_while_off(self, off, audio_root):
+        alice = _user()
+        n = _node(alice)
+        n.streaming_transcription = True
+        _db.session.commit()
+        c = _client(off, alice)
+        assert c.get(f"/api/nodes/{n.id}/audio-chunks").status_code == 403
+        assert c.get(f"/api/nodes/{n.id}/audio-download").status_code == 403
+
+
+class TestOptionalCalls:
+    def test_no_new_profile_speech_without_the_paid_set(self, on):
+        from backend.models import UserProfile
+        alice = _user()
+        p = UserProfile(user_id=alice.id, generated_by="m", content="x")
+        _db.session.add(p)
+        _db.session.commit()
+        r = _client(on, alice).post(f"/api/profile/{p.id}/tts")
+        assert r.status_code == 402
+        assert r.get_json()["error"] == "subscription_required"
+
+    def test_no_new_reference_speech_without_the_paid_set(self, on):
+        from backend.models import ExternalItem
+        alice = _user()
+        item = ExternalItem(user_id=alice.id, source="x", external_id="1",
+                            content="a saved post")
+        _db.session.add(item)
+        _db.session.commit()
+        r = _client(on, alice).post(f"/api/external/items/{item.id}/tts")
+        assert r.status_code == 402
+
+    def test_paid_accounts_still_reach_speech(self, on):
+        from backend.models import UserProfile
+        alice = _user(plan="alpha")
+        p = UserProfile(user_id=alice.id, generated_by="m", content="x")
+        _db.session.add(p)
+        _db.session.commit()
+        r = _client(on, alice).post(f"/api/profile/{p.id}/tts")
+        assert r.status_code != 402

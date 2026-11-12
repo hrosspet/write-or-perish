@@ -165,6 +165,72 @@ def get_user_month_spend_microdollars(user_id, now=None):
     return int(q.scalar() or 0)
 
 
+def user_spend_since_microdollars(user_id, since):
+    """One user's spend since *since* (naive UTC), all providers."""
+    q = db.session.query(
+        func.coalesce(func.sum(APICostLog.cost_microdollars), 0)
+    ).filter(
+        APICostLog.user_id == user_id,
+        APICostLog.created_at >= since,
+    )
+    return int(q.scalar() or 0)
+
+
+# --- The trial's own ceiling (#438) ------------------------------------------
+# A trialing subscription may use SUBSCRIPTION_TRIAL_SPEND_LIMIT_USD of model
+# cost in all, counted from the trial's start: nothing has been paid yet. The
+# block is a flag on the account (User.subscription_trial_capped), not a
+# month, so it holds across a month boundary inside the trial; it ends with
+# the trial (stripe_billing.apply_subscription). An admin's per-user limit
+# replaces it, as it replaces the level's ceiling.
+
+def trial_limit_usd(user, config):
+    if getattr(user, "subscription_status", None) != "trialing":
+        return 0
+    if getattr(user, "plan_set_by_hand", True):
+        return 0
+    if getattr(user, "monthly_spend_limit_usd", None) is not None:
+        return 0
+    return float(config.get("SUBSCRIPTION_TRIAL_SPEND_LIMIT_USD") or 0)
+
+
+def trial_capped(user):
+    return bool(getattr(user, "subscription_trial_capped", False)
+                and getattr(user, "subscription_status", None) == "trialing")
+
+
+def enforce_trial_cap(user, config, send_email=None):
+    """Set (or clear) the trial block from the spend since the trial's
+    start. Commits when it changed. Returns True when the user is
+    blocked by it."""
+    limit = trial_limit_usd(user, config)
+    since = getattr(user, "subscription_trial_start", None)
+    blocked = False
+    spend = 0
+    if limit > 0 and since is not None:
+        spend = user_spend_since_microdollars(user.id, since)
+        blocked = spend >= _usd_to_microdollars(limit)
+    if bool(user.subscription_trial_capped) == blocked:
+        return blocked
+    user.subscription_trial_capped = blocked
+    db.session.commit()
+    if blocked:
+        logger.warning("User %s capped for the trial: $%.2f spent >= $%.2f",
+                       user.id, spend / 1e6, limit)
+        if send_email is None:
+            from backend.utils.email import send_user_spend_block_email
+            send_email = send_user_spend_block_email
+        try:
+            send_email(
+                to_email=config.get("SPEND_ALERT_EMAIL") or "signup@loore.org",
+                username=user.username, spend_usd=spend / 1e6,
+                limit_usd=limit, carried_usd=0)
+        except Exception:
+            logger.exception("Failed to send trial cap email for user %s",
+                             user.id)
+    return blocked
+
+
 def _user_spend_in_month_microdollars(user_id, month):
     """One user's spend in a whole past month ("YYYY-MM"), all providers."""
     start = _month_first_day(month)
@@ -413,7 +479,10 @@ def user_is_capped(user, now=None):
         if user is None:
             return False
     blocked = user.spend_blocked_month
-    return bool(blocked) and blocked == current_month(now)
+    if bool(blocked) and blocked == current_month(now):
+        return True
+    # The trial's own ceiling (#438); always False while payments are off.
+    return trial_capped(user)
 
 
 def enforce_user_spend_cap(user_id, config, now=None, send_email=None):
@@ -430,6 +499,12 @@ def enforce_user_spend_cap(user_id, config, now=None, send_email=None):
     user = db.session.get(User, user_id)
     if user is None:
         return {"status": "no_user", "user_id": user_id}
+
+    # A trial has its own ceiling over the whole trial (#438).
+    if (trial_limit_usd(user, config) > 0 or user.subscription_trial_capped) \
+            and enforce_trial_cap(user, config, send_email=send_email):
+        return {"status": "trial_capped", "user_id": user_id,
+                "blocked": True}
 
     # Per-user override wins over the global default (and 0 = uncapped).
     limit_usd = get_user_spend_limit_usd(user, config)
@@ -509,6 +584,18 @@ def spend_cap_payload(user=None, now=None):
     from flask import current_app
     from backend.models import User
     lifts_on = None
+    if isinstance(user, User) and trial_capped(user) and \
+            not (user.spend_blocked_month
+                 and user.spend_blocked_month == current_month(now)):
+        # The trial's own ceiling (#438): it lifts when the trial ends.
+        end = user.subscription_trial_end
+        when = f" on {end.strftime('%B')} {end.day}" if end else ""
+        return {
+            "error": "monthly_spend_limit_reached",
+            "message": ("You've reached the usage limit of your trial. "
+                        f"It lifts when the trial ends{when}."),
+            "lifts_on": end.date().isoformat() if end else None,
+        }
     if user is not None and isinstance(user, User):
         try:
             lifts_on = spend_cap_lift_date(user, current_app.config, now)

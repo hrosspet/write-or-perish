@@ -285,6 +285,12 @@ def generate_item_tts(item_id):
         return jsonify({"message": "TTS generation already in progress",
                         "task_id": item.tts_task_id,
                         "status": item.tts_task_status}), 202
+    # Payments on and no AI replies for this account (#438): no new
+    # speech; speech already made stays playable above.
+    from backend.utils.subscriptions import refuse_without_paid_features
+    refused = refuse_without_paid_features(current_user)
+    if refused is not None:
+        return refused
     if not get_openai_chat_key(current_app.config):
         return jsonify({"error": "TTS not configured (missing API key)"}), 500
 

@@ -1493,6 +1493,10 @@ def list_subscriptions():
         "trial_end": iso_utc(u.subscription_trial_end),
         "cancel_at_period_end": bool(u.subscription_cancel_at_period_end),
         "trial_used": bool(u.subscription_trial_used),
+        # Live at Stripe but giving nothing: past its grace days, or
+        # withdrawn ("dispute", "refund").
+        "access": bool(u.subscription_grants_access),
+        "revoked": u.subscription_revoked,
     } for u in users]
     return jsonify({"subscriptions": rows}), 200
 

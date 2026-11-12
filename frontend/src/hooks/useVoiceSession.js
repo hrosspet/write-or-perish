@@ -11,6 +11,7 @@ import { useToast } from '../contexts/ToastContext';
 import api from '../api';
 import * as voiceTiming from '../utils/voiceTiming';
 import { isAiUsageRefusedError, aiUsageRefusalScope } from '../utils/aiUsage';
+import { isSubscriptionRequiredError } from '../utils/subscription';
 import { onPageReturn } from '../utils/pageReturn';
 import { playErrorSound } from '../utils/errorSound';
 
@@ -429,6 +430,13 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
         if (isAiUsageRefusedError(err) && onAiUsageRefusedRef.current) {
           setPhase('ready');
           onAiUsageRefusedRef.current(aiUsageRefusalScope(err));
+          return;
+        }
+        // Payments on, no AI replies (#438): the banner (raised by the api
+        // interceptor) says why and links to Settings; no failure toast
+        // with the raw code.
+        if (isSubscriptionRequiredError(err)) {
+          setPhase('ready');
           return;
         }
         // The reply could not start.

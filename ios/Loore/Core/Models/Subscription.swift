@@ -61,7 +61,10 @@ struct SubscriptionState: Decodable, Equatable, Sendable {
     /// The Settings row: level, state and date, as the web says them, with
     /// nothing about buying (no price, no "subscribe", no "manage").
     func statusText(plan: String) -> String {
-        if planSetByHand {
+        // A live subscription is shown also on a plan set by hand: it still
+        // renews until it is cancelled on the web.
+        let live = ["trialing", "active", "past_due"].contains(status)
+        if planSetByHand && !live {
             return "Included with your plan (\(plan.capitalized))."
         }
         let name = levelName ?? "Subscription"

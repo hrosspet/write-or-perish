@@ -1428,6 +1428,10 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     </span>
   );
   const nodeAllowsAi = node.ai_usage !== 'none';
+  // Payments on (#438): an account without Voice mode (free, or its
+  // subscription ended) still plays its own recordings; no new speech.
+  const ownRecording = !!(currentUser?.payments_enabled && node.has_original_audio
+    && node.user && node.user.id === currentUser.id);
   const topRightControls = isOwner && !isPublicThread && (
     <div style={{
       display: 'flex',
@@ -1748,8 +1752,9 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
           >
             <FaThumbtack />
           </button>
-          <SpeakerIcon nodeId={node.id} content={node.content} isPublic={node.privacy_level === 'public'} aiUsage={node.ai_usage} onTtsGenerated={() => setNode(prev => prev ? { ...prev, has_tts: true } : prev)} />
-          <DownloadAudioIcon nodeId={node.id} isPublic={node.privacy_level === 'public'} aiUsage={node.ai_usage} />
+          {/* Payments on (#438): the owner always plays their own recording. */}
+          <SpeakerIcon nodeId={node.id} content={node.content} isPublic={node.privacy_level === 'public'} aiUsage={node.ai_usage} onTtsGenerated={() => setNode(prev => prev ? { ...prev, has_tts: true } : prev)} ownRecording={ownRecording} />
+          <DownloadAudioIcon nodeId={node.id} isPublic={node.privacy_level === 'public'} aiUsage={node.ai_usage} ownRecording={ownRecording} />
         </NodeFooter>
         {(showCraftBar || showTryAgain || readActions) && (
           <div
