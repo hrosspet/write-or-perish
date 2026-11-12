@@ -134,5 +134,34 @@ test('a thread_too_long refusal never opens the mic and returns to idle', async 
   expect(onError).toHaveBeenCalledTimes(1);
   const err = onError.mock.calls[0][0];
   expect(err.threadTooLong).toBe(true);
+  expect(err.approvalPending).toBeUndefined();
+  expect(err.startup).toBe(true);
+});
+
+// Peter, 2026-11-12: a Voice recording in a thread where a change the AI
+// proposed waits for the user's approval is refused by init with 409
+// {"code": "approval_pending", "pending"}. No mic, back to idle, and the
+// parent shows the change (no toast here).
+test('an approval_pending refusal never opens the mic and returns to idle', async () => {
+  const err409 = new Error('Request failed with status code 409');
+  err409.response = {
+    status: 409,
+    data: { error: 'A change to your data waits', code: 'approval_pending', pending: 1 },
+  };
+  mockPost.mockRejectedValue(err409);
+  const onError = jest.fn();
+  const { result } = renderHook(() => useStreamingTranscription({
+    onError, label: 'Voice', aiUsage: 'chat',
+  }));
+
+  await act(async () => { await result.current.startStreaming(5); });
+
+  expect(mockStartRecording).not.toHaveBeenCalled();
+  expect(result.current.sessionState).toBe('idle');
+  expect(mockAddToast).not.toHaveBeenCalled();
+  expect(onError).toHaveBeenCalledTimes(1);
+  const err = onError.mock.calls[0][0];
+  expect(err.approvalPending).toBe(true);
+  expect(err.threadTooLong).toBeUndefined();
   expect(err.startup).toBe(true);
 });

@@ -31,11 +31,13 @@ PROMPT_KEY = 'voice'
 # a second prompt node.
 
 
-def _ready_under_gleaning(node, has_prompt, ai_usage):
-    """Voice continuing from a gleaning (#435): the next recording goes
-    under it (under a Voice prompt attached below it when the thread has
-    no agentic prompt yet), and nothing is played: a gleaning is never
-    read aloud."""
+def _ready_under(node, has_prompt, ai_usage):
+    """Voice opens on *node* ready to record, with no reply made: the next
+    recording goes under it (under a Voice prompt attached below it when
+    the thread has no agentic prompt yet), and nothing is played. For a
+    gleaning, which is never read aloud (#435), and for an entry in a
+    thread where a change waits for the user's approval (Peter,
+    2026-11-12)."""
     parent_id = node.id
     if not has_prompt:
         prompt_record = get_user_prompt_record(current_user.id, PROMPT_KEY)
@@ -67,6 +69,9 @@ def create_voice_from_node(node_id):
     A thread that keeps AI out gets 403 ``code: ai_usage_none`` and
     nothing is created: the clients then open the Voice screen on it,
     which explains instead of recording.
+    An entry in a thread where a change the AI proposed waits for the
+    user's approval gets "ready" and no reply (the Voice screen shows the
+    change; utils/tool_approvals).
     A deleted node (a page opened before the delete) gets the 410 that
     POST /nodes/ gives for a deleted parent, before any prompt node or
     reply is created (#480). The check locks the row as POST /nodes/
@@ -92,6 +97,23 @@ def create_voice_from_node(node_id):
         model_id = pick_model_for_generation(node, current_user)
     if model_id not in current_app.config["SUPPORTED_MODELS"]:
         return jsonify({"error": f"Unsupported model: {model_id}"}), 400
+    # Inherit ai_usage from the target node, looking through a read (#362)
+    ai_usage = reply_ai_usage(node, current_user)
+
+    has_prompt = ancestors_have_prompt(node, current_user.id, AGENTIC_PROMPT_KEYS)
+    is_llm = is_llm_node(node)
+
+    # No new Voice reply while a change the AI proposed in this thread
+    # waits for the user's approval (Peter, 2026-11-12): the Voice screen
+    # opens ready, where the approval dialog shows and recording waits for
+    # the decision. (On a reply, Voice only plays it.) Asked before the
+    # thread's length, as at streaming init: the change needs a decision
+    # first, and the length is asked at the next Record press.
+    if not is_llm:
+        from backend.utils.tool_approvals import waiting_in_thread
+        if waiting_in_thread(current_user.id, node):
+            return _ready_under(node, has_prompt, ai_usage)
+
     # A thread too long for another reply (#648) gets 409 ``code:
     # thread_too_long`` and nothing is created: the clients open the Voice
     # screen on it, which says so and offers a new thread.
@@ -100,17 +122,11 @@ def create_voice_from_node(node_id):
     if too_long is not None:
         return thread_too_long_response(too_long)
 
-    # Inherit ai_usage from the target node, looking through a read (#362)
-    ai_usage = reply_ai_usage(node, current_user)
-
-    has_prompt = ancestors_have_prompt(node, current_user.id, AGENTIC_PROMPT_KEYS)
-    is_llm = is_llm_node(node)
-
     # A gleaning is never read aloud (#435): continuing by voice from one
     # opens the record button under it instead of playing it first.
     from backend.utils.glean import is_gleaning
     if is_llm and is_gleaning(node):
-        return _ready_under_gleaning(node, has_prompt, ai_usage)
+        return _ready_under(node, has_prompt, ai_usage)
 
     if not is_llm:
         # A reply starts here: directly under *node* inside an agentic
@@ -246,6 +262,17 @@ def create_voice_session():
     refused = read_only_model_refusal(model_id, parent_node, new_entry=True)
     if refused is not None:
         return read_only_model_response(refused)
+    # Nor while a change the AI proposed in this thread waits for the
+    # user's approval (Peter, 2026-11-12): 409, nothing written. Asked
+    # before the thread's length, as at streaming init: the change needs a
+    # decision first.
+    if parent_node is not None:
+        from backend.utils.tool_approvals import (
+            approval_pending_response, waiting_in_thread,
+        )
+        waiting = waiting_in_thread(current_user.id, parent_node)
+        if waiting:
+            return approval_pending_response(waiting)
     # Nor in a thread already too long for another reply (#648), as at
     # streaming init.
     if parent_node is not None:
@@ -367,6 +394,56 @@ def voice_availability():
         if state is not None:
             return jsonify({"allowed": True, "thread_length": state})
     return jsonify({"allowed": True})
+
+
+# ── The approval announcement (Peter, 2026-11-12) ────────────────────────
+# "the announcement should be TTSed as a separate chunk and appended to the
+# queue. So that when it's not pending, it's not voiced out anymore"
+
+@voice_bp.route("/approval-announcement", methods=["GET"])
+@login_required
+def approval_announcement_info():
+    """Whether the Voice reply ending at ``?node=<id>`` is followed by the
+    spoken announcement now: ``{"count", "url", "duration"}``. *count* is
+    how many of its write calls wait for the user's approval (0 for a
+    reply not made in Voice mode, an interim step, or calls all decided);
+    *url* the cached clip the players append after the reply's last chunk
+    (utils/announcement_audio), or null when count is 0 or the clip can't
+    be made. Asked when the reply is played, so a replay after the user
+    decided has no announcement. A node that is not the user's reply
+    answers 404, like one that does not exist."""
+    from backend.utils.announcement_audio import ensure_clip, variant_for
+    from backend.utils.privacy import can_user_access_node
+    from backend.utils.tool_approvals import announcement_count
+    try:
+        node = Node.query.get(int(request.args.get("node", "")))
+    except (TypeError, ValueError):
+        return jsonify({"error": "node is required"}), 400
+    if (node is None or node.human_owner_id != current_user.id
+            or not can_user_access_node(node, current_user.id)):
+        return jsonify({"error": "Node not found"}), 404
+    count = announcement_count(node)
+    clip = ensure_clip(variant_for(count), current_user.id) if count else None
+    return jsonify({"count": count,
+                    "url": clip.url if clip else None,
+                    "duration": clip.duration if clip else None})
+
+
+@voice_bp.route("/approval-announcement/<variant>.mp3", methods=["GET"])
+@login_required
+def approval_announcement_audio(variant):
+    """The announcement clip (one change / several), made on the first
+    request and cached; 404 for another name, 503 when it can't be made."""
+    from flask import send_file
+    from backend.utils.announcement_audio import (
+        ANNOUNCEMENT_TEXTS, ensure_clip,
+    )
+    if variant not in ANNOUNCEMENT_TEXTS:
+        return jsonify({"error": "Not found"}), 404
+    clip = ensure_clip(variant, current_user.id)
+    if clip is None:
+        return jsonify({"error": "The announcement is not available."}), 503
+    return send_file(str(clip.path), mimetype="audio/mpeg", max_age=86400)
 
 
 # ── Where a voice turn's wait goes (#371 step 0) ─────────────────────────

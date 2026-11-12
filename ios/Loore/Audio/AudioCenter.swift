@@ -73,7 +73,11 @@ final class AudioCenter {
         observers.append(NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification,
                                                                 object: nil, queue: .main) { [weak self] _ in
             RecordingLog.shared.note("app active")
-            MainActor.assumeIsolated { self?.voiceController?.appDidBecomeActive() }
+            MainActor.assumeIsolated {
+                self?.voiceController?.appDidBecomeActive()
+                // A change may have been decided on another device meanwhile.
+                self?.recheckQueuedAnnouncement()
+            }
         })
         observers.append(NotificationCenter.default.addObserver(forName: UIApplication.didEnterBackgroundNotification,
                                                                 object: nil, queue: .main) { [weak self] _ in
@@ -117,8 +121,103 @@ final class AudioCenter {
         controller.aiUsage = { [weak self] in self?.app?.user?.defaultAIUsage.rawString ?? "none" }
         controller.onGleaningReady = { [weak self] id in self?.openGleaning(id) }
         controller.appIsActive = { UIApplication.shared.applicationState == .active }
+        controller.onApprovalsListed = { [weak self] node, items in
+            guard let model = self?.makeVoiceApprovals() else { return }
+            model.nodeId = node
+            model.update(items, autoOpen: false)
+        }
         voiceController = controller
         return controller
+    }
+
+    // MARK: Changes waiting for approval in the voice conversation (2026-11-12)
+
+    /// The Voice screen's approval dialog: the thread screen's model and dialog,
+    /// fed by the conversation's list (`VoiceTurnController.waitingApprovals`).
+    /// Kept here, with the conversation, so a decision reaches the lock screen
+    /// whichever screen is showing.
+    private(set) var voiceApprovals: ToolApprovalsModel?
+
+    @discardableResult
+    func makeVoiceApprovals() -> ToolApprovalsModel? {
+        if let voiceApprovals { return voiceApprovals }
+        guard let app else { return nil }
+        let model = ToolApprovalsModel(api: app.api, nodeId: voiceController?.approvalsNodeId ?? 0)
+        model.onApproved = { [weak app] item in ToolApprovalsModel.signalApproved(item, signals: app?.signals) }
+        model.onPendingChanged = { [weak self] items in
+            self?.voiceController?.approvalsChanged(items)
+            self?.recheckQueuedAnnouncement()
+        }
+        model.onGroupDone = { [weak model] in
+            // The next reply's calls, if any, follow at once: the Voice screen's
+            // dialog has no "Later", and it closes when nothing waits.
+            if model?.pending.isEmpty == false { model?.review() }
+        }
+        voiceApprovals = model
+        return model
+    }
+
+    /// A call was decided on a thread screen: a voice conversation waiting for
+    /// it asks the server again (only while something waits there), and so does
+    /// an announcement at the end of the loaded queue.
+    func toolApprovalsDecidedElsewhere() {
+        recheckQueuedAnnouncement()
+        guard let voice = voiceController, voice.approvalWaiting else { return }
+        Task { await voice.refreshApprovalsIfWaiting() }
+    }
+
+    // MARK: The spoken approval announcement in the queue (2026-11-12)
+
+    struct QueuedAnnouncement: Equatable {
+        var nodeId: Int
+        var url: String
+    }
+
+    /// Peter, 2026-11-12: "the announcement should be TTSed as a separate chunk
+    /// and appended to the queue. So that when it's not pending, it's not voiced
+    /// out anymore". The announcement at the end of the loaded queue (voice turn
+    /// or a reply's speaker), and its reply.
+    var queuedAnnouncement: QueuedAnnouncement? { queuedAnnouncementValue }
+    @ObservationIgnored private var queuedAnnouncementValue: QueuedAnnouncement?
+
+    func noteQueuedAnnouncement(nodeId: Int, url: String) {
+        queuedAnnouncementValue = QueuedAnnouncement(nodeId: nodeId, url: url)
+    }
+
+    /// After a decision (any screen) or a return to the app: asks whether the
+    /// reply of the announcement at the end of the queue still has changes
+    /// waiting; when none do, the announcement leaves the queue (if it is
+    /// playing, after it ends), so a replay no longer says it. Costs a request
+    /// only while such an announcement is loaded.
+    func recheckQueuedAnnouncement() {
+        guard let queued = queuedAnnouncementValue, let api = app?.api else { return }
+        guard let url = player.urlResolver(queued.url), player.entries.last?.url == url else {
+            queuedAnnouncementValue = nil  // the queue moved on
+            return
+        }
+        Task { [weak self] in
+            guard let answer: ApprovalAnnouncement = try? await api.get(APIPath.voiceApprovalAnnouncement, query: [
+                URLQueryItem(name: "node", value: String(queued.nodeId)),
+            ]), let self, self.queuedAnnouncementValue == queued, answer.count == 0 else { return }
+            self.player.dropTrailing(url: queued.url)
+            self.queuedAnnouncementValue = nil
+        }
+    }
+
+    /// A reply's spoken audio was loaded from its speaker: its announcement
+    /// joins the end while one of its changes waits. Waits at most
+    /// `VoiceApproval.announcementWait` for the answer.
+    func appendApprovalAnnouncement(nodeId: Int) async {
+        guard let api = app?.api else { return }
+        var request = APIRequest(.get, APIPath.voiceApprovalAnnouncement,
+                                 query: [URLQueryItem(name: "node", value: String(nodeId))])
+        request.timeout = VoiceApproval.announcementWait
+        guard let (data, http) = try? await api.data(for: request), http.statusCode == 200,
+              let answer = try? api.decode(ApprovalAnnouncement.self, from: data), let clip = answer.clip,
+              player.source == .node(nodeId) else { return }
+        if player.append(url: clip, duration: answer.duration) {
+            noteQueuedAnnouncement(nodeId: nodeId, url: clip)
+        }
     }
 
     /// A glean from the Voice screen (or its lock screen) landed (#475): the view
@@ -157,6 +256,8 @@ final class AudioCenter {
     func signedOut() {
         voiceController?.tearDown()
         voiceController = nil
+        voiceApprovals = nil
+        queuedAnnouncementValue = nil
         activeDictation?.cancel()
         ChunkUploader.shared.reset()
         PrivateFiles.sweepTemporary()
@@ -242,7 +343,8 @@ final class AudioCenter {
                                                       glean: voice.lockScreenGlean,
                                                       gleaning: voice.isGleaning,
                                                       gleanAccepted: voice.gleanAccepted,
-                                                      gleaned: voice.gleaningDone),
+                                                      gleaned: voice.gleaningDone,
+                                                      approvalWaiting: voice.approvalWaiting),
                               start: voice.state == .starting)
         }
         if let voice = voiceController, voice.isActive || (player.source == .voice && player.isLoaded) {
@@ -341,39 +443,49 @@ extension AudioCenter {
     /// Record from the lock screen: the next turn, also while the reply plays
     /// (the Voice screen's Continue), or a new one between turns. On a locked
     /// phone a toast is not seen, so a refusal or a failed start also notifies.
-    private func recordFromLockScreen(_ voice: VoiceTurnController) async {
+    /// Returns what that notification said (nil: none was posted).
+    @discardableResult
+    func recordFromLockScreen(_ voice: VoiceTurnController) async -> String? {
         // A glean runs: its card shows no Record button (a stale tap does nothing).
-        guard !voice.isGleaning else { return }
+        guard !voice.isGleaning else { return nil }
         if app?.spendCapped == true {
             app?.notifySpendBlocked()
             _ = app?.toasts.show(SpendCap.toastMessage(.record), duration: 8)
-            LocalNotifier.post(.recordFailed, body: SpendCap.toastMessage(.record))
-            return
+            return refuseLockScreenRecord(SpendCap.toastMessage(.record))
         }
         // Checked before Continue stops the reply (the Voice screen disables it offline).
         guard NetworkStatus.shared.isOnline else {
-            LocalNotifier.post(.recordFailed, body: "You're offline. Record again when you're back online.")
-            return
+            return refuseLockScreenRecord("You're offline. Record again when you're back online.")
         }
-        // A thread too long for another reply (#648), known before the press (the
-        // last reply reached the limit): it is said aloud, and the intent waits
-        // until it has been said, as the app may be suspended once it returns.
-        if let block = voice.aiBlock, block.isThreadTooLong, voice.phase == .ready || voice.phase == .playback {
+        // The one gate for a new turn (`newTurnRefusal`), the waiting change first:
+        // - A change in the thread waits for approval (Peter, 2026-11-12): no new
+        //   turn, and the reply keeps playing. The card has no Record button then;
+        //   a tap on a card not yet updated asks the server once more, since the
+        //   change may have been decided on another device.
+        // - A thread too long for another reply (#648), known before the press (the
+        //   last reply reached the limit): it is said aloud, and the intent waits
+        //   until it has been said, as the app may be suspended once it returns.
+        if voice.approvalWaiting { await voice.refreshApprovalsIfWaiting() }
+        switch voice.newTurnRefusalReason {
+        case .approvalWaiting?:
+            return refuseLockScreenRecord(voice.newTurnRefusal ?? LocalNotice.recordFailed.body)
+        case .threadTooLong(let block)? where voice.phase == .ready || voice.phase == .playback:
             LocalNotifier.post(.recordFailed, body: block.body)
             await voice.announceBlock()
-            return
+            return block.body
+        default:
+            break
         }
         switch voice.phase {
         case .playback:
             voice.continueConversation()
         case .ready:
             if let block = voice.aiBlock {
-                LocalNotifier.post(.recordFailed, body: block.body)
-                return
+                return refuseLockScreenRecord(block.body)
             }
             voice.start()
         default:
-            return
+            return nil
         }
         let tapped = Date()
         let deadline = tapped.addingTimeInterval(Self.lockScreenStartWait)
@@ -381,15 +493,22 @@ extension AudioCenter {
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
         if voice.state == .idle {
-            // The start failed; its toast says why (a refusal for the thread's
-            // length has no toast: the block says it).
-            let reason = lastVoiceToast.flatMap { $0.at >= tapped ? $0.text : nil }
-            let block = voice.aiBlock?.isThreadTooLong == true ? voice.aiBlock?.body : nil
-            LocalNotifier.post(.recordFailed, body: reason ?? block ?? LocalNotice.recordFailed.body)
+            // The start failed; its toast says why. Two refusals have no toast: a
+            // change waiting for approval that the server named (the dialog waits
+            // in the app) and the thread's length (the block says it, aloud).
+            let reason = voice.newTurnRefusal ?? lastVoiceToast.flatMap { $0.at >= tapped ? $0.text : nil }
+            let body = refuseLockScreenRecord(reason ?? LocalNotice.recordFailed.body)
+            // A start refused for the thread's length is being said: keep the app
+            // running until it has been (#648).
+            await voice.untilSpoken()
+            return body
         }
-        // A start refused for the thread's length is being said: keep the app
-        // running until it has been (#648).
-        await voice.untilSpoken()
+        return nil
+    }
+
+    private func refuseLockScreenRecord(_ body: String) -> String {
+        LocalNotifier.post(.recordFailed, body: body)
+        return body
     }
 }
 
@@ -424,6 +543,10 @@ extension AudioCenter: VoiceAudio {
 
     func voiceConversationEnded() {
         liveActivity.end()
+    }
+
+    func announcementQueued(nodeId: Int, url: String) {
+        noteQueuedAnnouncement(nodeId: nodeId, url: url)
     }
 
     func startCue() { sounds.startCue() }

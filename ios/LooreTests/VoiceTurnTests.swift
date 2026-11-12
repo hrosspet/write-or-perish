@@ -110,6 +110,28 @@ final class FakeVoiceBackend: VoiceBackend {
         log.append("discard")
         discarded.append(sessionId)
     }
+
+    /// `GET /api/tool-approvals?node=`: the waiting calls per node asked (none
+    /// listed: nothing waits). Not in `log`, so the turn sequences stay as they were.
+    var approvalLists: [Int: [ToolApproval]] = [:]
+    var approvalRequests: [Int] = []
+    var approvalError: Error?
+    func pendingApprovals(nodeId: Int) async throws -> [ToolApproval] {
+        approvalRequests.append(nodeId)
+        if let approvalError { throw approvalError }
+        return approvalLists[nodeId] ?? []
+    }
+
+    /// `GET /api/voice/approval-announcement?node=`: per node (none: nothing
+    /// waits, no clip). `announcementDelay`: seconds the answer takes.
+    var announcements: [Int: ApprovalAnnouncement] = [:]
+    var announcementRequests: [Int] = []
+    var announcementDelay: Double = 0
+    func approvalAnnouncement(nodeId: Int) async throws -> ApprovalAnnouncement {
+        announcementRequests.append(nodeId)
+        if announcementDelay > 0 { try? await Task.sleep(nanoseconds: UInt64(announcementDelay * 1_000_000_000)) }
+        return announcements[nodeId] ?? ApprovalAnnouncement(count: 0)
+    }
     func timingClock() async throws -> Double { Date().timeIntervalSince1970 }
     func postTiming(nodeId: Int, marks: [String: Double], offsetMs: Double, rttMs: Double) async {
         timingPosts.append((nodeId, marks))
@@ -247,6 +269,7 @@ final class FakeAudio: VoiceAudio {
     func playLongRecordingWarning() { events.append("sound.59") }
     func refreshNowPlaying() {}
     func voiceConversationEnded() { events.append("conversation.ended") }
+    func announcementQueued(nodeId: Int, url: String) { events.append("announcement \(nodeId) \(url)") }
 }
 
 @MainActor

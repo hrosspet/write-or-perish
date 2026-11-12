@@ -12,6 +12,10 @@ export const useAudio = () => {
   return context;
 };
 
+// The player when there is one (null outside an AudioProvider): for code
+// that also runs where nothing plays, e.g. the approval dialog's hook.
+export const useOptionalAudio = () => useContext(AudioContext) || null;
+
 // Map an HTMLMediaElement.error to a user-facing toast message. The
 // most common cause of code 4 (SRC_NOT_SUPPORTED) here is older iOS
 // Safari being asked to play a WebM/Opus recording made in
@@ -85,6 +89,15 @@ export const AudioProvider = ({ children }) => {
   const queueMetadataRef = useRef(null);
   // Playback ID to prevent stale event handlers from updating state
   const playbackIdRef = useRef(0);
+  // The approval announcement (Peter, 2026-11-12: "the announcement should
+  // be TTSed as a separate chunk and appended to the queue. So that when
+  // it's not pending, it's not voiced out anymore"): { url, nodeId } of
+  // the clip appended after a reply's last chunk, while that reply's
+  // changes wait. Not a chapter. dropAnnouncement removes it once they are
+  // decided; one playing then goes when it ends (dropAfterPlayRef).
+  const announcementRef = useRef(null);
+  const dropAfterPlayRef = useRef(null);
+  const removeAnnouncementRef = useRef(null);
 
   // Calculate cumulative time based on chunk index and current position
   const calculateCumulativeTime = useCallback((chunkIndex, timeInChunk) => {
@@ -358,6 +371,13 @@ export const AudioProvider = ({ children }) => {
         setCurrentTime(chunkDurationsRef.current[chunkIndex] || 0);
         setCumulativeTime(totalDur);
         setQueueFinishedCount((n) => n + 1);
+        // The announcement just played, and its changes were decided
+        // meanwhile: a replay plays the reply alone.
+        const dropUrl = dropAfterPlayRef.current;
+        if (dropUrl) {
+          dropAfterPlayRef.current = null;
+          if (removeAnnouncementRef.current) removeAnnouncementRef.current(dropUrl);
+        }
       }
     };
 
@@ -409,6 +429,8 @@ export const AudioProvider = ({ children }) => {
     setCumulativeTime(0);
     allChunkUrlsRef.current = [];
     audioQueueRef.current = [];
+    announcementRef.current = null;
+    dropAfterPlayRef.current = null;
 
     setLoading(true);
     setCurrentAudio(audioData);
@@ -478,7 +500,7 @@ export const AudioProvider = ({ children }) => {
   // When provided, these are used instead of browser metadata detection
   // onPlaying: called once when the first chunk's audio actually starts
   // (the element's `playing` event; voice timing, #371).
-  const loadAudioQueue = useCallback(async (urls, audioData, serverDurations = null, { onPlaying } = {}) => {
+  const loadAudioQueueNow = useCallback(async (urls, audioData, serverDurations = null, { onPlaying } = {}) => {
     if (!urls || urls.length === 0) return;
 
     // If there's already audio playing, pause it first
@@ -508,8 +530,11 @@ export const AudioProvider = ({ children }) => {
     queueMetadataRef.current = audioData;
     setWaitingForChunks(false);
 
-    // Store all URLs for seeking
-    allChunkUrlsRef.current = urls;
+    // Store all URLs for seeking. A copy: chunks appended later (streamed
+    // TTS, the approval announcement) must not land in the caller's array.
+    allChunkUrlsRef.current = [...urls];
+    announcementRef.current = null;
+    dropAfterPlayRef.current = null;
     setTotalChunks(urls.length);
     setCurrentChunkIndex(0);
     currentChunkIndexRef.current = 0;
@@ -537,6 +562,17 @@ export const AudioProvider = ({ children }) => {
     // need to create and fetch a new one from scratch.
     playChunkAtTime(0, 0, true, preloadedElement);
   }, [stopTimeTracking, preloadChunkDurations, playChunkAtTime, setWaitingForChunks]);
+
+  // The load in progress, so a chunk added right after a load (the
+  // approval announcement) waits for it: the load sets the queue's
+  // durations when they are known, and would drop a chunk appended
+  // before then.
+  const queueLoadRef = useRef(null);
+  const loadAudioQueue = useCallback((...args) => {
+    const load = loadAudioQueueNow(...args);
+    queueLoadRef.current = load;
+    return load;
+  }, [loadAudioQueueNow]);
 
   // Append a single chunk URL to the active audio queue (for streaming TTS).
   // chapterTitle: when set, a chapter marker is recorded at this chunk's
@@ -608,6 +644,66 @@ export const AudioProvider = ({ children }) => {
       playChunkAtTime(newIndex, 0, true);
     }
   }, [preloadChunkDurations, playChunkAtTime, setWaitingForChunks]);
+
+  // The approval announcement after the reply of node *nodeId* (see
+  // announcementRef): appended as the queue's last chunk, with no chapter.
+  // *alone* (the queue's metadata): nothing of the reply plays, so the
+  // clip starts a queue of its own.
+  const appendAnnouncement = useCallback(async (url, serverDuration, nodeId, { alone = null } = {}) => {
+    if (queueLoadRef.current) {
+      await queueLoadRef.current.catch(() => {});
+    }
+    if (alone) {
+      await loadAudioQueue([url], alone, [serverDuration]);
+    } else {
+      await appendChunkToQueue(url, serverDuration, null);
+    }
+    const urls = allChunkUrlsRef.current;
+    if (urls[urls.length - 1] === url) {
+      announcementRef.current = { url, nodeId };
+      dropAfterPlayRef.current = null;
+    }
+  }, [appendChunkToQueue, loadAudioQueue]);
+
+  // Take the announcement chunk *url* off the end of the queue. A player
+  // that stood on it (it had played) stands at the reply's end instead.
+  const removeAnnouncementChunk = useCallback((url) => {
+    const urls = allChunkUrlsRef.current;
+    if (!urls.length || urls[urls.length - 1] !== url) return;
+    const kept = urls.slice(0, -1);
+    const durations = chunkDurationsRef.current.slice(0, kept.length);
+    allChunkUrlsRef.current = kept;
+    chunkDurationsRef.current = durations;
+    setChunkDurations(durations);
+    setTotalChunks(kept.length);
+    setTotalDuration(durations.reduce((a, b) => a + b, 0));
+    audioQueueRef.current = audioQueueRef.current.filter((u) => u !== url);
+    if (kept.length && currentChunkIndexRef.current >= kept.length) {
+      const last = kept.length - 1;
+      playChunkAtTime(last, durations[last] || 0, false);
+    }
+  }, [playChunkAtTime]);
+  removeAnnouncementRef.current = removeAnnouncementChunk;
+
+  // The reply's changes were all decided: no announcement on a replay.
+  // One playing now finishes first.
+  const dropAnnouncement = useCallback(() => {
+    const announcement = announcementRef.current;
+    if (!announcement) return;
+    announcementRef.current = null;
+    const urls = allChunkUrlsRef.current;
+    const playingIt = currentChunkIndexRef.current === urls.length - 1
+      && audioRef.current && !audioRef.current.paused;
+    if (playingIt) {
+      dropAfterPlayRef.current = announcement.url;
+    } else {
+      removeAnnouncementChunk(announcement.url);
+    }
+  }, [removeAnnouncementChunk]);
+
+  // The node whose announcement is in the queue, or null.
+  const announcementNodeId = useCallback(
+    () => (announcementRef.current ? announcementRef.current.nodeId : null), []);
 
   const play = useCallback(async () => {
     // A voice turn's audio started by hand (iOS never autoplays): its
@@ -707,6 +803,8 @@ export const AudioProvider = ({ children }) => {
     setTotalDuration(0);
     allChunkUrlsRef.current = [];
     audioQueueRef.current = [];
+    announcementRef.current = null;
+    dropAfterPlayRef.current = null;
     queueMetadataRef.current = null;
     setWaitingForChunks(false);
     setCurrentAudio(null);
@@ -939,6 +1037,9 @@ export const AudioProvider = ({ children }) => {
     updateChapters,
     renameChapter,
     appendChunkToQueue,
+    appendAnnouncement,
+    dropAnnouncement,
+    announcementNodeId,
     play,
     pause,
     stop,

@@ -1934,6 +1934,16 @@ def request_llm_response(node_id):
 
     if source_mode is not None and source_mode not in ("voice", "textmode"):
         return jsonify({"error": f"Invalid source_mode: {source_mode}"}), 400
+    # A Voice reply asked for here (no client does today) waits like any
+    # Voice turn while a change the AI proposed in the thread waits for the
+    # user's approval (Peter, 2026-11-12). LLM Response itself does not.
+    if source_mode == "voice":
+        from backend.utils.tool_approvals import (
+            approval_pending_response, waiting_in_thread,
+        )
+        waiting = waiting_in_thread(current_user.id, parent_node)
+        if waiting:
+            return approval_pending_response(waiting)
 
     if not model_id:
         # Walks ancestry from parent_node → user.preferred_model → DEFAULT.

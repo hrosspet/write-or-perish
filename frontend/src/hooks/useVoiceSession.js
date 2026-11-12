@@ -15,6 +15,7 @@ import {
   THREAD_LIMIT_SPOKEN, THREAD_TOO_LONG_CODE, isThreadTooLong, primeSpeech,
   soundThenSay, stopSpeaking,
 } from '../utils/threadLength';
+import { isApprovalPendingError } from '../utils/toolApprovals';
 import { onPageReturn } from '../utils/pageReturn';
 import { playErrorSound } from '../utils/errorSound';
 
@@ -40,6 +41,16 @@ const TTS_TRIGGER_WATCHDOG_MS = 20000;
 // page returns to the foreground: that is when iOS has most likely killed
 // the stream, and a reconnect to a live one is harmless (it replays).
 const TTS_SSE_CATCH_UP_MS = 3000;
+// INTRODUCED CONSTANT: how long the end of a turn's audio waits for the
+// answer on the approval announcement (Peter, 2026-11-12) before the queue
+// ends without it. The answer is asked as soon as the reply is written, so
+// it is usually in before the reply has been heard; only a clip being made
+// for the first time, or a slow network, takes this long. Not measured.
+const ANNOUNCEMENT_WAIT_MS = 5000;
+
+const absoluteUrl = (url) => (url.startsWith('http')
+  ? url
+  : `${process.env.REACT_APP_BACKEND_URL || ''}${url}`);
 
 // Chapter title of a node whose audio starts before its text is complete
 // (#367: spoken while written); replaced with the real one when it's done.
@@ -75,8 +86,9 @@ function chapterTitleFromContent(content) {
  * @param {number|null} options.initialLlmNodeId - Resume in processing phase, polling this LLM node
  * @param {number|null} options.initialParentId - Resume in ready phase with thread parent pre-set
  * @param {string|null} [options.entry] - 'glean' when the session was opened from the Glean card (#435): the thread the first recording starts is marked as a Glean thread
+ * @param {Function} [options.onApprovalPending] - Called when the server refused a Voice turn because a change the AI proposed in the thread waits for the user's approval: no recording started
  */
-export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete, onLLMFailed = null, initialLlmNodeId = null, initialParentId = null, model = null, aiUsage = 'none', onAiUsageRefused = null, onEntrySaved = null, onCancelled = null, entry = null }) {
+export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete, onLLMFailed = null, initialLlmNodeId = null, initialParentId = null, model = null, aiUsage = 'none', onAiUsageRefused = null, onEntrySaved = null, onCancelled = null, entry = null, onApprovalPending = null }) {
   const audio = useAudio();
   const isOnline = useOnlineStatus();
   const [phase, setPhase] = useState(initialLlmNodeId ? 'processing' : 'ready');
@@ -264,6 +276,12 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   useEffect(() => {
     onCancelledRef.current = onCancelled;
   }, [onCancelled]);
+  // The server refused the turn: a change the AI proposed in this thread
+  // waits for the user's approval (Peter, 2026-11-12). The page shows it.
+  const onApprovalPendingRef = useRef(onApprovalPending);
+  useEffect(() => {
+    onApprovalPendingRef.current = onApprovalPending;
+  }, [onApprovalPending]);
 
   // A voice turn that fails plays the error sound, so a user who isn't
   // looking at the screen (driving) knows the reply stopped (Peter,
@@ -284,6 +302,45 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   const errorSoundAfterQueueRef = useRef(null);
   const latestAudioRef = useRef(audio);
   latestAudioRef.current = audio;
+
+  // The approval announcement (Peter, 2026-11-12: "the announcement should
+  // be TTSed as a separate chunk and appended to the queue. So that when
+  // it's not pending, it's not voiced out anymore"). When the turn's final
+  // node is written, the server is asked whether that reply's changes wait
+  // (GET /voice/approval-announcement); its clip then joins the same queue
+  // after the reply's last chunk. The queue waits for the answer
+  // (generatingTTS stays on), at most ANNOUNCEMENT_WAIT_MS.
+  const announcementAskRef = useRef({ nodeId: null, promise: null });
+  const askAnnouncement = useCallback((nodeId) => {
+    if (announcementAskRef.current.nodeId === nodeId) {
+      return announcementAskRef.current.promise;
+    }
+    const promise = Promise.resolve()
+      .then(() => api.get('/voice/approval-announcement', { params: { node: nodeId } }))
+      .then((res) => (res && res.data && res.data.url ? res.data : null))
+      .catch(() => null);
+    announcementAskRef.current = { nodeId, promise };
+    return promise;
+  }, []);
+  // Nothing more of the reply is coming: add the announcement if it is
+  // due, then let the queue end. *alone*: nothing of this turn is in the
+  // queue (a reply that is all proposal card), so the clip starts a queue.
+  const endTurnAudio = useCallback(async (nodeId, { alone = false } = {}) => {
+    const turn = turnRef.current;
+    const announcement = await Promise.race([
+      askAnnouncement(nodeId),
+      new Promise((resolve) => { setTimeout(() => resolve(null), ANNOUNCEMENT_WAIT_MS); }),
+    ]);
+    // The user started, cancelled or left the turn meanwhile.
+    if (turn !== turnRef.current) return;
+    const queue = latestAudioRef.current;
+    if (announcement) {
+      const url = absoluteUrl(announcement.url);
+      await queue.appendAnnouncement(url, announcement.duration, nodeId,
+        alone ? { alone: { title: ttsTitle, url, chapters: [] } } : {});
+    }
+    queue.setGeneratingTTS(false);
+  }, [askAnnouncement, ttsTitle]);
   // nodeId: the reply node, or null when the reply never started.
   const soundReplyFailure = useCallback((nodeId, turn) => {
     if (turn !== turnRef.current) return;
@@ -342,6 +399,17 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
         if (onAiUsageRefusedRef.current) {
           onAiUsageRefusedRef.current(err.aiUsageScope || 'account');
         }
+        return;
+      }
+      // Refused because a change waits for the user's approval in this
+      // thread: no recording started. The page shows the change. (The
+      // server answers this before the thread's length: the change needs
+      // a decision first, and the next Record press asks the length.)
+      if (err?.approvalPending) {
+        stopSilentAudio();
+        setIsStopping(false);
+        setPhase('ready');
+        if (onApprovalPendingRef.current) onApprovalPendingRef.current();
         return;
       }
       // Refused because the thread is too long for another reply (#648):
@@ -405,7 +473,10 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
         // #513: a recording with no transcribed text is saved as a failure
         // note only (the server's "*Note: ..." line); Glean has nothing to read.
         if (onEntrySavedRef.current) {
-          onEntrySavedRef.current({ noText: finalTranscript.trimStart().startsWith('*Note:') });
+          onEntrySavedRef.current({
+            noText: finalTranscript.trimStart().startsWith('*Note:'),
+            warning: true,
+          });
         }
         addToast(data.warning, 8000);
         setPhase('ready');
@@ -457,6 +528,15 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
         if (isAiUsageRefusedError(err) && onAiUsageRefusedRef.current) {
           setPhase('ready');
           onAiUsageRefusedRef.current(aiUsageRefusalScope(err));
+          return;
+        }
+        // A change waits for the user's approval in this thread: the page
+        // shows it (not a failure: no sound). Asked by the server before
+        // the thread's length.
+        if (isApprovalPendingError(err)) {
+          addToast(err.response.data.error, 8000);
+          setPhase('ready');
+          if (onApprovalPendingRef.current) onApprovalPendingRef.current();
           return;
         }
         // Too long for another reply (#648): said, and shown, not failed.
@@ -598,7 +678,8 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       }
       continuingChainRef.current = false;
       setTtsGenerating(false);
-      audio.setGeneratingTTS(false);
+      // The queue ends once the announcement is in (or not due).
+      endTurnAudio(llmNodeId, { alone: firstChunkRef.current });
       // The turn ended with nothing (more) to play — e.g. a final answer
       // that is all proposal card: leave "Thinking...".
       if (firstChunkRef.current || awaitingNextNodeRef.current) {
@@ -686,9 +767,10 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       advanceChain(nextId);
     } else {
       continuingChainRef.current = false;
-      audio.setGeneratingTTS(false);
+      // The queue ends once the announcement is in (or not due).
+      endTurnAudio(llmNodeId);
     }
-  }, [llmNodeId, audio, ttsTitle, stopSilentAudio, advanceChain]);
+  }, [llmNodeId, audio, ttsTitle, stopSilentAudio, advanceChain, endTurnAudio]);
 
   // Interim playback finished but the continuation's audio isn't ready yet
   // (the answer is still generating) — drop back to "Thinking..." until
@@ -744,6 +826,8 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       // next turn parents off the answer (not an interim retrieval step), and
       // interim text carries no proposals to parse.
       if (firstCompletion && continuationId == null) {
+        // Asked now, so the answer is in when the reply's audio ends.
+        askAnnouncement(llmNodeId);
         const wasInitialResume = initialResumeRef.current;
         if (initialResumeRef.current) {
           initialResumeRef.current = false;
@@ -783,8 +867,11 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       // final answer — end any chain so the audio queue can finish.
       if (!llmData.content || !llmData.content.trim()) {
         stopSilentAudio();
+        const alone = !continuingChainRef.current;
         continuingChainRef.current = false;
-        audio.setGeneratingTTS(false);
+        // Ends the queue once the announcement is in (or not due).
+        audio.setGeneratingTTS(true);
+        endTurnAudio(llmNodeId, { alone });
         setPhase('playback');
         return;
       }
@@ -873,7 +960,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     // (llm-status polling already stopped on 'completed', so no other dep
     // changes).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [llmStatus, llmData, llmNodeId, audio, ttsTitle, stopSilentAudio, advanceChain, deliverFullTts, ttsRetriggerNonce, soundReplyFailure, finishGenerating, refuseForThreadLength]);
+  }, [llmStatus, llmData, llmNodeId, audio, ttsTitle, stopSilentAudio, advanceChain, deliverFullTts, ttsRetriggerNonce, soundReplyFailure, finishGenerating, refuseForThreadLength, askAnnouncement, endTurnAudio]);
 
   // Safety net: TTS is being generated (POST /tts returned 202) but no
   // chunk arrived within 60s — SSE is probably dead; transition to

@@ -13,6 +13,12 @@ import SwiftUI
 /// button once the thread has a recorded message. It waits for Loore's reply to
 /// the last message, stops the reply, and starts a live glean; the gleaning then
 /// opens in text mode and is never read aloud.
+///
+/// Changes waiting for approval (Peter, 2026-11-12): when the thread holds a
+/// write tool call waiting for the user (`VoiceApproval`), the record and
+/// Continue buttons are off with a line saying why, and the thread screen's
+/// approval dialog opens here once the reply's audio has ended (its last words
+/// are the server's spoken announcement), without "Later".
 struct VoiceView: View {
     let parentId: Int?
     let resumeLLMId: Int?
@@ -80,6 +86,18 @@ struct VoiceView: View {
         }
         .loorePageBackground(glow: true)
         .navigationBarTitleDisplayMode(.inline)
+        // Write tool calls waiting for approval (Peter, 2026-11-12): the thread
+        // screen's dialog, without "Later" and not dismissed by a tap outside,
+        // since no new turn starts while a call waits.
+        .looreDialog(isPresented: Binding(get: { approvalDialogShown }, set: { _ in }),
+                     dismissOnBackdropTap: false) {
+            if let model = app.audio.voiceApprovals, let group = model.shownGroup {
+                ToolApprovalDialog(group: group, model: model, onOpenThread: openThreadForApprovals)
+            }
+        }
+        .onChange(of: voice.approvalDialogDue) { _, due in
+            if due { openDueApprovalDialog() }
+        }
         .onAppear(perform: appear)
         .onDisappear(perform: disappear)
         .task {
@@ -152,11 +170,12 @@ struct VoiceView: View {
 
     @ViewBuilder private var recordControl: some View {
         if voice.phase == .ready {
-            VoiceRoundButton(enabled: online && !voice.isGleaning, action: startRecording) {
-                RecordGlyph(enabled: online)
+            VoiceRoundButton(enabled: online && !voice.isGleaning && !voice.approvalWaiting, action: startRecording) {
+                RecordGlyph(enabled: online && !voice.approvalWaiting)
             }
             .accessibilityLabel("Record")
             .accessibilityIdentifier("voice.record")
+            approvalLine
             gleanButton
         } else if voice.isPaused && !voice.isStopping {
             VoiceRoundButton(action: { voice.resumeRecording() }) {
@@ -215,7 +234,8 @@ struct VoiceView: View {
             OfflineNotice()
             if let block = voice.aiBlock, block.isThreadTooLong {
                 // This reply took the thread to its limit (#648): no Continue; the
-                // reply stays playable above.
+                // reply stays playable above. A change the reply proposed still
+                // waits first: its line stays, and its dialog opens after the audio.
                 Text(block.body)
                     .font(LooreFont.sans(14.4, .light))
                     .foregroundStyle(LooreColor.textSecondary)
@@ -228,14 +248,16 @@ struct VoiceView: View {
                     HStack(spacing: 16) { aiBlockButtons(block) }
                     VStack(spacing: 12) { aiBlockButtons(block) }
                 }
+                approvalLine
             } else {
                 if voice.lengthNotice { threadLengthNotice }
-                VoiceRoundButton(size: 56, enabled: online && !voice.isGleaning, dimmed: 0.7,
+                VoiceRoundButton(size: 56, enabled: online && !voice.isGleaning && !voice.approvalWaiting, dimmed: 0.7,
                                  action: continueConversation) {
-                    RecordGlyph(enabled: online).scaleEffect(0.84)
+                    RecordGlyph(enabled: online && !voice.approvalWaiting).scaleEffect(0.84)
                 }
                 .accessibilityLabel(online ? "Continue" : "You're offline")
                 .accessibilityIdentifier("voice.continue")
+                approvalLine
                 gleanButton
             }
         }
@@ -252,6 +274,30 @@ struct VoiceView: View {
             .frame(maxWidth: 320)
             .padding(.bottom, 20)
             .accessibilityIdentifier("voice.threadLengthNotice")
+    }
+
+    /// Under the record (or Continue) button while a change in the thread waits
+    /// for approval: why it is off, and Review, which opens the dialog (the
+    /// thread screen's waiting line).
+    @ViewBuilder private var approvalLine: some View {
+        if voice.approvalWaiting {
+            let line = VoiceApproval.waitingLine(count: voice.waitingApprovals.count)
+            Button(action: reviewApprovals) {
+                // No-break spaces: "· Review" never starts a line on its own.
+                (Text(line + "\u{00A0}·\u{00A0}").foregroundColor(LooreColor.textMuted)
+                 + Text("Review").foregroundColor(LooreColor.accent))
+                    .font(LooreFont.sans(13.6, .light))
+                    .multilineTextAlignment(.center)
+                    .lineSpacing(3)
+                    .frame(maxWidth: 320, minHeight: 32)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 14)
+            .accessibilityLabel(line)
+            .accessibilityHint("Opens the changes to approve or reject")
+            .accessibilityIdentifier("voice.approvals.line")
+        }
     }
 
     /// Under the record (or Continue) button in a Glean session, once the thread
@@ -345,6 +391,9 @@ struct VoiceView: View {
                 HStack(spacing: 16) { aiBlockButtons(block) }
                 VStack(spacing: 12) { aiBlockButtons(block) }
             }
+            // A change in the conversation's thread still waits for approval: it
+            // is decided first, so its line (and Review) stays under the block.
+            approvalLine
         }
         .multilineTextAlignment(.center)
     }
@@ -418,6 +467,49 @@ struct VoiceView: View {
         app.audio.voiceScreenVisible = true
         // Before the first check the route waits: a blocked thread's reply is not resumed.
         if availabilityChecked && aiBlock == nil { applyRoute() }
+        // Back from the thread screen or another tab: the dialog the conversation
+        // wanted opens now, and a change still waiting brings it back.
+        openDueApprovalDialog()
+        if voice.approvalWaiting {
+            Task { await voice.refreshApprovalsIfWaiting(openDialog: true) }
+        }
+    }
+
+    // MARK: Changes waiting for approval (2026-11-12)
+
+    /// The dialog is up: only on this screen, never over the screen pushed on top.
+    private var approvalDialogShown: Bool {
+        app.audio.voiceScreenVisible && app.audio.voiceApprovals?.shownGroup != nil
+    }
+
+    /// The conversation wants the dialog (the reply's audio ended, or the thread
+    /// opened with calls waiting): the oldest reply's calls.
+    private func openDueApprovalDialog() {
+        guard voice.approvalDialogDue, app.audio.voiceScreenVisible,
+              let model = app.audio.makeVoiceApprovals(), !model.pending.isEmpty else { return }
+        voice.approvalDialogOpened()
+        if model.shownTurnId == nil { model.review() }
+    }
+
+    /// The waiting line's Review.
+    private func reviewApprovals() {
+        app.audio.makeVoiceApprovals()?.review()
+    }
+
+    /// The dialog's "Open the thread": Voice gives way to the thread screen,
+    /// where the calls wait with their line and dialog as before. Nothing is
+    /// decided; back on Voice the dialog comes again.
+    private func openThreadForApprovals() {
+        app.audio.voiceApprovals?.later()
+        guard let id = voice.lastReplyNodeId ?? voice.approvalsNodeId else {
+            app.open(.textMode())
+            return
+        }
+        Task {
+            // Let the dialog's cover go before the push (as ThreadSheets does).
+            try? await Task.sleep(nanoseconds: 450_000_000)
+            NodePrefetch.shared.openThread(id, app: app)  // opens once the node is in
+        }
     }
 
     /// The route's `parent` / `resume` / `glean`, once per screen.
@@ -460,6 +552,11 @@ struct VoiceView: View {
 
     private func startRecording() {
         guard aiBlock == nil else { return }
+        // The button is off while a change waits; the dialog is the way on.
+        if voice.approvalWaiting {
+            reviewApprovals()
+            return
+        }
         // Block before any recording starts: a long recording stopped only at
         // the end would be lost work (web #85).
         if app.spendCapped {
@@ -489,6 +586,10 @@ struct VoiceView: View {
     }
 
     private func continueConversation() {
+        if voice.approvalWaiting {
+            reviewApprovals()
+            return
+        }
         if app.spendCapped {
             app.notifySpendBlocked()
             app.toasts.show(SpendCap.toastMessage(.record), duration: 8)

@@ -4,7 +4,9 @@ utils/tool_approvals).
 
 GET  /api/tool-approvals?node=<id>   the waiting calls in that node's
                                      thread (the node, its ancestors and
-                                     its replies), oldest first
+                                     its replies), oldest first; the
+                                     Voice screens ask after every reply
+                                     (a Voice turn waits for them)
 POST /api/tool-approvals/<id>/approve  run the call now
 POST /api/tool-approvals/<id>/reject   drop it; nothing changes
 
@@ -20,28 +22,10 @@ from backend.utils.privacy import can_user_access_node
 from backend.utils.error_privacy import describe_exception
 from backend.utils.tool_approvals import (
     claim, decide, pending_for_user, release, serialize_pending,
+    thread_node_ids,
 )
 
 tool_approvals_bp = Blueprint("tool_approvals", __name__)
-
-
-def thread_node_ids(node):
-    """*node*, its ancestors and its replies at every depth: ids only,
-    one query per level (the level walk node_settings uses)."""
-    ids = {node.id}
-    current = node.parent
-    seen = {node.id}
-    while current is not None and current.id not in seen:
-        seen.add(current.id)
-        ids.add(current.id)
-        current = current.parent
-    frontier = [node.id]
-    while frontier:
-        rows = db.session.query(Node.id).filter(
-            Node.parent_id.in_(frontier)).all()
-        frontier = [r[0] for r in rows if r[0] not in ids]
-        ids.update(frontier)
-    return ids
 
 
 # The answer when the call can't run now; it still waits.
