@@ -306,16 +306,7 @@ def _latest_non_integration_profile(user_id):
 
 
 def _new_token_count(user, cutoff):
-    q = db.session.query(func.coalesce(func.sum(Node.token_count), 0)).filter(
-        or_(Node.user_id == user.id, Node.human_owner_id == user.id),
-        Node.ai_usage.in_(['chat', 'train']),
-    )
-    if cutoff is not None:
-        # Writing created after the cutoff, as the window reads it: an
-        # import's nodes carry the import time as updated_at, which made
-        # the first entry after a large import trigger an update (R11).
-        q = q.filter(Node.created_at > cutoff)
-    return q.scalar()
+    return _exports.new_units_since_cutoff(user, cutoff)
 
 
 def _should_seed(user, ignore_backoff=False):

@@ -1672,6 +1672,45 @@ def test_imported_nodes_do_not_count_as_new_writing(app):
     assert pb._new_token_count(u, cutoff) == 0
 
 
+def _gate_node(u, tokens, created_at):
+    n = Node(user_id=u.id, node_type="user", ai_usage="chat",
+             token_count=tokens, created_at=created_at,
+             updated_at=created_at)
+    n.set_content("synthetic text")
+    db.session.add(n)
+    db.session.commit()
+    return n
+
+
+def test_deleted_writing_does_not_count_toward_the_gate(app):
+    from backend.tasks import exports
+    u = _user()
+    cutoff = datetime(2026, 1, 1)
+    _gate_node(u, 50_000, datetime(2026, 2, 1))
+    gone = _gate_node(u, 40_000, datetime(2026, 2, 2))
+    gone.deleted_at = datetime(2026, 2, 3)
+    db.session.commit()
+    # 90,000 stored, 50,000 alive: under the 80,000 gate.
+    assert pb._new_token_count(u, cutoff) == 50_000
+    assert exports.new_units_since_cutoff(u, cutoff) == 50_000
+    assert exports.new_units_since_cutoff(u, None) == 50_000
+
+
+def test_deleting_old_writing_does_not_add_it_to_the_count(app):
+    # Control: the count already reads created_at (R11), so the deletion's
+    # updated_at bump never counted. Pins it with the deleted_at filter.
+    from backend.tasks import exports
+    u = _user()
+    cutoff = datetime(2026, 1, 1)
+    old = _gate_node(u, 90_000, datetime(2025, 6, 1))
+    assert pb._new_token_count(u, cutoff) == 0
+    old.deleted_at = datetime(2026, 3, 1)
+    old.updated_at = datetime(2026, 3, 1)
+    db.session.commit()
+    assert pb._new_token_count(u, cutoff) == 0
+    assert exports.new_units_since_cutoff(u, cutoff) == 0
+
+
 # ── 15. an import on a set ────────────────────────────────────────────────
 
 def test_an_import_on_a_set(app):
