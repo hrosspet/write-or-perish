@@ -811,6 +811,61 @@ final class ImportTests: StubbedAppTestCase {
         XCTAssertNil(model.result)
     }
 
+    // MARK: The rebuild question after Chat → None (#625)
+
+    private func importAskingToRebuild(answer: StubResponse = .json(202, #"{"profile_update_task_id":null}"#))
+        async -> ImportModel {
+        StubURLProtocol.install { request in
+            if request.url?.path == "/api/import/profile-rebuild" { return answer }
+            return .json(201, #"{"created":0,"skipped":0,"restored":0,"updated":4,"ask_profile_rebuild":{"token":"signed","entries":4}}"#)
+        }
+        let model = ImportModel(app: app)
+        model.analysis = ImportAnalysis(kind: .markdown, raw: ["files": []])
+        await model.confirm()
+        return model
+    }
+
+    func testTheResultAsksWhetherToRebuildTheProfile() async {
+        let model = await importAskingToRebuild()
+        let question = try? XCTUnwrap(model.result?.rebuildQuestion)
+        XCTAssertEqual(question?.entries, 4)
+        XCTAssertEqual(question?.lines.first,
+                       "This import set 4 entries that were already in Loore to None, so AI no longer reads them.")
+        XCTAssertTrue(question?.lines[1].contains("It may also not") ?? false)
+        await model.answerRebuild(true)
+        XCTAssertEqual(body(of: "POST /api/import/profile-rebuild")?["token"] as? String, "signed")
+        XCTAssertEqual(model.rebuildAnswer, .rebuilding)
+    }
+
+    func testKeepingTheProfileSendsNothing() async {
+        let model = await importAskingToRebuild()
+        await model.answerRebuild(false)
+        XCTAssertEqual(model.rebuildAnswer, .kept)
+        XCTAssertFalse(calls.contains("POST /api/import/profile-rebuild"))
+    }
+
+    func testAYesThatStartedNothingSaysWhy() async {
+        let model = await importAskingToRebuild(
+            answer: .json(200, #"{"status":"skipped","message":"This question has been answered already, so no rebuild was started."}"#))
+        await model.answerRebuild(true)
+        XCTAssertEqual(model.rebuildAnswer,
+                       .skipped("This question has been answered already, so no rebuild was started."))
+    }
+
+    func testARefusedRebuildShowsTheServersReason() async {
+        let model = await importAskingToRebuild(
+            answer: .json(400, #"{"error":"This question has expired. Your profile stays as it is."}"#))
+        await model.answerRebuild(true)
+        XCTAssertEqual(model.rebuildAnswer, .failed("This question has expired. Your profile stays as it is."))
+    }
+
+    func testAResultWithoutTheQuestionHasNone() {
+        XCTAssertNil(ImportResult(["created": 2, "ask_profile_rebuild": NSNull()]).rebuildQuestion)
+        XCTAssertNil(ImportResult(["created": 2]).rebuildQuestion)
+        XCTAssertEqual(ProfileRebuildQuestion(["token": "t", "entries": 1])?.savedYes,
+                       "Your profile will be rebuilt without this entry.")
+    }
+
     func testDeletedContentConflictAsksThenRetriesWithTheChoice() async {
         let model = ImportModel(app: app)
         model.analysis = ImportAnalysis(kind: .markdown, raw: ["files": []])

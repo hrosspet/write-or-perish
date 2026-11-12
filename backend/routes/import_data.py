@@ -226,6 +226,89 @@ def _restore_node(node_id, content, privacy_level, ai_usage,
     node.ai_usage = ai_usage
     node.provenance = provenance
     node.deleted_at = None
+    return node
+
+
+class _ProfileChanges:
+    """What an import changed in the writing the profile reads (#625).
+    Peter, 2026-11-11: "only what's changed by the import should count
+    towards the decision whether / how much of the profile should be
+    rebuilt". That is: the entries it created or restored that AI may
+    read, and the entries already in Loore whose AI usage it moved into
+    what AI may read (None to Chat) or out of it (Chat to None). A
+    privacy change, or one between Chat and Train, leaves the profile's
+    input as it was, and an entry skipped as it is changes nothing.
+
+    ``earliest`` is the oldest date among the changed entries (an entry
+    without a date of its own is dated at the import, newer than any
+    profile): the profile hand-off rebuilds from there on. ``added``
+    counts entries that entered the profile's input, ``removed`` those
+    that left it, ``tokens`` their units (for the log)."""
+
+    def __init__(self, ai_usage):
+        self.readable = ai_usage in AI_ALLOWED
+        self.earliest = None
+        self.tokens = 0
+        self.added = 0
+        self.removed = 0
+
+    def _note(self, when, tokens):
+        self.tokens += tokens or 0
+        if when is not None and (self.earliest is None
+                                 or when < self.earliest):
+            self.earliest = when
+
+    def entry_added(self, when, tokens):
+        """An entry this import created or restored, with its AI usage."""
+        if self.readable:
+            self._note(when, tokens)
+            self.added += 1
+
+    def setting_changed(self, node):
+        """Before ``node``, already in Loore, takes this import's AI
+        usage: counted when that moves it into or out of what AI may
+        read."""
+        if (node.ai_usage in AI_ALLOWED) == self.readable:
+            return
+        self._note(node.created_at, node.token_count)
+        if self.readable:
+            self.added += 1
+        else:
+            self.removed += 1
+
+    @classmethod
+    def from_state(cls, state, ai_usage):
+        """The changes a background conversation import recorded in its
+        saved state. A state saved before #625 has the import's oldest
+        message and its counts instead: read conservatively, as changes
+        dated from that message."""
+        changes = cls(ai_usage)
+        if "profile_added" not in state:
+            raw = state.get("earliest_ts")
+            changes.earliest = datetime.fromisoformat(raw) if raw else None
+            changes.tokens = state.get("imported_tokens", 0)
+            n = (state.get("created", 0) + state.get("restored", 0)
+                 + state.get("updated", 0))
+            if changes.readable:
+                changes.added = n
+            else:
+                changes.removed = state.get("updated", 0)
+            return changes
+        raw = state.get("profile_changed_from")
+        changes.earliest = datetime.fromisoformat(raw) if raw else None
+        changes.tokens = state.get("profile_changed_tokens", 0)
+        changes.added = state.get("profile_added", 0)
+        changes.removed = state.get("profile_removed", 0)
+        return changes
+
+    def to_state(self, state):
+        state.update({
+            "profile_changed_from": (self.earliest.isoformat()
+                                     if self.earliest else None),
+            "profile_changed_tokens": self.tokens,
+            "profile_added": self.added,
+            "profile_removed": self.removed,
+        })
 
 
 def _requested_ai_usage(data):
@@ -236,7 +319,8 @@ def _requested_ai_usage(data):
     return data.get('ai_usage') or current_user.default_ai_usage or 'none'
 
 
-def _apply_settings_to_skipped(node_ids, privacy_level, ai_usage, dek=None):
+def _apply_settings_to_skipped(node_ids, privacy_level, ai_usage, dek=None,
+                               changes=None):
     """Apply this import's privacy/ai_usage to already-imported nodes.
 
     Re-importing an archive is also how users change their mind about
@@ -245,6 +329,9 @@ def _apply_settings_to_skipped(node_ids, privacy_level, ai_usage, dek=None):
     number of nodes whose settings actually changed; callers report it
     as ``updated`` and keep it disjoint from ``skipped``. Provenance is
     NOT touched: how a node first arrived is a fact, not a setting.
+
+    ``changes`` (a _ProfileChanges) records the nodes whose new AI usage
+    moves them into or out of what the profile reads (#625).
     """
     from sqlalchemy import or_
     ids = [i for i in node_ids if i is not None]
@@ -262,6 +349,8 @@ def _apply_settings_to_skipped(node_ids, privacy_level, ai_usage, dek=None):
                 Node.ai_usage != ai_usage,
             ),
         ).all():
+            if changes is not None:
+                changes.setting_changed(node)
             node.set_privacy_level(privacy_level, dek=dek)
             node.ai_usage = ai_usage
             updated += 1
@@ -808,6 +897,7 @@ def confirm_import():
         nodes_restored = 0
         thread_count = 0
         skipped_alive_ids = []
+        changes = _ProfileChanges(ai_usage)
         key_index, deleted_keys = _load_source_key_index(current_user.id)
 
         def _file_source_key(filename, content, source_format=None):
@@ -847,9 +937,12 @@ def confirm_import():
                     # Chain the next new file onto the existing copy so
                     # partially-skipped imports don't orphan new nodes.
                     if source_key in deleted_keys and on_deleted == 'restore':
-                        _restore_node(key_index[source_key], node_content,
-                                      privacy_level, ai_usage,
-                                      provenance=PROVENANCE_ARCHIVE_UPLOAD)
+                        restored = _restore_node(
+                            key_index[source_key], node_content,
+                            privacy_level, ai_usage,
+                            provenance=PROVENANCE_ARCHIVE_UPLOAD)
+                        changes.entry_added(restored.created_at,
+                                            restored.token_count)
                         deleted_keys.discard(source_key)
                         nodes_restored += 1
                     else:
@@ -873,6 +966,8 @@ def confirm_import():
                 tip, created_count = _import_file_nodes(
                     file_data, parts, parent_id, source_key,
                     node_created_at, privacy_level, ai_usage)
+                changes.entry_added(node_created_at,
+                                    approximate_token_count(content))
 
                 key_index[source_key] = tip.id
                 parent_id = tip.id
@@ -897,9 +992,12 @@ def confirm_import():
                                           deleted_keys, on_deleted)
                 if source_key in key_index:
                     if source_key in deleted_keys and on_deleted == 'restore':
-                        _restore_node(key_index[source_key], node_content,
-                                      privacy_level, ai_usage,
-                                      provenance=PROVENANCE_ARCHIVE_UPLOAD)
+                        restored = _restore_node(
+                            key_index[source_key], node_content,
+                            privacy_level, ai_usage,
+                            provenance=PROVENANCE_ARCHIVE_UPLOAD)
+                        changes.entry_added(restored.created_at,
+                                            restored.token_count)
                         deleted_keys.discard(source_key)
                         nodes_restored += 1
                     else:
@@ -923,6 +1021,8 @@ def confirm_import():
                 _, created_count = _import_file_nodes(
                     file_data, parts, None, source_key,
                     node_created_at, privacy_level, ai_usage)
+                changes.entry_added(node_created_at,
+                                    approximate_token_count(content))
 
                 nodes_created += created_count
                 threads_created += 1
@@ -930,44 +1030,15 @@ def confirm_import():
             thread_count = threads_created
 
         nodes_updated = _apply_settings_to_skipped(
-            skipped_alive_ids, privacy_level, ai_usage
+            skipped_alive_ids, privacy_level, ai_usage, changes=changes
         )
         nodes_skipped -= nodes_updated
 
         # Commit all nodes
         db.session.commit()
 
-        # Determine if imported data predates the current profile cutoff
-        profile_update_task_id = None
-        profile_waits = False
-        if ai_usage in AI_ALLOWED:
-            try:
-                user_obj = User.query.get(current_user.id)
-                if (user_obj and (user_obj.plan or "free")
-                        in User.VOICE_MODE_PLANS):
-                    earliest_ts = None
-                    for f in files_sorted:
-                        raw_ts = f.get('modified_at', '')
-                        if raw_ts:
-                            try:
-                                ts = datetime.fromisoformat(raw_ts)
-                                if earliest_ts is None or ts < earliest_ts:
-                                    earliest_ts = ts
-                            except (ValueError, TypeError):
-                                pass
-
-                    total_imported_tokens = sum(
-                        approximate_token_count(f.get('content', ''))
-                        for f in files_sorted
-                    )
-                    profile_update_task_id = (
-                        _hand_off_profile_update_after_import(
-                            user_obj, earliest_ts, total_imported_tokens))
-                    profile_waits = _profile_waits_for_imports(user_obj.id)
-            except Exception as e:
-                current_app.logger.warning(
-                    "Auto-trigger profile update failed: %s", describe_exception(e)
-                )
+        profile_update_task_id, profile_waits, rebuild_question = (
+            _profile_after_import(current_user.id, changes))
 
         return jsonify({
             "message": "Import successful",
@@ -975,8 +1046,9 @@ def confirm_import():
             "thread_count": thread_count,
             "profile_update_task_id": profile_update_task_id,
             "profile_waits_for_imports": profile_waits,
+            "ask_profile_rebuild": rebuild_question,
             "ask_both_providers": _ask_both_providers(
-                current_user.id, ai_usage, nodes_created + nodes_restored),
+                current_user.id, ai_usage, changes.added),
             "created": nodes_created,
             "skipped": nodes_skipped,
             "restored": nodes_restored,
@@ -1466,8 +1538,7 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
     skipped_alive_ids = []
     key_index, deleted_keys = _load_source_key_index(user_id)
     parent_id = None
-    earliest_ts = None
-    total_imported_tokens = 0
+    changes = _ProfileChanges(ai_usage)
     since_commit = 0
     done = 0
 
@@ -1490,20 +1561,17 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
         token_count = tweet_data.get(
             'token_count', approximate_token_count(content)
         )
-        total_imported_tokens += token_count
         tweet_created_at = _parse_tweet_ts(tweet_data.get('created_at', ''))
-        if tweet_created_at and (earliest_ts is None
-                                 or tweet_created_at < earliest_ts):
-            earliest_ts = tweet_created_at
 
         source_key = _tweet_source_key(tweet_data)
         if source_key in key_index:
             if source_key in deleted_keys and on_deleted == 'restore':
-                _restore_node(
+                restored = _restore_node(
                     key_index[source_key], content,
                     privacy_level, ai_usage, token_count,
                     provenance=provenance,
                 )
+                changes.entry_added(restored.created_at, token_count)
                 deleted_keys.discard(source_key)
                 nodes_restored += 1
             else:
@@ -1532,6 +1600,7 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
         if tweet_created_at:
             node.created_at = tweet_created_at
         db.session.add(node)
+        changes.entry_added(tweet_created_at, token_count)
 
         if import_type == 'single_thread':
             db.session.flush()
@@ -1549,7 +1618,7 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
                 on_progress(done)
 
     nodes_updated = _apply_settings_to_skipped(
-        skipped_alive_ids, privacy_level, ai_usage
+        skipped_alive_ids, privacy_level, ai_usage, changes=changes
     )
     nodes_skipped -= nodes_updated
     db.session.commit()
@@ -1558,13 +1627,8 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
 
     thread_count = 1 if import_type == 'single_thread' else nodes_created
 
-    profile_update_task_id = None
-    profile_waits = False
-    if ai_usage in AI_ALLOWED and nodes_created + nodes_restored > 0:
-        profile_update_task_id = _maybe_update_profile_after_import(
-            user_id, earliest_ts, total_imported_tokens
-        )
-        profile_waits = _profile_waits_for_imports(user_id)
+    profile_update_task_id, profile_waits, rebuild_question = (
+        _profile_after_import(user_id, changes))
 
     return {
         "message": "Import successful",
@@ -1572,8 +1636,9 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
         "thread_count": thread_count,
         "profile_update_task_id": profile_update_task_id,
         "profile_waits_for_imports": profile_waits,
+        "ask_profile_rebuild": rebuild_question,
         "ask_both_providers": _ask_both_providers(
-            user_id, ai_usage, nodes_created + nodes_restored),
+            user_id, ai_usage, changes.added),
         "created": nodes_created,
         "skipped": nodes_skipped,
         "empty": nodes_empty,
@@ -1583,7 +1648,8 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
 
 
 def _maybe_update_profile_after_import(user_id, earliest_ts, imported_tokens):
-    """Twitter path: same hand-off as every other importer. Best-effort."""
+    """The hand-off for an account that gets profiles (a Voice Mode plan),
+    by user id. Best-effort."""
     try:
         user_obj = User.query.get(user_id)
         if not user_obj or (user_obj.plan or "free") not in User.VOICE_MODE_PLANS:
@@ -1597,11 +1663,209 @@ def _maybe_update_profile_after_import(user_id, earliest_ts, imported_tokens):
     return None
 
 
+def _profile_after_import(user_id, changes):
+    """The profile's part of an import's result, from what the import
+    changed in the writing the profile reads (``changes``, #625).
+
+    - Entries entered it (created or restored for AI to read, or moved
+      from None to Chat or Train): the hand-off, dated from the oldest of
+      them, so the profile is rebuilt from that place in the user's whole
+      history on and keeps what comes before it.
+    - Entries only left it (Chat or Train to None): no rebuild on its own
+      (Peter, 2026-11-11); the result asks the user whether to rebuild
+      (``_profile_rebuild_question``).
+    - Nothing changed (an archive imported again as it was): no profile
+      work at all.
+
+    One import has one AI usage, so its changes either all enter or all
+    leave. Returns (profile_update_task_id, profile_waits_for_imports,
+    ask_profile_rebuild)."""
+    if changes.added:
+        task_id = _maybe_update_profile_after_import(
+            user_id, changes.earliest, changes.tokens)
+        return task_id, _profile_waits_for_imports(user_id), None
+    if changes.removed:
+        return None, False, _profile_rebuild_question(user_id, changes)
+    return None, False, None
+
+
+# The rebuild question's answer is accepted for this long after the import
+# (#625): a heuristic, long enough for a result left open in a tab or
+# opened from a background import later, short enough that an old answer
+# does not start a rebuild long after the user has moved on.
+PROFILE_REBUILD_QUESTION_MAX_AGE = 7 * 24 * 3600
+_PROFILE_REBUILD_SALT = "import-profile-rebuild"
+
+
+def _rebuild_signer():
+    from itsdangerous import URLSafeTimedSerializer
+    return URLSafeTimedSerializer(current_app.config["SECRET_KEY"])
+
+
+def _profile_rebuild_question(user_id, changes):
+    """The question an import asks after it set entries already in Loore
+    to None (#625; Peter, 2026-11-11: "in that case we should ask the user
+    whether to rebuild the profile, explaining that the import data are
+    possibly included in their current profile (not necessarily ...)").
+
+    Asked only where the answer can change something: the account gets
+    profiles (a Voice Mode plan) and allows AI (no profile job runs for an
+    account set to None), and the profile in use covers writing up to the
+    oldest of those entries or later, so it may have read them. A profile
+    that ends before them never read them, and a profile written by hand
+    covers no writing.
+
+    The question gets an id, stored on the user
+    (``User.profile_rebuild_offer_id``): the answer is accepted once
+    (``rebuild_profile_after_import``), and a newer import's question
+    replaces an open one.
+
+    Returns ``{"token", "entries"}`` (``token`` is what the answer sends
+    back, signed: the user, the question's id, when it was asked and the
+    oldest entry's date; ``entries`` how many entries left what AI reads),
+    or None. Best-effort: None on any error."""
+    try:
+        import secrets
+        from backend.utils.privacy import account_allows_ai
+        from backend.utils.profile_versions import current_profile_query
+        asked_at = datetime.utcnow()   # before the profile in use is read
+        user = db.session.get(User, user_id)
+        if (user is None or changes.earliest is None
+                or (user.plan or "free") not in User.VOICE_MODE_PLANS
+                or not account_allows_ai(user)):
+            return None
+        in_use = current_profile_query(user_id).filter(
+            UserProfile.ai_usage.in_(AI_ALLOWED)).first()
+        cutoff = in_use.source_data_cutoff if in_use is not None else None
+        if cutoff is None or cutoff < changes.earliest:
+            return None
+        question_id = secrets.token_hex(16)
+        user.profile_rebuild_offer_id = question_id
+        db.session.commit()
+        token = _rebuild_signer().dumps(
+            {"u": user_id, "q": question_id, "at": asked_at.isoformat(),
+             "from": changes.earliest.isoformat()},
+            salt=_PROFILE_REBUILD_SALT)
+        return {"token": token, "entries": changes.removed}
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.warning(
+            "Profile rebuild question after import failed: %s",
+            describe_exception(e))
+        return None
+
+
+@import_bp.route("/import/profile-rebuild", methods=["POST"])
+@login_required
+def rebuild_profile_after_import():
+    """The user's yes to an import's rebuild question (#625,
+    ``_profile_rebuild_question``). Body: ``{"token": "..."}`` from the
+    import's result. The profile is rebuilt as after any import that
+    changed entries: from the oldest of the entries the import set to
+    None, in the user's whole history, on; what comes before stays.
+
+    A no sends nothing, and closing the result without an answer starts
+    nothing and records nothing.
+
+    One question starts at most one rebuild (review of #625: each rebuild
+    is billed). The question's id is cleared in the same UPDATE that
+    checks it, so an answer sent again, or twice at once, finds it gone;
+    a newer import's question has replaced it too. The yes then starts
+    nothing either when a profile update is already pending or running
+    (a rebuild flagged, a batch in flight, a profile task running), or a
+    profile version was saved after the question was asked: the profile
+    has moved on since. These answers are 200 ``{"status": "skipped",
+    "message"}``, the message saying that no rebuild was started.
+
+    Returns 202 ``{"status": "rebuilding", "profile_update_task_id",
+    "profile_waits_for_imports"}``, 200 skipped as above, 400 when the
+    question has expired or is not this user's, 409 when the account no
+    longer gets profile builds."""
+    from itsdangerous import BadSignature
+    from backend.utils.privacy import account_allows_ai
+    data = request.get_json(silent=True) or {}
+    token = data.get("token")
+    expired = jsonify({"error": "This question has expired. Your profile "
+                                "stays as it is."}), 400
+    if not isinstance(token, str) or not token:
+        return expired
+    try:
+        payload = _rebuild_signer().loads(
+            token, salt=_PROFILE_REBUILD_SALT,
+            max_age=PROFILE_REBUILD_QUESTION_MAX_AGE)
+        earliest = datetime.fromisoformat(payload["from"])
+        asked_at = datetime.fromisoformat(payload["at"])
+        question_id = payload["q"]
+    except (BadSignature, KeyError, TypeError, ValueError):
+        return expired
+    if payload.get("u") != current_user.id or not question_id:
+        return expired
+    user = db.session.get(User, current_user.id)
+    if ((user.plan or "free") not in User.VOICE_MODE_PLANS
+            or not account_allows_ai(user)):
+        return jsonify({"error": "Your account doesn't build a profile "
+                                 "right now, so there is nothing to "
+                                 "rebuild."}), 409
+
+    def skipped(message):
+        return jsonify({"status": "skipped", "message": message}), 200
+
+    claimed = User.query.filter(
+        User.id == user.id,
+        User.profile_rebuild_offer_id == question_id,
+    ).update({"profile_rebuild_offer_id": None}, synchronize_session=False)
+    if claimed != 1:
+        db.session.rollback()
+        return skipped("This question has been answered already, so no "
+                       "rebuild was started.")
+    db.session.refresh(user)
+    if _profile_update_under_way(user):
+        db.session.commit()
+        return skipped("Your profile is being updated right now, so no "
+                       "second rebuild was started.")
+    if UserProfile.query.filter(
+            UserProfile.user_id == user.id,
+            UserProfile.created_at > asked_at).first() is not None:
+        db.session.commit()
+        return skipped("Your profile has changed since this import, so no "
+                       "rebuild was started.")
+    try:
+        task_id = _hand_off_profile_update_after_import(user, earliest, 0)
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.warning(
+            "Profile rebuild after import failed: %s", describe_exception(e))
+        return jsonify({"error": "Couldn't start the rebuild. Please try "
+                                 "again."}), 500
+    return jsonify({
+        "status": "rebuilding",
+        "profile_update_task_id": task_id,
+        "profile_waits_for_imports": _profile_waits_for_imports(user.id),
+    }), 202
+
+
+def _profile_update_under_way(user):
+    """Whether a profile update of ``user``'s is pending or running: a
+    rebuild from scratch is flagged, profile work is in the Batch queue
+    (the chained steps or a window set's items), or a profile task holds
+    the user's guard. Metadata only."""
+    if (user.profile_needs_full_regen or user.profile_batch_pending
+            or user.profile_generation_task_id):
+        return True
+    from backend.tasks.profile_windows import inflight_items
+    return bool(inflight_items(user.id))
+
+
 def _hand_off_profile_update_after_import(user_obj, earliest_ts, imported_tokens):
     """After an import, invalidate only the profile versions the imported
     data touches and regenerate the chain from there to the end, on the
     pipeline the account is on. Shared by every importer (Twitter,
-    ChatGPT, Claude, markdown).
+    ChatGPT, Claude, markdown), and by the yes to an import's rebuild
+    question. ``earliest_ts`` is the date of the oldest entry the import
+    changed in the writing the profile reads (``_ProfileChanges``, #625),
+    not of the oldest entry in the archive: an import that changed
+    nothing does not get here.
 
     - Data older than a version's cutoff invalidates that version
       (``revert_profile_for_import``): the latest still-valid version
@@ -1659,8 +1923,9 @@ def _hand_off_profile_update_after_import(user_obj, earliest_ts, imported_tokens
 def _ask_both_providers(user_id, ai_usage, added):
     """Whether the import's result asks the both-providers question (#599,
     profile_providers.ask_after_import): an import that added entries AI
-    may read, for a user who never answered or said no at least 30 days
-    ago. Never a user who said yes."""
+    may read (created, restored, or moved from None: ``_ProfileChanges
+    .added``, #625), for a user who never answered or said no at least 30
+    days ago. Never a user who said yes."""
     from backend.utils.profile_providers import ask_after_import
     if not added:
         return False
@@ -2317,9 +2582,12 @@ def _new_conversation_state(options):
         "restored": 0,
         "updated": 0,
         "thread_count": 0,
-        # For the profile hand-off, over every message of the import.
-        "earliest_ts": None,
-        "imported_tokens": 0,
+        # What the import changed in the writing the profile reads (#625,
+        # _ProfileChanges.to_state).
+        "profile_changed_from": None,
+        "profile_changed_tokens": 0,
+        "profile_added": 0,
+        "profile_removed": 0,
     }
 
 
@@ -2349,8 +2617,7 @@ def create_conversation_nodes(user_id, source, conversations, privacy_level,
     import time
     spec = _CONVERSATION_SOURCES[source]
     state = dict(state) if state else _new_conversation_state(None)
-    earliest_ts = (datetime.fromisoformat(state["earliest_ts"])
-                   if state.get("earliest_ts") else None)
+    changes = _ProfileChanges.from_state(state, ai_usage)
 
     key_index, deleted_keys = _load_source_key_index(user_id)
 
@@ -2372,10 +2639,10 @@ def create_conversation_nodes(user_id, source, conversations, privacy_level,
         nonlocal skipped_alive_ids
         state["updated"] += _apply_settings_to_skipped(
             skipped_alive_ids, privacy_level, ai_usage,
-            dek=data_key.get() if skipped_alive_ids else None)
+            dek=data_key.get() if skipped_alive_ids else None,
+            changes=changes)
         skipped_alive_ids = []
-        state["earliest_ts"] = (earliest_ts.isoformat()
-                                if earliest_ts else None)
+        changes.to_state(state)
         db.session.commit()
         data_key.rotate()
         if on_commit:
@@ -2384,21 +2651,6 @@ def create_conversation_nodes(user_id, source, conversations, privacy_level,
     for index, conv in conversations:
         messages = conv.get('messages', [])
         conv_name = conv.get('name', '')
-
-        # The profile hand-off reads every message of the import, the
-        # skipped ones too (as the confirm step did).
-        for msg in messages:
-            raw_ts = msg.get('created_at', '')
-            if raw_ts:
-                try:
-                    ts = spec["parse_ts"](raw_ts)
-                    if earliest_ts is None or ts < earliest_ts:
-                        earliest_ts = ts
-                except (ValueError, TypeError, AttributeError):
-                    pass
-            if msg.get('text'):
-                state["imported_tokens"] += approximate_token_count(
-                    msg.get('text', ''))
 
         parent_id = None
         conv_started_new_thread = False
@@ -2424,10 +2676,13 @@ def create_conversation_nodes(user_id, source, conversations, privacy_level,
                 # so overlap re-imports extend the original thread.
                 if (source_key in deleted_keys
                         and on_deleted == 'restore'):
-                    _restore_node(key_index[source_key], node_content,
-                                  privacy_level, ai_usage,
-                                  provenance=PROVENANCE_ARCHIVE_UPLOAD,
-                                  dek=data_key.get())
+                    restored = _restore_node(
+                        key_index[source_key], node_content,
+                        privacy_level, ai_usage,
+                        provenance=PROVENANCE_ARCHIVE_UPLOAD,
+                        dek=data_key.get())
+                    changes.entry_added(restored.created_at,
+                                        restored.token_count)
                     deleted_keys.discard(source_key)
                     state["restored"] += 1
                 else:
@@ -2466,6 +2721,7 @@ def create_conversation_nodes(user_id, source, conversations, privacy_level,
                 origin=spec["origin"],
                 dek=data_key.get(),
             )
+            changes.entry_added(msg_created_at, approximate_token_count(text))
 
             key_index[source_key] = tip.id
             parent_id = tip.id
@@ -2569,7 +2825,18 @@ def _run_conversation_import(user_id, token, task_id, options, *,
     cs.touch(path)
 
     if not state or state.get("options") != options:
+        earlier = state
         state = _new_conversation_state(options)
+        earlier_usage = ((earlier or {}).get("options") or {}).get("ai_usage")
+        if earlier and ((earlier_usage in AI_ALLOWED)
+                        == (options.get("ai_usage", "none") in AI_ALLOWED)):
+            # The entries an earlier run of this import changed are in
+            # Loore and were never handed to the profile (#625): this run
+            # skips them as they are now, so they count here. Only when
+            # both runs are on the same side of None: otherwise this run
+            # moves those entries across it and counts them itself (Chat
+            # to None then asks; review of #637).
+            _ProfileChanges.from_state(earlier, earlier_usage).to_state(state)
 
     def save(st):
         cs.write_state(user_id, token, dict(st, task_id=task_id))
@@ -2602,14 +2869,9 @@ def _run_conversation_import(user_id, token, task_id, options, *,
         cs.release_lock(user_id, task_id)
         raise
 
-    profile_update_task_id = None
-    profile_waits = False
-    if options.get("ai_usage", "none") in AI_ALLOWED:
-        earliest_ts = (datetime.fromisoformat(state["earliest_ts"])
-                       if state.get("earliest_ts") else None)
-        profile_update_task_id = _maybe_update_profile_after_import(
-            user_id, earliest_ts, state["imported_tokens"])
-        profile_waits = _profile_waits_for_imports(user_id)
+    changes = _ProfileChanges.from_state(state, options.get("ai_usage", "none"))
+    profile_update_task_id, profile_waits, rebuild_question = (
+        _profile_after_import(user_id, changes))
 
     result = {
         "message": "Import successful",
@@ -2617,9 +2879,9 @@ def _run_conversation_import(user_id, token, task_id, options, *,
         "thread_count": state["thread_count"],
         "profile_update_task_id": profile_update_task_id,
         "profile_waits_for_imports": profile_waits,
+        "ask_profile_rebuild": rebuild_question,
         "ask_both_providers": _ask_both_providers(
-            user_id, options.get("ai_usage", "none"),
-            state["created"] + state["restored"]),
+            user_id, options.get("ai_usage", "none"), changes.added),
         "created": state["created"],
         "skipped": state["skipped"] - state["updated"],
         "restored": state["restored"],
