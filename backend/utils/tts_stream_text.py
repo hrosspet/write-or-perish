@@ -369,6 +369,10 @@ class ChunkPlanner:
         self._sealed = deque()
         self.closed = False
         self.cut = 0                  # chunks handed out so far
+        # (index, title) of the last chunk handed out: where a coda goes
+        # once everything before it has been cut.
+        self._last_section = None
+        self._coda = None             # added at close (add_coda)
 
     @property
     def pending_chars(self):
@@ -394,7 +398,39 @@ class ChunkPlanner:
             # The reply ended on a heading with no body: the section
             # before it was the last one after all.
             self._sealed[-1][3] = False
+        if self._coda:
+            self._append_coda(self._coda)
+            self._coda = None
         self.closed = True
+
+    def add_coda(self, text):
+        """*text* is spoken after everything else (a fixed sentence the
+        reply's text does not hold: tool_approvals.approval_announcement).
+        It belongs to the reply's last section, so the chapter list and
+        each chapter's start stay as they are (tts_chapters). Before
+        close it waits for the rest; after close it goes straight in."""
+        text = (text or "").strip()
+        if not text:
+            return
+        if not self.closed:
+            self._coda = f"{self._coda}\n\n{text}" if self._coda else text
+            return
+        self._append_coda(text)
+
+    def _append_coda(self, text):
+        if self._sealed:
+            # The end of the last section is not cut yet: the coda
+            # follows it in the same chunk(s).
+            last = self._sealed[-1]
+            last[0] = f"{last[0]}\n\n{text}"
+            return
+        if self._last_section is not None:
+            index, title = self._last_section
+        else:
+            # Nothing was spoken (a reply that is all proposal card).
+            index, title = self._next_section, None
+            self._next_section += 1
+        self._sealed.append([text, title, index, False])
 
     def _add_text(self, text):
         if self._section is None:
@@ -441,6 +477,7 @@ class ChunkPlanner:
         chunk = self._take(limit, jit, min_chars)
         if chunk is not None:
             self.cut += 1
+            self._last_section = (chunk.section_index, chunk.section_title)
         return chunk
 
     def _take(self, limit, jit, min_chars):

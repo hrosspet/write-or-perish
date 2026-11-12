@@ -805,6 +805,14 @@ def generate_tts_audio(self, node_id: int, audio_storage_root: str,
                 }
 
             text = _node_spoken_text(node.get_content(), node.tool_calls_meta)
+            # A Voice reply whose calls wait for the user's approval ends
+            # saying so (Peter, 2026-11-12), in its last chapter; the
+            # stored text stays as it is. Same as the live path
+            # (llm_completion._finalize, NodeSpeech.add_coda).
+            from backend.utils.tool_approvals import approval_announcement_for
+            coda = approval_announcement_for(node)
+            if coda:
+                text = f"{text}\n\n{coda}" if text else coda
             if not text:
                 logger.info(f"No text to speak for node {node_id}, skipping TTS")
                 node.tts_task_status = 'completed'

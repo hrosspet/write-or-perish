@@ -614,6 +614,11 @@ def init_streaming():
     thread is not AI-readable (voice_turn_refusal). Voice mode exists to
     get a reply, and that reply would send the recording to a model.
 
+    A Voice recording continuing a thread where a change the AI proposed
+    waits for the user's approval gets 409 ``{"error", "code":
+    "approval_pending", "pending": <count>}`` and no draft
+    (utils/tool_approvals.waiting_in_thread).
+
     400 for a label a recording doesn't carry (_RECORDING_LABELS), 410
     for a parent that has been deleted.
 
@@ -653,6 +658,15 @@ def init_streaming():
             current_user, parent, None if parent else ai_usage)
         if refused is not None:
             return ai_usage_refused_response(refused)
+        # A change the AI proposed in this thread waits for the user's
+        # approval: no Voice turn continues it until they decide (Peter,
+        # 2026-11-12). Dictation and Text mode are not affected.
+        from backend.utils.tool_approvals import (
+            approval_pending_response, waiting_in_thread,
+        )
+        waiting = waiting_in_thread(current_user.id, parent)
+        if waiting:
+            return approval_pending_response(waiting)
 
     # Generate session ID
     session_id = str(uuid.uuid4())

@@ -236,6 +236,15 @@ def create_voice_session():
     refused = read_only_model_refusal(model_id, parent_node, new_entry=True)
     if refused is not None:
         return read_only_model_response(refused)
+    # Nor while a change the AI proposed in this thread waits for the
+    # user's approval (Peter, 2026-11-12): 409, nothing written.
+    if parent_node is not None:
+        from backend.utils.tool_approvals import (
+            approval_pending_response, waiting_in_thread,
+        )
+        waiting = waiting_in_thread(current_user.id, parent_node)
+        if waiting:
+            return approval_pending_response(waiting)
 
     if not parent_id:
         prompt_record = get_user_prompt_record(current_user.id, PROMPT_KEY)
