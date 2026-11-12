@@ -250,7 +250,7 @@ const needsAiLinkStyle = {
 // is too long for another reply (#648): every reply reads the whole
 // thread. The way on is a new thread (*onNewThread*: a fresh Voice
 // session). Same text as the server's refusal and the iPhone app.
-export function VoiceThreadTooLong({ threadId, onNewThread }) {
+export function VoiceThreadTooLong({ threadId, onNewThread, message }) {
   return (
     <div style={containerStyle}>
       <p style={{
@@ -275,7 +275,7 @@ export function VoiceThreadTooLong({ threadId, onNewThread }) {
         margin: '0 0 28px 0',
         textAlign: 'center',
       }}>
-        {THREAD_LIMIT_TEXT}
+        {message || THREAD_LIMIT_TEXT}
       </p>
       <div style={{ display: 'flex', gap: '24px', flexWrap: 'wrap', justifyContent: 'center', alignItems: 'center' }}>
         <button
@@ -304,9 +304,13 @@ export function VoiceThreadTooLong({ threadId, onNewThread }) {
   );
 }
 
-export function VoiceNeedsAi({ scope, threadId, onNewThread }) {
+export function VoiceNeedsAi({ scope, threadId, onNewThread, limitMessage }) {
   if (scope === 'too_long') {
-    return <VoiceThreadTooLong threadId={threadId} onNewThread={onNewThread} />;
+    return (
+      <VoiceThreadTooLong
+        threadId={threadId} onNewThread={onNewThread} message={limitMessage}
+      />
+    );
   }
   return (
     <div style={containerStyle}>
@@ -374,7 +378,9 @@ function fetchVoiceAvailability(parent) {
         return { refusal: null, threadLength: data.thread_length || null };
       }
       if (data.code === THREAD_TOO_LONG_CODE) {
-        return { refusal: 'too_long', threadLength: 'limit' };
+        return {
+          refusal: 'too_long', threadLength: 'limit', message: data.error || null,
+        };
       }
       return {
         refusal: data.scope === 'thread' ? 'thread' : 'account',
@@ -406,6 +412,9 @@ export default function VoicePage() {
   const [refusal, setRefusal] = useState(threadId ? undefined : null);
   // "notice" when the thread is getting long (#648): a line on the screen.
   const [threadNotice, setThreadNotice] = useState(null);
+  // The server's text for the limit (the thread's length, or an entry or
+  // what it quotes too large), when it sent one.
+  const [limitMessage, setLimitMessage] = useState(null);
   // A new thread (#648) starts a fresh session: its key changes.
   const [sessionKey, setSessionKey] = useState(0);
   const recovery = useInterruptedRecovery();
@@ -422,10 +431,11 @@ export default function VoicePage() {
     let cancelled = false;
     setRefusal(undefined);
     fetchVoiceAvailability(threadId)
-      .then(({ refusal: scope, threadLength }) => {
+      .then(({ refusal: scope, threadLength, message }) => {
         if (cancelled) return;
         setRefusal(scope);
         setThreadNotice(threadLength === 'notice' ? 'notice' : null);
+        setLimitMessage(message || null);
       })
       .catch(() => {
         // Offline, or a server without the route: record as before; the
@@ -441,6 +451,7 @@ export default function VoicePage() {
   const startNewThread = useCallback(() => {
     setRefusal(null);
     setThreadNotice(null);
+    setLimitMessage(null);
     setFinishing(false);
     setSessionKey((k) => k + 1);
     navigate('/voice', { replace: true });
@@ -452,7 +463,12 @@ export default function VoicePage() {
     return <div style={containerStyle} />;
   }
   if (shown && !recovery.interruptedDraft && !finishing) {
-    return <VoiceNeedsAi scope={shown} threadId={threadId} onNewThread={startNewThread} />;
+    return (
+      <VoiceNeedsAi
+        scope={shown} threadId={threadId} onNewThread={startNewThread}
+        limitMessage={limitMessage}
+      />
+    );
   }
   return (
     <VoiceSession
@@ -462,7 +478,12 @@ export default function VoicePage() {
       threadId={threadId}
       threadNotice={threadNotice}
       onThreadNotice={setThreadNotice}
-      onAiUsageRefused={setRefusal}
+      limitMessage={limitMessage}
+      onLimitMessage={setLimitMessage}
+      onAiUsageRefused={(scope, message) => {
+        if (scope === 'too_long' && message) setLimitMessage(message);
+        setRefusal(scope);
+      }}
       onFinishInterrupted={() => setFinishing(true)}
       onNewThread={startNewThread}
     />
@@ -502,6 +523,7 @@ function useFinishRefusal(draft, pageParentId) {
 // record button, and a ?resume= reply is not played.
 function VoiceSession({
   recovery, blocked, threadId, threadNotice, onThreadNotice,
+  limitMessage, onLimitMessage,
   onAiUsageRefused, onFinishInterrupted, onNewThread,
 }) {
   const navigate = useNavigate();
@@ -548,6 +570,15 @@ function VoiceSession({
   const [gleanNodeId, setGleanNodeId] = useState(null);
   const gleanDescId = useId();
   const getThreadParentIdRef = useRef(null);
+  // A finished reply's `thread_length` and its text (llm-status, #648).
+  const applyThreadLength = (threadLength, message) => {
+    if (threadLength === undefined) return; // a server without it
+    if (onThreadNotice) onThreadNotice(threadLength === 'notice' ? 'notice' : null);
+    if (threadLength === 'limit') {
+      if (onLimitMessage) onLimitMessage(message || null);
+      if (onAiUsageRefused) onAiUsageRefused('too_long');
+    }
+  };
 
   const {
     phase, isStopping, hasError, isOnline, streaming, audio, handleStart, handleStop,
@@ -575,21 +606,17 @@ function VoiceSession({
       lastLlmNodeIdRef.current = nodeId;
       setGleanAnchor(getThreadParentIdRef.current?.() ?? nodeId);
       setLlmContent(content);
-      // The thread grew with this turn: is it getting long now (#648)? A
-      // thread too long for another reply is refused, and said, at the
-      // next record press.
-      if (onThreadNotice) {
-        fetchVoiceAvailability(nodeId)
-          .then(({ threadLength }) => onThreadNotice(
-            threadLength === 'notice' ? 'notice' : null))
-          .catch(() => { /* non-fatal: the notice stays as it was */ });
-      }
       // ProposalInline handles its own parsing + apply-status derivation
       // from tool_calls_meta. We just feed it the raw content + meta.
       api.get(`/nodes/${nodeId}/llm-status`).then(res => {
         if (res.data.tool_calls_meta) {
           setToolCallsMeta(res.data.tool_calls_meta);
         }
+        // The thread grew with this turn (#648): the notice once it is
+        // getting long, the limit (in place of the record button, once the
+        // reply has played) when it has no room for another reply.
+        applyThreadLength(res.data.thread_length,
+          res.data.thread_length_message);
       }).catch(() => { /* non-fatal */ });
     },
     // The reply failed: no reply is coming, so Glean stops waiting for it.
@@ -820,6 +847,7 @@ function VoiceSession({
         scope={blocked}
         threadId={getThreadParentId?.() || threadId}
         onNewThread={onNewThread}
+        limitMessage={limitMessage}
       />
     );
   }

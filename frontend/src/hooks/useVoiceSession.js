@@ -12,7 +12,8 @@ import api from '../api';
 import * as voiceTiming from '../utils/voiceTiming';
 import { isAiUsageRefusedError, aiUsageRefusalScope } from '../utils/aiUsage';
 import {
-  THREAD_LIMIT_SPOKEN, THREAD_TOO_LONG_CODE, isThreadTooLong, speakSentence,
+  THREAD_LIMIT_SPOKEN, THREAD_TOO_LONG_CODE, isThreadTooLong, primeSpeech,
+  soundThenSay, stopSpeaking,
 } from '../utils/threadLength';
 import { onPageReturn } from '../utils/pageReturn';
 import { playErrorSound } from '../utils/errorSound';
@@ -241,12 +242,16 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   }, [onAiUsageRefused]);
   // The thread is too long for another reply (#648): a refused record
   // press, a recording whose reply was skipped, or a reply refused before
-  // its first call. The sentence is said aloud (the user may not be
-  // looking), with the browser's own speech: no server call. The page then
-  // shows the limit ('too_long') with the way to a new thread.
-  const refuseForThreadLength = useCallback(() => {
-    speakSentence(THREAD_LIMIT_SPOKEN);
-    if (onAiUsageRefusedRef.current) onAiUsageRefusedRef.current('too_long');
+  // its first call. The error sound plays, then the sentence is said aloud
+  // (the user may not be looking) with the browser's own speech: no server
+  // call; a browser that refuses speech outside a gesture still plays the
+  // sound. The page then shows the limit ('too_long', with the server's
+  // *message* when it sent one) and the way to a new thread.
+  const refuseForThreadLength = useCallback((message) => {
+    soundThenSay(THREAD_LIMIT_SPOKEN, playErrorSound);
+    if (onAiUsageRefusedRef.current) {
+      onAiUsageRefusedRef.current('too_long', message || null);
+    }
   }, []);
   // The server confirmed the recording is saved as an entry (#391): the
   // page learns that without waiting for a reply, which can fail or be
@@ -345,7 +350,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
         stopSilentAudio();
         setIsStopping(false);
         setPhase('ready');
-        refuseForThreadLength();
+        refuseForThreadLength(err?.response?.data?.error);
         return;
       }
 
@@ -461,7 +466,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
             if (onEntrySavedRef.current) onEntrySavedRef.current();
           }
           setPhase('ready');
-          refuseForThreadLength();
+          refuseForThreadLength(err?.response?.data?.error);
           return;
         }
         // The reply could not start.
@@ -846,7 +851,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
         if (onLLMFailedRef.current) onLLMFailedRef.current(llmNodeId);
         finishGenerating();
         setPhase('ready');
-        refuseForThreadLength();
+        refuseForThreadLength(llmError);
         return;
       }
       // The red dot alone didn't say why; the server's error is written
@@ -1008,6 +1013,10 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
 
   const handleStart = useCallback(() => {
     turnRef.current += 1;
+    // A refusal's sentence (#648) never goes into the new recording; the
+    // tap also lets WebKit speak a later one outside a gesture.
+    stopSpeaking();
+    primeSpeech();
     setPhase('recording');
     setHasError(false);
     startSilentAudio(); // User gesture context — activates iOS lock screen controls
@@ -1064,6 +1073,8 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     setHasError(false);
     if (extraReset) extraReset();
     streaming.cancelStreaming();
+    stopSpeaking();
+    primeSpeech();
     // Go straight to recording — skip the ready phase
     setPhase('recording');
     startSilentAudio(); // User gesture context
@@ -1132,6 +1143,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       url.searchParams.delete('resume');
       window.history.replaceState({}, '', url);
     }
+    stopSpeaking();
     setPhase('recording');
     setHasError(false);
     startSilentAudio();

@@ -11,7 +11,9 @@ import {
  * thread). Writing in the thread still works either way. The pattern of
  * the spend cap's notice (SpendCapBanner: an uppercase accent label before
  * the text) and the outlined accent button of DataDeletionBanner. No
- * price, no token numbers. *message*: the server's text, when it sent one.
+ * price, no token numbers. *message*: the server's text, when it sent one
+ * (`thread_length_message`: the thread's length, or an entry or what it
+ * quotes too large for a reply).
  */
 export default function ThreadLengthNotice({ state, message, newThreadPath = NEW_THREAD_PATH }) {
   if (state !== 'notice' && state !== 'limit') return null;
@@ -19,7 +21,7 @@ export default function ThreadLengthNotice({ state, message, newThreadPath = NEW
   return (
     <div
       role="status"
-      aria-label={atLimit ? 'Thread too long' : 'Long thread'}
+      aria-label={atLimit ? 'Limit reached' : 'Long thread'}
       style={{
         display: 'flex',
         alignItems: 'center',
@@ -42,7 +44,7 @@ export default function ThreadLengthNotice({ state, message, newThreadPath = NEW
         color: atLimit ? 'var(--accent)' : 'var(--text-muted)',
         whiteSpace: 'nowrap',
       }}>
-        {atLimit ? 'Thread too long' : 'Long thread'}
+        {atLimit ? 'Limit reached' : 'Long thread'}
       </span>
       <span style={{
         flex: '1 1 260px',

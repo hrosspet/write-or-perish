@@ -53,7 +53,9 @@ jest.mock('../utils/errorSound', () => ({
 
 import { renderHook, act } from '@testing-library/react';
 import { useVoiceSession } from './useVoiceSession';
-import { THREAD_LIMIT_SPOKEN } from '../utils/threadLength';
+import {
+  SENTENCE_AFTER_SOUND_MS, THREAD_LIMIT_SPOKEN, resetSpeechForTests,
+} from '../utils/threadLength';
 
 const IDLE_POLLING = { data: null, status: 'idle', error: null };
 const SKIPPED = "Your recording is saved. Loore didn't reply because this "
@@ -69,6 +71,11 @@ const renderSession = () => renderHook(() => useVoiceSession({
 const finishRecording = (data) => act(async () => {
   await mockStreamingOptions.onComplete({ sessionId: 's1', ...data });
 });
+// The sentence follows the error sound.
+const afterSound = () => act(() => {
+  jest.advanceTimersByTime(SENTENCE_AFTER_SOUND_MS);
+});
+const said = () => spoken.filter(Boolean);
 
 beforeEach(() => {
   mockPolling = IDLE_POLLING;
@@ -76,6 +83,8 @@ beforeEach(() => {
   mockAddToast.mockReset();
   mockPlayErrorSound.mockReset();
   onAiUsageRefused = jest.fn();
+  resetSpeechForTests();
+  jest.useFakeTimers();
   spoken = [];
   window.speechSynthesis = {
     cancel: jest.fn(),
@@ -85,22 +94,27 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  jest.useRealTimers();
   delete window.speechSynthesis;
   delete window.SpeechSynthesisUtterance;
 });
 
-test('a record press refused for the thread length is said and shown, not failed', () => {
+test('a record press refused for the thread length: the error sound, then the sentence', () => {
   const { result } = renderSession();
 
   act(() => {
     mockStreamingOptions.onError({ startup: true, threadTooLong: true });
   });
 
-  expect(spoken).toEqual([THREAD_LIMIT_SPOKEN]);
-  expect(onAiUsageRefused).toHaveBeenCalledWith('too_long');
+  // The sound first: a browser that refuses speech outside a gesture is
+  // never silent.
+  expect(mockPlayErrorSound).toHaveBeenCalledTimes(1);
+  expect(said()).toEqual([]);
+  afterSound();
+  expect(said()).toEqual([THREAD_LIMIT_SPOKEN]);
+  expect(onAiUsageRefused.mock.calls[0][0]).toBe('too_long');
   expect(result.current.phase).toBe('ready');
   expect(result.current.hasError).toBe(false);
-  expect(mockPlayErrorSound).not.toHaveBeenCalled();
 });
 
 test('a recording whose reply was skipped for the length is saved, said and shown', async () => {
@@ -112,8 +126,10 @@ test('a recording whose reply was skipped for the length is saved, said and show
   });
 
   expect(mockAddToast).toHaveBeenCalledWith(SKIPPED, 8000);
-  expect(spoken).toEqual([THREAD_LIMIT_SPOKEN]);
-  expect(onAiUsageRefused).toHaveBeenCalledWith('too_long');
+  expect(mockPlayErrorSound).toHaveBeenCalledTimes(1);
+  afterSound();
+  expect(said()).toEqual([THREAD_LIMIT_SPOKEN]);
+  expect(onAiUsageRefused.mock.calls[0][0]).toBe('too_long');
 });
 
 test('other skipped replies are not spoken (the monthly limit stays a toast)', async () => {
@@ -126,11 +142,13 @@ test('other skipped replies are not spoken (the monthly limit stays a toast)', a
   });
 
   expect(mockAddToast).toHaveBeenCalledTimes(1);
-  expect(spoken).toEqual([]);
+  afterSound();
+  expect(said()).toEqual([]);
+  expect(mockPlayErrorSound).not.toHaveBeenCalled();
   expect(onAiUsageRefused).not.toHaveBeenCalled();
 });
 
-test('a reply the server refused before its call is said instead of the error sound', async () => {
+test('a reply the server refused before its call: the sound, then the sentence', async () => {
   mockPolling = {
     data: { node_id: 7, content: '', error_code: 'thread_too_long' },
     status: 'failed', error: 'This thread is too long for another AI reply.',
@@ -139,10 +157,11 @@ test('a reply the server refused before its call is said instead of the error so
 
   await finishRecording({ content: 'my words', llmNodeId: 7 });
 
-  expect(spoken).toEqual([THREAD_LIMIT_SPOKEN]);
-  expect(mockPlayErrorSound).not.toHaveBeenCalled();
+  expect(mockPlayErrorSound).toHaveBeenCalledTimes(1);
+  afterSound();
+  expect(said()).toEqual([THREAD_LIMIT_SPOKEN]);
   expect(mockAddToast).not.toHaveBeenCalled();
-  expect(onAiUsageRefused).toHaveBeenCalledWith('too_long');
+  expect(onAiUsageRefused.mock.calls[0][0]).toBe('too_long');
   expect(result.current.phase).toBe('ready');
 });
 
@@ -154,7 +173,29 @@ test('the fallback POST refused for the length is said and shown', async () => {
 
   await finishRecording({ content: 'my words', llmNodeId: null });
 
-  expect(spoken).toEqual([THREAD_LIMIT_SPOKEN]);
-  expect(onAiUsageRefused).toHaveBeenCalledWith('too_long');
-  expect(mockPlayErrorSound).not.toHaveBeenCalled();
+  expect(mockPlayErrorSound).toHaveBeenCalledTimes(1);
+  afterSound();
+  expect(said()).toEqual([THREAD_LIMIT_SPOKEN]);
+  expect(onAiUsageRefused.mock.calls[0][0]).toBe('too_long');
+});
+
+test('a new recording stops the sentence, so it is never recorded', () => {
+  const { result } = renderSession();
+  act(() => {
+    mockStreamingOptions.onError({ startup: true, threadTooLong: true });
+  });
+
+  // "Start a new thread", then Record, before the sentence was said.
+  act(() => { result.current.handleStart(); });
+  afterSound();
+
+  expect(said()).toEqual([]);
+  expect(window.speechSynthesis.cancel).toHaveBeenCalled();
+});
+
+test('the Record tap primes speech once (WebKit speaks later only after a gesture)', () => {
+  const { result } = renderSession();
+  act(() => { result.current.handleStart(); });
+  act(() => { result.current.handleStart(); });
+  expect(spoken).toEqual(['']);
 });

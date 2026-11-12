@@ -477,6 +477,13 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
           tool_calls_meta: llmData.tool_calls_meta ?? prev.tool_calls_meta,
           feed_picks_count: llmData.feed_picks_count ?? prev.feed_picks_count,
           llm_task_status: 'completed',
+          // How long the thread is with this reply in it (#648): the
+          // notice or the limit shows on this turn, not the next.
+          thread_length: llmData.thread_length !== undefined
+            ? llmData.thread_length : prev.thread_length,
+          thread_length_message: llmData.thread_length !== undefined
+            ? (llmData.thread_length_message || null)
+            : prev.thread_length_message,
         } : prev);
         // Calls the reply made that wait for the user's approval.
         refreshApprovals();

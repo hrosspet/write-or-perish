@@ -166,6 +166,28 @@ test('a reply refused for the thread length turns the form to the limit, no toas
   expect(mockAddToast).not.toHaveBeenCalled();
 });
 
+test('a reply finishing in place brings the thread length with it (this turn, not the next)', async () => {
+  routes['/nodes/80'] = entry(80, 'Thinking…', {
+    node_type: 'llm', llm_model: 'gpt-5', llm_task_status: 'processing',
+    user: { id: 9, username: 'gpt-5' }, user_id: 9, parent_user_id: 1,
+    thread_length: null,
+  });
+  mockGet.mockImplementation((url) => {
+    if (url === '/nodes/80/llm-status') {
+      return Promise.resolve({ data: {
+        node_id: 80, status: 'completed', content: 'The answer.',
+        thread_length: 'notice',
+      } });
+    }
+    if (url in routes) return Promise.resolve({ data: routes[url] });
+    return Promise.resolve({ data: {} });
+  });
+  renderAt('/node/80?awaitLlm=80');
+
+  expect(await screen.findByText('The answer.')).toBeInTheDocument();
+  expect(await screen.findByText(THREAD_NOTICE_TEXT)).toBeInTheDocument();
+});
+
 test('at the limit an entry is written without asking for an automatic reply', async () => {
   routes['/nodes/10'] = entry(10, 'At the limit.', { thread_length: 'limit' });
   routes['/nodes/70'] = entry(70, 'New entry.', { thread_length: 'limit' });

@@ -52,3 +52,57 @@ export function speakSentence(text) {
     return false;
   }
 }
+
+// The sentence waits for the error sound (three tones, ~0.6 s) to end.
+export const SENTENCE_AFTER_SOUND_MS = 700;
+let pendingSentence = null;
+
+// The refusal in Voice mode: the error sound every browser plays, then the
+// sentence. A browser that allows speech only inside a user gesture (iPhone
+// Safari before primeSpeech ran) stays silent for the sentence, never for
+// the sound.
+export function soundThenSay(text, playSound) {
+  stopSpeaking();
+  if (playSound) playSound();
+  pendingSentence = setTimeout(() => {
+    pendingSentence = null;
+    speakSentence(text);
+  }, SENTENCE_AFTER_SOUND_MS);
+}
+
+// A new recording starts: a sentence still waiting or being said stops, so
+// it is never recorded into the entry.
+export function stopSpeaking() {
+  if (pendingSentence) {
+    clearTimeout(pendingSentence);
+    pendingSentence = null;
+  }
+  try {
+    if (typeof window !== 'undefined' && window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+    }
+  } catch (e) { /* speech unavailable */ }
+}
+
+// Called in the Record tap (a user gesture): WebKit lets a page speak
+// later, outside a gesture, only after it has spoken inside one. An empty
+// utterance, once per page: nothing is heard or recorded.
+let speechPrimed = false;
+export function primeSpeech() {
+  if (speechPrimed) return;
+  try {
+    if (typeof window === 'undefined') return;
+    const synth = window.speechSynthesis;
+    const Utterance = window.SpeechSynthesisUtterance;
+    if (!synth || typeof Utterance !== 'function') return;
+    synth.speak(new Utterance(''));
+    speechPrimed = true;
+  } catch (e) { /* speech unavailable */ }
+}
+
+// Tests only.
+export function resetSpeechForTests() {
+  speechPrimed = false;
+  if (pendingSentence) clearTimeout(pendingSentence);
+  pendingSentence = null;
+}

@@ -43,9 +43,11 @@ import { MemoryRouter } from 'react-router-dom';
 import VoicePage from './VoicePage';
 import { THREAD_LIMIT_TEXT, THREAD_NOTICE_TEXT } from '../utils/threadLength';
 
+let llmStatus = {};
 const answerGets = (availability = {}) => {
   mockGet.mockImplementation((url, config) => {
     if (url === '/drafts/interrupted') return Promise.resolve({ data: [] });
+    if (url.endsWith('/llm-status')) return Promise.resolve({ data: llmStatus });
     if (url === '/voice/availability') {
       const parent = config?.params?.parent;
       const key = parent == null ? '' : String(parent);
@@ -71,11 +73,14 @@ beforeEach(() => {
   mockGet.mockReset();
   mockUseVoiceSession.mockReset();
   mockSessionOptions = null;
+  llmStatus = {};
   answerGets();
 });
 
 test('a thread at the limit shows why, a new thread, and the way back', async () => {
-  answerGets({ 42: { allowed: false, code: 'thread_too_long', error: 'x' } });
+  answerGets({ 42: {
+    allowed: false, code: 'thread_too_long', error: THREAD_LIMIT_TEXT,
+  } });
   renderAt('/voice?parent=42');
 
   expect(await screen.findByText('This thread is too long')).toBeInTheDocument();
@@ -94,6 +99,15 @@ test('a thread at the limit shows why, a new thread, and the way back', async ()
   expect(last.initialParentId).toBeNull();
 });
 
+test("the block shows the server's reason (an entry too large, not the thread long)", async () => {
+  const SIZE_TEXT = 'An entry in this thread, or what it quotes, is too large for an AI reply.';
+  answerGets({ 42: { allowed: false, code: 'thread_too_long', error: SIZE_TEXT } });
+  renderAt('/voice?parent=42');
+
+  expect(await screen.findByText(SIZE_TEXT)).toBeInTheDocument();
+  expect(screen.queryByText(THREAD_LIMIT_TEXT)).not.toBeInTheDocument();
+});
+
 test('near the limit the screen records and says the thread is getting long', async () => {
   answerGets({ 42: { allowed: true, thread_length: 'notice' } });
   renderAt('/voice?parent=42');
@@ -109,5 +123,28 @@ test('a turn refused for the length in a session shows the limit', async () => {
   act(() => { mockSessionOptions.onAiUsageRefused('too_long'); });
 
   expect(screen.getByText('This thread is too long')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Start a new thread' })).toBeInTheDocument();
+});
+
+test('a reply that takes the thread into the notice range shows the notice', async () => {
+  llmStatus = { status: 'completed', thread_length: 'notice' };
+  renderAt('/voice?parent=42');
+  await screen.findByText("What's on your mind?");
+  expect(screen.queryByText(THREAD_NOTICE_TEXT)).not.toBeInTheDocument();
+
+  await act(async () => { mockSessionOptions.onLLMComplete(77, 'An answer.'); });
+
+  expect(await screen.findByText(THREAD_NOTICE_TEXT)).toBeInTheDocument();
+});
+
+test('a reply that takes the thread to the limit shows the limit, not an empty line', async () => {
+  llmStatus = { status: 'completed', thread_length: 'limit' };
+  answerGets({ 42: { allowed: true, thread_length: 'notice' } });
+  renderAt('/voice?parent=42');
+  await screen.findByText(THREAD_NOTICE_TEXT);
+
+  await act(async () => { mockSessionOptions.onLLMComplete(77, 'An answer.'); });
+
+  expect(await screen.findByText('This thread is too long')).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Start a new thread' })).toBeInTheDocument();
 });
