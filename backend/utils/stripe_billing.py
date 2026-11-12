@@ -430,7 +430,15 @@ def checkout_session_params(user, level, price_id, config=None,
         meta["loore_code_id"] = str(code_id)
     subscription_data = {"metadata": dict(meta)}
     trial_days = int(cfg.get("SUBSCRIPTION_TRIAL_DAYS") or 0)
-    if trial_days > 0 and not user.subscription_trial_used:
+    if user.is_alpha_tester:
+        # The free month is an alpha tester's trial: no 14 days on top.
+        # Subscribing during it, the first payment is due when it ends.
+        from backend.utils.subscriptions import alpha_checkout_trial_end
+        trial_end = alpha_checkout_trial_end(user, cfg)
+        if trial_end is not None:
+            subscription_data["trial_end"] = int(
+                trial_end.replace(tzinfo=timezone.utc).timestamp())
+    elif trial_days > 0 and not user.subscription_trial_used:
         subscription_data["trial_period_days"] = trial_days
     return {
         "mode": "subscription",

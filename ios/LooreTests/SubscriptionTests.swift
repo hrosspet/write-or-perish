@@ -75,6 +75,42 @@ final class SubscriptionTests: XCTestCase {
         }
     }
 
+    func testTheAlphaFreeMonth() throws {
+        let user = try decode(CurrentUser.self, #"""
+        {"id": 1, "plan": "free", "payments_enabled": true,
+         "subscription": {"state": "active", "status": "none", "ai_replies": true,
+           "alpha_tester": true, "free_month_active": true,
+           "free_month_until": "2026-12-12T10:00:00Z"}}
+        """#)
+        let sub = try XCTUnwrap(user.subscription)
+        XCTAssertTrue(sub.alphaTester)
+        XCTAssertFalse(user.aiRepliesPaused)
+        let running = sub.statusText(plan: "free")
+        XCTAssertEqual(running, "Free month until December 12, 2026.")
+        var ended = sub
+        ended.freeMonthActive = false
+        ended.aiReplies = false
+        let after = ended.statusText(plan: "free")
+        XCTAssertTrue(after.hasPrefix("Free month ended."))
+        var subscribed = sub
+        subscribed.level = "discounted"
+        subscribed.status = "trialing"
+        subscribed.trialEnd = sub.freeMonthUntil
+        let during = subscribed.statusText(plan: "free")
+        XCTAssertEqual(during, "Reduced. Free month until December 12, 2026.")
+        // Nothing to buy, no price, no link, in any of them.
+        for text in [running, after, during] {
+            let lower = text.lowercased()
+            for word in ["subscribe", "buy", "price", "$", "usd", "http", "loore.org", "web", "stripe", "manage"] {
+                XCTAssertFalse(lower.contains(word), "\(text) mentions \(word)")
+            }
+        }
+        // An older server without the fields: not a tester.
+        let older = try decode(SubscriptionState.self, #"{"status": "none", "ai_replies": false}"#)
+        XCTAssertFalse(older.alphaTester)
+        XCTAssertEqual(older.statusText(plan: "free"), "No subscription.")
+    }
+
     func testA402SubscriptionRequired() {
         let message = "Loore doesn't reply on an account without a subscription. Your writing is saved."
         let error = map(402, #"{"error": "subscription_required", "message": "\#(message)"}"#)

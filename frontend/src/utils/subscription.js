@@ -129,6 +129,14 @@ export function subscriptionStatusLine(sub) {
   const trialEnd = formatDay(sub.trial_end);
   switch (sub.status) {
     case 'trialing':
+      // An alpha tester who subscribed during the free month: the trial is
+      // the rest of that month.
+      if (sub.alpha_tester) {
+        if (sub.cancel_at_period_end) {
+          return `${level}, cancelled. Your free month runs until ${trialEnd || end}; you won't be charged.`;
+        }
+        return `${level}. Your free month runs until ${trialEnd || end}; the first payment is on that day.`;
+      }
       if (sub.cancel_at_period_end) {
         return `${level} trial, cancelled. It ends on ${trialEnd || end}; you won't be charged.`;
       }
@@ -152,4 +160,34 @@ export function subscriptionStatusLine(sub) {
     default:
       return null;
   }
+}
+
+// ── The alpha free month (#438) ──────────────────────────────────────
+// Alpha testers have a free month after the opening, then the discounted
+// price without a code. `sub.free_month_until` is its end (expected, while
+// it has not started); `sub.free_month_active` whether it still runs.
+
+// Days before the end of the free month when the web says it ends soon.
+export const FREE_MONTH_NOTICE_DAYS = 7;
+
+// The free month's line in Settings, for a tester without a live
+// subscription. `price` is the discounted level's, formatted.
+export function freeMonthLine(sub, price) {
+  if (!sub || !sub.alpha_tester) return null;
+  const until = formatDay(sub.free_month_until);
+  if (sub.free_month_active) {
+    const after = price ? ` After it, Loore is ${price} a month for you, plus tax where it applies.` : '';
+    return `Your free month as an alpha tester runs until ${until}.${after}`;
+  }
+  return 'Your free month has ended. Your writing, reading and export stay; AI replies, Voice mode and profile updates are paused.';
+}
+
+// Whether the web should say that the free month ends soon: a tester
+// without a live subscription in the month's last FREE_MONTH_NOTICE_DAYS.
+export function freeMonthEndsSoon(sub, now = Date.now()) {
+  if (!sub || !sub.alpha_tester || !sub.free_month_active) return false;
+  if (['trialing', 'active', 'past_due'].includes(sub.status)) return false;
+  const end = sub.free_month_until ? new Date(sub.free_month_until).getTime() : NaN;
+  if (Number.isNaN(end)) return false;
+  return end - now <= FREE_MONTH_NOTICE_DAYS * 86400000;
 }

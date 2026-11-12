@@ -1482,7 +1482,8 @@ def list_subscriptions():
         abort(404)
     users = User.query.filter(or_(
         User.stripe_customer_id.isnot(None),
-        User.subscription_status != "none")).order_by(User.id).all()
+        User.subscription_status != "none",
+        User.alpha_free_granted_at.isnot(None))).order_by(User.id).all()
     rows = [{
         "user_id": u.id,
         "username": u.username,
@@ -1497,6 +1498,10 @@ def list_subscriptions():
         # withdrawn ("dispute", "refund").
         "access": bool(u.subscription_grants_access),
         "revoked": u.subscription_revoked,
+        # The alpha free month: given (an alpha tester) and when it ends;
+        # None while it has not started (no visit since it was given).
+        "alpha_tester": bool(u.is_alpha_tester),
+        "free_month_until": iso_utc(u.alpha_free_until),
     } for u in users]
     return jsonify({"subscriptions": rows}), 200
 

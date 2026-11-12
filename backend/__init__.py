@@ -391,6 +391,10 @@ def create_app():
     # /media route answers 402 {"error": "no_subscription"}. No-op while
     # payments are off.
     from backend.utils.subscriptions import block_accounts_without_subscription
+    # An alpha tester's free month starts at their first request after
+    # `flask alpha-free-month --apply` (#438). No-op while payments are off.
+    from backend.utils.subscriptions import start_alpha_free_month_hook
+    app.before_request(start_alpha_free_month_hook)
     app.before_request(block_accounts_without_subscription)
     # --------------------------------------------------------------------
 
@@ -601,8 +605,10 @@ def create_app():
     )
     app.cli.add_command(pgvector_enable_command)
     app.cli.add_command(pgvector_compare_command)
-    from backend.billing_cli import stripe_sync_catalog_command
+    from backend.billing_cli import (
+        alpha_free_month_command, stripe_sync_catalog_command)
     app.cli.add_command(stripe_sync_catalog_command)
+    app.cli.add_command(alpha_free_month_command)
 
     try:
         from experiments.prompt_rct.run_rct import rct_cli

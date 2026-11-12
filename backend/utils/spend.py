@@ -203,6 +203,10 @@ def trial_limit_usd(user, config):
         return 0
     if getattr(user, "plan_set_by_hand", True):
         return 0
+    # An alpha tester's only trial is the rest of their free month (#438),
+    # whose ceiling is the discounted level's monthly one.
+    if getattr(user, "alpha_free_granted_at", None) is not None:
+        return 0
     if getattr(user, "monthly_spend_limit_usd", None) is not None:
         return 0
     return float(config.get("SUBSCRIPTION_TRIAL_SPEND_LIMIT_USD") or 0)

@@ -1,7 +1,13 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useUser } from '../contexts/UserContext';
-import { SUBSCRIPTION_REQUIRED_EVENT } from '../utils/subscription';
+import {
+  SUBSCRIPTION_REQUIRED_EVENT, formatDay, freeMonthEndsSoon,
+} from '../utils/subscription';
+
+// The free month's notice is said once: dismissing it is remembered for
+// that end date (a later date, after an admin change, says it again).
+const FREE_MONTH_DISMISSED_KEY = 'loore:free-month-notice-dismissed';
 
 /**
  * Payments (#438): shown when a reply was refused because the account has
@@ -16,6 +22,28 @@ export default function SubscriptionBanner() {
   const userCtx = useUser();
   const sub = userCtx?.user?.payments_enabled ? userCtx.user.subscription : null;
   const pastDue = !!(sub && sub.status === 'past_due' && sub.state === 'lapsed');
+  // An alpha tester's free month ends within a week (#438), and they have
+  // not subscribed: said once, so the replies don't stop unannounced.
+  const freeMonthEnd = sub && freeMonthEndsSoon(sub) ? sub.free_month_until : null;
+  const [freeMonthNotice, setFreeMonthNotice] = useState(false);
+
+  useEffect(() => {
+    if (!freeMonthEnd) return;
+    let dismissed = null;
+    try { dismissed = window.localStorage.getItem(FREE_MONTH_DISMISSED_KEY); } catch (e) { /* private mode */ }
+    if (dismissed === freeMonthEnd) return;
+    setFreeMonthNotice(true);
+    setMessage(`Your free month ends on ${formatDay(freeMonthEnd)}. `
+      + 'To keep AI replies after it, subscribe in');
+  }, [freeMonthEnd]);
+
+  const dismiss = () => {
+    if (freeMonthNotice && freeMonthEnd) {
+      try { window.localStorage.setItem(FREE_MONTH_DISMISSED_KEY, freeMonthEnd); } catch (e) { /* private mode */ }
+      setFreeMonthNotice(false);
+    }
+    setMessage(null);
+  };
 
   // A failed payment (Peter, 2026-11-12: "we should inform the user"):
   // said on every load until the card is updated.
@@ -27,9 +55,12 @@ export default function SubscriptionBanner() {
   }, [pastDue]);
 
   useEffect(() => {
-    const onRequired = (e) => setMessage(
-      (e.detail && e.detail.message)
-      || "Loore doesn't reply on an account without a subscription.");
+    const onRequired = (e) => {
+      setFreeMonthNotice(false);
+      setMessage(
+        (e.detail && e.detail.message)
+        || "Loore doesn't reply on an account without a subscription.");
+    };
     window.addEventListener(SUBSCRIPTION_REQUIRED_EVENT, onRequired);
     return () => window.removeEventListener(SUBSCRIPTION_REQUIRED_EVENT, onRequired);
   }, []);
@@ -72,14 +103,14 @@ export default function SubscriptionBanner() {
           {message}{' '}
           <Link
             to="/account#subscription"
-            onClick={() => setMessage(null)}
+            onClick={dismiss}
             style={{ color: 'var(--accent)', whiteSpace: 'nowrap' }}
           >
             Settings
           </Link>
         </span>
         <button
-          onClick={() => setMessage(null)}
+          onClick={dismiss}
           aria-label="Dismiss"
           style={{
             background: 'transparent',

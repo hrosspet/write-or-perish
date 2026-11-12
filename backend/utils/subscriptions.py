@@ -4,8 +4,9 @@ The switch is PAYMENTS_ENABLED. Off, nothing here changes what an account
 can do. On:
 
 * an account gets AI replies when it is on a paid plan
-  (User.on_paid_plan: a plan set by hand, alpha or pro, or a trialing,
-  active or past-due subscription) or is an admin. Every other account
+  (User.on_paid_plan: a plan set by hand, alpha or pro, a trialing or
+  active subscription, or an alpha tester's free month) or is an admin.
+  Every other account
   ("free", or a subscription that ended) keeps writing, reading and
   export; create_llm_placeholder refuses its replies with
   SubscriptionRequired, which the routes answer as a 402 (or, where the
@@ -19,6 +20,8 @@ can do. On:
 A Stripe event never writes ``User.plan``: an account set by hand stays
 as it is (utils/stripe_billing.apply_subscription).
 """
+from datetime import datetime, timedelta
+
 from flask import current_app, has_app_context
 
 from backend.models import SUBSCRIPTION_LEVELS
@@ -214,6 +217,8 @@ def subscription_required_message(user=None, kind="reply"):
         return f"Your subscription has ended, so {so}. {works}"
     if status == "past_due":
         return f"Your last payment didn't go through, so {so}. {works}"
+    if user is not None and getattr(user, "is_alpha_tester", False):
+        return f"Your free month has ended, so {so}. {works}"
     return f"{alone} {works}"
 
 
@@ -263,12 +268,149 @@ def level_spend_limit_usd(level, config=None):
 def subscription_spend_limit_usd(user, config=None):
     """The monthly ceiling an account's subscription gives it, or None:
     for an account set by hand (its cap stays what it was) and for one
-    whose subscription gives nothing."""
+    whose subscription gives nothing. An alpha tester's free month without
+    a subscription has the discounted level's ceiling, the level the
+    month leads to."""
     if user is None or getattr(user, "plan_set_by_hand", True):
         return None
-    if not getattr(user, "subscription_grants_access", False):
+    if getattr(user, "subscription_grants_access", False):
+        return level_spend_limit_usd(user.subscription_level, config)
+    if getattr(user, "alpha_free_month_active", False):
+        return level_spend_limit_usd("discounted", config)
+    return None
+
+
+# ── The alpha free month (#438) ─────────────────────────────────────────
+# Peter, 2026-11-12: alpha testers are "free for one month after the
+# opening, then the discounted price". `flask alpha-free-month --apply`
+# moves every approved account on the hand-set "alpha" plan to "free" and
+# marks it (User.alpha_free_granted_at); the month starts at its first
+# request after that (start_alpha_free_month). During it the account has
+# everything, without a card; it may subscribe at any time, at the
+# discounted price without a code, and the first payment is then due when
+# the month ends. After it, without a subscription, the account is lapsed:
+# reading, writing and export stay.
+
+# Stripe refuses a Checkout trial that ends less than 48 hours ahead; a
+# tester who subscribes in the last two days gets those hours on top.
+CHECKOUT_TRIAL_MIN = timedelta(hours=49)
+
+
+def start_alpha_free_month(user, config=None, now=None):
+    """The first request of an alpha tester after the grant starts the
+    free month. Returns True when this call started it. A conditional
+    write, so two requests at once agree on one end date."""
+    if user is None or not payments_enabled(config):
+        return False
+    if (getattr(user, "alpha_free_granted_at", None) is None
+            or user.alpha_free_until is not None):
+        return False
+    from backend.extensions import db
+    from backend.models import User
+    cfg = _config(config)
+    now = now or datetime.utcnow()
+    until = now + timedelta(days=int(cfg.get("ALPHA_FREE_MONTH_DAYS") or 30))
+    try:
+        written = (User.query
+                   .filter(User.id == user.id,
+                           User.alpha_free_granted_at.isnot(None),
+                           User.alpha_free_until.is_(None))
+                   .update({"alpha_free_until": until},
+                           synchronize_session=False))
+        db.session.commit()
+    except Exception:  # noqa: BLE001 - never fail a request over this
+        db.session.rollback()
+        return False
+    db.session.refresh(user)
+    return bool(written)
+
+
+def start_alpha_free_month_hook():
+    """before_request: start a signed-in alpha tester's free month."""
+    from flask_login import current_user
+    if current_user.is_authenticated:
+        start_alpha_free_month(current_user)
+
+
+def alpha_free_month_end(user, config=None, now=None):
+    """When an alpha tester's running free month ends (its expected end
+    when it has not started yet), or None."""
+    if not getattr(user, "alpha_free_month_active", False):
         return None
-    return level_spend_limit_usd(user.subscription_level, config)
+    if user.alpha_free_until is not None:
+        return user.alpha_free_until
+    cfg = _config(config)
+    now = now or datetime.utcnow()
+    return now + timedelta(days=int(cfg.get("ALPHA_FREE_MONTH_DAYS") or 30))
+
+
+def alpha_checkout_trial_end(user, config=None, now=None):
+    """The trial a Checkout gives an alpha tester who subscribes during
+    the free month: until the month ends (at least CHECKOUT_TRIAL_MIN
+    ahead), so the first payment is due then. None once the month is
+    over, or when the account used a trial already: a later subscription
+    is charged at checkout."""
+    if getattr(user, "subscription_trial_used", False):
+        return None
+    end = alpha_free_month_end(user, config, now)
+    if end is None:
+        return None
+    now = now or datetime.utcnow()
+    return max(end, now + CHECKOUT_TRIAL_MIN)
+
+
+def alpha_free_month_candidates(usernames=None):
+    """Accounts the free month goes to: approved, not admins, on the
+    hand-set "alpha" plan, not being deleted, not given it already.
+    *usernames* narrows the list."""
+    from backend.models import User
+    q = User.query.filter(User.approved.is_(True),
+                          User.is_admin.isnot(True),
+                          User.plan == "alpha",
+                          User.deleted_at.is_(None),
+                          User.alpha_free_granted_at.is_(None))
+    if usernames:
+        q = q.filter(User.username.in_(list(usernames)))
+    return q.order_by(User.id).all()
+
+
+def grant_alpha_free_month(users, now=None):
+    """Move *users* from "alpha" to "free" with a free month that starts
+    at their next request. Commits. Returns how many changed."""
+    from backend.extensions import db
+    now = now or datetime.utcnow()
+    for user in users:
+        user.plan = "free"
+        user.alpha_free_granted_at = now
+        user.alpha_free_until = None
+    db.session.commit()
+    return len(users)
+
+
+def undo_alpha_free_month(usernames=None):
+    """Put alpha testers back on the hand-set "alpha" plan and forget
+    their free month (a subscription they started stays theirs and keeps
+    renewing until they cancel it). Commits. Returns how many changed."""
+    from backend.extensions import db
+    from backend.models import User
+    q = User.query.filter(User.alpha_free_granted_at.isnot(None))
+    if usernames:
+        q = q.filter(User.username.in_(list(usernames)))
+    users = q.all()
+    for user in users:
+        user.plan = "alpha"
+        user.alpha_free_granted_at = None
+        user.alpha_free_until = None
+    db.session.commit()
+    return len(users)
+
+
+def checkout_levels(user):
+    """The levels the account may choose without a code: an alpha tester
+    has the discounted one too, first."""
+    if getattr(user, "is_alpha_tester", False):
+        return ("discounted",) + OFFERED_LEVELS
+    return OFFERED_LEVELS
 
 
 def level_price_cents(level, config=None):
@@ -281,6 +423,7 @@ def subscription_state(user, config=None):
     iPhone Settings). Ids and payment details stay on the server."""
     cfg = _config(config)
     state = access_state(user, cfg)
+    alpha = bool(user.is_alpha_tester)
     return {
         # "set_by_hand" (also admins), "active", "lapsed", "none".
         "state": "set_by_hand" if state == "full" else state,
@@ -289,8 +432,17 @@ def subscription_state(user, config=None):
         "current_period_end": iso_utc(user.subscription_period_end),
         "trial_end": iso_utc(user.subscription_trial_end),
         "cancel_at_period_end": bool(user.subscription_cancel_at_period_end),
-        "trial_available": not user.subscription_trial_used,
+        # An alpha tester's free month takes the trial's place.
+        "trial_available": not user.subscription_trial_used and not alpha,
         "trial_days": int(cfg.get("SUBSCRIPTION_TRIAL_DAYS") or 0),
+        # The alpha free month: whether this is an alpha tester, whether
+        # the month still runs, and when it ends (an expected date while
+        # it has not started).
+        "alpha_tester": alpha,
+        "free_month_active": bool(user.alpha_free_month_active),
+        "free_month_until": iso_utc(
+            alpha_free_month_end(user, cfg) or user.alpha_free_until)
+        if alpha else None,
         "plan_set_by_hand": bool(user.plan_set_by_hand),
         "ai_replies": ai_replies_allowed(user, cfg),
         # Live at Stripe (it renews) but giving nothing: a failed payment
