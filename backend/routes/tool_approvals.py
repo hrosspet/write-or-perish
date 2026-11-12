@@ -11,14 +11,15 @@ POST /api/tool-approvals/<id>/reject   drop it; nothing changes
 Each call is the user's own; another user's id answers 404, like one that
 does not exist.
 """
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, current_app, jsonify, request
 from flask_login import current_user, login_required
 
 from backend.extensions import db
 from backend.models import Draft, Node
 from backend.utils.privacy import can_user_access_node
+from backend.utils.error_privacy import describe_exception
 from backend.utils.tool_approvals import (
-    TOOL_PENDING_LABEL, decide, pending_for_user, serialize_pending,
+    claim, decide, pending_for_user, release, serialize_pending,
 )
 
 tool_approvals_bp = Blueprint("tool_approvals", __name__)
@@ -43,12 +44,9 @@ def thread_node_ids(node):
     return ids
 
 
-def _own_pending(draft_id):
-    draft = db.session.get(Draft, draft_id)
-    if (draft is None or draft.user_id != current_user.id
-            or draft.label != TOOL_PENDING_LABEL):
-        return None
-    return draft
+# The answer when the call can't run now; it still waits.
+NOT_RUN_MESSAGE = ("Loore couldn't make this change. It still waits for "
+                   "your approval.")
 
 
 @tool_approvals_bp.route("", methods=["GET"])
@@ -67,13 +65,28 @@ def list_pending():
 
 
 def _decide(draft_id, approve):
-    draft = _own_pending(draft_id)
-    if draft is None:
+    # One decision per call: a second request for it (a double tap,
+    # another device, a retry) finds it claimed and gets the answer for a
+    # call already decided.
+    if not claim(draft_id, current_user.id):
         return jsonify({"error": "Not found"}), 404
+    draft = db.session.get(Draft, draft_id)
     turn_node_id = serialize_pending(draft, current_user.id)["turn_node_id"]
     anchor = db.session.get(Node, draft.parent_id)
-    outcome, result = decide(draft, current_user.id, approve)
-    db.session.commit()
+    try:
+        outcome, result = decide(draft, current_user.id, approve)
+        if outcome == "failed":
+            db.session.rollback()
+            release(draft_id)
+        else:
+            db.session.commit()
+    except Exception as e:  # noqa: BLE001 - the call stays waiting
+        db.session.rollback()
+        current_app.logger.exception(
+            "Tool approval %s could not be decided: %s", draft_id,
+            describe_exception(e))
+        release(draft_id)
+        return jsonify({"error": NOT_RUN_MESSAGE}), 500
     # The reply's other waiting calls, so the dialog stays in step.
     remaining = []
     if anchor is not None:
@@ -82,7 +95,9 @@ def _decide(draft_id, approve):
             if p["turn_node_id"] == turn_node_id]
     body = {"outcome": outcome, "pending": remaining}
     if outcome == "failed":
-        body["error"] = result.get("error") or "Nothing was saved."
+        # Nothing was saved; the call still waits (approve again, or
+        # reject it).
+        body["error"] = result.get("error") or NOT_RUN_MESSAGE
     return jsonify(body), 200
 
 

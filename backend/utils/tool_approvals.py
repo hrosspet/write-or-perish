@@ -27,12 +27,22 @@ tools are the voice path that applies a proposal without that button, so
 they wait here like update_artifact.
 """
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
+
+from sqlalchemy import and_, or_
 
 from backend.extensions import db
 from backend.models import Draft, Node, UserArtifact
 
 TOOL_PENDING_LABEL = "tool_pending"
+# A call one request has claimed to decide (claim): no other request
+# decides it meanwhile, so an approval runs once.
+TOOL_DECIDING_LABEL = "tool_deciding"
+# INTRODUCED HEURISTIC: a claim older than this (its request died between
+# the claim and its commit) reads as waiting again. Far above any
+# decision's run (one write or one queued job), short enough that the
+# call shows again the next time the user opens the thread.
+DECIDING_STALE_AFTER = timedelta(minutes=10)
 
 # Every tool that changes the user's data, or acts for them, when it runs.
 DIRECT_WRITE_TOOLS = (
@@ -107,6 +117,15 @@ def _payload(draft):
     return data if isinstance(data, dict) else {}
 
 
+def _waiting(now=None):
+    """A call that waits for a decision: not claimed, or claimed by a
+    request that died (DECIDING_STALE_AFTER)."""
+    now = now or datetime.utcnow()
+    return or_(Draft.label == TOOL_PENDING_LABEL,
+               and_(Draft.label == TOOL_DECIDING_LABEL,
+                    Draft.updated_at < now - DECIDING_STALE_AFTER))
+
+
 def pending_drafts(user_id, node_ids):
     """The user's waiting calls made in the nodes *node_ids*, oldest
     first. One indexed query."""
@@ -116,10 +135,34 @@ def pending_drafts(user_id, node_ids):
     rows = []
     for start in range(0, len(ids), 900):
         rows.extend(Draft.query.filter(
-            Draft.user_id == user_id,
-            Draft.label == TOOL_PENDING_LABEL,
+            Draft.user_id == user_id, _waiting(),
             Draft.parent_id.in_(ids[start:start + 900])).all())
     return sorted(rows, key=lambda d: d.id)
+
+
+def claim(draft_id, user_id):
+    """Claim the waiting call *draft_id* of *user_id* for one decision:
+    one conditional UPDATE, committed. True when this request got it;
+    False when it is not the user's, not waiting, or another request
+    claimed it first (a double tap, two devices, a retry)."""
+    now = datetime.utcnow()
+    claimed = Draft.query.filter(
+        Draft.id == draft_id, Draft.user_id == user_id, _waiting(now),
+    ).update({Draft.label: TOOL_DECIDING_LABEL, Draft.updated_at: now},
+             synchronize_session=False)
+    db.session.commit()
+    return claimed == 1
+
+
+def release(draft_id):
+    """Put a claimed call back to waiting (its run failed): the user can
+    approve it again or reject it."""
+    Draft.query.filter(
+        Draft.id == draft_id, Draft.label == TOOL_DECIDING_LABEL,
+    ).update({Draft.label: TOOL_PENDING_LABEL,
+              Draft.updated_at: datetime.utcnow()},
+             synchronize_session=False)
+    db.session.commit()
 
 
 def _artifact_preview(payload, user_id):
@@ -247,10 +290,13 @@ def _record_outcome(node, pending_id, fields):
 
 
 def decide(draft, user_id, approve):
-    """Approve (run) or reject the waiting call *draft*. Returns
-    (outcome, result): outcome "approved", "failed" (it ran and failed,
-    e.g. the artifact changed since: nothing was saved) or "rejected";
-    result the call's tool_calls_meta entry. The caller commits."""
+    """Approve (run) or reject the waiting call *draft* (claimed by the
+    caller, claim). Returns (outcome, result): "approved" or "rejected",
+    recorded on the reply and the draft deleted; or "failed": the call
+    ran and did not succeed (e.g. the artifact changed since), nothing
+    was saved or recorded, and the caller puts it back to waiting
+    (release). *result* is the call's tool_calls_meta entry. The caller
+    commits."""
     from backend.tasks.llm_completion import (
         _execute_tool_calls, _redact_tool_input,
     )
@@ -272,7 +318,9 @@ def decide(draft, user_id, approve):
         result = _execute_tool_calls(
             [{"name": name, "input": inp}], node, _chain_above(node),
             user_id, client=client)[0]
-        outcome = "approved" if result.get("status") == "success" else "failed"
+        if result.get("status") != "success":
+            return "failed", result
+        outcome = "approved"
         result["approval"] = outcome
     result["decided_at"] = datetime.utcnow().isoformat() + "Z"
     if node is not None:

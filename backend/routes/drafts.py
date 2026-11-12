@@ -66,7 +66,8 @@ def _session_dir(user_id, session_id):
 # (breaking "yes, send it" / "apply those changes" text confirmation). #158.
 # A write tool call kept for the user's approval (utils/tool_approvals)
 # is keyed on its reply node the same way.
-_PROPOSAL_DRAFT_LABELS = tuple(PROPOSAL_TOOLS) + ("tool_pending",)
+_PROPOSAL_DRAFT_LABELS = tuple(PROPOSAL_TOOLS) + (
+    "tool_pending", "tool_deciding")
 
 # The labels a recording may carry, as the web and iPhone recorders send
 # them: "Voice" (voice mode) or none (dictation). "Reflect" and "Orient"
