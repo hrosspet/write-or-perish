@@ -98,6 +98,41 @@ final class ThreadModel {
 
     var isLLMNode: Bool { node.map { $0.nodeType == .llm || $0.llmModel != nil } ?? false }
 
+    // MARK: "Only you see this reply" (2026-11-12)
+
+    /// A private AI reply of the viewer's under a node others can read.
+    func showsPrivateReplyNote(nodeType: NodeType, llmModel: String?, userId: Int?, parentUserId: Int?,
+                               deleted: Bool = false, privacy: PrivacyLevel?, parentPrivacy: PrivacyLevel?) -> Bool {
+        SharedThread.showsPrivateReplyNote(
+            isAIReply: nodeType == .llm || llmModel != nil,
+            owned: ownedByMe(userId: userId, parentUserId: parentUserId, nodeType: nodeType),
+            deleted: deleted, privacy: privacy, parentPrivacy: parentPrivacy)
+    }
+
+    /// The focal node; its parent is the last ancestor.
+    var focalShowsPrivateReplyNote: Bool {
+        guard let node else { return false }
+        return isOwner && SharedThread.showsPrivateReplyNote(
+            isAIReply: isLLMNode, owned: true, privacy: node.privacyLevel,
+            parentPrivacy: parentAncestor?.privacyLevel)
+    }
+
+    /// An ancestor; its parent is the one before it (the root has none shown).
+    func showsPrivateReplyNote(ancestorAt index: Int) -> Bool {
+        guard let ancestors = node?.ancestors, ancestors.indices.contains(index), index > 0 else { return false }
+        let n = ancestors[index]
+        return showsPrivateReplyNote(nodeType: n.nodeType, llmModel: n.llmModel, userId: n.userId,
+                                     parentUserId: n.parentUserId, deleted: n.deleted, privacy: n.privacyLevel,
+                                     parentPrivacy: ancestors[index - 1].privacyLevel)
+    }
+
+    /// A reply in the tree, under a parent with `parentPrivacy`.
+    func showsPrivateReplyNote(_ n: TreeNode, parentPrivacy: PrivacyLevel?) -> Bool {
+        showsPrivateReplyNote(nodeType: n.nodeType, llmModel: n.llmModel, userId: n.userId,
+                              parentUserId: n.parentUserId, deleted: n.deleted || n.inaccessible,
+                              privacy: n.privacyLevel, parentPrivacy: parentPrivacy)
+    }
+
     var isLLMPending: Bool { isLLMNode && (node?.llmTaskStatus?.isInFlight ?? false) }
 
     /// A read waiting in a provider batch (`_batch` submitted/cancelling).

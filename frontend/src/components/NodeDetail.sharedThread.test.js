@@ -151,3 +151,63 @@ test('a refused automatic reply leaves the page on the entry without an error', 
 
   expect(await screen.findByText('New entry.')).toBeInTheDocument();
 });
+
+
+const aiReply = (id, overrides = {}) => ({
+  id, node_type: 'llm', llm_model: 'gpt-5', username: 'gpt-5', user_id: 3,
+  parent_user_id: 1, content: `AI reply ${id}`, privacy_level: 'private',
+  ai_usage: 'chat', llm_task_status: 'completed', children: [], child_count: 0,
+  ...overrides,
+});
+
+test('my private AI reply under a public entry says only I see it', async () => {
+  routes['/nodes/10'] = entry(10, 'A public entry.', {
+    privacy_level: 'public',
+    children: [aiReply(11)],
+  });
+  renderAt('/node/10');
+  await screen.findByText('A public entry.');
+
+  expect(screen.getByText(/Only you see this reply/)).toBeInTheDocument();
+});
+
+test('no note under a private entry, nor on a public reply', async () => {
+  routes['/nodes/10'] = entry(10, 'A private entry.', {
+    children: [aiReply(11)],
+  });
+  routes['/nodes/20'] = entry(20, 'A public entry.', {
+    privacy_level: 'public',
+    children: [aiReply(21, { privacy_level: 'public' })],
+  });
+  const first = renderAt('/node/10');
+  await screen.findByText('A private entry.');
+  expect(screen.queryByText(/Only you see this reply/)).toBeNull();
+  first.unmount();
+
+  renderAt('/node/20');
+  await screen.findByText('A public entry.');
+  expect(screen.queryByText(/Only you see this reply/)).toBeNull();
+});
+
+test('the focal AI reply carries the note under a circles entry', async () => {
+  routes['/nodes/11'] = aiReply(11, {
+    user: { id: 3, username: 'gpt-5' },
+    ancestors: [entry(10, 'Shared with circles.', { privacy_level: 'circles' })],
+    in_read_thread: false, read_reply_above: false, glean_thread: false,
+  });
+  renderAt('/node/11');
+  await screen.findByText('AI reply 11');
+
+  expect(screen.getByText(/Only you see this reply/)).toBeInTheDocument();
+});
+
+test("someone else's private AI reply shows no note", async () => {
+  mockUser = { ...ME, id: 2, username: 'anna' };
+  routes['/nodes/10'] = entry(10, 'A public entry.', {
+    privacy_level: 'public', children: [aiReply(11)],
+  });
+  renderAt('/node/10');
+  await screen.findByText('A public entry.');
+
+  expect(screen.queryByText(/Only you see this reply/)).toBeNull();
+});

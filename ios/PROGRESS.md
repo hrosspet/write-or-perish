@@ -1056,6 +1056,13 @@ public node never quotes a node that isn't public; publishing one shows a dialog
   yet" (`QuotesNotPublicDialog`): the server's words, one row per quoted entry (its preview opens it; "An
   entry you can't open (#N). Remove its quote to publish."), OK. A form in a sheet closes its sheet before
   the entry opens (`NodeFormConfig.leaveForNode`). The Share page's Publish shows the same dialog.
+- Simulator-check fixes: a reply form follows its parent's current privacy (`NodeFormConfig.parentPrivacy`,
+  `NodeFormModel.parentPrivacyChanged`): made public above an open form, the reply is pinned to public and the
+  public-reply question comes back; made private, the form returns to private; the typed text stays. A private
+  AI reply under a public or circles node shows its owner a lock and "Only you see this reply" under its
+  footer (focal, ancestors, replies; `SharedThread.showsPrivateReplyNote`, `PrivateReplyNote`). The locked
+  switch's words are "Auto-generate is off in public and shared threads." and, in a circles thread, show as a
+  caption under the dimmed switch.
 - Deviation: the LLM Response bar shows to the owner in circles threads too, not only public ones
   (`showCraftBar`), as it is the only way to a reply there without craft mode.
 - Tests: `SharedThreadTests.swift` (`SharedPrivacyTests`, `SharedEntryFormTests`, `SharedThreadModelTests`).

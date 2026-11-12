@@ -25,7 +25,7 @@ import useSubmitShortcut from "../hooks/useSubmitShortcut";
 
 const NodeForm = forwardRef(
   (
-    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt, hidePowerFeatures = false, placeholder, onSubmitOverride, uploadReplyOptions, compact = false, hideAudioUpload = false, allowAgenticPrompt = false, hasGeneratedTts = false, aiUsageFromGlobalDefault = false, hasChildren = false },
+    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt, hidePowerFeatures = false, placeholder, onSubmitOverride, uploadReplyOptions, compact = false, hideAudioUpload = false, allowAgenticPrompt = false, hasGeneratedTts = false, aiUsageFromGlobalDefault = false, hasChildren = false, parentPrivacyLevel },
     ref
   ) => {
     const { user } = useUser();
@@ -197,6 +197,19 @@ const NodeForm = forwardRef(
           });
       }
     }, [parentId, editMode, initialPrivacyLevel, initialAiUsage]);
+
+    // The parent's privacy as the page holds it now: an edit of the parent
+    // while this form is open (made public, or private again) moves the
+    // reply's privacy with it, and the public-reply dialog follows. The
+    // first value comes from the fetch above; the text typed stays.
+    const seenParentPrivacyProp = useRef(parentPrivacyLevel);
+    useEffect(() => {
+      if (editMode || !parentId || !parentPrivacyLevel) return;
+      if (seenParentPrivacyProp.current === parentPrivacyLevel) return;
+      seenParentPrivacyProp.current = parentPrivacyLevel;
+      setParentPrivacy(parentPrivacyLevel);
+      setPrivacyLevel(parentPrivacyLevel);
+    }, [parentPrivacyLevel, parentId, editMode]);
 
     // Replies in a public thread are public (#228): pin the STATE, not just
     // the display — a remembered 'private' from loore_last_privacy_level
