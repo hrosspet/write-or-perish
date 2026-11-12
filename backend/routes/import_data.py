@@ -3,7 +3,9 @@ from flask_login import login_required, current_user
 from backend.utils.error_privacy import describe_exception
 from backend.models import Node, User, UserProfile
 from backend.extensions import db
-from backend.utils.privacy import AI_ALLOWED
+from backend.utils.privacy import (
+    AI_ALLOWED, validate_ai_usage, validate_privacy_level,
+)
 from backend.utils import docx_import, pdf_import
 from backend.utils.pdf_extract_worker import MAX_CHAPTERS as MAX_PDF_CHAPTERS
 from datetime import datetime, timedelta
@@ -18,6 +20,7 @@ import io
 import shutil
 import tempfile
 import json
+import uuid
 
 import_bp = Blueprint("import_bp", __name__)
 
@@ -27,6 +30,9 @@ DOCX_UNEXPECTED_ERROR = (
 
 # Analyzed formats that become one entry per chapter (see _file_parts).
 CHAPTER_FORMATS = ("docx", "pdf")
+# Each chapter of an imported document is dated this long after the one
+# before it, which keeps the chain in order (_import_file_nodes).
+CHAPTER_STEP = timedelta(seconds=1)
 # The confirm step's answer to "Whose writing is this?" for a PDF.
 WHOSE_WRITING = ("mine", "someone_else")
 
@@ -129,7 +135,7 @@ def _add_imported_message_nodes(user_id, human_owner_id, parent_id,
                                 privacy_level, ai_usage, source_key,
                                 msg_created_at, origin,
                                 provenance=PROVENANCE_ARCHIVE_UPLOAD,
-                                dek=None):
+                                dek=None, split_item=None):
     """Create the node(s) for one imported message, splitting content
     above NODE_CHAR_CAP into a serial parent→child chain.
 
@@ -137,6 +143,10 @@ def _add_imported_message_nodes(user_id, human_owner_id, parent_id,
     and the next message's parent resolve via source_key, so keeping it
     on the tip means re-imports skip the whole message and follow-ups
     chain after the full content — identical to a fresh import.
+
+    *split_item*: the token every entry of a multi-entry item shares
+    (Node.split_item; a document's chapters pass theirs). A message that
+    splits here and has none gets a new one.
 
     Every caller today reads an export the user uploaded, hence the
     default provenance; a future Loore-fetched path must say what it is.
@@ -150,6 +160,8 @@ def _add_imported_message_nodes(user_id, human_owner_id, parent_id,
         raise ValueError(f"Unknown provenance {provenance!r}")
     from backend.utils.node_split import PART_STEP, split_text_at_cap
     segments = split_text_at_cap(node_content)
+    if split_item is None and len(segments) > 1:
+        split_item = uuid.uuid4().hex
     # Parts are PART_STEP apart, also for a message without a usable
     # timestamp: that is how split_chain_tip finds the last part.
     base = msg_created_at or datetime.utcnow()
@@ -167,6 +179,7 @@ def _add_imported_message_nodes(user_id, human_owner_id, parent_id,
             source_key=source_key if j == len(segments) - 1 else None,
             origin=origin,
             provenance=provenance,
+            split_item=split_item,
         )
         # Never pass content= to Node(): that writes the raw column and
         # bypasses KMS envelope encryption (#256). set_content() is the
@@ -319,50 +332,83 @@ def _requested_ai_usage(data):
     return data.get('ai_usage') or current_user.default_ai_usage or 'none'
 
 
+def _invalid_settings(privacy_level, ai_usage):
+    """A 400 response when an import request names a privacy level or
+    AI usage Loore does not know; else None. A re-import applies both to
+    entries already in Loore, so neither is stored unchecked."""
+    if not (isinstance(privacy_level, str)
+            and validate_privacy_level(privacy_level)):
+        return jsonify({"error": "Invalid privacy_level"}), 400
+    if not (isinstance(ai_usage, str) and validate_ai_usage(ai_usage)):
+        return jsonify({"error": "Invalid ai_usage"}), 400
+    return None
+
+
 def _split_item_nodes(tip_ids):
     """Map every node of the imported items keyed on ``tip_ids`` to its
-    item's tip (#638).
+    item's tip (#638), taking only nodes certainly part of the item.
 
     A Word or PDF document is saved as one entry per chapter, and an
     entry or message above the per-entry cap as a chain of parts; the
-    dedup key sits on the chain's last node only (_import_file_nodes,
-    _add_imported_message_nodes). A re-import matches that node, so the
-    rest of the item is found by walking up from it: a parent with no
-    key of its own, by the same author, of the same type and origin,
-    belongs to the same item. The walk stops at the thread's root or at
-    a keyed node, which is the tip of the file or message before it.
-    Deleted nodes are walked through, so a chapter deleted on its own
-    does not hide the chapters before it. Reads no content."""
-    cols = (Node.id, Node.parent_id, Node.source_key, Node.user_id,
-            Node.human_owner_id, Node.node_type, Node.origin)
+    dedup key sits on the last entry only. Every entry of such an item
+    holds the same split_item token, so the item is exactly the entries
+    of the tip's owner with the tip's token.
 
-    def rows(ids):
-        ids = list(ids)
+    An item imported before the token existed is proven by the dates its
+    import wrote. Walking up from the keyed entry, a parent belongs to
+    the item only when it is alive, has no key and no token, has the
+    same author, owner, type and origin, and is dated exactly one part
+    step (PART_STEP, the part before it of the same text) or, in a Word
+    or PDF document, exactly one chapter step (CHAPTER_STEP, the chapter
+    before) earlier. The walk stops at the first parent that fails: it
+    never passes a deleted entry, a key, or another item's token. What
+    it cannot prove keeps its settings: the chapters above a deleted
+    chapter or above a chapter that was itself split into parts, and
+    the chapters of a document imported without a date. Reads no
+    content."""
+    from backend.utils.node_split import PART_STEP
+    cols = (Node.id, Node.parent_id, Node.source_key, Node.split_item,
+            Node.user_id, Node.human_owner_id, Node.node_type, Node.origin,
+            Node.created_at, Node.deleted_at)
+
+    def rows(column, values):
+        values = list(values)
         found = {}
-        for start in range(0, len(ids), 1000):
+        for start in range(0, len(values), 1000):
             for r in db.session.query(*cols).filter(
-                    Node.id.in_(ids[start:start + 1000])):
+                    column.in_(values[start:start + 1000])):
                 found[r.id] = r
         return found
 
-    def same_item(parent, tip):
-        return (parent.source_key is None
-                and parent.user_id == tip.user_id
-                and parent.human_owner_id == tip.human_owner_id
-                and parent.node_type == tip.node_type
-                and parent.origin == tip.origin)
+    def proven_part(parent, cur, tip):
+        if (parent.deleted_at is not None or parent.source_key is not None
+                or parent.split_item is not None
+                or parent.created_at is None or cur.created_at is None
+                or (parent.user_id, parent.human_owner_id, parent.node_type,
+                    parent.origin) != (tip.user_id, tip.human_owner_id,
+                                       tip.node_type, tip.origin)):
+            return False
+        step = cur.created_at - parent.created_at
+        return step == PART_STEP or (step == CHAPTER_STEP
+                                     and tip.origin in CHAPTER_FORMATS)
 
-    tips = rows({i for i in tip_ids if i is not None})
+    tips = rows(Node.id, {i for i in tip_ids if i is not None})
     item_of = {i: i for i in tips}
-    walking = [(tip, tip) for tip in tips.values()]
+    by_token = {t.split_item: t for t in tips.values() if t.split_item}
+    for r in rows(Node.split_item, by_token).values():
+        tip = by_token[r.split_item]
+        if r.human_owner_id == tip.human_owner_id:
+            item_of.setdefault(r.id, tip.id)
+
+    walking = [(t, t) for t in tips.values() if not t.split_item]
     while walking:
-        parents = rows({cur.parent_id for _, cur in walking
-                        if cur.parent_id is not None})
+        parents = rows(Node.id, {cur.parent_id for _, cur in walking
+                                 if cur.parent_id is not None})
         step = []
         for tip, cur in walking:
             parent = parents.get(cur.parent_id)
             if (parent is not None and parent.id not in item_of
-                    and same_item(parent, tip)):
+                    and proven_part(parent, cur, tip)):
                 item_of[parent.id] = tip.id
                 step.append((tip, parent))
         walking = step
@@ -377,8 +423,9 @@ def _apply_settings_to_skipped(node_ids, privacy_level, ai_usage, dek=None,
     import settings, so the entries a re-import matches adopt the values
     chosen for this import instead of being a pure no-op. ``node_ids``
     are the matched (keyed) nodes; every alive entry of their items
-    takes the settings, all chapters of a document and all parts of a
-    long message (#638), also when the keyed node itself was deleted.
+    (_split_item_nodes) takes the settings, all chapters of a document
+    and all parts of a long message (#638), also when the keyed node
+    itself was deleted.
     Returns the number of items in which an entry actually changed;
     callers report it as ``updated`` and keep it disjoint from
     ``skipped``. Provenance is NOT touched: how a node first arrived is
@@ -420,8 +467,10 @@ def _release_deleted_docx_key(file_data, source_key, key_index,
     import: the dedup key sits on the last node of its chapter chain, so
     refilling that node would bring back only the last chapter. The
     deleted tip gives up the key and the document is imported again in
-    full. Returns the old tip's id (its chapters still alive take this
-    import's settings, #638), or None."""
+    full. Returns the old tip's id when its split_item token names the
+    old copy's chapters (still alive ones take this import's settings,
+    #638), else None: without the token they are not looked for, since
+    nothing walks up from a tip whose key was given up."""
     if (file_data.get('source_format') in CHAPTER_FORMATS
             and on_deleted == 'restore' and source_key in deleted_keys):
         old = Node.query.get(key_index.pop(source_key))
@@ -429,7 +478,8 @@ def _release_deleted_docx_key(file_data, source_key, key_index,
         if old is not None:
             old.source_key = None
             db.session.flush()
-            return old.id
+            if old.split_item:
+                return old.id
     return None
 
 
@@ -641,9 +691,12 @@ def _import_file_nodes(file_data, parts, parent_id, source_key, created_at,
                        privacy_level, ai_usage):
     """Create the node(s) for one analyzed file: a chain with one entry
     per part (each part itself splits above the per-node cap). The
-    source_key lands on the last node. Returns (tip_node, nodes_created)."""
+    source_key lands on the last node, and every node of a document with
+    several chapters holds the same split_item token (#638). Returns
+    (tip_node, nodes_created)."""
     source_format = file_data.get('source_format')
     origin = source_format if source_format in CHAPTER_FORMATS else "markdown"
+    split_item = uuid.uuid4().hex if len(parts) > 1 else None
     tip = None
     created = 0
     for k, part in enumerate(parts):
@@ -657,10 +710,10 @@ def _import_file_nodes(file_data, parts, parent_id, source_key, created_at,
             privacy_level=privacy_level,
             ai_usage=ai_usage,
             source_key=source_key if k == len(parts) - 1 else None,
-            # one second per chapter keeps the chain in order
-            msg_created_at=(created_at + timedelta(seconds=k)
+            msg_created_at=(created_at + CHAPTER_STEP * k
                             if created_at else None),
             origin=origin,
+            split_item=split_item,
         )
         created += n
     return tip, created
@@ -922,6 +975,9 @@ def confirm_import():
     privacy_level = data.get('privacy_level', 'private')
     ai_usage = _requested_ai_usage(data)
     on_deleted = data.get('on_deleted')
+    invalid = _invalid_settings(privacy_level, ai_usage)
+    if invalid:
+        return invalid
 
     if not files:
         return jsonify({"error": "No files provided"}), 400
@@ -2069,6 +2125,9 @@ def confirm_twitter_import():
     privacy_level = data.get('privacy_level', 'private')
     ai_usage = _requested_ai_usage(data)
     on_deleted = data.get('on_deleted')
+    invalid = _invalid_settings(privacy_level, ai_usage)
+    if invalid:
+        return invalid
 
     path = ta.stash_path(current_user.id, data.get('import_token'))
     if path is None or not path.exists():
@@ -2568,6 +2627,9 @@ def _confirm_conversation_import(source):
     privacy_level = data.get('privacy_level', 'private')
     ai_usage = _requested_ai_usage(data)
     on_deleted = data.get('on_deleted')
+    invalid = _invalid_settings(privacy_level, ai_usage)
+    if invalid:
+        return invalid
 
     path = cs.stash_path(current_user.id, token)
     try:

@@ -605,6 +605,14 @@ class Node(db.Model):
     # NULL = written in Loore, or imported before this column existed.
     # Never part of dedup: source_key alone decides a re-import match.
     provenance = db.Column(db.String(16), nullable=True)
+    # One imported item saved as several entries (the chapters of a Word
+    # or PDF document, the parts of a file or message above the per-entry
+    # cap): every entry of it holds the same random token (uuid4 hex),
+    # while source_key sits on its last entry only. A re-import finds the
+    # item's other entries by it (#638). NULL for an item saved as one
+    # entry, for anything written in Loore, and for items imported
+    # before this column existed. Says nothing about the content.
+    split_item = db.Column(db.String(32), nullable=True, index=True)
 
     # DB-level backstop against concurrent imports racing past the
     # application dedup check. NULL source_key rows are exempt (both
