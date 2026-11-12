@@ -205,7 +205,7 @@ export default function SubscriptionSection({ user, setUser }) {
             </button>
           </div>
           <div style={helperStyle}>
-            Change your card, see invoices or cancel on Stripe's page. A cancelled subscription runs to the end of the period you paid for.
+            Switch between Standard and Supporter, change your card, see invoices or cancel on Stripe's page. A switch is prorated: the difference for the rest of the month comes with the next payment. A cancelled subscription runs to the end of the period you paid for.
           </div>
         </>
       ) : sub.plan_set_by_hand ? (
@@ -233,7 +233,7 @@ export default function SubscriptionSection({ user, setUser }) {
                   {LEVEL_NAMES[l.level] || l.level}
                 </span>
                 <span style={{ display: "block", fontFamily: "var(--sans)", fontSize: "0.9rem", fontWeight: 300, color: "var(--accent)", margin: "2px 0 6px" }}>
-                  {formatPrice(l.amount_cents, l.currency)} a month
+                  {formatPrice(l.amount_cents, l.currency)} a month, plus tax where it applies
                 </span>
                 <span style={{ display: "block", fontFamily: "var(--sans)", fontSize: "0.78rem", fontWeight: 300, color: "var(--text-muted)", lineHeight: 1.5 }}>
                   {LEVEL_NOTES[l.level]}

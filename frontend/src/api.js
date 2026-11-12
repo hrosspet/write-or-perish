@@ -42,6 +42,17 @@ api.interceptors.response.use(
         // Ignore — CustomEvent unavailable; the rejection below still flows.
       }
     }
+    // Payments on (#438): the account is not let in (never had a
+    // subscription, or its first payment failed): UserContext reads the
+    // user again and the app shows the subscribe page.
+    if (error.response && error.response.status === 402 &&
+        data && data.error === "no_subscription") {
+      try {
+        window.dispatchEvent(new CustomEvent("loore:no-subscription"));
+      } catch (e) {
+        // Ignore — CustomEvent unavailable.
+      }
+    }
     // Payments on (#438): a reply refused for an account without AI
     // replies raises SubscriptionBanner, which links to Settings.
     if (error.response && error.response.status === 402 &&

@@ -66,6 +66,24 @@ export const UserProvider = ({ children }) => {
       : prev));
   }, []);
 
+  // Payments on (#438): the server says the account is not let in (its
+  // first payment failed, say): read the user again, so the app shows
+  // the subscribe page. Nothing sends this event while payments are off.
+  useEffect(() => {
+    const onNoSubscription = () => {
+      api.get("/dashboard", { params: { profile: 0 } })
+        .then((res) => {
+          if (res?.data?.user) {
+            rememberSubscription(res.data.user);
+            setUser(res.data.user);
+          }
+        })
+        .catch(() => {});
+    };
+    window.addEventListener("loore:no-subscription", onNoSubscription);
+    return () => window.removeEventListener("loore:no-subscription", onNoSubscription);
+  }, []);
+
   return (
     <UserContext.Provider value={{ user, loading, error, setUser, markHasOwnEntries }}>
       {children}

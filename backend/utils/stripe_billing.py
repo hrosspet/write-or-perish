@@ -28,10 +28,21 @@ from backend.models import (
 
 logger = logging.getLogger(__name__)
 
-# The product's id in every Stripe account Loore uses (Stripe accepts our
-# own id at creation), so the sync finds it again without a search.
-PRODUCT_ID = "loore_subscription"
-PRODUCT_NAME = "Loore subscription"
+# One product per level, with our own ids (Stripe accepts them at
+# creation), so the sync finds them again without a search. Separate
+# products are what lets the customer portal switch Standard and
+# Supporter: it cannot offer two monthly prices of one product.
+PRODUCTS = {
+    "standard": ("loore_standard", "Loore Standard"),
+    "supporter": ("loore_supporter", "Loore Supporter"),
+    "discounted": ("loore_reduced", "Loore (reduced price)"),
+}
+# The single product of this PR's first version: archived by the sync.
+OLD_PRODUCT_ID = "loore_subscription"
+# Levels a subscriber may switch between in the portal. The discounted
+# level is never offered there: a discounted subscriber may move up, not
+# back without a code.
+PORTAL_SWITCH_LEVELS = ("standard", "supporter")
 # One monthly price per level, found by its lookup key. A key moves to a
 # new price when the amount, currency or tax behaviour changes.
 PRICE_LOOKUP_KEYS = {
@@ -215,16 +226,31 @@ def _price_matches(price, level, cfg):
             == cfg.get("SUBSCRIPTION_CURRENCY", "usd")
             and recurring.get("interval") == "month"
             and (recurring.get("interval_count") or 1) == 1
-            and product == PRODUCT_ID
+            and product == PRODUCTS[level][0]
             and price.get("tax_behavior")
             == cfg.get("SUBSCRIPTION_TAX_BEHAVIOR", "inclusive"))
 
 
-def portal_configuration_params(cfg):
+def portal_configuration_params(cfg, prices=None):
     """The customer portal Loore links to: change the card, see invoices,
-    cancel at the end of the period. No plan switching (the discounted
-    price is opened only by a code) and no customer-detail edits."""
+    cancel at the end of the period, and switch between Standard and
+    Supporter (*prices*: level -> price id). An upgrade or downgrade is
+    prorated (Stripe's proration for subscription updates): the
+    difference for the rest of the period goes on the next invoice. A
+    trialing subscription keeps its trial when it switches. No customer
+    detail edits."""
     frontend = (cfg.get("FRONTEND_URL") or "").rstrip("/")
+    switch = {"enabled": False}
+    if prices:
+        switch = {
+            "enabled": True,
+            "default_allowed_updates": ["price"],
+            "products": [{"product": PRODUCTS[level][0],
+                          "prices": [prices[level]]}
+                         for level in PORTAL_SWITCH_LEVELS],
+            "proration_behavior": "create_prorations",
+            "trial_update_behavior": "continue_trial",
+        }
     return {
         "name": "Loore",
         "default_return_url": f"{frontend}/account#subscription",
@@ -233,11 +259,28 @@ def portal_configuration_params(cfg):
             "invoice_history": {"enabled": True},
             "subscription_cancel": {"enabled": True,
                                     "mode": "at_period_end"},
-            "subscription_update": {"enabled": False},
+            "subscription_update": switch,
             "customer_update": {"enabled": False},
         },
         "metadata": {PORTAL_METADATA_KEY: "1"},
     }
+
+
+def _sync_product(gateway, level, cfg, changes):
+    product_id, name = PRODUCTS[level]
+    params = {"name": name, "tax_code": cfg.get("STRIPE_PRODUCT_TAX_CODE")}
+    product = gateway.retrieve_product(product_id)
+    if product is None:
+        gateway.create_product({"id": product_id, **params})
+        changes.append(f"created product {product_id}")
+        return
+    tax_code = product.get("tax_code")
+    if isinstance(tax_code, dict):
+        tax_code = tax_code.get("id")
+    if (product.get("name") != name or tax_code != params["tax_code"]
+            or not product.get("active", True)):
+        gateway.update_product(product_id, {**params, "active": True})
+        changes.append(f"updated product {product_id}")
 
 
 def sync_catalog(gateway, config=None, log=None):
@@ -250,25 +293,9 @@ def sync_catalog(gateway, config=None, log=None):
     cfg = _config(config)
     log = log or (lambda _msg: None)
     changes = []
-    product_params = {
-        "name": PRODUCT_NAME,
-        "tax_code": cfg.get("STRIPE_PRODUCT_TAX_CODE"),
-    }
-    product = gateway.retrieve_product(PRODUCT_ID)
-    if product is None:
-        product = gateway.create_product({"id": PRODUCT_ID, **product_params})
-        changes.append(f"created product {PRODUCT_ID}")
-    else:
-        tax_code = product.get("tax_code")
-        if isinstance(tax_code, dict):
-            tax_code = tax_code.get("id")
-        if (product.get("name") != PRODUCT_NAME
-                or tax_code != product_params["tax_code"]
-                or not product.get("active", True)):
-            product = gateway.update_product(
-                PRODUCT_ID, {**product_params, "active": True})
-            changes.append(f"updated product {PRODUCT_ID}")
-    log(f"product {PRODUCT_ID}")
+    for level in SUBSCRIPTION_LEVELS:
+        _sync_product(gateway, level, cfg, changes)
+        log(f"product {PRODUCTS[level][0]}")
 
     existing = {p.get("lookup_key"): p
                 for p in gateway.list_prices(PRICE_LOOKUP_KEYS.values())}
@@ -281,7 +308,7 @@ def sync_catalog(gateway, config=None, log=None):
             log(f"price {level}: {current['id']} (unchanged)")
             continue
         created = gateway.create_price({
-            "product": PRODUCT_ID,
+            "product": PRODUCTS[level][0],
             "unit_amount": level_price_cents(level, cfg),
             "currency": cfg.get("SUBSCRIPTION_CURRENCY", "usd"),
             "recurring": {"interval": "month"},
@@ -301,8 +328,12 @@ def sync_catalog(gateway, config=None, log=None):
             gateway.update_price(current["id"], {"active": False})
             changes.append(f"archived price {current['id']}")
     _price_cache.clear()
+    old = gateway.retrieve_product(OLD_PRODUCT_ID)
+    if old is not None and old.get("active", True):
+        gateway.update_product(OLD_PRODUCT_ID, {"active": False})
+        changes.append(f"archived product {OLD_PRODUCT_ID}")
 
-    params = portal_configuration_params(cfg)
+    params = portal_configuration_params(cfg, prices)
     ours = [c for c in gateway.list_portal_configurations()
             if (c.get("metadata") or {}).get(PORTAL_METADATA_KEY) == "1"]
     if ours:
@@ -312,7 +343,8 @@ def sync_catalog(gateway, config=None, log=None):
         portal = gateway.create_portal_configuration(params)
         changes.append(f"created portal configuration {portal['id']}")
         log(f"portal configuration {portal['id']} (new)")
-    return {"product": PRODUCT_ID, "prices": prices,
+    return {"products": {lv: PRODUCTS[lv][0] for lv in PRODUCTS},
+            "prices": prices,
             "portal_configuration": portal["id"], "changes": changes}
 
 
@@ -516,23 +548,20 @@ def _first_item(sub):
 
 
 def _apply_payment_state(user, sub, status):
-    """The columns that belong to one subscription: start again with a
-    new one; paid once it was active; when a failed payment was first
-    seen; the trial ceiling ends with the trial."""
+    """The columns that belong to one subscription start again with a new
+    one; the account has paid once a subscription of it was active (set
+    for good); why it ended; the trial ceiling ends with the trial."""
     if user.stripe_subscription_id != sub.get("id"):
-        user.subscription_paid = False
-        user.subscription_past_due_since = None
         user.subscription_revoked = None
         user.subscription_trial_capped = False
     if status != "trialing":
         user.subscription_trial_capped = False
     if status == "active":
         # Active after a trial or a checkout means an invoice was paid.
-        user.subscription_paid = True
-    if status != "past_due":
-        user.subscription_past_due_since = None
-    elif user.subscription_past_due_since is None:
-        user.subscription_past_due_since = datetime.utcnow()
+        user.subscription_ever_paid = True
+    details = sub.get("cancellation_details") or {}
+    user.subscription_end_reason = (details.get("reason")
+                                    if status == "ended" else None)
 
 
 def apply_subscription(sub, config=None):
@@ -921,7 +950,7 @@ def handle_event(gateway, event, config=None):
                                        "invoice.payment_succeeded")
             and (obj.get("amount_paid") or 0) > 0
             and user.stripe_subscription_id == sub_id):
-        user.subscription_paid = True
+        user.subscription_ever_paid = True
     return "applied" if user is not None else "no_account"
 
 

@@ -516,6 +516,11 @@ def sync_all_twitter_bookmarks():
                 continue
             if account_on_hold(account.user_id):   # #269
                 continue
+            # Payments on: no background job for an account without the
+            # paid set (#438); always True while off.
+            from backend.utils.subscriptions import ai_replies_allowed
+            if not ai_replies_allowed(account.user):
+                continue
             if (account.last_synced_at
                     and now - account.last_synced_at < NIGHTLY_SYNC_MIN_GAP):
                 continue

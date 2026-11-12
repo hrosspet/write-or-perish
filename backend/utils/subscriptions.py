@@ -89,6 +89,72 @@ def refuse_without_paid_features(user, config=None):
     return subscription_required_response(user)
 
 
+def access_state(user, config=None):
+    """Where the account stands: "full" while payments are off, for an
+    admin and for a plan set by hand; otherwise the subscription's
+    ACCESS_STATES ("active", "lapsed", "none")."""
+    if not payments_enabled(config) or user is None:
+        return "full"
+    if getattr(user, "is_admin", False) or user.plan_set_by_hand:
+        return "full"
+    return user.subscription_access_state
+
+
+# State "none" (#438; Peter, 2026-11-12: "people shouldn't be let in until
+# they have a subscription"): the only routes such an account reaches.
+# Everything else under /api and /media answers no_subscription_response.
+_OPEN_EXACT = {
+    ("GET", "/api/dashboard"),            # who am I (no profile in it)
+    ("PATCH", "/api/dashboard/timezone"),
+    ("POST", "/api/account/delete"),
+    ("POST", "/api/account/delete/confirm"),
+    ("POST", "/api/account/restore"),
+    ("POST", "/api/account/restore/decline"),
+    ("GET", "/api/account/restore"),
+}
+_OPEN_PREFIXES = ("/api/billing", "/api/terms", "/api/webhooks",
+                  "/api/health", "/api/ready", "/api/live")
+
+NO_SUBSCRIPTION_ERROR = "no_subscription"
+NO_SUBSCRIPTION_MESSAGE = "This account has no active subscription yet."
+
+
+def open_without_subscription(method, path):
+    """Whether an account in state "none" may call *method* *path*."""
+    path = path.rstrip("/") or "/"
+    if not (path.startswith("/api") or path.startswith("/media")):
+        return True   # sign-in, sign-out, the pages themselves
+    if (method, path) in _OPEN_EXACT:
+        return True
+    return any(path == p or path.startswith(p + "/") for p in _OPEN_PREFIXES)
+
+
+def no_subscription_response():
+    from flask import jsonify
+    return jsonify({"error": NO_SUBSCRIPTION_ERROR,
+                    "message": NO_SUBSCRIPTION_MESSAGE}), 402
+
+
+def block_accounts_without_subscription():
+    """The app's before_request (#438). Payments on: an approved account
+    that never had a subscription (and whose plan was not set by hand) is
+    not let in. It reaches only who-am-I, its subscription, the terms and
+    deleting itself; every other /api and /media route answers 402
+    {"error": "no_subscription"} before the view runs. No-op while
+    payments are off."""
+    if not payments_enabled():
+        return None
+    from flask import request
+    from flask_login import current_user
+    if not current_user.is_authenticated or not current_user.approved:
+        return None
+    if open_without_subscription(request.method, request.path):
+        return None
+    if access_state(current_user) != "none":
+        return None
+    return no_subscription_response()
+
+
 def ai_replies_allowed(user, config=None):
     """Whether *user* may get an AI reply. Always True while payments
     are off, for admins, and on a paid plan (set by hand or subscribed)."""
@@ -171,7 +237,10 @@ def subscription_state(user, config=None):
     """The account's subscription as the clients show it (web Settings,
     iPhone Settings). Ids and payment details stay on the server."""
     cfg = _config(config)
+    state = access_state(user, cfg)
     return {
+        # "set_by_hand" (also admins), "active", "lapsed", "none".
+        "state": "set_by_hand" if state == "full" else state,
         "level": user.subscription_level,
         "status": user.subscription_status or "none",
         "current_period_end": iso_utc(user.subscription_period_end),

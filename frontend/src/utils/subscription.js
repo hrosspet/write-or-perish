@@ -35,6 +35,13 @@ export function rememberSubscription(user) {
   _required = !!(_paymentsEnabled && sub && sub.ai_replies === false);
 }
 
+// Payments on and the account was never let in (no subscription yet, or
+// its first payment failed): the app shows only the subscribe page.
+export function notLetIn(user) {
+  return !!(user && user.approved && user.payments_enabled
+    && user.subscription && user.subscription.state === 'none');
+}
+
 export function paymentsEnabled() {
   return _paymentsEnabled;
 }
@@ -132,7 +139,7 @@ export function subscriptionStatusLine(sub) {
       }
       return `${level}. Next payment on ${end}.`;
     case 'past_due':
-      return `${level}. The last payment didn't go through; Stripe will try again. Update your card to keep it.`;
+      return `${level}. The last payment didn't go through, so AI replies, Voice mode and profile updates are paused until it does. Update your card to continue.`;
     case 'ended':
       return 'Your subscription has ended. Your writing, reading and export stay; AI replies, Voice mode and profile updates are paused.';
     default:

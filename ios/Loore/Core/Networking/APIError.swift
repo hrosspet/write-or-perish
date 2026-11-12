@@ -60,6 +60,8 @@ enum APIError: Error, Equatable, Sendable {
     static let paidSpendCapMessage =
         "You've reached your monthly usage limit. It resets at the start of next month."
     static let subscriptionRequiredCode = "subscription_required"
+    /// 402 for an account that was never let in (#438); kept as `.server`.
+    static let noSubscriptionCode = "no_subscription"
     static let defaultSubscriptionMessage =
         "Loore doesn't reply on an account without a subscription. Your writing is saved."
 
@@ -127,6 +129,7 @@ enum APIError: Error, Equatable, Sendable {
     var reason: String? { body?.reason }
 
     var isNotFound: Bool { status == 404 }
+    var isNoSubscription: Bool { status == 402 && body?.error == Self.noSubscriptionCode }
     var isCancelled: Bool {
         if case .transport(let code, _) = self { return code == NSURLErrorCancelled }
         return false

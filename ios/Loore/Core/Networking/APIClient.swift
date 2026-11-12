@@ -8,6 +8,9 @@ enum APIEvent: Sendable, Equatable {
     case spendCapped(message: String)
     /// Payments on, no AI replies on this account (#438).
     case subscriptionRequired(message: String)
+    /// Payments on, the account has no subscription yet (402 `no_subscription`):
+    /// read the user again, which shows `NoSubscriptionView`.
+    case notLetIn
     case notApproved
 }
 
@@ -209,6 +212,7 @@ final class APIClient: @unchecked Sendable {
         case .spendCap(let message): emit(.spendCapped(message: message))
         case .subscriptionRequired(let message): emit(.subscriptionRequired(message: message))
         case .notApproved: emit(.notApproved)
+        case _ where error.isNoSubscription: emit(.notLetIn)
         default: break
         }
         throw error
@@ -324,6 +328,7 @@ final class APIClient: @unchecked Sendable {
         case .spendCap(let message): emit(.spendCapped(message: message))
         case .subscriptionRequired(let message): emit(.subscriptionRequired(message: message))
         case .notApproved: emit(.notApproved)
+        case _ where error.isNoSubscription: emit(.notLetIn)
         default: break
         }
         throw error

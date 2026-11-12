@@ -384,6 +384,14 @@ def create_app():
 
         # For HTML (or non-JSON) requests, redirect to the landing page with an alpha flag.
         return redirect("/landing?alpha=1")
+
+    # Payments on (#438): an approved account that never had a subscription
+    # (and whose plan was not set by hand) reaches only who-am-I, its
+    # subscription, the terms and deleting itself; every other /api and
+    # /media route answers 402 {"error": "no_subscription"}. No-op while
+    # payments are off.
+    from backend.utils.subscriptions import block_accounts_without_subscription
+    app.before_request(block_accounts_without_subscription)
     # --------------------------------------------------------------------
 
     # Initialize Twitter blueprint.

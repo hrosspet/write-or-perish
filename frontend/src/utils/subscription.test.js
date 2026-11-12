@@ -59,6 +59,17 @@ test('an answer without the flag raises nothing', () => {
   expect(screen.queryByText('Settings')).toBeNull();
 });
 
+test('a 402 no_subscription asks the app to read the user again', async () => {
+  const seen = jest.fn();
+  window.addEventListener('loore:no-subscription', seen);
+  const error = { response: { status: 402, data: { error: 'no_subscription' } } };
+  const rejected = api.interceptors.response.handlers
+    .filter(Boolean).map((h) => h.rejected).filter(Boolean)[0];
+  await expect(rejected(error)).rejects.toBe(error);
+  expect(seen).toHaveBeenCalledTimes(1);
+  window.removeEventListener('loore:no-subscription', seen);
+});
+
 test('the 402 raises the banner through the api interceptor', async () => {
   render(<MemoryRouter><SubscriptionBanner /></MemoryRouter>);
   const error = {

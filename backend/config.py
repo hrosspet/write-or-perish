@@ -188,12 +188,13 @@ class Config:
         os.environ.get("SUBSCRIPTION_PRICE_CENTS_DISCOUNTED") or "1200")
     SUBSCRIPTION_CURRENCY = (
         os.environ.get("SUBSCRIPTION_CURRENCY") or "usd").lower()
-    # "inclusive": the amounts above include the VAT or sales tax Stripe
-    # collects as merchant of record, so a buyer pays the price shown.
-    # "exclusive": tax is added on top at checkout. Stripe cannot change
-    # a price's tax behaviour later; the sync makes a new price instead.
+    # "exclusive" (Peter, 2026-11-12: "tax should be on top of our
+    # pricing"): the VAT or sales tax Stripe collects as merchant of record
+    # is added at checkout. "inclusive" would put it inside the amounts.
+    # Stripe cannot change a price's tax behaviour later; the sync makes a
+    # new price instead.
     SUBSCRIPTION_TAX_BEHAVIOR = (
-        os.environ.get("SUBSCRIPTION_TAX_BEHAVIOR") or "inclusive").lower()
+        os.environ.get("SUBSCRIPTION_TAX_BEHAVIOR") or "exclusive").lower()
     # Managed Payments sells only products with an eligible tax code:
     # AI as a Service, cloud based, personal use.
     STRIPE_PRODUCT_TAX_CODE = (
@@ -213,15 +214,15 @@ class Config:
     SUBSCRIPTION_SPEND_LIMIT_USD_DISCOUNTED = float_from_env(
         "SUBSCRIPTION_SPEND_LIMIT_USD_DISCOUNTED", 50.0)
     # Model cost a trial may use in all, whatever the level: nothing has
-    # been paid yet. Counted from the trial's start, not per month. 0: no
-    # separate trial ceiling (the level's monthly one applies).
+    # been paid yet. Counted from the trial's start, not per month. From
+    # the first successful payment the level's monthly ceiling applies, and
+    # it counts the whole calendar month, trial usage in that month
+    # included. 0: no separate trial ceiling. Peter, 2026-11-12: "let's go
+    # with $30 for the free trial period, and if the user pays, extend
+    # this to the subscription's cap" — a starting value, to be checked
+    # with the prices before the switch is turned on.
     SUBSCRIPTION_TRIAL_SPEND_LIMIT_USD = float_from_env(
-        "SUBSCRIPTION_TRIAL_SPEND_LIMIT_USD", 10.0)
-    # Days a failed payment keeps the paid set, from when it is first
-    # seen, and only for a subscription that was paid before (a trial
-    # whose first payment fails gets the free set at once).
-    SUBSCRIPTION_PAST_DUE_GRACE_DAYS = float_from_env(
-        "SUBSCRIPTION_PAST_DUE_GRACE_DAYS", 7.0)
+        "SUBSCRIPTION_TRIAL_SPEND_LIMIT_USD", 30.0)
     # Wrong discount codes one account may try per hour before the code
     # field answers "try again later". 10: a typo or two is never
     # refused, guessing an 8-character code is out of reach.

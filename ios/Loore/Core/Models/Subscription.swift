@@ -10,6 +10,10 @@ struct SubscriptionState: Decodable, Equatable, Sendable {
     var level: String?
     /// "none", "trialing", "active", "past_due", "ended".
     var status: String
+    /// What the account may do: "set_by_hand" or "active" (everything),
+    /// "lapsed" (its writing, reading, export and Settings; no AI replies),
+    /// "none" (never had a subscription: not let in). Nil from an older server.
+    var state: String?
     var currentPeriodEnd: Date?
     var trialEnd: Date?
     var cancelAtPeriodEnd: Bool
@@ -19,7 +23,7 @@ struct SubscriptionState: Decodable, Equatable, Sendable {
     var aiReplies: Bool
 
     enum CodingKeys: String, CodingKey {
-        case level, status
+        case level, status, state
         case currentPeriodEnd = "current_period_end"
         case trialEnd = "trial_end"
         case cancelAtPeriodEnd = "cancel_at_period_end"
@@ -27,10 +31,12 @@ struct SubscriptionState: Decodable, Equatable, Sendable {
         case aiReplies = "ai_replies"
     }
 
-    init(level: String? = nil, status: String = "none", currentPeriodEnd: Date? = nil, trialEnd: Date? = nil,
-         cancelAtPeriodEnd: Bool = false, planSetByHand: Bool = false, aiReplies: Bool = true) {
+    init(level: String? = nil, status: String = "none", state: String? = nil, currentPeriodEnd: Date? = nil,
+         trialEnd: Date? = nil, cancelAtPeriodEnd: Bool = false, planSetByHand: Bool = false,
+         aiReplies: Bool = true) {
         self.level = level
         self.status = status
+        self.state = state
         self.currentPeriodEnd = currentPeriodEnd
         self.trialEnd = trialEnd
         self.cancelAtPeriodEnd = cancelAtPeriodEnd
@@ -42,6 +48,7 @@ struct SubscriptionState: Decodable, Equatable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         level = c.tolerant(.level)
         status = c.tolerant(.status, default: "none")
+        state = c.tolerant(.state)
         currentPeriodEnd = c.tolerant(.currentPeriodEnd)
         trialEnd = c.tolerant(.trialEnd)
         cancelAtPeriodEnd = c.tolerant(.cancelAtPeriodEnd, default: false)
@@ -78,7 +85,7 @@ struct SubscriptionState: Decodable, Equatable, Sendable {
             if cancelAtPeriodEnd { return "\(name), cancelled. It ends on \(end ?? "—")." }
             return "\(name). Renews on \(end ?? "—")."
         case "past_due":
-            return "\(name). The last payment didn't go through."
+            return "\(name). The last payment didn't go through, so AI replies, Voice mode and profile updates are paused."
         case "ended":
             return "Ended. Your writing, reading and export stay; AI replies, Voice mode and profile updates are paused."
         default:

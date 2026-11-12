@@ -56,7 +56,10 @@ struct RootView: View {
         case .accountDeleted(let deleteOn):
             AccountDeletedView(deleteOn: deleteOn)
         case .signedIn:
-            if app.isApproved {
+            if app.isApproved, app.user?.notLetIn == true {
+                // Payments on, no subscription yet (#438).
+                NoSubscriptionView()
+            } else if app.isApproved {
                 MainTabView()
             } else {
                 WaitlistView()

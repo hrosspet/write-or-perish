@@ -129,4 +129,57 @@ final class SubscriptionTests: XCTestCase {
         XCTAssertFalse(app.subscriptionRequired)
         XCTAssertFalse(APIError.paymentsEnabled)
     }
+
+    /// Peter, 2026-11-12: "people shouldn't be let in until they have a
+    /// subscription". Only accounts in state "none" get NoSubscriptionView.
+    func testWhoIsNotLetIn() throws {
+        func user(_ subscription: String, payments: Bool = true, approved: Bool = true) throws -> CurrentUser {
+            try decode(CurrentUser.self, #"""
+            {"id": 1, "plan": "free", "approved": \#(approved), "payments_enabled": \#(payments),
+             "subscription": \#(subscription)}
+            """#)
+        }
+        XCTAssertTrue(try user(#"{"state": "none", "status": "none", "ai_replies": false}"#).notLetIn)
+        // The first payment failed: never paid, so not let in either.
+        XCTAssertTrue(try user(#"{"state": "none", "status": "past_due", "ai_replies": false}"#).notLetIn)
+        XCTAssertFalse(try user(#"{"state": "active", "status": "trialing"}"#).notLetIn)
+        XCTAssertFalse(try user(#"{"state": "lapsed", "status": "ended", "ai_replies": false}"#).notLetIn)
+        XCTAssertFalse(try user(#"{"state": "set_by_hand", "status": "none", "plan_set_by_hand": true}"#).notLetIn)
+        XCTAssertFalse(try user(#"{"state": "none", "status": "none"}"#, payments: false).notLetIn)
+        XCTAssertFalse(try user(#"{"state": "none", "status": "none"}"#, approved: false).notLetIn)
+        // An older server sends no state: nobody is stopped.
+        XCTAssertFalse(try user(#"{"status": "none", "ai_replies": false}"#).notLetIn)
+        XCTAssertFalse(try decode(CurrentUser.self, #"{"id": 1, "plan": "free", "approved": true}"#).notLetIn)
+    }
+
+    func testTheScreenWithoutASubscriptionOffersNothingToBuy() {
+        let texts = [NoSubscriptionView.message, AppState.paymentFailedMessage,
+                     SubscriptionState(level: "standard", status: "past_due").statusText(plan: "free")]
+        for text in texts {
+            let lower = text.lowercased()
+            for word in ["subscribe", "buy", "price", "$", "usd", "http", "loore.org", "web", "stripe",
+                         "manage", "settings", "card"] {
+                XCTAssertFalse(lower.contains(word), "\(text) mentions \(word)")
+            }
+        }
+    }
+
+    @MainActor
+    func testAFailedPaymentIsSaidOnLoad() throws {
+        let app = AppState(launch: LaunchOptions(), secureStore: InMemorySecureStore(),
+                           defaults: UserDefaults(suiteName: "loore-tests-\(UUID().uuidString)")!)
+        let failed = try decode(CurrentUser.self, #"""
+        {"id": 1, "plan": "free", "approved": true, "payments_enabled": true,
+         "subscription": {"state": "lapsed", "status": "past_due", "level": "standard", "ai_replies": false}}
+        """#)
+        XCTAssertFalse(failed.notLetIn)
+        app.replaceUser(failed)
+        XCTAssertEqual(app.subscriptionBannerMessage, AppState.paymentFailedMessage)
+        XCTAssertTrue(app.subscriptionRequired)
+        // Payments off: no banner.
+        let off = AppState(launch: LaunchOptions(), secureStore: InMemorySecureStore(),
+                           defaults: UserDefaults(suiteName: "loore-tests-\(UUID().uuidString)")!)
+        off.replaceUser(try decode(CurrentUser.self, #"{"id": 1, "plan": "free", "approved": true}"#))
+        XCTAssertNil(off.subscriptionBannerMessage)
+    }
 }

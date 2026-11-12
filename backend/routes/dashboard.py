@@ -174,7 +174,11 @@ def get_dashboard():
     dashboard = {
         "user": _serialize_current_user(),
     }
-    if request.args.get("profile") != "0":
+    # Payments on (#438): an account not let in yet reads nothing, its
+    # profile included.
+    from backend.utils.subscriptions import access_state
+    if request.args.get("profile") != "0" and \
+            access_state(current_user) != "none":
         dashboard["latest_profile"] = get_latest_profile(current_user)
     return jsonify(dashboard), 200
 

@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { useUser } from '../contexts/UserContext';
 import { SUBSCRIPTION_REQUIRED_EVENT } from '../utils/subscription';
 
 /**
@@ -12,6 +13,18 @@ import { SUBSCRIPTION_REQUIRED_EVENT } from '../utils/subscription';
  */
 export default function SubscriptionBanner() {
   const [message, setMessage] = useState(null);
+  const userCtx = useUser();
+  const sub = userCtx?.user?.payments_enabled ? userCtx.user.subscription : null;
+  const pastDue = !!(sub && sub.status === 'past_due' && sub.state === 'lapsed');
+
+  // A failed payment (Peter, 2026-11-12: "we should inform the user"):
+  // said on every load until the card is updated.
+  useEffect(() => {
+    if (pastDue) {
+      setMessage("Your last payment didn't go through, so Loore doesn't reply for now. "
+        + 'Update your card in');
+    }
+  }, [pastDue]);
 
   useEffect(() => {
     const onRequired = (e) => setMessage(

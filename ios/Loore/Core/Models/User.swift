@@ -123,6 +123,16 @@ struct CurrentUser: Decodable, Equatable, Sendable {
     /// recording before it starts, as it does for the spend cap.
     var aiRepliesPaused: Bool { paymentsEnabled && subscription?.aiReplies == false }
 
+    /// Payments on and the account never had a subscription (or its first
+    /// payment failed): it is not let in, and gets `NoSubscriptionView` only.
+    var notLetIn: Bool { approved && paymentsEnabled && subscription?.state == "none" }
+
+    /// Payments on, a payment failed on an account that paid before: it keeps
+    /// its writing, and the app says so on load (no way to pay here).
+    var paymentFailed: Bool {
+        paymentsEnabled && subscription?.status == "past_due" && subscription?.state == "lapsed"
+    }
+
     /// Applies an email-state answer from any `/api/dashboard/email*` call
     /// (web `utils/emailState.js`).
     mutating func apply(_ state: EmailState) {

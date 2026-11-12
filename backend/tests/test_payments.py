@@ -1141,57 +1141,127 @@ class TestDuplicateRefunds:
 
 
 class TestPastDue:
-    def test_a_paid_subscription_keeps_access_for_the_grace_days(
+    """Peter, 2026-11-12: a failed payment gives "zero days": lapsed at
+    once for an account that paid at least once, "none" for one that
+    never paid; a retry that succeeds makes it active again."""
+
+    def test_a_failed_renewal_lapses_at_once_and_a_retry_restores(
             self, app, gateway):
+        from backend.utils.subscriptions import (
+            access_state, subscription_required_message)
         u = _user(stripe_customer_id="cus_1")
         gateway.subscriptions["sub_1"] = subscription(status="active")
         _post_event(app, _event("customer.subscription.created",
                                 {"id": "sub_1"}, "evt_1"))
+        assert access_state(_db.session.get(User, u.id)) == "active"
         gateway.subscriptions["sub_1"]["status"] = "past_due"
         _post_event(app, _event("invoice.payment_failed", {
             "id": "in_2", "subscription": "sub_1"}, "evt_2"))
         user = _db.session.get(User, u.id)
-        assert user.subscription_paid and user.on_paid_plan
-        ids = {x.id for x in User.profile_eligible_query().all()}
-        assert u.id in ids
-        # Past the grace days: nothing more.
-        user.subscription_past_due_since = datetime.utcnow() - timedelta(
-            days=7, hours=1)
-        _db.session.commit()
+        assert user.subscription_ever_paid
+        assert access_state(user) == "lapsed"
         assert not user.on_paid_plan
         assert u.id not in {x.id for x in User.profile_eligible_query()}
-        from backend.utils.subscriptions import subscription_required_message
         assert "last payment" in subscription_required_message(user)
-        # Paid again: active, access back, the clock gone.
+        # The retry succeeds: active again.
         gateway.subscriptions["sub_1"]["status"] = "active"
         _post_event(app, _event("invoice.paid", {
             "id": "in_2", "subscription": "sub_1", "amount_paid": 3000},
             "evt_3"))
         user = _db.session.get(User, u.id)
-        assert user.on_paid_plan and user.subscription_past_due_since is None
+        assert access_state(user) == "active" and user.on_paid_plan
 
-    def test_a_trial_whose_first_payment_fails_gets_nothing(self, app,
-                                                            gateway):
+    def test_a_trial_whose_first_payment_fails_is_not_let_in(self, app,
+                                                             gateway):
+        from backend.utils.subscriptions import access_state
         u = _user(stripe_customer_id="cus_1")
         gateway.subscriptions["sub_1"] = subscription(
             status="trialing", trial=True)
         _post_event(app, _event("customer.subscription.created",
                                 {"id": "sub_1"}, "evt_1"))
-        assert _db.session.get(User, u.id).on_paid_plan
+        assert access_state(_db.session.get(User, u.id)) == "active"
         gateway.subscriptions["sub_1"]["status"] = "past_due"
         _post_event(app, _event("invoice.payment_failed", {
             "id": "in_1", "subscription": "sub_1"}, "evt_2"))
         user = _db.session.get(User, u.id)
         assert user.subscription_status == "past_due"
-        assert not user.subscription_paid and not user.on_paid_plan
+        assert access_state(user) == "none"
+        # Stripe gives up after its retries: still "none".
+        gateway.subscriptions["sub_1"].update(
+            status="canceled",
+            cancellation_details={"reason": "payment_failed"})
+        _post_event(app, _event("customer.subscription.deleted",
+                                {"id": "sub_1"}, "evt_3"))
+        assert access_state(_db.session.get(User, u.id)) == "none"
 
-    def test_a_paid_invoice_event_marks_the_subscription_paid(self, app,
-                                                              gateway):
+    def test_a_trial_its_owner_cancelled_lapses(self, app, gateway):
+        from backend.utils.subscriptions import access_state
+        u = _user(stripe_customer_id="cus_1")
+        gateway.subscriptions["sub_1"] = subscription(
+            status="canceled", trial=True,
+            ) | {"cancellation_details": {"reason": "cancellation_requested"}}
+        _post_event(app, _event("customer.subscription.deleted",
+                                {"id": "sub_1"}))
+        user = _db.session.get(User, u.id)
+        assert user.subscription_end_reason == "cancellation_requested"
+        assert access_state(user) == "lapsed"
+
+    def test_a_paid_invoice_event_marks_the_account_paid(self, app,
+                                                         gateway):
         u = _user(stripe_customer_id="cus_1")
         gateway.subscriptions["sub_1"] = subscription(status="past_due")
         _post_event(app, _event("invoice.paid", {
             "id": "in_1", "subscription": "sub_1", "amount_paid": 3000}))
-        assert _db.session.get(User, u.id).subscription_paid
+        assert _db.session.get(User, u.id).subscription_ever_paid
+
+    def test_paid_once_counts_across_subscriptions(self, app, gateway):
+        from backend.utils.subscriptions import access_state
+        u = _user(stripe_customer_id="cus_1", stripe_subscription_id="sub_1",
+                  subscription_status="ended", subscription_level="standard",
+                  subscription_ever_paid=True)
+        gateway.subscriptions["sub_1"] = subscription(status="canceled")
+        gateway.subscriptions["sub_2"] = subscription(
+            "sub_2", status="past_due")
+        _post_event(app, _event("customer.subscription.created",
+                                {"id": "sub_2"}))
+        assert access_state(_db.session.get(User, u.id)) == "lapsed"
+
+
+class TestAccessStates:
+    """The three states while payments are on, and accounts set by hand."""
+
+    def test_new_accounts_start_in_none(self, app):
+        from backend.utils.subscriptions import access_state
+        assert access_state(_user()) == "none"
+
+    @pytest.mark.parametrize("kw", [{"plan": "alpha"}, {"plan": "pro"},
+                                    {"is_admin": True}])
+    def test_set_by_hand_is_untouched(self, app, kw):
+        from backend.utils.subscriptions import access_state
+        u = _user(**kw)
+        assert access_state(u) == "full"
+        user = _client(app, u).get("/api/dashboard/?profile=0").get_json()[
+            "user"]
+        assert user["subscription"]["state"] == "set_by_hand"
+
+    def test_payments_off_everyone_is_full(self, app_off):
+        from backend.utils.subscriptions import access_state
+        assert access_state(_user()) == "full"
+        assert access_state(_user("e", subscription_status="ended",
+                                  subscription_level="standard")) == "full"
+
+    def test_the_dashboard_gives_no_profile_in_none(self, app):
+        u = _user()
+        data = _client(app, u).get("/api/dashboard/").get_json()
+        assert "latest_profile" not in data
+        assert data["user"]["subscription"]["state"] == "none"
+
+    def test_a_lapsed_account_keeps_its_profile(self, app):
+        u = _user(subscription_status="ended", subscription_level="standard",
+                  subscription_ever_paid=True)
+        data = _client(app, u).get("/api/dashboard/").get_json()
+        assert "latest_profile" in data
+        assert data["user"]["subscription"]["state"] == "lapsed"
 
 
 class TestTrialCeiling:
@@ -1207,13 +1277,13 @@ class TestTrialCeiling:
                   subscription_level="supporter",
                   subscription_trial_start=start,
                   subscription_trial_end=datetime(2026, 12, 9))
-        _cost(u.id, 6, datetime(2026, 11, 28))
+        _cost(u.id, 20, datetime(2026, 11, 28))
         r = self._enforce(app, u.id, now=datetime(2026, 11, 28, 12))
         assert r.get("status") != "trial_capped"
         assert not user_is_capped(_db.session.get(User, u.id))
-        # December: 4 more makes 10 over the whole trial, whatever the
-        # level's monthly ceiling (100 for Supporter).
-        _cost(u.id, 4, datetime(2026, 12, 2))
+        # December: 10 more makes 30 over the whole trial (the default),
+        # whatever the level's monthly ceiling (100 for Supporter).
+        _cost(u.id, 10, datetime(2026, 12, 2))
         r = self._enforce(app, u.id, now=datetime(2026, 12, 2, 12))
         assert r["status"] == "trial_capped"
         user = _db.session.get(User, u.id)
@@ -1238,13 +1308,40 @@ class TestTrialCeiling:
         assert not user.subscription_trial_capped
         assert not user_is_capped(user)
 
+    def test_trial_usage_counts_toward_the_first_paid_month(self, app):
+        # The level's ceiling is per calendar month: once the first payment
+        # went through, the trial's usage in that month counts toward it.
+        from backend.utils.spend import user_is_capped
+        u = _user(subscription_status="trialing",
+                  subscription_level="standard",
+                  subscription_trial_start=datetime(2026, 11, 1),
+                  subscription_trial_end=datetime(2026, 11, 15))
+        _cost(u.id, 29, datetime(2026, 11, 10))
+        self._enforce(app, u.id, now=datetime(2026, 11, 10, 12))
+        assert not user_is_capped(_db.session.get(User, u.id),
+                                  now=datetime(2026, 11, 10, 12))
+        user = _db.session.get(User, u.id)
+        user.subscription_status = "active"
+        user.subscription_ever_paid = True
+        _db.session.commit()
+        _cost(u.id, 20, datetime(2026, 11, 20))
+        r = self._enforce(app, u.id, now=datetime(2026, 11, 20, 12))
+        assert r.get("status") != "trial_capped"
+        assert not user_is_capped(_db.session.get(User, u.id),
+                                  now=datetime(2026, 11, 20, 12))
+        # 29 + 20 + 1 reaches Standard's 50 for November.
+        _cost(u.id, 1, datetime(2026, 11, 21))
+        self._enforce(app, u.id, now=datetime(2026, 11, 21, 12))
+        assert user_is_capped(_db.session.get(User, u.id),
+                              now=datetime(2026, 11, 21, 12))
+
     def test_an_admins_limit_replaces_the_trial_ceiling(self, app):
         from backend.utils.spend import user_is_capped
         u = _user(subscription_status="trialing",
                   subscription_level="standard",
                   subscription_trial_start=datetime(2026, 11, 1),
                   monthly_spend_limit_usd=200.0)
-        _cost(u.id, 15, datetime(2026, 11, 2))
+        _cost(u.id, 30, datetime(2026, 11, 2))
         self._enforce(app, u.id, now=datetime(2026, 11, 3))
         assert not user_is_capped(_db.session.get(User, u.id),
                                   now=datetime(2026, 11, 3))
@@ -1260,7 +1357,7 @@ class TestWithdrawn:
     def _active(self, gateway):
         u = _user(stripe_customer_id="cus_1", stripe_subscription_id="sub_1",
                   subscription_status="active",
-                  subscription_level="standard", subscription_paid=True)
+                  subscription_level="standard", subscription_ever_paid=True)
         gateway.subscriptions["sub_1"] = subscription(
             status="active", latest_invoice="in_1")
         gateway.invoices["in_1"] = {
@@ -1454,22 +1551,52 @@ class TestCatalog:
     def test_sync_is_idempotent(self, app, gateway):
         gateway.prices.clear()
         first = stripe_billing.sync_catalog(gateway, app.config)
-        product = gateway.products[stripe_billing.PRODUCT_ID]
-        assert product["tax_code"] == "txcd_10105001"
+        for level, (pid, _name) in stripe_billing.PRODUCTS.items():
+            assert gateway.products[pid]["tax_code"] == "txcd_10105001"
         amounts = {p["lookup_key"]: p["unit_amount"] for p in gateway.prices}
         assert amounts == {"loore_standard_monthly": 3000,
                            "loore_supporter_monthly": 9900,
                            "loore_discounted_monthly": 1200}
-        assert all(p["tax_behavior"] == "inclusive" for p in gateway.prices)
+        # Peter, 2026-11-12: "tax should be on top of our pricing".
+        assert all(p["tax_behavior"] == "exclusive" for p in gateway.prices)
+        assert {p["lookup_key"]: p["product"] for p in gateway.prices} == {
+            "loore_standard_monthly": "loore_standard",
+            "loore_supporter_monthly": "loore_supporter",
+            "loore_discounted_monthly": "loore_reduced"}
         assert len(gateway.portal_configs) == 1
         conf = gateway.portal_configs[0]
         assert conf["features"]["subscription_cancel"]["mode"] == \
             "at_period_end"
-        assert conf["features"]["subscription_update"]["enabled"] is False
-        assert len(first["changes"]) == 5
+        # Standard <-> Supporter in the portal; the reduced price never.
+        switch = conf["features"]["subscription_update"]
+        assert switch["enabled"] is True
+        assert switch["products"] == [
+            {"product": "loore_standard",
+             "prices": [first["prices"]["standard"]]},
+            {"product": "loore_supporter",
+             "prices": [first["prices"]["supporter"]]}]
+        assert switch["proration_behavior"] == "create_prorations"
+        assert switch["trial_update_behavior"] == "continue_trial"
+        assert len(first["changes"]) == 7   # 3 products, 3 prices, portal
         second = stripe_billing.sync_catalog(gateway, app.config)
         assert second["changes"] == []
         assert second["prices"] == first["prices"]
+
+    def test_the_first_versions_product_is_archived(self, app, gateway):
+        gateway.prices.clear()
+        gateway.products["loore_subscription"] = {
+            "id": "loore_subscription", "active": True}
+        old = gateway.create_price({
+            "product": "loore_subscription", "unit_amount": 3000,
+            "currency": "usd", "tax_behavior": "inclusive",
+            "lookup_key": "loore_standard_monthly",
+            "metadata": {"loore_level": "standard"}})
+        result = stripe_billing.sync_catalog(gateway, app.config)
+        assert gateway.products["loore_subscription"]["active"] is False
+        assert old["active"] is False and old["lookup_key"] is None
+        assert result["prices"]["standard"] != old["id"]
+        # A subscription still on the old price keeps its level.
+        assert stripe_billing.level_for_price(old) == "standard"
 
     def test_a_changed_amount_makes_a_new_price(self, app, gateway):
         gateway.prices.clear()
