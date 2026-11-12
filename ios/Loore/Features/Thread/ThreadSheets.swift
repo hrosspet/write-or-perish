@@ -11,7 +11,8 @@ struct ThreadSheets: ViewModifier {
         content
             .sheet(item: $model.replyTarget) { target in
                 NodeFormSheet(title: "Reply",
-                              config: NodeFormConfig(parentId: target.id, hidePowerFeatures: !app.capabilities.craftMode)) { result in
+                              config: NodeFormConfig(parentId: target.id, parentPrivacy: target.privacy,
+                                                     hidePowerFeatures: !app.capabilities.craftMode)) { result in
                     model.replyTarget = nil
                     if let id = result.id { model.openThread(id, awaitLLM: nil) }
                 } onClose: {

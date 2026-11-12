@@ -86,7 +86,7 @@ test('a public entry shows Auto-generate off, disabled, and asks for no reply', 
   const button = autoGenerateButton();
   expect(button).toBeDisabled();
   expect(button).toHaveAttribute('aria-pressed', 'false');
-  expect(screen.getByText(/Auto-generate is off in public threads/)).toBeInTheDocument();
+  expect(screen.getByText(/Auto-generate is off in public and shared threads/)).toBeInTheDocument();
   fireEvent.change(screen.getByRole('textbox'), { target: { value: 'hello' } });
   await act(async () => { await ref.current.submit(); });
   expect(mockPost.mock.calls[0][1]).toEqual(
@@ -126,4 +126,33 @@ test('quotesNotPublicError reads only that refusal', () => {
   expect(quotesNotPublicError({ response: { status: 409, data: { code: 'other' } } })).toBeNull();
   expect(quotesNotPublicError({ response: { status: 409, data: { code: 'quotes_not_public', error: 'x', quoted: [{ id: 1 }] } } }))
     .toEqual({ message: 'x', quoted: [{ id: 1 }] });
+});
+
+
+test('a reply form follows its parent made public while it is open', async () => {
+  mockGet.mockImplementation((url) => (url === '/nodes/5'
+    ? Promise.resolve({ data: { id: 5, privacy_level: 'private', ai_usage: 'chat' } })
+    : Promise.reject({ response: { status: 404 } })));
+  const ref = createRef();
+  const view = render(
+    <MemoryRouter>
+      <NodeForm ref={ref} parentId={5} parentPrivacyLevel="private" onSuccess={jest.fn()} />
+    </MemoryRouter>,
+  );
+  await act(async () => {});
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: 'my reply' } });
+
+  view.rerender(
+    <MemoryRouter>
+      <NodeForm ref={ref} parentId={5} parentPrivacyLevel="public" onSuccess={jest.fn()} />
+    </MemoryRouter>,
+  );
+  await act(async () => {});
+
+  expect(screen.getByRole('textbox')).toHaveValue('my reply');
+  await act(async () => { await ref.current.submit(); });
+  // The public-reply consent dialog asks first, as for any reply under a
+  // public node.
+  expect(screen.getByText('This reply will be public')).toBeInTheDocument();
+  expect(mockPost).not.toHaveBeenCalled();
 });

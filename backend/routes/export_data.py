@@ -22,7 +22,7 @@ from backend.utils.encryption import dek_cached, prefetch_deks
 from backend.utils.task_owner import failure_text, task_owned_by
 from backend.utils.thread_tree import ancestor_chains
 from sqlalchemy import and_, case, exists, func, or_
-from sqlalchemy.orm import subqueryload
+from sqlalchemy.orm import selectinload, subqueryload
 from bisect import bisect_left, bisect_right
 from collections import namedtuple
 from datetime import datetime
@@ -1412,40 +1412,57 @@ def _thread_has_alive_node(root_id):
 
 # Ids per IN list of the export's batched queries (#591): the threads
 # per query of the deleted-thread check (a query per thread was 84 of
-# the 120 s a 42k-entry export took), and the entries per query the
-# download loads by id. INTRODUCED CONSTANT.
+# the 120 s a 42k-entry export took), the parents per query of the
+# level-by-level thread walks, and the entries per query the download
+# loads by id. INTRODUCED CONSTANT.
 IDS_PER_QUERY = 500
 
 
 def _threads_with_alive_node(root_ids, batch=None):
     """The ids among *root_ids* whose subtree holds a node with
     deleted_at IS NULL: the per-thread skip rule (§5a) of
-    ``_thread_has_alive_node``, in one recursive query per *batch*
-    threads (default IDS_PER_QUERY, #591).
+    ``_thread_has_alive_node``.
 
-    Every node of a thread is visited, so a caller with many threads
-    passes only those whose root is deleted: a thread with a live root is
-    kept without a query.
+    A caller with many threads passes only those whose root is deleted:
+    a thread with a live root is kept without a query.
 
-    Recursive CTE for portability across PostgreSQL and SQLite.
+    The threads are walked level by level, *batch* ids (default
+    IDS_PER_QUERY) per ``IN (...)`` query, and a thread's walk stops at
+    its first live node. This was one recursive query per batch of
+    threads (#591), which Postgres planned as a full scan of ``node`` for
+    every level of the deepest thread (it cannot estimate a recursive
+    work table; see _foreign_thread_node_ids): on a 1M-row table, 400
+    deleted threads up to 130 levels deep took 38 s, and 19 took 1.2 s
+    (local measurement, 2026-11-11).
     """
     batch = batch or IDS_PER_QUERY
     ids = list(root_ids)
     alive = set()
+    root_of = {}     # a deleted node still walked -> the thread it is in
     for start in range(0, len(ids), batch):
-        chunk = ids[start:start + batch]
-        base = db.session.query(
-            Node.id.label("root_id"), Node.id.label("id"),
-        ).filter(Node.id.in_(chunk)).cte(
-            name="thread_alive_batch", recursive=True)
-        desc = db.aliased(Node, flat=True)
-        recursive = db.session.query(base.c.root_id, desc.id).join(
-            base, desc.parent_id == base.c.id)
-        cte = base.union_all(recursive)
-        rows = db.session.query(cte.c.root_id).join(
-            Node, Node.id == cte.c.id,
-        ).filter(Node.deleted_at.is_(None)).distinct()
-        alive.update(root_id for (root_id,) in rows)
+        for node_id, deleted_at in db.session.query(
+                Node.id, Node.deleted_at).filter(
+                Node.id.in_(ids[start:start + batch])):
+            if deleted_at is None:
+                alive.add(node_id)
+            else:
+                root_of[node_id] = node_id
+    level = list(root_of)
+    while level:
+        next_level = []
+        for start in range(0, len(level), batch):
+            for node_id, parent_id, deleted_at in db.session.query(
+                    Node.id, Node.parent_id, Node.deleted_at).filter(
+                    Node.parent_id.in_(level[start:start + batch])):
+                root = root_of[parent_id]
+                if root in alive or node_id in root_of:
+                    continue
+                if deleted_at is None:
+                    alive.add(root)
+                else:
+                    root_of[node_id] = root
+                    next_level.append(node_id)
+        level = [n for n in next_level if root_of[n] not in alive]
     return alive
 
 
@@ -2803,11 +2820,19 @@ def build_user_export_content(
 # up after 60 s without a byte. iter_user_export sends the same text a
 # few threads at a time instead. Every wait between two pieces stays far
 # below that limit: the first piece (the header) goes out after a few
-# metadata queries; the preamble's artifact versions come from one query
-# over the pins instead of a walk of every entry; the deleted-thread
-# check is one query per batch of threads; data keys are unwrapped a
-# window of entries at a time, also inside one very large thread; and a
-# thread is sent piece by piece as it renders.
+# metadata queries; the preamble's artifact versions come from the pins
+# found by a level-by-level walk of the threads instead of a render of
+# every entry; the deleted-thread check walks only threads with a
+# deleted root; data keys are unwrapped a window of entries at a time,
+# also inside one very large thread; and a thread is sent piece by piece
+# as it renders.
+#
+# The response's headers go out before any of that work
+# (_send_user_export), and they say "nosniff": a browser sniffs a
+# text/plain response's first 1 KiB before it starts a download (Chrome
+# waits for those bytes, measured 2026-11-11), so without it the save
+# dialog waited until the export had sent 1 KiB, ~30 s into a large
+# account's export.
 
 # What the download holds when the user has no thread to export.
 NO_THREADS_TEXT = "No threads found to export."
@@ -2902,30 +2927,52 @@ def _export_roots(user_id):
     return rows
 
 
-def _pinning_entries(user_id, thread_ids):
-    """The entries of the threads *thread_ids* (roots of the user's) that
-    pin a context artifact and that the user can access: the only ones
-    that add to the full export's preamble (_ArtifactVersions, which
-    the legacy path feeds every entry _collect_all_nodes_in_tree
-    returns). One recursive query over the user's threads finds them
-    (#591)."""
-    base = db.session.query(
-        Node.id.label("root_id"), Node.id.label("id"),
-    ).filter(
-        Node.user_id == user_id, Node.parent_id.is_(None),
-    ).cte(name="export_threads", recursive=True)
-    desc = db.aliased(Node, flat=True)
-    cte = base.union_all(db.session.query(base.c.root_id, desc.id).join(
-        base, desc.parent_id == base.c.id))
-    rows = db.session.query(cte.c.root_id, cte.c.id).join(
-        NodeContextArtifact, NodeContextArtifact.node_id == cte.c.id,
-    ).distinct()
-    ids = sorted({node_id for root_id, node_id in rows
-                  if root_id in thread_ids})
-    entries = []
+def _thread_entry_ids(roots):
+    """The ids of every entry of the threads *roots* (rows of
+    _export_roots), the roots included. Walked level by level from the
+    roots that have a reply, IDS_PER_QUERY parents per query: about one
+    query per level of the deepest thread, each a seek on the parent_id
+    index, so the cost follows the size of the threads, not of the
+    table."""
+    ids = [r.id for r in roots]
+    level = [r.id for r in roots if r.has_reply]
+    while level:
+        next_level = []
+        for start in range(0, len(level), IDS_PER_QUERY):
+            next_level.extend(node_id for (node_id,) in db.session.query(
+                Node.id).filter(
+                Node.parent_id.in_(level[start:start + IDS_PER_QUERY])))
+        ids.extend(next_level)
+        level = next_level
+    return ids
+
+
+def _pinning_entries(user_id, roots):
+    """The entries of the threads *roots* (rows of _export_roots: the
+    threads the download shows) that pin a context artifact and that the
+    user can access: the only ones that add to the full export's preamble
+    (_ArtifactVersions, which the legacy path feeds every entry
+    _collect_all_nodes_in_tree returns), their pins loaded with them.
+
+    This was one recursive query over the user's threads (#591), which
+    Postgres planned as a full scan and sort of ``node`` for every level
+    of the deepest thread: 68 s on a 1M-row table with a 130-level
+    thread (local measurement, 2026-11-11), the wait before the
+    download's second piece. The threads are walked level by level
+    instead (_thread_entry_ids)."""
+    ids = _thread_entry_ids(roots)
+    pinning = set()
     for start in range(0, len(ids), IDS_PER_QUERY):
-        entries.extend(Node.query.filter(
-            Node.id.in_(ids[start:start + IDS_PER_QUERY])))
+        pinning.update(node_id for (node_id,) in db.session.query(
+            NodeContextArtifact.node_id).filter(
+            NodeContextArtifact.node_id.in_(
+                ids[start:start + IDS_PER_QUERY])).distinct())
+    pinning = sorted(pinning)
+    entries = []
+    for start in range(0, len(pinning), IDS_PER_QUERY):
+        entries.extend(Node.query.options(
+            selectinload(Node.context_artifacts)).filter(
+            Node.id.in_(pinning[start:start + IDS_PER_QUERY])))
     return [n for n in entries if can_user_access_node(n, user_id)]
 
 
@@ -2998,7 +3045,7 @@ def iter_user_export(user):
     yield out.take()
 
     versions = _ArtifactVersions(user, filter_ai_usage=False)
-    for n in _pinning_entries(user.id, {r.id for r in kept}):
+    for n in _pinning_entries(user.id, kept):
         versions.add_node(n)
         out.turn()
     for line in versions.iter_lines(
@@ -3067,12 +3114,20 @@ def iter_user_export(user):
 
 
 def _send_user_export(user):
-    """iter_user_export, logging a failure before it ends the response.
+    """iter_user_export after an empty piece, logging a failure before
+    it ends the response.
 
-    A failure after the first piece cannot become an error status: the
-    exception propagates, the app server closes the connection without
-    the response's last chunk, and the browser (or the iPhone app) marks
-    the download failed. The file never ends as if it were complete."""
+    The empty piece comes before any query: the app server sends the
+    response's headers on it (it writes no body chunk for it), so the
+    browser starts the download and shows its save dialog at once,
+    whatever the account's size. The first piece of the file follows
+    when iter_user_export has it.
+
+    So a failure cannot become an error status: the exception
+    propagates, the app server closes the connection without the
+    response's last chunk, and the browser (or the iPhone app) marks the
+    download failed. The file never ends as if it were complete."""
+    yield ""
     sent = 0
     try:
         for piece in iter_user_export(user):
@@ -3113,6 +3168,10 @@ def export_threads():
             "Cache-Control": "no-store",
             # Pass each piece on as it comes (see sse.py).
             "X-Accel-Buffering": "no",
+            # Start the download on the headers: without it a browser
+            # waits for the first 1 KiB of a text/plain body to sniff its
+            # type before it shows the save dialog.
+            "X-Content-Type-Options": "nosniff",
         },
     )
 

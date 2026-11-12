@@ -1,4 +1,5 @@
 import XCTest
+import SwiftUI
 @testable import Loore
 
 // Write tool calls that wait for the user's approval in a thread holding text
@@ -342,5 +343,67 @@ final class ToolApprovalsModelTests: StubbedAppTestCase {
         XCTAssertTrue(asked)
         XCTAssertTrue(calls.contains("GET /api/tool-approvals"))
         thread.stop()
+    }
+}
+
+/// The dialog on this simulator's screen, dark and light: the first call's
+/// Approve and Reject must be on screen when it opens, with a title change, a
+/// description change and a 40-line diff. Run it on an iPhone SE (375×667) and an
+/// iPhone 17 Pro Max (440×956) with `TEST_RUNNER_LOORE_SNAPSHOT_DIR` set: the
+/// images are written there. It is drawn in a real window, because
+/// `ImageRenderer` leaves a `ScrollView`'s content (the dialog card is one) blank.
+@MainActor
+final class ToolApprovalDialogRenderingTests: StubbedAppTestCase {
+    private func group() -> ToolApprovalGroup {
+        var lines: [LineDiff.Op] = []
+        for i in 1...10 { lines.append(.init(type: .same, text: "A line that stays, number \(i).")) }
+        for i in 1...15 { lines.append(.init(type: .del, text: "An old line about the river, number \(i).")) }
+        for i in 1...15 { lines.append(.init(type: .add, text: "A new line about the glacier, number \(i).")) }
+        let change = ToolApproval(
+            id: 31, turnNodeId: 77, tool: "update_artifact", kinds: [.otherUser, .glean],
+            title: "Change your Memory", kind: "memory", artifactTitle: "Memory", baseVersion: 3, currentVersion: 3,
+            lines: lines, titleChange: .init(from: "Memory", to: "Shared memory of the river walks"),
+            descriptionChange: .init(from: "What I keep about the river", to: "What I keep about the river and the glacier"))
+        let todo = ToolApproval(
+            id: 32, turnNodeId: 77, tool: "apply_todo_changes", kinds: [.savedReference],
+            title: "Apply the proposed changes to your todo list",
+            proposalText: "### New Tasks\n- [ ] Walk by the river\n- [ ] Write about the glacier")
+        return ToolApprovalGroup(turnNodeId: 77, items: [change, todo])
+    }
+
+    func testTheDialogFitsThePhone() throws {
+        // The diff box scales with the screen, between 120 and 240 pt.
+        XCTAssertEqual(ToolApprovalDialog.diffMaxHeight(screen: 667), 667 * 0.22, accuracy: 0.01)
+        XCTAssertEqual(ToolApprovalDialog.diffMaxHeight(screen: 956), 956 * 0.22, accuracy: 0.01)
+        XCTAssertEqual(ToolApprovalDialog.diffMaxHeight(screen: 2000), 240)
+        XCTAssertEqual(ToolApprovalDialog.diffMaxHeight(screen: 400), 120)
+
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let bounds = scene.screen.bounds
+        let model = ToolApprovalsModel(api: app.api, nodeId: 10)
+        for scheme in [ColorScheme.dark, .light] {
+            // As `looreDialog` shows it: the card centred in the safe area over the dimmed page.
+            let view = ZStack {
+                LooreColor.bgDeep.overlay(LooreColor.dialogBackdrop).ignoresSafeArea()
+                ToolApprovalDialog(group: group(), model: model, screenHeight: bounds.height)
+            }
+            .environment(app)
+            let window = UIWindow(windowScene: scene)
+            window.frame = bounds
+            window.overrideUserInterfaceStyle = scheme == .dark ? .dark : .light
+            window.rootViewController = UIHostingController(rootView: view)
+            window.isHidden = false
+            RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+            let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+                _ = window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+            }
+            window.isHidden = true
+            XCTAssertEqual(image.size, bounds.size)
+            if let dir = ProcessInfo.processInfo.environment["LOORE_SNAPSHOT_DIR"], !dir.isEmpty {
+                let phone = "\(Int(bounds.width))x\(Int(bounds.height))"
+                try image.pngData()?.write(to: URL(fileURLWithPath: dir)
+                    .appendingPathComponent("approval-dialog-\(phone)-\(scheme == .dark ? "dark" : "light").png"))
+            }
+        }
     }
 }

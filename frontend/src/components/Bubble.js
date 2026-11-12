@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { FaChevronDown, FaChevronUp } from 'react-icons/fa';
 import NodeFooter from './NodeFooter';
+import { ONLY_YOU_SEE_REPLY } from "../utils/sharedThread";
 import MarkdownBody from './MarkdownBody';
 import BubbleKebabMenu from './BubbleKebabMenu';
 
@@ -57,6 +58,10 @@ const Bubble = ({
   // fills the tag slot (Pinned / prompt / Voice Note) with a source label.
   footer = null,
   tag = null,
+  // The viewer's own private AI reply under a node others can read
+  // (utils/sharedThread onlyYouSeeReply): a small "Only you see this
+  // reply" tag.
+  privateNote = false,
 }) => {
   // Detect voice notes via backend-provided has_original_audio flag
   const isVoiceNote = !!node.has_original_audio;
@@ -263,6 +268,15 @@ const Bubble = ({
           )}
           {!isPlaceholder && (
             <div style={{ display: "flex", alignItems: "center" }}>
+              {privateNote && (
+                <span style={{
+                  ...tagStyle,
+                  color: "var(--text-muted)",
+                  backgroundColor: "transparent",
+                }}>
+                  🔒 {ONLY_YOU_SEE_REPLY}
+                </span>
+              )}
               {tag && (
                 <span style={{
                   ...tagStyle,

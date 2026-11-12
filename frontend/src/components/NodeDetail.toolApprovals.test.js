@@ -196,3 +196,15 @@ test('an artifact change shows the title and description it sets', async () => {
   expect(screen.getByText('Title: Memory → What I keep')).toBeInTheDocument();
   expect(screen.getByText('Description: Kept facts')).toBeInTheDocument();
 });
+
+test("each call's decision comes right after its title, before the change", async () => {
+  routes['/nodes/90'] = reply({ pending_approvals: [MEMORY] });
+  renderAt('/node/90');
+  await screen.findByRole('dialog');
+
+  const approve = screen.getByText('Approve');
+  const diffLine = screen.getByText(/trusts anna/);
+  // On a small screen a long change scrolls; the buttons stay above it.
+  expect(approve.compareDocumentPosition(diffLine)
+    & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});

@@ -15,6 +15,9 @@ struct NodeFormConfig {
     }
 
     var parentId: Int?
+    /// The parent's privacy as the host shows it now (a reply). The form follows
+    /// it when it changes (an edit of the parent above the form).
+    var parentPrivacy: PrivacyLevel?
     var edit: Edit?
     var hidePowerFeatures = false
     var hideAudioUpload = false
@@ -184,10 +187,12 @@ final class NodeFormModel {
         guard !started else { return }
         started = true
         async let draftLoad: Void = drafts.load()
+        if config.parentId != nil, !config.isEdit, let known = config.parentPrivacy {
+            parentPrivacyChanged(known)
+        }
         if let parentId = config.parentId, !config.isEdit {
             if let parent = try? await app.api.nodeDetail(parentId) {
-                parentPrivacy = parent.privacyLevel
-                privacy = parent.privacyLevel
+                parentPrivacyChanged(parent.privacyLevel)
                 aiUsage = parent.replyAIUsage ?? parent.aiUsage
             }
         }
@@ -199,6 +204,16 @@ final class NodeFormModel {
         if let draft = drafts.draft, let sid = draft.sessionId, draft.hasStoredChunks {
             await recoverAudio(sessionId: sid)
         }
+    }
+
+    /// The parent's privacy now (on load, and after it was edited while the form
+    /// was open): the reply takes it. A public parent pins the reply to public
+    /// (and the public-reply question comes back); a private one returns it to
+    /// private. The text typed so far stays.
+    func parentPrivacyChanged(_ level: PrivacyLevel) {
+        guard config.parentId != nil, !config.isEdit else { return }
+        parentPrivacy = level
+        privacy = level
     }
 
     /// The form left the screen: save the pending draft now (the debounce and the
