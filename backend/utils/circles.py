@@ -568,22 +568,22 @@ def is_shared_prompt_for(node, user_id) -> bool:
             and node.is_system_prompt)
 
 
-def agreement_prompts(chain, user_id):
-    """The prompt nodes of *chain* that a reply for *user_id* in a shared
-    thread may run only with *user_id*'s agreement: every prompt someone
-    else wrote, however the user reads it, that fills the user's data or
-    turns tools on in the reply.
+def others_prompts(chain, user_id):
+    """The prompt nodes of *chain* someone else wrote that act for
+    *user_id* in a reply in a shared thread, however the user reads
+    them:
 
-    * A prompt shared with the user in a circle (is_shared_prompt_for):
-      its personal placeholders are filled with the user's own data.
-    * Any agentic prompt someone else wrote, shared or public: its tools
-      act on the user's account (their memory, their to-do list) and
-      what they find goes into a reply other people read.
+    * a prompt shared with the user in a circle (is_shared_prompt_for):
+      its personal placeholders are filled with the user's own data;
+    * any agentic prompt someone else wrote, shared or public: its tools
+      act on the user's account (their memory, their to-do list).
 
-    *chain*: the nodes the reply is built from, root first, without the
-    ones whose ai_usage keeps AI out (privacy.reply_context_nodes, then
-    that filter). A deleted prompt acts in no way
-    (privacy.acting_prompts, the rule the task's tools follow too)."""
+    Which of them need the user's agreement is decided from their text
+    (agreement_prompts). *chain*: the nodes the reply is built from,
+    root first, without the ones whose ai_usage keeps AI out
+    (privacy.reply_context_nodes, then that filter). A deleted prompt
+    acts in no way (privacy.acting_prompts, the rule the task's tools
+    follow too)."""
     from backend.utils.privacy import acting_prompts
     from backend.utils.session_helpers import chain_has_agentic_prompt
     out = []
@@ -591,6 +591,90 @@ def agreement_prompts(chain, user_id):
         if (n.human_owner_id or n.user_id) == user_id:
             continue
         if is_shared_prompt_for(n, user_id) or chain_has_agentic_prompt([n]):
+            out.append(n)
+    return out
+
+
+def _default_prompt_keys(prompt_key):
+    """*prompt_key* and the keys whose default is the same file (Voice
+    and Text mode share one): a default of one is a default of the
+    other."""
+    from backend.utils.prompts import PROMPT_DEFAULTS
+    meta = PROMPT_DEFAULTS.get(prompt_key) or {}
+    same = {k for k, m in PROMPT_DEFAULTS.items()
+            if meta.get("file") and m.get("file") == meta.get("file")}
+    return sorted(same | {prompt_key})
+
+
+def is_default_prompt_text(text, prompt_key) -> bool:
+    """*text* is, byte for byte, one of Loore's own default prompts for
+    *prompt_key*, unedited (Peter, 2026-11-12): the current default (the
+    file in backend/prompts), or an earlier default the database
+    recorded. Decided from the text alone, never from what a client
+    says.
+
+    Earlier defaults: every prompt version saved since 2026-02-25 (the
+    automatic upgrade to a new default, a user's save, a revert, a
+    reset) records the SHA-256 of the file default current at that
+    moment (UserPrompt.based_on_default_hash, written only by the server,
+    from the file). A prompt node holds its version's text, so a node
+    started under an earlier default matches that recorded hash. A
+    default from before then is not recorded anywhere: such a text
+    counts as edited. Whitespace counts: a default changed only in its
+    whitespace counts as edited too.
+
+    No content is decrypted here: the hashes are of Loore's files."""
+    if not text or not prompt_key:
+        return False
+    import hashlib
+    from backend.models import UserPrompt
+    from backend.utils.prompts import default_prompt_hash
+    digest = hashlib.sha256(text.encode()).hexdigest()
+    keys = _default_prompt_keys(prompt_key)
+    if any(default_prompt_hash(k) == digest for k in keys):
+        return True
+    return db.session.query(UserPrompt.id).filter(
+        UserPrompt.prompt_key.in_(keys),
+        UserPrompt.based_on_default_hash == digest).first() is not None
+
+
+def uses_personal_placeholder(text) -> bool:
+    """*text* names a placeholder that reads the requester's own data
+    (the ones the dialog names, _PLACEHOLDER_NAMES)."""
+    return any(placeholder in (text or "")
+               for placeholder, _ in _PLACEHOLDER_NAMES)
+
+
+def needs_agreement(node, text, user_id) -> bool:
+    """A prompt of others_prompts, with *text* (the text the reply is
+    built from), needs *user_id*'s agreement before a reply in a shared
+    thread: it is not one of Loore's defaults unedited
+    (is_default_prompt_text; Peter, 2026-11-12: "The dialog should be
+    there if the sys prompt is edited, or created from scratch and is
+    using any Loore placeholders"), and it fills the requester's data
+    (a prompt shared with them that names a personal placeholder) or
+    turns tools on (builder's addition: an edited agentic prompt acts on
+    the requester's account through its tools, placeholders or not)."""
+    from backend.utils.session_helpers import chain_has_agentic_prompt
+    if is_default_prompt_text(text, node.get_prompt_key()):
+        return False
+    if chain_has_agentic_prompt([node]):
+        return True
+    return is_shared_prompt_for(node, user_id) and uses_personal_placeholder(
+        text)
+
+
+def agreement_prompts(chain, user_id, texts=None):
+    """The prompts of others_prompts that a reply for *user_id* in a
+    shared thread may run only with *user_id*'s agreement
+    (needs_agreement). *texts* (``{node id: text}``): the text each is
+    judged by, the one the reply is built from (the completion task
+    holds it); without it each node's current text."""
+    texts = texts or {}
+    out = []
+    for n in others_prompts(chain, user_id):
+        text = texts[n.id] if n.id in texts else (n.get_content() or "")
+        if needs_agreement(n, text, user_id):
             out.append(n)
     return out
 
@@ -632,33 +716,45 @@ def ai_reply_reads(node, user_id):
     tools when a prompt someone else wrote turns them on.
 
     *key*: prompts_key of agreement_prompts (the prompts someone ELSE
-    wrote that fill the user's data or turn tools on). The request for
-    the reply carries the key the user saw; the route and the task work
-    it out again and refuse when it differs, so a prompt edited after
-    the dialog fills nothing the user did not agree to. "" when only the
-    user's own prompts fill anything (own data, own prompt: nothing to
-    agree to).
+    wrote that fill the user's data or turn tools on and are not one of
+    Loore's defaults unedited). The request for the reply carries the
+    key the user saw; the route and the task work it out again and
+    refuse when it differs, so a prompt edited after the dialog fills
+    nothing the user did not agree to. "" when nothing needs agreeing to:
+    only the user's own prompts fill anything (own data, own prompt), or
+    every prompt someone else wrote that acts here is a Loore default
+    unedited (Peter, 2026-11-12). The clients show the dialog only for a
+    key.
 
     The walk is the task's (chain_for_reply). Decrypts only prompt
-    nodes."""
+    nodes, each once."""
     from backend.utils.privacy import acting_prompts
     from backend.utils.session_helpers import chain_has_agentic_prompt
     chain = chain_for_reply(node, user_id)
+    texts = {}
+
+    def text_of(n):
+        if n.id not in texts:
+            texts[n.id] = n.get_content() or ""
+        return texts[n.id]
+
     found = []
     for n in acting_prompts(chain, user_id, in_shared_thread=True):
         mine = (n.human_owner_id or n.user_id) == user_id
         if not (mine or is_shared_prompt_for(n, user_id)):
             continue   # a public prompt of someone else's fills nothing
-        text = n.get_content() or ""
+        text = text_of(n)
         for placeholder, name in _PLACEHOLDER_NAMES:
             if placeholder in text and name not in found:
                 found.append(name)
     order = [name for _, name in _PLACEHOLDER_NAMES]
     names = sorted(found, key=order.index)
-    theirs = agreement_prompts(chain, user_id)
-    if theirs and chain_has_agentic_prompt(theirs):
+    others = others_prompts(chain, user_id)
+    if others and chain_has_agentic_prompt(others):
         names.append(TOOLS_NAME if names else TOOLS_ONLY_NAME)
-    return names, prompts_key({n.id: n.get_content() or "" for n in theirs})
+    theirs = agreement_prompts(
+        chain, user_id, texts={n.id: text_of(n) for n in others})
+    return names, prompts_key({n.id: texts[n.id] for n in theirs})
 
 
 def ai_reads(node, user_id):

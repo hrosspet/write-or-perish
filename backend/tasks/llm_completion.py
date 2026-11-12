@@ -4199,29 +4199,33 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 parent_node, user_id,
                 in_shared_thread=llm_node.audience_root_id is not None)
             circle_prompts = shared_prompt_ids(llm_node, node_chain, user_id)
-            # The prompts someone else wrote that fill the requester's
-            # data or turn tools on in this reply (circles
-            # .agreement_prompts): a shared prompt, or an agentic prompt
-            # the requester reads, shared or public.
+            # The prompts someone else wrote that act for the requester
+            # in this reply (circles.others_prompts): a shared prompt, or
+            # an agentic prompt the requester reads, shared or public.
             agreed_prompts = frozenset()
             if llm_node.audience_root_id is not None:
                 from backend.utils import circles as _cz
-                _held = _cz.agreement_prompts(node_chain, user_id)
+                _held = _cz.others_prompts(node_chain, user_id)
                 agreed_prompts = frozenset(n.id for n in _held)
             if agreed_prompts and batch_entry is None:
-                # The requester agreed to exactly these prompts, as they
-                # were (the dialog named what they fill). One edited or
-                # added since fills nothing: the reply is not made, and
-                # the requester is asked again. Each prompt's text is
-                # read once and held: the reply is built from the text
-                # the key is worked out from, whatever happens to the
-                # prompt after this (Node.hold_content).
+                # Each prompt's text is read once and held: whether it
+                # needs the requester's agreement (one of Loore's
+                # defaults unedited does not, Peter 2026-11-12) and the
+                # key are worked out from the text the reply is built
+                # from, whatever happens to the prompt after this
+                # (Node.hold_content). The requester agreed to exactly
+                # the prompts that need it, as they were (the dialog
+                # named what they fill). One edited or added since fills
+                # nothing: the reply is not made, and the requester is
+                # asked again.
                 _texts = {}
                 for n in _held:
                     _texts[n.id] = n.get_content() or ""
                     n.hold_content(_texts[n.id])
-                if _acknowledged_reads_key(llm_node) != _cz.prompts_key(
-                        _texts):
+                _needed = {n.id: _texts[n.id] for n in _cz.agreement_prompts(
+                    node_chain, user_id, texts=_texts)}
+                if _needed and _acknowledged_reads_key(
+                        llm_node) != _cz.prompts_key(_needed):
                     logger.warning(
                         "Node %s: the shared prompt changed after the "
                         "requester agreed; reply not made", llm_node_id)
@@ -4535,9 +4539,10 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # the member's latest artifacts, not pinned versions, so
                 # a stored render would go stale. (A stored render is
                 # keyed by user either way, _system_render_variant.)
-                # Nor any prompt the requester agreed to: the reply is
-                # built from the text held at the agreement, never from
-                # a render made of another.
+                # Nor any prompt someone else wrote that acts here
+                # (held above, agreed to or a default): the reply is
+                # built from the text held there, never from a render
+                # made of another.
                 system_render_cacheable = (
                     system_node.id not in circle_prompts
                     and system_node.id not in agreed_prompts
