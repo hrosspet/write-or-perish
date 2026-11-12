@@ -333,6 +333,11 @@ else
     warn "Backup unit files not found, skipping backup timer"
 fi
 
+# A failed config test is recorded here and re-raised at the very end (like
+# FAILED_SERVICES): exiting now would leave services stopped for a pending
+# migration.
+NGINX_TEST_FAILED=0
+
 # Update Nginx configuration if changed
 NGINX_CONFIG_SOURCE="$PROJECT_DIR/configs/nginx.txt"
 NGINX_CONFIG_TARGET="/etc/nginx/sites-available/write-or-perish"
@@ -359,12 +364,13 @@ if [ -f "$NGINX_CONFIG_SOURCE" ]; then
             log "Nginx configuration test passed"
         else
             echo "$NGINX_TEST_OUTPUT" | tee -a "$LOG_FILE"
-            # Restore the previous config before error(), which exits.
             NGINX_BACKUP=$(ls -t "$NGINX_CONFIG_TARGET".backup.* 2>/dev/null | head -1 || true)
-            if [ -n "$NGINX_BACKUP" ]; then
-                sudo cp "$NGINX_BACKUP" "$NGINX_CONFIG_TARGET" 2>/dev/null || true
+            if [ -n "$NGINX_BACKUP" ] && sudo cp "$NGINX_BACKUP" "$NGINX_CONFIG_TARGET"; then
+                warn "Nginx configuration test failed; previous config restored, the new one is NOT applied"
+            else
+                warn "Nginx configuration test failed and no backup was restored: the failing config is still on disk"
             fi
-            error "Nginx configuration test failed! Previous config restored."
+            NGINX_TEST_FAILED=1
         fi
     else
         log "Nginx configuration unchanged, skipping update"
@@ -474,10 +480,14 @@ else
 fi
 
 # Reload Nginx
-log "Reloading Nginx..."
-sudo systemctl reload nginx || warn "Failed to reload Nginx (may need manual intervention)"
+if [ "$NGINX_TEST_FAILED" -eq 1 ]; then
+    warn "Skipping Nginx reload: the new configuration failed its test"
+else
+    log "Reloading Nginx..."
+    sudo systemctl reload nginx || warn "Failed to reload Nginx (may need manual intervention)"
+fi
 
-if [ -n "$FAILED_SERVICES" ]; then
+if [ -n "$FAILED_SERVICES" ] || [ "$NGINX_TEST_FAILED" -eq 1 ]; then
     warn "====== Deployment completed WITH FAILURES ======"
 else
     log "====== Deployment completed successfully ======"
@@ -501,4 +511,10 @@ log ""
 # deploy run red — a failed worker or scheduler must never pass silently.
 if [ -n "$FAILED_SERVICES" ]; then
     error "Deployment finished, but these services are NOT running:$FAILED_SERVICES"
+fi
+
+# Same for a failed Nginx config test: the services above are up, so this
+# only turns the run red.
+if [ "$NGINX_TEST_FAILED" -eq 1 ]; then
+    error "Deployment finished, but the new Nginx configuration failed its test and was not applied"
 fi
