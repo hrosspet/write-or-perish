@@ -131,10 +131,11 @@ def _single_shot_retrievals(t):
     return reply
 
 
-def _ask(parent, user, source_mode="textmode"):
+def _ask(parent, user, source_mode="textmode", privacy_level="public"):
     """*user* asks for a reply under *parent*: their own node, then the
     reply. Returns (the payload's text, the reply node)."""
-    mine = _node(user, parent, f"{user.username} asks a question")
+    mine = _node(user, parent, f"{user.username} asks a question",
+                 privacy_level=privacy_level)
     llm_node = _llm(mine, user)
     _ScriptedProvider.reset([_resp("An answer.")])
     generate_llm_response(_FakeSelf(), mine.id, llm_node.id, "gpt-5",
@@ -174,14 +175,14 @@ def test_owner_still_gets_her_results_on_her_next_turn(thread):
                if e.get("name") in _llm_task_mod.RETRIEVAL_TOOLS)
 
 
-def test_bobs_own_results_still_reach_him_in_alices_thread(thread):
-    """bob's own single-shot reply in alice's public thread: his next
-    turn there gets his results."""
-    t = thread
+def _bobs_memory_read(t, privacy_level):
+    """bob's single-shot reply in alice's public thread, in which the
+    model calls read_artifact on his memory. Returns the reply."""
     bob = t["bob"]
     bob_memory = _mk_artifact(bob.id, "memory", "BOB MEMORY")
     _db.session.commit()
-    question = _node(bob, t["entry"], "bob asks")
+    question = _node(bob, t["entry"], "bob asks",
+                     privacy_level=privacy_level)
     bob_reply = _llm(question, bob)
     _ScriptedProvider.reset([
         _resp("Looking.", tool_calls=[
@@ -190,12 +191,35 @@ def test_bobs_own_results_still_reach_him_in_alices_thread(thread):
     ])
     generate_llm_response(_FakeSelf(), question.id, bob_reply.id, "gpt-5",
                           bob.id, source_mode=None)
-    assert json.loads(_fresh(bob_reply.id).tool_calls_meta)[0][
+    return _fresh(bob_reply.id), bob_memory
+
+
+def test_bobs_own_results_still_reach_him_in_a_private_reply_in_alices_thread(thread):  # noqa: E501
+    """bob's own private single-shot reply in alice's public thread: his
+    next private turn there gets his results."""
+    t = thread
+    bob_reply, bob_memory = _bobs_memory_read(t, "private")
+    assert json.loads(bob_reply.tool_calls_meta)[0][
         "artifact_id"] == bob_memory.id
 
-    payload, _ = _ask(bob_reply, bob)
+    payload, _ = _ask(bob_reply, t["bob"], privacy_level="private")
 
     assert "BOB MEMORY" in payload
+    assert "ALICE MEMORY" not in payload
+
+
+def test_bobs_public_reply_in_alices_thread_reads_none_of_his_data(thread):
+    """The same reply, public: no tool is offered or run (#483), and his
+    next public turn there gets nothing of his memory."""
+    t = thread
+    bob_reply, _ = _bobs_memory_read(t, "public")
+    assert not bob_reply.tool_calls_meta or not [
+        e for e in json.loads(bob_reply.tool_calls_meta)
+        if e.get("name") == "read_artifact"]
+
+    payload, _ = _ask(bob_reply, t["bob"])
+
+    assert "BOB MEMORY" not in payload
     assert "ALICE MEMORY" not in payload
 
 
