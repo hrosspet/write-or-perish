@@ -281,6 +281,61 @@ class TestCeiling:
         u = _tester(until=datetime.utcnow() - timedelta(days=5))
         assert get_user_spend_limit_usd(u, app.config) == 20.0
 
+    def test_any_level_chosen_in_the_month_has_the_discounted_ceiling(
+            self, app):
+        """Nothing paid yet: Supporter chosen during the free month still
+        has the discounted level's ceiling, not Supporter's."""
+        from backend.utils.spend import get_user_spend_limit_usd
+        app.config["SUBSCRIPTION_SPEND_LIMIT_USD_DISCOUNTED"] = 45.0
+        app.config["SUBSCRIPTION_SPEND_LIMIT_USD_SUPPORTER"] = 100.0
+        u = _tester(until=datetime.utcnow() + timedelta(days=5),
+                    subscription_status="trialing",
+                    subscription_level="supporter",
+                    subscription_trial_start=datetime.utcnow())
+        assert get_user_spend_limit_usd(u, app.config) == 45.0
+        # The month over, the first charge not through yet: still 45.
+        u.alpha_free_until = datetime.utcnow() - timedelta(minutes=5)
+        u.subscription_status = "active"
+        _db.session.commit()
+        assert get_user_spend_limit_usd(u, app.config) == 45.0
+
+    def test_the_levels_ceiling_from_the_first_paid_invoice(self, app):
+        """Control: once paid, the chosen level's ceiling, as for any
+        subscriber."""
+        from backend.utils.spend import get_user_spend_limit_usd
+        app.config["SUBSCRIPTION_SPEND_LIMIT_USD_DISCOUNTED"] = 45.0
+        app.config["SUBSCRIPTION_SPEND_LIMIT_USD_SUPPORTER"] = 100.0
+        u = _tester(until=datetime.utcnow() - timedelta(days=1),
+                    subscription_status="active",
+                    subscription_level="supporter",
+                    subscription_ever_paid=True)
+        assert get_user_spend_limit_usd(u, app.config) == 100.0
+
+    def test_the_first_paid_invoice_lifts_it_through_the_webhook(
+            self, app, gateway):
+        """The same through the webhook: Supporter subscribed during the
+        month, then its first invoice paid."""
+        from backend.utils.spend import get_user_spend_limit_usd
+        app.config["SUBSCRIPTION_SPEND_LIMIT_USD_DISCOUNTED"] = 45.0
+        app.config["SUBSCRIPTION_SPEND_LIMIT_USD_SUPPORTER"] = 100.0
+        u = _tester(until=datetime.utcnow() + timedelta(days=2),
+                    stripe_customer_id="cus_t")
+        gateway.subscriptions["sub_t"] = tp.subscription(
+            "sub_t", customer="cus_t", status="trialing", trial=True,
+            level="supporter")
+        tp._post_event(app, tp._event("customer.subscription.created",
+                                      {"id": "sub_t"}, event_id="e1"))
+        u = _db.session.get(User, u.id)
+        assert get_user_spend_limit_usd(u, app.config) == 45.0
+        gateway.subscriptions["sub_t"]["status"] = "active"
+        tp._post_event(app, tp._event("invoice.paid", {
+            "id": "in_t", "subscription": "sub_t", "customer": "cus_t",
+            "amount_paid": 11781}, event_id="e2"))
+        _db.session.expire_all()
+        u = _db.session.get(User, u.id)
+        assert u.subscription_ever_paid
+        assert get_user_spend_limit_usd(u, app.config) == 100.0
+
     def test_no_trial_ceiling_for_the_rest_of_the_month(self, app):
         from backend.utils.spend import trial_limit_usd
         u = _tester(until=datetime.utcnow() + timedelta(days=5),

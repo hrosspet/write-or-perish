@@ -268,12 +268,18 @@ def level_spend_limit_usd(level, config=None):
 def subscription_spend_limit_usd(user, config=None):
     """The monthly ceiling an account's subscription gives it, or None:
     for an account set by hand (its cap stays what it was) and for one
-    whose subscription gives nothing. An alpha tester's free month without
-    a subscription has the discounted level's ceiling, the level the
-    month leads to."""
+    whose subscription gives nothing. An alpha tester has the discounted
+    level's ceiling, the level the free month leads to, until a first
+    invoice is paid: during the month without a subscription, and with
+    one started during the month (at any level) whose first payment has
+    not gone through. The chosen level's ceiling applies from then."""
     if user is None or getattr(user, "plan_set_by_hand", True):
         return None
+    alpha_unpaid = (getattr(user, "alpha_free_granted_at", None) is not None
+                    and not getattr(user, "subscription_ever_paid", False))
     if getattr(user, "subscription_grants_access", False):
+        if alpha_unpaid:
+            return level_spend_limit_usd("discounted", config)
         return level_spend_limit_usd(user.subscription_level, config)
     if getattr(user, "alpha_free_month_active", False):
         return level_spend_limit_usd("discounted", config)
