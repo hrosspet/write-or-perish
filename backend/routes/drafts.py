@@ -1583,6 +1583,17 @@ def save_streaming_as_node(session_id):
     node.token_count = approximate_token_count(content)
     db.session.add(node)
     db.session.flush()
+    # A recorded reply that joined a shared thread quotes only nodes all
+    # of the thread's people can read (Peter, 2026-11-12, as for a
+    # public entry above); the session stays, so the text can be changed
+    # and saved again.
+    if node.privacy_level == "circles":
+        from backend.utils.publish_quotes import circle_share_refusal
+        refusal = circle_share_refusal(
+            [(node, content, set(), None)], current_user.id)
+        if refusal is not None:
+            db.session.rollback()
+            return refusal
     # Per-node cap: split very long transcripts into a serial chain
     # (audio stays on this head node). An LLM reply chains after the
     # tip so its context walk sees the whole transcript (as the Voice

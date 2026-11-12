@@ -118,13 +118,14 @@ def test_a_members_ai_reply_end_to_end(app, circles):  # noqa: F811
     ben = w["ben"]
     assert reply_refusal(w["b"], ben.id, "chat") is None
     llm_node, _ = create_llm_placeholder(
-        w["b"].id, None, ben.id, privacy_level="circles", ai_usage="train",
-        enqueue=False)
+        w["b"].id, None, ben.id, ai_usage="train", enqueue=False)
     # anna's private Claude reply above the entry does not set his model.
     assert llm_node.llm_model == "gpt-5"
     assert llm_node.human_owner_id == ben.id
     assert llm_node.audience_root_id == w["entry"].id
-    assert llm_node.privacy_level == "circles" and llm_node.ai_usage == "chat"
+    # Private, like every new AI reply (Peter, 2026-11-12): ben's alone
+    # until he shares it with the thread.
+    assert llm_node.privacy_level == "private" and llm_node.ai_usage == "chat"
     _ScriptedProvider.reset([_resp("An answer.")])
     generate_llm_response(_FakeSelf(), w["b"].id, llm_node.id, "gpt-5",
                           ben.id)
@@ -153,8 +154,7 @@ def test_the_authors_own_reply_in_her_shared_thread_uses_the_chat_key(
     w = _world()
     anna = w["anna"]
     llm_node, _ = create_llm_placeholder(
-        w["entry"].id, "gpt-5", anna.id, privacy_level="circles",
-        ai_usage="train", enqueue=False)
+        w["entry"].id, "gpt-5", anna.id, ai_usage="train", enqueue=False)
     assert llm_node.audience_root_id == w["entry"].id
     _ScriptedProvider.reset([_resp("ok")])
     generate_llm_response(_FakeSelf(), w["entry"].id, llm_node.id, "gpt-5",
@@ -303,8 +303,7 @@ def test_a_members_reply_runs_on_the_members_provider(app, circles):  # noqa: F8
                   llm_model="claude-x")
     _db.session.commit()
     llm_node, _ = create_llm_placeholder(
-        annas.id, None, ben.id, privacy_level="circles", ai_usage="chat",
-        enqueue=False)
+        annas.id, None, ben.id, ai_usage="chat", enqueue=False)
     assert llm_node.llm_model == "gpt-5"
     _ScriptedProvider.reset([_resp("An answer.")])
     generate_llm_response(_FakeSelf(), annas.id, llm_node.id,
@@ -315,8 +314,7 @@ def test_a_members_reply_runs_on_the_members_provider(app, circles):  # noqa: F8
                                              "sk-train"} <= {"ant-chat"}
     assert call["api_keys"].get("openai") == "sk-chat"
     named, _ = create_llm_placeholder(
-        annas.id, "claude-x", ben.id, privacy_level="circles",
-        ai_usage="chat", enqueue=False)
+        annas.id, "claude-x", ben.id, ai_usage="chat", enqueue=False)
     assert named.llm_model == "claude-x"
 
 
@@ -370,8 +368,7 @@ def _run(w, who, key=None):
     if key is None:
         key = cz.ai_reply_reads(w["entry"], who.id)[1]
     llm_node, _ = create_llm_placeholder(
-        w["entry"].id, "gpt-5", who.id, privacy_level="circles",
-        ai_usage="chat", enqueue=False,
+        w["entry"].id, "gpt-5", who.id, ai_usage="chat", enqueue=False,
         meta=[{"name": cz.AI_READS_MARKER, "key": key}] if key else None)
     w["last"] = llm_node.id
     _ScriptedProvider.reset([_resp("ok")])
@@ -395,8 +392,10 @@ def test_a_shared_prompt_is_filled_with_the_requesters_artifacts(
         lambda config, node, variant: stored.get((node.id, variant)))
     monkeypatch.setattr(
         pc, "store_render",
-        lambda config, node, text, variant, unlicensed=None, rows=None:
-        stored.__setitem__((node.id, variant), (text, unlicensed)))
+        lambda config, node, text, variant, unlicensed=None, rows=None,
+        references=(): stored.__setitem__(
+            (node.id, variant), pc.CachedRender(text, unlicensed,
+                                                tuple(references))))
     # anna first, so that her render is in the cache.
     hers = _run(w, w["anna"])
     assert "profile=[ANNAS-PROFILE]" in hers

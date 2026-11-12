@@ -17,8 +17,8 @@ from backend.extensions import db as _db
 from backend.models import Node, UserProfile, UserPrompt
 
 
-def _ask(w, who, parent, key=None, privacy="circles", responses=None,
-         task_self=None, source_mode=None):
+def _ask(w, who, parent, key=None, responses=None, task_self=None,
+         source_mode=None):
     """*who* asks for a reply under *parent* (in anna's shared thread),
     agreeing to what ai_reply_reads names now (or to *key*); the task
     runs. Returns the text sent, or None when no model was called."""
@@ -27,8 +27,7 @@ def _ask(w, who, parent, key=None, privacy="circles", responses=None,
     if key is None:
         key = cz.ai_reply_reads(parent, who.id)[1]
     llm_node, _ = create_llm_placeholder(
-        parent.id, "gpt-5", who.id, privacy_level=privacy, ai_usage="chat",
-        enqueue=False,
+        parent.id, "gpt-5", who.id, ai_usage="chat", enqueue=False,
         meta=[{"name": cz.AI_READS_MARKER, "key": key}] if key else None)
     w["last"] = llm_node.id
     _ScriptedProvider.reset(responses or [_resp("ok")])
@@ -96,6 +95,10 @@ def _tool_round():
 
 def test_the_node_holding_the_answer_after_a_tool_call_is_in_the_thread(
         app, circles):  # noqa: F811
+    """The node that holds the answer after a tool call is private, like
+    every new AI reply (Peter, 2026-11-12), and carries the thread's
+    pointer, like the reply's first node: ben's alone, and closed and
+    deleted with his access to the entry."""
     from backend.utils.privacy import (
         can_user_access_node, is_others_thread_answer)
     w = _agentic_world(share_path=True)
@@ -104,21 +107,14 @@ def test_the_node_holding_the_answer_after_a_tool_call_is_in_the_thread(
     _db.session.commit()
     _ask(w, ben, entry, responses=_tool_round(), source_mode="textmode")
     first = _fresh(w["last"])
+    assert first.privacy_level == "private"
     cont = _db.session.get(Node, first.continuation_node_id)
     assert cont is not None and cont.get_content() == "THE FINAL ANSWER"
     assert cont.audience_root_id == entry.id
-    assert cont.privacy_level == "circles"
-    assert can_user_access_node(cont, anna.id)       # the thread reads it
-    assert is_others_thread_answer(cont)             # goes with the entry
-    # Kept to Only me: the answer is ben's alone, still from the thread.
-    _ask(w, ben, entry, privacy="private", responses=_tool_round(),
-         source_mode="textmode")
-    first = _fresh(w["last"])
-    cont = _db.session.get(Node, first.continuation_node_id)
     assert cont.privacy_level == "private"
-    assert cont.audience_root_id == entry.id
     assert not can_user_access_node(cont, anna.id)
     assert can_user_access_node(cont, ben.id)
+    assert is_others_thread_answer(cont)             # goes with the entry
 
 
 # ── 3. The text agreed to is the text sent ──────────────────────────────

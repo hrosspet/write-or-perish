@@ -758,20 +758,11 @@ def set_audience(node, user, circle_ids, usernames, now=None):
     parts = split_chain_parts(node)
     for part in parts:
         join_thread_audience(part, node)
-    # An AI reply made along with the entry (auto-generate, Text mode, a
-    # recording) was created before this second step gave the entry its
-    # audience: it carries the entry's level and no pointer yet. It is a
-    # reply in the thread like one asked for afterwards. Replies that
-    # are private (an older entry shared through Edit) stay private.
-    if not was_shared:
-        tip = parts[-1] if parts else node
-        for child in Node.query.filter(
-                Node.parent_id == tip.id, Node.node_type == "llm",
-                Node.privacy_level == CIRCLES,
-                Node.audience_root_id.is_(None),
-                Node.human_owner_id == user.id,
-                Node.deleted_at.is_(None)):
-            join_ai_reply(child, node)
+    # No AI reply joins the audience here: every AI reply is created
+    # private and is shared only by its owner, once it is written (Peter,
+    # 2026-11-12). An entry created "circles" gets no automatic reply
+    # (llm_nodes.auto_generate_refusal), and the user's replies below an
+    # older entry join only through "apply to my replies".
 
     after = reader_ids(node.id)
     note_shared(node, after - before)
@@ -833,9 +824,11 @@ def reply_thread_entry(parent, user_id):
 
 def join_ai_reply(node, entry):
     """*node*, a new AI reply in *entry*'s shared thread, joins the
-    thread: its pointer is set for good (where it was written). Created
-    "private" it is its requester's alone; with any other level it is
-    "circles" and the thread's audience reads it. Never public."""
+    thread: its pointer is set for good (where it was written). Every AI
+    reply is created "private" (Peter, 2026-11-12), so it is its
+    requester's alone until they share it with the thread through Edit
+    (apply_requested_sharing). A level other than private, which no
+    caller passes now, would be "circles". Never public."""
     if node.privacy_level != PrivacyLevel.PRIVATE.value:
         if node.id is None:
             node.privacy_level = CIRCLES     # no content to move yet

@@ -434,6 +434,9 @@ def test_pinned_answer_stays_in_readers_log_after_entry_deleted(app):
 
 
 def _answer(app, who, parent):
+    """*who*'s AI reply under *parent*, written, then shared with the
+    thread by *who* (every AI reply is created private and shared by its
+    requester once it is written, Peter 2026-11-12)."""
     r = _client(app, who).post(f"/api/nodes/{parent}/llm",
                                json={})
     assert r.status_code == 202, r.get_json()
@@ -442,6 +445,9 @@ def _answer(app, who, parent):
     a.set_content("ANSWER-DERIVED-FROM-ANNA")
     a.llm_task_status = "completed"
     _db.session.commit()
+    r = _client(app, who).put(f"/api/nodes/{aid}", json={
+        "content": "ANSWER-DERIVED-FROM-ANNA", "privacy_level": "circles"})
+    assert r.status_code == 200, r.get_json()
     return aid
 
 

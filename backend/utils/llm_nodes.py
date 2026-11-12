@@ -705,7 +705,15 @@ def shared_with_others(node=None, privacy_level=None):
     This is the one test of "a shared thread" (auto_generate_refusal,
     the node pages' ``shared_thread`` flag). A sharing that does not
     show in the node's own privacy_level (a circle audience inherited
-    from the entry a reply was written under) has to be added here."""
+    from the entry a reply was written under) has to be added here.
+
+    Circles shows every sharing in the level: a shared entry, a reply
+    that joined its thread and the discussion shared with it are all
+    "circles" (circles.set_audience, join_reply, share_thread_path), so
+    they count. A node of a person's own Only-me branch in a shared
+    thread (an AI reply they kept to themselves, a note under it) is
+    private and read by nobody else: like a private branch under a
+    public node, it is not shared."""
     level = privacy_level
     if node is not None:
         level = node.privacy_level
@@ -1032,10 +1040,10 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     )
     if thread_entry is not None:
         # Circles: the reply joins the thread (its pointer), whoever of
-        # the thread's people asked for it and on whichever path. It is
-        # read by the thread's audience while it is "circles" (the level
-        # of the node it answers), and by its requester alone when the
-        # requester asked for it as private or answers a private node.
+        # the thread's people asked for it and on whichever path. Private
+        # like every new AI reply, it is read by its requester alone, and
+        # closed and deleted with their access to the entry, until they
+        # share it with the thread (Peter, 2026-11-12).
         from backend.utils.circles import join_ai_reply
         join_ai_reply(llm_node, thread_entry)
     llm_node.set_content(placeholder_text)

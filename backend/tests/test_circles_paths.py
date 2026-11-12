@@ -229,14 +229,24 @@ def test_every_path_that_creates_a_node_under_a_shared_entry(app, monkeypatch):
     _db.session.commit()
     assert ben.post(f"/api/drafts/streaming/{d.session_id}/save-as-node",
                     json={}).status_code in (200, 201)
-    #    ... and an AI reply, the reader's and the author's.
+    #    ... and an AI reply, the reader's and the author's: in the
+    #    thread (its pointer), but private like every new AI reply
+    #    (Peter, 2026-11-12), read by its requester alone until shared.
     assert ben.post(f"/api/nodes/{e}/llm", json={}).status_code == 202
     assert anna.post(f"/api/nodes/{e}/llm", json={}).status_code == 202
     joined = new_under(e, before)
     assert len(joined) == 6, [(n.id, n.node_type) for n in joined]
     for n in joined:
-        assert n.privacy_level == "circles" and n.audience_root_id == e, n.id
-        assert _seen(app, "anna", n.id) == 200
+        assert n.audience_root_id == e, n.id
+        if n.node_type == "llm":
+            assert n.privacy_level == "private", n.id
+            asker = "ben" if n.human_owner_id == _user("ben").id else "anna"
+            other = "anna" if asker == "ben" else "ben"
+            assert _seen(app, asker, n.id) == 200
+            assert _seen(app, other, n.id) == 404, n.id
+        else:
+            assert n.privacy_level == "circles", n.id
+            assert _seen(app, "anna", n.id) == 200
 
     # 2. Everything else the author starts from her shared entry.
     before = ids()

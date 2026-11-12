@@ -1035,6 +1035,16 @@ def create_node():
     except cz.AudienceError as e:
         db.session.rollback()
         return e.response()
+    # A new entry shared with a circle, or a reply that joined a shared
+    # thread, quotes only nodes all its readers can read (Peter,
+    # 2026-11-12, as for a public entry above). Nothing is saved.
+    if node.privacy_level == PrivacyLevel.CIRCLES:
+        from backend.utils.publish_quotes import circle_share_refusal
+        refusal = circle_share_refusal(
+            [(node, content, set(), None)], current_user.id)
+        if refusal is not None:
+            db.session.rollback()
+            return refusal
 
     parts = split_node_into_chain(node, segments=segments)
 
@@ -1065,6 +1075,53 @@ def create_node():
         "split_into": 1 + len(parts),
         "tip_id": parts[-1].id if parts else node.id
     }), 201
+
+def _shared_path_ids(node, user_id):
+    """Circles: the ids of the nodes of the discussion leading up to
+    *node* that are shared with it now (circles.share_thread_path), for
+    the quote check of a save that sends ``share_path``. Empty while no
+    node can carry a thread pointer, or when *node* is not shared."""
+    from backend.utils import circles as cz
+    from backend.utils.privacy import pointers_may_exist
+    if not pointers_may_exist() or not cz.is_shared_entry(node):
+        return set()
+    return {n.id for n in cz.thread_path(node, user_id)
+            if n.privacy_level == "circles" and n.audience_root_id == node.id}
+
+
+def _circle_quote_refusal(node, user_id, new_text, old_text, old_readers,
+                          shared_along=(), old_path_ids=None):
+    """Circles: the 409 answer when this save shares a node with a circle
+    audience while it quotes a node one of those people cannot read
+    (publish_quotes.circle_share_refusal), else None. Called after the
+    save is applied and before it is committed. Checked: *node* (its
+    quotes new to *new_text* against all its readers, the ones it had
+    against the readers it gains over *old_readers*); the discussion
+    leading up to it when ``share_path`` was sent (*old_path_ids*: those
+    of its nodes shared with it before, None when not sent); and the
+    replies an "apply to my replies" change carried along
+    (*shared_along*), which are new to their readers."""
+    from backend.utils import circles as cz
+    from backend.utils.publish_quotes import circle_share_refusal
+    changes = []
+    if node.privacy_level == "circles":
+        changes.append((node, new_text, old_readers, old_text))
+        if old_path_ids is not None and cz.is_shared_entry(node):
+            for above in cz.thread_path(node, user_id):
+                if (above.deleted_at is not None
+                        or above.privacy_level != "circles"
+                        or above.audience_root_id != node.id):
+                    continue
+                text = above.get_content()
+                if above.id in old_path_ids:
+                    changes.append((above, text, old_readers, text))
+                else:
+                    changes.append((above, text, set(), None))
+    for n in shared_along:
+        if n is not node and n.privacy_level == "circles":
+            changes.append((n, n.get_content(), set(), None))
+    return circle_share_refusal(changes, user_id)
+
 
 # Update (edit) a node. (The node's prior content is saved in NodeVersion.)
 @nodes_bp.route("/<int:node_id>", methods=["PUT"])
@@ -1102,6 +1159,16 @@ def update_node(node_id):
         return jsonify({"error": "This prompt can't be changed."}), 403
 
     old_privacy, old_ai_usage = node.privacy_level, node.ai_usage
+    # Circles: who read the node before this edit, for the quote check
+    # below (a quote it already had is checked against the readers it
+    # gains). Nothing is read while no node can carry a thread pointer.
+    from backend.utils.privacy import pointers_may_exist
+    from backend.utils.publish_quotes import circle_readers
+    old_readers = (circle_readers(node)
+                   if old_privacy == "circles" and pointers_may_exist()
+                   else set())
+    old_path_ids = (_shared_path_ids(node, current_user.id)
+                    if data.get("share_path") else None)
     # Handle privacy settings updates (optional)
     if "privacy_level" in data:
         privacy_level = data["privacy_level"]
@@ -1255,6 +1322,20 @@ def update_node(node_id):
         if refusal is not None:
             db.session.rollback()
             return refusal
+    # Circles, the same rule for the people a node is shared with (Peter,
+    # 2026-11-12): a node shared with a circle audience here (the entry,
+    # the discussion leading up to it, the replies carried along, a reply
+    # or an AI reply put back in its thread) never quotes a node one of
+    # its readers cannot read; nor does new text in a shared node.
+    shared_along = cascaded if (privacy_changed or audience_changed) else []
+    if node.privacy_level == "circles" or any(
+            n.privacy_level == "circles" for n in shared_along):
+        refusal = _circle_quote_refusal(
+            node, current_user.id, new_content, old_content, old_readers,
+            shared_along, old_path_ids)
+        if refusal is not None:
+            db.session.rollback()
+            return refusal
     try:
         db.session.commit()
     except Exception as e:
@@ -1330,6 +1411,17 @@ def set_node_audience(node_id):
         return _node_not_found()
     data = request.get_json(silent=True) or {}
     old_privacy = node.privacy_level
+    # An AI reply is shared by its owner once it is written, after they
+    # have read it (Peter, 2026-11-12): not while it is.
+    if old_privacy != "circles" and reply_in_progress(node):
+        return jsonify({
+            "error": REPLY_IN_PROGRESS_MESSAGE,
+            "code": REPLY_IN_PROGRESS_CODE,
+        }), 409
+    from backend.utils.publish_quotes import circle_readers
+    old_readers = circle_readers(node) if old_privacy == "circles" else set()
+    old_path_ids = (_shared_path_ids(node, current_user.id)
+                    if data.get("share_path") else None)
     try:
         node.set_privacy_level("circles")
         cz.apply_requested_sharing(node, current_user, {
@@ -1341,11 +1433,23 @@ def set_node_audience(node_id):
     except cz.AudienceError as e:
         db.session.rollback()
         return e.response()
+    cascaded = []
     if data.get("apply_to_descendants"):
         from backend.utils.node_settings import apply_settings_to_descendants
-        apply_settings_to_descendants(
+        cascaded = apply_settings_to_descendants(
             node, current_user.id, privacy_level="circles",
             audience_from=node)
+    # Its text, the discussion shared with it and the replies carried
+    # along quote only nodes all its readers can read (Peter,
+    # 2026-11-12). Nothing is shared otherwise; the entry stays as it
+    # was.
+    text = node.get_content()
+    refusal = _circle_quote_refusal(
+        node, current_user.id, text, text, old_readers, cascaded,
+        old_path_ids)
+    if refusal is not None:
+        db.session.rollback()
+        return refusal
     try:
         db.session.commit()
     except Exception:
@@ -2192,32 +2296,25 @@ def request_llm_response(node_id):
     # (create_llm_placeholder, Peter 2026-11-12).
     from backend.utils.node_deletion import ParentDeletedError
     try:
-        # In a shared thread the requester may keep the reply to
-        # themselves ("private"); otherwise it has the level of the node
-        # it answers. No other level can be asked for.
-        privacy_level = parent_node.privacy_level
-        if in_thread and data.get("privacy_level") == "private":
-            privacy_level = "private"
-        # A prompt someone else shared in the thread is filled with the
-        # requester's own data. A reply the thread will read is made
-        # only for exactly what the requester saw named in the dialog:
-        # the request carries that key, and it is checked again here and
-        # when the task runs (a prompt can be edited in between). The
-        # same for a reply the requester keeps private: the prompt
-        # still reads their data and its tools act on their account.
+        # The reply is private whatever is asked for (Peter, 2026-11-12):
+        # in a shared thread too, only its requester reads it until they
+        # share it with the thread through Edit. A prompt someone else
+        # wrote in the thread that fills the requester's own data or
+        # turns tools on acts only for exactly what the requester saw
+        # named in the dialog: the request carries that key, and it is
+        # checked again here and when the task runs (a prompt can be
+        # edited in between).
         reads_meta = None
         if in_thread:
             reads, reads_key = cz.ai_reply_reads(
                 parent_node, current_user.id)
             if reads_key:
-                # An agreement given for a private reply (its dialog
-                # names no readers) is sent as "private:<key>" and
-                # holds for a private reply only; one given for a
-                # shared reply holds for both.
+                # The dialog sends "private:<key>". The bare key, sent
+                # by clients from before every AI reply was private
+                # (agreed to in a dialog that named the readers), says
+                # at least as much and is accepted too.
                 ack = data.get("ai_reads_ack")
-                agreed = ack == reads_key or (
-                    privacy_level == "private"
-                    and ack == f"private:{reads_key}")
+                agreed = ack in (reads_key, f"private:{reads_key}")
                 if not agreed:
                     return jsonify({
                         "error": cz.AI_READS_CHANGED,

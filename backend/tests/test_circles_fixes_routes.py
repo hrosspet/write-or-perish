@@ -185,11 +185,18 @@ def test_a_reader_sees_his_own_recent_writing_on_a_shared_prompt(app):  # noqa: 
 def test_a_reply_under_a_members_own_private_ai_reply_is_only_me(app):  # noqa: F811
     entry = _share(app, names=["ben"])
     ben = _client(app, "ben")
-    r = ben.post(f"/api/nodes/{entry}/llm", json={"privacy_level": "private"})
+    # Every AI reply is created private (Peter, 2026-11-12).
+    r = ben.post(f"/api/nodes/{entry}/llm", json={})
     assert r.status_code == 202, r.get_json()
     private_ai = r.get_json()["node_id"]
     r = ben.post(f"/api/nodes/{entry}/llm", json={})
     shared_ai = r.get_json()["node_id"]
+    node = _node(shared_ai)
+    node.llm_task_status = "completed"
+    _db.session.commit()
+    r = ben.put(f"/api/nodes/{shared_ai}", json={
+        "content": node.get_content(), "privacy_level": "circles"})
+    assert r.status_code == 200, r.get_json()
     assert ben.get(f"/api/nodes/{private_ai}").get_json().get(
         "reply_only_private") is True
     assert "reply_only_private" not in ben.get(
@@ -198,8 +205,7 @@ def test_a_reply_under_a_members_own_private_ai_reply_is_only_me(app):  # noqa: 
     assert _reply(app, "ben", private_ai, privacy="public").status_code == 403
     assert _reply(app, "ben", private_ai, privacy="private").status_code == 201
     # anna's own private AI reply in her own thread: hers to share.
-    r = _client(app, "anna").post(f"/api/nodes/{entry}/llm",
-                                  json={"privacy_level": "private"})
+    r = _client(app, "anna").post(f"/api/nodes/{entry}/llm", json={})
     hers = r.get_json()["node_id"]
     assert "reply_only_private" not in _client(app, "anna").get(
         f"/api/nodes/{hers}").get_json()

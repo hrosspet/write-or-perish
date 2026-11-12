@@ -1,9 +1,12 @@
 import XCTest
 
-/// Circles, the screens that need taps (2026-11-11): the add-person dialog, the
-/// picker in the writing form, the "discussion leading up to this node" toggle,
-/// the readers popover, the who-will-see dialogs for a typed reply and an AI
-/// reply, "Only me", a shared prompt for a reader, and the Updates item.
+/// Circles, the screens that need taps (2026-11-11, the shared-thread rules of
+/// 2026-11-12): the add-person dialog, the picker in the writing form, the
+/// "discussion leading up to this node" toggle, the readers popover, the
+/// who-will-see dialog for a typed reply, the dialog before an AI reply (only
+/// where a prompt someone else shared reads the reader's data; the reply is
+/// private), a shared prompt for a reader, the Updates item, the author's LLM
+/// Response, and "Not shared yet" for a quote the circle cannot read.
 ///
 /// Runs against a scratch backend with fake users only (never the Docker stack):
 /// `TEST_RUNNER_LOORE_E2E_DIR` holds `cookies.json` (session cookies keyed
@@ -213,84 +216,60 @@ final class CirclesUITests: XCTestCase {
 
     // MARK: 5. An AI reply in a shared thread
 
-    func test5AnAIReplySharedThenOnlyMe() throws {
+    /// Every AI reply is created private (Peter, 2026-11-12). Where a prompt
+    /// someone else shared reads the reader's data, the dialog says so in the
+    /// private wording; the reply carries "Only you see this reply".
+    func test5AnAIReplyIsPrivateAndTheSharedPromptIsAgreedTo() throws {
         let turn = try id("agentic_turn")
-        var app = try launch(as: "ben", route: "/node/\(turn)")
+        let app = try launch(as: "ben", route: "/node/\(turn)")
         waitForFocal(app)
         let llm = app.buttons["thread.llmResponse"]
         bringIntoView(app, llm)
         XCTAssertTrue(llm.exists, "no LLM Response control for a reader on someone else's node")
-        XCTAssertTrue(element(app, "thread.aiReplyPrivacy.shared").exists, "no \"AI reply:\" choice")
+        XCTAssertFalse(element(app, "thread.aiReplyPrivacy").exists, "no \"AI reply:\" choice any more")
+        XCTAssertFalse(element(app, "thread.aiReplyPrivacy.shared").exists)
         snapshot("19-ben-ai-reply-control")
         llm.tap()
         let confirm = app.buttons["circles.replyConfirm"]
         XCTAssertTrue(confirm.waitForExistence(timeout: 10), "the AI dialog did not open")
         XCTAssertTrue(app.staticTexts["Generate an AI reply?"].exists)
-        XCTAssertTrue(text(app, containing: "@anna will see it, marked with your name.").exists)
-        XCTAssertTrue(text(app, containing: "Your AI reads your profile").exists, "the artifacts sentence is missing")
-        XCTAssertTrue(text(app, containing: "and could share private information from them.").exists)
+        XCTAssertTrue(text(app, containing: "Only you will see it. Your AI reads your profile").exists)
+        XCTAssertTrue(text(app, containing: "for this reply, as the prompt shared in this thread asks.").exists)
+        XCTAssertFalse(text(app, containing: "will see it, marked with your name").exists, "nobody is named")
+        XCTAssertFalse(text(app, containing: "could share private information").exists)
         XCTAssertEqual(confirm.label, "Generate")
         XCTAssertTrue(confirm.isHittable, "Generate is off the screen")
-        snapshot("20-ben-ai-dialog")
+        snapshot("20-ben-ai-dialog-private")
         confirm.tap()
         // The reply opens on its own page; the stub answers at once.
         XCTAssertTrue(text(app, containing: "Stub reply from").waitForExistence(timeout: 30), "no AI reply appeared")
         let label = text(app, containing: "via @ben")
         XCTAssertTrue(label.waitForExistence(timeout: 10), "no label on the AI reply")
         XCTAssertTrue(label.label.contains("GPT-6 Luna via @ben"), "the label reads \(label.label)")
-        sleep(2)
-        snapshot("21-ben-ai-reply-shared")
-
-        // Only me in a thread whose shared prompt reads ben's data: the dialog in
-        // its private variant, then a private reply.
-        app = try launch(as: "ben", route: "/node/\(turn)")
-        waitForFocal(app)
-        let onlyMe = element(app, "thread.aiReplyPrivacy.onlyMe")
-        bringIntoView(app, onlyMe)
-        onlyMe.tap()
-        XCTAssertTrue(onlyMe.isSelected, "Only me was not chosen")
-        snapshot("22-ben-ai-reply-only-me-chosen")
-        app.buttons["thread.llmResponse"].tap()
-        let privateConfirm = app.buttons["circles.replyConfirm"]
-        XCTAssertTrue(privateConfirm.waitForExistence(timeout: 10), "the private AI dialog did not open")
-        XCTAssertTrue(app.staticTexts["Generate an AI reply?"].exists)
-        XCTAssertTrue(text(app, containing: "Only you will see it. Your AI reads your profile").exists)
-        XCTAssertTrue(text(app, containing: "for this reply, as the prompt shared in this thread asks.").exists)
-        XCTAssertFalse(text(app, containing: "will see it, marked with your name").exists, "no names for a private reply")
-        XCTAssertFalse(text(app, containing: "could share private information").exists)
-        XCTAssertTrue(privateConfirm.isHittable, "Generate is off the screen")
-        snapshot("22b-ben-ai-dialog-only-me")
-        privateConfirm.tap()
-        XCTAssertTrue(text(app, containing: "Stub reply from").waitForExistence(timeout: 30), "no private AI reply appeared")
+        XCTAssertTrue(text(app, containing: "Only you see this reply").waitForExistence(timeout: 10),
+                      "the private reply does not say so")
         XCTAssertFalse(element(app, "thread.readers").exists, "a private reply has no readers")
         sleep(2)
-        snapshot("23-ben-ai-reply-only-me")
-        // `-LooreResetState` forgets the choice: the next launch is back to shared.
-        app = try launch(as: "ben", route: "/node/\(turn)")
-        waitForFocal(app)
-        let shared = element(app, "thread.aiReplyPrivacy.shared")
-        bringIntoView(app, shared)
-        XCTAssertTrue(shared.isSelected, "-LooreResetState should forget \"Only me\"")
+        snapshot("21-ben-ai-reply-private")
     }
 
-    // MARK: 6. The AI dialog where nothing of the requester's is read
+    // MARK: 6. No dialog where nothing of the requester's is read
 
-    func test6TheAIDialogWithoutTheArtifactsSentence() throws {
+    func test6NoDialogWhereNothingOfTheRequestersIsRead() throws {
         let app = try launch(as: "ben", route: "/node/\(try id("entry"))")
         waitForFocal(app)
         let llm = app.buttons["thread.llmResponse"]
         bringIntoView(app, llm)
+        XCTAssertTrue(text(app, containing: "only you see it until you share it").exists,
+                      "the reader's note does not say an AI reply is private")
         llm.tap()
-        let confirm = app.buttons["circles.replyConfirm"]
-        XCTAssertTrue(confirm.waitForExistence(timeout: 10), "the AI dialog did not open")
-        XCTAssertTrue(app.staticTexts["@anna and @chidi will see it, marked with your name."].exists)
-        XCTAssertFalse(text(app, containing: "Your AI reads your").exists, "nothing of ben's is read here")
-        snapshot("24-ben-ai-dialog-no-artifacts")
-        app.buttons["Cancel"].firstMatch.tap()
+        // The reply is ben's alone and the thread's prompt reads nothing of his:
+        // nothing to ask, the reply is made.
+        XCTAssertFalse(app.buttons["circles.replyConfirm"].waitForExistence(timeout: 3), "a dialog with nothing to ask")
+        XCTAssertTrue(text(app, containing: "Stub reply from").waitForExistence(timeout: 30), "no AI reply appeared")
+        XCTAssertTrue(text(app, containing: "Only you see this reply").waitForExistence(timeout: 10))
         sleep(2)
-        // Cancel generates nothing: the page is still the entry, its control at rest.
-        XCTAssertTrue(element(app, "thread.sharedBanner").exists, "Cancel left the entry's page")
-        XCTAssertEqual(app.buttons["thread.llmResponse"].label, "LLM Response")
+        snapshot("24-ben-ai-reply-no-dialog")
     }
 
     // MARK: 7. A shared prompt, for a reader
@@ -406,6 +385,50 @@ final class CirclesUITests: XCTestCase {
         sleep(1)
         snapshot("33-anna-share-stopped")
         // Nothing was saved: the draft is discarded so no entry or draft stays.
+        let discard = element(app, "nodeForm.discardDraft")
+        if discard.exists && discard.isHittable { discard.tap() }
+    }
+
+    // MARK: 14–15. The author's thread; a quote the circle cannot read
+
+    func test14TheAuthorHasLLMResponseAndNoAutoGenerateInHerSharedThread() throws {
+        let app = try launch(as: "anna", route: "/node/\(try id("entry"))")
+        waitForFocal(app)
+        let llm = app.buttons["thread.llmResponse"]
+        bringIntoView(app, llm)
+        XCTAssertTrue(llm.exists, "no LLM Response for the author in her shared thread")
+        XCTAssertTrue(text(app, containing: "Auto-generate is off in public and shared threads.").exists,
+                      "the auto-generate switch is not locked off")
+        sleep(1)
+        snapshot("34-anna-shared-thread-llm-response")
+    }
+
+    func test15AQuoteTheCircleCannotReadStopsTheShare() throws {
+        let note = try id("annas_private_note")
+        let app = try launch(as: "anna", route: "/textmode")
+        let editor = element(app, "nodeForm.text.new")
+        XCTAssertTrue(editor.waitForExistence(timeout: 20), "no new entry form")
+        editor.tap()
+        editor.typeText("See {quote:\(note)}")
+        let circles = app.buttons["privacy.choice.circles"]
+        bringIntoView(app, circles)
+        circles.tap()
+        let chip = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'circles.chip.'")).firstMatch
+        XCTAssertTrue(chip.waitForExistence(timeout: 10))
+        bringIntoView(app, chip)
+        chip.tap()
+        let sentence = element(app, "circles.sentence")
+        let named = NSPredicate(format: "label CONTAINS %@", "can read this entry and reply to it.")
+        wait(for: [expectation(for: named, evaluatedWith: sentence)], timeout: 10)
+        let send = element(app, "nodeForm.send.new")
+        bringIntoView(app, send)
+        send.tap()
+        XCTAssertTrue(app.staticTexts["Not shared yet"].waitForExistence(timeout: 10), "no dialog for the quote")
+        XCTAssertTrue(text(app, containing: "not all of them can read").exists)
+        XCTAssertTrue(text(app, containing: "ANNAS-PRIVATE-NOTE").exists, "the dialog does not name the quoted entry")
+        sleep(1)
+        snapshot("35-anna-quote-not-shared")
+        app.buttons["OK"].firstMatch.tap()
         let discard = element(app, "nodeForm.discardDraft")
         if discard.exists && discard.isHittable { discard.tap() }
     }

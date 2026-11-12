@@ -111,12 +111,16 @@ final class ThreadModel {
 
     // MARK: "Only you see this reply" (2026-11-12)
 
-    /// A private AI reply of the viewer's under a node others can read.
+    /// A private AI reply of the viewer's under a node others can read. In a
+    /// circle-shared thread the reply under another person's node is the
+    /// viewer's by `humanOwnerUsername` (ownedByMe), not by `parentUserId`.
     func showsPrivateReplyNote(nodeType: NodeType, llmModel: String?, userId: Int?, parentUserId: Int?,
-                               deleted: Bool = false, privacy: PrivacyLevel?, parentPrivacy: PrivacyLevel?) -> Bool {
+                               humanOwnerUsername: String? = nil, deleted: Bool = false,
+                               privacy: PrivacyLevel?, parentPrivacy: PrivacyLevel?) -> Bool {
         SharedThread.showsPrivateReplyNote(
             isAIReply: nodeType == .llm || llmModel != nil,
-            owned: ownedByMe(userId: userId, parentUserId: parentUserId, nodeType: nodeType),
+            owned: ownedByMe(userId: userId, parentUserId: parentUserId, nodeType: nodeType,
+                             humanOwnerUsername: humanOwnerUsername),
             deleted: deleted, privacy: privacy, parentPrivacy: parentPrivacy)
     }
 
@@ -133,14 +137,16 @@ final class ThreadModel {
         guard let ancestors = node?.ancestors, ancestors.indices.contains(index), index > 0 else { return false }
         let n = ancestors[index]
         return showsPrivateReplyNote(nodeType: n.nodeType, llmModel: n.llmModel, userId: n.userId,
-                                     parentUserId: n.parentUserId, deleted: n.deleted, privacy: n.privacyLevel,
+                                     parentUserId: n.parentUserId, humanOwnerUsername: n.humanOwnerUsername,
+                                     deleted: n.deleted, privacy: n.privacyLevel,
                                      parentPrivacy: ancestors[index - 1].privacyLevel)
     }
 
     /// A reply in the tree, under a parent with `parentPrivacy`.
     func showsPrivateReplyNote(_ n: TreeNode, parentPrivacy: PrivacyLevel?) -> Bool {
         showsPrivateReplyNote(nodeType: n.nodeType, llmModel: n.llmModel, userId: n.userId,
-                              parentUserId: n.parentUserId, deleted: n.deleted || n.inaccessible,
+                              parentUserId: n.parentUserId, humanOwnerUsername: n.humanOwnerUsername,
+                              deleted: n.deleted || n.inaccessible,
                               privacy: n.privacyLevel, parentPrivacy: parentPrivacy)
     }
 

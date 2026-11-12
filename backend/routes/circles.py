@@ -252,10 +252,37 @@ def audience_preview():
         node = db.session.get(Node, node_id)
         if node is not None and cz.entry_owner_id(node) == current_user.id:
             entry = node
-    return jsonify({
-        "readers": cz.preview_readers(circles, people, current_user.id,
-                                      entry=entry),
-    }), 200
+    readers = cz.preview_readers(circles, people, current_user.id,
+                                 entry=entry)
+    # ``content``: the text about to be shared. It may not quote a node
+    # one of these people cannot read (Peter, 2026-11-12): the same 409
+    # the save gives, before anything is saved, so the form shows the
+    # dialog naming the quoted entry. For an entry already shared, a
+    # quote it had is checked against the people it gains only.
+    content = data.get("content")
+    if isinstance(content, str) and content and readers:
+        from backend.utils.publish_quotes import (
+            circle_readers, quotes_not_public_response, unpublished_quotes,
+        )
+        from backend.utils.quotes import find_quote_ids
+        ids = {u.id for u in User.query.filter(User.username.in_(readers))}
+        ids.add(current_user.id)
+        before, old_ids = set(), set()
+        if entry is not None and entry.privacy_level == "circles":
+            before = circle_readers(entry)
+            old_ids = set(find_quote_ids(entry.get_content() or ""))
+        found = unpublished_quotes([content], current_user.id,
+                                   skip_ids=old_ids, readers=ids)
+        added = ids - before
+        if added and old_ids:
+            seen = {n.id for n in found}
+            found += [n for n in unpublished_quotes(
+                [content], current_user.id, readers=added)
+                if n.id not in seen]
+        if found:
+            return quotes_not_public_response(found, current_user.id,
+                                              shared=True)
+    return jsonify({"readers": readers}), 200
 
 
 # ── The reader's side ───────────────────────────────────────────────────

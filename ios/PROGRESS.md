@@ -1122,17 +1122,19 @@ privacy select is greyed out (`SelectField.unavailable`), as on the web.
   thread (`threadAudience`, from the parent's `audience`) is sent as `circles` after `CircleReplyDialog`;
   "Don't ask again in this thread" is `DefaultsKey.circleReplyAck(entryId:userId:)`.
 - **Thread**: `SharedEntryBanner` for a reader, `CircleReadersButton` (a tap opens a popover) in the focal
-  footer for author and readers. In someone else's shared thread: auto-generate off, no Voice Mode or
-  auto-generate switch.
+  footer for author and readers. In someone else's shared thread: no Voice Mode or auto-generate
+  switch. Auto-generate is off in every circle thread, for the author too (Peter, 2026-11-12; main's
+  `isSharedThread`, privacy-based); the circles audience test is `ThreadModel.isCircleThread`.
 - **AI replies in a shared thread** (2026-11-11; "Ask my AI" and `circle_ask` are gone): every member has
   the normal LLM Response control on every node they can read (`ThreadModel.showCraftBar`; a reader
-  without Craft mode too, then without the model picker). The request is the normal
-  `POST /nodes/<id>/llm {model, source_mode}`, plus `privacy_level: "private"` when "AI reply: Only me"
-  is chosen (Craft mode; `DefaultsKey.circleAiReplyPrivacy`). Before a shared AI reply the
-  `CircleReplyDialog` AI variant names the readers (`confirmAIReply`, also before the author's
-  auto-generated reply; `DefaultsKey.circleAiReplyAck`), with the `audience.ai_reads` sentence when
-  the prompt reads the requester's artifacts. Off states: `CirclesWording.aiReplyOffReason`. The
-  author's own AI replies under her shared entry are shared with the thread too. An AI reply shows
+  without Craft mode too, then without the model picker; the author as well, since auto-generate is
+  off there). The request is the normal `POST /nodes/<id>/llm {model, source_mode}`. Since 2026-11-12
+  every AI reply is created private (Peter): "AI reply: Shared with this thread / Only me" is gone, the
+  reply carries "Only you see this reply" (`SharedThread.showsPrivateReplyNote`, by
+  `human_owner_username` in the tree too), and its requester shares it with the thread through Edit.
+  The `CircleReplyDialog` AI variant ("Only you will see it. Your AI reads your ...") comes only when a
+  prompt someone else wrote reads the requester's data (`confirmAIReply`; `DefaultsKey.circleAiReplyAck`).
+  Off states: `CirclesWording.aiReplyOffReason`. An AI reply shows
   `llm_label` in place of the model id (`NodeFooterText.author`) and belongs to
   `human_owner_username` (`ThreadModel.ownedByMe`); its edit form offers Only me and Circles
   (`NodeFormModel.hidePublic`).
@@ -1150,14 +1152,14 @@ privacy select is greyed out (`SelectField.unavailable`), as on the web.
   `SharedWithYouView` (`.sharedWithYou`, `/shared`); linked from Account ("Circles" row), More ("Shared
   with you") and each other. **Updates**: `CircleShareItemView` ("Read it" / "Don't show <name>'s entries").
 - **The agreement before an AI reply**: `audience.ai_reads` names what the thread's prompts fill from
-  the requester's own data, `ai_reads_key` identifies the shared prompts as they are. A shared AI reply
-  sends `ai_reads_ack: <key>` (only a key the user was shown); "Don't ask again in this thread" stores
-  the key (`DefaultsKey.circleAiReplyAck`), so it stops applying when a prompt changes. On 409
-  `circle_ai_reads_changed` the dialog opens again with the response's list and Generate retries with
-  the new key. "Only me" sends `privacy_level: "private"`; with a key it needs the same agreement
-  (the shared prompt still reads the requester's data and its tools act on their account) and shows
-  the dialog in its private variant ("Only you will see it. Your AI reads your ... for this reply, as
-  the prompt shared in this thread asks."); without a key, no dialog.
+  the requester's own data, `ai_reads_key` identifies the shared prompts as they are. The request
+  sends `ai_reads_ack: private:<key>` (only a key the user was shown; a bare key stored by an earlier
+  build counts too); "Don't ask again in this thread" stores it (`DefaultsKey.circleAiReplyAck`), so it
+  stops applying when a prompt changes. On 409 `circle_ai_reads_changed` the dialog opens again with
+  the response's list and Generate retries with the new key. Without a key, no dialog.
+- **A quote the circle cannot read** (2026-11-12): the check before sharing sends the text with
+  `/circles/audience-preview`; 409 `quotes_not_shared` opens `QuotesNotPublicDialog` titled "Not
+  shared yet" (`QuotesNotPublic.shared`) and saves nothing.
 - **The discussion above an entry**: `thread_path` from `GET /nodes/<id>/audience`, the toggle "Share
   also the discussion leading up to this node?" (off by default), `share_path` in the requests.
 - **A shared prompt** is shown to a reader with the `context_artifacts` the server sends (the reader's

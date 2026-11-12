@@ -414,6 +414,44 @@ final class CirclesFormTests: StubbedAppTestCase {
         XCTAssertFalse(calls.contains("PUT /api/nodes/42/audience"), "the audience went with the entry")
     }
 
+    func testAQuoteTheCircleCannotReadOpensTheDialogAndSavesNothing() async {
+        // Peter, 2026-11-12: a shared node never quotes a node its readers
+        // cannot read; the check before saving sends the text.
+        StubURLProtocol.install { [self] request in
+            switch (request.httpMethod ?? "", path(request)) {
+            case ("POST", "/api/circles/audience-preview"):
+                let sent = (try? JSONSerialization.jsonObject(with: request.httpBody ?? Data())) as? [String: Any]
+                if (sent?["content"] as? String)?.contains("{quote:7}") == true {
+                    return .json(409, """
+                    {"code":"quotes_not_shared","error":"This can't be shared with these people yet: it quotes an entry that not all of them can read. Share the quoted entry with them first, or make it public, then try again.",
+                     "quoted":[{"id":7,"can_open":true,"preview":"my private note","permalink":"/node/7","privacy_level":"private"}]}
+                    """)
+                }
+                return .json(200, #"{"readers":["ben"]}"#)
+            case ("POST", "/api/nodes/"): return .json(201, #"{"id":42,"privacy_level":"circles","audience_set":true}"#)
+            default: return .json(200, "{}")
+            }
+        }
+        let (model, result) = form(NodeFormConfig(parentId: nil))
+        model.content = "see {quote:7}"
+        model.privacy = .circles
+        model.audience.circleIds = [3]
+        await model.submit()
+        XCTAssertNil(result())
+        XCTAssertFalse(calls.contains("POST /api/nodes/"), "nothing is saved")
+        XCTAssertEqual(body(of: "POST /api/circles/audience-preview")?["content"] as? String, "see {quote:7}")
+        guard case .quotesNotPublic(let refusal)? = model.dialog else {
+            return XCTFail("the dialog names the quoted entry")
+        }
+        XCTAssertTrue(refusal.shared)
+        XCTAssertEqual(refusal.title, "Not shared yet")
+        XCTAssertEqual(refusal.quoted.map(\.id), [7])
+        XCTAssertEqual(refusal.quoted.first?.rowText, "my private note")
+        XCTAssertNil(model.error)
+        // The public refusal keeps its own title.
+        XCTAssertEqual(QuotesNotPublic(message: "x", quoted: []).title, "Not public yet")
+    }
+
     func testSharingWithNobodyOrAnUnknownNameIsRefusedBeforeAnythingIsSaved() async {
         StubURLProtocol.install { [self] request in
             if path(request) == "/api/circles/audience-preview" {
@@ -1098,6 +1136,14 @@ final class CirclesFormTests: StubbedAppTestCase {
         let model = await thread(json)
         XCTAssertTrue(model.focalShowsPrivateReplyNote)
         XCTAssertEqual(SharedThread.privateReplyNote, "Only you see this reply")
+        // In the list of replies under anna's entry the reply is the viewer's by
+        // its requester's name, though the node it answers is anna's.
+        XCTAssertTrue(model.showsPrivateReplyNote(nodeType: .llm, llmModel: "gpt-6-luna", userId: 9, parentUserId: 8,
+                                                  humanOwnerUsername: "seowriter", privacy: .private,
+                                                  parentPrivacy: .circles))
+        XCTAssertFalse(model.showsPrivateReplyNote(nodeType: .llm, llmModel: "gpt-6-luna", userId: 9, parentUserId: 8,
+                                                   humanOwnerUsername: "ben", privacy: .private,
+                                                   parentPrivacy: .circles))
         // Once shared with the thread, the note goes.
         let shared = await thread(json.replacingOccurrences(of: #""privacy_level":"private""#,
                                                              with: #""privacy_level":"circles""#))
