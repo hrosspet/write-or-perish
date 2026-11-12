@@ -79,6 +79,9 @@ private struct ThreadContent: View {
                         }
                         HairlineDivider().padding(.top, node.ancestors.isEmpty ? 0 : 2)
                             .id("focal")
+                        ToolApprovalsLine(model: model.approvals)
+                            .padding(.leading, 8)
+                            .padding(.top, 8)
                         focalSection(node)
                         HairlineDivider().padding(.vertical, 8)
                         ForEach(ChildRow.flatten(node.children, parentPrivacy: node.privacyLevel)) { row in
@@ -639,12 +642,19 @@ private struct ToolCallsDisclosure: View {
 
     private func row(_ tc: ToolCallMeta) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 4) {
-            Text(tc.status == "success" ? "✓" : "✗")
-                .accessibilityLabel(tc.status == "success" ? "Succeeded:" : "Failed:")
-            if detailed {
-                label(tc)
+            if let approval = tc.approvalLabel(owner: detailed) {
+                // Kept for the user's approval, or declined (2026-11-12).
+                Text(tc.status == ToolCallMeta.pendingApprovalStatus ? "…" : "–")
+                    .accessibilityHidden(true)
+                Text("\(tc.approvalActionName) — \(approval)")
             } else {
-                Text(tc.sharedLabel)
+                Text(tc.status == "success" ? "✓" : "✗")
+                    .accessibilityLabel(tc.status == "success" ? "Succeeded:" : "Failed:")
+                if detailed {
+                    label(tc)
+                } else {
+                    Text(tc.sharedLabel)
+                }
             }
             if detailed, let err = tc["error"]?.stringValue, !err.isEmpty {
                 Text(" — \(err)").foregroundStyle(LooreColor.accent)

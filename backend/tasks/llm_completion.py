@@ -1689,6 +1689,14 @@ def _artifact_write_report(tr, user_id, licence=None, numbers=None,
         if known is not None:
             known.add(row.id)
 
+    if tr.get("status") == "pending_approval":
+        number = tr.get("previous_version")
+        stays = (f" '{tr.get('kind', '?')}' stays at v{number} until then."
+                 if number else "")
+        return (f"update_artifact: nothing was saved yet. "
+                f"{HELD_FOR_APPROVAL_TEXT}{stays}")
+    if tr.get("status") == "rejected":
+        return f"update_artifact: {DECLINED_TEXT}"
     if tr.get("status") != "success":
         text = f"update_artifact failed — {tr.get('error', 'unknown error')}"
         if known is None:
@@ -1767,7 +1775,9 @@ def _artifact_current_text(tr, user_id, licence=None):
     same id, unless the prompt shows that version already
     (_artifact_write_report). Returns (text, row), or (None, None) when
     there is nothing to show."""
-    if tr.get("name") != "update_artifact" or tr.get("status") == "success":
+    if (tr.get("name") != "update_artifact"
+            or tr.get("status") in ("success", "pending_approval",
+                                    "rejected")):
         return None, None
     row = stored_version(tr.get("current_artifact_id"), user_id)
     if row is None or row.ai_usage not in AI_ALLOWED:
@@ -1812,7 +1822,8 @@ def _replayed_write_blocks(node, writes, user_id, licence=None,
                   "content": _artifact_write_report(
                       entry, user_id, licence=licence, numbers=numbers,
                       known=known)}
-        if entry.get("status") != "success":
+        if entry.get("status") not in ("success", "pending_approval",
+                                       "rejected"):
             result["is_error"] = True
         results.append(result)
     return calls, results
@@ -1896,6 +1907,15 @@ def _prefetch_replayed_versions(node_chain, user_id):
     prefetch_deks(row.content for row in rows)
 
 
+# What a call kept for the user's approval answers (tool_approvals, Peter
+# 2026-11-12), and one the user declined.
+HELD_FOR_APPROVAL_TEXT = (
+    "This thread holds text the user didn't write, so this call waits for "
+    "their approval: nothing is done until they approve it. Tell them what "
+    "you proposed; Loore asks them.")
+DECLINED_TEXT = "The user declined it; nothing was done."
+
+
 def _action_result_text(tr):
     """One-line result string injected back to the model for a NON-retrieval
     tool result, so the loop can continue after action tools too: the model
@@ -1904,6 +1924,10 @@ def _action_result_text(tr):
     _artifact_write_report instead (its version and what it wrote)."""
     name = tr.get("name")
     status = tr.get("status")
+    if status == "pending_approval":
+        return f"[{name}: {HELD_FOR_APPROVAL_TEXT}]"
+    if status == "rejected":
+        return f"[{name}: {DECLINED_TEXT}]"
     if status == "success":
         if name == "apply_todo_changes":
             return ("[apply_todo_changes: merge started in the background; "
@@ -2073,6 +2097,13 @@ def _scan_proposal_statuses(node_chain, user_id, licence=None):
                 else:
                     # A silent failure reads as success to the model.
                     notes.append(_action_result_text(entry))
+                to_mark.append((node, name))
+
+            elif (name in ACTION_TOOL_LABELS and entry.get("approval")
+                    and not reported):
+                # A call the user approved or declined after its turn
+                # (tool_approvals): its outcome, once.
+                notes.append(_action_result_text(entry))
                 to_mark.append((node, name))
 
             elif name in RETRIEVAL_TOOLS and not reported:
@@ -2361,13 +2392,19 @@ def _redact_tool_input(inp):
 
 
 def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
-                        quote_labels=None, client=None):
+                        quote_labels=None, client=None, hold=None):
     """Execute tool calls and return metadata list. *quote_labels* is the
     turn's label map ({label: ("node"|"external", id)}) so read_full can
     resolve a search-result label; None outside the retrieval loop.
     *client* is the app the turn was asked from ('ios' / 'web' / None,
     utils/client_platform): an issue apply_github_issue files gets it as
-    its platform label."""
+    its platform label.
+
+    *hold* (tool_approvals.ApprovalHold): when present, a call that writes
+    the user's data directly (tool_approvals.DIRECT_WRITE_TOOLS) is
+    checked as usual and then kept for the user's approval instead of
+    run: its entry says "pending_approval" (Peter, 2026-11-12). A call
+    the checks refuse fails as before; nothing is kept for it."""
     tool_results = []
 
     for tc in tool_calls:
@@ -2401,6 +2438,10 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                     if refusal is not None:
                         result["status"] = "error"
                         result["error"] = refusal
+                    elif hold:
+                        result.update(hold.hold(
+                            name, inp, llm_node, user_id,
+                            proposal_draft_id=draft.id))
                     else:
                         task_id = _start_todo_merge(
                             draft, proposal_node, user_id,
@@ -2429,6 +2470,10 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                             origin_node, user_id, "github_issue_pending"):
                         result["status"] = "error"
                         result["error"] = "No pending GitHub issue found"
+                    elif hold:
+                        result.update(hold.hold(
+                            name, inp, llm_node, user_id,
+                            proposal_draft_id=draft.id))
                     else:
                         user = User.query.get(user_id)
                         username = (
@@ -2481,6 +2526,18 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                         if current_id is not None:
                             result["current_artifact_id"] = current_id
                             result["current_version"] = latest_number
+                    elif hold:
+                        # Checked like a write: it names the version it is
+                        # based on, which stays the latest until the user
+                        # decides (tool_approvals.decide writes it then).
+                        result.update(hold.hold(
+                            name, inp, llm_node, user_id,
+                            previous_artifact_id=(previous.id if previous
+                                                  else None),
+                            kind=kind))
+                        result["previous_artifact_id"] = (
+                            previous.id if previous else None)
+                        result["previous_version"] = latest_number or None
                     else:
                         title = (inp.get("title") or "").strip()
                         if not title:
@@ -2732,6 +2789,10 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                             origin_node, user_id, "feedback_pending"):
                         result["status"] = "error"
                         result["error"] = "No pending feedback found"
+                    elif hold:
+                        result.update(hold.hold(
+                            name, inp, llm_node, user_id,
+                            proposal_draft_id=draft.id))
                     else:
                         from backend.utils.feedback import (
                             submit_feedback_from_node,
@@ -2773,6 +2834,10 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                             origin_node, user_id, "share_pending"):
                         result["status"] = "error"
                         result["error"] = "No pending share found"
+                    elif hold:
+                        result.update(hold.hold(
+                            name, inp, llm_node, user_id,
+                            proposal_draft_id=draft.id))
                     else:
                         from backend.utils.share import (
                             save_share_drafts_from_node,
@@ -4383,6 +4448,25 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             agentic_tools = (
                 gated_voice_tools(flask_app.config)
                 if is_agentic and not in_others_thread else None)
+            # The history holds text the requester did not write (another
+            # person's node or quote, a saved reference, a Glean reply's
+            # picks): this reply's calls that write their data directly
+            # wait for their approval (Peter, 2026-11-12). Known before
+            # the first call; the tools offered and the prompt are the
+            # same either way.
+            write_hold = None
+            if agentic_tools:
+                from backend.utils.foreign_text import history_by_others
+                from backend.utils.tool_approvals import ApprovalHold
+                write_hold = ApprovalHold(
+                    history_by_others(node_chain, user_id,
+                                      read_reply_ids=ca_reply_ids),
+                    turn_node_id=llm_node.id)
+                if write_hold:
+                    logger.info(
+                        "Node %s: history holds text by others (%s); "
+                        "direct writes wait for approval", llm_node_id,
+                        ", ".join(write_hold.kinds))
 
             # Check for pending drafts and inject context notes: only
             # proposals the user can accept (utils/proposals).
@@ -5439,6 +5523,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     tool_results = _execute_tool_calls(
                         f_tool_calls, target_node, node_chain, user_id,
                         quote_labels=quote_labels, client=client,
+                        hold=write_hold,
                     )
                     if f_truncated:
                         for tr in tool_results:
@@ -5620,6 +5705,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     tool_results = _execute_tool_calls(
                         response_tool_calls, current_node, node_chain,
                         user_id, quote_labels=quote_labels, client=client,
+                        hold=write_hold,
                     )
                     if interim_truncated:
                         for tr in tool_results:

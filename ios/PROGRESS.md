@@ -1067,3 +1067,35 @@ public node never quotes a node that isn't public; publishing one shows a dialog
   (`showCraftBar`), as it is the only way to a reply there without craft mode.
 - Tests: `SharedThreadTests.swift` (`SharedPrivacyTests`, `SharedEntryFormTests`, `SharedThreadModelTests`).
   Unit tests only; not walked in the simulator.
+
+## Write tool calls wait for approval (Peter, 2026-11-12)
+
+Peter: in a thread whose history holds text the user didn't write, a write tool call (an artifact change,
+an apply) is kept by the server and "raised to the user" in a dialog with the proposed diff; every call is
+approved one by one; one reply's calls share one dialog. Dismissing it decides nothing.
+
+- Models: `Core/Models/ToolApprovals.swift` (`ToolApproval` in its two shapes, `ToolApprovalList`,
+  `ToolApprovalDecision`, `ToolApprovalGroup` with the grouping and the why-sentence,
+  `ToolCallMeta.approvalLabel`). `NodeDetail.pendingApprovals` reads `pending_approvals`.
+- Thread: `ToolApprovalsModel` and the views in `Features/Thread/ToolApprovalDialog.swift`, owned by
+  `ThreadModel.approvals`. The dialog opens by itself (0.6 s after the data, so the page's push ends first) on
+  the screen's first load with calls waiting, and after a reply on the screen finishes
+  (`GET /api/tool-approvals?node=`); later loads don't reopen it. "N changes wait for your approval · Review"
+  under the focal divider while any wait. One dialog per reply, the oldest reply (lowest turn node id) first.
+- Dialog: "Approve changes?", the kinds sentence, per call its title, "Based on vN" (artifact changes), and
+  right under them Reject / Approve (off while its request runs), so the first call's buttons are on screen
+  when the dialog opens whatever its diff (an iPhone SE included; checked in renders at 375×667 and 440×956,
+  `ToolApprovalDialogRenderingTests`). Below the buttons: "Title: <from> → <to>" / "Description: …" when the
+  call changes them (`title_change`, `description_change`; just "Title: <to>" without a previous one), and
+  the server's lines in `DiffRowsView` (`VersionDiff(lines:)`, word-refined), 22 % of the screen high
+  (120–240 pt); an apply shows the proposal text, 20 % (100–180 pt); stale calls say why and Approve is off.
+  The list of calls takes at most half the screen and flashes its scroll indicator on open. Each answer's
+  `pending` replaces the reply's calls; `failed`
+  shows its error on the call, which still waits; 404 drops it silently and refreshes the list; any other
+  error shows the server's words (or "Loore couldn't make this change…"). When the reply has none left the
+  dialog closes and the thread reloads; an approved artifact change posts `artifactsChanged`, a todo apply
+  `todoChanged`. "Later" closes it with nothing sent.
+- Actions taken: `pending_approval` rows read "<action> — Waiting for your approval" ("Waiting for approval"
+  for others), `rejected` rows "<action> — Declined"; an approved call is a normal success row.
+- Tests: `ToolApprovalTests.swift` (`ToolApprovalDecodingTests`, `ToolApprovalsModelTests`). Unit tests
+  only; the dialog was not seen on screen.

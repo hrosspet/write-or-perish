@@ -31,6 +31,13 @@ struct ThreadSheets: ViewModifier {
                     }
                 }
             }
+            // Write tool calls waiting for approval: one reply's calls per dialog.
+            .looreDialog(isPresented: Binding(get: { model.approvals.shownGroup != nil },
+                                              set: { if !$0 { model.approvals.later() } })) {
+                if let group = model.approvals.shownGroup {
+                    ToolApprovalDialog(group: group, model: model.approvals)
+                }
+            }
             .looreDialog(isPresented: $model.showPromptEditConfirm) {
                 PromptEditConfirmDialog(
                     onConfirm: {
