@@ -22,7 +22,8 @@ from backend.tests.test_user_purge import (  # noqa: F401 - fixtures
     _real_flask_login, stubs, world,
 )
 from backend.models import (
-    ApiToken, Draft, Node, Poll, ReleasedUsername,
+    ApiToken, CheckoutSession, DiscountCode, DiscountCodeAttempt,
+    DiscountRedemption, Draft, Node, Poll, ReleasedUsername,
     ShareDraft, User, UserDataPurge, UsernameHistory,
 )
 from backend.utils import account_deletion as acc
@@ -851,6 +852,13 @@ def test_after_the_grace_period_nothing_of_the_account_is_left(
     a_id = a.id
     _add(UsernameHistory(user_id=a_id, old_username="alice_old"))
     w_poll = _add(Poll(question="Hers?", created_by=a_id))
+    # Payments (#438): a code she made, its use by her (the count stays),
+    # a code she tried and a checkout she opened.
+    code = _add(DiscountCode(code="HERS-1", created_by_id=a_id))
+    _add(DiscountRedemption(code_id=code.id, user_id=a_id,
+                            stripe_subscription_id="sub_hers"))
+    _add(DiscountCodeAttempt(user_id=a_id, ok=False))
+    _add(CheckoutSession(id="cs_hers", user_id=a_id, level="standard"))
     B3 = _db.session.get(Node, world.ids["B3"])
     B3.pinned_by, B3.pinned_at = a_id, T0
     _db.session.commit()
@@ -878,6 +886,11 @@ def test_after_the_grace_period_nothing_of_the_account_is_left(
     # The job row stays, with ids and counts only.
     job = _db.session.get(UserDataPurge, job.id)
     assert job.status == "done" and job.user_id == a_id
+    # The code's use is still counted, without her.
+    red = DiscountRedemption.query.filter_by(
+        stripe_subscription_id="sub_hers").one()
+    assert red.user_id is None and red.state == "redeemed"
+    assert _db.session.get(CheckoutSession, "cs_hers") is None
     assert job.counts["user"] == 1 and job.counts["node"] == 6
     assert all(isinstance(v, int) for v in job.counts.values())
 

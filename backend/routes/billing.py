@@ -60,16 +60,17 @@ def get_billing():
 
 
 def _checkout_level(user, data):
-    """(level, redemption, None), or (None, None, the refusal)."""
-    code = (data.get("code") or "").strip()
-    if not code:
+    """(level, code, None), or (None, None, the refusal). A code takes no
+    use here: it is counted when its subscription is created."""
+    raw = (data.get("code") or "").strip()
+    if not raw:
         level = data.get("level")
         if level not in OFFERED_LEVELS:
             return None, None, (jsonify({"error": "invalid_level",
                                          "message": "Choose a level."}), 400)
         return level, None, None
     try:
-        redemption = discount_codes.redeem(user, code, current_app.config)
+        code = discount_codes.check_code(user, raw, current_app.config)
     except discount_codes.TooManyAttempts:
         return None, None, (jsonify({
             "error": "too_many_attempts",
@@ -78,7 +79,7 @@ def _checkout_level(user, data):
         return None, None, (jsonify({
             "error": "code_not_valid",
             "message": discount_codes.NOT_VALID_MESSAGE}), 400)
-    return "discounted", redemption, None
+    return "discounted", code, None
 
 
 @billing_bp.route("/checkout", methods=["POST"])
@@ -100,17 +101,20 @@ def start_checkout():
             "error": "already_subscribed",
             "message": "You have a subscription already. Manage it from "
                        "the link in Settings."}), 409
-    level, redemption, refused = _checkout_level(user, data)
+    level, code, refused = _checkout_level(user, data)
     if refused is not None:
         return refused
     try:
         gateway = stripe_billing.get_gateway()
         session = stripe_billing.create_checkout(
-            gateway, user, level, redemption=redemption)
-    except stripe_billing.BillingNotConfigured as e:
-        db.session.rollback()
-        return _unavailable(e)
-    except Exception as e:  # noqa: BLE001 - Stripe unreachable or refused
+            gateway, user, level, code=code)
+    except stripe_billing.CheckoutAlreadyCompleted:
+        # The earlier checkout was finished; the webhook is on its way.
+        return jsonify({
+            "error": "already_subscribed",
+            "message": "Your checkout is complete; your subscription is "
+                       "starting. Reload this page in a moment."}), 409
+    except Exception as e:  # noqa: BLE001 - not configured, Stripe down
         db.session.rollback()
         return _unavailable(e)
     return jsonify({"url": session.get("url")})

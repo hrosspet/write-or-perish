@@ -22,7 +22,8 @@ os.environ.setdefault("ENCRYPTION_DISABLED", "true")
 from backend.config import Config  # noqa: E402
 from backend.extensions import db as _db  # noqa: E402
 from backend.models import (  # noqa: E402
-    DiscountCodeAttempt, DiscountRedemption, StripeEvent, User)
+    CheckoutSession, DiscountCodeAttempt, DiscountRedemption, StripeEvent,
+    User)
 from backend.utils import stripe_billing  # noqa: E402
 
 SECRET = "whsec_test_secret"
@@ -39,6 +40,7 @@ class FakeGateway:
         self.products = {}
         self.prices = []
         self.portal_configs = []
+        self.invoices = {}
         self.fail = False
         self._n = 0
 
@@ -121,12 +123,29 @@ class FakeGateway:
     def create_checkout_session(self, params):
         self._call("create_checkout_session", params)
         sid = self._id("cs_test")
-        self.sessions[sid] = {"id": sid, **params}
+        self.sessions[sid] = {"id": sid, "status": "open", **params}
         return {"id": sid, "url": f"https://checkout.example/{sid}"}
 
     def retrieve_checkout_session(self, sid):
         self._call("retrieve_checkout_session", sid)
         return self.sessions[sid]
+
+    def expire_checkout_session(self, sid):
+        self._call("expire_checkout_session", sid)
+        # Stripe refuses to expire a session that is no longer open.
+        if self.sessions[sid]["status"] != "open":
+            raise RuntimeError("Only open sessions can be expired")
+        self.sessions[sid]["status"] = "expired"
+        return self.sessions[sid]
+
+    def retrieve_invoice(self, invoice_id):
+        self._call("retrieve_invoice", invoice_id)
+        return self.invoices.get(invoice_id, {"id": invoice_id,
+                                              "amount_paid": 0})
+
+    def create_refund(self, params, idempotency_key=None):
+        self._call("create_refund", params, idempotency_key)
+        return {"id": self._id("re"), **params}
 
     def create_portal_session(self, params):
         self._call("create_portal_session", params)
@@ -149,15 +168,20 @@ class FakeGateway:
 
 def subscription(sub_id="sub_1", customer="cus_1", status="active",
                  level="standard", trial=False, cancel_at_period_end=False,
-                 user_id=None, period_end=NOW + 30 * 86400):
+                 user_id=None, period_end=NOW + 30 * 86400, created=NOW,
+                 latest_invoice=None, code_id=None):
+    meta = {"loore_user_id": str(user_id)} if user_id else {}
+    if code_id is not None:
+        meta["loore_code_id"] = str(code_id)
     return {
         "id": sub_id, "object": "subscription", "customer": customer,
-        "status": status,
+        "status": status, "created": created,
+        "latest_invoice": latest_invoice,
         "cancel_at_period_end": cancel_at_period_end,
         "cancel_at": period_end if cancel_at_period_end else None,
         "trial_start": NOW if trial else None,
         "trial_end": NOW + 14 * 86400 if trial else None,
-        "metadata": {"loore_user_id": str(user_id)} if user_id else {},
+        "metadata": meta,
         "items": {"data": [{
             "current_period_end": period_end,
             "price": {"id": f"price_{level}",
@@ -531,13 +555,25 @@ class TestCheckout:
 
 # ── Discount codes ───────────────────────────────────────────────────────
 
+def _completed(app, user, sub_id, session_id, event_id):
+    """Stripe reports the checkout *session_id* completed with *sub_id*."""
+    return _post_event(app, _event("checkout.session.completed", {
+        "id": session_id, "mode": "subscription",
+        "client_reference_id": str(user.id),
+        "customer": user.stripe_customer_id, "subscription": sub_id},
+        event_id))
+
+
 class TestDiscountCodes:
     def _code(self, **kw):
         from backend.utils.discount_codes import create_code
         return create_code(code=kw.pop("code", "LOWER-1"), **kw)
 
+    def _session_id(self, r):
+        return r.get_json()["url"].rsplit("/")[-1]
+
     def test_a_code_opens_the_discounted_price(self, app, gateway):
-        self._code()
+        code = self._code()
         u = _user()
         r = _client(app, u).post("/api/billing/checkout",
                                  json={"code": " lower-1 "})
@@ -546,10 +582,13 @@ class TestDiscountCodes:
                   if c[0] == "create_checkout_session"][0][1]
         assert params["line_items"][0]["price"] == "price_discounted"
         assert params["metadata"]["loore_level"] == "discounted"
-        red = DiscountRedemption.query.one()
-        assert red.state == "pending" and red.user_id == u.id
-        assert red.checkout_session_id == r.get_json()["url"].rsplit("/")[-1]
-        assert params["metadata"]["loore_redemption_id"] == str(red.id)
+        assert params["metadata"]["loore_code_id"] == str(code.id)
+        assert params["subscription_data"]["metadata"]["loore_code_id"] == \
+            str(code.id)
+        # Opening a checkout takes no use.
+        assert DiscountRedemption.query.count() == 0
+        row = _db.session.get(CheckoutSession, self._session_id(r))
+        assert row.code_id == code.id and row.state == "open"
 
     @pytest.mark.parametrize("kind", ["unknown", "expired", "inactive",
                                       "used_up", "malformed"])
@@ -563,7 +602,8 @@ class TestDiscountCodes:
             code = self._code(max_uses=1)
             other = _user("other")
             _db.session.add(DiscountRedemption(
-                code_id=code.id, user_id=other.id, state="redeemed"))
+                code_id=code.id, user_id=other.id,
+                stripe_subscription_id="sub_other", state="redeemed"))
             _db.session.commit()
         else:
             self._code()
@@ -575,16 +615,16 @@ class TestDiscountCodes:
                                 "message": "That code is not valid."}
         assert "create_checkout_session" not in gateway.names()
 
-    def test_stale_pending_uses_do_not_count(self, app, gateway):
-        code = self._code(max_uses=1)
-        other = _user("other")
-        _db.session.add(DiscountRedemption(
-            code_id=code.id, user_id=other.id, state="pending",
-            created_at=datetime.utcnow() - timedelta(hours=25)))
-        _db.session.commit()
-        r = _client(app, _user()).post("/api/billing/checkout",
-                                       json={"code": "LOWER-1"})
-        assert r.status_code == 200
+    def test_an_abandoned_checkout_takes_nothing(self, app, gateway):
+        self._code(max_uses=1)
+        assert _client(app, _user("a")).post(
+            "/api/billing/checkout",
+            json={"code": "LOWER-1"}).status_code == 200
+        # Never completed: the next account still gets the code.
+        assert _client(app, _user("b")).post(
+            "/api/billing/checkout",
+            json={"code": "LOWER-1"}).status_code == 200
+        assert DiscountRedemption.query.count() == 0
 
     def test_rate_limit(self, app, gateway):
         app.config["DISCOUNT_CODE_ATTEMPTS_PER_HOUR"] = 3
@@ -598,31 +638,237 @@ class TestDiscountCodes:
         assert r.get_json()["error"] == "too_many_attempts"
         assert DiscountCodeAttempt.query.count() == 3
 
-    def test_checkout_events_settle_the_redemption(self, app, gateway):
+    def test_the_use_is_counted_once_when_the_subscription_starts(
+            self, app, gateway):
+        from backend.utils.discount_codes import uses
         code = self._code(max_uses=5)
-        u = _user(stripe_customer_id="cus_1")
-        red = DiscountRedemption(code_id=code.id, user_id=u.id,
-                                 state="pending", checkout_session_id="cs_1")
-        red2 = DiscountRedemption(code_id=code.id, user_id=u.id,
-                                  state="pending", checkout_session_id="cs_2")
-        _db.session.add_all([red, red2])
-        _db.session.commit()
-        gateway.subscriptions["sub_1"] = subscription(level="discounted")
-        done = {"id": "cs_1", "mode": "subscription",
-                "client_reference_id": str(u.id), "customer": "cus_1",
-                "subscription": "sub_1",
-                "metadata": {"loore_redemption_id": str(red.id)}}
-        assert _post_event(app, _event("checkout.session.completed", done)
-                           ).status_code == 200
-        expired = {"id": "cs_2", "mode": "subscription",
-                   "metadata": {"loore_redemption_id": str(red2.id)}}
-        assert _post_event(app, _event("checkout.session.expired", expired,
-                                       "evt_2")).status_code == 200
-        assert _db.session.get(DiscountRedemption, red.id).state == "redeemed"
-        assert _db.session.get(DiscountRedemption, red2.id).state == "expired"
+        u = _user()
+        r = _client(app, u).post("/api/billing/checkout",
+                                 json={"code": "LOWER-1"})
+        sid = self._session_id(r)
+        u = _db.session.get(User, u.id)
+        gateway.subscriptions["sub_1"] = subscription(
+            customer=u.stripe_customer_id, level="discounted",
+            code_id=code.id)
+        assert _completed(app, u, "sub_1", sid, "evt_1").status_code == 200
+        _post_event(app, _event("customer.subscription.created",
+                                {"id": "sub_1"}, "evt_2"))
+        _post_event(app, _event("invoice.paid", {
+            "id": "in_1", "subscription": "sub_1"}, "evt_3"))
+        assert uses(code) == 1
+        red = DiscountRedemption.query.one()
+        assert red.stripe_subscription_id == "sub_1" and red.user_id == u.id
+        assert _db.session.get(CheckoutSession, sid).state == "complete"
         user = _db.session.get(User, u.id)
         assert user.subscription_level == "discounted"
+
+    def test_one_account_two_checkouts_one_use(self, app, gateway):
+        from backend.utils.discount_codes import uses
+        code = self._code(max_uses=2)
+        u = _user()
+        c = _client(app, u)
+        first = self._session_id(c.post("/api/billing/checkout",
+                                        json={"code": "LOWER-1"}))
+        second = self._session_id(c.post("/api/billing/checkout",
+                                         json={"code": "LOWER-1"}))
+        # The second checkout expired the first at Stripe.
+        assert ("expire_checkout_session", first) in gateway.calls
+        assert gateway.sessions[first]["status"] == "expired"
+        assert _db.session.get(CheckoutSession, first).state == "expired"
+        u = _db.session.get(User, u.id)
+        gateway.subscriptions["sub_1"] = subscription(
+            customer=u.stripe_customer_id, level="discounted",
+            code_id=code.id)
+        _completed(app, u, "sub_1", second, "evt_1")
+        assert uses(code) == 1
+
+    def test_code_with_one_use_left_opened_in_two_accounts(self, app,
+                                                           gateway):
+        from backend.utils.discount_codes import uses
+        code = self._code(max_uses=1)
+        a, b = _user("a"), _user("b")
+        sa = self._session_id(_client(app, a).post(
+            "/api/billing/checkout", json={"code": "LOWER-1"}))
+        sb = self._session_id(_client(app, b).post(
+            "/api/billing/checkout", json={"code": "LOWER-1"}))
+        a = _db.session.get(User, a.id)
+        gateway.subscriptions["sub_a"] = subscription(
+            "sub_a", a.stripe_customer_id, level="discounted",
+            code_id=code.id)
+        _completed(app, a, "sub_a", sa, "evt_a")
+        assert uses(code) == 1
+        # The last use went to a: b's open checkout is expired at Stripe.
+        assert gateway.sessions[sb]["status"] == "expired"
+        assert _db.session.get(CheckoutSession, sb).state == "expired"
+        # A third account is told the code is not valid.
+        r = _client(app, _user("c")).post("/api/billing/checkout",
+                                          json={"code": "LOWER-1"})
+        assert r.status_code == 400
+
+    def test_two_accounts_completing_at_once_are_both_kept(
+            self, app, gateway):
+        # b finished before a's use expired b's checkout: b paid the price
+        # Checkout showed, so it is kept and counted over the limit.
+        from backend.utils.discount_codes import uses
+        code = self._code(max_uses=1)
+        a, b = _user("a"), _user("b")
+        sa = self._session_id(_client(app, a).post(
+            "/api/billing/checkout", json={"code": "LOWER-1"}))
+        sb = self._session_id(_client(app, b).post(
+            "/api/billing/checkout", json={"code": "LOWER-1"}))
+        gateway.sessions[sb]["status"] = "complete"
+        a = _db.session.get(User, a.id)
+        b = _db.session.get(User, b.id)
+        gateway.subscriptions["sub_a"] = subscription(
+            "sub_a", a.stripe_customer_id, level="discounted",
+            code_id=code.id)
+        gateway.subscriptions["sub_b"] = subscription(
+            "sub_b", b.stripe_customer_id, level="discounted",
+            code_id=code.id)
+        _completed(app, a, "sub_a", sa, "evt_a")
+        assert _db.session.get(CheckoutSession, sb).state == "complete"
+        _completed(app, b, "sub_b", sb, "evt_b")
+        assert uses(code) == 2
+        assert "cancel_subscription" not in gateway.names()
+        assert _db.session.get(User, b.id).subscription_status == "active"
+
+
+# ── One subscription and one trial per account ──────────────────────────
+
+class TestOneSubscription:
+    def test_a_new_checkout_expires_the_open_one(self, app, gateway):
+        u = _user()
+        c = _client(app, u)
+        r1 = c.post("/api/billing/checkout", json={"level": "standard"})
+        r2 = c.post("/api/billing/checkout", json={"level": "supporter"})
+        s1 = r1.get_json()["url"].rsplit("/")[-1]
+        s2 = r2.get_json()["url"].rsplit("/")[-1]
+        assert gateway.sessions[s1]["status"] == "expired"
+        assert gateway.sessions[s2]["status"] == "open"
+        states = {row.id: row.state for row in CheckoutSession.query.all()}
+        assert states == {s1: "expired", s2: "open"}
+
+    def test_a_completed_checkout_blocks_the_next(self, app, gateway):
+        # Completed in another tab; the webhook has not arrived yet.
+        u = _user()
+        c = _client(app, u)
+        r1 = c.post("/api/billing/checkout", json={"level": "standard"})
+        s1 = r1.get_json()["url"].rsplit("/")[-1]
+        gateway.sessions[s1]["status"] = "complete"
+        r2 = c.post("/api/billing/checkout", json={"level": "standard"})
+        assert r2.status_code == 409
+        assert r2.get_json()["error"] == "already_subscribed"
+        assert gateway.names().count("create_checkout_session") == 1
+        assert _db.session.get(CheckoutSession, s1).state == "complete"
+
+    def test_stripe_down_while_closing_the_open_one(self, app, gateway):
+        u = _user()
+        c = _client(app, u)
+        c.post("/api/billing/checkout", json={"level": "standard"})
+        gateway.fail = True
+        r = c.post("/api/billing/checkout", json={"level": "standard"})
+        assert r.status_code == 503
+        gateway.fail = False
+        assert gateway.names().count("create_checkout_session") == 1
+
+    @pytest.mark.parametrize("order", ["older_first", "newer_first"])
+    def test_two_sessions_both_completed(self, app, gateway, order):
+        # Two subscriptions for one account, whatever slipped through: the
+        # one created first is kept, the later one is cancelled and its
+        # payment refunded, in either arrival order.
+        u = _user(stripe_customer_id="cus_1")
+        gateway.subscriptions["sub_old"] = subscription(
+            "sub_old", created=NOW - 60, latest_invoice="in_old")
+        gateway.subscriptions["sub_new"] = subscription(
+            "sub_new", created=NOW, latest_invoice="in_new")
+        gateway.invoices["in_new"] = {
+            "id": "in_new", "amount_paid": 3000,
+            "payments": {"data": [{"payment": {
+                "type": "payment_intent", "payment_intent": "pi_new"}}]}}
+        gateway.invoices["in_old"] = {"id": "in_old", "amount_paid": 3000}
+        first, second = (("sub_old", "sub_new") if order == "older_first"
+                         else ("sub_new", "sub_old"))
+        _completed(app, u, first, "cs_x", "evt_1")
+        _completed(app, u, second, "cs_y", "evt_2")
+        # The cancellation's own event changes nothing more.
+        _post_event(app, _event("customer.subscription.deleted",
+                                {"id": "sub_new"}, "evt_3"))
+        user = _db.session.get(User, u.id)
+        assert user.stripe_subscription_id == "sub_old"
         assert user.subscription_status == "active"
+        assert gateway.subscriptions["sub_new"]["status"] == "canceled"
+        assert gateway.subscriptions["sub_old"]["status"] == "active"
+        cancels = [c for c in gateway.calls if c[0] == "cancel_subscription"]
+        assert cancels == [("cancel_subscription", "sub_new")]
+        refunds = [c for c in gateway.calls if c[0] == "create_refund"]
+        assert refunds == [("create_refund",
+                            {"payment_intent": "pi_new",
+                             "reason": "duplicate"},
+                            "loore-duplicate-sub_new")]
+
+    def test_a_duplicate_gives_its_code_use_back(self, app, gateway):
+        from backend.utils.discount_codes import create_code, uses
+        code = create_code(code="LOWER-1", max_uses=3)
+        u = _user(stripe_customer_id="cus_1")
+        gateway.subscriptions["sub_old"] = subscription(
+            "sub_old", created=NOW - 60, level="discounted", code_id=code.id)
+        gateway.subscriptions["sub_new"] = subscription(
+            "sub_new", created=NOW, level="discounted", code_id=code.id)
+        _completed(app, u, "sub_new", "cs_x", "evt_1")
+        assert uses(code) == 1
+        _completed(app, u, "sub_old", "cs_y", "evt_2")
+        assert uses(code) == 1
+        states = {r.stripe_subscription_id: r.state
+                  for r in DiscountRedemption.query.all()}
+        assert states == {"sub_new": "void", "sub_old": "redeemed"}
+
+    def test_trial_used_then_a_second_checkout(self, app, gateway):
+        u = _user(stripe_customer_id="cus_1")
+        gateway.subscriptions["sub_1"] = subscription(
+            "sub_1", status="trialing", trial=True)
+        _post_event(app, _event("customer.subscription.created",
+                                {"id": "sub_1"}, "evt_1"))
+        user = _db.session.get(User, u.id)
+        assert user.subscription_trial_used is True
+        assert user.subscription_trial_sub_id == "sub_1"
+        # The trial ends without payment; the next checkout has no trial.
+        gateway.subscriptions["sub_1"]["status"] = "canceled"
+        _post_event(app, _event("customer.subscription.deleted",
+                                {"id": "sub_1"}, "evt_2"))
+        _client(app, user).post("/api/billing/checkout",
+                                json={"level": "standard"})
+        params = [c for c in gateway.calls
+                  if c[0] == "create_checkout_session"][-1][1]
+        assert "trial_period_days" not in params["subscription_data"]
+
+    def test_a_second_trial_is_cancelled(self, app, gateway):
+        u = _user(stripe_customer_id="cus_1", stripe_subscription_id="sub_1",
+                  subscription_status="ended", subscription_level="standard",
+                  subscription_trial_used=True,
+                  subscription_trial_sub_id="sub_1")
+        gateway.subscriptions["sub_1"] = subscription(
+            "sub_1", status="canceled", trial=True)
+        gateway.subscriptions["sub_2"] = subscription(
+            "sub_2", status="trialing", trial=True, latest_invoice="in_2")
+        _post_event(app, _event("customer.subscription.created",
+                                {"id": "sub_2"}, "evt_1"))
+        user = _db.session.get(User, u.id)
+        assert gateway.subscriptions["sub_2"]["status"] == "canceled"
+        assert user.subscription_status == "ended"
+        assert not user.on_paid_plan
+        # Nothing was charged during the trial: nothing to refund.
+        assert "create_refund" not in gateway.names()
+        assert user.subscription_trial_sub_id == "sub_1"
+
+    def test_the_trial_holder_keeps_its_trial(self, app, gateway):
+        u = _user(stripe_customer_id="cus_1")
+        gateway.subscriptions["sub_1"] = subscription(
+            "sub_1", status="trialing", trial=True)
+        for n in range(3):
+            _post_event(app, _event("customer.subscription.updated",
+                                    {"id": "sub_1"}, f"evt_{n}"))
+        assert "cancel_subscription" not in gateway.names()
+        assert _db.session.get(User, u.id).subscription_status == "trialing"
 
 
 # ── The webhook ──────────────────────────────────────────────────────────

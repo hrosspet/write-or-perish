@@ -1503,7 +1503,7 @@ def _code_row(code, now):
         "id": code.id,
         "code": code.code,
         "max_uses": code.max_uses,
-        "uses": uses(code, now),
+        "uses": uses(code),
         "expires_at": iso_utc(code.expires_at),
         # The last day the code works (it stops at the end of it, UTC).
         "expires_on": ((code.expires_at - timedelta(seconds=1)).strftime(

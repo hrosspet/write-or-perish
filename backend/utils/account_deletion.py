@@ -54,7 +54,8 @@ from sqlalchemy import func, null, or_
 
 from backend.extensions import db
 from backend.models import (
-    ApiToken, ChangelogReadState, DiscountCode, DiscountCodeAttempt,
+    ApiToken, ChangelogReadState, CheckoutSession, DiscountCode,
+    DiscountCodeAttempt,
     DiscountRedemption, Node, Poll, ReleasedUsername, User, UserDataPurge,
     UsernameHistory,
 )
@@ -623,7 +624,7 @@ def delete_identity(user_id):
     # Stripe first; while Stripe can't be reached the deletion waits and
     # is tried again. Stripe keeps its own records of the purchase (it is
     # the merchant of record). A code's uses stay counted without the
-    # account; the codes the account tried go.
+    # account; the codes the account tried and its checkouts go.
     from backend.utils.stripe_billing import cancel_for_purge
     try:
         if cancel_for_purge(user):
@@ -639,6 +640,8 @@ def delete_identity(user_id):
         {DiscountCode.created_by_id: None}, synchronize_session=False)
     counts["discount_code_attempt"] += DiscountCodeAttempt.query.filter(
         DiscountCodeAttempt.user_id == U).delete(synchronize_session=False)
+    counts["checkout_session"] += CheckoutSession.query.filter(
+        CheckoutSession.user_id == U).delete(synchronize_session=False)
 
     handles = {(user.username or "").lower()}
     handles.update(h for (h,) in db.session.query(

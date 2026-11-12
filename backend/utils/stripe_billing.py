@@ -18,14 +18,13 @@ what its state is, so events may arrive in any order. It never writes
 """
 import logging
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from flask import current_app, has_app_context
 
 from backend.extensions import db
 from backend.models import (
-    SUBSCRIPTION_GRANTING_STATUSES, SUBSCRIPTION_LEVELS, DiscountRedemption,
-    User)
+    SUBSCRIPTION_GRANTING_STATUSES, SUBSCRIPTION_LEVELS, CheckoutSession, User)
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +142,19 @@ class StripeGateway:
 
     def retrieve_checkout_session(self, session_id):
         return plain(self.client.v1.checkout.sessions.retrieve(session_id))
+
+    def expire_checkout_session(self, session_id):
+        return plain(self.client.v1.checkout.sessions.expire(session_id))
+
+    def retrieve_invoice(self, invoice_id):
+        return plain(self.client.v1.invoices.retrieve(
+            invoice_id, params={"expand": ["payments"]}))
+
+    def create_refund(self, params, idempotency_key=None):
+        options = {"idempotency_key": idempotency_key} if idempotency_key \
+            else None
+        return plain(self.client.v1.refunds.create(params=params,
+                                                   options=options))
 
     def create_portal_session(self, params):
         return plain(self.client.v1.billing_portal.sessions.create(
@@ -351,13 +363,18 @@ def ensure_customer(gateway, user):
     return user.stripe_customer_id
 
 
+class CheckoutAlreadyCompleted(Exception):
+    """The account's open checkout was completed: its subscription is on
+    its way (the webhook has not arrived yet), so no other opens."""
+
+
 def checkout_session_params(user, level, price_id, config=None,
-                            redemption_id=None):
+                            code_id=None):
     cfg = _config(config)
     frontend = (cfg.get("FRONTEND_URL") or "").rstrip("/")
     meta = {"loore_user_id": str(user.id), "loore_level": level}
-    if redemption_id is not None:
-        meta["loore_redemption_id"] = str(redemption_id)
+    if code_id is not None:
+        meta["loore_code_id"] = str(code_id)
     subscription_data = {"metadata": dict(meta)}
     trial_days = int(cfg.get("SUBSCRIPTION_TRIAL_DAYS") or 0)
     if trial_days > 0 and not user.subscription_trial_used:
@@ -376,18 +393,52 @@ def checkout_session_params(user, level, price_id, config=None,
     }
 
 
-def create_checkout(gateway, user, level, config=None, redemption=None):
-    """A Stripe-hosted Checkout Session for *user* at *level*, with the
-    trial when the account has not had one. Returns the session (its
-    ``url`` is where the browser goes)."""
+def expire_session(gateway, row):
+    """Expire one of Loore's open sessions at Stripe and record what it
+    is now: "expired", or "complete" when the buyer finished it first
+    (Stripe refuses to expire a session that is no longer open). Raises
+    when Stripe can't be reached, or keeps an open session open."""
+    try:
+        gateway.expire_checkout_session(row.id)
+        row.state = "expired"
+        return row.state
+    except Exception:  # noqa: BLE001 - read what the session is now
+        status = (gateway.retrieve_checkout_session(row.id) or {}).get(
+            "status")
+        if status == "open":
+            raise
+    row.state = "complete" if status == "complete" else "expired"
+    return row.state
+
+
+def create_checkout(gateway, user, level, config=None, code=None):
+    """A Stripe-hosted Checkout Session for *user* at *level* (*code*: the
+    discount code that opened it), with the trial when the account has not
+    had one. The account's earlier open session is expired first, so only
+    one can ever be completed; raises CheckoutAlreadyCompleted when it was
+    completed already. Returns the session (its ``url`` is where the
+    browser goes). Commits."""
     price_id = price_id_for_level(gateway, level)
     ensure_customer(gateway, user)
+    # One open checkout per account, also for two presses at once. Read
+    # the account again under the lock: a webhook may have just started
+    # its subscription or used its trial.
+    db.session.query(User).filter(User.id == user.id).with_for_update().one()
+    db.session.refresh(user)
+    completed = user.subscription_grants_access
+    for row in CheckoutSession.query.filter_by(user_id=user.id,
+                                               state="open").all():
+        completed = expire_session(gateway, row) == "complete" or completed
+    if completed:
+        db.session.commit()
+        raise CheckoutAlreadyCompleted()
     session = gateway.create_checkout_session(checkout_session_params(
         user, level, price_id, config,
-        redemption_id=redemption.id if redemption is not None else None))
-    if redemption is not None:
-        redemption.checkout_session_id = session["id"]
-        db.session.commit()
+        code_id=code.id if code is not None else None))
+    db.session.add(CheckoutSession(
+        id=session["id"], user_id=user.id, level=level,
+        code_id=code.id if code is not None else None, state="open"))
+    db.session.commit()
     return session
 
 
@@ -472,6 +523,8 @@ def apply_subscription(sub, config=None):
     user.subscription_cancel_at_period_end = cancelling and status != "ended"
     if sub.get("trial_end") or sub.get("trial_start"):
         user.subscription_trial_used = True
+        if not user.subscription_trial_sub_id:
+            user.subscription_trial_sub_id = sub.get("id")
     if not user.stripe_customer_id:
         customer = sub.get("customer")
         user.stripe_customer_id = (customer.get("id")
@@ -481,10 +534,133 @@ def apply_subscription(sub, config=None):
     return user
 
 
+def _granting(sub):
+    return STATUS_MAP.get(sub.get("status"), "none") in \
+        SUBSCRIPTION_GRANTING_STATUSES
+
+
+def _order_key(sub):
+    """Which of two subscriptions of one account is kept: the one created
+    first, then the smaller id, whatever order their events arrive in."""
+    return (int(sub.get("created") or 0), sub.get("id") or "")
+
+
+def _payment_intent_of(invoice):
+    pi = invoice.get("payment_intent")
+    for entry in ((invoice.get("payments") or {}).get("data") or []):
+        payment = entry.get("payment") or {}
+        pi = payment.get("payment_intent") or pi
+    if isinstance(pi, dict):
+        pi = pi.get("id")
+    return pi
+
+
+def refund_latest_payment(gateway, sub):
+    """Refund what the subscription's latest invoice charged, once (the
+    refund's idempotency key is the subscription). Returns the refund, or
+    None when nothing was charged."""
+    invoice_id = sub.get("latest_invoice")
+    if isinstance(invoice_id, dict):
+        invoice_id = invoice_id.get("id")
+    if not invoice_id:
+        return None
+    invoice = gateway.retrieve_invoice(invoice_id)
+    if not invoice.get("amount_paid"):
+        return None
+    pi = _payment_intent_of(invoice)
+    if not pi:
+        logger.error("Duplicate subscription %s: paid invoice without a "
+                     "payment to refund", sub.get("id"))
+        return None
+    return gateway.create_refund(
+        {"payment_intent": pi, "reason": "duplicate"},
+        idempotency_key=f"loore-duplicate-{sub.get('id')}")
+
+
+def cancel_duplicate(gateway, sub):
+    """Cancel a subscription the account must not keep, refund what it
+    charged, and give back the code use it took. Returns it cancelled."""
+    from backend.utils import discount_codes
+    cancelled = gateway.cancel_subscription(sub["id"])
+    refund_latest_payment(gateway, sub)
+    discount_codes.void_use(sub["id"])
+    return cancelled
+
+
+def _record_code_use(gateway, user, sub):
+    """The code that opened a kept subscription takes one use; when that
+    was its last, other accounts' open checkouts with it are expired."""
+    from backend.utils import discount_codes
+    raw = (sub.get("metadata") or {}).get("loore_code_id")
+    try:
+        code_id = int(raw) if raw else None
+    except (TypeError, ValueError):
+        code_id = None
+    if code_id is None:
+        return
+    code, used_up = discount_codes.record_use(code_id, user.id, sub["id"])
+    if not used_up:
+        return
+    for row in CheckoutSession.query.filter(
+            CheckoutSession.code_id == code.id,
+            CheckoutSession.state == "open",
+            CheckoutSession.user_id != user.id).all():
+        expire_session(gateway, row)
+
+
+def settle_subscription(gateway, sub, config=None):
+    """Apply *sub* (just read from Stripe) to its account, keeping one
+    subscription and one trial per account:
+
+    * a second subscription that gives access while the account's current
+      one still does: the one created later is cancelled and what it
+      charged refunded, whichever arrives first;
+    * a subscription still in a trial for an account whose trial another
+      subscription used: cancelled (nothing was charged yet);
+    * the code that opened a kept subscription takes its use now.
+
+    Returns the account (None when the subscription belongs to none).
+    Does not commit."""
+    user = _user_for_subscription(sub)
+    if user is None:
+        logger.warning("Stripe subscription %s belongs to no account",
+                       sub.get("id"))
+        return None
+    sub_id = sub.get("id")
+    if _granting(sub):
+        current_id = user.stripe_subscription_id
+        if current_id and current_id != sub_id:
+            current = gateway.retrieve_subscription(current_id)
+            if _granting(current):
+                keep, drop = sorted([current, sub], key=_order_key)
+                logger.warning("User %s has two subscriptions: %s kept, "
+                               "%s cancelled", user.id, keep.get("id"),
+                               drop.get("id"))
+                cancel_duplicate(gateway, drop)
+                if user.subscription_trial_sub_id == drop.get("id"):
+                    user.subscription_trial_sub_id = None
+                apply_subscription(keep, config)
+                _record_code_use(gateway, user, keep)
+                return user
+        if (sub.get("status") == "trialing"
+                and user.subscription_trial_used
+                and user.subscription_trial_sub_id not in (None, sub_id)):
+            logger.warning("User %s: a second trial (%s) cancelled; %s had "
+                           "the trial", user.id, sub_id,
+                           user.subscription_trial_sub_id)
+            cancelled = cancel_duplicate(gateway, sub)
+            apply_subscription(cancelled, config)
+            return user
+    apply_subscription(sub, config)
+    if _granting(sub):
+        _record_code_use(gateway, user, sub)
+    return user
+
+
 def sync_subscription(gateway, subscription_id, config=None):
-    """Read the subscription from Stripe and apply it. Commits."""
+    """Read the subscription from Stripe and settle it. Commits."""
     sub = gateway.retrieve_subscription(subscription_id)
-    user = apply_subscription(sub, config)
+    user = settle_subscription(gateway, sub, config)
     db.session.commit()
     return user
 
@@ -520,20 +696,10 @@ CHECKOUT_EVENTS = {"checkout.session.completed", "checkout.session.expired"}
 HANDLED_EVENTS = SUBSCRIPTION_EVENTS | INVOICE_EVENTS | CHECKOUT_EVENTS
 
 
-def _set_redemption(session, state):
-    raw = (session.get("metadata") or {}).get("loore_redemption_id")
-    try:
-        redemption = db.session.get(DiscountRedemption, int(raw)) if raw \
-            else None
-    except (TypeError, ValueError):
-        redemption = None
-    if redemption is None or redemption.state == "redeemed":
-        return
-    redemption.state = state
-    if state == "redeemed":
-        redemption.redeemed_at = datetime.utcnow()
-    if not redemption.checkout_session_id:
-        redemption.checkout_session_id = session.get("id")
+def _set_checkout_state(session, state):
+    row = db.session.get(CheckoutSession, session.get("id") or "")
+    if row is not None and row.state == "open":
+        row.state = state
 
 
 def _checkout_user(session):
@@ -571,17 +737,18 @@ def handle_event(gateway, event, config=None):
         if obj.get("mode") != "subscription":
             return "ignored"
         if etype == "checkout.session.expired":
-            _set_redemption(obj, "expired")
+            _set_checkout_state(obj, "expired")
             return "applied"
+        _set_checkout_state(obj, "complete")
         user = _checkout_user(obj)
         if user is None:
             return "no_account"
-        _set_redemption(obj, "redeemed")
         sub_id = obj.get("subscription")
         if isinstance(sub_id, dict):
             sub_id = sub_id.get("id")
         if sub_id:
-            apply_subscription(gateway.retrieve_subscription(sub_id), config)
+            settle_subscription(
+                gateway, gateway.retrieve_subscription(sub_id), config)
         return "applied"
     if etype in INVOICE_EVENTS:
         sub_id = subscription_id_of_invoice(obj)
@@ -589,7 +756,8 @@ def handle_event(gateway, event, config=None):
         sub_id = obj.get("id")
     if not sub_id:
         return "ignored"
-    user = apply_subscription(gateway.retrieve_subscription(sub_id), config)
+    user = settle_subscription(
+        gateway, gateway.retrieve_subscription(sub_id), config)
     return "applied" if user is not None else "no_account"
 
 
@@ -628,10 +796,3 @@ def cancel_for_purge(user, config=None):
     sub = gateway.cancel_subscription(user.stripe_subscription_id)
     apply_subscription(sub, config)
     return True
-
-
-def recent_pending_cutoff(now=None):
-    """Pending redemptions older than this no longer count as uses: a
-    Checkout Session expires after 24 hours, and the expiry event may
-    have been missed."""
-    return (now or datetime.utcnow()) - timedelta(hours=24)

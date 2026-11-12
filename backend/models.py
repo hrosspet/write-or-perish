@@ -163,6 +163,9 @@ class User(db.Model, UserMixin):
     subscription_trial_used = db.Column(
         db.Boolean, nullable=False, default=False,
         server_default=db.text("false"))
+    # The subscription that used the trial: another subscription that
+    # still arrives with a trial is cancelled (stripe_billing).
+    subscription_trial_sub_id = db.Column(db.String(255), nullable=True)
 
     # Per-user monthly spend hard cap (issue: free-alpha guardrail). Stores the
     # "YYYY-MM" (UTC) in which the user crossed PER_USER_MONTHLY_LIMIT_USD. While
@@ -2464,10 +2467,11 @@ class DiscountCode(db.Model):
 
 
 class DiscountRedemption(db.Model):
-    """One account's use of a discount code: "pending" from the checkout
-    it started until Stripe reports the checkout completed ("redeemed")
-    or expired ("expired"). An account deletion keeps the row without
-    the account, so a code's use count stays right."""
+    """A use of a discount code: written once, when the subscription the
+    code opened is created and kept (never when a checkout is opened), one
+    row per subscription. "void" when that subscription was cancelled as
+    a duplicate, which gives the use back. An account deletion keeps the
+    row without the account, so a code's use count stays right."""
     __tablename__ = "discount_redemption"
 
     id = db.Column(db.Integer, primary_key=True)
@@ -2475,12 +2479,31 @@ class DiscountRedemption(db.Model):
                         nullable=False, index=True)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
                         nullable=True, index=True)
-    checkout_session_id = db.Column(db.String(255), nullable=True,
-                                    index=True)
-    state = db.Column(db.String(16), nullable=False, default="pending")
+    stripe_subscription_id = db.Column(db.String(255), nullable=False,
+                                       unique=True)
+    state = db.Column(db.String(16), nullable=False, default="redeemed")
     created_at = db.Column(db.DateTime, nullable=False,
                            default=datetime.utcnow)
-    redeemed_at = db.Column(db.DateTime, nullable=True)
+
+
+class CheckoutSession(db.Model):
+    """A Stripe Checkout Session Loore opened (#438). An account has at
+    most one "open" at a time: opening another expires the one before at
+    Stripe, so only one can be completed. A session that carries a
+    discount code is expired when the code's last use goes to someone
+    else. Ids, the level and the code only."""
+    __tablename__ = "checkout_session"
+
+    id = db.Column(db.String(255), primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=False, index=True)
+    level = db.Column(db.String(16), nullable=False)
+    code_id = db.Column(db.Integer, db.ForeignKey("discount_code.id"),
+                        nullable=True, index=True)
+    # "open", "complete" or "expired".
+    state = db.Column(db.String(16), nullable=False, default="open")
+    created_at = db.Column(db.DateTime, nullable=False,
+                           default=datetime.utcnow)
 
 
 class DiscountCodeAttempt(db.Model):

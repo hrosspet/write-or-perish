@@ -1,17 +1,24 @@
 """Loore's own discount codes (#438): a code opens the discounted price.
 
-A user types the code in Settings; checkout_with_code checks it and the
-checkout starts at the discounted price (no Stripe promotion code). The
-answer to a code that does not open the price is always the same "not
-valid", whether the code is unknown, used up, expired or switched off,
-and an account may try DISCOUNT_CODE_ATTEMPTS_PER_HOUR wrong codes an
-hour.
+A user types the code in Settings; check_code looks at it and the checkout
+starts at the discounted price (no Stripe promotion code). The answer to a
+code that does not open the price is always the same "not valid", whether
+the code is unknown, used up, expired or switched off, and an account may
+try DISCOUNT_CODE_ATTEMPTS_PER_HOUR wrong codes an hour.
+
+A use is counted once, when the subscription the code opened is created
+and kept (record_use, from the webhook), never when a checkout is opened:
+an abandoned checkout takes nothing, and since an account has one open
+checkout at a time it cannot hold several uses. When a code's last use is
+taken, the other accounts' open checkouts with it are expired
+(stripe_billing.settle_subscription), so at most the checkouts completed
+in the same moment can go over the limit; they are kept and counted.
 """
 import re
 import secrets
 from datetime import datetime, timedelta
 
-from sqlalchemy import func, or_
+from sqlalchemy import func
 
 from backend.extensions import db
 from backend.models import DiscountCode, DiscountCodeAttempt, DiscountRedemption
@@ -47,19 +54,18 @@ def generate_code():
             return code
 
 
-def uses(code, now=None, exclude_user_id=None):
-    """Checkouts that count against the code: completed ones, and ones
-    started in the last 24 hours that have not expired."""
-    from backend.utils.stripe_billing import recent_pending_cutoff
-    q = db.session.query(func.count(DiscountRedemption.id)).filter(
+def uses(code):
+    """Subscriptions the code opened and Loore kept."""
+    return db.session.query(func.count(DiscountRedemption.id)).filter(
         DiscountRedemption.code_id == code.id,
-        or_(DiscountRedemption.state == "redeemed",
-            (DiscountRedemption.state == "pending")
-            & (DiscountRedemption.created_at >= recent_pending_cutoff(now))))
-    if exclude_user_id is not None:
-        q = q.filter(or_(DiscountRedemption.user_id.is_(None),
-                         DiscountRedemption.user_id != exclude_user_id))
-    return q.scalar() or 0
+        DiscountRedemption.state == "redeemed").scalar() or 0
+
+
+def usable(code, now=None):
+    now = now or datetime.utcnow()
+    return bool(code is not None and code.active
+                and (code.expires_at is None or code.expires_at > now)
+                and (code.max_uses is None or uses(code) < code.max_uses))
 
 
 def _check_rate(user_id, limit, now):
@@ -72,39 +78,54 @@ def _check_rate(user_id, limit, now):
         raise TooManyAttempts()
 
 
-def redeem(user, raw_code, config, now=None):
-    """Check *raw_code* for *user* and hold one use of it for the checkout
-    about to start: returns the pending DiscountRedemption (the user's
-    own pending one when they try again). Raises TooManyAttempts or
-    CodeNotValid. Commits the attempt either way."""
+def check_code(user, raw_code, config, now=None):
+    """The code *user* typed, if it opens the discounted price now.
+    Raises TooManyAttempts or CodeNotValid. Takes no use. Commits the
+    attempt either way."""
     now = now or datetime.utcnow()
     limit = int(config.get("DISCOUNT_CODE_ATTEMPTS_PER_HOUR") or 10)
     _check_rate(user.id, limit, now)
     code_text = normalize(raw_code)
-    code = None
-    if CODE_RE.match(code_text):
-        code = DiscountCode.query.filter_by(code=code_text).with_for_update(
-        ).first()
-    ok = bool(
-        code is not None and code.active
-        and (code.expires_at is None or code.expires_at > now)
-        and (code.max_uses is None
-             or uses(code, now, exclude_user_id=user.id) < code.max_uses))
+    code = DiscountCode.query.filter_by(code=code_text).first() \
+        if CODE_RE.match(code_text) else None
+    ok = usable(code, now)
     db.session.add(DiscountCodeAttempt(user_id=user.id, created_at=now,
                                        ok=ok))
-    if not ok:
-        db.session.commit()
-        raise CodeNotValid()
-    redemption = DiscountRedemption.query.filter_by(
-        code_id=code.id, user_id=user.id, state="pending").first()
-    if redemption is None:
-        redemption = DiscountRedemption(code_id=code.id, user_id=user.id,
-                                        state="pending", created_at=now)
-        db.session.add(redemption)
-    else:
-        redemption.created_at = now
     db.session.commit()
-    return redemption
+    if not ok:
+        raise CodeNotValid()
+    return code
+
+
+def record_use(code_id, user_id, subscription_id):
+    """Count the use of a kept subscription the code opened, once per
+    subscription. Returns (the code, whether this took its last use).
+    Does not commit."""
+    code = DiscountCode.query.filter_by(id=code_id).with_for_update().first()
+    if code is None:
+        return None, False
+    row = DiscountRedemption.query.filter_by(
+        stripe_subscription_id=subscription_id).first()
+    if row is None:
+        db.session.add(DiscountRedemption(
+            code_id=code.id, user_id=user_id,
+            stripe_subscription_id=subscription_id, state="redeemed"))
+    elif row.state != "redeemed":
+        row.state = "redeemed"
+    else:
+        return code, False
+    db.session.flush()
+    used_up = code.max_uses is not None and uses(code) >= code.max_uses
+    return code, used_up
+
+
+def void_use(subscription_id):
+    """The subscription was cancelled as a duplicate: its use goes back.
+    Does not commit."""
+    row = DiscountRedemption.query.filter_by(
+        stripe_subscription_id=subscription_id).first()
+    if row is not None:
+        row.state = "void"
 
 
 def create_code(*, code=None, max_uses=None, expires_at=None, note=None,
