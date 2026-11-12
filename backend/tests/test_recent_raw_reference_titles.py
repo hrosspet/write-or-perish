@@ -1,16 +1,17 @@
 """Recent entries show a saved reference by title; the model opens it
 when it needs the text (Peter, voice review 2026-11-12).
 
-The recent raw window of an agentic prompt ({user_recent_raw} in the
-voice / textmode prompt) carries the user's recent entries as written.
-A {quote_ext:ID} in them (a clipped page, a bookmark, a Glean pick)
-used to bring the reference's whole text into the window. Now it is one
-line: the title (with no title, the author), where the reference came
-from, and the name the read_full tool opens it by.
+The recent raw window ({user_recent_raw}) carries the user's recent
+entries as written. A {quote_ext:ID} in them (a clipped page, a
+bookmark, a Glean pick) used to bring the reference's whole text into
+the window. In every call with tools (any voice / textmode chain, and
+its pre-warm) it is now one line: the title (with no title, the
+author), where the reference came from, and, while the reply has the
+read_full tool, the name read_full opens it by.
 
 Everything else keeps the text: the user's data download, {user_export},
-the thread's own quotes, prompts whose reply has no read_full. A window
-that quotes no reference is the same bytes as before (prompt cache).
+the thread's own quotes, calls without tools. A window that quotes no
+reference is the same bytes as before (prompt cache).
 Runs the real task body through the test_retrieval_loop harness;
 nothing reaches a real model.
 """
@@ -27,18 +28,19 @@ from backend.tests.test_raw_window_duplication import (  # noqa: F401 (fixtures)
     _new_session, _render, _window,
 )
 from backend.tests.test_training_key_payload import (  # noqa: F401
-    keys, _keys_used, _payload, _train_chain, _entry,
+    keys, _keys_used, _payload, _train_chain, _entry, _plain_thread,
 )
 from backend.tests.test_training_key_own_rows import (
     _set_prompt, _train_user,
 )
 from backend.extensions import db as _db
-from backend.models import ExternalItem, Node
+from backend.models import ExternalItem, Node, User
 from backend.routes.export_data import (
     build_user_export_content, iter_user_export,
 )
 from backend.utils import document_reference
 from backend.utils.quotes import (
+    REFERENCE_LINE, REFERENCE_LINE_NAMED,
     reference_id_from_name, reference_name, reference_title_lines,
 )
 
@@ -74,9 +76,12 @@ def _document(user):
         "A Pattern Language", "Christopher Alexander", DOC_BODY))
 
 
-def _line(item, what, source):
-    return (f"[Saved reference {what} ({source}), text not included; "
-            f'read_full "reference {item.id}" opens it]')
+def _line(item, what, source, named=True):
+    opener = f'; read_full "reference {item.id}" opens it' if named else ""
+    return f"[Saved reference {what} ({source}), text not included{opener}]"
+
+
+CLIP_LINE = ('"How to Do Great Work"', "page from paulgraham.com")
 
 
 def _earlier_session_quoting(user, *items, llm=False):
@@ -142,7 +147,7 @@ def test_a_marker_inside_a_title_stays_as_written(app, alice):  # noqa: F811
 
 
 def test_reference_title_lines_unit(app):  # noqa: F811
-    alice = _mk_user("alice", approved=True)
+    alice = _mk_user("alice", approved=True)  # noqa: F811
     bob = _mk_user("bob", approved=True)
     mine = _item(alice, "twitter_bookmark", "MINE", author="visa")
     bare = _item(alice, "web_clip", "BARE", url=None)
@@ -161,6 +166,12 @@ def test_reference_title_lines_unit(app):  # noqa: F811
     assert "MINE" not in text and "THEIRS" not in text
     assert named == [mine.id, bare.id]
     assert titled == []
+
+    plain, _named, _titled = reference_title_lines(
+        "a {quote_ext:%d}" % mine.id, alice.id, named=False)
+    assert plain == "a " + _line(
+        mine, "by @visa", "tweet from the user's Twitter bookmarks",
+        named=False)
     assert reference_title_lines("no markers", alice.id) == (
         "no markers", [], [])
 
@@ -186,20 +197,21 @@ def test_a_window_quoting_no_reference_is_the_same_bytes(
     ])
     _clip(alice)   # saved, but quoted nowhere
     system, _entry, _reply = _new_session(alice)
-    assert _llm_task_mod._recent_raw_reference_titles(system)
+    assert (_llm_task_mod._recent_raw_reference_lines(True)
+            == REFERENCE_LINE_NAMED)
 
     with_titles = _render(system, alice)
-    monkeypatch.setattr(_llm_task_mod, "_recent_raw_reference_titles",
-                        lambda node: False)
+    monkeypatch.setattr(_llm_task_mod, "_recent_raw_reference_lines",
+                        lambda tools: None)
     without = _render(system, alice)
 
     assert "AN OLDER ENTRY" in _window(with_titles)
     assert with_titles == without
     raw = _llm_task_mod.get_user_recent_raw_content
-    assert (raw(alice.id, created_before=system.created_at,
-                reference_titles=True)
-            == raw(alice.id, created_before=system.created_at,
-                   reference_titles=False))
+    windows = [raw(alice.id, created_before=system.created_at,
+                   reference_titles=mode)
+               for mode in (None, REFERENCE_LINE, REFERENCE_LINE_NAMED)]
+    assert windows[0] == windows[1] == windows[2]
 
 
 def test_the_reply_and_the_pre_warm_render_the_same_title_lines(
@@ -268,22 +280,102 @@ def test_a_prompt_without_read_full_keeps_the_text(app, alice, key):  # noqa: F8
     assert 'read_full "reference' not in window
 
 
-def test_the_search_killswitch_keeps_the_text(app, alice, monkeypatch):  # noqa: F811
+def test_a_reply_without_tools_keeps_the_text(app, alice, frozen_export_time):  # noqa: F811
+    """A Reflect chain's reply has no tools, and its render is not the
+    one an agentic reply of the same prompt would read."""
+    clip = _clip(alice)
+    _earlier_session_quoting(alice, clip)
+    system, entry = _session(alice, "reflect", NOW - timedelta(hours=1),
+                             [("today", 3, False)])
+    reply = _node(alice, entry, "[pending]", NOW, llm=True)
+    reply.llm_task_status = "pending"
+    _db.session.commit()
+
+    _ScriptedProvider.reset([_resp("An answer.")])
+    generate_llm_response(_FakeSelf(), entry.id, reply.id, "gpt-5",
+                          alice.id)
+    call = _ScriptedProvider.calls[-1]
+
+    assert not call["tools"]
+    assert "THE CLIPPED PAGE BODY" in _window(call["messages"][0]["text"])
+    assert 'read_full "reference' not in call["messages"][0]["text"]
+    variant = _llm_task_mod._system_render_variant
+    assert variant(system, alice.id).endswith("t0")
+    agentic = _new_session(alice)[0]
+    assert variant(agentic, alice.id) == _llm_task_mod._render_variant(
+        alice.id)
+
+
+def test_a_placeholder_typed_into_a_message(app):  # noqa: F811
+    """With no agentic prompt the call has no tools: the text. Typed
+    into a message of a voice / textmode chain, the call has tools: the
+    line."""
+    alice, system, user_node, llm_node = _build_chain("textmode")  # noqa: F811
+    clip = _clip(alice)
+    old = _entry(alice, "MY NOTE on {quote_ext:%d}" % clip.id, "chat")
+    old.created_at = datetime(2020, 1, 1)
+    user_node.set_content("look back {user_recent_raw}")
+    note, plain_llm = _plain_thread(
+        alice, User.query.filter_by(username="gpt-5").first(),
+        "look back {user_recent_raw}", ai_usage="chat")
+    _db.session.commit()
+
+    _ScriptedProvider.reset([_resp("Agentic."), _resp("Plain.")])
+    generate_llm_response(_FakeSelf(), user_node.id, llm_node.id, "gpt-5",
+                          alice.id, source_mode="textmode")
+    generate_llm_response(_FakeSelf(), note.id, plain_llm.id, "gpt-5",
+                          alice.id)
+
+    agentic, plain = _payload(0), _payload(1)
+    assert _ScriptedProvider.calls[0]["tools"]
+    assert _line(clip, *CLIP_LINE) in agentic
+    assert "THE CLIPPED PAGE BODY" not in agentic
+    assert not _ScriptedProvider.calls[1]["tools"]
+    assert "THE CLIPPED PAGE BODY" in plain
+    assert 'read_full "reference' not in plain
+
+
+def test_without_read_full_the_line_leaves_out_its_name(
+        app, alice, frozen_export_time, fake_redis, monkeypatch):  # noqa: F811
+    """The SEMANTIC_SEARCH_AGENTIC killswitch drops read_full; the reply
+    still has the tools that write, so it gets the line, without the
+    name read_full would open it by. The pre-warm renders the same
+    bytes."""
+    clip = _clip(alice)
+    _earlier_session_quoting(alice, clip)
+    system, entry, reply = _new_session(alice)
+    monkeypatch.setitem(app.config, "SEMANTIC_SEARCH_AGENTIC", False)
+
+    _ScriptedProvider.reset([_resp("An answer.")])
+    generate_llm_response(_FakeSelf(), entry.id, reply.id, "gpt-5",
+                          alice.id, source_mode="textmode")
+    call = _ScriptedProvider.calls[-1]
+    sent = call["messages"][0]["text"]
+
+    tools = [t["name"] for t in call["tools"]]
+    assert "read_full" not in tools and tools
+    assert _line(clip, *CLIP_LINE, named=False) in _window(sent)
+    assert "THE CLIPPED PAGE BODY" not in sent
+    assert "read_full" not in sent
+    fake_redis.store.clear()
+    assert sent == _render(system, alice)
+
+
+def test_with_the_references_toggle_off_the_line_keeps_its_name(app, alice):  # noqa: F811
+    """The toggle decides what a search returns; read_full stays in the
+    tool list and opens the reference by its name."""
+    alice.external_content_enabled = False
     clip = _clip(alice)
     _earlier_session_quoting(alice, clip)
     system, _entry, _reply = _new_session(alice)
-    monkeypatch.setitem(app.config, "SEMANTIC_SEARCH_AGENTIC", False)
 
-    window = _window(_render(system, alice))
-
-    assert "THE CLIPPED PAGE BODY" in window
-    assert 'read_full "reference' not in window
+    assert _line(clip, *CLIP_LINE) in _window(_render(system, alice))
 
 
 # ── the training key ─────────────────────────────────────────────────────
 
 def _ask_with_window(item_factory):
-    alice, system, user_node, llm_node = _train_chain("textmode")
+    alice, system, user_node, llm_node = _train_chain("textmode")  # noqa: F811
     _train_user(alice)
     _set_prompt(system, "system prompt body\n{user_recent_raw}")
     item = item_factory(alice)
@@ -325,7 +417,7 @@ def test_an_author_and_source_line_leaves_the_training_key(app, keys):  # noqa: 
 def test_read_full_opens_a_reference_by_its_name(app):  # noqa: F811
     """Also with the "External references" toggle off (the default): the
     toggle decides what a search returns."""
-    alice, system, user_node, llm_node = _build_chain("textmode")
+    alice, system, user_node, llm_node = _build_chain("textmode")  # noqa: F811
     alice.external_content_enabled = False
     clip = _clip(alice)
     _db.session.commit()
@@ -352,7 +444,7 @@ def test_read_full_opens_a_reference_by_its_name(app):  # noqa: F811
 
 
 def test_read_full_by_name_opens_only_the_users_own_reference(app):  # noqa: F811
-    alice, system, user_node, llm_node = _build_chain("textmode")
+    alice, system, user_node, llm_node = _build_chain("textmode")  # noqa: F811
     bob = _mk_user("bob", approved=True)
     theirs = _clip(bob)
     _db.session.commit()

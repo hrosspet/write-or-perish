@@ -230,8 +230,15 @@ def release_quotes(text: str) -> str:
         _HELD_QUOTE, "{quote:")
 
 
-# A saved reference named in an agentic prompt's recent raw window is
-# opened by this name with the read_full tool (reference_title_lines).
+# How the recent raw window of a call with tools shows a quoted saved
+# reference (reference_title_lines): one line naming it, and with
+# REFERENCE_LINE_NAMED also the name read_full opens it by, for a reply
+# that has read_full.
+REFERENCE_LINE = "line"
+REFERENCE_LINE_NAMED = "named line"
+
+# A saved reference named in the recent raw window is opened by this
+# name with the read_full tool (reference_title_lines).
 _REFERENCE_NAME_RE = re.compile(r"reference\s*#?\s*(\d+)", re.IGNORECASE)
 
 # Where a reference came from, as its card's first line says it
@@ -274,15 +281,16 @@ def _one_line(text) -> str:
     return " ".join(str(text or "").split())
 
 
-def reference_title_lines(content: str, user_id: int
+def reference_title_lines(content: str, user_id: int, named: bool = True
                           ) -> Tuple[str, List[int], List[int]]:
     """Replace each {quote_ext:ID} with one line that names the saved
     reference instead of giving its text: its title (with no title, its
-    author), where it came from, and the name read_full opens it by. For
-    the recent raw window of an agentic prompt (Peter, voice review
-    2026-11-12): recent entries show a saved reference by title, and the
-    model opens it when it needs the text. A reference the user cannot
-    read is the export's inaccessible line (resolve_ext_quotes).
+    author), where it came from, and with *named* the name read_full
+    opens it by. For the recent raw window of a call with tools (Peter,
+    voice review 2026-11-12: recent entries show a saved reference by
+    title); the model opens it with read_full when it needs the text.
+    A reference the user cannot read is the export's inaccessible line
+    (resolve_ext_quotes).
 
     Only an uploaded document is decrypted, as its title and author are
     inside its text (utils/document_reference); every other source has
@@ -307,14 +315,14 @@ def reference_title_lines(content: str, user_id: int
         item = db.session.get(ExternalItem, item_id)
         if item is not None and item.user_id == user_id:
             items[item_id] = item
-    named, titled = [], []
+    named_ids, titled = [], []
 
     def replace(match):
         item_id = int(match.group(1))
         item = items.get(item_id)
         if item is None:
             return f"[Quoted reference inaccessible: item {item_id}]"
-        named.append(item_id)
+        named_ids.append(item_id)
         if item.source == SOURCE_DOCUMENT:
             title, author, _body = document_reference.split(
                 item.get_content() or "")
@@ -330,13 +338,14 @@ def reference_title_lines(content: str, user_id: int
             what = f" by {author}"
         else:
             what = ""
+        opener = (f'; read_full "{reference_name(item_id)}" opens it'
+                  if named else "")
         return hold_quotes(
             f"[Saved reference{what} ({_reference_source_text(item)}), "
-            f'text not included; read_full "{reference_name(item_id)}" '
-            f"opens it]")
+            f"text not included{opener}]")
 
     text = re.sub(EXT_QUOTE_PLACEHOLDER_PATTERN, replace, content)
-    return text, named, titled
+    return text, named_ids, titled
 
 
 def written_by(node, user_id) -> bool:

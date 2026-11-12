@@ -16,6 +16,7 @@ from backend.utils.quotes import (
     resolve_quotes_for_export, resolve_ext_quotes, has_ext_quotes,
     ai_blocked_artifact, AI_BLOCKED_ARTIFACT_TEXT,
     quotes_inside, hold_quotes, release_quotes, reference_title_lines,
+    REFERENCE_LINE_NAMED,
 )
 from backend.utils.timefmt import iso_utc
 from backend.utils.encryption import dek_cached, prefetch_deks
@@ -533,7 +534,7 @@ def _add_artifact_free_entry(resolver, node):
 def _format_node_text(node, label, user_id, embedded_quotes,
                       ai_blocked_ids, licence=None, filter_ai_usage=False,
                       artifact_refs=True, quote_reference=None,
-                      hold_others_markers=False, reference_titles=False):
+                      hold_others_markers=False, reference_titles=None):
     """The node's own text block: header, any pinned-artifact refs, then
     content. System-prompt nodes emit refs only (their content IS the
     prompt, shown as a ref). The node, the entries its quotes embed and
@@ -551,10 +552,11 @@ def _format_node_text(node, label, user_id, embedded_quotes,
     its own quote passes over the export (an AI reply's prompt) and
     releases them after; otherwise they are released here.
 
-    *reference_titles*: a quoted saved reference is one line naming it
-    (title or author, source, the name read_full opens it by) instead
-    of its text (quotes.reference_title_lines), for the recent raw
-    window of an agentic prompt."""
+    *reference_titles* (quotes.REFERENCE_LINE or REFERENCE_LINE_NAMED):
+    a quoted saved reference is one line naming it (title or author,
+    source; NAMED adds the name read_full opens it by) instead of its
+    text (quotes.reference_title_lines), for the recent raw window of a
+    call with tools. None keeps the text."""
     if not artifact_refs and _is_system_prompt_node(node):
         return ""
     result = _node_header_line(node, label)
@@ -616,7 +618,8 @@ def _format_node_text(node, label, user_id, embedded_quotes,
             # only its author and source, so only a title reports
             # (Training licence; as a quote by author and time, #626).
             content, _named, titled = reference_title_lines(
-                content, user_id)
+                content, user_id,
+                named=reference_titles == REFERENCE_LINE_NAMED)
             if licence is not None:
                 licence.note_external(titled,
                                       what="archive reference title")
@@ -651,7 +654,7 @@ def format_node_tree(
     prune_tombstones=False,
     references=None,
     hold_others_markers=False,
-    reference_titles=False,
+    reference_titles=None,
 ):
     """
     Format a node and its descendants into a human-readable tree structure
@@ -685,7 +688,7 @@ def iter_node_tree(
     references=None,
     before_entry=None,
     hold_others_markers=False,
-    reference_titles=False,
+    reference_titles=None,
 ):
     """
     Yield the text of a node and its descendants piece by piece, in
@@ -1779,7 +1782,7 @@ def _build_user_export_incremental(
     user, max_tokens, filter_ai_usage, created_before, created_after,
     chronological_order, return_metadata, collapse_artifacts,
     licence=None, omit_artifacts=False, whole_window=False, scope=None,
-    hold_others_markers=False, reference_titles=False,
+    hold_others_markers=False, reference_titles=None,
 ):
     """Incremental export path (created_after is set). See
     `build_user_export_content` docstring for behavior. The CTE row
@@ -2345,7 +2348,7 @@ def build_user_export_content(
     whole_window=False,
     scope=None,
     hold_others_markers=False,
-    reference_titles=False,
+    reference_titles=None,
 ):
     """
     Core export logic: Build a human-readable text export of threads for a user.
@@ -2458,14 +2461,14 @@ def build_user_export_content(
                come back held (quotes.hold_quotes), for an AI reply's
                prompt, which runs its own quote passes over the text
                and then releases them (quotes.release_quotes).
-        reference_titles: If True, a saved reference quoted in the user's
-               own text is one line naming it (its title, or its
-               author; its source; the name read_full opens it by),
-               not its text (quotes.reference_title_lines). Only for
-               the recent raw window of an agentic prompt, whose reply
-               has read_full (Peter, voice review 2026-11-12); the data
-               download, {user_export} and the background jobs keep the
-               text.
+        reference_titles: quotes.REFERENCE_LINE or REFERENCE_LINE_NAMED:
+               a saved reference quoted in the user's own text is one
+               line naming it (its title, or its author; its source;
+               NAMED adds the name read_full opens it by), not its text
+               (quotes.reference_title_lines). Only for the recent raw
+               window of a call with tools (Peter, voice review
+               2026-11-12); None, for the data download, {user_export}
+               and the background jobs, keeps the text.
 
     Returns:
         str or dict: Formatted export content (or None if no threads found).

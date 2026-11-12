@@ -38,6 +38,7 @@ from backend.utils.quotes import (
     resolve_quotes, has_quotes,
     resolve_ext_quotes, has_ext_quotes, find_ext_quote_ids,
     quotes_inside, release_quotes, reference_id_from_name,
+    REFERENCE_LINE, REFERENCE_LINE_NAMED,
 )
 from backend.utils.node_split import NODE_CHAR_CAP
 from backend.utils.session_helpers import (
@@ -175,16 +176,28 @@ def _render_variant(user_id):
             + (f"d{deleted}" if deleted else ""))
 
 
-def _system_render_variant(system_node, user_id):
+def _system_render_variant(system_node, user_id, tools=None):
     """The #192 render-cache variant of *system_node* rendered for
     *user_id*. The owner's is _render_variant alone (the key their cached
     renders already use). Someone else's render of it (a reply in a
     public thread) has the personal placeholders blanked and its own
     toggles, so it is keyed by that user: it never reads the owner's
-    render, and never overwrites it."""
+    render, and never overwrites it.
+
+    *tools*: whether the call rendering it has tools (an agentic chain);
+    None reads it from the node's own prompt, as render_system_message
+    does. A call without tools renders the recent raw window with the
+    text of the saved references it quotes, one with tools names them
+    (_recent_raw_reference_lines), so the two never share a render: a
+    render without tools takes the "t0" suffix, and the agentic renders
+    keep the key they had."""
     variant = _render_variant(user_id)
     if not node_is_users(system_node, user_id):
         variant += f"r{user_id}"
+    if tools is None:
+        tools = chain_has_agentic_prompt([system_node])
+    if not tools:
+        variant += "t0"
     return variant
 
 
@@ -2841,26 +2854,29 @@ def get_user_recent_content(user_id, pinned_node=None, usage=None):
     return None
 
 
-def _recent_raw_reference_titles(node):
-    """Whether the recent raw window filled into *node* (the node
-    carrying {user_recent_raw}) shows each quoted saved reference as a
-    line naming it rather than its text (Peter, voice review 2026-11-12):
-    recent entries show a saved reference by title, and the model opens
-    it with read_full when it needs the text. So only where the reply
-    has read_full: an agentic prompt (voice / textmode) with archive
-    search on. Elsewhere (Reflect, Orient, a placeholder typed into a
-    message, the SEMANTIC_SEARCH_AGENTIC killswitch) the window keeps
-    the text. Depends on the node's prompt key and config only, so the
-    pre-warm render and the generation loop agree byte for byte (#187),
-    and the render cache key carries the killswitch (#192)."""
-    return (node is not None
-            and chain_has_agentic_prompt([node])
-            and any(t.get("name") == "read_full"
-                    for t in gated_voice_tools(flask_app.config)))
+def _recent_raw_reference_lines(tools):
+    """How the recent raw window of a call shows each saved reference
+    the user's entries quote (Peter, voice review 2026-11-12: recent
+    entries show a saved reference by title). A call with *tools* (any
+    voice / textmode chain, and its pre-warm) gets a line naming the
+    reference instead of its text: REFERENCE_LINE_NAMED, which adds the
+    name read_full opens it by, while read_full is in the tool list;
+    REFERENCE_LINE under the SEMANTIC_SEARCH_AGENTIC killswitch, which
+    drops read_full. A call without tools (Reflect, Orient, a
+    placeholder typed into a message with no agentic prompt) keeps the
+    text: None. Depends on *tools* and config only, so the pre-warm
+    render and the generation loop agree byte for byte (#187); the
+    render cache key carries both (#192, _system_render_variant)."""
+    if not tools:
+        return None
+    if any(t.get("name") == "read_full"
+           for t in gated_voice_tools(flask_app.config)):
+        return REFERENCE_LINE_NAMED
+    return REFERENCE_LINE
 
 
 def get_user_recent_raw_content(user_id, created_before=None, usage=None,
-                                reference_titles=False):
+                                reference_titles=None):
     """Get the most recent ~10K tokens of raw user writing.
 
     Always returns a fixed window of the last ~10K tokens regardless of
@@ -2878,10 +2894,11 @@ def get_user_recent_raw_content(user_id, created_before=None, usage=None,
             time are excluded to avoid duplicating current session context.
         usage: A ContextUsage; every entry, quote and reference the window
             renders reports to it (#326).
-        reference_titles: True names each saved reference the user's
-            entries quote by a line (title or author, source, the name
-            read_full opens it by) instead of giving its text; see
-            _recent_raw_reference_titles. A window that quotes none is
+        reference_titles: REFERENCE_LINE or REFERENCE_LINE_NAMED names
+            each saved reference the user's entries quote by a line
+            (title or author, source; NAMED adds the name read_full
+            opens it by) instead of giving its text; see
+            _recent_raw_reference_lines. A window that quotes none is
             the same bytes either way.
 
     The markers left as written in other people's text come back held
@@ -3473,7 +3490,8 @@ def _own_system_values(text, system_node, user_id, usage):
     if USER_RECENT_RAW_PLACEHOLDER in text:
         raw_result = get_user_recent_raw_content(
             user_id, created_before=system_node.created_at, usage=usage,
-            reference_titles=_recent_raw_reference_titles(system_node))
+            reference_titles=_recent_raw_reference_lines(
+                chain_has_agentic_prompt([system_node])))
         raw_text = ""
         if raw_result:
             raw_text = format_date_metadata(
@@ -3523,7 +3541,9 @@ def render_system_message(system_node, user_id, usage=None):
     {quote:..}, {quote_ext:..}) — callers must check first. The rows the
     placeholders resolve to report to *usage* (a ContextUsage, #326).
     A system node that is not *user_id*'s own renders its personal
-    placeholders empty, as the generation loop does.
+    placeholders empty, as the generation loop does. Whether the call
+    has tools is read from the node's own prompt (an agentic prompt:
+    the pre-warm's call), as _system_render_variant reads it.
     All placeholders are filled in one pass (fill_placeholders), so text
     filled in for one is never searched for another (#518).
     """
@@ -4117,6 +4137,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 (n for n in node_chain
                  if not _gone(n) and n.has_artifact("prompt")),
                 None)
+            # Whether this call has tools (an agentic chain): the recent
+            # raw window and the render cache key depend on it.
+            chain_tools = _is_agentic_prompt(node_chain)
             system_render_cacheable = False
             cached_system_render = None
             # Why the cached render's own rows are not licensed for
@@ -4134,7 +4157,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     and not has_quotes(_sys_text)
                     and not has_ext_quotes(_sys_text)
                 )
-                render_variant = _system_render_variant(system_node, user_id)
+                render_variant = _system_render_variant(
+                    system_node, user_id, tools=chain_tools)
                 if system_render_cacheable:
                     _cached = get_cached_render(
                         flask_app.config, system_node, render_variant)
@@ -4225,8 +4249,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 raw_cutoff = recent_raw_node.created_at if recent_raw_node else None
                 raw_result = get_user_recent_raw_content(
                     user_id, created_before=raw_cutoff, usage=context_usage,
-                    reference_titles=_recent_raw_reference_titles(
-                        recent_raw_node),
+                    reference_titles=_recent_raw_reference_lines(
+                        chain_tools),
                 )
                 if raw_result:
                     # Raw data is dynamic — add metadata on the fly
@@ -4251,7 +4275,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 )
 
             # Detect if this is an agentic session (enables tools)
-            is_agentic = _is_agentic_prompt(node_chain)
+            is_agentic = chain_tools
             # semantic_search / read_full are on for everyone under the env
             # killswitch (#329); the "External references" Account toggle
             # only decides, inside the handler, whether the search also
