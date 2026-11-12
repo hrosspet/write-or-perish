@@ -193,6 +193,10 @@ class StripeGateway:
     def cancel_subscription(self, subscription_id):
         return plain(self.client.v1.subscriptions.cancel(subscription_id))
 
+    def release_subscription_schedule(self, schedule_id):
+        return plain(self.client.v1.subscription_schedules.release(
+            schedule_id))
+
 
 def get_gateway(config=None):
     """The gateway for the configured secret key. Raises
@@ -234,11 +238,15 @@ def _price_matches(price, level, cfg):
 def portal_configuration_params(cfg, prices=None):
     """The customer portal Loore links to: change the card, see invoices,
     cancel at the end of the period, and switch between Standard and
-    Supporter (*prices*: level -> price id). An upgrade or downgrade is
-    prorated (Stripe's proration for subscription updates): the
-    difference for the rest of the period goes on the next invoice. A
-    trialing subscription keeps its trial when it switches. No customer
-    detail edits."""
+    Supporter (*prices*: level -> price id). An upgrade is charged at
+    once: the prorated difference for the rest of the period is invoiced
+    when the user confirms, so "Subscribe and pay" on Stripe's confirm
+    page is what happens and the next invoice is the plain monthly price
+    (decided under Peter's "depending on the difficulty ... pls decide",
+    2026-11-12). A downgrade waits for the end of the period: the user
+    keeps the higher level they paid for, nothing is refunded, and the
+    lower price starts with the next period. A trialing subscription keeps
+    its trial when it switches. No customer detail edits."""
     frontend = (cfg.get("FRONTEND_URL") or "").rstrip("/")
     switch = {"enabled": False}
     if prices:
@@ -248,7 +256,9 @@ def portal_configuration_params(cfg, prices=None):
             "products": [{"product": PRODUCTS[level][0],
                           "prices": [prices[level]]}
                          for level in PORTAL_SWITCH_LEVELS],
-            "proration_behavior": "create_prorations",
+            "proration_behavior": "always_invoice",
+            "schedule_at_period_end": {
+                "conditions": [{"type": "decreasing_item_amount"}]},
             "trial_update_behavior": "continue_trial",
         }
     return {
@@ -965,6 +975,16 @@ def stop_renewal_for_deletion(user, config=None):
         return False
     try:
         gateway = get_gateway(config)
+        # A downgrade waiting for the period end is a subscription
+        # schedule, and Stripe refuses cancel_at_period_end on a
+        # subscription a schedule manages: release it first (the
+        # subscription ends with this period, so the downgrade is moot).
+        current = gateway.retrieve_subscription(user.stripe_subscription_id)
+        schedule = current.get("schedule")
+        if isinstance(schedule, dict):
+            schedule = schedule.get("id")
+        if schedule:
+            gateway.release_subscription_schedule(schedule)
         sub = gateway.update_subscription(
             user.stripe_subscription_id, {"cancel_at_period_end": True})
         apply_subscription(sub, config)

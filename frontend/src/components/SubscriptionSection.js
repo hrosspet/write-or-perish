@@ -205,7 +205,7 @@ export default function SubscriptionSection({ user, setUser }) {
             </button>
           </div>
           <div style={helperStyle}>
-            Switch between Standard and Supporter, change your card, see invoices or cancel on Stripe's page. A switch is prorated: the difference for the rest of the month comes with the next payment. A cancelled subscription runs to the end of the period you paid for.
+            Switch between Standard and Supporter, change your card, see invoices or cancel on Stripe's page. Moving up is charged for the rest of the month at once; moving down takes effect when the month you paid for ends. A cancelled subscription runs to the end of the period you paid for.
           </div>
         </>
       ) : sub.plan_set_by_hand ? (

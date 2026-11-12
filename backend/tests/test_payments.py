@@ -195,6 +195,13 @@ class FakeGateway:
         self.subscriptions[sub_id]["status"] = "canceled"
         return self.subscriptions[sub_id]
 
+    def release_subscription_schedule(self, schedule_id):
+        self._call("release_subscription_schedule", schedule_id)
+        for sub in self.subscriptions.values():
+            if sub.get("schedule") == schedule_id:
+                sub["schedule"] = None
+        return {"id": schedule_id, "status": "released"}
+
 
 def subscription(sub_id="sub_1", customer="cus_1", status="active",
                  level="standard", trial=False, cancel_at_period_end=False,
@@ -1575,7 +1582,11 @@ class TestCatalog:
              "prices": [first["prices"]["standard"]]},
             {"product": "loore_supporter",
              "prices": [first["prices"]["supporter"]]}]
-        assert switch["proration_behavior"] == "create_prorations"
+        # An upgrade is charged at the switch; a downgrade waits for the
+        # end of the period, nothing refunded.
+        assert switch["proration_behavior"] == "always_invoice"
+        assert switch["schedule_at_period_end"] == {
+            "conditions": [{"type": "decreasing_item_amount"}]}
         assert switch["trial_update_behavior"] == "continue_trial"
         assert len(first["changes"]) == 7   # 3 products, 3 prices, portal
         second = stripe_billing.sync_catalog(gateway, app.config)
@@ -1671,6 +1682,22 @@ class TestDeletion:
         assert stripe_billing.stop_renewal_for_deletion(u) is True
         assert ("update_subscription", "sub_1",
                 {"cancel_at_period_end": True}) in gateway.calls
+        assert _db.session.get(User, u.id).subscription_cancel_at_period_end
+
+    def test_a_waiting_downgrade_does_not_block_the_stop(self, app, gateway):
+        # A downgrade waits for the period end as a subscription schedule;
+        # Stripe refuses cancel_at_period_end while one manages the
+        # subscription (seen in the sandbox), so it is released first.
+        u = _user(stripe_customer_id="cus_1", stripe_subscription_id="sub_1",
+                  subscription_status="active",
+                  subscription_level="supporter")
+        gateway.subscriptions["sub_1"] = {**subscription(level="supporter"),
+                                          "schedule": "sub_sched_1"}
+        assert stripe_billing.stop_renewal_for_deletion(u) is True
+        names = [c[0] for c in gateway.calls]
+        assert names.index("release_subscription_schedule") < names.index(
+            "update_subscription")
+        assert gateway.subscriptions["sub_1"]["schedule"] is None
         assert _db.session.get(User, u.id).subscription_cancel_at_period_end
 
     def test_nothing_to_stop(self, app, gateway):
