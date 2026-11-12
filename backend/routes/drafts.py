@@ -4,7 +4,9 @@ from backend.utils.error_privacy import describe_exception
 from sqlalchemy.exc import IntegrityError
 from backend.models import Draft, Node, NodeTranscriptChunk
 from backend.extensions import db
-from backend.utils.privacy import can_user_edit_node
+from backend.utils.privacy import (
+    can_user_edit_node, validate_ai_usage, validate_privacy_level,
+)
 from backend.utils.proposals import PROPOSAL_TOOLS
 import uuid
 import pathlib
@@ -1523,7 +1525,10 @@ def save_streaming_as_node(session_id):
                                  // inside an agentic thread
         "auto_generate": false,  // create + enqueue an LLM reply after the
                                  // entry (spend cap honored, like /textmode/start)
-        "model": "optional model id for auto_generate"
+        "model": "optional model id for auto_generate",
+        "privacy_level": "private",  // optional: the form's settings when
+        "ai_usage": "chat"           // it is saved; without them the
+                                     // recording's own (older clients)
     }
 
     Returns: The created node data. With the flags above it also carries
@@ -1557,8 +1562,31 @@ def save_streaming_as_node(session_id):
     auto_generate = bool(data.get("auto_generate", False))
     model_id = data.get("model")
 
+    # The entry takes the settings the form shows when it is saved: the
+    # form sends them, and they can differ from the ones the recording
+    # started with. A client that sends neither (an installed iPhone
+    # build) gets the recording's, as before.
     privacy_level = draft.privacy_level or "private"
     ai_usage = draft.ai_usage or "none"
+    form_settings = "privacy_level" in data or "ai_usage" in data
+    if "privacy_level" in data:
+        privacy_level = data["privacy_level"]
+        if not validate_privacy_level(privacy_level):
+            return jsonify(
+                {"error": f"Invalid privacy_level: {privacy_level}"}), 400
+    if "ai_usage" in data:
+        ai_usage = data["ai_usage"]
+        if not validate_ai_usage(ai_usage):
+            return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
+    if form_settings and draft.parent_id and privacy_level != "public":
+        # As for a typed entry (#228): replies under public posts are
+        # public.
+        parent = Node.query.get(draft.parent_id)
+        if parent is not None and parent.privacy_level == "public":
+            return jsonify({
+                "error": "Replies under public posts are public.",
+                "code": "public_reply_required",
+            }), 400
 
     # A public entry quotes only public nodes (Peter, 2026-11-12); the
     # session stays, so the text can be changed and saved again.
@@ -1643,6 +1671,12 @@ def save_streaming_as_node(session_id):
     from backend.utils.tokens import approximate_token_count
     node.set_content(content)
     node.token_count = approximate_token_count(content)
+    if form_settings and privacy_level == "public" and user_parent_id is None:
+        # A public root gets its permalink slug at birth, as a typed one
+        # does (POST /nodes/, #228).
+        from backend.utils.slugs import generate_unique_public_slug
+        node.public_slug = generate_unique_public_slug(
+            current_user.id, content)
     db.session.add(node)
     db.session.flush()
     # Per-node cap: split very long transcripts into a serial chain

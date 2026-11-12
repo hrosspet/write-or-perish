@@ -46,7 +46,7 @@ export default function WritePage() {
       );
       const res = streaming_session_id
         ? await api.post(`/drafts/streaming/${streaming_session_id}/save-as-node`, {
-          content,
+          content, privacy_level, ai_usage,
         })
         : await api.post('/nodes/', { content, privacy_level, ai_usage });
       return { id: res.data.id };
@@ -65,7 +65,10 @@ export default function WritePage() {
     if (streaming_session_id) {
       const res = await api.post(
         `/drafts/streaming/${streaming_session_id}/save-as-node`,
-        { content, agentic: true, auto_generate: autoGenerate, ...entry },
+        {
+          content, privacy_level, ai_usage, agentic: true,
+          auto_generate: autoGenerate, ...entry,
+        },
       );
       return res.data;
     }

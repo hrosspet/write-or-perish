@@ -498,7 +498,11 @@ final class NodeFormModel {
         // A recorded transcript: the streaming draft becomes the node.
         if let sid = streamingSessionId {
             let topLevelWithAI = config.parentId == nil && aiUsage != .off
-            var body: [String: JSONValue] = ["content": .string(content)]
+            // The settings the form shows now, which can differ from the ones the recording started with.
+            var body: [String: JSONValue] = [
+                "content": .string(content), "privacy_level": .string(privacyLevel.rawString),
+                "ai_usage": .string(aiUsage.rawString),
+            ]
             if topLevelWithAI && useAgenticPrompt { body["agentic"] = .bool(true) }
             if topLevelWithAI && autoGenerateOn && config.allowAgenticPrompt { body["auto_generate"] = .bool(true) }
             let answer: SaveAsNodeResponse = try await api.post(APIPath.streamingSaveAsNode(sid), json: .object(body))
