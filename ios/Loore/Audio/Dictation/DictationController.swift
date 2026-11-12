@@ -105,6 +105,12 @@ final class DictationController {
                     app.toasts.show(SpendCap.toastMessage(.record), duration: 8)
                     self.state = .idle
                     self.callbacks.failed(nil, true)
+                } else if case APIError.subscriptionRequired = error {
+                    // Payments on (#438): no transcription without a
+                    // subscription. Refused before the mic opened; the
+                    // banner shows the server's words (APIEvent).
+                    self.state = .idle
+                    self.callbacks.failed(nil, true)
                 } else {
                     self.fail((error as? APIError)?.userMessage(fallback: "Could not start recording.") ?? "Could not start recording.")
                 }

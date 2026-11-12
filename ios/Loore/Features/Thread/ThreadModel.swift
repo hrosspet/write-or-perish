@@ -664,6 +664,7 @@ final class ThreadModel {
             ]))
             return NodeFormResult(id: answer.id, userNodeId: answer.userNodeId, llmNodeId: answer.llmNodeId,
                                   spendCapped: answer.spendCapped, llmError: answer.llmError,
+                                  subscriptionMessage: answer.subscriptionNotice,
                                   llmErrorCode: answer.llmErrorCode)
         }
         if submission.aiUsage == .off {
@@ -679,6 +680,7 @@ final class ThreadModel {
         ]))
         return NodeFormResult(id: answer.userNodeId, userNodeId: answer.userNodeId, llmNodeId: answer.llmNodeId,
                               promptNodeId: answer.promptNodeId, spendCapped: answer.spendCapped, llmError: answer.llmError,
+                              subscriptionMessage: answer.subscriptionNotice,
                               llmErrorCode: answer.llmErrorCode)
     }
 

@@ -217,11 +217,16 @@ def _cap_held_users(exclude_ids):
 
 
 def _held_users(flag, exclude_ids):
+    # Payments on (#438): an account whose subscription lapsed gets no
+    # background model work, a held build included. A pre-fill for an
+    # account that never had a subscription goes on: it is Loore's service
+    # to them (Peter, 2026-11-12: "Prefill is a very different case").
+    from backend.utils.subscriptions import access_state
     return [u for u in User.query.filter(
         flag.is_(True),
         User.deleted_at.is_(None),
         or_(User.approved.is_(True), User.deactivated_at.is_(None)),
-    ).all() if u.id not in exclude_ids]
+    ).all() if u.id not in exclude_ids and access_state(u) != "lapsed"]
 
 
 # ── batch profile work waiting for a later pass (Peter, 2026-11-03) ─────

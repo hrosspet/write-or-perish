@@ -5,8 +5,11 @@ import Log from "./components/Log";
 import NavBar from "./components/NavBar";
 import NodeFormModal from "./components/NodeFormModal";
 import SpendCapBanner from "./components/SpendCapBanner";
+import SubscriptionBanner from "./components/SubscriptionBanner";
 import DataDeletionBanner from "./components/DataDeletionBanner";
 import TermsModal from "./components/TermsModal";
+import SubscribePage from "./pages/SubscribePage";
+import { notLetIn } from "./utils/subscription";
 import AdminPanel from "./components/AdminPanel";
 import NodeDetailWrapper from "./components/NodeDetailWrapper";
 import NodeOpeningSpinner from "./components/NodeOpeningSpinner";
@@ -140,11 +143,15 @@ function App() {
   // Dev-update channel (#207): asked once per session; anything unread
   // opens the updates modal. Never for a session that starts on /welcome
   // (#392).
-  const [updates, clearUpdates] = useSessionUpdates(user, pathname);
+  // Payments on (#438): an account that never had a subscription sees
+  // only the subscribe page; nothing else of the app loads for it.
+  const noSubscription = notLetIn(user);
+  const [updates, clearUpdates] = useSessionUpdates(
+    noSubscription ? null : user, pathname);
   // The both-providers question (#599) on opening Loore: never over
   // another dialog, a recording, or a Voice or Text session.
   const [askProviders, closeAskProviders] = useBothProvidersQuestion(
-    user, pathname,
+    noSubscription ? null : user, pathname,
     showTerms || !!updates || showNewEntry || showSearch || !!openingNode);
 
   // When the user info is loaded, check if they have accepted the terms.
@@ -178,11 +185,33 @@ function App() {
     return () => window.removeEventListener('keydown', handleSearchShortcut);
   }, []);
 
+  if (noSubscription) {
+    return (
+      <>
+        {showTerms && (
+          <TermsModal
+            onAccepted={() => {
+              setUser({ ...user, terms_up_to_date: true });
+              setShowTerms(false);
+            }}
+          />
+        )}
+        <Routes>
+          <Route path="/confirm-account-deletion" element={<ConfirmAccountDeletionPage />} />
+          <Route path="/account-deleted" element={<AccountDeletedPage />} />
+          <Route path="/account-restore" element={<AccountRestorePage />} />
+          <Route path="*" element={<SubscribePage />} />
+        </Routes>
+      </>
+    );
+  }
+
   return (
     <AudioProvider>
       <div>
         <NavBar onNewEntryClick={() => setShowNewEntry(true)} />
         <SpendCapBanner />
+        <SubscriptionBanner />
         <div style={{ paddingTop: "60px" }}>
         <DataDeletionBanner />
         {showNewEntry && (

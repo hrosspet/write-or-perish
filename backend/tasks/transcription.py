@@ -74,6 +74,15 @@ def _start_upload_reply(node, tip, model_id):
     if user_is_capped(node.user_id):
         record_task_warning(node, UPLOAD_REPLY_SKIPPED_SPEND_CAP)
         return None
+    # Payments on and no AI replies for this account (#438).
+    from backend.utils.subscriptions import (
+        ai_replies_allowed, payments_enabled, subscription_required_message)
+    if payments_enabled():
+        from backend.models import User
+        owner = db.session.get(User, node.user_id)
+        if not ai_replies_allowed(owner):
+            record_task_warning(node, subscription_required_message(owner))
+            return None
     from backend.utils.llm_nodes import (
         AIUsageRefused, ReadOnlyModelRefused, auto_generate_refusal,
         create_llm_placeholder,

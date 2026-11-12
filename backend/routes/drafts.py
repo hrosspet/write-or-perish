@@ -657,6 +657,14 @@ def init_streaming():
         return err
     privacy_level = data.get("privacy_level", "private")
     ai_usage = data.get("ai_usage", "none")
+    # Payments on (#438): no transcription without the paid set, dictation
+    # included, so the mic never opens for a recording nobody would turn
+    # into text. Typing works as before.
+    from backend.utils.subscriptions import refuse_billed_call
+    refused = refuse_billed_call(
+        current_user, "reply" if label == "Voice" else "transcribe")
+    if refused is not None:
+        return refused
     if label == "Voice":
         parent = Node.query.get(int(parent_id)) if parent_id else None
         refused = voice_turn_refusal(
@@ -1645,8 +1653,13 @@ def save_streaming_as_node(session_id):
         # writing is never blocked by the cap or by a placeholder error,
         # only the reply is skipped — same stance as /textmode/start.
         from backend.utils.spend import spend_capped_fields, user_is_capped
+        from backend.utils.subscriptions import subscription_required_fields
+        skipped = subscription_required_fields(current_user)
         if user_is_capped(current_user):
             response.update(spend_capped_fields(current_user))
+        elif skipped:
+            # Payments on, no AI replies for this account (#438).
+            response.update(skipped)
         else:
             from backend.utils.llm_nodes import create_llm_placeholder
             from backend.utils.placeholders import UserExportValidationError

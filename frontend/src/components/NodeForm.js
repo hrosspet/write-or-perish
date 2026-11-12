@@ -22,6 +22,7 @@ import { uploadFileInChunks } from "../utils/chunkedUpload";
 import {
   isSpendBlocked, notifySpendBlocked, isSpendCapError, spendCapToastMessage,
 } from "../utils/spendCap";
+import { noteSkippedReply } from "../utils/subscription";
 import useSubmitShortcut from "../hooks/useSubmitShortcut";
 
 const NodeForm = forwardRef(
@@ -545,6 +546,7 @@ const NodeForm = forwardRef(
           // Spend cap: backend kept the system + user nodes but skipped the
           // LLM placeholder (e.g. /textmode/start). Surface the banner.
           if (data && data.spend_capped) notifySpendBlocked(data.spend_cap_lifts_on);
+          noteSkippedReply(data);
           // The entry was saved but the reply was refused (e.g. an
           // uncapped {user_export} on a non-Pro plan): say why. A thread
           // too long for another reply (#648) says so above the reply form
@@ -580,6 +582,7 @@ const NodeForm = forwardRef(
           // LLM placeholder. Surface the banner; the no-llm_node_id branch
           // below lands the user on their new thread without a placeholder.
           if (res.data.spend_capped) notifySpendBlocked(res.data.spend_cap_lifts_on);
+          noteSkippedReply(res.data);
           if (res.data.llm_error && !replySkippedForLength(res.data)) {
             addToast(res.data.llm_error, 10000);
           }
@@ -623,6 +626,7 @@ const NodeForm = forwardRef(
           if (response.data.spend_capped) {
             notifySpendBlocked(response.data.spend_cap_lifts_on);
           }
+          noteSkippedReply(response.data);
           // Land on the entry; ?awaitLlm hands a pending reply to NodeDetail.
           succeed({
             ...response.data,
@@ -1215,7 +1219,9 @@ const NodeForm = forwardRef(
                   onError={(err) => {
                     // A start refused by the monthly spend cap is not a
                     // failure; the recorder already showed a toast (#341).
-                    if (!err?.spendCapped) {
+                    // Nor is one refused without a subscription (#438):
+                    // the banner says why.
+                    if (!err?.spendCapped && !err?.subscriptionRequired) {
                       setError(err.message || 'Streaming transcription failed');
                     }
                     setLoading(false);
