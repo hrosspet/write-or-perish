@@ -25,6 +25,18 @@ A todo proposal ("### New Tasks") is not a tool call: the user applies it
 with its own button, as before. apply_todo_changes and the other apply
 tools are the voice path that applies a proposal without that button, so
 they wait here like update_artifact.
+
+Voice mode (Peter, 2026-11-12): "A spoken announcement should also be
+added after the model reply, informing the user they need to confirm, or
+reject the tool called. Also, the lockscreen controls shouldn't allow next
+recording". And: "the announcement should be TTSed as a separate chunk
+and appended to the queue. So that when it's not pending, it's not voiced
+out anymore". A Voice reply whose calls wait is followed by a fixed spoken
+sentence: its own cached clip, which the players append after the reply
+while its calls wait (announcement_count, utils/announcement_audio). The
+reply's audio and text are unchanged. No Voice turn starts in a thread
+where a call waits (waiting_in_thread; the routes answer
+APPROVAL_PENDING_CODE).
 """
 import json
 from datetime import datetime, timedelta
@@ -348,6 +360,105 @@ def pending_for_user(user_id, node_ids):
             continue
         out.append(serialize_pending(draft, user_id))
     return out
+
+
+def thread_node_ids(node):
+    """*node*, its ancestors and its replies at every depth: ids only.
+    The thread GET /api/tool-approvals lists and a Voice turn is checked
+    against (waiting_in_thread). Three queries whatever the thread's
+    length (thread_tree's recursive walks), so a Voice turn can ask after
+    every reply."""
+    from backend.utils.thread_tree import ancestor_chain, subtree_rows
+    ids = {n.id for n in ancestor_chain(node.id, Node.id)}
+    ids.add(node.id)
+    ids.update(row[0] for row in subtree_rows(node.id))
+    return ids
+
+
+def waiting_in_thread(user_id, node):
+    """How many of the user's calls wait in *node*'s thread
+    (thread_node_ids), counting only calls whose reply still stands, as
+    GET /api/tool-approvals lists them. A call whose artifact changed
+    since (stale) still waits until it is rejected. 0 for no node."""
+    if node is None:
+        return 0
+    count = 0
+    for draft in pending_drafts(user_id, thread_node_ids(node)):
+        if reply_alive(db.session.get(Node, draft.parent_id)):
+            count += 1
+    return count
+
+
+# ── Voice mode (Peter, 2026-11-12) ──────────────────────────────────────
+# A Voice turn in a thread where a call waits is refused with this code
+# (409), before a recording starts or a reply is made.
+APPROVAL_PENDING_CODE = "approval_pending"
+
+
+def approval_pending_message(count):
+    """What the refusal of a Voice turn says (shown by clients that don't
+    know the code, e.g. an older app)."""
+    if count == 1:
+        return ("A change to your data waits for your approval. Approve or "
+                "reject it to continue in Voice mode.")
+    return (f"{count} changes to your data wait for your approval. Approve "
+            "or reject them to continue in Voice mode.")
+
+
+def approval_pending_response(count):
+    """The 409 answer for a Voice turn in a thread where *count* calls
+    wait: ``{"error", "code": "approval_pending", "pending": count}``."""
+    from flask import jsonify
+    return jsonify({"error": approval_pending_message(count),
+                    "code": APPROVAL_PENDING_CODE,
+                    "pending": count}), 409
+
+
+def _meta_entries(node):
+    try:
+        meta = json.loads(node.tool_calls_meta or "[]")
+    except (json.JSONDecodeError, TypeError):
+        return []
+    return [e for e in meta if isinstance(e, dict)] if isinstance(
+        meta, list) else []
+
+
+def _is_voice_reply(node):
+    """The reply was made in Voice mode: its final node carries the
+    "_mode" entry with source_mode "voice" (llm_completion._finalize)."""
+    return any(e.get("name") == "_mode" and e.get("source_mode") == "voice"
+               for e in _meta_entries(node))
+
+
+def waiting_in_reply(node):
+    """How many calls of the reply that ends at *node* wait for approval
+    now: the "pending_approval" entries of *node* and of the interim
+    steps before it (the nodes whose continuation leads to it). 0 when
+    *node* is itself an interim step: the reply goes on after it."""
+    if node is None or node.continuation_node_id is not None:
+        return 0
+    count = 0
+    current, seen = node, set()
+    while current is not None and current.id not in seen:
+        seen.add(current.id)
+        count += sum(1 for e in _meta_entries(current)
+                     if e.get("status") == PENDING_STATUS)
+        parent = current.parent
+        if parent is None or parent.continuation_node_id != current.id:
+            break
+        current = parent
+    return count
+
+
+def announcement_count(node):
+    """How many calls of the Voice reply ending at *node* wait now: the
+    count its spoken announcement is for (utils/announcement_audio). 0 for
+    anything else: a reply not made in Voice mode, an interim step, a
+    reply whose calls were all decided. Read when the reply is played, so
+    once every call is decided a replay has no announcement."""
+    if node is None or not _is_voice_reply(node):
+        return 0
+    return waiting_in_reply(node)
 
 
 def _chain_above(node):

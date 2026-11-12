@@ -706,6 +706,39 @@ class TestVoiceFinalize:
         assert _llm_count() == 0
         st._fake_llm.generate_llm_response.si.assert_not_called()
 
+    def test_a_waiting_change_saves_the_turn_without_a_reply(self, st):
+        """A change the AI proposed in the thread waits for the user's
+        approval (Peter, 2026-11-12): streaming init refuses a new Voice
+        recording there; one that started before (or is finished after an
+        interruption) is saved, and no reply is made until they decide."""
+        user = _user()
+        root = _node(user)
+        reply = _reply(root, user)
+        waiting = Draft(user_id=user.id, parent_id=reply.id,
+                        label="tool_pending")
+        waiting.set_content("{}")
+        _db.session.add(waiting)
+        _voice_draft(user, "sess-wait", "chat", text="more words",
+                     parent=reply)
+
+        self._finalize(st, user, "sess-wait", parent=reply)
+
+        draft = Draft.query.filter_by(session_id="sess-wait").one()
+        assert draft.streaming_warning == st.VOICE_REPLY_SKIPPED_APPROVAL
+        assert draft.llm_node_id is None
+        entry = Node.query.filter_by(parent_id=reply.id).one()
+        assert entry.get_content() == "more words"
+        st._fake_llm.generate_llm_response.si.assert_not_called()
+        st._fake_llm.prewarm_anthropic_cache.assert_not_called()
+
+        # Decided: the next recording there gets its reply.
+        _db.session.delete(waiting)
+        _db.session.commit()
+        _voice_draft(user, "sess-next", "chat", text="go on", parent=entry)
+        self._finalize(st, user, "sess-next", parent=entry)
+        assert Draft.query.filter_by(
+            session_id="sess-next").one().llm_node_id is not None
+
     def test_chat_recording_gets_its_reply(self, st):
         # The control: same path, the chain starts.
         user = _user()

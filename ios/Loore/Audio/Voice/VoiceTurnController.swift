@@ -34,7 +34,11 @@ final class VoiceTurnController {
 
     // MARK: Observable state
 
-    private(set) var state: State = .idle
+    private(set) var state: State = .idle {
+        // The approval dialog waits for the reply's audio to end (or for any
+        // turn in progress to settle) before it opens by itself.
+        didSet { if state != oldValue { openApprovalDialogIfDue() } }
+    }
     private(set) var isPaused = false
     private(set) var isInterrupted = false
     /// Red dot on the ready screen, cleared after 3 s (web `hasError`).
@@ -45,9 +49,15 @@ final class VoiceTurnController {
     private(set) var replyContent: String?
     private(set) var toolCallsMeta: [ToolCallMeta]?
     private(set) var threadParentId: Int?
-    /// The server refused to start because AI usage is `none` (`ai_usage_none`):
-    /// the Voice screen shows why instead of the record button.
+    /// The server refused to start because AI usage is `none` (`ai_usage_none`),
+    /// or a turn met a thread too long for another reply (`thread_too_long`,
+    /// #648): the Voice screen shows why instead of the record button.
     private(set) var aiBlock: VoiceAIBlock?
+    /// The thread is getting long (#648): a calm line above the record button.
+    private(set) var lengthNotice = false
+    /// The refusal's sentence being said (#648), and which one is the latest.
+    @ObservationIgnored private var speechTask: Task<Void, Never>?
+    @ObservationIgnored private var speechToken = 0
     /// Between an interim node's audio and its continuation's first chunk.
     private(set) var awaitingNextNode = false
 
@@ -88,6 +98,63 @@ final class VoiceTurnController {
     @ObservationIgnored private var gleanDeadline = Date.distantFuture
     @ObservationIgnored private var gleanLastAnswer = Date()
     @ObservationIgnored private var gleanInactiveSince: Date?
+
+    // MARK: Changes waiting for approval (Peter, 2026-11-12; `VoiceApproval`)
+
+    /// Every write tool call of the conversation's thread that waits for the
+    /// user's approval, as the server listed them (oldest first). While any
+    /// waits, no new turn starts (`newTurnRefusal`).
+    private(set) var waitingApprovals: [ToolApproval] = []
+    /// The Voice screen opens the approval dialog now; it calls
+    /// `approvalDialogOpened()` when it does. Set once the reply's audio has
+    /// ended, or at once when nothing plays.
+    private(set) var approvalDialogDue = false
+    /// The list was asked for with the dialog to open: it opens when nothing plays.
+    @ObservationIgnored private var approvalDialogWanted = false
+    /// Bumped when the conversation changes: a list asked for an earlier one is dropped.
+    @ObservationIgnored private var approvalsEpoch = 0
+    /// A list arrived from the server for a node of the thread (the owner keeps
+    /// the dialog's model in step).
+    @ObservationIgnored var onApprovalsListed: ((Int, [ToolApproval]) -> Void)?
+
+    var approvalWaiting: Bool { !waitingApprovals.isEmpty }
+
+    /// Why a new turn may not start in this conversation (`newTurnRefusal`).
+    enum NewTurnRefusal: Equatable {
+        /// Changes in the thread wait for approval (Peter, 2026-11-12).
+        case approvalWaiting(count: Int)
+        /// The thread is too long for another reply (#648), as last known: a
+        /// refused start, a skipped reply, or the last reply's `thread_length`.
+        case threadTooLong(VoiceAIBlock)
+
+        var message: String {
+            switch self {
+            case .approvalWaiting(let count): return VoiceApproval.recordRefusal(count: count)
+            case .threadTooLong(let block): return block.body
+            }
+        }
+    }
+
+    /// Why a new turn may not start in this conversation, or nil. Checked by
+    /// every way of starting one: the Voice screen's Record and Continue and
+    /// the lock screen's Record all end in `start()` or `continueConversation()`.
+    /// When both apply, the waiting change comes first: it needs a decision
+    /// before anything else, and the thread's length is said once it is
+    /// decided (the server answers `approval_pending` before `thread_too_long`
+    /// the same way).
+    var newTurnRefusalReason: NewTurnRefusal? {
+        if approvalWaiting { return .approvalWaiting(count: waitingApprovals.count) }
+        if let block = aiBlock, block.isThreadTooLong { return .threadTooLong(block) }
+        return nil
+    }
+
+    /// The refusal's text (a lock-screen notification), or nil.
+    var newTurnRefusal: String? { newTurnRefusalReason?.message }
+
+    /// A node of the conversation's thread, to ask the server with.
+    var approvalsNodeId: Int? { threadParentId ?? lastReplyNodeId ?? approvalsListedNode }
+    /// The node the last list was asked with.
+    @ObservationIgnored private var approvalsListedNode: Int?
 
     var isGleaning: Bool { gleanPhase != .idle }
     /// The server accepted the glean; the gleaning is being written.
@@ -153,6 +220,9 @@ final class VoiceTurnController {
         var gleanPoll: Double = 2
         /// The session stays active this long after an error sound starts.
         var errorSound: Double = ToneSynth.errorSoundLength
+        /// The end of the reply's queue waits at most this long for the approval
+        /// announcement's answer (`VoiceApproval.announcementWait`).
+        var announcementWait: Double = VoiceApproval.announcementWait
     }
 
     // MARK: Dependencies
@@ -193,6 +263,12 @@ final class VoiceTurnController {
     /// Any newer generation (cancel, new turn, leaving Voice) drops it.
     @ObservationIgnored private var errorSoundAfterQueue: Int?
     @ObservationIgnored private var initialResume = false
+    /// The approval announcement of the turn's final reply: the node asked for,
+    /// and its answer once it came (`answered`; nil answer = no clip).
+    @ObservationIgnored private var announcementNode: Int?
+    @ObservationIgnored private var announcementAnswered = false
+    @ObservationIgnored private var announcementAnswer: ApprovalAnnouncement?
+    @ObservationIgnored private var announcementWaitTask: Task<Void, Never>?
     @ObservationIgnored private var toastedWarnings: Set<String> = []
     @ObservationIgnored private var failureToasted: Set<Int> = []
     @ObservationIgnored private var interruptionToast: Int?
@@ -245,12 +321,20 @@ final class VoiceTurnController {
         }
         threadParentId = parentId
         lastReplyNodeId = nil
+        // The screen's availability says how long the thread is (#648).
+        lengthNotice = false
         resetGlean(session: glean)
         // A continued thread has its messages already; a glean starts under
         // the node the screen opened on (web VoicePage).
         hasRecordedMessage = parentId != nil
         gleanAnchor = parentId
+        clearApprovals()
         audio.refreshNowPlaying()
+        // A thread may hold changes waiting for approval from before: the record
+        // control waits for them, and the dialog opens once nothing plays.
+        if let parentId {
+            Task { [weak self] in await self?.refreshApprovals(nodeId: parentId, openDialog: true) }
+        }
     }
 
     /// A Voice screen checks AI usage afresh (a new screen, or a return after the
@@ -275,14 +359,18 @@ final class VoiceTurnController {
     }
 
     /// Record tap (web `handleStart`). The caller checks the spend cap first.
+    /// Refused while a change in the thread waits for approval, or once the
+    /// thread is known to be too long for another reply (`newTurnRefusal`).
     func start() {
-        guard state == .idle || state == .done, !isGleaning else { return }
+        guard state == .idle || state == .done, !isGleaning, newTurnRefusal == nil else { return }
         beginRecording(resume: nil)
     }
 
     /// Record button in playback (web `handleContinue`): new turn, same thread.
+    /// Refused, with the reply left playing, while a change waits for approval
+    /// or when the reply took the thread to its limit (`newTurnRefusal`).
     func continueConversation() {
-        guard phase == .playback, !isGleaning else { return }
+        guard phase == .playback, !isGleaning, newTurnRefusal == nil else { return }
         timing.endTurn()
         resetTurn(keepQueue: false)
         beginRecording(resume: nil)
@@ -300,6 +388,9 @@ final class VoiceTurnController {
     }
 
     private func beginRecording(resume draft: InterruptedDraft?) {
+        // A refusal's sentence still being said stops first: the new
+        // recording must not hear it (#648).
+        stopSpeech()
         generation += 1
         let gen = generation
         state = .starting
@@ -323,11 +414,12 @@ final class VoiceTurnController {
             if let draft {
                 sid = draft.sessionId
             } else {
+                let parentId = self.threadParentId
                 do {
                     // Its own task: leaving the screen cancels this flow, and a
                     // cancelled request could leave a session on the server whose
                     // id never arrives here, so it would never be discarded.
-                    let parentId = self.threadParentId, aiUsage = self.aiUsage()
+                    let aiUsage = self.aiUsage()
                     sid = try await Task { [backend = self.backend] in
                         try await backend.startSession(parentId: parentId, aiUsage: aiUsage)
                     }.value.sessionId
@@ -341,9 +433,33 @@ final class VoiceTurnController {
                         self.audio.refreshNowPlaying()
                     } else if let block = VoiceAIBlock.from(
                         error, fallback: self.threadParentId == nil ? .account : .thread) {
-                        // AI usage is `none`: no draft exists and the mic never opens.
-                        // The screen explains instead of a toast and the red dot.
-                        self.aiBlock = block
+                        // AI usage is `none`, or the thread is too long for another
+                        // reply (#648): no draft exists and the mic never opens. The
+                        // screen explains instead of a toast and the red dot; a thread
+                        // too long is also said aloud. (Where a change also waits, the
+                        // server answers `approval_pending` first: the branch below.)
+                        if block.isThreadTooLong {
+                            self.threadTooLong(block)
+                        } else {
+                            self.aiBlock = block
+                            self.state = .idle
+                            self.audio.deactivate()
+                            self.audio.refreshNowPlaying()
+                        }
+                    } else if VoiceApproval.isRefusal(error) {
+                        // A change in this thread waits for approval that this phone
+                        // did not know of (made on another device): no session exists
+                        // and the mic never opened. The list comes, and the dialog
+                        // with it once the turn is back to ready. Not a failure: no
+                        // sound and no red dot. Unlisted (offline), the server's words
+                        // say why.
+                        await self.refreshApprovals(nodeId: parentId, openDialog: true)
+                        guard gen == self.generation else { return }
+                        if !self.approvalWaiting {
+                            let fallback = VoiceApproval.waitingLine(count: 1) + "."
+                            self.notices.toast((error as? APIError)?.userMessage(fallback: fallback) ?? fallback,
+                                               duration: 8)
+                        }
                         self.state = .idle
                         self.audio.deactivate()
                         self.audio.refreshNowPlaying()
@@ -673,7 +789,13 @@ final class VoiceTurnController {
             // A failure note alone is the server's "no text" entry (#513).
             entrySaved(noText: status.content.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("*Note:"))
             notices.toast(warning, duration: 8)
-            finishQuietly()
+            if ThreadLength.isRefusal(status.warningCode) {
+                // This recording took the thread past its limit (#648): said
+                // aloud, then the screen offers a new thread.
+                threadTooLong(.threadTooLong())
+            } else {
+                finishQuietly()
+            }
             return
         }
         if let nodeId = status.llmNodeId {
@@ -697,9 +819,16 @@ final class VoiceTurnController {
         } catch {
             guard gen == generation else { return }
             if let block = VoiceAIBlock.from(error, fallback: threadParentId == nil ? .account : .thread) {
-                // A blocked state with its own screen, not a failure: no sound.
-                aiBlock = block
-                finishQuietly()
+                if block.isThreadTooLong {
+                    // The thread is too long for another reply (#648): the entry
+                    // may be saved (the answer names it), the refusal is said aloud.
+                    if (error as? APIError)?.body?.extra["user_node_id"]?.intValue != nil { entrySaved() }
+                    threadTooLong(block)
+                } else {
+                    // A blocked state with its own screen, not a failure: no sound.
+                    aiBlock = block
+                    finishQuietly()
+                }
             } else if let apiError = error as? APIError, apiError.status == 400 {
                 endTurnWithError(apiError.userMessage(fallback: "Could not start the reply."), sound: true)
             } else {
@@ -799,14 +928,21 @@ final class VoiceTurnController {
                 }
                 // Glean starts under the last finished reply (web `onLLMComplete`).
                 gleanAnchor = threadParentId ?? nodeId
+                // On the turn it is reached (#648): the notice, or the limit's block.
+                noteThreadLength(status.threadLength, message: status.threadLengthMessage)
                 audio.refreshNowPlaying()
+                // The reply's calls that change the user's data may wait for their
+                // approval: asked once it is written. The dialog opens when its
+                // audio, with the spoken announcement last, is over.
+                Task { [weak self] in await self?.refreshApprovals(nodeId: nodeId, openDialog: true) }
+                askAnnouncement(nodeId, gen)
             }
             let content = (status.content ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             if content.isEmpty {
                 // Nothing to speak (e.g. only a proposal card): end any chain.
                 if status.continuationNodeId == nil {
                     closeStream()
-                    finishGenerating()
+                    finishReply(nodeId, gen)
                 } else {
                     advanceChain(to: status.continuationNodeId!, gen)
                 }
@@ -826,6 +962,14 @@ final class VoiceTurnController {
             // No reply is coming: Glean stops waiting. It starts under the failed
             // reply, which the server turns into its parent (web `onLLMFailed`).
             gleanAnchor = nodeId
+            if ThreadLength.isRefusal(status.errorCode), !track.failureHandled {
+                // Refused before any model call: the thread is too long for
+                // another reply (#648). Said aloud instead of the error sound.
+                nodes[nodeId]?.failureHandled = true
+                closeStream()
+                threadTooLong(.threadTooLong(message: status.error))
+                return true
+            }
             replyFailed(nodeId, gen)
             return true
         case .cancelled?:
@@ -978,7 +1122,66 @@ final class VoiceTurnController {
             advanceChain(to: next, gen)
             return
         }
-        finishGenerating()
+        finishReply(nodeId, gen)
+    }
+
+    /// The turn's final node has all its audio in the queue. While one of the
+    /// reply's changes waits for approval, the spoken announcement joins the
+    /// end of the same queue as one more chunk (no chapter: chapters and their
+    /// starts stay the reply's); then nothing more is coming. The queue keeps
+    /// waiting for the answer at most `timings.announcementWait`.
+    private func finishReply(_ nodeId: Int, _ gen: Int) {
+        sseTask?.cancel()
+        reconcileTask?.cancel()
+        askAnnouncement(nodeId, gen)
+        if announcementAnswered {
+            appendAnnouncement(nodeId)
+            finishGenerating()
+            return
+        }
+        let deadline = Date().addingTimeInterval(timings.announcementWait)
+        announcementWaitTask?.cancel()
+        announcementWaitTask = Task { [weak self] in
+            while let self, !Task.isCancelled, gen == self.generation, !self.announcementAnswered, Date() < deadline {
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+            guard let self, !Task.isCancelled, gen == self.generation else { return }
+            if !self.announcementAnswered { self.log.info("approval announcement not in time; the reply ends without it") }
+            self.appendAnnouncement(nodeId)
+            self.finishGenerating()
+        }
+    }
+
+    /// Asks once per reply, as soon as its final node is written, so the answer
+    /// is usually in before its audio ends.
+    private func askAnnouncement(_ nodeId: Int, _ gen: Int) {
+        guard announcementNode != nodeId else { return }
+        announcementNode = nodeId
+        announcementAnswered = false
+        announcementAnswer = nil
+        Task { [weak self] in
+            guard let self else { return }
+            let answer = try? await self.backend.approvalAnnouncement(nodeId: nodeId)
+            guard gen == self.generation, self.announcementNode == nodeId else { return }
+            self.announcementAnswer = answer
+            self.announcementAnswered = true
+        }
+    }
+
+    private func appendAnnouncement(_ nodeId: Int) {
+        guard announcementNode == nodeId, let answer = announcementAnswer, let url = answer.clip else { return }
+        if turnHasAudio {
+            guard audio.queue.append(url: url, duration: answer.duration, chapterTitle: nil) else { return }
+        } else {
+            // The reply had nothing to speak (only a proposal card): the
+            // announcement alone, so a listener still hears that a change waits.
+            turnHasAudio = true
+            audio.queue.generatingTTS = true
+            audio.queue.loadFirst(url: url, duration: answer.duration, chapterTitle: nil) {}
+        }
+        awaitingNextNode = false
+        state = .playing
+        audio.announcementQueued(nodeId: nodeId, url: url)
     }
 
     /// Nothing more will be appended for this turn.
@@ -1029,8 +1232,7 @@ final class VoiceTurnController {
         if let next = nodes[nodeId]?.continuation {
             advanceChain(to: next, gen)
         } else {
-            sseTask?.cancel()
-            finishGenerating()
+            finishReply(nodeId, gen)
         }
         audio.refreshNowPlaying()
     }
@@ -1098,6 +1300,10 @@ final class VoiceTurnController {
     func appDidBecomeActive() {
         let gen = generation
         gleanResumed()
+        // A change may have been decided on another device meanwhile.
+        if approvalWaiting {
+            Task { [weak self] in await self?.refreshApprovalsIfWaiting() }
+        }
         if state == .recording && isInterrupted {
             audio.playInterruptionAlert()
         }
@@ -1372,6 +1578,70 @@ final class VoiceTurnController {
         onGleaningReady?(id)
     }
 
+    // MARK: Changes waiting for approval
+
+    /// Asks the server for the thread's waiting calls (`nodeId`, else the
+    /// conversation's node). `openDialog`: the dialog opens by itself once
+    /// nothing plays (a reply just written, a thread just opened). A failed
+    /// request keeps what was known.
+    func refreshApprovals(nodeId: Int? = nil, openDialog: Bool) async {
+        guard let node = nodeId ?? approvalsNodeId else { return }
+        let epoch = approvalsEpoch
+        guard let items = try? await backend.pendingApprovals(nodeId: node), epoch == approvalsEpoch else { return }
+        approvalsListedNode = node
+        setApprovals(items, listedFor: node)
+        if openDialog && !items.isEmpty {
+            approvalDialogWanted = true
+            openApprovalDialogIfDue()
+        }
+    }
+
+    /// Asks again only while something waits: the app came back, the Voice
+    /// screen returned, or a call was decided on the thread screen. A thread
+    /// with nothing waiting costs no request.
+    func refreshApprovalsIfWaiting(openDialog: Bool = false) async {
+        guard approvalWaiting else { return }
+        await refreshApprovals(openDialog: openDialog)
+    }
+
+    /// The dialog decided calls: what still waits. With nothing left, Record
+    /// (the lock screen's too) is offered again at once.
+    func approvalsChanged(_ items: [ToolApproval]) {
+        setApprovals(items, listedFor: nil)
+    }
+
+    /// The Voice screen showed the dialog.
+    func approvalDialogOpened() {
+        approvalDialogDue = false
+    }
+
+    private func setApprovals(_ items: [ToolApproval], listedFor node: Int?) {
+        waitingApprovals = items
+        if items.isEmpty {
+            approvalDialogWanted = false
+            approvalDialogDue = false
+        }
+        if let node { onApprovalsListed?(node, items) }
+        audio.refreshNowPlaying()
+    }
+
+    /// Opens the dialog when it is wanted and nothing plays: after the reply's
+    /// audio ended (`done`), or between turns. A reply the user paused keeps
+    /// the dialog closed (the screen's Review opens it).
+    private func openApprovalDialogIfDue() {
+        guard approvalDialogWanted, approvalWaiting, state == .idle || state == .done else { return }
+        approvalDialogWanted = false
+        approvalDialogDue = true
+    }
+
+    private func clearApprovals() {
+        approvalsEpoch += 1
+        approvalsListedNode = nil
+        waitingApprovals = []
+        approvalDialogWanted = false
+        approvalDialogDue = false
+    }
+
     // MARK: Cancel and reset
 
     /// The ✕ under "Thinking…", or lock-screen "next track" while thinking
@@ -1410,10 +1680,14 @@ final class VoiceTurnController {
         }
         state = .idle
         aiBlock = nil
+        lengthNotice = false
+        // A refusal's sentence goes with the screen (#648).
+        stopSpeech()
         // The next Voice screen is a new conversation, not a reply to this one.
         threadParentId = nil
         lastReplyNodeId = nil
         resetGlean(session: false)
+        clearApprovals()
         audio.deactivate()
         audio.voiceConversationEnded()
         audio.refreshNowPlaying()
@@ -1421,8 +1695,11 @@ final class VoiceTurnController {
 
     private func resetTurn(keepQueue: Bool) {
         generation += 1
-        [flowTask, tickTask, llmTask, sseTask, reconcileTask].forEach { $0?.cancel() }
-        flowTask = nil; tickTask = nil; llmTask = nil; sseTask = nil; reconcileTask = nil
+        [flowTask, tickTask, llmTask, sseTask, reconcileTask, announcementWaitTask].forEach { $0?.cancel() }
+        flowTask = nil; tickTask = nil; llmTask = nil; sseTask = nil; reconcileTask = nil; announcementWaitTask = nil
+        announcementNode = nil
+        announcementAnswered = false
+        announcementAnswer = nil
         if state == .recording || state == .starting { recorder.cancel() }
         cueOff()
         if !keepQueue {
@@ -1449,6 +1726,94 @@ final class VoiceTurnController {
         state = .idle
         audio.deactivate()
         audio.refreshNowPlaying()
+    }
+
+    // MARK: Thread too long (#648)
+
+    /// The thread is too long for another AI reply (a refused start, a recording
+    /// whose reply was skipped, a reply the server refused): the turn ends, the
+    /// sentence is said aloud on the device (no request), and the screen shows
+    /// the block with a way to start a new thread. Not a failure: no error sound
+    /// and no red dot. Other refusals (the monthly limit) stay a toast.
+    private func threadTooLong(_ block: VoiceAIBlock) {
+        [llmTask, sseTask, reconcileTask, tickTask].forEach { $0?.cancel() }
+        cueOff()
+        audio.queue.generatingTTS = false
+        aiBlock = block
+        state = .idle
+        audio.refreshNowPlaying()
+        speakThenDeactivate(ThreadLength.spokenText)
+    }
+
+    /// A record press where Voice mode is already known to be closed for a thread
+    /// too long (the lock screen's Record, also on Continue while the reply
+    /// plays): the reply stops, as Continue stops it, and the sentence says why,
+    /// as a refused start does. Returns once it has been said: the lock screen's
+    /// intent keeps the app running only until it returns.
+    func announceBlock() async {
+        guard let block = aiBlock, block.isThreadTooLong, phase == .ready || phase == .playback else { return }
+        if state != .idle && state != .done {
+            timing.endTurn()
+            resetTurn(keepQueue: false)
+            state = .idle
+            audio.refreshNowPlaying()
+        }
+        speakThenDeactivate(ThreadLength.spokenText)
+        await untilSpoken()
+    }
+
+    /// Returns once the sentence being said (if any) has been said, or stopped.
+    func untilSpoken() async {
+        while let task = speechTask {
+            await task.value
+            if speechTask == task { speechTask = nil }
+        }
+    }
+
+    /// The sentence, then the session's end (as the error sound: deactivating
+    /// while it is said would cut it off). Only the latest sentence ends the
+    /// session: a second refusal's sentence starts while the first is said, and
+    /// the first one's end must not cut it off. A new turn meanwhile keeps the
+    /// session.
+    private func speakThenDeactivate(_ text: String) {
+        speechToken += 1
+        let token = speechToken
+        let gen = generation
+        speechTask = Task { [weak self] in
+            guard let self else { return }
+            await self.audio.speak(text)
+            guard token == self.speechToken else { return }
+            self.speechTask = nil
+            guard gen == self.generation, self.state == .idle || self.state == .done else { return }
+            self.audio.deactivate()
+        }
+    }
+
+    /// A new recording starts (or Voice closes): the sentence stops at once, so
+    /// the microphone never hears it, and its end leaves the session alone.
+    private func stopSpeech() {
+        guard speechTask != nil else { return }
+        speechToken += 1
+        speechTask = nil
+        audio.stopSpeaking()
+    }
+
+    /// How close the thread the last reply reached is to its limit (#648; the
+    /// reply's llm-status `thread_length`, or the screen's availability): the
+    /// notice line under the record button, or at the limit the block, shown
+    /// without being said (nothing was refused yet; the next record press says
+    /// it). Not while a recording runs.
+    func noteThreadLength(_ length: ThreadLength?, message: String? = nil) {
+        guard phase != .recording else { return }
+        switch length {
+        case .limit?:
+            aiBlock = .threadTooLong(message: message)
+            lengthNotice = false
+        case .notice?:
+            lengthNotice = true
+        case nil:
+            lengthNotice = false
+        }
     }
 
     private func endTurnWithError(_ message: String?, sound: Bool) {

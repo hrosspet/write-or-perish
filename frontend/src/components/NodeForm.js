@@ -21,6 +21,7 @@ import {
 import { useOnlineStatus } from "../hooks/useOnlineStatus";
 import { useToast } from "../contexts/ToastContext";
 import RecoveryBanner from './RecoveryBanner';
+import { replySkippedForLength } from "../utils/threadLength";
 import api from "../api";
 import { uploadFileInChunks } from "../utils/chunkedUpload";
 import {
@@ -757,8 +758,12 @@ const NodeForm = forwardRef(
           // LLM placeholder (e.g. /textmode/start). Surface the banner.
           if (data && data.spend_capped) notifySpendBlocked(data.spend_cap_lifts_on);
           // The entry was saved but the reply was refused (e.g. an
-          // uncapped {user_export} on a non-Pro plan): say why.
-          if (data && data.llm_error) addToast(data.llm_error, 10000);
+          // uncapped {user_export} on a non-Pro plan): say why. A thread
+          // too long for another reply (#648) says so above the reply form
+          // of the page the entry opens on, so no toast repeats it.
+          if (data && data.llm_error && !replySkippedForLength(data)) {
+            addToast(data.llm_error, 10000);
+          }
           succeed(data);
           setLoading(false);
           return;
@@ -788,7 +793,9 @@ const NodeForm = forwardRef(
           // LLM placeholder. Surface the banner; the no-llm_node_id branch
           // below lands the user on their new thread without a placeholder.
           if (res.data.spend_capped) notifySpendBlocked(res.data.spend_cap_lifts_on);
-          if (res.data.llm_error) addToast(res.data.llm_error, 10000);
+          if (res.data.llm_error && !replySkippedForLength(res.data)) {
+            addToast(res.data.llm_error, 10000);
+          }
           if (res.data.llm_node_id) {
             // Through the USER node so the entry gets its own URL/history
             // step; ?awaitLlm hands the pending LLM response to NodeDetail,

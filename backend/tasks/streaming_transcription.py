@@ -77,6 +77,26 @@ VOICE_REPLY_SKIPPED_NO_WORDS = (
     "Loore didn't hear any words in this recording. It's saved with its "
     "audio, without a reply."
 )
+# The same when a change the AI proposed in the thread waits for the
+# user's approval (Peter, 2026-11-12): streaming init refuses such a
+# recording; this covers one that started before the change was proposed
+# (another device) or an interrupted recording continued later.
+VOICE_REPLY_SKIPPED_APPROVAL = (
+    "Your recording is saved. Loore didn't reply because a change to your "
+    "data waits for your approval. Approve or reject it, then continue."
+)
+
+
+def _voice_approval_skip(user_id, parent_id):
+    """VOICE_REPLY_SKIPPED_APPROVAL when a call of the user's waits in the
+    thread the recording continues (tool_approvals.waiting_in_thread), else
+    None."""
+    if not user_id or not parent_id:
+        return None
+    from backend.utils.tool_approvals import waiting_in_thread
+    if waiting_in_thread(user_id, Node.query.get(parent_id)):
+        return VOICE_REPLY_SKIPPED_APPROVAL
+    return None
 
 
 def _voice_reply_refusal(user_id, parent_id, draft):
@@ -91,6 +111,25 @@ def _voice_reply_refusal(user_id, parent_id, draft):
     parent = Node.query.get(parent_id) if parent_id else None
     return voice_turn_refusal(
         user, parent, None if parent else (draft.ai_usage or "none"))
+
+
+def _voice_thread_too_long(user_id, parent_id, model):
+    """True when the thread a Voice recording continues is already too
+    long for another reply (#648): the reply will be skipped, so no
+    cache pre-warm is paid for it. A fresh thread never is."""
+    if not parent_id:
+        return False
+    from backend.utils.thread_size import thread_length_refusal
+    try:
+        parent = Node.query.get(parent_id)
+        return (parent is not None
+                and thread_length_refusal(parent, user_id, model) is not None)
+    except Exception:
+        # Only the warm depends on it: the reply's own check still runs.
+        db.session.rollback()
+        logger.warning("Thread length check for the pre-warm failed",
+                       exc_info=True)
+        return False
 
 
 def _find_thread_system_node(parent_id):
@@ -1091,7 +1130,9 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
         if (user_id and model and label == 'Voice'
                 and is_chat_model(model)
                 and not user_is_capped(user_id)
-                and _voice_reply_refusal(user_id, parent_id, draft) is None):
+                and _voice_reply_refusal(user_id, parent_id, draft) is None
+                and _voice_approval_skip(user_id, parent_id) is None
+                and not _voice_thread_too_long(user_id, parent_id, model)):
             try:
                 model_cfg = flask_app.config["SUPPORTED_MODELS"].get(model)
                 is_anthropic = bool(
@@ -1476,6 +1517,8 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
 
     prompt_key = label.lower()  # 'voice'
     refused = _voice_reply_refusal(user_id, parent_id, draft)
+    if refused is None and not skip_message:
+        skip_message = _voice_approval_skip(user_id, parent_id)
     if refused is None and skip_message:
         # No reply for another reason (#513: nothing was transcribed); the
         # recording is saved on its own, like a refused one.
@@ -1578,22 +1621,31 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     # ReadOnlyModelRefused the same way: the client sent a read-only model
     # (an app whose picker does not filter on "chat"); the recording is
     # kept and the reply is not moved to another model.
+    # ThreadTooLong the same way (#648): the thread grew past the limit
+    # with this recording; it is kept, and the Voice screen says aloud why
+    # no reply follows (the warning's code, thread_size.skipped_reply_code).
     from backend.utils.placeholders import UserExportValidationError
     from backend.utils.node_deletion import ParentDeletedError
     from backend.utils.spend import SpendCapExceeded
+    from backend.utils.thread_size import (
+        ThreadTooLong,
+    )
     try:
         llm_node, _ = create_llm_placeholder(
             tip_node.id, model, user_id, enqueue=False,
             ai_usage=ai_usage, client=client,
         )
     except (UserExportValidationError, ParentDeletedError,
-            SpendCapExceeded, AIUsageRefused, ReadOnlyModelRefused) as e:
+            SpendCapExceeded, AIUsageRefused, ReadOnlyModelRefused,
+            ThreadTooLong) as e:
         if isinstance(e, SpendCapExceeded):
             message = VOICE_REPLY_SKIPPED_SPEND_CAP
         elif isinstance(e, AIUsageRefused):
             message = VOICE_REPLY_SKIPPED_AI_USAGE
         elif isinstance(e, ReadOnlyModelRefused):
             message = VOICE_REPLY_SKIPPED_READ_ONLY.format(model=e.model_name)
+        elif isinstance(e, ThreadTooLong):
+            message = e.recording_message
         else:
             message = str(e)
         logger.warning(

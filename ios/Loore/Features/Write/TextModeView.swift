@@ -88,7 +88,8 @@ struct TextModeView: View {
             let answer: SaveAsNodeResponse = try await app.api.post(APIPath.streamingSaveAsNode(sid),
                                                                     json: .object(body))
             return NodeFormResult(id: answer.id, userNodeId: answer.userNodeId, llmNodeId: answer.llmNodeId,
-                                  spendCapped: answer.spendCapped, llmError: answer.llmError)
+                                  spendCapped: answer.spendCapped, llmError: answer.llmError,
+                                  llmErrorCode: answer.llmErrorCode)
         }
         var body: [String: JSONValue] = [
             "content": .string(s.content), "privacy_level": .string(s.privacy.rawString),
@@ -98,7 +99,8 @@ struct TextModeView: View {
         let answer: TextmodeStartResponse = try await app.api.post(APIPath.textmodeStart, json: .object(body))
         app.signals.post(.nodeCreated(answer.userNodeId))
         return NodeFormResult(id: answer.userNodeId, userNodeId: answer.userNodeId, llmNodeId: answer.llmNodeId,
-                              spendCapped: answer.spendCapped, llmError: answer.llmError)
+                              spendCapped: answer.spendCapped, llmError: answer.llmError,
+                              llmErrorCode: answer.llmErrorCode)
     }
 
     /// Where a Text-mode send lands (web `WritePage.handleSuccess`). The entry's

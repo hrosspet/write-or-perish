@@ -3352,6 +3352,578 @@ Kinds (one per entry and per table row):
 - **Source:** Claude Code session 2026-11-11 (Opus 5.5)
 - **Applies to:** #623, #625
 
+### 2026-11-11 · Circles: the Terms sentence
+
+- **Kind:** user-facing text
+- **Situation:** #631 (Circles) was built dark, with its switch off. Its brief to Peter asked four questions before the switch goes on. The first: the sentence the Terms get for Circles, (A) "Circles: shared with the people you choose." (recommended) or (B) "Circles: only the people you name can read it."; until he answers, the switch stays off and the Terms unchanged.
+- **Prediction:** A or a small edit of it (55 %); his own sentence (30 %); B (15 %).
+- **Peter:** "Circles: shared with the people you choose."
+- **Score:** hit
+- **Source:** Loore voice review, node 201850 answering brief 201848, 2026-11-11 (Fable 5.2)
+- **Applies to:** #631
+
+### 2026-11-11 · Circles: one note when a person is added with older entries
+
+- **Kind:** UX
+- **Situation:** as in the entry before. Peter had asked for a note for every shared entry (2026-11-10), and the builder read that as every newly shared entry: a person added to a circle that already holds 12 shared entries gets one note, not 12.
+- **Prediction:** one note (75 %); a note per entry (15 %); other (10 %).
+- **Peter:** "yes, that's correct" · "however I think the default when adding a new user to a circle with pre-existing nodes is that the new user sees only new nodes published after the user's addition. There should be an option, though, when adding a new user to a circle with pre-existing nodes, to allow previously published content to be also visible by the new user"
+- **Score:** hit. He also set the add-person dialog's default, which the first build had left open: only the entries shared from then on, with an option for the earlier ones.
+- **Source:** Loore voice review, node 201850 answering brief 201848, 2026-11-11 (Fable 5.2)
+- **Applies to:** #631
+
+### 2026-11-11 · Circles: what "Delete all my content" removes
+
+- **Kind:** data safety
+- **Situation:** as in the entry before. As built, "Delete all my content" removes, after the 30 days, the circles the user made, their places in other people's circles and their list of people they hid. Recommended: keep their places in other people's circles and their hidden list, and delete only the circles they made, since being in Anna's circle is Anna's choice, not Ben's content.
+- **Prediction:** the recommendation (65 %); as built (25 %); other (10 %).
+- **Peter:** "agree it's Anna's circle so Ben should stay in it" · "however the list of people hidden for Ben belongs to ben and should be deleted" · "deleting only the circles he made: yes"
+- **Score:** partial: his places in other people's circles stay and only his own circles go, as recommended; his hidden list is deleted, against the recommendation.
+- **Why it missed:** the hidden list was grouped with the memberships as something other people decide. It is a list the user made, so for Peter it is the user's data and goes with the rest.
+- **Source:** Loore voice review, node 201850 answering brief 201848, 2026-11-11 (Fable 5.2)
+- **Applies to:** #631
+- **Rule:** candidate: deleting a user's content deletes what they made, lists about other people included; what other people made about them stays
+
+### 2026-11-11 · Circles: "Delete all my content" removed the user's places in other people's circles
+
+- **Kind:** data safety
+- **Situation:** the first Circles build's choice behind the question in the entry before.
+- **Decision:** after the 30 days, deleted the circles the user made, their places in other people's circles and their hidden list.
+- **Peter:** "agree it's Anna's circle so Ben should stay in it" · "however the list of people hidden for Ben belongs to ben and should be deleted" · "deleting only the circles he made: yes"
+- **Score:** partial: the user's own circles and hidden list go, as built; the places in other people's circles stay.
+- **Why it missed:** a place in someone else's circle was counted as the user's data. It is the circle owner's choice.
+- **Source:** Loore voice review, node 201850, 2026-11-11; the decision is from the first Circles build of 2026-11-10 (Fable 5.2)
+- **Applies to:** #631
+
+### 2026-11-11 · Circles: names written as "@ben, @chidi and @dana"
+
+- **Kind:** user-facing text
+- **Situation:** as in the entry before. Readers are named by their Loore usernames, since accounts have no display name: "@ben, @chidi and @dana" (recommended), plain "ben, chidi and dana" (as built, the default), or a display-name field later.
+- **Prediction:** the @ form (50 %); plain names (30 %); display names (20 %).
+- **Peter:** "yes, this version pls"
+- **Score:** hit
+- **Source:** Loore voice review, node 201850 answering brief 201848, 2026-11-11 (Fable 5.2)
+- **Applies to:** #631
+
+### 2026-11-11 · Circles: a reader's AI reply belongs to the reader's export and profile
+
+- **Kind:** privacy
+- **Situation:** in the first Circles build a reader could press "Ask my AI" under a shared entry. The coordinating builder decided, from the choices #631 listed, that the answer stays out of the reader's data download and never shapes the reader's profile.
+- **Decision:** the answer stays out of the reader's export and profile.
+- **Peter:** "it should belong to the reader's export and I'm not sure about whether it should go to their profile. Similar question is open for public nodes if I remember correctly. Or have we resolved it? I'm leaning yes, it should also shape their profile" · later: "let's leave Anna's circle nodes out of Ben's profile, but both Ben's own writing and LLM where Ben's the human owner should go to Ben's profile"
+- **Score:** miss. The rebuilt #631 puts a member's typed and AI replies in other people's threads into the member's download and profile builds, and leaves the author's entries out.
+- **Why it missed:** the builder kept everything written in someone else's thread out of the reader's own data, to keep shared threads apart. For Peter an AI reply that a person asked for is that person's writing, wherever it sits.
+- **Source:** Loore voice review, nodes 201850 and 201852, 2026-11-11; the decision is the coordinating builder's (Fable 5.2)
+- **Applies to:** #631
+
+### 2026-11-11 · Circles: the author's automatic AI reply joins the circle
+
+- **Kind:** privacy
+- **Situation:** as in the entry before. When an author writes a shared entry with automatic AI replies on, the reply was kept private, since it was written with the author's profile in context.
+- **Decision:** the automatic reply to a shared entry stays private.
+- **Peter:** "answered by the above: it should inherit the circle setting by default, but the author can change it to private (in craft mode, before or after generating the response)"
+- **Score:** miss. On 2026-11-12 Peter then turned automatic replies off in circles and public threads altogether (the entry "Widening #642's rule to the requester's own threads").
+- **Why it missed:** the builder weighed what the reply was written with. Peter treats an AI reply like the entry it answers: shared where the entry is, unless its owner keeps it private.
+- **Source:** Loore voice review, node 201850, 2026-11-11; the decision is the coordinating builder's (Fable 5.2)
+- **Applies to:** #631
+
+### 2026-11-11 · Circles: "Ask my AI" replaced by ordinary AI replies
+
+- **Kind:** product scope
+- **Situation:** the Circles design of 2026-11-10 gave a reader a separate "Ask my AI" button under a shared entry: an answer on the reader's model, readable in the thread and kept out of the reader's own data. Peter had approved the design from its mockup ("I actually like the AI reply design", the entry "Circles: a reader's AI"). After the first build he read how it worked.
+- **Decision:** a separate "Ask my AI" mechanism for readers, with its own button and rules.
+- **Peter:** "I forgot to give you feedback during the design phase, sorry" · "I'm not too happy about the way it's implemented" · "I'd like it to work exactly the same as private nodes and LLM replies under them, only accessible to the people in the selected circle" · "each user from the circle will be able to generate a LLM reply under a node shared via that circle, and this LLM reply should be tagged something like "Claude Fable 5.2 via @hrosspet"" · "if there is agentic prompt in the history of that node, the agentic prompt should be filled in by artifacts of the user that is requesting that particular LLM response" · "thus, every LLM reply in a circle should inherit that circle by default, but ofc could be changed by the user to private (not public, nor other circle)"
+- **Score:** miss. #631 was rebuilt: any member presses LLM Response, the reply is labelled with the model and the person who asked, and it is shared with the circle unless that person keeps it private.
+- **Why it missed:** the design made a reader's AI a special case, to keep the author's thread and the reader's data apart. Peter wanted the AI replies Loore already has, with the person who asked named on each. By his own words, his approval of the mockup did not cover this part.
+- **Source:** Loore voice review, node 201850, 2026-11-11; the design is the builder's of 2026-11-10 (Fable 5.2)
+- **Applies to:** #588, #631
+
+### 2026-11-11 · Circles: the iPhone screens were not opened in the simulator
+
+- **Kind:** testing
+- **Situation:** the first Circles build compiled and unit-tested its iPhone part, and its PR said under "Not verified" that the iPhone screens had never been opened.
+- **Decision:** offered the build for review without a simulator run.
+- **Peter:** "why not? Running tests on local simulator is a standard procedure for Loore development"
+- **Score:** miss. The rebuild ran the Circles screens in the simulator, with UI tests and screenshots.
+- **Why it missed:** the same miss as #520 on 2026-10-16. The candidate rule from that entry was not in the brief to the builder, and the coordinating builder did not ask for the run.
+- **Source:** Loore voice review, node 201850, 2026-11-11 (Fable 5.2)
+- **Applies to:** #631
+- **Rule:** candidate: an iPhone app change is run on the simulator before it is offered for merging (2026-10-16)
+
+### 2026-11-11 · Circles: the dialog names every artifact the AI reads
+
+- **Kind:** privacy
+- **Situation:** in the rebuilt Circles, Ben's AI reply under Anna's shared entry is written with Ben's own profile and data, and the circle reads it. Proposed as the default: build it so, and have the dialog that names who will see the reply also say that it is written with his profile.
+- **Prediction:** accepts (65 %); no extra notice (25 %); other (10 %).
+- **Peter:** "it shouldn't inform about just the profile, but any artifact that is referenced in the prompt - the user should be informed the LLM will have access to the user's own artifacts when generating the answer and could thus share private info"
+- **Score:** hit, widened: the dialog names every artifact of the requester's that the prompt reads.
+- **Source:** Loore voice review, node 201852 answering node 201851, 2026-11-11 (Fable 5.2)
+- **Applies to:** #631
+
+### 2026-11-11 · Circles: a prompt is shared or not read at all
+
+- **Kind:** privacy
+- **Situation:** as in the entry before. Anna's thread may start from her own prompt. Proposed as the default: the prompt's text is sent to Ben's model when he asks for a reply, and never shown to Ben.
+- **Prediction:** accepts (70 %); other, such as built-in prompts only or telling Anna (30 %).
+- **Peter:** "that's not how it should work - either Anna shares the sys prompt in the circle, and then Ben can see it, or she doesn't and then Ben can't see it, neither models he uses can"
+- **Score:** miss
+- **Why it missed:** the builder separated what a model reads from what its user may read, so that a reader's AI could follow the author's prompt without showing it. For Peter a model that acts for a person reads only what that person may read.
+- **Source:** Loore voice review, node 201852 answering node 201851, 2026-11-11 (Fable 5.2)
+- **Applies to:** #631
+- **Rule:** candidate: what a model reads for a user, that user may read; no hidden context
+
+### 2026-11-11 · Circles: what shapes a reader's profile
+
+- **Kind:** privacy
+- **Situation:** as in the entry before. Which parts of a shared thread shape Ben's profile. Recommended and the default: only Ben's typed replies; his AI replies and Anna's text wait for the design of public discussion after the Beta. On main, a public thread a user takes part in goes into the profile whole, which was never decided.
+- **Prediction:** all of it shapes his profile (45 %); his typed replies only, as recommended (40 %); his replies and AI replies, not Anna's text (15 %).
+- **Peter:** "let's leave Anna's circle nodes out of Ben's profile, but both Ben's own writing and LLM where Ben's the human owner should go to Ben's profile"
+- **Score:** miss: the third option (15 %).
+- **Why it missed:** the recommendation left AI replies out until a later design. Peter applied the rule he had just given for the export: an AI reply a person asked for is that person's, and another person's text is not.
+- **Source:** Loore voice review, node 201852 answering node 201851, 2026-11-11 (Fable 5.2)
+- **Applies to:** #631
+
+### 2026-11-11 · Circles: the share step offers the discussion, not the prompt
+
+- **Kind:** product scope
+- **Situation:** after Peter's answer in the entry "Circles: a prompt is shared or not read at all", the coordinating builder told the Circles builder that sharing an entry does not share its prompt, and that the share step offers "Also share the prompt this thread starts from", off by default.
+- **Decision:** a share option for the thread's prompt alone.
+- **Peter:** "it shouldn't be limited to just prompt. The question should be something like "Share also the discussion leading up to this node?". If the author clicks yes, that should share the whole discussion history up to and including the node the author decided to share" · "sharing just the sys prompt and the selected node, if there was some discussion in between, shouldn't be an option for now"
+- **Score:** miss
+- **Why it missed:** the option followed the question that had come up (the prompt) rather than what a reader needs in order to follow the entry: the discussion it answers.
+- **Source:** Claude Code session 2026-11-11, on node 201853 (Fable 5.2)
+- **Applies to:** #631
+
+### 2026-11-11 · Circles: a shared prompt shows the reader's own artifacts
+
+- **Kind:** UX
+- **Situation:** as in the entry before. The coordinating builder decided that a reader sees a shared prompt as text with its placeholders, never filled with the author's artifacts.
+- **Decision:** the reader sees the placeholders unfilled.
+- **Peter:** "it should embed Ben's artifacts where possible (Anna may have artifacts that Ben doesn't, in which case just the placeholder should be displayed)"
+- **Score:** miss
+- **Why it missed:** hiding the author's artifacts was right, but the reader's own artifacts are what his AI reads, so Peter wants him to see them.
+- **Source:** Claude Code session 2026-11-11, on node 201853 (Fable 5.2)
+- **Applies to:** #631
+
+### 2026-11-11 · Circles: whole-writing placeholders in another person's prompt
+
+- **Kind:** privacy
+- **Situation:** a shared prompt may hold placeholders that fill in a reader's whole archive (`{user_export}`) or recent writing word for word (`{user_recent_raw}`). The Circles builder recommended not filling them. The coordinating builder made them fillable by default, named in the dialog and checked on the server, under Peter's "any artifact that is referenced in the prompt".
+- **Prediction:** fillable (65 %); not filled (30 %); other (5 %).
+- **Peter:** "we have some limits for the placeholder which includes user's raw data, don't we? What's the limit? 100k units? That should be fine given the explicit question & acknowledgement"
+- **Score:** hit. In a prompt the requester did not write, `{user_export}` reads at most 100,000 tokens of the requester's archive, on every plan.
+- **Source:** Loore voice review, node 201855 answering node 201854, 2026-11-11 (Fable 5.2)
+- **Applies to:** #631
+
+### 2026-11-11 · Circles: the Terms sentence changes without a new Terms version
+
+- **Kind:** user-facing text
+- **Situation:** #631 adds one sentence about Circles to the Terms. The default: no new Terms version, so nobody is asked to accept the Terms again.
+- **Prediction:** no new version (75 %); a new version to accept (20 %); other (5 %).
+- **Peter:** "ok"
+- **Score:** hit
+- **Source:** Loore voice review, node 201855 answering node 201854, 2026-11-11 (Fable 5.2)
+- **Applies to:** #631
+
+### 2026-11-11 · A single entry set to None in Loore asks nothing
+
+- **Kind:** privacy
+- **Situation:** #637 asks the user about a profile rebuild when a re-import sets entries already in Loore to None (Peter, 2026-11-11). The same can happen without an import: a user sets one older entry to None inside Loore while the profile in use may hold what it says. Recommended: the same question, asked only when the profile could contain the entry. As built, nothing is asked and the entry stays in the profile until a full rebuild.
+- **Prediction:** the recommendation (60 %); no question (25 %); other, such as a rebuild button in Settings (15 %).
+- **Decision:** recommended asking.
+- **Peter:** "what question?" · "ask nothing"
+- **Score:** miss
+- **Why it missed:** the import flow's question was carried over to a one-click setting inside Loore. In the import flow a dialog is open anyway; for a single entry Peter wants no extra question.
+- **Source:** Claude Code session 2026-11-11 (Opus 5.5)
+- **Applies to:** #625, #637
+
+### 2026-11-11 · Export data tested on Peter's own account on prod
+
+- **Kind:** release/ops
+- **Situation:** #629 streams the data download. To check it on prod, the builder recommended that Peter export his own account (about $0.15 in key-service calls, about 10 minutes) instead of a staging test, which would need a large private import to show anything.
+- **Prediction:** he exports his own account on prod (60 %); he wants the staging test first (35 %); other (5 %).
+- **Peter:** before the recommendation: "could you run the test on staging? Or do we need a biiig account to test it properly?" · after it: "clicking export data does nothing for ~30s and only then pops up the save file dialog. After confirming, it works as expected - there is a file downloaded immediately and it grows in time."
+- **Score:** hit. The 30 seconds before the save dialog became #640.
+- **Source:** Claude Code session 2026-11-11 (Opus 5.5)
+- **Applies to:** #629, #640
+
+### 2026-11-11 · Subagents of a Fable 5.2 session run on Opus 5.5
+
+- **Kind:** process
+- **Situation:** the coordinating session ran on Fable 5.2, and its subagents, the Circles builder and its reviewer among them, took the session's model. The 5-hour usage limit stopped them.
+- **Peter:** "also, pls make part of the voice review skill that when fable 5.2 is selected for the session, they should start fable 5.2 subagents only when explicitly asked for. Otherwise call Opus 5.5, or smaller models. This rule should be revisited by me if new models are released, so pls raise it when that time comes" · "but do restart them after the refresh, as Opus 5.5 agents, though, pls!"
+- **Score:** not scored: a new rule; the subagents had taken the session's model by default, not by a choice of the builder's.
+- **Source:** Claude Code session 2026-11-11 (Fable 5.2)
+- **Applies to:** the voice-review skill
+- **Rule:** in a Fable 5.2 session, subagents run on Opus 5.5 or smaller unless Peter asks for Fable (added to the voice-review skill)
+
+### 2026-11-12 · Widening #642's rule to the requester's own threads
+
+- **Kind:** privacy
+- **Situation:** #642 makes an AI reply that other people can read, in a thread whose root or prompt the requester did not write, run without the requester's tools. The builder decided it under #483 and told Peter in node 201858, for him to object. Its review raised the same question for other threads that hold someone else's text. Recommended, as a follow-up PR by default: no tools for a reply others can read whenever its thread holds text the requester did not write, the requester's own threads included.
+- **Prediction:** accepts (60 %); keeps the tools in own threads (30 %); other (10 %).
+- **Peter:** "you changed my mind, the privacy/security issue with circles and public threads is bigger than I thought" · "your recommendation imo is not enough" · "let's go with a different rule: all AI replies in a public thread are private by default, autogenerate is off in public threads and circles and can't be turned on, and only the user can change an AI reply to that circle/public (after the reply being generated and the user supposedly having read it and decided it to share it)"
+- **Score:** miss. Built as #644, merged in train #652.
+- **Why it missed:** the builder narrowed the fix to the tools of a reply that others read. Peter moved the decision earlier, to whether an AI reply is shared at all: each reply stays private until its user has read it and shares it.
+- **Source:** Loore voice review, node 201860 answering brief 201859, 2026-11-12; the prediction was written on 2026-11-11 (Fable 5.2)
+- **Applies to:** #642, #644
+- **Rule:** candidate: an AI reply is private until its user shares it; no automatic reply where other people read
+
+### 2026-11-12 · Write tools when the thread holds other people's text
+
+- **Kind:** privacy
+- **Situation:** as in the entry before. The second question: whether tools that write the requester's data (memory, the to-do list, proposals) stay on in a reply, private ones included, when the thread holds text the requester did not write. Recommended, built together with the first question by default: writing tools off there, reading tools kept in private replies.
+- **Prediction:** accepts (50 %); keeps the writing tools (30 %); other, such as writes becoming something to confirm (20 %).
+- **Peter:** "yeah, that's an even worse example. Thx for raising it to me" · "todo proposals are fine to keep, because the user needs to confirm them to apply them to their todo" · "but direct writing to artifacts should be in the case when other user's text is in the context, intercepted and via a dialog raised to the user. It should should what tool call is proposed, and show the proposed diff if it's about changing an artifact. The user would have to approve every single tool call in such a thread. If more the one such possibly destructive tool call is made in a single node, all of them should be raised inside one dialog"
+- **Score:** miss: the third option (20 %) was his direction. Built as #645, merged in train #652.
+- **Why it missed:** turning the tools off was chosen as the safe answer. Peter keeps the feature and has the user confirm each write, as proposals already work.
+- **Source:** Loore voice review, node 201860 answering brief 201859, 2026-11-12; the prediction was written on 2026-11-11 (Fable 5.2)
+- **Applies to:** #642, #645
+- **Rule:** candidate: on a privacy risk, prefer the user confirming each action to turning the feature off
+
+### 2026-11-12 · The two widening questions: ask or decide
+
+- **Kind:** escalation
+- **Situation:** as in the two entries before.
+- **Decision:** asked Peter instead of deciding.
+- **Peter:** "you changed my mind, the privacy/security issue with circles and public threads is bigger than I thought" · "Thx for raising it to me"
+- **Score:** hit
+- **Source:** Loore voice review, node 201860, 2026-11-12 (Fable 5.2)
+- **Applies to:** #642, #644, #645
+
+### 2026-11-12 · Saved references and Glean tweets in the history need the approval too
+
+- **Kind:** privacy
+- **Situation:** with Peter's rules from node 201860 being built (#644, #645), the next brief asked whether the approval dialog also applies when the thread history holds text that no Loore user wrote: clipped pages and Community Archive tweets. Recommended: yes, in a later PR. Default: only other users' text for now.
+- **Prediction:** included, in a later PR (55 %); only other users' text (35 %); other (10 %).
+- **Peter:** "by clipped pages you mean the saved external references? Yes, I'd like to apply the new rule to these, too. For gleans, that should apply too - I mean if a user continues discussion in private, but some external tweets are in the history."
+- **Score:** hit, and sooner: in #645 itself, not a later PR.
+- **Source:** Loore voice review, node 201862 answering node 201861, 2026-11-12 (Fable 5.2)
+- **Applies to:** #645
+
+### 2026-11-12 · No notice when a shared AI reply read private entries
+
+- **Kind:** user-facing text
+- **Situation:** as in the entry before. The second question: when the user shares a private AI reply that read their private entries with a tool, the share step says so (built by default). The brief described such a reply as one that "holds a passage from one of his private entries".
+- **Prediction:** accepts (75 %); no notice (15 %); other (10 %).
+- **Peter:** "what exactly do you mean by a passage? How would that be detected? Like a direct quote, or anything else? If it's about private quotes in public nodes, that shouldn't be allowed. If a user wants to publish a private node with a quote of another private node, a dialog stating that this is not possible should be displayed. Informing the user that they first need to make the quoted node public, too." · "if the node isn't using the {quote:<node_id} , but the AI just quoted a private text in a free form text, I would rely here on the user being fine with that. I don't see an effective way of detecting that."
+- **Score:** miss. No notice was built. His rule on quotes became #644's publish check.
+- **Why it missed:** partly the brief: it spoke of "a passage" when it meant that the reply ran a reading tool, so Peter read it as detecting quoted text. On what an AI reply repeats in free text, he relies on the user.
+- **Source:** Loore voice review, node 201862 answering node 201861, 2026-11-12 (Fable 5.2)
+- **Applies to:** #644
+
+### 2026-11-12 · The approval dialog only for text in the thread history
+
+- **Kind:** privacy
+- **Situation:** a check of the routes found that outside text reaches a reply in more ways than the thread history: the recent-writing block and the archive placeholders of every agentic prompt, and tools that read saved references or other people's public entries. Recommended, and the default: the approval dialog whenever outside text came in by any route in the same reply.
+- **Prediction:** any route (60 %); the thread history, perhaps with tool results (30 %); other (10 %).
+- **Peter:** "this is a text generated by AI. I can imagine a delicate prompt injection attack via a saved reference where the reference contains a prompt injection and that injection self-replicates into the recent-writing block, but currently I see it as too unlikely. The UX degradation would be too big compared to the risk." · "let's keep the confirmation dialog only for nodes directly in history, including quotes of public / circles nodes in private entries"
+- **Score:** miss
+- **Why it missed:** the builder extended the rule to every route outside text can take. Peter weighs a dialog in ordinary private sessions against an unlikely route, and keeps the dialog to the history. He also took the recent-writing block to be written by AI; it holds saved-reference text as written, which the next brief corrected (the entry after this one).
+- **Source:** Loore voice review, node 201864 answering node 201863, 2026-11-12 (Fable 5.2)
+- **Applies to:** #645
+
+### 2026-11-12 · Saved references in the recent-writing block shown by title
+
+- **Kind:** privacy
+- **Situation:** Peter's answer above took the recent-writing block to be text written by AI. It holds the user's recent entries as written, and a saved reference quoted in them comes with its full text. The next brief corrected the fact and recommended a small later PR: show a saved reference there by its title and source only. Default: nothing changes.
+- **Prediction:** leaves it as it is (55 %); title only, as recommended (35 %); other (10 %).
+- **Peter:** "agreed with the proposed small followup PR fix"
+- **Score:** miss: he took the recommendation, the second option. Built as #643, merged in train #652.
+- **Why it missed:** the builder expected his "too unlikely" judgement to hold. Once the fact was right and the fix cost the user nothing, he took it.
+- **Source:** Loore voice review, node 201866 answering node 201865, 2026-11-12 (Fable 5.2)
+- **Applies to:** #643
+
+### 2026-11-12 · #643: the title line only where read_full was offered
+
+- **Kind:** product scope
+- **Situation:** #643 shows a saved reference in the recent-writing block as one line with its title and source. The builder gave the line only to calls whose reply has `read_full`; under the search switch-off, a voice or Text-mode reply still got the reference's text.
+- **Decision:** the title line only in calls that offer `read_full`.
+- **Peter:** cited in the coordinator's check, from node 201866: "agreed with the proposed small followup PR fix" (the fix: in the recent-writing block, a saved reference shows by its title and source only)
+- **Score:** miss: corrected by the coordinator before the review; every call with tools gets the line, and without `read_full` it leaves out the part about opening the reference.
+- **Why it missed:** the line was tied to the tool that opens the reference rather than to the block the decision named.
+- **Source:** Claude Code session 2026-11-12; the decision is the #643 builder's (Opus 5.5)
+- **Applies to:** #643
+
+### 2026-11-12 · #643: reference names ignored the External references switch
+
+- **Kind:** privacy
+- **Situation:** #643 lets the model open a reference by the name the line gives ("reference N"). The builder let the name open any of the user's own references, whatever the "External references" switch said.
+- **Decision:** the name opens any of the user's references.
+- **Peter:** ticked on the train's summary node 201887, then merged the train: "With the External references switch off, the model can open only the saved references that the recent-writing block names."
+- **Score:** miss: corrected by the coordinator after the review, so that the user's setting decides.
+- **Why it missed:** the name was treated as the decision's own way back to a reference, so the user's switch was not checked.
+- **Source:** Claude Code session 2026-11-12; the decision is the #643 builder's (Opus 5.5)
+- **Applies to:** #643, #652
+
+### 2026-11-12 · The planning node is written by the coordinating builder
+
+- **Kind:** process
+- **Situation:** Peter asked for a short outline of the Beta payment system as a new Loore thread. The coordinating builder gave an Opus subagent the research and the draft of the outline.
+- **Decision:** a subagent researches and drafts the outline node.
+- **Peter:** "pls, write the Loore node yourself - feel free to use Opus subagents for research / gathering information, but weigh the found information yourself and do the synthesis / design yourself (pls, add this to the skill)"
+- **Score:** miss
+- **Why it missed:** the outline was handled as research to delegate. For Peter a plan or a design is the coordinating builder's own synthesis; subagents gather facts.
+- **Source:** Claude Code session 2026-11-12 (Fable 5.2)
+- **Applies to:** #438, the voice-review skill
+- **Rule:** subagents gather facts for plans and designs; the coordinating builder weighs them and writes the node (added to the voice-review skill)
+
+### 2026-11-12 · Payments: two price levels, the higher one an anchor
+
+- **Kind:** product scope
+- **Situation:** the outline of the payment system (no payment code exists; account plans and spend caps do) asked three questions with defaults. The first: one plan at 15 euros a month, with a two-week trial that takes a card.
+- **Prediction:** accepts both (45 %); another price or trial shape (45 %); other (10 %).
+- **Peter:** "ideally I'd like two price levels - one that most people will choose, it will be around $30, and an exclusive level at $99. These prices may still change, but probably will not be lower if they change." · "the simplest idea for the higher price level is something, that is very common in TPOT - pay up to support those that can't afford the main price level. And then offer discounted pricing on request." · "The exclusive pricing level should serve mostly as an anchor."
+- **Score:** hit, on a tie with acceptance: another price. The 15-euro plan was rejected. He did not comment on the trial, and the default, 14 days with a card, went into #649.
+- **Source:** Loore voice review, node 201868 answering the outline 201867, 2026-11-12 (Fable 5.2)
+- **Applies to:** #438, #649
+
+### 2026-11-12 · Payments: alpha testers are offered the discounted price
+
+- **Kind:** product scope
+- **Situation:** as in the entry before. The second question: alpha testers stay free (the default).
+- **Prediction:** they stay free (80 %); they pay too (10 %); other (10 %).
+- **Peter:** "This discounted pricing will be also offer to my alpha testers and my close ones. That might be the default."
+- **Score:** miss
+- **Why it missed:** the brief took the alpha testers' free plan in the code as their plan after the opening. Peter sees the alpha as a period that ends, after which testers are offered the lower price.
+- **Source:** Loore voice review, node 201868 answering the outline 201867, 2026-11-12 (Fable 5.2)
+- **Applies to:** #438
+
+### 2026-11-12 · Payments: a lapsed account keeps writing, reading and export
+
+- **Kind:** product scope
+- **Situation:** as in the entry before. The third question: after a subscription ends, the account keeps writing, reading and export, and loses AI replies, Voice mode and profile updates (the default).
+- **Prediction:** accepts (55 %); keeps some AI (35 %); other (10 %).
+- **Peter:** "agree with your default"
+- **Score:** hit
+- **Source:** Loore voice review, node 201868 answering the outline 201867, 2026-11-12 (Fable 5.2)
+- **Applies to:** #438, #649
+
+### 2026-11-12 · Payments: alpha testers free for one more month
+
+- **Kind:** product scope
+- **Situation:** after the answer above, the next brief proposed for alpha testers: free for one more month after the opening, then the discounted price (recommended, the default).
+- **Prediction:** accepts (50 %); the discounted price from the first day (25 %); free for longer (25 %).
+- **Peter:** "I like this a default. Maybe I'll change the particulars, like number of months free, but let's go with your proposal"
+- **Score:** hit
+- **Source:** Loore voice review, node 201870 answering node 201869, 2026-11-12 (Fable 5.2)
+- **Applies to:** #438
+
+### 2026-11-12 · Payments: the 12-dollar price was an unflagged guess
+
+- **Kind:** process
+- **Situation:** the same brief proposed the discounted level as one fixed price of 12 USD a month, given by a code, with no proof asked. The 12 was the builder's guess, and the brief did not say so.
+- **Decision:** proposed 12 USD without saying where the number came from.
+- **Peter:** "what is the discounted price of 12 dollars based on? Vibe guess for a service like Loore? Or actual costs? If the latter, we should refresh the costs analysis on prod."
+- **Score:** miss. The number itself was kept after the cost check (the entry after this one); the miss is that it was not flagged.
+- **Why it missed:** a number made up for a brief was presented like a worked-out one. Every number the builder introduces is to be named as such.
+- **Source:** Loore voice review, node 201870 answering node 201869, 2026-11-12 (Fable 5.2)
+- **Applies to:** #438
+- **Rule:** every added heuristic is named (2026-10-06)
+
+### 2026-11-12 · Payments: the discounted price stays 12 dollars
+
+- **Kind:** cost
+- **Situation:** after Peter's question above, the builder gave him a script that counts the last 30 days of model cost per account on prod, by days of use and by request type, with no content and no names. An account used on 12 or more days cost about 28 USD at the median. The next brief proposed keeping 12 USD as an openly subsidised price, below what a regular user costs, with one 99-USD supporter covering about four. For the first proposal (node 201869) the prediction had been a fixed 12 USD with a code at 50 %.
+- **Prediction:** 12 USD, subsidised (50 %); higher, 15 to 20 USD (35 %); other (15 %).
+- **Peter:** "Yeah, let's go with $12 for discounted price."
+- **Score:** hit
+- **Source:** Loore voice review, node 201874 answering node 201873, 2026-11-12 (Fable 5.2)
+- **Applies to:** #438, #647, #649
+
+### 2026-11-12 · Payments: the usage ceiling
+
+- **Kind:** cost
+- **Situation:** each subscription level gets a monthly ceiling of model cost. Proposed: 60 USD for Standard and the discounted level, 120 USD for Supporter (the builder's numbers, the default).
+- **Prediction:** accepts (45 %); other numbers or a lower ceiling for the discounted level (45 %); other (10 %).
+- **Peter:** "What I have now is $50 cap for every user" · "and it usually works"
+- **Score:** hit, on a tie with acceptance: other numbers. The next brief proposed 50 USD for Standard and the discounted level (the present cap) and 100 USD for Supporter (the builder's number; prediction: accepts, 70 %). He did not answer that part, and #649 uses those values; the 100 is a row in "Decided by the builder".
+- **Source:** Loore voice review, node 201876 answering node 201875, 2026-11-12 (Fable 5.2)
+- **Applies to:** #438, #649
+
+### 2026-11-12 · Long threads: an issue, required for the Beta
+
+- **Kind:** product scope
+- **Situation:** Peter asked whether the depth of a thread is limited. It is not: every AI reply sends the whole thread, up to the model's window. Proposed, as an issue filed by default: a notice for long threads instead of cutting their history, from 150k tokens (the builder's number).
+- **Prediction:** an issue (70 %); a hard limit (15 %); nothing (15 %).
+- **Peter:** "pls file this as an issue, but a requirement for beta. We need to base the decision on actual depth & token data from prod"
+- **Score:** hit. Filed as #648 for the Beta; the threshold waits for the data.
+- **Source:** Loore voice review, node 201878 answering node 201877, 2026-11-12 (Fable 5.2)
+- **Applies to:** #648
+
+### 2026-11-12 · The payments review runs on Fable 5.2
+
+- **Kind:** process
+- **Situation:** #649 (payments) was being built by an Opus 5.5 subagent. Under Peter's rule of 2026-11-11, its review would also have run on Opus.
+- **Peter:** "one thing - for the payment system pls run review using Fable 5.2 subagent, not Opus"
+- **Score:** not scored: an instruction given before the review started, under his rule that a Fable session starts Fable subagents when he asks for them.
+- **Source:** Claude Code session 2026-11-12 (Fable 5.2)
+- **Applies to:** #649
+
+### 2026-11-12 · Payments: the build plan
+
+- **Kind:** product scope
+- **Situation:** after the answers on prices, the builder checked the payment provider's documentation and posted a build plan for #438 without a question, asking Peter to say so if he wanted it different.
+- **Decision:** Stripe-hosted Checkout with Managed Payments, flat monthly prices, the 14-day trial with a card, Stripe's customer portal for changes and cancelling, the discounted price through Loore's own code and a price shown nowhere, all built dark behind one switch.
+- **Peter:** "I just read the Payments: the build plan and I like it. Does it make sense to wait for the current PR train to finish, and then start building on top of it, or we run it in parallel?"
+- **Score:** hit. Built in parallel with the train, as #649.
+- **Source:** Claude Code session 2026-11-12 (Fable 5.2)
+- **Applies to:** #438, #649
+
+### 2026-11-12 · Long threads: a notice at 90 % and a hard limit
+
+- **Kind:** product scope
+- **Situation:** data from prod for #648, the last 30 days of conversation calls: the median prompt was 47k tokens, the 99th percentile 234k and the largest 751k; calls over 150k tokens came from two accounts and made 28 % of the conversation cost. Recommended, and the default: a notice and no hard limit, from 150k tokens of prompt, measured by size, its text naming the cost of a reply after a pause.
+- **Prediction:** a notice at about 150k (60 %); another threshold (25 %); a hard limit or other (15 %).
+- **Peter:** "Users shouldn't be shown price in this case." · "I'd make it two tiered: a notice at 90% of the hard limit, and a hard limit - I'll leave it up to you to decide the hard limit."
+- **Score:** miss. Built as #650: a hard limit of 250,000 prompt tokens and a notice at 225,000, with no price shown (a row in "Decided by the builder").
+- **Why it missed:** the builder argued against a hard limit, because it stops a conversation, and wanted the notice to show the cost. Peter wants a hard stop on prompt size and no prices shown to users.
+- **Source:** Loore voice review, node 201885 answering node 201883, 2026-11-12 (Fable 5.2)
+- **Applies to:** #648, #650
+- **Rule:** candidate: no prices in notices to users about their usage
+
+### 2026-11-12 · #650: every refusal in Voice mode is spoken
+
+- **Kind:** UX
+- **Situation:** #650 speaks the thread-length refusal aloud in Voice mode, while the refusals for the monthly usage limit and for AI usage None stay a toast with no sound. The builder recommended speaking those too, in a follow-up; if Peter said nothing, they would stay toast-only.
+- **Peter:** "agreed"
+- **Score:** not scored: no prediction was written; the question came in a status message. Filed as #651.
+- **Source:** Claude Code session 2026-11-12 (Fable 5.2)
+- **Applies to:** #650, #651
+
+### 2026-11-12 · Train #652: the "Only you see this reply" label
+
+- **Kind:** user-facing text
+- **Situation:** under #644 every AI reply in a public thread is private when made. The iPhone simulator check showed that nothing told the user that others cannot read such a reply. The coordinating builder had the label "Only you see this reply" added to it, on the web and the iPhone, and listed it in the train's summary node among the choices left as built.
+- **Prediction:** he keeps the label (85 %).
+- **Decision:** added the label without asking.
+- **Peter:** ticked on node 201887, then merged the train: "A private AI reply in a public thread carries the label "Only you see this reply", on the web and the iPhone. I added it, because nothing else showed that others cannot read it."
+- **Score:** hit
+- **Source:** Claude Code session 2026-11-12; train summary node 201887 (Fable 5.2)
+- **Applies to:** #644, #652
+
+### 2026-11-12 · Train #652: sharing an AI reply takes four steps
+
+- **Kind:** UX
+- **Situation:** as in the entry before. Sharing a private AI reply takes four steps: the menu, Edit, Privacy, Send. The summary node said that a one-step share action would be a follow-up.
+- **Prediction:** he wants the one-step share action as a follow-up (60 %).
+- **Peter:** ticked on node 201887, then merged the train: "Sharing an AI reply takes four steps: menu, Edit, Privacy, Send. A one-step share action would be a follow-up."
+- **Score:** not scored: the tick accepts the four steps as built; it does not say whether he wants the follow-up, which is what the prediction was about.
+- **Source:** Claude Code session 2026-11-12; train summary node 201887 (Fable 5.2)
+- **Applies to:** #644, #652
+
+### 2026-11-12 · Train #652: a public entry may still quote a saved reference
+
+- **Kind:** privacy
+- **Situation:** #644 refuses to make an entry public while it quotes an entry that is not public. A saved reference (`{quote_ext:ID}`) is not covered: a public entry that quotes one shows the reference's text to its readers, as before. The #644 builder listed it under Needs Peter and recommended leaving it, since quoting a reference in a public entry is the author's own act.
+- **Prediction:** it stays as built (80 %).
+- **Peter:** ticked on node 201887, then merged the train: "A public entry that quotes a saved reference shows the reference's text to its readers, as today. The new publish check covers quoted entries only."
+- **Score:** hit
+- **Source:** Claude Code session 2026-11-12; train summary node 201887 (Fable 5.2)
+- **Applies to:** #644, #652
+
+### 2026-11-12 · Train #652: applying a proposal by voice waits for the dialog
+
+- **Kind:** privacy
+- **Situation:** Peter's rule for #645 kept todo proposals as they are, since the user confirms them. The coordinating builder added in its check of #645 that applying a proposal by saying yes, without the button (`apply_todo_changes`, `apply_feedback`, `apply_share`, `apply_github_issue`), also waits for the approval dialog when the thread holds other people's text; the proposals and their buttons are unchanged.
+- **Prediction:** accepts (70 %); applying by voice runs without the dialog (25 %); other (5 %).
+- **Decision:** applying by voice waits for the dialog there.
+- **Peter:** ticked on node 201887, then merged the train: "Saying "yes, apply those" to a proposal also waits for the dialog when the thread holds text of others. The proposal buttons work as before."
+- **Score:** hit
+- **Source:** Claude Code session 2026-11-12; train summary node 201887 (Fable 5.2)
+- **Applies to:** #645, #652
+
+### 2026-11-12 · Train #652: in Voice mode the approval waits for the thread screen
+
+- **Kind:** UX
+- **Situation:** under #645, Ben talks in Voice mode in a thread with Anna's reply above, and asks for a memory change. The spoken reply says the change waits for his approval; the dialog appears when he opens the thread screen, not on the Voice screen, so the conversation is not interrupted. The #645 builder recommended keeping it so (the coordinating builder's prediction before the train: accepts, 80 %). Peter asked about the line in the summary node ("what's meant by this?", node 201888), and it was explained again in node 201889.
+- **Prediction:** after the explanation he keeps it as built (70 %); the dialog on the Voice screen or an approval by voice (25 %); other (5 %).
+- **Decision:** the dialog on the thread screen, with the change announced in the spoken reply.
+- **Peter:** "yes, I'd like that [the dialog on the Voice screen right after the reply]. A spoken announcement should also be added after the model reply, informing the user they need to confirm, or reject the tool called. Also, the lockscreen controls shouldn't allow next recording (replay of the reply should be still possible, but the announcement should still be there after the LLM reply)"
+- **Score:** miss. Train #652 merged with the behaviour as built; the change is a follow-up PR on top of #645.
+- **Why it missed:** keeping the hands-free conversation free of dialogs was weighed above deciding at once. Peter wants the waiting change decided before the conversation goes on: shown on the Voice screen, announced aloud, with no next recording until it is decided.
+- **Source:** Loore voice review, node 201891 answering node 201889, 2026-11-12 (Fable 5.2)
+- **Applies to:** #645, #652
+
+### 2026-11-12 · Background work pauses after a month without use
+
+- **Kind:** cost
+- **Situation:** #647: background jobs (the bookmark sync and the external digest) keep billing accounts that nobody uses. The builder asked after how many days without use the pause starts.
+- **Peter:** "I'd say a month?"
+- **Score:** not scored: no prediction was written; the question came in a status message. Recorded on #647 as 30 days, a setting.
+- **Source:** Claude Code session 2026-11-12 (Fable 5.2)
+- **Applies to:** #647
+
+### 2026-11-12 · Payments: prices include tax
+
+- **Kind:** cost
+- **Situation:** #649 (payments, built dark) was reviewed by a Fable 5.2 subagent, and its open questions went to Peter in one brief. The first: prices include tax. A Czech buyer sees 30 USD and pays 30, of which about 5 is VAT; the alternative charges 36.30 at checkout. Recommended, and the default: tax included. The #649 builder's own prediction, written before its PR body: inclusive 60 %, exclusive 30 %.
+- **Prediction:** tax included (75 %); tax added at checkout (15 %); other (10 %).
+- **Peter:** pending: no answer yet.
+- **Score:** not scored: pending
+- **Source:** Loore brief node 201890, 2026-11-12 (Fable 5.2)
+- **Applies to:** #438, #649
+
+### 2026-11-12 · Payments: the EU withdrawal right
+
+- **Kind:** product scope
+- **Situation:** as in the entry before. EU buyers may withdraw within 14 days. Stripe says it handles cooling-off periods where required, but no page describes how for sales through Link. Recommended, and the default: Peter asks Stripe in writing, with a message the builder drafts, and nothing is built meanwhile; a first-time buyer is covered by the trial, since the first charge comes on day 15. The #649 builder's prediction: asks Stripe first 55 %, a withdrawal button now 30 %.
+- **Prediction:** he asks Stripe first (70 %); a Loore withdrawal button now (15 %); other (15 %).
+- **Peter:** pending: no answer yet.
+- **Score:** not scored: pending
+- **Source:** Loore brief node 201890, 2026-11-12 (Fable 5.2)
+- **Applies to:** #438, #649
+
+### 2026-11-12 · Payments: a card before the first reply
+
+- **Kind:** product scope
+- **Situation:** as in the entry before. With payments on, a new Beta account can write and read its pre-filled profile but gets no AI reply until it starts the trial with a card; people Peter picks by hand get a free account, as planned for the free week. Recommended, and the default. The #649 builder's prediction: accepts 65 %, some use before the card 30 %.
+- **Prediction:** accepts (55 %); some free replies before the card (35 %); other (10 %).
+- **Peter:** pending: no answer yet.
+- **Score:** not scored: pending
+- **Source:** Loore brief node 201890, 2026-11-12 (Fable 5.2)
+- **Applies to:** #438, #649
+
+### 2026-11-12 · Payments: how much a trial may use
+
+- **Kind:** cost
+- **Situation:** as in the entry before. As built, a trial had the level's full usage ceiling, 50 or 100 USD, before any payment, and someone whose card then fails would have used it for nothing. Recommended, and the default: 10 USD of model cost for the whole trial (the builder's number).
+- **Prediction:** a low ceiling (60 %, of which 10 USD itself 40 %); the full ceiling (25 %); other (15 %).
+- **Peter:** pending: no answer yet.
+- **Score:** not scored: pending
+- **Source:** Loore brief node 201890, 2026-11-12 (Fable 5.2)
+- **Applies to:** #438, #649
+
+### 2026-11-12 · Payments: when a payment fails
+
+- **Kind:** cost
+- **Situation:** as in the entry before. A card is declined at renewal and Stripe retries for some days. Recommended, and the default: the paid features continue for 7 days (the builder's number), and only if the subscription has been paid at least once.
+- **Prediction:** accepts (70 %); other (30 %).
+- **Peter:** pending: no answer yet.
+- **Score:** not scored: pending
+- **Source:** Loore brief node 201890, 2026-11-12 (Fable 5.2)
+- **Applies to:** #438, #649
+
+### 2026-11-12 · Payments: moving up a level
+
+- **Kind:** product scope
+- **Situation:** as in the entry before. As built, a Standard subscriber who reaches the ceiling mid-month cannot move to Supporter until the period ends. Recommended: an upgrade through Stripe's page, as a follow-up issue, filed if Peter says nothing.
+- **Prediction:** accepts (60 %); not needed (30 %); other (10 %).
+- **Peter:** pending: no answer yet.
+- **Score:** not scored: pending
+- **Source:** Loore brief node 201890, 2026-11-12 (Fable 5.2)
+- **Applies to:** #438, #649
+
+### 2026-11-12 · Payments: deleting an account mid-month
+
+- **Kind:** cost
+- **Situation:** as in the entry before. A subscriber deletes their account mid-month: the renewal stops at once and nothing is refunded; the purge 30 days later cancels whatever still runs. The default. The #649 builder's prediction: accepts 70 %, a pro-rata refund 15 %.
+- **Prediction:** accepts (75 %).
+- **Peter:** pending: no answer yet.
+- **Score:** not scored: pending
+- **Source:** Loore brief node 201890, 2026-11-12 (Fable 5.2)
+- **Applies to:** #438, #649
+
 ## Decided by the builder
 
 Choices that agents flagged in PRs and that the builder decided because a rule above already covers them (Peter, 2026-10-02: decide what the log supports, raise only real judgement calls). Each is also recorded on its PR, or in the session where Peter asked. The Decided column holds only the builder's part; a rule or decision of Peter's goes in the Rule column. Questions raised to Peter instead are not listed; his answers become entries. Model is the model that wrote the PR (its Co-Authored-By line). Result is "accepted by merge (PR #N, date)" once the PR has merged and Peter didn't correct the choice, "pending" until it merges, and "corrected → entry <title>" when he overrules it; the entry is then scored as a miss.
@@ -3776,19 +4348,128 @@ Choices that agents flagged in PRs and that the builder decided because a rule a
 | 2026-11-10 | #631 | privacy | Shared content at rest | Encrypted like private content | none: builder's judgement | Fable 5.2 | pending |
 | 2026-11-10 | #631 | privacy | Who reads an Ask-my-AI answer | The thread's audience, as an AI reply takes its parent's privacy in public threads | The approved mockup | Fable 5.2 | pending |
 | 2026-11-10 | #631 | privacy | `{quote:ID}` and read_full of another person's shared entry in the reader's own threads | Closed to the reader's AI; the thread page still shows the reader the quote | No AI means no AI, taken strictly | Fable 5.2 | pending |
-| 2026-11-10 | #631 | privacy | Where an Ask-my-AI answer counts | Only in the thread, saved as Chat; left out of the reader's export, profile builds, recent context and search | The design: shared content never enters the reader's profile | Fable 5.2 | pending |
+| 2026-11-10 | #631 | privacy | Where an Ask-my-AI answer counts | Only in the thread, saved as Chat; left out of the reader's export, profile builds, recent context and search | The design: shared content never enters the reader's profile | Fable 5.2 | corrected → entry Circles: a reader's AI reply belongs to the reader's export and profile |
 | 2026-11-10 | #631 | privacy | The training key for a prompt with another person's shared writing | Never used | Training licence | Fable 5.2 | pending |
 | 2026-11-10 | #631 | UX | Replies generated on their own in a shared thread | None, for the author too: auto-generate off, the LLM Response bar instead, Voice mode hidden | Nothing leaves without your say | Fable 5.2 | pending |
-| 2026-11-10 | #631 | privacy | An AI reply made when a new shared entry is written | Not shared with the entry; the author shares replies through Edit | Nothing leaves without your say | Fable 5.2 | pending |
+| 2026-11-10 | #631 | privacy | An AI reply made when a new shared entry is written | Not shared with the entry; the author shares replies through Edit | Nothing leaves without your say | Fable 5.2 | corrected → entry Circles: the author's automatic AI reply joins the circle |
 | 2026-11-10 | #631 | privacy | A thread's system prompt | Never shared, since it holds the author's profile and notes | none: builder's judgement | Fable 5.2 | pending |
 | 2026-11-10 | #631 | product scope | Changing an entry's audience | Changes who reads the replies under it too | none: builder's judgement | Fable 5.2 | pending |
 | 2026-11-10 | #631 | UX | Notes when a person is added to a circle with entries already shared | One note, not one per entry; a new or newly shared entry sends one note per reader, a reply none | Calm over clever | Fable 5.2 | pending |
 | 2026-11-10 | #631 | user-facing text | The names shown for people | Loore usernames, since accounts have no separate display name | none: builder's judgement | Fable 5.2 | pending |
-| 2026-11-10 | #631 | privacy | Circles, memberships and mutes after "Delete all my writing" | Deleted after the 30 days; the shared entries close at once | The brief | Fable 5.2 | pending |
+| 2026-11-10 | #631 | privacy | Circles, memberships and mutes after "Delete all my writing" | Deleted after the 30 days; the shared entries close at once | The brief | Fable 5.2 | corrected → entry Circles: "Delete all my content" removed the user's places in other people's circles |
 | 2026-11-10 | #631 | privacy | An Ask-my-AI answer when the author deletes the entry | Closed at once, also to the reader who asked, and deleted with the entry; the readers' typed replies stay theirs | none: builder's judgement (the answer restates the entry) | Fable 5.2 | pending |
 | 2026-11-10 | #631 | cost | Speech for a shared entry | A reader with Voice mode may generate it when the entry allows AI, billed to the reader | The existing speech rule | Fable 5.2 | pending |
 | 2026-11-10 | #631 | UX | Default privacy on the Account page | Circles is not offered; with Circles on, the greyed option reads "Circles (chosen for each entry)" | none: builder's judgement | Fable 5.2 | pending |
 | 2026-11-10 | #631 | reliability | Introduced limits | 50 circles per user, 150 people per circle, 20 names for one entry, 60 characters per circle name; 30 entries per page of Shared with you, titles up to 80 and previews up to 160 characters | Every added heuristic is named | Fable 5.2 | pending |
+| 2026-11-11 | #631 | provider | The model of a member's AI reply | The requester's own: the model named in the request, else the one of their earlier reply in the thread, else their account's; never the model of another member's reply | A user's model is theirs | Fable 5.2 | pending |
+| 2026-11-11 | #631 | privacy | The key for prompts in a circle thread | Always the chat key, whoever asks; a member's AI reply is saved as Chat, never Train | Training licence: people shared that text with people, not for training | Fable 5.2 | pending |
+| 2026-11-11 | #631 | privacy | AI usage None on the entry or on the node replied to | No AI reply for anyone; other None nodes in the chain are left out of the prompt | No AI means no AI | Fable 5.2 | pending |
+| 2026-11-11 | #631 | UX | Other members' AI replies in a member's prompt | Messages named by model and requester ("Claude Fable 5.2 via @hrosspet"), not the model's own turns; a closing note says whom the reply is for | Peter: the label "should be visible to the LLMs generating the response" | Fable 5.2 | pending |
+| 2026-11-11 | #631 | privacy | Tools under a shared agentic prompt | Run for the requester (their memory, their to-do list), as in their own threads; the dialog says so | Peter: the prompt is "filled in by artifacts of the user that is requesting" | Fable 5.2 | pending |
+| 2026-11-11 | #631 | data safety | "Delete all my content", the cases Peter did not name | Entries shared with the user by name stay shared with them; other people's choice to hide the user stays | Peter's answer of 2026-11-11: what others made stays | Fable 5.2 | pending |
+| 2026-11-11 | #631 | privacy | A member's replies in other people's threads, in the data download | A section of their own: typed and AI replies, with the date and whose thread, only while the thread is open to them; nobody else's text | Peter: the reader's AI reply "should belong to the reader's export" | Fable 5.2 | pending |
+| 2026-11-11 | #631 | product scope | What "Share also the discussion leading up to this node?" shares | The author's own nodes on the path from the thread's start, or from the first node of someone else's, down to the entry; no side branches; a node already public stays public; unticking takes them back | Peter's wording of the question | Fable 5.2 | pending |
+| 2026-11-11 | #631 | privacy | A node on a shared path made private later | A reader's AI gets only the run of nodes the reader can read upward from the node replied to; the change applies from the next reply | What a model reads for a user, the user may read (Peter, 2026-11-11) | Fable 5.2 | pending |
+| 2026-11-11 | #631 | UX | The default of the discussion question | Off; sharing an entry never shares anything above it on its own | Nothing leaves without your say | Fable 5.2 | pending |
+| 2026-11-11 | #631 | product scope | Loore's built-in prompts in a shared thread | No special case: the same rule as a prompt the author wrote | none: builder's judgement | Fable 5.2 | pending |
+| 2026-11-11 | #631 | cost | `{user_export}` in a prompt the requester did not write | At most 100,000 tokens of the requester's archive, on every plan, Pro included | Peter: "That should be fine given the explicit question & acknowledgement" | Fable 5.2 | pending |
+| 2026-11-11 | #631 | privacy | Taking an author off the Circles allow list | Does not close what she already shared; she takes entries back through Edit. Explained again to Peter in node 201851, with no objection | none: builder's judgement | Fable 5.2 | pending |
+| 2026-11-11 | #631 | privacy | A public prompt someone else wrote, above a shared entry | Keeps its placeholders empty in a member's AI reply, as in a public thread; its tools still act for the member, and the dialog names them | #483: an AI reply in someone else's public thread uses no profile | Opus 5.5 | pending |
+| 2026-11-11 | #631 | data safety | Deleting a shared entry | Every node of the author's that points at it goes back to her as Only me, the ones below it too; members' AI replies go with the entry, also on side branches of the shared discussion; typed replies stay their writers' | none: builder's judgement | Opus 5.5 | pending |
+| 2026-11-11 | #631 | privacy | Each person's corpus in a shared thread (profile builds, `{user_export}`, recent context, the download) | Only their own typed nodes and the AI replies they own, for the author too: a member's reply in her thread leaves her corpus | Peter's profile answer, applied to both sides | Opus 5.5 | pending |
+| 2026-11-11 | #631 | privacy | A prompt node below a shared entry | Never joins the audience on its own: "Circles" on it through Edit is refused, and "apply to my replies" never shares a prompt | A prompt carries its writer's session setup | Opus 5.5 | pending |
+| 2026-11-11 | #631 | UX | A reader's own recent-writing summary and window on a shared prompt | Shown in place of `{user_recent}` and `{user_recent_raw}`, as the other artifacts | Peter: "it should embed Ben's artifacts where possible" | Opus 5.5 | pending |
+| 2026-11-11 | #631 | reliability | Introduced limits of the rebuild | 20 failed name lookups per user per hour, then 429; the newest 500 replies scanned for "@name replied."; names looked up 200 ms after the last change; 500 nodes followed above an entry; a 32-hex-character agreement key; ids sent to the database 900 at a time; "no shared entries" remembered for 10 minutes while Circles is off for everyone; numbers as words up to twelve | Every added heuristic is named | Fable 5.2 | pending |
+| 2026-11-11 | #641 | privacy | A quote in another person's text that the reader's AI may not resolve | Stays as the raw `{quote:ID}`, as the thread page shows it to a reader who cannot open it; a deleted quoted node too | The model sees what a reader of the thread sees (as on the Circles branch) | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-11 | #641 | privacy | Which quotes resolve inside text the reader did not write | Only public entries that are not deleted; a saved reference stays as written | Readable by every reader of that text; on main only public nodes are | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-11 | #641 | privacy | Deeper levels of quoting inside someone else's text | Follow that text's rule at every depth, also an entry of the reader's own reached from there | The readers rule at every depth | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-11 | #641 | privacy | Saved references in other people's AI replies, a Glean reply included | Not rendered, and they add none of the requester's read marks or verdicts | Fix the root cause, not one instance | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-11 | #641 | cost | Keeping markers in other people's text from later quote passes | Held with a private-use character and released after the passes, instead of reordering the passes | Own-only prompts and exports stay byte-identical (prompt cache) | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-11 | #641 | privacy | What the quote passes resolve inside the cached system message | Counts toward the cached render's verdict for the training key | A cached render carries the verdict of everything in it (#326) | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-11 | #641 | privacy | An AI reply stored without a human owner | Belongs to the person above it; ownership is checked only for text that holds a marker | Own-only exports stay identical, with no per-node queries | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-11 | #641 | product scope | The archive export (the download, `{user_export}`, profile builds, recent context) | In scope: the same rule for other people's replies and quoted text in the account's threads | Fix the root cause, not one instance | Fable 5.2 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-11 | #642 | privacy | An AI reply other people can read, in a thread whose root or prompt the requester did not write | No tools, no tool runs, no earlier tool results, no proposals; a private reply and the requester's own threads keep everything. Told to Peter in node 201858, for him to object | #483: an AI reply in someone else's public thread uses no profile (Peter, 2026-10-09) | Fable 5.2 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-11 | #642 | privacy | `read_full` in such a reply | Off entirely, not limited to public entries | #483 | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-11 | #642 | privacy | What "readable by other people" means | The reply's privacy is not private | #483 is about public replies | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-11 | #642 | cost | The voice pre-warm for such a reply | Keeps its config-only tool list; the reply then misses the cache once | The pre-warm's tool list matches generation in the cases it serves (#187) | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-11 | #642 | cost | How the reply learns it has no tools | One closing line after the cached part of the prompt; the prompt above stays as it is | The cached system render is keyed per reader | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-11 | #642 | privacy | Which nodes count as the thread's prompt | Every node with an agentic prompt key, not only the one still linked to a prompt | The check and the switch it guards read the same thing | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-11 | #637 | product scope | What counts as a change for the profile | An entry created or restored that AI may read, or one whose AI usage crosses between None and Chat/Train; a privacy change or Chat ↔ Train does not count | Peter's decision of 2026-11-11, with the line where "No AI means no AI" draws it | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-11 | #637 | product scope | The date of a change | The entry's date in Loore, not the archive's; an entry with no date of its own is dated at the import | Peter: its place "in the middle of the users total Loore archive" | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-11 | #637 | cost | A windowed profile and an import inside it | The windows before the change are kept (copied as stored, still encrypted) and only the rest is read again; this replaces #589's rebuild from scratch | Peter's decision of 2026-11-11 | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-11 | #637 | data safety | The user's edit of a windowed profile | Survives the re-tip; the new final merges it at its date | The user's edit wins | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-11 | #637 | reliability | Where the re-tip cannot run (a set in the Batch queue, a profile run under way, the window path off, no window before the date) | The rebuild from scratch, as before | Autonomy (reversible) | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-11 | #637 | UX | When "Rebuild your profile?" shows | Only when the answer can change something: the account gets profile builds, its AI usage is not None, and the profile in use reaches the entries | Ask when the choice matters | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-11 | #637 | user-facing text | The question's words | "Rebuild your profile?", three sentences on what the import changed and what a rebuild does, and two equal buttons, "Rebuild my profile" and "Keep my profile as it is" | Show the choices; the two equal answers of #599 | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-11 | #637 | UX | No answer to the question | Changes nothing and records nothing; "Keep" sends nothing | No answer means "we don't know", not "no" | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-11 | #637 | data safety | A background import confirmed again with other settings | Starts over and skips what its earlier run created, which still counts toward the hand-off; a crossing of None is counted by the new run | Problems show | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-11 | #637 | product scope | #599's both-providers question | Also asked after a None → Chat re-import | #599's own rule | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-11 | #637 | reliability | Introduced constant | The yes to the rebuild question is accepted for 7 days | Every added heuristic is named | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-11 | #640 | UX | The 30 seconds before the save dialog | The cause fixed (headers first, `nosniff`, the pinning walk level by level); no spinner, which Peter had offered as an option | Fix the cause, not the display | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-11 | #640 | reliability | A failure in the export's first queries | Ends the download as failed instead of an HTTP 500, since the headers have gone out | Problems show; as a failure part-way (#629) | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-11 | #640 | reliability | The legacy builder's deleted-thread check | Uses the new walk too: same output, faster | none: builder's judgement | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-11 | #640 | reliability | The empty first piece of the download | Relies on the app server sending the headers on an empty write without a body chunk; a test checks the route | Every added heuristic is named | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-12 | #643 | UX | How the model opens a reference the line names | `read_full` accepts "reference N"; the tool's description names the form, so sessions write their prompt cache once more after the deploy | Autonomy (reversible) | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-12 | #643 | privacy | What the name opens with the External references switch off | Only the references this call's window names; any other id gets the answer for a missing one (ticked on node 201887) | The user's setting decides | Fable 5.2 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-12 | #643 | UX | Quoting a reference read by name | `{quote:reference N}` is stored as `{quote_ext:N}`; a bare `{quote:N}` is an entry id and stays as written, so it can point at an unrelated entry (known and left; ticked on node 201887) | Autonomy (reversible) | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-12 | #643 | privacy | The training key for the title line | A line with a title reports to the payload licence; a line with only an author and a source does not | Training licence, as for a quote reference by author and time (#626) | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-12 | #643 | product scope | What the line shows | The title, or the author when there is none; the source, worded as on the reference card; the name; no date and no read marks | Peter: "title and source only"; existing copy reused | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-12 | #643 | product scope | Glean picks in the window | The same line, named by their author | They are saved references too | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-12 | #643 | product scope | What keeps the reference text | The data download, `{user_export}`, the thread's own quotes, profile and recent-summary builds, and calls without tools | The decision covers the recent-writing block of calls with tools | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-12 | #643 | cost | The render cache | Renders without tools are keyed apart; the key prefix moves from v4 to v5, so every session renders its system prompt once more after the deploy | Prompt cache byte identity | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-12 | #644 | privacy | Which replies Peter's rule makes private | Every new AI reply on every path, the user's own public thread where nobody else wrote included; enforced on the server | Peter: "all AI replies in a public thread are private by default" | Fable 5.2 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-12 | #644 | data safety | Existing public AI replies | Stay public; no data migration | The rule is about new replies ("by default") | Fable 5.2 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-12 | #644 | privacy | Reading tools in a reply that is now private | Keep working | #642: tools are kept from replies other people can read | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-12 | #644 | product scope | When a thread counts as shared | The node a reply would answer is public or circles; a private branch under a public node is not shared | Peter: "public threads and circles" | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-12 | #644 | product scope | Voice, LLM Response and Glean in shared threads | Keep working: they are the user's own requests, not automatic replies | The rule turns off only the automatic reply | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-12 | #644 | UX | A skipped automatic reply | Never blocks the writing: the entry is saved and the answer says why | Problems show | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-12 | #644 | UX | Sharing an AI reply while it is generated | Refused | Peter: "after the reply being generated" | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-12 | #644 | UX | The LLM Response bar in a circles thread without craft mode | Shown to the owner, as in a public thread | Show the choices | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-12 | #644 | privacy | The publish check's details | Quotes followed into the author's own quoted entries only; deleted entries and ones the author can't open don't block; nodes made public in the same change count as public; all or nothing; nodes public before stay editable | Peter's quote decision of 2026-11-12 | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-12 | #644 | product scope | Imports made public | Not checked for quotes: text from other apps has no Loore quote markers | The quote decision covers publishing in Loore | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-12 | #644 | UX | Introduced constant | The refusal shows 120 characters of each quoted entry | Every added heuristic is named | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-12 | #644 | UX | How a private AI reply gets shared | Through the menu, Edit, Privacy, Send: four steps, with no one-step share action in this PR (ticked on node 201887) | none: builder's judgement | Fable 5.2 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-12 | #645 | privacy | Text with no mark of its author (typed or pasted text, transcripts, imports, model-written artifacts) | Counts as the user's own and asks for nothing | Peter: "I don't see an effective way of detecting that" | Fable 5.2 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-12 | #645 | privacy | When a quote in the user's entry counts | When the resolver would show its text in the history: readable, not deleted, allowed for AI | Peter: "only for nodes directly in history, including quotes" | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-12 | #645 | UX | Waiting calls of one reply | One dialog per reply, its tool rounds included; the oldest reply first | Peter: "all of them should be raised inside one dialog" | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-12 | #645 | UX | Closing the dialog | Decides nothing; a line under the reply opens it again | No answer means "we don't know", not "no" | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-12 | #645 | data safety | Approving a change to an artifact that changed since | Nothing is saved; only Reject is offered for it | The version check on all writes (Peter, 2026-11-06) | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-12 | #645 | reliability | Deciding a call | Once per call; a run that fails leaves the call waiting, with the reason | Problems show | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-12 | #645 | cost | How the model learns about a held call | Only from the call's result, with no note in the prompt | Prompt cache byte identity | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-12 | #645 | reliability | Introduced constant | A call claimed by a request that died reads as waiting again after 10 minutes | Every added heuristic is named | Opus 5.5 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-12 | #652 | testing | A real model with #643's title line and #645's approval wording | Not checked before the merge; every test replaces the model (ticked on node 201887) | none: builder's judgement | Fable 5.2 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-12 | #652 | testing | Voice mode with a real microphone and real speech | Not checked before the merge (ticked on node 201887) | none: builder's judgement | Fable 5.2 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-12 | #652 | testing | Staging | The train was not run on staging (ticked on node 201887) | none: builder's judgement | Fable 5.2 | accepted by merge (PR #652, 2026-11-12) |
+| 2026-11-12 | follow-up of #645 | UX | What Peter's Voice-mode answer covers | No new Voice turn in the thread, on the screen or the lock screen, until every waiting change is approved or rejected; the announcement is a fixed sentence added to the reply's audio, so a replay includes it | Peter, node 201891 | Fable 5.2 | pending |
+| 2026-11-12 | #649 | product scope | Subscriptions when the payments switch is turned off | Keep counting; the webhook keeps working while its secret is set | Autonomy (reversible); Problems show | Opus 5.5 | pending |
+| 2026-11-12 | #649 | user-facing text | The refusal for an account without a subscription | Names the state, never where or how to pay: "Loore doesn't reply on an account without a subscription. Your writing is saved." / "Your subscription has ended, so Loore doesn't reply. Your writing is saved."; the web adds a link to Settings | Peter: no purchase button or link in the iPhone app; Calm over clever | Opus 5.5 | pending |
+| 2026-11-12 | #649 | data safety | Writing saved before the reply, on an account without the paid features | The entry is kept and the reply skipped; Voice refuses before a recording starts | Peter: the account keeps writing; Problems show | Opus 5.5 | pending |
+| 2026-11-12 | #649 | product scope | Dictation and Glean without the paid features | Dictation stays, since it is writing; Glean stops, since it is an AI reply | Peter's answer on lapsed accounts | Opus 5.5 | pending |
+| 2026-11-12 | #649 | user-facing text | The spend-cap message with payments on | "You've reached your monthly usage limit.", without "for the free alpha" | none: builder's judgement | Opus 5.5 | pending |
+| 2026-11-12 | #649 | product scope | Checkout for accounts set by hand or with a live subscription, and level changes | Refused; a level change is a cancel and a new subscription after the period ends | Autonomy (reversible) | Opus 5.5 | pending |
+| 2026-11-12 | #649 | product scope | The trial | Once per account; a checkout left unfinished doesn't use it | none: builder's judgement | Opus 5.5 | pending |
+| 2026-11-12 | #649 | privacy | What Loore sends Stripe about a customer | One customer per account with only the Loore account id; name, email and address are asked for by Checkout | Seen, not surveilled; data minimisation | Opus 5.5 | pending |
+| 2026-11-12 | #649 | cost | Two checkouts or two subscriptions of one account | Opening a checkout expires the earlier open one; of two subscriptions the one created first is kept, and the other is cancelled and refunded | Nobody pays twice | Opus 5.5 | pending |
+| 2026-11-12 | #649 | cost | A later subscription that still arrives with a trial | Cancelled rather than having its trial cut short | Loore never charges on a schedule other than the one Checkout showed | Opus 5.5 | pending |
+| 2026-11-12 | #649 | UX | Discount codes | Every refusal reads "That code is not valid."; a use counts once the subscription it opened is kept; the last use expires other open checkouts with the code | none: builder's judgement | Opus 5.5 | pending |
+| 2026-11-12 | #649 | user-facing text | The discounted level's name in Settings | "Reduced", shown only to people who used a code | none: builder's judgement | Opus 5.5 | pending |
+| 2026-11-12 | #649 | privacy | Payment data of a deleted account | Loore deletes its columns with the account and keeps a code's use count without it; Stripe keeps its own records as the seller | Deletion | Opus 5.5 | pending |
+| 2026-11-12 | #649 | product scope | The iPhone app | Shows the level, the state and the date; subscribing and the code field are on the web only | Peter: no purchase button or link in the app | Opus 5.5 | pending |
+| 2026-11-12 | #649 | release/ops | The Stripe library | Pinned to one version | none: builder's judgement | Opus 5.5 | pending |
+| 2026-11-12 | #649 | reliability | Introduced numbers | 10 wrong codes per account per hour; generated codes of 8 characters without 0, O, 1, I or L; a 600 s price cache; 2 network retries per Stripe call | Every added heuristic is named | Opus 5.5 | pending |
+| 2026-11-12 | #649 | product scope | Alpha testers who want to pay | Cannot check out until the alpha free-month PR moves them to the discounted price; the #649 builder's Needs Peter item (its prediction: accepts, 70 %), given to Peter as information in node 201890 | Peter: alpha testers get a free month, then the discounted price | Fable 5.2 | pending |
+| 2026-11-12 | #649 | cost | The Supporter level's usage ceiling | 100 USD a month, as a setting; Standard and discounted keep the present 50. Proposed in node 201877, not answered | none: builder's judgement | Fable 5.2 | pending |
+| 2026-11-12 | #649 | product scope | The trial's shape | 14 days, with a card; proposed in the payments outline (node 201867), not commented on | none: builder's judgement | Fable 5.2 | pending |
+| 2026-11-12 | #650 | cost | The long-thread limit Peter left to the builder | 250,000 prompt tokens, the notice at 225,000 (90 %), measured by the prompt's size, not the number of entries; settings, and 0 turns it off | Peter: "I'll leave it up to you to decide the hard limit"; below the 272k price tier and above last month's 99th percentile | Fable 5.2 | pending |
+| 2026-11-12 | #650 | product scope | Admins | The same limit | The spend cap exempts nobody | Opus 5.5 | pending |
+| 2026-11-12 | #650 | UX | Voice mode in a thread at the limit | No turn starts and the mic never opens; dictation still records | A turn that could not get a reply is not started (Peter, 2026-10-01) | Opus 5.5 | pending |
+| 2026-11-12 | #650 | product scope | Glean in a thread at the limit | Counts as an AI reply and is refused | The decision on #648 | Opus 5.5 | pending |
+| 2026-11-12 | #650 | product scope | An uncapped `{user_export}` (Pro and admin accounts) | Fitted under the limit, not refused | Quality first | Opus 5.5 | pending |
+| 2026-11-12 | #650 | privacy | How the size is measured | From stored sizes and cost rows only; no content is read | Nobody decrypts users' content | Opus 5.5 | pending |
+| 2026-11-12 | #650 | provider | A reply at the limit | Refused, never moved to a cheaper model | A user's model is theirs | Opus 5.5 | pending |
+| 2026-11-12 | #650 | user-facing text | The notice and the limit's words | "This thread is getting long. Each AI reply reads all of it, so AI replies here will stop soon. You can start a new thread to keep going." and a refusal that says writing still works and to start a new thread; no price, token numbers or percentages | Peter: "Users shouldn't be shown price in this case." | Opus 5.5 | pending |
+| 2026-11-12 | #650 | UX | Record on the iPhone's lock screen in a thread at the limit | Also speaks the refusal, beside the notification (the builder's addition) | none: builder's judgement | Opus 5.5 | pending |
+| 2026-11-12 | #650 | reliability | Introduced numbers | 10 units per message for its time stamp and author; tokens per character from the thread's last call, then the user's, then the profile's, then the prior; a measurement dropped when an entry it held is deleted; the archive fitted to 0.99 of the limit; the refusal's status 409 | Every added heuristic is named | Opus 5.5 | pending |
 
 ## Backfilled decisions
 

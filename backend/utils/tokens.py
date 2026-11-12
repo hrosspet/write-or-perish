@@ -4,6 +4,44 @@ Token estimation utilities for LLM context management.
 from flask import current_app
 
 
+# Tokenizer families: which BPE a model bills with (config
+# ``tokenizer_family``). Chunk balance never depends on the family; it
+# only selects the prior for the real-token cap check and tags the user's
+# measured ratio, so a figure measured on one tokenizer is never applied
+# to another. (Moved here from tasks/exports for the thread size check,
+# #648; exports re-exports them.)
+TOKENIZER_FAMILIES = ("claude_old", "claude_new", "o200k")
+_FAMILY_BY_PROVIDER = {"openai": "o200k", "anthropic": "claude_new"}
+
+# Prior billed-input tokens per stored unit, by content class and family,
+# used for the cap check until the user's first chunk on that family has
+# been measured. These are the UPPER ends of the ranges measured
+# 2026-09-03 (Loore threads: hrosspet's prod chain; tweets: the exgenesis
+# and majamediaco compact exports), so an unmeasured user errs toward one
+# extra split, never toward the pricing tier. The claude_new tweet figure
+# is estimated from the o200k counts (no local tokenizer).
+TOKENS_PER_UNIT_PRIOR = {
+    "threads": {"o200k": 1.15, "claude_old": 1.55, "claude_new": 2.2},
+    "tweets": {"o200k": 2.4, "claude_old": 2.6, "claude_new": 3.1},
+}
+# Sanity bounds on a measured ratio, so one degenerate measurement (an
+# empty or truncated prompt) cannot collapse the cap check for every
+# later chunk. Real corpora measured 0.85–2.4 tokens per unit.
+TOKENS_PER_UNIT_MIN = 0.25
+TOKENS_PER_UNIT_MAX = 8.0
+
+
+def tokenizer_family(model_id):
+    """The model's tokenizer family (config ``tokenizer_family``), by
+    provider when the config does not say — Anthropic defaulting to the
+    denser new family, the conservative guess for the cap check."""
+    cfg = current_app.config.get("SUPPORTED_MODELS", {}).get(model_id) or {}
+    family = cfg.get("tokenizer_family")
+    if family in TOKENIZER_FAMILIES:
+        return family
+    return _FAMILY_BY_PROVIDER.get(cfg.get("provider"), "claude_new")
+
+
 def approximate_token_count(text: str) -> int:
     """
     Approximate token count for a text string.

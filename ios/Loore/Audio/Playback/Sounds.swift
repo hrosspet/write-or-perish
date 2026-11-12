@@ -197,6 +197,85 @@ final class SoundPlayer {
     func playError() { play { ToneSynth.errorSound() } }
     func playInterruptionAlert() { play { ToneSynth.interruptionAlert() } }
     func playLongRecordingWarning() { play { ToneSynth.longRecordingWarning() } }
+
+    private let speaker = SentenceSpeaker()
+
+    /// Says `text` with the device's own speech (no request); returns when it has
+    /// been said, or after `SentenceSpeaker.timeout`. The caller activates the session.
+    func speak(_ text: String) async {
+        await speaker.speak(text)
+    }
+
+    /// Stops the sentence being said at once (a new recording starts).
+    func stopSpeaking() {
+        speaker.stop()
+    }
+}
+
+/// A short sentence said on the device (`AVSpeechSynthesizer`, on the app's audio
+/// session): Voice mode's refusal when a thread is too long for another reply
+/// (#648). Nothing goes to a server or a provider.
+@MainActor
+final class SentenceSpeaker: NSObject, AVSpeechSynthesizerDelegate {
+    /// Longest wait for the synthesizer to say it is done (a sentence takes ~4 s).
+    static let timeout: Double = 15
+
+    private let synthesizer = AVSpeechSynthesizer()
+    /// The utterance being said and the caller waiting for it.
+    private var waiting: (utterance: ObjectIdentifier, continuation: CheckedContinuation<Void, Never>)?
+
+    override init() {
+        super.init()
+        synthesizer.delegate = self
+    }
+
+    /// An English voice in the device's own English, else US English: the
+    /// sentence is the app's, which is in English.
+    nonisolated static func voiceLanguage(preferred: [String] = Locale.preferredLanguages) -> String {
+        if let english = preferred.first(where: { $0.lowercased().hasPrefix("en") }) { return english }
+        return "en-US"
+    }
+
+    func speak(_ text: String) async {
+        if let current = waiting { finish(current.utterance) }
+        if synthesizer.isSpeaking { synthesizer.stopSpeaking(at: .immediate) }
+        let utterance = AVSpeechUtterance(string: text)
+        utterance.voice = AVSpeechSynthesisVoice(language: Self.voiceLanguage())
+        let id = ObjectIdentifier(utterance)
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            waiting = (id, continuation)
+            synthesizer.speak(utterance)
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(Self.timeout * 1_000_000_000))
+                self?.finish(id)
+            }
+        }
+    }
+
+    /// Stops the sentence at once: a recording is about to start, and the
+    /// microphone must not hear it. The caller waiting for it goes on.
+    func stop() {
+        if synthesizer.isSpeaking { synthesizer.stopSpeaking(at: .immediate) }
+        if let current = waiting { finish(current.utterance) }
+    }
+
+    /// Ends the wait for `utterance` (said, cancelled, or timed out); a late
+    /// callback for an earlier sentence changes nothing.
+    private func finish(_ utterance: ObjectIdentifier) {
+        guard let current = waiting, current.utterance == utterance else { return }
+        waiting = nil
+        current.continuation.resume()
+    }
+
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        let id = ObjectIdentifier(utterance)
+        Task { @MainActor [weak self] in self?.finish(id) }
+    }
+
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+        let id = ObjectIdentifier(utterance)
+        Task { @MainActor [weak self] in self?.finish(id) }
+    }
 }
 
 /// The queue-confined side of `SoundPlayer`.

@@ -5,6 +5,8 @@ import { useToast } from '../contexts/ToastContext';
 import api from '../api';
 import { isSpendCapError, spendCapToastMessage } from '../utils/spendCap';
 import { isAiUsageRefusedError, aiUsageRefusalScope } from '../utils/aiUsage';
+import { isThreadTooLong } from '../utils/threadLength';
+import { isApprovalPendingError } from '../utils/toolApprovals';
 import { onPageReturn } from '../utils/pageReturn';
 import { playErrorSound } from '../utils/errorSound';
 import { RECORDING_DEVICE_KEY, TAKEN_OVER_CODE } from '../utils/recordingDevice';
@@ -541,6 +543,8 @@ export function useStreamingTranscription(options = {}) {
           // placeholder rejected before LLM dispatch). Voice session
           // surfaces this as a toast.
           warning: data.warning || null,
+          // "thread_too_long" (#648): the Voice session also says it.
+          warningCode: data.warning_code || null,
         });
       }
     },
@@ -618,6 +622,7 @@ export function useStreamingTranscription(options = {}) {
               llmNodeId: res.data.llm_node_id || null,
               userNodeId: res.data.user_node_id || null,
               warning: res.data.warning || null,
+              warningCode: res.data.warning_code || null,
             });
           }
           return; // Done — don't schedule another poll
@@ -781,6 +786,33 @@ export function useStreamingTranscription(options = {}) {
         if (onError) onError(err);
         throw err;
       }
+      if (isApprovalPendingError(err)) {
+        // A Voice recording in a thread where a change the AI proposed
+        // waits for the user's approval (Peter, 2026-11-12): refused
+        // before any draft existed and before the mic opened. Nothing
+        // failed; the parent shows the change to decide. No toast here.
+        // The server asks this before the thread's length, so a thread
+        // both long and waiting answers with this code first.
+        setSessionState('idle');
+        try {
+          err.approvalPending = true;
+          err.startup = true;
+        } catch (_) { /* sealed error object */ }
+        if (onError) onError(err);
+        throw err;
+      }
+      if (isThreadTooLong(err)) {
+        // A Voice recording that would continue a thread already too long
+        // for another reply (#648): refused before any draft existed and
+        // before the mic opened. Nothing failed; the parent says why.
+        setSessionState('idle');
+        try {
+          err.threadTooLong = true;
+          err.startup = true;
+        } catch (_) { /* sealed error object */ }
+        if (onError) onError(err);
+        throw err;
+      }
       setSessionState('error');
       setErrorMessage(err.message);
       if (onError) {
@@ -809,9 +841,11 @@ export function useStreamingTranscription(options = {}) {
 
     } catch (err) {
       console.error('Failed to start streaming:', err);
-      // Refused by the spend cap or by AI usage: initSession already
-      // returned to idle and told the parent. The mic was never requested.
-      if (err?.spendCapped || err?.aiUsageRefused) return;
+      // Refused by the spend cap, by AI usage, by a waiting change or for
+      // the thread's length: initSession already returned to idle and told
+      // the parent. The mic was never requested.
+      if (err?.spendCapped || err?.aiUsageRefused || err?.approvalPending
+          || err?.threadTooLong) return;
       // Always land in a terminal state. The error path here means recording
       // never started, so the session must not be left in 'recording' or
       // 'initializing' (which would strand the parent UI). 'error' is set
