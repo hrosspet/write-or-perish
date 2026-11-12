@@ -14,8 +14,11 @@ a recorded entry, a published share). The answer names the quoted nodes
 that are not public, so the page can link them.
 
 What is checked is a {quote:ID} marker of a node the user can open,
-followed into the quoted text to the depth the quote resolver follows
-(quotes.DEFAULT_MAX_DEPTH). A quoted node the user cannot open is treated
+followed into the text of quoted nodes the user wrote, to the depth the
+quote resolver follows (quotes.DEFAULT_MAX_DEPTH). Someone else's quoted
+text is not followed: its own quotes show each reader what that reader
+can open, as the resolver's rule for text the reader did not write
+(quotes.quotes_inside). A quoted node the user cannot open is treated
 like one that does not exist or was deleted: no reader is shown its text
 through the quote (each reader's own access decides), so it is neither
 counted nor named. A saved reference ({quote_ext:ID}) is not a node and
@@ -27,7 +30,9 @@ from flask import jsonify
 
 from backend.extensions import db
 from backend.models import Node
-from backend.utils.quotes import DEFAULT_MAX_DEPTH, find_quote_ids
+from backend.utils.quotes import (
+    DEFAULT_MAX_DEPTH, find_quote_ids, written_by,
+)
 
 QUOTES_NOT_PUBLIC_CODE = "quotes_not_public"
 QUOTES_NOT_PUBLIC_MESSAGE = (
@@ -42,8 +47,9 @@ def unpublished_quotes(texts, user_id, becoming_public=(), skip_ids=(),
     """The nodes *user_id* can open that the {quote:ID} markers in
     *texts* show and that are not public, in the order found, each once.
     *becoming_public* are ids made public by the same change: they count
-    as public. Quotes are followed into the quoted node's text to
-    *max_depth*, the resolver's depth. A quoted node the user cannot open
+    as public. Quotes are followed into the text of quoted nodes *user_id*
+    wrote, to *max_depth*, the resolver's depth. A quoted node the user
+    cannot open
     is passed over like a missing one. *skip_ids*: quotes at the first
     level that are not checked (an edit of a public node keeps the
     quotes it already had).
@@ -69,7 +75,8 @@ def unpublished_quotes(texts, user_id, becoming_public=(), skip_ids=(),
             if (node.privacy_level != "public"
                     and node.id not in becoming_public):
                 found.append(node)
-            walk(node.get_content(), depth - 1, False)
+            if written_by(node, user_id):
+                walk(node.get_content(), depth - 1, False)
 
     for text in texts:
         walk(text, max_depth, True)

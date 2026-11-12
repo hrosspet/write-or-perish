@@ -402,6 +402,21 @@ def test_a_private_node_quoted_inside_a_public_quote_is_found(app):
     assert [q["id"] for q in resp.get_json()["quoted"]] == [secret.id]
 
 
+def test_a_quote_inside_someone_elses_public_entry_is_not_followed(app):
+    """Anna quotes Ben's public entry, which quotes Anna's private one.
+    Through Ben's text each reader is shown only what they can open, so
+    Anna's publish is not refused for a quote she did not write."""
+    annas_private = _node("anna", "anna's own private note",
+                          privacy="private")
+    bens = _node("ben", f"ben quoting {{quote:{annas_private.id}}}")
+    note = _node("anna", f"see {{quote:{bens.id}}}", privacy="private")
+
+    resp = _client(app, "anna").put(f"/api/nodes/{note.id}", json={
+        "content": note.get_content(), "privacy_level": "public"})
+
+    assert resp.status_code == 200, resp.get_json()
+
+
 def test_a_deleted_quoted_node_does_not_block(app):
     from datetime import datetime
     gone = _node("ben", "gone", privacy="private")
