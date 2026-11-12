@@ -228,10 +228,14 @@ struct NodeDetail: Decodable, Identifiable, Sendable {
     /// The viewer's write tool calls waiting for approval anywhere in the thread
     /// shown (ancestors, this node, every reply below); empty when none.
     var pendingApprovals: [ToolApproval]
+    /// How close the next AI reply under this node is to the thread's limit
+    /// (#648; the node's owner only): nil, a notice, or the limit.
+    var threadLength: ThreadLength?
 
     enum CodingKeys: String, CodingKey {
         case id, content, permalink, user, origin, ancestors, children
         case pendingApprovals = "pending_approvals"
+        case threadLength = "thread_length"
         case nodeType = "node_type"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
@@ -289,6 +293,7 @@ struct NodeDetail: Decodable, Identifiable, Sendable {
         replyAIUsage = c.tolerant(.replyAIUsage)
         gleanThread = c.tolerant(.gleanThread, default: false)
         pendingApprovals = ToolApproval.decodeList(c, .pendingApprovals)
+        threadLength = ThreadLength(rawString: c.tolerant(.threadLength))
     }
 
     var isLLM: Bool { nodeType == .llm }

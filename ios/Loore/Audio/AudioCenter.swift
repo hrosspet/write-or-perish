@@ -361,6 +361,8 @@ extension AudioCenter {
         case .ready:
             if let block = voice.aiBlock {
                 LocalNotifier.post(.recordFailed, body: block.body)
+                // A thread too long for another reply is also said aloud (#648).
+                voice.announceBlock()
                 return
             }
             voice.start()
@@ -416,6 +418,13 @@ extension AudioCenter: VoiceAudio {
     func startCue() { sounds.startCue() }
     func stopCue() { sounds.stopCue() }
     func playErrorSound() { sounds.playError() }
+
+    func speak(_ text: String) async {
+        // Recording's session stays as it is (it plays too); otherwise playback.
+        session.activateForPlayback()
+        await sounds.speak(text)
+    }
+
     func playInterruptionAlert() { sounds.playInterruptionAlert() }
     func playLongRecordingWarning() { sounds.playLongRecordingWarning() }
 }

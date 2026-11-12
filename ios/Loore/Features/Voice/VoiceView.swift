@@ -27,6 +27,8 @@ struct VoiceView: View {
     /// The server's answer for the route's thread (`GET /api/voice/availability`).
     @State private var threadAvailability: VoiceAvailability?
     @State private var availabilityChecked = false
+    /// The thread is getting long (#648): a calm line under the record button.
+    @State private var lengthNotice = false
 
     init(parentId: Int?, resumeLLMId: Int?, glean: Bool = false) {
         self.parentId = parentId
@@ -86,6 +88,7 @@ struct VoiceView: View {
             await checkAvailability()
             await checkInterrupted()
         }
+        .task(id: voice.lastReplyNodeId) { await checkLength(after: voice.lastReplyNodeId) }
     }
 
     // MARK: Phases
@@ -137,6 +140,7 @@ struct VoiceView: View {
                 }
             } else {
                 OfflineNotice()
+                if lengthNotice { threadLengthNotice }
                 if voice.hasError {
                     PulsingDot(color: LooreColor.error).padding(.bottom, 16)
                         // The web shows only the red dot; VoiceOver users get words for it.
@@ -212,6 +216,7 @@ struct VoiceView: View {
                               onApplied: { voice.updateToolMeta($0, $1) })
             Spacer().frame(height: 32)
             OfflineNotice()
+            if lengthNotice { threadLengthNotice }
             VoiceRoundButton(size: 56, enabled: online && !voice.isGleaning, dimmed: 0.7,
                              action: continueConversation) {
                 RecordGlyph(enabled: online).scaleEffect(0.84)
@@ -220,6 +225,19 @@ struct VoiceView: View {
             .accessibilityIdentifier("voice.continue")
             gleanButton
         }
+    }
+
+    /// The thread is getting long (#648): AI replies will stop soon. Calm, muted,
+    /// above the record (or Continue) button; no numbers.
+    private var threadLengthNotice: some View {
+        Text(ThreadLength.noticeText)
+            .font(LooreFont.sans(13.6, .light))
+            .foregroundStyle(LooreColor.textMuted)
+            .multilineTextAlignment(.center)
+            .lineSpacing(4)
+            .frame(maxWidth: 320)
+            .padding(.bottom, 20)
+            .accessibilityIdentifier("voice.threadLengthNotice")
     }
 
     /// Under the record (or Continue) button in a Glean session, once the thread
@@ -292,10 +310,11 @@ struct VoiceView: View {
             .accessibilityIdentifier("voice.recovery.discard")
     }
 
-    /// Instead of the record button where AI usage is `none` (web `VoicePage`).
+    /// Instead of the record button where AI usage is `none`, or where the thread
+    /// is too long for another reply (#648) (web `VoicePage`).
     private func aiBlockView(_ block: VoiceAIBlock) -> some View {
         VStack(spacing: 0) {
-            Text(VoiceAIBlock.title)
+            Text(block.heading)
                 .font(LooreFont.serif(19.2, .light, italic: true, relativeTo: .title2))
                 .foregroundStyle(LooreColor.textMuted)
                 .padding(.bottom, 40)
@@ -317,12 +336,21 @@ struct VoiceView: View {
     }
 
     @ViewBuilder private func aiBlockButtons(_ block: VoiceAIBlock) -> some View {
-        Button("Account settings") {
-            app.open(.account(anchor: VoiceAIBlock.accountAnchor))
+        if block.isThreadTooLong {
+            Button(ThreadLength.newThreadLabel, action: startNewThread)
+                .buttonStyle(RecoveryButtonStyle(accent: true))
+                .accessibilityIdentifier("voice.aiBlock.newThread")
+        } else {
+            Button("Account settings") {
+                app.open(.account(anchor: VoiceAIBlock.accountAnchor))
+            }
+            .buttonStyle(RecoveryButtonStyle(accent: true))
+            .accessibilityIdentifier("voice.aiBlock.account")
         }
-        .buttonStyle(RecoveryButtonStyle(accent: true))
-        .accessibilityIdentifier("voice.aiBlock.account")
-        if block.scope == .thread, let threadId = routeThreadId {
+        // The thread the conversation reached (a session that grew to the limit),
+        // else the one the screen opened on.
+        if block.scope == .thread, let threadId = block.isThreadTooLong
+            ? (voice.threadParentId ?? routeThreadId) : routeThreadId {
             Button("Back to the thread") {
                 if VoiceAIBlock.backPops(previous: app.router.previousRoute) {
                     app.router.pop()
@@ -361,6 +389,29 @@ struct VoiceView: View {
 
     // MARK: Actions
 
+    /// "Start a new thread" where the thread is too long for another reply (#648):
+    /// a fresh Voice conversation, as the Voice tab opens one.
+    private func startNewThread() {
+        voice.clearAIBlock()
+        lengthNotice = false
+        voice.startNewConversation(parentId: nil, glean: glean && app.capabilities.gleanEnabled)
+        if routeThreadId != nil {
+            // A new screen without the thread: its route check finds no block.
+            app.router.replaceTop(with: .voice(parentId: nil, resumeLLMId: nil, glean: glean))
+        }
+    }
+
+    /// After each reply, whether the thread it continues is getting long (#648):
+    /// the notice under the record button. The limit itself shows when the next
+    /// recording is refused (said aloud, then the block).
+    private func checkLength(after replyId: Int?) async {
+        guard replyId != nil, let threadId = voice.threadParentId else { return }
+        guard let answer = try? await app.api.get(
+            APIPath.voiceAvailability, query: [URLQueryItem(name: "parent", value: String(threadId))],
+            as: VoiceAvailability.self) else { return }
+        lengthNotice = answer.showsNotice
+    }
+
     private func appear() {
         app.audio.voiceScreenVisible = true
         // Before the first check the route waits: a blocked thread's reply is not resumed.
@@ -387,6 +438,7 @@ struct VoiceView: View {
         threadAvailability = try? await app.api.get(
             APIPath.voiceAvailability, query: [URLQueryItem(name: "parent", value: String(threadId))],
             as: VoiceAvailability.self)
+        lengthNotice = threadAvailability?.showsNotice ?? false
     }
 
     private func disappear() {
