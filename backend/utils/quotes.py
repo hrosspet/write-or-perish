@@ -201,6 +201,75 @@ def has_ext_quotes(content: str) -> bool:
     return bool(re.search(EXT_QUOTE_PLACEHOLDER_PATTERN, content))
 
 
+# A marker in text that someone other than the reader wrote, held so a
+# later pass over the reader's whole text (the saved-reference pass, or
+# the prompt's quote passes over an archive filled into it) cannot
+# resolve it with the reader's access. release_quotes puts it back as
+# written once those passes are done.
+_HELD_EXT_QUOTE = "{quote_ext\ue000:"
+_HELD_QUOTE = "{quote\ue000:"
+
+
+def hold_ext_quotes(text: str) -> str:
+    """*text* with every {quote_ext:ID} held (see _HELD_EXT_QUOTE)."""
+    return text.replace("{quote_ext:", _HELD_EXT_QUOTE) if text else text
+
+
+def hold_quotes(text: str) -> str:
+    """*text* with every {quote:ID} and {quote_ext:ID} held."""
+    if not text:
+        return text
+    return hold_ext_quotes(text).replace("{quote:", _HELD_QUOTE)
+
+
+def release_quotes(text: str) -> str:
+    """*text* with every held marker back as written."""
+    if not text:
+        return text
+    return text.replace(_HELD_EXT_QUOTE, "{quote_ext:").replace(
+        _HELD_QUOTE, "{quote:")
+
+
+def written_by(node, user_id) -> bool:
+    """True when *user_id* wrote *node*: their own entry, or an AI reply
+    they asked for. An AI reply from before human_owner_id was stored
+    belongs to the person above it."""
+    owner = node.human_owner_id
+    if owner is None and node.node_type == "llm":
+        from backend.utils.privacy import find_human_owner
+        owner = find_human_owner(node)
+    return (owner or node.user_id) == user_id
+
+
+def readable_by_everyone(node_id) -> bool:
+    """True when the node *node_id* is public and not deleted: every
+    reader of any node can read it."""
+    from backend.extensions import db
+    from backend.models import Node
+    node = db.session.get(Node, node_id)
+    return (node is not None and node.deleted_at is None
+            and node.privacy_level == "public")
+
+
+def quotes_inside(user_id, quotable_for=None):
+    """The *inside* test of resolve_quotes and the export: for a quoted
+    node's id, None when *user_id* wrote that node (its quotes resolve
+    with their access, as before), else the test each {quote:ID} in its
+    text must pass: quotable_for(node), by default "the quoted node is
+    public" (readable_by_everyone)."""
+    from backend.extensions import db
+    from backend.models import Node
+
+    def inside(node_id):
+        node = db.session.get(Node, node_id)
+        if node is not None and written_by(node, user_id):
+            return None
+        if node is None or quotable_for is None:
+            return readable_by_everyone
+        return quotable_for(node)
+    return inside
+
+
 def get_quote_data(node_ids: List[int], user_id: int) -> Dict[int, Optional[dict]]:
     """
     Fetch node data for the given IDs, checking access permissions.
@@ -274,9 +343,25 @@ def resolve_quotes(
     _seen_ids: Optional[Set[int]] = None,
     tz_name: Optional[str] = None,
     block_ai_none: Optional[bool] = None,
+    only=None,
+    inside=None,
 ) -> Tuple[str, List[int]]:
     """
     Replace {quote:ID} placeholders with quoted node content, recursively.
+
+    *only* (a callable taking a node id): a quote whose id it refuses is
+    left as written, at every depth. Used for text another person wrote
+    into a shared thread, where a quote resolves only when every reader
+    of the thread can read the quoted node (llm_completion).
+
+    *inside* (quotes_inside): for each quoted node, None when the user
+    wrote it, else the test the quotes in its text must pass. Text the
+    user did not write, and everything quoted below it, then resolves
+    its quotes only through that test (or *only*). A quote it refuses,
+    and every marker left in such text, comes back held (hold_quotes):
+    no later pass over the caller's text resolves it, and
+    release_quotes puts it back as written. A caller passing *only* or
+    *inside* releases.
 
     Args:
         content: Text containing {quote:ID} placeholders
@@ -316,6 +401,8 @@ def resolve_quotes(
 
     def replace_quote(match):
         node_id = int(match.group(1))
+        if only is not None and not only(node_id):
+            return hold_quotes(match.group(0))
         data = quote_data.get(node_id)
 
         if data is None:
@@ -351,6 +438,15 @@ def resolve_quotes(
         node_content = data["content"] or ""
         username = data["username"]
 
+        # The quoted text's own quotes: under the test of the text it
+        # sits in (*only*), or, quoted from text the user wrote, under
+        # the test for the quoted node when someone else wrote it.
+        inner_only = only
+        if inner_only is None and inside is not None:
+            inner_only = inside(node_id)
+        if inner_only is not None:
+            node_content = hold_ext_quotes(node_content)
+
         # Recursively resolve quotes in the quoted content
         if max_depth > 1 and has_quotes(node_content):
             new_seen = _seen_ids | {node_id}
@@ -362,8 +458,13 @@ def resolve_quotes(
                 _seen_ids=new_seen,
                 tz_name=tz_name,
                 block_ai_none=block_ai_none,
+                only=inner_only,
+                inside=inside,
             )
             resolved_ids.extend(nested_ids)
+        if inner_only is not None:
+            # Whatever the depth left unresolved stays as written.
+            node_content = hold_quotes(node_content)
 
         stamp = quote_stamp(data.get("created_at"), tz_name)
         if for_llm:
@@ -431,6 +532,11 @@ class NodeEntry:
     is_top_level: bool = True  # Whether this is a top-level entry vs embedded
     user_prompt_id: Optional[int] = None  # System prompt reference (legacy)
     artifacts: List[Tuple[str, int]] = field(default_factory=list)  # (type, id)
+    # quote id -> the test of the text it was found in, for a quote found
+    # only in text the export's user did not write (quotes_inside); a
+    # quote found in their own text is not listed.
+    found_under: Dict[int, Callable[[int], bool]] = field(
+        default_factory=dict)
 
     @property
     def total_tokens(self) -> int:
@@ -461,7 +567,8 @@ class ExportQuoteResolver:
     def __init__(self, user_id: int, max_tokens: Optional[int],
                  filter_ai_usage: bool = False,
                  chronological: bool = False,
-                 with_preamble: bool = True):
+                 with_preamble: bool = True,
+                 inside=None):
         """
         Initialize the resolver.
 
@@ -482,8 +589,14 @@ class ExportQuoteResolver:
                           them (#550): then the
                           budget counts only the entries, and the profile
                           and todo texts are not loaded (#518).
+            inside: quotes_inside(user_id), or None. In an entry the
+                   user did not write, and in quoted text they did not
+                   write, a quote is embedded only when it passes the
+                   test of the text it is in (resolve_quotes_for_export
+                   renders by the same rule).
         """
         self.user_id = user_id
+        self.inside = inside
         self.max_tokens = max_tokens
         self.filter_ai_usage = filter_ai_usage
         self.chronological = chronological
@@ -557,7 +670,15 @@ class ExportQuoteResolver:
                 token_count = approximate_token_count(content)
             base_tokens = token_count
 
-        quote_ids = find_quote_ids(content)
+        all_quote_ids = find_quote_ids(content)
+        quote_ids = all_quote_ids
+        # An entry someone else wrote: only the quotes its test passes.
+        entry_only = (self.inside(node_id)
+                      if self.inside is not None and all_quote_ids else None)
+        found_under = {}
+        if entry_only is not None:
+            quote_ids = [q for q in all_quote_ids if entry_only(q)]
+            found_under = {q: entry_only for q in quote_ids}
 
         # Only the export user's own versions: a node of someone else's
         # in the user's threads (their system prompt above the user's
@@ -574,6 +695,7 @@ class ExportQuoteResolver:
             quote_ids=quote_ids,
             user_prompt_id=user_prompt_id,
             artifacts=artifacts or [],
+            found_under=found_under,
         )
         self.entries.append(entry)
 
@@ -593,7 +715,7 @@ class ExportQuoteResolver:
         # Cache for later use
         self._node_cache[node_id] = {
             'tokens': base_tokens,
-            'quote_ids': quote_ids,
+            'quote_ids': all_quote_ids,
             'content': content
         }
 
@@ -808,10 +930,25 @@ class ExportQuoteResolver:
                     entry.embedded_tokens += metadata['tokens']
                     entry.quote_ids.remove(quoted_id)
 
-                    # Inherit quotes from the embedded content
+                    # Inherit quotes from the embedded content: under the
+                    # test of the text it was quoted from, or, quoted from
+                    # the user's own text, the test for the quoted node
+                    # when someone else wrote it (quotes_inside). A quote
+                    # found in the user's own text at all is theirs.
+                    inner = entry.found_under.get(quoted_id)
+                    if inner is None and self.inside is not None:
+                        inner = self.inside(quoted_id)
                     for nested_quote_id in metadata['quote_ids']:
+                        if inner is not None and not inner(nested_quote_id):
+                            continue
                         if nested_quote_id not in entry.quote_ids:
                             entry.quote_ids.append(nested_quote_id)
+                            if inner is not None:
+                                entry.found_under[nested_quote_id] = inner
+                            else:
+                                entry.found_under.pop(nested_quote_id, None)
+                        elif inner is None:
+                            entry.found_under.pop(nested_quote_id, None)
 
                     # Mark as embedded (content is now in the export via embedding)
                     # This is tracked separately so _truncate() preserves it
@@ -925,6 +1062,8 @@ def resolve_quotes_for_export(
     ai_blocked_ids: Optional[Set[int]] = None,
     _resolving: Optional[Set[int]] = None,
     reference: Optional[Callable[[int], str]] = None,
+    only=None,
+    inside=None,
 ) -> str:
     """
     Resolve quotes in a node's content for export rendering.
@@ -949,6 +1088,10 @@ def resolve_quotes_for_export(
                    with the quoted entry's position label once the whole
                    document is rendered (#592); without it the text
                    names the node id.
+        only, inside: as in resolve_quotes: a quote *only* refuses comes
+                   back held, and embedded text the user did not write
+                   resolves its quotes only through its test and has
+                   every marker left in it held (the caller releases).
 
     Returns:
         Content with quotes resolved (embedded or marked as reference)
@@ -966,6 +1109,8 @@ def resolve_quotes_for_export(
 
     def replace_quote(match):
         quoted_id = int(match.group(1))
+        if only is not None and not only(quoted_id):
+            return hold_quotes(match.group(0))
 
         # Prevent infinite loops
         if quoted_id in _resolving:
@@ -978,6 +1123,11 @@ def resolve_quotes_for_export(
         if quoted_id in node_embeds:
             # Embedded quote - include the content
             embedded_content = node_embeds[quoted_id]
+            inner_only = only
+            if inner_only is None and inside is not None:
+                inner_only = inside(quoted_id)
+            if inner_only is not None:
+                embedded_content = hold_ext_quotes(embedded_content)
 
             # Recursively resolve any quotes in the embedded content
             if has_quotes(embedded_content):
@@ -990,7 +1140,11 @@ def resolve_quotes_for_export(
                     ai_blocked_ids=ai_blocked_ids,
                     _resolving=new_resolving,
                     reference=reference,
+                    only=inner_only,
+                    inside=inside,
                 )
+            if inner_only is not None:
+                embedded_content = hold_quotes(embedded_content)
 
             # Get username for formatting
             from backend.models import Node
