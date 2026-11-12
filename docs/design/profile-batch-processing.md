@@ -708,7 +708,13 @@ advance before `resolve_set` (its own run excluded), the seeder's gate
 clears it. With no profile version yet, or a rebuild from scratch
 flagged, it is dropped: that build reads everything. The import's result
 still says that the profile is built once the imports stop
-(`_profile_waits_for_imports`). A synchronous task's guard alone does not hold the
+(`_profile_waits_for_imports`). The hand-off and the applier read the date
+under a lock on the user's row (`_lock_user_row`), so two of them never
+undo each other's older date or re-tip the same set twice. A re-tip that
+raises is rolled back (the date stays), recorded in the admin Profile
+column and logged as an error; the seeder goes on with the next user,
+and a waiting date keeps the user's work hold so the hourly pass returns
+to it. A synchronous task's guard alone does not hold the
 re-tip: it chooses its base when it starts, `base_moved` stops it at its
 next step, and one that hands off to the window path claims the build
 first.
