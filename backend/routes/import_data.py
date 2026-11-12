@@ -453,7 +453,8 @@ def _split_item_nodes(tip_ids, shapes=None):
 
 
 def _apply_settings_to_skipped(node_ids, privacy_level, ai_usage, dek=None,
-                               changes=None, shapes=None, partial=None):
+                               changes=None, shapes=None, partial=None,
+                               privacy_changed=None):
     """Apply this import's privacy/ai_usage to already-imported items.
 
     Re-importing an archive is also how users change their mind about
@@ -470,7 +471,8 @@ def _apply_settings_to_skipped(node_ids, privacy_level, ai_usage, dek=None,
 
     ``changes`` (a _ProfileChanges) records the nodes whose new AI usage
     moves them into or out of what the profile reads (#625). ``partial``
-    (a set) gets the items only partly updated.
+    (a set) gets the items only partly updated, and ``privacy_changed``
+    (a list) the ids of the nodes whose privacy level changed.
     """
     from sqlalchemy import or_
     item_of, unproven = _split_item_nodes(node_ids, shapes)
@@ -494,6 +496,9 @@ def _apply_settings_to_skipped(node_ids, privacy_level, ai_usage, dek=None,
         ).all():
             if changes is not None:
                 changes.setting_changed(node)
+            if (privacy_changed is not None
+                    and node.privacy_level != privacy_level):
+                privacy_changed.append(node.id)
             node.set_privacy_level(privacy_level, dek=dek)
             node.ai_usage = ai_usage
             updated_items.add(item_of[node.id])
@@ -507,13 +512,16 @@ class _Matched:
     and, for a file or message, the parts of the re-imported text, from
     which an item imported before split_item existed is checked
     (_item_shape). ``apply`` runs before the commit and returns
-    ``updated``; ``partial`` keeps the items only partly updated."""
+    ``updated``; ``partial`` keeps the items only partly updated;
+    ``after_commit`` drops the cached public pages of the entries whose
+    privacy level changed, as an edit does (routes/nodes.py)."""
 
     def __init__(self):
         self.skipped = []
         self.restored = []
         self.shapes = {}
         self.partial = set()
+        self.privacy_changed = []
 
     def _shape(self, node_id, parts):
         if node_id is not None and parts is not None:
@@ -531,7 +539,8 @@ class _Matched:
 
     def apply(self, privacy_level, ai_usage, dek=None, changes=None):
         kw = dict(dek=dek, changes=changes, shapes=self.shapes,
-                  partial=self.partial)
+                  partial=self.partial,
+                  privacy_changed=self.privacy_changed)
         updated = _apply_settings_to_skipped(
             self.skipped, privacy_level, ai_usage, **kw)
         # A restored item's other entries take the settings too; it is
@@ -543,6 +552,12 @@ class _Matched:
 
     def any(self):
         return bool(self.skipped or self.restored)
+
+    def after_commit(self):
+        ids, self.privacy_changed = self.privacy_changed, []
+        if ids:
+            from backend.utils.public_cache import invalidate_for_nodes
+            invalidate_for_nodes(ids)
 
 
 def _release_deleted_docx_key(file_data, source_key, key_index,
@@ -1236,6 +1251,7 @@ def confirm_import():
 
         # Commit all nodes
         db.session.commit()
+        matched.after_commit()
 
         profile_update_task_id, profile_waits, rebuild_question = (
             _profile_after_import(current_user.id, changes))
@@ -1821,6 +1837,7 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
     nodes_updated = matched.apply(privacy_level, ai_usage, changes=changes)
     nodes_skipped -= nodes_updated
     db.session.commit()
+    matched.after_commit()
     if on_progress:
         on_progress(total)
 
@@ -2850,6 +2867,7 @@ def create_conversation_nodes(user_id, source, conversations, privacy_level,
         matched.partial.clear()
         changes.to_state(state)
         db.session.commit()
+        matched.after_commit()
         data_key.rotate()
         if on_commit:
             on_commit(state)

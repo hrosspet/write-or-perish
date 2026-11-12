@@ -505,6 +505,47 @@ def test_legacy_parts_without_an_origin_are_reported(app):
     assert count() == (1, 1, 1)
 
 
+# ── cached public pages ──────────────────────────────────────────────────
+
+class _FakeCache:
+    """The Redis calls public_cache makes."""
+
+    def __init__(self):
+        self.store = {}
+
+    def get(self, key):
+        return self.store.get(key)
+
+    def setex(self, key, ttl, value):
+        self.store[key] = value
+
+    def delete(self, *keys):
+        for k in keys:
+            self.store.pop(k, None)
+
+
+@pytest.mark.parametrize("legacy", LEGACY)
+def test_chapters_made_private_leave_the_page_cache(app, monkeypatch,
+                                                    legacy):
+    from backend.utils import public_cache
+    cache = _FakeCache()
+    monkeypatch.setattr(public_cache, "_redis", lambda: cache)
+    u, client = _user(app, f"public_doc_{legacy}")
+    doc = _analyze(client, "Thesis.docx", _thesis(3))
+    _confirm(client, [doc], "chat", privacy_level="public")
+    nodes = _entries(u)
+    _imported(u, legacy)
+    pages = [f"/node/{n.id}" for n in nodes] + [f"/@{u.username}"]
+    for path in pages:
+        public_cache.put(path, 200, "text/html", "synthetic page")
+    assert all(public_cache.get(p) for p in pages)
+
+    _confirm(client, [doc], "chat", privacy_level="private")
+    _db.session.expire_all()
+    assert {n.privacy_level for n in _entries(u)} == {"private"}
+    assert [p for p in pages if public_cache.get(p)] == []
+
+
 # ── the user's own change of one chapter ─────────────────────────────────
 
 def test_a_chapter_the_user_changed_takes_the_reimport_setting(app):
