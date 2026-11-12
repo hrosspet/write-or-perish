@@ -22,7 +22,8 @@ from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.cost import llm_cost_log_fields
 from backend.utils.privacy import AI_ALLOWED, account_allows_ai
 from backend.utils.profile_versions import continue_boundary
-from backend.utils import refusal_backoff
+from backend.utils import refusal_backoff, soft_limit
+from backend.utils.error_privacy import describe_exception
 from backend.utils.refusal_backoff import REFUSED_REF
 from backend.utils.heavy_slot import HeavyTask
 
@@ -1171,8 +1172,13 @@ def revert_profile_for_import(user_id, earliest_imported_created_at,
     ``("deferred", None)`` (the date waits) or ``("none", tip)`` when
     nothing is invalidated: no parseable timestamp, or the import is newer
     than the tip's cutoff.
+
+    The user's row is locked for the rest of the caller's transaction
+    (``_lock_user_row``): two hand-offs, or a hand-off and the applier,
+    run one after the other, and the waiting date is read after the lock,
+    so neither writes over the other's older date.
     """
-    user = db.session.get(User, user_id)
+    user = _lock_user_row(user_id)
     waiting = user.profile_import_retip_from if user is not None else None
     dates = [d for d in (earliest_imported_created_at, waiting)
              if d is not None]
@@ -1317,26 +1323,71 @@ def apply_waiting_import_date(user, own_run=None):
     scratch flagged, there is nothing to invalidate: that build reads
     everything anyway.
 
+    The user's row is locked from the check to the commit
+    (``_lock_user_row``), so an import's hand-off running at the same time
+    waits and then sees the re-tip. A re-tip that raises (a version that
+    cannot be decrypted, say) is rolled back, so the date stays for the
+    next pass; it is recorded in the admin Profile column
+    (``profile_seed_error``) and logged as an error, and "error" is
+    returned: callers that loop over users go on with the next one.
+
     Returns the action (``revert_profile_for_import``'s), "deferred" while
-    the work is still in flight, or None when no date waits. Commits."""
+    the work is still in flight, "error", or None when no date waits.
+    Commits."""
     if user is None or user.profile_import_retip_from is None:
         return None
-    if import_retip_waits(user, own_run):
-        return "deferred"
-    retip = (not user.profile_needs_full_regen
-             and db.session.query(UserProfile.id).filter(
-                 UserProfile.user_id == user.id,
-                 UserProfile.generation_type != 'integration'
-             ).first() is not None)
-    if retip:
-        action, _version = revert_profile_for_import(user.id, None, own_run)
-    else:
-        user.profile_import_retip_from = None
-        action = "none"
-    db.session.commit()
+    user_id = user.id
+    try:
+        user = _lock_user_row(user_id)
+        if user is None or user.profile_import_retip_from is None:
+            db.session.commit()          # another pass applied it
+            return None
+        if import_retip_waits(user, own_run):
+            db.session.commit()          # releases the row
+            return "deferred"
+        retip = (not user.profile_needs_full_regen
+                 and db.session.query(UserProfile.id).filter(
+                     UserProfile.user_id == user_id,
+                     UserProfile.generation_type != 'integration'
+                 ).first() is not None)
+        if retip:
+            action, _version = revert_profile_for_import(
+                user_id, None, own_run)
+        else:
+            user.profile_import_retip_from = None
+            action = "none"
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        soft_limit.reraise(e)
+        failure = describe_exception(e)
+        user = db.session.get(User, user_id)
+        if user is not None:
+            user.profile_seed_error = (
+                f"{RETIP_FAILED_NOTE}: {failure}")[:255]
+            db.session.commit()
+        logger.error(
+            "User %d: the re-tip for an import date that waited for the "
+            "profile work in flight failed (%s); the date stays and the "
+            "next pass tries again", user_id, failure)
+        return "error"
     logger.info("User %d: the import date that waited for the profile work "
-                "in flight is applied: %s", user.id, action)
+                "in flight is applied: %s", user_id, action)
     return action
+
+
+# The admin Profile column's note for a waiting import date whose re-tip
+# raised (``apply_waiting_import_date``).
+RETIP_FAILED_NOTE = "Re-tip after an import failed"
+
+
+def _lock_user_row(user_id):
+    """The user's row, read again and locked until the transaction ends
+    (SELECT ... FOR UPDATE on Postgres; SQLite has no row locks and runs
+    one writer at a time). Serializes an import's hand-off with another
+    hand-off and with the applier of a waiting date (#639)."""
+    return (db.session.query(User).filter(User.id == user_id)
+            .populate_existing().with_for_update().one_or_none())
 
 
 def _copy_set_row(row, set_id, created_at, parent_id):
@@ -2817,6 +2868,8 @@ def maybe_trigger_incremental_profile_update(user, ignore_backoff=False):
     # An import whose re-tip waited for window work in flight (#639) is
     # applied now, and its build starts as the import's hand-off starts it.
     waited = apply_waiting_import_date(user)
+    if waited == "error":
+        return None          # the date stays; recorded, tried again later
     if waited in ("full", "revert"):
         return maybe_trigger_profile_update(
             user.id, force_full_regen=(waited == "full"))
@@ -2934,6 +2987,8 @@ def check_pending_profile_updates():
             try:
                 maybe_trigger_incremental_profile_update(user)
             except Exception as e:
+                # The next user starts from a clean session (#639).
+                db.session.rollback()
                 logger.warning(
                     f"Profile update check failed for user {user.id}: {e}"
                 )

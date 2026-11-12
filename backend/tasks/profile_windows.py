@@ -1681,8 +1681,9 @@ def next_work(user, keys, deadline, wait_for_imports=True, task_id=None):
     groups whose windows are all in, and the final when everything is.
     Returns "submitted", "partial" (render budget used; the caller hands
     the rest to a new task), "idle", "held", "waiting", "blocked" (a
-    content-policy block of a group or final stops the account's build) or
-    "failed". ``task_id``: the advance running this pass."""
+    content-policy block of a group or final stops the account's build),
+    "failed" or "error" (an import's waiting re-tip failed, #639).
+    ``task_id``: the advance running this pass."""
     run_locks.beat()
     # Before anything of the user's is read: the read time of the groups
     # and the final this pass builds (#590, review of #630). A "Delete all
@@ -1705,7 +1706,10 @@ def next_work(user, keys, deadline, wait_for_imports=True, task_id=None):
     # An import that arrived while this user's windows were in the batch
     # or being rendered waited for them (#639): once nothing is in flight,
     # the set is re-tipped from its date before the pass chooses its set.
-    _exports.apply_waiting_import_date(user, own_run=task_id)
+    # A re-tip that failed keeps the date (rolled back and recorded), and
+    # nothing goes out over the set it was to replace.
+    if _exports.apply_waiting_import_date(user, own_run=task_id) == "error":
+        return "error"
     set_id, base, fresh = resolve_set(user)
     if fresh and not wants_window_build(user):
         # A set is started only for a build that plans into two or more
