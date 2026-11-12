@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import api from "../api";
 import { formatDate } from "../utils/date";
+import { formatPrice } from "../utils/subscription";
 
 // Admin: subscriptions and discount codes (#438). The tab exists only
 // while the server has payments on. Subscriptions show what Loore keeps
@@ -33,8 +34,17 @@ const h2 = { fontFamily: "var(--serif)", fontWeight: 300, fontSize: "1.3rem", ma
 
 const day = (iso) => (iso ? formatDate(iso) : "—");
 
+// A referral's free week for one side (#439): the credit Stripe made, or
+// why there is none.
+const week = (state, cents, currency) => {
+  if (state === "granted") return formatPrice(cents, currency || "usd");
+  if (!state) return "—";
+  return state.replace(/_/g, " ");
+};
+
 export default function AdminSubscriptions() {
   const [subs, setSubs] = useState(null);
+  const [referrals, setReferrals] = useState(null);
   const [codes, setCodes] = useState(null);
   const [err, setErr] = useState("");
   const [form, setForm] = useState({ code: "", max_uses: "", expires_at: "", note: "" });
@@ -48,6 +58,9 @@ export default function AdminSubscriptions() {
     api.get("/admin/subscriptions")
       .then((res) => setSubs(res.data.subscriptions))
       .catch(() => setErr("Failed to fetch subscriptions."));
+    api.get("/admin/referrals")
+      .then((res) => setReferrals(res.data.referrals))
+      .catch(() => setErr("Failed to fetch invitations."));
     loadCodes();
   }, []);
 
@@ -106,6 +119,42 @@ export default function AdminSubscriptions() {
                   <td style={cell}>{day(s.trial_end)}</td>
                   <td style={cell}>{day(s.current_period_end)}</td>
                   <td style={cell}>{s.cancel_at_period_end ? "yes" : ""}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Referrals (#439): who invited whom, and the free week each side
+          got on the friend's first payment. */}
+      <h2 style={h2}>Invitations</h2>
+      {referrals === null ? <div>Loading…</div> : referrals.length === 0 ? (
+        <div style={{ color: "var(--text-muted)" }}>No invitations yet.</div>
+      ) : (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                <th style={th}>invited by</th>
+                <th style={th}>friend</th>
+                <th style={th}>approved</th>
+                <th style={th}>signed up</th>
+                <th style={th}>first payment</th>
+                <th style={th}>inviter's week</th>
+                <th style={th}>friend's week</th>
+              </tr>
+            </thead>
+            <tbody>
+              {referrals.map((r) => (
+                <tr key={r.id}>
+                  <td style={cell}>{r.inviter || "(deleted)"}</td>
+                  <td style={cell}>{r.friend || "(deleted)"}</td>
+                  <td style={cell}>{r.friend_approved === null ? "—" : (r.friend_approved ? "yes" : "waiting")}</td>
+                  <td style={cell}>{day(r.created_at)}</td>
+                  <td style={cell}>{day(r.rewarded_at)}</td>
+                  <td style={cell}>{week(r.inviter_reward, r.inviter_credit_cents, r.inviter_credit_currency)}</td>
+                  <td style={cell}>{week(r.friend_reward, r.friend_credit_cents, r.friend_credit_currency)}</td>
                 </tr>
               ))}
             </tbody>

@@ -9,6 +9,7 @@ import SubscriptionBanner from "./components/SubscriptionBanner";
 import DataDeletionBanner from "./components/DataDeletionBanner";
 import TermsModal from "./components/TermsModal";
 import SubscribePage from "./pages/SubscribePage";
+import InvitePage from "./pages/InvitePage";
 import { notLetIn } from "./utils/subscription";
 import AdminPanel from "./components/AdminPanel";
 import NodeDetailWrapper from "./components/NodeDetailWrapper";
@@ -267,6 +268,8 @@ function App() {
           <Route path="/" element={<RootRoute />} />
           <Route path="/landing" element={<LandingPage />} />
           <Route path="/login" element={<LoginPage />} />
+          {/* An invite link (#439): keeps the code for the sign-in. */}
+          <Route path="/invite/:code" element={<InvitePage />} />
           {/* Public about pages */}
           <Route path="/vision" element={<VisionPage />} />
           <Route path="/why-loore" element={<WhyLoorePage />} />

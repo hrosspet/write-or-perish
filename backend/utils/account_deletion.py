@@ -56,8 +56,8 @@ from backend.extensions import db
 from backend.models import (
     ApiToken, ChangelogReadState, CheckoutSession, DiscountCode,
     DiscountCodeAttempt,
-    DiscountRedemption, Node, Poll, ReleasedUsername, User, UserDataPurge,
-    UsernameHistory,
+    DiscountRedemption, Node, Poll, Referral, ReleasedUsername, User,
+    UserDataPurge, UsernameHistory,
 )
 from backend.utils import user_purge
 from backend.utils.user_purge import (
@@ -656,6 +656,14 @@ def delete_identity(user_id):
         DiscountCodeAttempt.user_id == U).delete(synchronize_session=False)
     counts["checkout_session"] += CheckoutSession.query.filter(
         CheckoutSession.user_id == U).delete(synchronize_session=False)
+    # Referrals (#439): the row stays for the other account's history,
+    # without the deleted one.
+    counts["referral.inviter_id"] += Referral.query.filter(
+        Referral.inviter_id == U).update(
+        {Referral.inviter_id: None}, synchronize_session=False)
+    counts["referral.friend_id"] += Referral.query.filter(
+        Referral.friend_id == U).update(
+        {Referral.friend_id: None}, synchronize_session=False)
 
     handles = {(user.username or "").lower()}
     handles.update(h for (h,) in db.session.query(
