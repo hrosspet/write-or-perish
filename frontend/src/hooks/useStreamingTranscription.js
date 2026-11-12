@@ -5,6 +5,7 @@ import { useToast } from '../contexts/ToastContext';
 import api from '../api';
 import { isSpendCapError, spendCapToastMessage } from '../utils/spendCap';
 import { isAiUsageRefusedError, aiUsageRefusalScope } from '../utils/aiUsage';
+import { isApprovalPendingError } from '../utils/toolApprovals';
 import { onPageReturn } from '../utils/pageReturn';
 import { playErrorSound } from '../utils/errorSound';
 import { RECORDING_DEVICE_KEY, TAKEN_OVER_CODE } from '../utils/recordingDevice';
@@ -781,6 +782,19 @@ export function useStreamingTranscription(options = {}) {
         if (onError) onError(err);
         throw err;
       }
+      if (isApprovalPendingError(err)) {
+        // A Voice recording in a thread where a change the AI proposed
+        // waits for the user's approval (Peter, 2026-11-12): refused
+        // before any draft existed and before the mic opened. Nothing
+        // failed; the parent shows the change to decide. No toast here.
+        setSessionState('idle');
+        try {
+          err.approvalPending = true;
+          err.startup = true;
+        } catch (_) { /* sealed error object */ }
+        if (onError) onError(err);
+        throw err;
+      }
       setSessionState('error');
       setErrorMessage(err.message);
       if (onError) {
@@ -809,9 +823,10 @@ export function useStreamingTranscription(options = {}) {
 
     } catch (err) {
       console.error('Failed to start streaming:', err);
-      // Refused by the spend cap or by AI usage: initSession already
-      // returned to idle and told the parent. The mic was never requested.
-      if (err?.spendCapped || err?.aiUsageRefused) return;
+      // Refused by the spend cap, by AI usage or by a waiting change:
+      // initSession already returned to idle and told the parent. The mic
+      // was never requested.
+      if (err?.spendCapped || err?.aiUsageRefused || err?.approvalPending) return;
       // Always land in a terminal state. The error path here means recording
       // never started, so the session must not be left in 'recording' or
       // 'initializing' (which would strand the parent UI). 'error' is set

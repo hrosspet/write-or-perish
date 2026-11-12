@@ -11,6 +11,7 @@ import { useToast } from '../contexts/ToastContext';
 import api from '../api';
 import * as voiceTiming from '../utils/voiceTiming';
 import { isAiUsageRefusedError, aiUsageRefusalScope } from '../utils/aiUsage';
+import { isApprovalPendingError } from '../utils/toolApprovals';
 import { onPageReturn } from '../utils/pageReturn';
 import { playErrorSound } from '../utils/errorSound';
 
@@ -71,8 +72,9 @@ function chapterTitleFromContent(content) {
  * @param {number|null} options.initialLlmNodeId - Resume in processing phase, polling this LLM node
  * @param {number|null} options.initialParentId - Resume in ready phase with thread parent pre-set
  * @param {string|null} [options.entry] - 'glean' when the session was opened from the Glean card (#435): the thread the first recording starts is marked as a Glean thread
+ * @param {Function} [options.onApprovalPending] - Called when the server refused a Voice turn because a change the AI proposed in the thread waits for the user's approval: no recording started
  */
-export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete, onLLMFailed = null, initialLlmNodeId = null, initialParentId = null, model = null, aiUsage = 'none', onAiUsageRefused = null, onEntrySaved = null, onCancelled = null, entry = null }) {
+export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete, onLLMFailed = null, initialLlmNodeId = null, initialParentId = null, model = null, aiUsage = 'none', onAiUsageRefused = null, onEntrySaved = null, onCancelled = null, entry = null, onApprovalPending = null }) {
   const audio = useAudio();
   const isOnline = useOnlineStatus();
   const [phase, setPhase] = useState(initialLlmNodeId ? 'processing' : 'ready');
@@ -247,6 +249,12 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   useEffect(() => {
     onCancelledRef.current = onCancelled;
   }, [onCancelled]);
+  // The server refused the turn: a change the AI proposed in this thread
+  // waits for the user's approval (Peter, 2026-11-12). The page shows it.
+  const onApprovalPendingRef = useRef(onApprovalPending);
+  useEffect(() => {
+    onApprovalPendingRef.current = onApprovalPending;
+  }, [onApprovalPending]);
 
   // A voice turn that fails plays the error sound, so a user who isn't
   // looking at the screen (driving) knows the reply stopped (Peter,
@@ -327,6 +335,15 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
         }
         return;
       }
+      // Refused because a change waits for the user's approval in this
+      // thread: no recording started. The page shows the change.
+      if (err?.approvalPending) {
+        stopSilentAudio();
+        setIsStopping(false);
+        setPhase('ready');
+        if (onApprovalPendingRef.current) onApprovalPendingRef.current();
+        return;
+      }
 
       const name = err?.name || err?.error?.name;
       let message;
@@ -379,7 +396,10 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
         // #513: a recording with no transcribed text is saved as a failure
         // note only (the server's "*Note: ..." line); Glean has nothing to read.
         if (onEntrySavedRef.current) {
-          onEntrySavedRef.current({ noText: finalTranscript.trimStart().startsWith('*Note:') });
+          onEntrySavedRef.current({
+            noText: finalTranscript.trimStart().startsWith('*Note:'),
+            warning: true,
+          });
         }
         addToast(data.warning, 8000);
         setPhase('ready');
@@ -429,6 +449,14 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
         if (isAiUsageRefusedError(err) && onAiUsageRefusedRef.current) {
           setPhase('ready');
           onAiUsageRefusedRef.current(aiUsageRefusalScope(err));
+          return;
+        }
+        // A change waits for the user's approval in this thread: the page
+        // shows it (not a failure: no sound).
+        if (isApprovalPendingError(err)) {
+          addToast(err.response.data.error, 8000);
+          setPhase('ready');
+          if (onApprovalPendingRef.current) onApprovalPendingRef.current();
           return;
         }
         // The reply could not start.

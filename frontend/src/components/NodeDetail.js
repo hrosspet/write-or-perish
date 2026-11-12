@@ -27,7 +27,8 @@ import BubbleKebabMenu from "./BubbleKebabMenu";
 import QuotedContent from "./QuotedContent";
 import FeedPicks from "./FeedPicks";
 import ToolActionsTaken from "./ToolActionsTaken";
-import ToolApprovalDialog, { groupByTurn } from "./ToolApprovalDialog";
+import ToolApprovalDialog from "./ToolApprovalDialog";
+import { useToolApprovals } from "../hooks/useToolApprovals";
 import { ReadWindowLine, ReadReplyTail, ReadCancelledLine } from "./ReadReply";
 
 import DeleteConfirmDialog from "./DeleteConfirmDialog";
@@ -213,20 +214,14 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // approval (Peter, 2026-11-12): the server's pending_approvals for this
   // thread. The dialog shows one reply's calls at a time, opens by itself
   // when calls are found, and closing it decides nothing.
-  const [pendingApprovals, setPendingApprovals] = useState([]);
-  const [approvalsOpen, setApprovalsOpen] = useState(false);
-  const [approvalBusy, setApprovalBusy] = useState({});
-  const [approvalErrors, setApprovalErrors] = useState({});
-  const showApprovals = useCallback((items) => {
-    const list = items || [];
-    setPendingApprovals(list);
-    if (list.length) setApprovalsOpen(true);
-  }, []);
+  const approvals = useToolApprovals();
+  const {
+    pending: pendingApprovals, open: approvalsOpen, setOpen: setApprovalsOpen,
+    show: showApprovals, refresh: refreshThreadApprovals,
+  } = approvals;
   const refreshApprovals = useCallback(() => {
-    api.get('/tool-approvals', { params: { node: id } })
-      .then((res) => showApprovals(res.data?.pending))
-      .catch(() => {});
-  }, [id, showApprovals]);
+    refreshThreadApprovals(id);
+  }, [id, refreshThreadApprovals]);
 
   // `autoGenerate` is the single source of truth. Defaults to true on
   // a fresh install (see useState initializer) and persists across
@@ -875,40 +870,11 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
 
   // The reply is watched on its own node from the start (#367): the
   // model thinking, then the text as it is written.
-  // Approve or reject one waiting call. The answer lists the reply's calls
-  // still waiting; a call another device decided (404) just goes.
-  const decideApproval = async (item, approve) => {
-    setApprovalBusy((b) => ({ ...b, [item.id]: true }));
-    setApprovalErrors((e) => ({ ...e, [item.id]: null }));
-    const replaceTurn = (rest) => setPendingApprovals((all) => [
-      ...all.filter((p) => p.turn_node_id !== item.turn_node_id),
-      ...(rest || []),
-    ]);
-    try {
-      const res = await api.post(
-        `/tool-approvals/${item.id}/${approve ? 'approve' : 'reject'}`);
-      replaceTurn(res.data?.pending);
-      if (res.data?.outcome === 'failed') {
-        setApprovalErrors((e) => ({ ...e, [item.id]: res.data.error }));
-      } else {
-        // The reply's Actions taken now say what happened.
-        api.get(`/nodes/${id}`).then((r) => setNode(r.data)).catch(() => {});
-      }
-    } catch (err) {
-      if (err?.response?.status === 404) {
-        setPendingApprovals((all) => all.filter((p) => p.id !== item.id));
-      } else {
-        setApprovalErrors((e) => ({
-          ...e,
-          [item.id]: err?.response?.data?.error
-            || "Loore couldn't make this change. It still waits for your approval.",
-        }));
-      }
-    } finally {
-      setApprovalBusy((b) => ({ ...b, [item.id]: false }));
-    }
-  };
-  const approvalGroups = groupByTurn(pendingApprovals);
+  // Approve or reject one waiting call; then the reply's Actions taken
+  // say what happened.
+  const decideApproval = (item, approve) => approvals.decide(item, approve, () => {
+    api.get(`/nodes/${id}`).then((r) => setNode(r.data)).catch(() => {});
+  });
 
   const handleLLMResponse = () => {
     setError("");
@@ -2098,10 +2064,10 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
         />
       )}
       <ToolApprovalDialog
-        open={approvalsOpen && approvalGroups.length > 0}
-        items={approvalGroups[0]}
-        busy={approvalBusy}
-        errors={approvalErrors}
+        open={approvalsOpen && approvals.groups.length > 0}
+        items={approvals.groups[0]}
+        busy={approvals.busy}
+        errors={approvals.errors}
         onDecide={decideApproval}
         onClose={() => setApprovalsOpen(false)}
       />

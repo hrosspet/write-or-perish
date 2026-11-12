@@ -8,6 +8,9 @@ import { useInterruptedRecovery } from '../hooks/useInterruptedRecovery';
 import RecoveryBanner from '../components/RecoveryBanner';
 import OfflineBanner from '../components/OfflineBanner';
 import ProposalInline from '../components/ProposalInline';
+import ToolApprovalDialog from '../components/ToolApprovalDialog';
+import { useToolApprovals } from '../hooks/useToolApprovals';
+import { voiceWaitingLine } from '../utils/toolApprovals';
 import { useToast } from '../contexts/ToastContext';
 import { isSpendBlocked, notifySpendBlocked, spendCapToastMessage } from '../utils/spendCap';
 import { isAiAllowed } from '../utils/aiUsage';
@@ -217,6 +220,23 @@ const gleanButtonStyle = (enabled) => ({
   cursor: enabled ? 'pointer' : 'default',
   opacity: enabled ? 1 : 0.5,
 });
+
+// Under the disabled record button while a change the AI proposed waits
+// for the user's approval (the thread page's waiting line, centred).
+const waitingLineStyle = {
+  marginTop: '16px',
+  maxWidth: '320px',
+  background: 'none',
+  border: 'none',
+  padding: '4px 8px',
+  cursor: 'pointer',
+  fontFamily: 'var(--sans)',
+  fontSize: '0.85rem',
+  fontWeight: 300,
+  lineHeight: 1.5,
+  color: 'var(--accent)',
+  textAlign: 'center',
+};
 
 // Shown instead of the record button when AI usage keeps the account (a
 // fresh thread) or the thread Voice would continue away from AI. Voice mode
@@ -442,6 +462,25 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
   const gleanDescId = useId();
   const getThreadParentIdRef = useRef(null);
 
+  // The AI's calls in this thread that wait for the user's approval
+  // (Peter, 2026-11-12): no new turn starts until each is approved or
+  // rejected. Looked up when the screen opens on a thread and after each
+  // reply; the dialog opens by itself once the reply has been heard (its
+  // audio ends saying a change waits), and the record button is disabled
+  // meanwhile, with a line that opens it.
+  const approvals = useToolApprovals();
+  const waitingCount = approvals.pending.length;
+  const recordBlocked = waitingCount > 0;
+  // The thread's latest node: where the waiting calls are looked up, and
+  // the thread page "Open the thread" leads to.
+  const threadTip = () => lastLlmNodeIdRef.current
+    ?? getThreadParentIdRef.current?.()
+    ?? (threadId ? Number(threadId) : null);
+  const refreshApprovals = approvals.refresh;
+  useEffect(() => {
+    if (threadId) refreshApprovals(Number(threadId), { open: false });
+  }, [threadId, refreshApprovals]);
+
   const {
     phase, isStopping, hasError, isOnline, streaming, audio, handleStart, handleStop,
     handleContinue, handleResumeSession, handleCancelProcessing, setThreadParentId,
@@ -463,9 +502,13 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
       setLastEntryNoText(!!info?.noText);
       // A new turn: Glean waits for its reply, so the glean reads it too.
       setGleanAnchor(null);
+      // Saved without a reply: one reason is a change waiting here.
+      if (info?.warning) refreshApprovals(threadTip(), { open: false });
     },
     onLLMComplete: (nodeId, content) => {
       lastLlmNodeIdRef.current = nodeId;
+      // Calls this reply made that wait for the user's approval.
+      refreshApprovals(nodeId, { open: false });
       setGleanAnchor(getThreadParentIdRef.current?.() ?? nodeId);
       setLlmContent(content);
       // ProposalInline handles its own parsing + apply-status derivation
@@ -484,6 +527,9 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
     // The user cancelled the reply: none is coming, so Glean starts under
     // their message instead of waiting for it (#514).
     onCancelled: (userNodeId) => setGleanAnchor(userNodeId),
+    // The server refused a recording: a change waits here (one this page
+    // had not seen, e.g. made on another device).
+    onApprovalPending: () => refreshApprovals(threadTip(), { open: true }),
   });
 
   setThreadParentIdRef.current = setThreadParentId;
@@ -653,6 +699,50 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
     }
   }, [showRecovery, audio]);
 
+  // The reply has been heard to its end, or nothing plays: the dialog of a
+  // waiting change opens by itself now ("right after the reply"). A reply
+  // paused partway doesn't count; the line under the record button opens
+  // the dialog then.
+  const replyHeard = !showRecovery && (phase === 'ready' || (phase === 'playback'
+    && !audio.isPlaying && !audio.generatingTTS
+    && (!(audio.totalDuration > 0)
+      || audio.cumulativeTime >= audio.totalDuration - 0.5)));
+  const setApprovalsOpen = approvals.setOpen;
+  useEffect(() => {
+    if (recordBlocked && replyHeard) setApprovalsOpen(true);
+  }, [recordBlocked, replyHeard, setApprovalsOpen]);
+
+  // The thread page's dialog, without "Later": deciding is the way on in
+  // Voice mode. "Open the thread" leaves for the thread page, where it
+  // works as everywhere else.
+  const approvalDialog = (
+    <ToolApprovalDialog
+      voice
+      open={approvals.open && approvals.groups.length > 0}
+      items={approvals.groups[0]}
+      busy={approvals.busy}
+      errors={approvals.errors}
+      onDecide={approvals.decide}
+      onClose={() => {}}
+      onOpenThread={() => {
+        const tip = threadTip();
+        navigate(tip ? `/node/${tip}` : '/textmode');
+      }}
+    />
+  );
+  const waitingLine = recordBlocked ? (
+    <button
+      type="button"
+      onClick={() => setApprovalsOpen(true)}
+      style={waitingLineStyle}
+    >
+      {voiceWaitingLine(waitingCount)}{' · Review'}
+    </button>
+  ) : null;
+  const canRecord = isOnline && !gleaning && !recordBlocked;
+  const recordTitle = recordBlocked
+    ? 'Approve or reject the waiting change first' : undefined;
+
   if (!recoveryChecked) {
     return <div style={containerStyle}>{textModeButton}</div>;
   }
@@ -777,15 +867,17 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
               }
               handleStart();
             }}
-            disabled={!isOnline || gleaning}
+            disabled={!canRecord}
+            title={recordTitle}
+            aria-label="Record"
             style={{
               width: '72px', height: '72px', borderRadius: '50%',
               border: `2px solid ${isOnline ? 'var(--accent)' : 'var(--text-muted)'}`,
               background: 'transparent',
-              cursor: isOnline && !gleaning ? 'pointer' : 'not-allowed',
+              cursor: canRecord ? 'pointer' : 'not-allowed',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
               transition: 'all 0.2s ease',
-              opacity: isOnline && !gleaning ? 1 : 0.4,
+              opacity: canRecord ? 1 : 0.4,
             }}
           >
             <svg width="24" height="24" viewBox="0 0 24 24" fill={isOnline ? 'var(--accent)' : 'var(--text-muted)'}>
@@ -793,6 +885,8 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
             </svg>
           </button>
         )}
+
+        {phase === 'ready' && waitingLine}
 
         {phase === 'ready' && gleanButton}
 
@@ -839,6 +933,7 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
             </button>
           )
         )}
+        {approvalDialog}
       </div>
     );
   }
@@ -1080,26 +1175,30 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
           }
           handleContinue(voiceReset);
         }}
-        disabled={!isOnline || gleaning}
-        title={isOnline ? 'Continue' : "You're offline"}
+        disabled={!canRecord}
+        title={recordTitle || (isOnline ? 'Continue' : "You're offline")}
+        aria-label="Continue"
         style={{
           width: '56px', height: '56px', borderRadius: '50%',
           border: `2px solid ${isOnline ? 'var(--accent)' : 'var(--text-muted)'}`,
           background: 'transparent',
-          cursor: isOnline && !gleaning ? 'pointer' : 'not-allowed',
+          cursor: canRecord ? 'pointer' : 'not-allowed',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           transition: 'all 0.2s ease',
-          opacity: isOnline && !gleaning ? 0.7 : 0.3,
+          opacity: canRecord ? 0.7 : 0.3,
         }}
-        onMouseEnter={(e) => { if (isOnline && !gleaning) e.currentTarget.style.opacity = '1'; }}
-        onMouseLeave={(e) => { if (isOnline && !gleaning) e.currentTarget.style.opacity = '0.7'; }}
+        onMouseEnter={(e) => { if (canRecord) e.currentTarget.style.opacity = '1'; }}
+        onMouseLeave={(e) => { if (canRecord) e.currentTarget.style.opacity = '0.7'; }}
       >
         <svg width="20" height="20" viewBox="0 0 24 24" fill={isOnline ? 'var(--accent)' : 'var(--text-muted)'}>
           <circle cx="12" cy="12" r="8" />
         </svg>
       </button>
 
+      {waitingLine}
+
       {gleanButton}
+      {approvalDialog}
     </div>
   );
 }
