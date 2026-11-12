@@ -1075,8 +1075,10 @@ approved one by one; one reply's calls share one dialog. Dismissing it decides n
   the screen's first load with calls waiting, and after a reply on the screen finishes
   (`GET /api/tool-approvals?node=`); later loads don't reopen it. "N changes wait for your approval · Review"
   under the focal divider while any wait. One dialog per reply, the oldest reply (lowest turn node id) first.
-- Dialog: "Approve changes?", the kinds sentence, per call its title; an artifact change shows "Based on vN"
-  and the server's lines in `DiffRowsView` (`VersionDiff(lines:)`, word-refined), at most 240 pt high; an
+- Dialog: "Approve changes?", the kinds sentence, per call its title; an artifact change shows "Based on vN",
+  "Title: <from> → <to>" / "Description: …" when the call changes them (`title_change`,
+  `description_change`; just "Title: <to>" without a previous one), and the server's lines in
+  `DiffRowsView` (`VersionDiff(lines:)`, word-refined), at most 240 pt high; an
   apply shows the proposal text, at most 180 pt high; stale calls say why and Approve is off. Reject /
   Approve per call, off while its request runs. Each answer's `pending` replaces the reply's calls; `failed`
   shows its error on the call, which still waits; 404 drops it silently and refreshes the list; any other

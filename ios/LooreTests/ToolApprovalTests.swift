@@ -42,6 +42,36 @@ final class ToolApprovalDecodingTests: XCTestCase {
         XCTAssertFalse(item.canApprove)
     }
 
+    func testTitleAndDescriptionChangesDecodeIntoTheirLines() throws {
+        let json = artifactItemJSON.replacingOccurrences(of: #""stale":false,"#, with: """
+        "stale":false,"title_change":{"from":"Memory","to":"Shared memory"},
+         "description_change":{"from":null,"to":"What I keep"},
+        """)
+        let item = try decode(ToolApproval.self, json)
+        XCTAssertEqual(item.titleChange, .init(from: "Memory", to: "Shared memory"))
+        XCTAssertEqual(item.descriptionChange, .init(from: nil, to: "What I keep"))
+        XCTAssertEqual(item.fieldChangeLines, ["Title: Memory → Shared memory", "Description: What I keep"])
+        XCTAssertEqual(item.lines.count, 3, "the text's diff stays")
+
+        // Only what the call changes; none when it changes only the text.
+        let onlyDescription = ToolApproval(id: 1, turnNodeId: 2, tool: "update_artifact", title: "x",
+                                           descriptionChange: .init(from: "Old", to: "New"))
+        XCTAssertEqual(onlyDescription.fieldChangeLines, ["Description: Old → New"])
+        XCTAssertEqual(try decode(ToolApproval.self, artifactItemJSON).fieldChangeLines, [])
+    }
+
+    func testAnIssueItemWithUnknownKeysDecodes() throws {
+        let item = try decode(ToolApproval.self, """
+        {"id":50,"turn_node_id":77,"tool":"apply_github_issue","kinds":["other_user"],"stale":false,
+         "title":"File the proposed GitHub issue: Crash on save","proposal_node_id":76,
+         "proposal_text":"### Issue\\nCrash on save","issues":[{"number":1,"title":"Crash on save"}],
+         "something_new":{"nested":[1,2]}}
+        """)
+        XCTAssertEqual(item.title, "File the proposed GitHub issue: Crash on save")
+        XCTAssertEqual(item.proposalText, "### Issue\nCrash on save")
+        XCTAssertEqual(item.fieldChangeLines, [])
+    }
+
     func testANewArtifactHasNoBaseVersion() throws {
         let item = try decode(ToolApproval.self, """
         {"id":40,"turn_node_id":77,"tool":"update_artifact","title":"Create your Reading List","created":true,

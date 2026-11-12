@@ -60,6 +60,9 @@ struct ToolApproval: Decodable, Identifiable, Equatable, Sendable {
     var currentVersion: Int?
     /// From the version the call was based on to the text it would save.
     var lines: [LineDiff.Op]
+    /// What the call changes besides the text; each only when it changes it.
+    var titleChange: FieldChange?
+    var descriptionChange: FieldChange?
     /// The write could not be prepared (shown instead of the diff).
     var error: String?
 
@@ -71,6 +74,36 @@ struct ToolApproval: Decodable, Identifiable, Equatable, Sendable {
     static let artifactTool = "update_artifact"
 
     var isArtifactWrite: Bool { tool == Self.artifactTool }
+
+    /// `title_change` / `description_change`: `from` is nil when there was none.
+    struct FieldChange: Decodable, Equatable, Sendable {
+        var from: String?
+        var to: String
+
+        init(from: String?, to: String) {
+            self.from = from
+            self.to = to
+        }
+
+        enum CodingKeys: String, CodingKey { case from, to }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            from = c.tolerant(.from)
+            to = c.tolerant(.to, default: "")
+        }
+
+        /// "Title: <from> → <to>", or "Title: <to>" when there was none.
+        func line(_ label: String) -> String {
+            guard let from else { return "\(label): \(to)" }
+            return "\(label): \(from) → \(to)"
+        }
+    }
+
+    /// The dialog's lines above the diff: what changes besides the text.
+    var fieldChangeLines: [String] {
+        [titleChange?.line("Title"), descriptionChange?.line("Description")].compactMap { $0 }
+    }
 
     /// "Based on vN" for a change of an existing artifact.
     var versionNote: String? {
@@ -92,7 +125,8 @@ struct ToolApproval: Decodable, Identifiable, Equatable, Sendable {
     init(id: Int, nodeId: Int? = nil, turnNodeId: Int, tool: String, kinds: [ForeignTextKind] = [],
          createdAt: Date? = nil, title: String, stale: Bool = false, kind: String? = nil,
          artifactTitle: String? = nil, created: Bool = false, baseVersion: Int? = nil,
-         currentVersion: Int? = nil, lines: [LineDiff.Op] = [], error: String? = nil,
+         currentVersion: Int? = nil, lines: [LineDiff.Op] = [], titleChange: FieldChange? = nil,
+         descriptionChange: FieldChange? = nil, error: String? = nil,
          proposalNodeId: Int? = nil, proposalText: String? = nil) {
         self.id = id
         self.nodeId = nodeId
@@ -108,6 +142,8 @@ struct ToolApproval: Decodable, Identifiable, Equatable, Sendable {
         self.baseVersion = baseVersion
         self.currentVersion = currentVersion
         self.lines = lines
+        self.titleChange = titleChange
+        self.descriptionChange = descriptionChange
         self.error = error
         self.proposalNodeId = proposalNodeId
         self.proposalText = proposalText
@@ -136,6 +172,8 @@ struct ToolApproval: Decodable, Identifiable, Equatable, Sendable {
         case currentVersion = "current_version"
         case proposalNodeId = "proposal_node_id"
         case proposalText = "proposal_text"
+        case titleChange = "title_change"
+        case descriptionChange = "description_change"
     }
 
     init(from decoder: Decoder) throws {
@@ -156,6 +194,8 @@ struct ToolApproval: Decodable, Identifiable, Equatable, Sendable {
         lines = c.tolerant(.lines, default: [WireLine]()).map {
             LineDiff.Op(type: LineDiff.Kind(rawValue: $0.type) ?? .same, text: $0.text)
         }
+        titleChange = c.tolerant(.titleChange)
+        descriptionChange = c.tolerant(.descriptionChange)
         error = c.tolerant(.error)
         proposalNodeId = c.tolerant(.proposalNodeId)
         proposalText = c.tolerant(.proposalText)

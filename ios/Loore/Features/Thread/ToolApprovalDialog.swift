@@ -205,6 +205,13 @@ private struct ToolApprovalItemView: View {
                 note(staleNote)
             }
             if item.isArtifactWrite {
+                // The title and description it changes, above the text's diff.
+                ForEach(item.fieldChangeLines, id: \.self) { line in
+                    Text(line)
+                        .font(LooreFont.sans(13.1, .light))
+                        .foregroundStyle(LooreColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if let failure = item.error, !failure.isEmpty {
                     Text(failure).font(LooreFont.sans(13.1, .light)).foregroundStyle(LooreColor.accent)
                 } else if !item.lines.isEmpty {
