@@ -5,13 +5,25 @@ A Markdown link ``[text](url)`` is spoken as its text, an image
 address — bare (``https://…``, ``www.…``), an autolink (``<https://…>``) or
 a link whose text is its own address — is spoken short: a GitHub pull
 request or issue as "PR 460" / "issue 423", any other address as "a link
-to example.com". A fenced code block (```` ``` ```` or ``~~~``, at any
-indentation, so also one inside a list item) is spoken as
-CODE_BLOCK_SPOKEN, once, in place of its opening line; its content and
+to example.com". A fenced code block (```` ``` ```` or ``~~~``; after
+list markers too, ``1. ```bash``; indented only inside a list item, at
+any depth) is spoken as CODE_BLOCK_SPOKEN, once, in place of its opening
+line (after its list markers: "1. Code omitted."); its content and
 closing line are not spoken, and a ``#`` line inside it is no chapter.
 An inline code span is read as written, links in it included (it is
 usually one name inside a sentence). Only the text sent to TTS changes;
 the stored node does not.
+
+Fences are paired line by line, without the container structure a
+Markdown renderer tracks. Where in doubt a line is read rather than taken
+for a fence: an indented fence line outside a list item, and one inside a
+``>`` quote, are read as written. Known cases where the pairing differs
+from the rendering and the text after a block is not spoken: a closing
+fence indented 4 or more spaces inside a code block (it closes the block,
+which a renderer does not do: e.g. a ```` ```markdown ```` block showing
+an indented ```` ```bash ```` block, whose outer closing fence then opens
+a block); and a block opened inside a list item and never closed,
+followed by unindented text (a renderer ends the block with the item).
 
 LinkSpeaker does this on a stream of text: it releases text as soon as no
 later text can change it and holds back an undecided tail (a ``[`` whose
@@ -65,10 +77,23 @@ _SCHEME_RE = re.compile(r"[a-z][a-z0-9+.\-]*://", re.IGNORECASE)
 _GITHUB_REF_RE = re.compile(
     r"(?:www\.)?github\.com/[^/?#\s]+/[^/?#\s]+/(pull|issues)/(\d+)"
     r"(?:[/?#]\S*)?", re.IGNORECASE)
-# Any indentation: a fence indented 4 or more spaces is still code where
-# it renders (inside a list item, or as an indented code block).
-_FENCE_OPEN_RE = re.compile(r"[ \t]*(`{3,}|~{3,})")
-_FENCE_PREFIX_RE = re.compile(r"[ \t]*(?:`{0,2}|~{0,2})")
+# A fence line: list markers may come first (``1. ```bash``,
+# ``- ```python``, nested ``- 1. ```), as a fence that opens a list item
+# renders as code too; without them, that block's closing fence would
+# open a block that runs to the end of the text. An ordered marker has at
+# most 9 digits, as in CommonMark. An indented fence line opens a block
+# only inside a list item (LinkSpeaker._in_item); elsewhere a renderer
+# shows it as text or as an indented code block, and taking it for a fence
+# could leave the text after it unspoken.
+_LIST_MARKERS = r"(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)*"
+_FENCE_OPEN_RE = re.compile(r"[ \t]*" + _LIST_MARKERS + r"(`{3,}|~{3,})")
+# A line start that may still become a fence line, or is blank so far
+# (streaming waits; see LinkSpeaker._note_line).
+_FENCE_PREFIX_RE = re.compile(
+    r"[ \t\r]*" + _LIST_MARKERS + r"(?:[-*+]|\d{1,9}[.)]?)?(?:`{0,2}|~{0,2})")
+# A line that starts a list item (indented or not); see
+# LinkSpeaker._note_line.
+_LIST_ITEM_RE = re.compile(r"[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]")
 _CHAPTER_START_RE = re.compile(r"#{1,2}[ \t]")
 _CHAPTER_LINE_RE = re.compile(r"(#{1,2}[ \t]+)(.*)", re.DOTALL)
 # Characters that may start something this module rewrites; anything else
@@ -235,6 +260,9 @@ class LinkSpeaker:
         self._line_start = True
         self._fence = None       # (char, run length) inside a code block
         self._closer = None      # can the code block's line close it?
+        # Inside a list item (_note_line): an indented fence line opens a
+        # code block only there.
+        self._in_item = False
         self._code = 0           # backtick run length of an open code span
         self._ticks = 0          # backticks of the run being read
         self._prev = "\n"        # last character consumed
@@ -270,6 +298,8 @@ class LinkSpeaker:
         self._resume = None
         if self._fence:
             self._closer = (0, 0)
+        else:
+            self._in_item = False    # as for its line in _line_head
         self._prev = "\n"
         return None if self._fence else _speak_title(title)
 
@@ -333,7 +363,9 @@ class LinkSpeaker:
         or an ordinary line."""
         nl = s.find("\n", i, i + MAX_LINE_HEAD + 1)
         if nl < 0 and len(s) - i > MAX_LINE_HEAD:
-            self._line_start = False     # a long line is an ordinary one
+            # A long line is an ordinary one.
+            self._note_line(s[i:i + MAX_LINE_HEAD + 1])
+            self._line_start = False
             return "", i
         complete = nl >= 0 or final
         line = s[i:nl] if nl >= 0 else s[i:]
@@ -343,6 +375,7 @@ class LinkSpeaker:
             if _CHAPTER_START_RE.match(line):
                 if not complete:
                     return _WAIT
+                self._in_item = False
                 return self._chapter_line(line) + newline, end
             if line in ("#", "##") and not complete:
                 return _WAIT
@@ -351,16 +384,44 @@ class LinkSpeaker:
             if m:
                 if not complete:
                     return _WAIT   # a fence line is decided once it ends
+                # Its own list marker counts ("  - ```" opens a block).
+                self._note_line(line)
                 char = m.group(1)[0]
-                if char == "~" or "`" not in line[m.end():]:
-                    # The block is spoken as one short phrase (#646).
+                if ((char == "~" or "`" not in line[m.end():])
+                        and (line[0] not in " \t" or self._in_item)):
+                    # The block is spoken as one short phrase (#646),
+                    # after the list markers before it ("1. Code
+                    # omitted."), so a numbered step keeps its number.
                     self._fence = (char, len(m.group(1)))
                     self._closer = (0, 0)
-                    return CODE_BLOCK_SPOKEN + newline, end
-            elif not complete and _FENCE_PREFIX_RE.fullmatch(line):
+                    markers = line[:m.start(1)].strip()
+                    spoken = (f"{markers} {CODE_BLOCK_SPOKEN}" if markers
+                              else CODE_BLOCK_SPOKEN)
+                    return spoken + newline, end
+                self._line_start = False   # read as written
+                return "", i
+            if not complete and _FENCE_PREFIX_RE.fullmatch(line):
                 return _WAIT
+        self._note_line(line)
         self._line_start = False
         return "", i
+
+    def _note_line(self, line):
+        """Are we inside a list item, after *line* (outside a code block;
+        or its start: a streamed line is decided before it ends, but
+        never before its first character other than a space, tab or CR)?
+        A list item's line starts one; an indented line continues it (or
+        not, as before it); an unindented one ends it; a blank line
+        changes nothing. Only "indented or not" counts, not how far: the
+        batch task collapses runs of spaces before this step
+        (tasks/tts._strip_quote_markers), a streamed reply does not, and
+        both must decide alike."""
+        if not line.strip(" \t\r"):
+            return
+        if _LIST_ITEM_RE.match(line):
+            self._in_item = True
+        elif line[0] not in " \t":
+            self._in_item = False
 
     def _chapter_line(self, line):
         """A ``#`` / ``##`` heading line, its title spoken as a streamed

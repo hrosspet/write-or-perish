@@ -176,6 +176,15 @@ def test_node_text_speaks_a_code_block_as_one_phrase():
         f"Use `os.path` here:\n\n{CODE_BLOCK_SPOKEN}\n\nThat prints a/b.")
 
 
+def test_node_text_list_item_fence_keeps_the_prose_after_it():
+    from backend.utils.spoken_links import CODE_BLOCK_SPOKEN
+    text = ("Do this:\n\n1. ```bash\n   pip install x\n   ```\n2. Run it.\n\n"
+            "Then read the docs.")
+    assert _node_spoken_text(text) == (
+        f"Do this:\n\n1. {CODE_BLOCK_SPOKEN}\n2. Run it.\n\n"
+        "Then read the docs.")
+
+
 def test_node_text_proposal_reply_leaves_code_out_of_its_prose():
     from backend.utils.spoken_links import CODE_BLOCK_SPOKEN
     text = ("I'd file this; it fails here:\n\n```\nTraceback (most recent "
@@ -193,12 +202,13 @@ def test_node_text_proposal_reply_leaves_code_out_of_its_prose():
     "Read https://www.example.com/a/b?c=d, then rest.",
     "Autolink <https://example.org/x/y> here.",
     # Code blocks (#646): one phrase each, no chapter from a comment.
-    # Parity only, so the first and the last are controls (before #646
+    # Parity only, so the first and the third are controls (before #646
     # both paths read the code, and cut the same chapters at comments).
     "Here:\n\n```python\n# setup\nimport os\n## not a chapter\n```\n\n"
     "Done. Next steps follow.",
     "Steps:\n1. Install:\n    ```bash\n    pip install x\n    ```\n2. Run.",
     "## A\nIntro.\n\n~~~\n# x\n~~~\n\n## B\nEnd.",
+    "Steps:\n1. ```bash\n   pip install x\n   ```\n2. Run it.\n\nThen more.",
 ])
 def test_node_text_matches_the_streamed_reply(text):
     """The batch task and a reply spoken while written say the same,

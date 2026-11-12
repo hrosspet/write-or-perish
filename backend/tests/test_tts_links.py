@@ -100,7 +100,17 @@ def test_unclosed_code_block_runs_to_the_end():
      f"10. Install:\n{CODE_BLOCK_SPOKEN}\n11. Run it."),
     ("- a\n    - b\n        ```\n        x = 1\n        ```\n    - c",
      f"- a\n    - b\n{CODE_BLOCK_SPOKEN}\n    - c"),
-    ("Run:\n\t```\n\tls\n\t```\nDone.", f"Run:\n{CODE_BLOCK_SPOKEN}\nDone."),
+    ("- Run:\n\t```\n\tls\n\t```\nDone.", f"- Run:\n{CODE_BLOCK_SPOKEN}\nDone."),
+    # Also after an indented line or another block in the same item.
+    ("1. A:\n   ```\n   x\n   ```\n\n   Then:\n\n    ```\n    y\n    ```\n"
+     "2. B.",
+     f"1. A:\n{CODE_BLOCK_SPOKEN}\n\n   Then:\n\n{CODE_BLOCK_SPOKEN}\n2. B."),
+    # Outside a list an indented fence line is text (a renderer shows it
+    # as text or as an indented code block), so a stray one, never
+    # closed, leaves the rest spoken. Controls: read as before #646.
+    ("Run:\n\t```\n\tls\n\t```\nDone.", "Run:\n\t```\n\tls\n\t```\nDone."),
+    ("Text:\n\n    ```\nMore text.\n\n## Next\nEnd.",
+     "Text:\n\n    ```\nMore text.\n\n## Next\nEnd."),
     # A closing run must be as long as the opening one, of the same
     # character, with nothing after it but spaces.
     ("````md\n```\nnot closed\n```\n````\nAfter.",
@@ -111,6 +121,30 @@ def test_unclosed_code_block_runs_to_the_end():
     # Each block once; the text between them is spoken.
     ("A:\n```\none\n```\nB:\n```\ntwo\n```\n",
      f"A:\n{CODE_BLOCK_SPOKEN}\nB:\n{CODE_BLOCK_SPOKEN}\n"),
+    # A fence that opens a list item, ordered or not: the item keeps its
+    # marker, and the text after the block is spoken (before the fix its
+    # closing fence opened a block that silenced the rest).
+    ("Do this:\n\n1. ```bash\n   pip install x\n   ```\n2. Run it.\n\n"
+     "Then read the docs.",
+     f"Do this:\n\n1. {CODE_BLOCK_SPOKEN}\n2. Run it.\n\nThen read the docs."),
+    ("- ```python\n  print(1)\n  ```\n- Next item.\n\nAfter.",
+     f"- {CODE_BLOCK_SPOKEN}\n- Next item.\n\nAfter."),
+    ("* ```js\nconsole.log(1)\n```\n+ ~~~\n  x\n  ~~~\n1) ```\n   y\n   ```\n"
+     "After.",
+     f"* {CODE_BLOCK_SPOKEN}\n+ {CODE_BLOCK_SPOKEN}\n1) {CODE_BLOCK_SPOKEN}\n"
+     "After."),
+    # Nested lists: in a nested item, and two markers on one line.
+    ("- Setup:\n  1. ```bash\n     npm i\n     ```\n  2. Start.\n- Done.",
+     f"- Setup:\n1. {CODE_BLOCK_SPOKEN}\n  2. Start.\n- Done."),
+    ("- 1. ```\n  code\n  ```\nAfter.", f"- 1. {CODE_BLOCK_SPOKEN}\nAfter."),
+    ("Para.\n  - ```\n    x\n    ```\nAfter.",
+     f"Para.\n- {CODE_BLOCK_SPOKEN}\nAfter."),
+    # Controls, read as before #646: a list line with inline code, a
+    # marker without a space, numbers and markers without a fence.
+    ("1. ```js``` inline\n2. Next.", "1. ```js``` inline\n2. Next."),
+    ("-```\nx", "-```\nx"),
+    ("1990 was a year.\n- item\n* star\n10. ten",
+     "1990 was a year.\n- item\n* star\n10. ten"),
     # Not a fence: backticks in the info string (inline code), or fewer
     # than three. Controls: read as before #646.
     ("```js``` is inline code.", "```js``` is inline code."),
@@ -334,6 +368,20 @@ def test_a_comment_in_a_code_block_is_no_chapter():
     assert _plan(_project(list(text), proposals=False))[0] == batch
 
 
+def test_a_list_item_fence_keeps_the_text_and_chapters_after_it():
+    text = ("## Install\n1. ```bash\n# not a chapter\npip install x\n```\n"
+            "2. Run it.\n\n## Use\nCall it.")
+    batch = section_aware_chunk_text(speak_links(text))
+    assert batch == [
+        (f"Install.\n\n1. {CODE_BLOCK_SPOKEN}\n2. Run it.", "Install", 0),
+        ("Use.\n\nCall it.", "Use", 1)]
+    rng = random.Random(670)
+    for _ in range(40):
+        assert _plan(_project(_random_splits(text, rng),
+                              proposals=False))[0] == batch
+    assert _plan(_project(list(text), proposals=False))[0] == batch
+
+
 def test_a_split_code_block_speaks_its_phrase_once_the_fence_line_ends():
     speaker = LinkSpeaker()
     assert speaker.feed("Run:\n``") == "Run:\n"
@@ -349,6 +397,8 @@ _CODE_BLOCKS = [
     "```python\n# a comment\nx = 1\n## also code\n```",
     "~~~\n# tilde\n```\nstill code\n~~~",
     "1. Step:\n    ```bash\n    # install\n    pip install x\n    ```\n2. Next.",
+    "1. ```bash\n   pip install x\n   ```\n2. Run it.",
+    "- ```\n# c\n```\n- Next.",
     "```\nunclosed\n# to the end",
 ]
 
