@@ -45,8 +45,8 @@ const overlayStyle = {
 
 const cardStyle = {
   background: "var(--bg-card)", border: "1px solid var(--border)",
-  borderRadius: "12px", padding: "2rem", width: "560px", maxWidth: "92vw",
-  maxHeight: "88vh", overflowY: "auto",
+  borderRadius: "12px", padding: "clamp(1rem, 5vw, 2rem)", width: "560px",
+  maxWidth: "92vw", maxHeight: "88vh", overflowY: "auto",
 };
 
 const titleStyle = {
@@ -76,7 +76,7 @@ const noteStyle = {
 };
 
 const previewStyle = {
-  maxHeight: "260px", overflowY: "auto", margin: "6px 0",
+  maxHeight: "min(260px, 30vh)", overflowY: "auto", margin: "6px 0",
   paddingTop: "6px", borderTop: "1px solid var(--border)",
 };
 
@@ -160,11 +160,10 @@ function ToolApprovalDialog({ open, items, busy, errors, onDecide, onClose }) {
         {items.map((item) => (
           <div key={item.id} style={itemStyle} data-testid={`approval-${item.id}`}>
             <div style={itemTitleStyle}>{item.title}</div>
-            <ItemBody item={item} />
-            {errors?.[item.id] && (
-              <p style={{ ...noteStyle, color: "var(--accent)" }}>{errors[item.id]}</p>
-            )}
-            <div style={{ display: "flex", gap: "8px", justifyContent: "flex-end", marginTop: "8px" }}>
+            {/* The decision sits right under the call's title, so it is in
+                view whenever the call is, whatever the size of the screen
+                and of the change below it. */}
+            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: "6px" }}>
               <button
                 type="button"
                 style={buttonStyle(false)}
@@ -185,6 +184,10 @@ function ToolApprovalDialog({ open, items, busy, errors, onDecide, onClose }) {
                 Approve
               </button>
             </div>
+            {errors?.[item.id] && (
+              <p style={{ ...noteStyle, color: "var(--accent)" }}>{errors[item.id]}</p>
+            )}
+            <ItemBody item={item} />
           </div>
         ))}
         <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "4px" }}>

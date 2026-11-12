@@ -1082,12 +1082,15 @@ approved one by one; one reply's calls share one dialog. Dismissing it decides n
   the screen's first load with calls waiting, and after a reply on the screen finishes
   (`GET /api/tool-approvals?node=`); later loads don't reopen it. "N changes wait for your approval · Review"
   under the focal divider while any wait. One dialog per reply, the oldest reply (lowest turn node id) first.
-- Dialog: "Approve changes?", the kinds sentence, per call its title; an artifact change shows "Based on vN",
-  "Title: <from> → <to>" / "Description: …" when the call changes them (`title_change`,
-  `description_change`; just "Title: <to>" without a previous one), and the server's lines in
-  `DiffRowsView` (`VersionDiff(lines:)`, word-refined), at most 240 pt high; an
-  apply shows the proposal text, at most 180 pt high; stale calls say why and Approve is off. Reject /
-  Approve per call, off while its request runs. Each answer's `pending` replaces the reply's calls; `failed`
+- Dialog: "Approve changes?", the kinds sentence, per call its title, "Based on vN" (artifact changes), and
+  right under them Reject / Approve (off while its request runs), so the first call's buttons are on screen
+  when the dialog opens whatever its diff (an iPhone SE included; checked in renders at 375×667 and 440×956,
+  `ToolApprovalDialogRenderingTests`). Below the buttons: "Title: <from> → <to>" / "Description: …" when the
+  call changes them (`title_change`, `description_change`; just "Title: <to>" without a previous one), and
+  the server's lines in `DiffRowsView` (`VersionDiff(lines:)`, word-refined), 22 % of the screen high
+  (120–240 pt); an apply shows the proposal text, 20 % (100–180 pt); stale calls say why and Approve is off.
+  The list of calls takes at most half the screen and flashes its scroll indicator on open. Each answer's
+  `pending` replaces the reply's calls; `failed`
   shows its error on the call, which still waits; 404 drops it silently and refreshes the list; any other
   error shows the server's words (or "Loore couldn't make this change…"). When the reply has none left the
   dialog closes and the thread reloads; an approved artifact change posts `artifactsChanged`, a todo apply

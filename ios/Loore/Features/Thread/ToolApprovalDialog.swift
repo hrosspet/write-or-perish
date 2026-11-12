@@ -154,9 +154,22 @@ struct ToolApprovalsLine: View {
 }
 
 /// "Approve changes?": every waiting call of one reply, each with Approve and Reject.
+/// Each call's buttons sit right under its title, above what it changes, so the
+/// first call's are on screen when the dialog opens, whatever its diff (an
+/// iPhone SE's 667 pt included); the heights below scale with the screen.
 struct ToolApprovalDialog: View {
     let group: ToolApprovalGroup
     let model: ToolApprovalsModel
+    /// The screen's height (a parameter so renders can take other phones').
+    var screenHeight: CGFloat = UIScreen.main.bounds.height
+
+    /// The calls' list, scrolled inside the dialog (heuristic: half the screen, so
+    /// the whole card fits an iPhone SE's safe area with the four-line reason).
+    static func listMaxHeight(screen: CGFloat) -> CGFloat { screen * 0.5 }
+    /// A diff box (heuristic: 22 % of the screen, 120–240 pt).
+    static func diffMaxHeight(screen: CGFloat) -> CGFloat { min(240, max(120, screen * 0.22)) }
+    /// A proposal box (heuristic: 20 % of the screen, 100–180 pt).
+    static func proposalMaxHeight(screen: CGFloat) -> CGFloat { min(180, max(100, screen * 0.2)) }
 
     var body: some View {
         LooreDialogCard(title: "Approve changes?") {
@@ -165,14 +178,18 @@ struct ToolApprovalDialog: View {
                 VStack(alignment: .leading, spacing: 12) {
                     ForEach(group.items) { item in
                         ToolApprovalItemView(item: item, busy: model.busy.contains(item.id),
-                                             error: model.errors[item.id]) { approve in
+                                             error: model.errors[item.id],
+                                             diffMaxHeight: Self.diffMaxHeight(screen: screenHeight),
+                                             proposalMaxHeight: Self.proposalMaxHeight(screen: screenHeight)) { approve in
                             Task { await model.decide(item, approve: approve) }
                         }
                     }
                 }
             }
             .scrollBounceBehavior(.basedOnSize)
-            .frame(maxHeight: UIScreen.main.bounds.height * 0.55)
+            // More calls than fit: the indicator shows on open that the list scrolls.
+            .scrollIndicatorsFlash(onAppear: true)
+            .frame(maxHeight: Self.listMaxHeight(screen: screenHeight))
             HStack {
                 Spacer()
                 Button("Later", action: model.later)
@@ -185,11 +202,14 @@ struct ToolApprovalDialog: View {
     }
 }
 
-/// One waiting call: what it does, the diff or the proposal, Approve and Reject.
+/// One waiting call: what it does, Approve and Reject, then the title and
+/// description it sets and the diff (or the proposal).
 private struct ToolApprovalItemView: View {
     let item: ToolApproval
     let busy: Bool
     let error: String?
+    let diffMaxHeight: CGFloat
+    let proposalMaxHeight: CGFloat
     let onDecide: (Bool) -> Void
 
     var body: some View {
@@ -204,6 +224,13 @@ private struct ToolApprovalItemView: View {
             if let staleNote = item.staleNote {
                 note(staleNote)
             }
+            if let error {
+                Text(error)
+                    .font(LooreFont.sans(13.1, .regular))
+                    .foregroundStyle(LooreColor.accent)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            buttons
             if item.isArtifactWrite {
                 // The title and description it changes, above the text's diff.
                 ForEach(item.fieldChangeLines, id: \.self) { line in
@@ -220,7 +247,7 @@ private struct ToolApprovalItemView: View {
                             .padding(6)
                     }
                     .scrollBounceBehavior(.basedOnSize)
-                    .frame(maxHeight: 240)
+                    .frame(maxHeight: diffMaxHeight)
                     .background(LooreColor.bgSurface, in: RoundedRectangle(cornerRadius: 6))
                     .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(LooreColor.border))
                 }
@@ -235,31 +262,29 @@ private struct ToolApprovalItemView: View {
                         .padding(10)
                 }
                 .scrollBounceBehavior(.basedOnSize)
-                .frame(maxHeight: 180)
+                .frame(maxHeight: proposalMaxHeight)
                 .background(LooreColor.bgSurface, in: RoundedRectangle(cornerRadius: 6))
                 .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(LooreColor.border))
-            }
-            if let error {
-                Text(error)
-                    .font(LooreFont.sans(13.1, .regular))
-                    .foregroundStyle(LooreColor.accent)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            HStack(spacing: 10) {
-                Spacer()
-                Button("Reject") { onDecide(false) }
-                    .buttonStyle(.looreOutline)
-                    .disabled(busy)
-                    .accessibilityIdentifier("approvals.reject.\(item.id)")
-                Button("Approve") { onDecide(true) }
-                    .buttonStyle(.loorePrimary)
-                    .disabled(busy || !item.canApprove)
-                    .accessibilityIdentifier("approvals.approve.\(item.id)")
             }
         }
         .padding(12)
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(LooreColor.border))
         .accessibilityElement(children: .contain)
+    }
+
+    /// Under the call's title, so they never sit below a long diff.
+    private var buttons: some View {
+        HStack(spacing: 10) {
+            Button("Reject") { onDecide(false) }
+                .buttonStyle(.looreOutline)
+                .disabled(busy)
+                .accessibilityIdentifier("approvals.reject.\(item.id)")
+            Button("Approve") { onDecide(true) }
+                .buttonStyle(.loorePrimary)
+                .disabled(busy || !item.canApprove)
+                .accessibilityIdentifier("approvals.approve.\(item.id)")
+            Spacer(minLength: 0)
+        }
     }
 
     private func note(_ text: String) -> some View {
