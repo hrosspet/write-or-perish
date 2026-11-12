@@ -617,6 +617,10 @@ def init_streaming():
     reply gets 409 ``{"error", "code": "thread_too_long"}`` and no draft
     (#648); a dictation (no label) records there as before.
 
+    Any other recording (a dictation) whose ai_usage is not 'chat' or
+    'train' gets the same 403, with ``"scope": "entry"`` (#665): its
+    audio would be sent to the provider to be transcribed.
+
     A Voice recording continuing a thread where a change the AI proposed
     waits for the user's approval gets 409 ``{"error", "code":
     "approval_pending", "pending": <count>}`` and no draft
@@ -684,6 +688,16 @@ def init_streaming():
                                              user=current_user)
             if too_long is not None:
                 return thread_too_long_response(too_long)
+    else:
+        # A dictation (#665): its text comes from sending the audio to the
+        # provider, so an entry set to None is refused here, before any
+        # draft or chunk folder exists. Voice keeps its own rule above.
+        from backend.utils.recording_ai_usage import (
+            recording_refused_response,
+        )
+        refused = recording_refused_response(ai_usage)
+        if refused is not None:
+            return refused
 
     # Generate session ID
     session_id = str(uuid.uuid4())
@@ -1111,7 +1125,20 @@ def upload_streaming_chunk(session_id):
     ).order_by(NodeTranscriptChunk.chunk_index).all()
 
     task_id = None
-    if len(stored_chunks) >= BATCH_SIZE:
+    from backend.utils.recording_ai_usage import (
+        draft_may_transcribe, mark_chunks_not_transcribed,
+    )
+    if len(stored_chunks) >= BATCH_SIZE and not draft_may_transcribe(draft):
+        # No AI means no AI (#665): the entry this recording becomes no
+        # longer lets AI read it (a Voice turn whose thread was set to
+        # None meanwhile). The chunks stay stored with their audio and are
+        # not queued for the provider.
+        mark_chunks_not_transcribed(stored_chunks)
+        db.session.commit()
+        current_app.logger.info(
+            "Session %s: %d chunk(s) not transcribed, AI usage is None",
+            session_id, len(stored_chunks))
+    elif len(stored_chunks) >= BATCH_SIZE:
         # Take the first BATCH_SIZE stored chunks and queue transcription
         batch = stored_chunks[:BATCH_SIZE]
         chunk_indices = [c.chunk_index for c in batch]
@@ -1322,6 +1349,21 @@ def transcribe_remaining(session_id):
         return jsonify({
             "message": "No stored chunks to transcribe",
             "chunk_count": 0
+        }), 200
+
+    # No AI means no AI (#665): a recording whose entry may not be read by
+    # AI keeps its stored audio, untranscribed; nothing is queued.
+    from backend.utils.recording_ai_usage import (
+        NOT_TRANSCRIBED_TEXT, draft_may_transcribe,
+        mark_chunks_not_transcribed,
+    )
+    if not draft_may_transcribe(draft):
+        mark_chunks_not_transcribed(stored_chunks)
+        db.session.commit()
+        return jsonify({
+            "message": NOT_TRANSCRIBED_TEXT,
+            "chunk_count": 0,
+            "not_transcribed": len(stored_chunks),
         }), 200
 
     chunk_indices = [c.chunk_index for c in stored_chunks]

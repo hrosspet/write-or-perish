@@ -752,6 +752,12 @@ def create_node():
             return jsonify({"error": f"Invalid privacy_level: {privacy_level}"}), 400
         if not validate_ai_usage(ai_usage):
             return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
+        # No AI means no AI (#665): an entry set to None is never sent to
+        # be transcribed. Refused before the file is stored.
+        from backend.utils.recording_ai_usage import recording_refused_response
+        refused = recording_refused_response(ai_usage)
+        if refused is not None:
+            return refused
 
         # Race A guard: lock parent and reject if soft-deleted.
         from backend.utils.node_deletion import assert_parent_alive
@@ -2717,6 +2723,12 @@ def init_chunked_upload():
         return jsonify({"error": f"Invalid privacy_level: {privacy_level}"}), 400
     if not validate_ai_usage(ai_usage):
         return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
+    # No AI means no AI (#665): refused before the entry and the chunk
+    # folder exist. Finalize asks again (the entry can be edited meanwhile).
+    from backend.utils.recording_ai_usage import recording_refused_response
+    refused = recording_refused_response(ai_usage)
+    if refused is not None:
+        return refused
 
     # Race A guard: lock parent and reject if soft-deleted.
     from backend.utils.node_deletion import assert_parent_alive
@@ -2939,11 +2951,24 @@ def finalize_chunked_upload():
     # Encrypt the assembled audio file at rest (URL stored without .enc)
     encrypt_file(str(target_path))
 
+    # No AI means no AI (#665): init refused an entry set to None, but the
+    # entry can be set to None while its chunks upload (read again now,
+    # after the reassembly). The audio is kept and not transcribed; the
+    # entry and its transcription status say why.
+    db.session.refresh(node)
+    from backend.utils.recording_ai_usage import (
+        mark_not_transcribed, may_transcribe,
+    )
+    transcribe = may_transcribe(node.ai_usage)
+
     # Update node with audio info
     rel_path = target_path.relative_to(AUDIO_STORAGE_ROOT)
     node.audio_original_url = f"/media/{rel_path.as_posix()}"
     node.audio_mime_type = f"audio/{ext}"
-    node.set_content("[Voice note – transcription pending]")
+    if transcribe:
+        node.set_content("[Voice note – transcription pending]")
+    else:
+        mark_not_transcribed(node, metadata["filename"])
     db.session.commit()
 
     # Clean up chunks
@@ -2958,7 +2983,7 @@ def finalize_chunked_upload():
 
     # Enqueue transcription task
     api_key = get_openai_chat_key(current_app.config)
-    if api_key:
+    if api_key and transcribe:
         from backend.tasks.transcription import transcribe_audio
 
         auto_reply_model = metadata.get("auto_reply_model")
@@ -3053,6 +3078,12 @@ def init_streaming_transcription():
         return jsonify({"error": f"Invalid privacy_level: {privacy_level}"}), 400
     if not validate_ai_usage(ai_usage):
         return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
+    # No AI means no AI (#665): refused before the entry and the chunk
+    # folder exist. Each chunk asks again.
+    from backend.utils.recording_ai_usage import recording_refused_response
+    refused = recording_refused_response(ai_usage)
+    if refused is not None:
+        return refused
 
     # Race A guard: lock parent and reject if soft-deleted.
     from backend.utils.node_deletion import assert_parent_alive
@@ -3116,6 +3147,11 @@ def upload_audio_chunk(node_id):
     - session_id: string (from init_streaming_transcription)
 
     Returns: { "chunk_index": 0, "task_id": "celery-task-id" }
+
+    A chunk of an entry set to None since the recording started (#665)
+    is stored and not transcribed: 200 ``{"chunk_index", "status":
+    "not_transcribed", "message"}``. Finalize keeps such a recording's
+    audio with the entry.
     """
     node = Node.query.get_or_404(node_id)
 
@@ -3192,6 +3228,23 @@ def upload_audio_chunk(node_id):
         )
         db.session.add(transcript_chunk)
         db.session.commit()
+
+    # No AI means no AI (#665): the entry may have been set to None since
+    # the recording started. The chunk stays stored and is not queued.
+    from backend.utils.recording_ai_usage import (
+        NOT_TRANSCRIBED_TEXT, mark_chunks_not_transcribed, may_transcribe,
+    )
+    if not may_transcribe(node.ai_usage):
+        mark_chunks_not_transcribed([transcript_chunk])
+        db.session.commit()
+        current_app.logger.info(
+            "Audio chunk %s for node %s stored, not transcribed: AI usage "
+            "is None", chunk_index, node_id)
+        return jsonify({
+            "chunk_index": chunk_index,
+            "status": "not_transcribed",
+            "message": NOT_TRANSCRIBED_TEXT,
+        }), 200
 
     # Queue transcription task
     from backend.tasks.streaming_transcription import transcribe_chunk
