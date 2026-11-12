@@ -230,6 +230,115 @@ def release_quotes(text: str) -> str:
         _HELD_QUOTE, "{quote:")
 
 
+# A saved reference named in an agentic prompt's recent raw window is
+# opened by this name with the read_full tool (reference_title_lines).
+_REFERENCE_NAME_RE = re.compile(r"reference\s*#?\s*(\d+)", re.IGNORECASE)
+
+# Where a reference came from, as its card's first line says it
+# (frontend utils/references.js, sourceLine); web clips name their site.
+_REFERENCE_SOURCE_TEXT = {
+    "community_archive": "tweet from the Community Archive",
+    "read_pick": "tweet from the Community Archive",
+    "twitter_bookmark": "tweet from the user's Twitter bookmarks",
+    "twitter_like": "tweet from the user's Twitter likes",
+    "document": "document the user uploaded",
+}
+
+
+def reference_name(item_id: int) -> str:
+    """The name read_full opens the saved reference *item_id* by."""
+    return f"reference {item_id}"
+
+
+def reference_id_from_name(ref: str) -> Optional[int]:
+    """The id in a read_full ref of the form reference_name gives
+    ("reference 12", any case, quotes around it allowed), or None."""
+    match = _REFERENCE_NAME_RE.fullmatch((ref or "").strip().strip("\"'"))
+    return int(match.group(1)) if match else None
+
+
+def _reference_source_text(item) -> str:
+    if item.source == "web_clip":
+        from urllib.parse import urlparse
+        try:
+            host = urlparse(item.url).hostname if item.url else None
+        except ValueError:
+            host = None
+        if host and host.startswith("www."):
+            host = host[4:]
+        return f"page from {host}" if host else "saved page"
+    return _REFERENCE_SOURCE_TEXT.get(item.source, item.source)
+
+
+def _one_line(text) -> str:
+    return " ".join(str(text or "").split())
+
+
+def reference_title_lines(content: str, user_id: int
+                          ) -> Tuple[str, List[int], List[int]]:
+    """Replace each {quote_ext:ID} with one line that names the saved
+    reference instead of giving its text: its title (with no title, its
+    author), where it came from, and the name read_full opens it by. For
+    the recent raw window of an agentic prompt (Peter, voice review
+    2026-11-12): recent entries show a saved reference by title, and the
+    model opens it when it needs the text. A reference the user cannot
+    read is the export's inaccessible line (resolve_ext_quotes).
+
+    Only an uploaded document is decrypted, as its title and author are
+    inside its text (utils/document_reference); every other source has
+    them in columns. A marker inside a title or author comes back held
+    (hold_quotes), so no later quote pass resolves it.
+
+    Returns (text, the ids named, the ids whose line carries a title: the
+    reference's own words, where a line without one carries only its
+    author and source)."""
+    if not content:
+        return content, [], []
+    item_ids = find_ext_quote_ids(content)
+    if not item_ids:
+        return content, [], []
+
+    from backend.extensions import db
+    from backend.models import BYLINE_SOURCES, SOURCE_DOCUMENT, ExternalItem
+    from backend.utils import document_reference
+
+    items = {}
+    for item_id in set(item_ids):
+        item = db.session.get(ExternalItem, item_id)
+        if item is not None and item.user_id == user_id:
+            items[item_id] = item
+    named, titled = [], []
+
+    def replace(match):
+        item_id = int(match.group(1))
+        item = items.get(item_id)
+        if item is None:
+            return f"[Quoted reference inaccessible: item {item_id}]"
+        named.append(item_id)
+        if item.source == SOURCE_DOCUMENT:
+            title, author, _body = document_reference.split(
+                item.get_content() or "")
+        else:
+            title, author = item.title, item.author_handle
+        title, author = _one_line(title), _one_line(author)
+        if title:
+            titled.append(item_id)
+            what = f' "{title}"'
+        elif author:
+            if item.source not in BYLINE_SOURCES:
+                author = f"@{author}"
+            what = f" by {author}"
+        else:
+            what = ""
+        return hold_quotes(
+            f"[Saved reference{what} ({_reference_source_text(item)}), "
+            f'text not included; read_full "{reference_name(item_id)}" '
+            f"opens it]")
+
+    text = re.sub(EXT_QUOTE_PLACEHOLDER_PATTERN, replace, content)
+    return text, named, titled
+
+
 def written_by(node, user_id) -> bool:
     """True when *user_id* wrote *node*: their own entry, or an AI reply
     they asked for. An AI reply from before human_owner_id was stored

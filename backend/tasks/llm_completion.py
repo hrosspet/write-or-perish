@@ -37,7 +37,7 @@ from backend.utils.tokens import (
 from backend.utils.quotes import (
     resolve_quotes, has_quotes,
     resolve_ext_quotes, has_ext_quotes, find_ext_quote_ids,
-    quotes_inside, release_quotes,
+    quotes_inside, release_quotes, reference_id_from_name,
 )
 from backend.utils.node_split import NODE_CHAR_CAP
 from backend.utils.session_helpers import (
@@ -778,12 +778,13 @@ VOICE_TOOLS = [
         "description": (
             "Read one semantic_search match in full — pass its label from "
             "this turn's search results (e.g. 'B'), or a numeric archive "
-            "entry id from your context. Use it BEFORE quoting or building "
-            "your answer on anything longer than its preview (previews "
-            "mark themselves truncated). The full text comes back the next "
-            "step; then write your final reply — with {quote:<label>} if "
-            "you want the user to see it quoted. Always produce a text "
-            "response alongside the call."
+            "entry id from your context, or 'reference N' for a saved "
+            "reference your context names that way. Use it BEFORE quoting "
+            "or building your answer on anything longer than its preview "
+            "(previews mark themselves truncated). The full text comes "
+            "back the next step; then write your final reply — with "
+            "{quote:<label>} if you want the user to see it quoted. Always "
+            "produce a text response alongside the call."
         ),
         "input_schema": {
             "type": "object",
@@ -792,7 +793,8 @@ VOICE_TOOLS = [
                     "type": "string",
                     "description": (
                         "A label from this turn's search results ('A', "
-                        "'B', …) or a numeric archive entry id."
+                        "'B', …), a numeric archive entry id, or "
+                        "'reference N' for a saved reference."
                     ),
                 },
             },
@@ -2567,16 +2569,31 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                 # re-resolved at injection time like every retrieval tool.
                 ref = (inp.get("ref") or "").strip()
                 target = None
+                # A saved reference by the name the recent raw window
+                # gives it ("reference 12", quotes.reference_title_lines):
+                # only one of the user's own. The window shows it to
+                # every user who quoted it, so its name opens it whatever
+                # the "External references" toggle says: the toggle
+                # decides what a search returns (#329), and the window
+                # carried the text itself before 2026-11-12.
+                named_id = reference_id_from_name(ref)
                 if quote_labels and ref.upper() in quote_labels:
                     target = quote_labels[ref.upper()]
                 elif ref.isdigit():
                     target = ("node", int(ref))
+                elif named_id is not None:
+                    item = db.session.get(ExternalItem, named_id)
+                    if item is not None and item.user_id == user_id:
+                        target = ("external", item.id)
+                    else:
+                        named_id = None
                 if target is None:
                     result["status"] = "error"
                     result["error"] = (
                         f"Unknown reference {ref!r} — pass a label from "
-                        "this turn's search results or a numeric entry id.")
-                elif (target[0] == "external"
+                        "this turn's search results, a numeric entry id, "
+                        "or a saved reference's name ('reference N').")
+                elif (target[0] == "external" and named_id is None
                         and not _external_references_for_user(user_id)):
                     # Defense in depth (#329): a search never hands out an
                     # external label to a user without the toggle, so this
@@ -2824,7 +2841,26 @@ def get_user_recent_content(user_id, pinned_node=None, usage=None):
     return None
 
 
-def get_user_recent_raw_content(user_id, created_before=None, usage=None):
+def _recent_raw_reference_titles(node):
+    """Whether the recent raw window filled into *node* (the node
+    carrying {user_recent_raw}) shows each quoted saved reference as a
+    line naming it rather than its text (Peter, voice review 2026-11-12):
+    recent entries show a saved reference by title, and the model opens
+    it with read_full when it needs the text. So only where the reply
+    has read_full: an agentic prompt (voice / textmode) with archive
+    search on. Elsewhere (Reflect, Orient, a placeholder typed into a
+    message, the SEMANTIC_SEARCH_AGENTIC killswitch) the window keeps
+    the text. Depends on the node's prompt key and config only, so the
+    pre-warm render and the generation loop agree byte for byte (#187),
+    and the render cache key carries the killswitch (#192)."""
+    return (node is not None
+            and chain_has_agentic_prompt([node])
+            and any(t.get("name") == "read_full"
+                    for t in gated_voice_tools(flask_app.config)))
+
+
+def get_user_recent_raw_content(user_id, created_before=None, usage=None,
+                                reference_titles=False):
     """Get the most recent ~10K tokens of raw user writing.
 
     Always returns a fixed window of the last ~10K tokens regardless of
@@ -2842,6 +2878,11 @@ def get_user_recent_raw_content(user_id, created_before=None, usage=None):
             time are excluded to avoid duplicating current session context.
         usage: A ContextUsage; every entry, quote and reference the window
             renders reports to it (#326).
+        reference_titles: True names each saved reference the user's
+            entries quote by a line (title or author, source, the name
+            read_full opens it by) instead of giving its text; see
+            _recent_raw_reference_titles. A window that quotes none is
+            the same bytes either way.
 
     The markers left as written in other people's text come back held
     (quotes.hold_quotes); the caller releases them (quotes.release_quotes)
@@ -2868,6 +2909,7 @@ def get_user_recent_raw_content(user_id, created_before=None, usage=None):
         licence=(usage.licence(USER_RECENT_RAW_PLACEHOLDER)
                  if usage is not None else None),
         hold_others_markers=True,
+        reference_titles=reference_titles,
     )
     if not result:
         return None
@@ -3430,7 +3472,8 @@ def _own_system_values(text, system_node, user_id, usage):
         values[USER_RECENT_PLACEHOLDER] = rc.get_content() if rc else ""
     if USER_RECENT_RAW_PLACEHOLDER in text:
         raw_result = get_user_recent_raw_content(
-            user_id, created_before=system_node.created_at, usage=usage)
+            user_id, created_before=system_node.created_at, usage=usage,
+            reference_titles=_recent_raw_reference_titles(system_node))
         raw_text = ""
         if raw_result:
             raw_text = format_date_metadata(
@@ -4181,7 +4224,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             if needs_recent_raw:
                 raw_cutoff = recent_raw_node.created_at if recent_raw_node else None
                 raw_result = get_user_recent_raw_content(
-                    user_id, created_before=raw_cutoff, usage=context_usage
+                    user_id, created_before=raw_cutoff, usage=context_usage,
+                    reference_titles=_recent_raw_reference_titles(
+                        recent_raw_node),
                 )
                 if raw_result:
                     # Raw data is dynamic — add metadata on the fly
