@@ -1212,7 +1212,9 @@ const NodeForm = forwardRef(
                   onError={(err) => {
                     // A start refused by the monthly spend cap is not a
                     // failure; the recorder already showed a toast (#341).
-                    if (!err?.spendCapped) {
+                    // Nor is one refused without a subscription (#438):
+                    // the banner says why.
+                    if (!err?.spendCapped && !err?.subscriptionRequired) {
                       setError(err.message || 'Streaming transcription failed');
                     }
                     setLoading(false);

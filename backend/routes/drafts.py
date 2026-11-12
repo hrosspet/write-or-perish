@@ -647,6 +647,14 @@ def init_streaming():
         return err
     privacy_level = data.get("privacy_level", "private")
     ai_usage = data.get("ai_usage", "none")
+    # Payments on (#438): no transcription without the paid set, dictation
+    # included, so the mic never opens for a recording nobody would turn
+    # into text. Typing works as before.
+    from backend.utils.subscriptions import refuse_billed_call
+    refused = refuse_billed_call(
+        current_user, "reply" if label == "Voice" else "transcribe")
+    if refused is not None:
+        return refused
     if label == "Voice":
         parent = Node.query.get(int(parent_id)) if parent_id else None
         refused = voice_turn_refusal(

@@ -183,10 +183,17 @@ class User(db.Model, UserMixin):
     subscription_trial_capped = db.Column(
         db.Boolean, nullable=False, default=False,
         server_default=db.text("false"))
-    # The account paid at least once (any of its subscriptions was
-    # active, or a paid invoice arrived). Set for good: after a failed
+    # The account paid at least once: an invoice of its subscription was
+    # paid with an amount above zero (not "active", which Stripe sets at
+    # a trial's end before charging). Set for good: after a failed
     # payment or an end it decides "lapsed" over "none".
     subscription_ever_paid = db.Column(
+        db.Boolean, nullable=False, default=False,
+        server_default=db.text("false"))
+    # Its owner cancelled one of the account's subscriptions (a trial
+    # included). Set for good, so a later attempt to subscribe again that
+    # never went through does not undo "lapsed".
+    subscription_cancelled_by_owner = db.Column(
         db.Boolean, nullable=False, default=False,
         server_default=db.text("false"))
     # Why the current subscription ended (Stripe's
@@ -380,10 +387,10 @@ class User(db.Model, UserMixin):
             return "active"
         if self.subscription_ever_paid:
             return "lapsed"
-        # A trial its owner cancelled: they had a subscription, and keep
-        # what they wrote. A first payment that failed: never let in.
-        if (self.subscription_status == "ended"
-                and self.subscription_end_reason == "cancellation_requested"):
+        # A subscription (a trial included) its owner cancelled: they had
+        # one, and keep what they wrote. A first payment that failed:
+        # never let in.
+        if self.subscription_cancelled_by_owner:
             return "lapsed"
         return "none"
 

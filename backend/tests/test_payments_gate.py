@@ -276,6 +276,169 @@ def test_a_lapsed_account_rejects_a_waiting_change(real_app):
     assert r.get_json()["outcome"] == "rejected"
 
 
+# Every rule outside /api and /media, by name: pages, sign-in and
+# sign-out, public pages, health checks. A new blueprint elsewhere fails
+# here and must say whether an account that is not let in may reach it
+# (the gate only looks at /api and /media).
+EXPECTED_OTHER_RULES = {
+    ("GET", "/"), ("GET", "/@<username>"), ("GET", "/@<username>/<slug>"),
+    ("GET", "/@<username>/<slug>/og.png"), ("GET", "/@<username>/feed.xml"),
+    ("GET", "/@<username>/og.png"), ("GET", "/alpha-thank-you"),
+    ("GET", "/auth/login"), ("GET", "/auth/logout"),
+    ("GET", "/auth/magic-link/verify"), ("POST", "/auth/magic-link/send"),
+    ("GET", "/auth/twitter"), ("GET", "/auth/twitter/authorized"),
+    ("GET", "/auth/x/connect"), ("GET", "/health"), ("GET", "/how-to"),
+    ("GET", "/landing"), ("GET", "/login"), ("GET", "/node/<int:node_id>"),
+    ("GET", "/ready"), ("GET", "/sitemap.xml"),
+    ("GET", "/static/<path:filename>"), ("GET", "/vision"),
+    ("GET", "/why-loore"),
+}
+
+# Routes that take a personal API token (utils/api_tokens) as well as the
+# session: the clipper's.
+EXPECTED_TOKEN_ROUTES = {
+    ("POST", "/api/external/clip"),
+    ("GET", "/api/external/clip/status"),
+}
+
+
+def _all_rules(app):
+    return {(m, r.rule) for r in app.url_map.iter_rules()
+            for m in r.methods - {"HEAD", "OPTIONS"}}
+
+
+def test_the_rules_outside_api_and_media_are_exactly_these(real_app):
+    other = {(m, r) for m, r in _all_rules(real_app)
+             if not (r.startswith("/api") or r.startswith("/media"))}
+    assert other == EXPECTED_OTHER_RULES
+
+
+def _token_rules(app):
+    return {(m, r.rule) for r in app.url_map.iter_rules()
+            for m in r.methods - {"HEAD", "OPTIONS"}
+            if getattr(app.view_functions[r.endpoint], "accepts_api_token",
+                       None)}
+
+
+def test_the_token_routes_are_exactly_these(real_app):
+    assert _token_rules(real_app) == EXPECTED_TOKEN_ROUTES
+
+
+def _token_for(user):
+    from backend.models import ApiToken
+    from backend.utils.api_tokens import generate_api_token
+    from backend.utils.magic_link import hash_token
+    plaintext, prefix = generate_api_token()
+    _db.session.add(ApiToken(user_id=user.id, name="clipper", prefix=prefix,
+                             token_hash=hash_token(plaintext),
+                             scope="external:write"))
+    _db.session.commit()
+    return plaintext
+
+
+CLIP = {"url": "https://example.com/a-page", "content": "A page."}
+
+
+def _no_session_client(app):
+    from flask import g
+    g.pop("_login_user", None)
+    return app.test_client()
+
+
+def test_a_token_of_an_account_not_let_in_is_refused_on_every_token_route(
+        real_app):
+    from backend.models import ExternalItem
+    u = _user("newcomer", external_content_enabled=True)
+    token = _token_for(u)
+    headers = {"Authorization": f"Bearer {token}"}
+    for method, rule in sorted(EXPECTED_TOKEN_ROUTES):
+        r = _no_session_client(real_app).open(
+            rule, method=method, json=CLIP, headers=headers)
+        assert r.status_code == 402, (method, rule, r.status_code)
+        assert r.get_json()["error"] == "no_subscription", (method, rule)
+    assert ExternalItem.query.filter_by(user_id=u.id).count() == 0
+
+
+def test_a_lapsed_accounts_token_gets_what_its_session_gets(real_app):
+    u = _user("lapsed", external_content_enabled=True,
+              subscription_status="ended", subscription_level="standard",
+              subscription_ever_paid=True)
+    token = _token_for(u)
+    headers = {"Authorization": f"Bearer {token}"}
+    by_token = _no_session_client(real_app).get(
+        "/api/external/clip/status", headers=headers)
+    by_session = _client(real_app, u).get("/api/external/clip/status")
+    assert by_token.status_code == by_session.status_code == 200
+    r = _no_session_client(real_app).post(
+        "/api/external/clip", json=CLIP, headers=headers)
+    assert r.status_code == 201, r.get_json()
+    r = _client(real_app, u).post("/api/external/clip", json=CLIP)
+    assert r.status_code == 200   # the same page again: a re-clip
+
+
+# Decided under Peter's "no AI replies and background jobs": a lapsed
+# account makes no billed call at all. Every route that starts one
+# answers 402 subscription_required, with what stops and what still works.
+BILLED_ROUTES = [
+    ("POST", "/api/drafts/streaming/init", {}, "transcribe recordings"),
+    ("POST", "/api/drafts/streaming/init", {"label": "Voice"},
+     "doesn't reply"),
+    ("POST", "/api/nodes/upload/init", {}, "transcribe recordings"),
+    ("POST", "/api/nodes/streaming/init", {}, "transcribe recordings"),
+    ("GET", "/api/search/semantic?q=tea", None, "search by meaning"),
+    ("POST", "/api/todo/apply-draft", {"llm_node_id": 1}, "use AI"),
+    ("POST", "/api/updates/polls/1/draft", {}, "use AI"),
+    ("POST", "/api/external/twitter/sync", {}, "sync bookmarks"),
+]
+
+
+@pytest.mark.parametrize("method,url,body,says", BILLED_ROUTES)
+def test_a_lapsed_account_starts_no_billed_call(real_app, method, url, body,
+                                                says):
+    u = _user("lapsed", subscription_status="ended",
+              subscription_level="standard", subscription_ever_paid=True)
+    r = _client(real_app, u).open(url, method=method, json=body)
+    assert r.status_code == 402, (url, r.status_code, r.get_json())
+    data = r.get_json()
+    assert data["error"] == "subscription_required"
+    assert says in data["message"]
+    assert "subscription has ended" in data["message"]
+
+
+def test_an_audio_upload_of_a_lapsed_account_is_refused(real_app):
+    import io
+    u = _user("lapsed", subscription_status="ended",
+              subscription_level="standard", subscription_ever_paid=True)
+    r = _client(real_app, u).post(
+        "/api/nodes/", content_type="multipart/form-data",
+        data={"audio_file": (io.BytesIO(b"x"), "a.webm")})
+    assert r.status_code == 402
+    assert "transcribe recordings" in r.get_json()["message"]
+
+
+@pytest.mark.parametrize("method,url,body,says", BILLED_ROUTES)
+def test_an_active_subscription_is_not_refused_there(
+        real_app, method, url, body, says):
+    u = _user("member", subscription_status="active",
+              subscription_level="standard", subscription_ever_paid=True)
+    r = _client(real_app, u).open(url, method=method, json=body)
+    assert (r.get_json(silent=True) or {}).get("error") != \
+        "subscription_required", url
+
+
+def test_a_lapsed_accounts_held_profile_build_does_not_resume(real_app):
+    from backend.tasks.profile_batch import _held_users
+    lapsed = _user("lapsed", subscription_status="ended",
+                   subscription_level="standard", subscription_ever_paid=True,
+                   profile_cap_held=True)
+    prefill = _user("prefilled", profile_cap_held=True)   # never let in
+    member = _user("member", subscription_status="active",
+                   subscription_level="standard", profile_cap_held=True)
+    held = {u.id for u in _held_users(User.profile_cap_held, set())}
+    assert lapsed.id not in held
+    assert {prefill.id, member.id} <= held
+
+
 def test_payments_off_nobody_is_stopped(real_app):
     real_app.config["PAYMENTS_ENABLED"] = False
     u = _user("newcomer")

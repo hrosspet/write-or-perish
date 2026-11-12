@@ -4,6 +4,7 @@ import { useDraftTranscriptionSSE } from './useSSE';
 import { useToast } from '../contexts/ToastContext';
 import api from '../api';
 import { isSpendCapError, spendCapToastMessage } from '../utils/spendCap';
+import { isSubscriptionRequiredError } from '../utils/subscription';
 import { isAiUsageRefusedError, aiUsageRefusalScope } from '../utils/aiUsage';
 import { onPageReturn } from '../utils/pageReturn';
 import { playErrorSound } from '../utils/errorSound';
@@ -767,6 +768,18 @@ export function useStreamingTranscription(options = {}) {
         if (onError) onError(err);
         throw err;
       }
+      if (isSubscriptionRequiredError(err)) {
+        // Payments on (#438): no transcription without a subscription,
+        // dictation included. Refused before any draft and before the mic
+        // opened; the api.js interceptor raised the banner that says why.
+        setSessionState('idle');
+        try {
+          err.subscriptionRequired = true;
+          err.startup = true;
+        } catch (_) { /* sealed error object */ }
+        if (onError) onError(err);
+        throw err;
+      }
       if (isAiUsageRefusedError(err)) {
         // A Voice recording where AI may not read (AI usage 'none' on the
         // account or the thread): the server refused before any draft
@@ -811,7 +824,7 @@ export function useStreamingTranscription(options = {}) {
       console.error('Failed to start streaming:', err);
       // Refused by the spend cap or by AI usage: initSession already
       // returned to idle and told the parent. The mic was never requested.
-      if (err?.spendCapped || err?.aiUsageRefused) return;
+      if (err?.spendCapped || err?.aiUsageRefused || err?.subscriptionRequired) return;
       // Always land in a terminal state. The error path here means recording
       // never started, so the session must not be left in 'recording' or
       // 'initializing' (which would strand the parent UI). 'error' is set

@@ -218,7 +218,9 @@ export default function SubscriptionSection({ user, setUser }) {
           <div style={{ ...textStyle, color: "var(--text-secondary)", marginBottom: "10px" }}>
             {sub.trial_available && sub.trial_days
               ? `The first ${sub.trial_days} days are free. Your card is charged when they end, unless you cancel before.`
-              : "Subscribe to keep AI replies, Voice mode and profile updates."}
+              : sub.state === "none"
+                ? "This account's free trial was used, so the first payment is due at checkout."
+                : "Subscribe to keep AI replies, Voice mode and profile updates."}
           </div>
           <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
             {levels.map((l) => (

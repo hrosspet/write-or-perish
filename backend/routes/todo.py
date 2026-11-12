@@ -289,7 +289,15 @@ def todo_merge_refusal(user_id, proposal_node):
     """Why a todo merge may not send its inputs to a model (a message for
     the user), or None: the proposal node whose text the merge applies, or
     the newest todo list, has an ai_usage AI may not read. No todo list
-    yet does not refuse: the merge then starts one from the proposal."""
+    yet does not refuse: the merge then starts one from the proposal.
+    Payments on (#438): no merge without the paid set (it is a billed
+    model call), also for a proposal left from when the account had it."""
+    from backend.models import User
+    from backend.utils.subscriptions import (
+        ai_replies_allowed, subscription_required_message)
+    user = db.session.get(User, user_id)
+    if not ai_replies_allowed(user):
+        return subscription_required_message(user, "ai")
     if (proposal_node is not None
             and proposal_node.ai_usage not in AI_ALLOWED):
         return TODO_PROPOSAL_REFUSED_MESSAGE
@@ -476,6 +484,14 @@ def apply_todo_draft():
     403 ``{"error", "code": "ai_usage_none"}`` when AI may not read the
     todo list or the proposal (todo_merge_refusal); nothing is started.
     """
+    # Payments on (#438): the merge is a billed model call, so none
+    # without the paid set, also for a proposal left from when the account
+    # had it. The proposal stays pending.
+    from backend.utils.subscriptions import refuse_billed_call
+    refused = refuse_billed_call(current_user, "ai")
+    if refused is not None:
+        return refused
+
     data = request.get_json() or {}
     llm_node_id = data.get("llm_node_id")
 

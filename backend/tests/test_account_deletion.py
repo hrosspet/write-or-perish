@@ -846,6 +846,28 @@ def test_no_restore_once_the_deletion_has_started(app, world, stubs, mail):
 
 # ── The purge and the identity layer ────────────────────────────────────
 
+def test_a_stripe_customer_without_a_key_does_not_hold_the_deletion(
+        app, world, stubs, mail, monkeypatch):
+    # Payments (#438): with no Stripe key on the server, waiting for
+    # Stripe would never end. The deletion finishes and its counts say
+    # the customer is left at Stripe (the log names it for an admin).
+    a = world.alice
+    a_id = a.id
+    a.stripe_customer_id = "cus_hers"
+    a.stripe_subscription_id = "sub_hers_live"
+    a.subscription_status = "active"
+    a.subscription_level = "standard"
+    _db.session.commit()
+    monkeypatch.setitem(app.config, "STRIPE_SECRET_KEY", None)
+    job = _schedule(a)
+    assert _run_due(job, datetime.utcnow() + timedelta(days=30, minutes=1)) \
+        == "done"
+    _db.session.expire_all()
+    assert _db.session.get(User, a_id) is None
+    job = _db.session.get(UserDataPurge, job.id)
+    assert job.status == "done"
+    assert job.counts["stripe_not_removed_no_key"] == 1
+
 def test_after_the_grace_period_nothing_of_the_account_is_left(
         app, world, stubs, mail):
     a, b = world.alice, world.bob

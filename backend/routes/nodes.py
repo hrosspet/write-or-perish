@@ -733,6 +733,11 @@ def create_node():
         from backend.utils.spend import spend_cap_response, user_is_capped
         if user_is_capped(current_user):
             return spend_cap_response(current_user)
+        # Payments on (#438): no transcription without the paid set.
+        from backend.utils.subscriptions import refuse_billed_call
+        refused = refuse_billed_call(current_user, "transcribe")
+        if refused is not None:
+            return refused
 
         if "audio_file" not in request.files:
             return jsonify({"error": "Field 'audio_file' is required"}), 400
@@ -2653,6 +2658,11 @@ def init_chunked_upload():
 
     Returns: { "node_id": 456, "upload_id": "unique-id" }
     """
+    # Payments on (#438): no transcription without the paid set.
+    from backend.utils.subscriptions import refuse_billed_call
+    refused = refuse_billed_call(current_user, "transcribe")
+    if refused is not None:
+        return refused
     data = request.get_json() or {}
 
     filename = data.get("filename")
@@ -3009,6 +3019,11 @@ def init_streaming_transcription():
 
     Returns: { "node_id": 456, "session_id": "unique-session-id" }
     """
+    # Payments on (#438): no transcription without the paid set.
+    from backend.utils.subscriptions import refuse_billed_call
+    refused = refuse_billed_call(current_user, "transcribe")
+    if refused is not None:
+        return refused
     data = request.get_json() or {}
 
     parent_id = data.get("parent_id")

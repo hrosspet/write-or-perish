@@ -4003,6 +4003,28 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # re-dispatch (read rerun, resumed batch) does not pass through
             # create_llm_placeholder. A batch already sent is collected.
             if batch_entry is None:
+                # Payments on (#438): no reply without the paid set, asked
+                # again when the run starts (a subscription can end while
+                # the task is queued, and a re-dispatch does not pass
+                # through create_llm_placeholder).
+                from backend.models import User as _User
+                from backend.utils.subscriptions import (
+                    ai_replies_allowed, subscription_required_message)
+                owner = db.session.get(
+                    _User, llm_node.human_owner_id or user_id)
+                if not ai_replies_allowed(owner):
+                    logger.warning("Node %s: reply refused, no paid set "
+                                   "(#438)", llm_node_id)
+                    llm_node.llm_task_status = 'failed'
+                    llm_node.llm_task_error = subscription_required_message(
+                        owner)
+                    db.session.commit()
+                    return {
+                        'parent_node_id': parent_node_id,
+                        'llm_node_id': llm_node_id,
+                        'status': 'refused',
+                        'reason': 'subscription_required',
+                    }
                 from backend.utils.llm_nodes import reply_refusal
                 refused = reply_refusal(parent_node, user_id,
                                         llm_node.ai_usage)

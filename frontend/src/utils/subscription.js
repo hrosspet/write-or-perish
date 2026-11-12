@@ -139,8 +139,15 @@ export function subscriptionStatusLine(sub) {
       }
       return `${level}. Next payment on ${end}.`;
     case 'past_due':
+      if (sub.state === 'none') {
+        // The first payment failed: the account was never let in.
+        return `${level}. The first payment didn't go through, so Loore stays closed until it does. Update your card to continue.`;
+      }
       return `${level}. The last payment didn't go through, so AI replies, Voice mode and profile updates are paused until it does. Update your card to continue.`;
     case 'ended':
+      // Ended before a first payment: the subscribe page says the account
+      // has no active subscription; nothing about writing that stays.
+      if (sub.state === 'none') return null;
       return 'Your subscription has ended. Your writing, reading and export stay; AI replies, Voice mode and profile updates are paused.';
     default:
       return null;

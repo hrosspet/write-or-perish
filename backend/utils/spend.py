@@ -181,11 +181,25 @@ def user_spend_since_microdollars(user_id, since):
 # cost in all, counted from the trial's start: nothing has been paid yet. The
 # block is a flag on the account (User.subscription_trial_capped), not a
 # month, so it holds across a month boundary inside the trial; it ends with
-# the trial (stripe_billing.apply_subscription). An admin's per-user limit
-# replaces it, as it replaces the level's ceiling.
+# the first payment (stripe_billing.handle_event), or with the trial when
+# none follows. An admin's per-user limit replaces it, as it replaces the
+# level's ceiling.
+
+def under_trial_ceiling(user):
+    """Trialing, or active after the trial before its first payment went
+    through: Stripe makes the subscription active at the trial's end and
+    charges the first invoice about an hour later, and until then
+    nothing has been paid."""
+    status = getattr(user, "subscription_status", None)
+    if status == "trialing":
+        return True
+    return (status == "active"
+            and not getattr(user, "subscription_ever_paid", False)
+            and getattr(user, "subscription_trial_start", None) is not None)
+
 
 def trial_limit_usd(user, config):
-    if getattr(user, "subscription_status", None) != "trialing":
+    if not under_trial_ceiling(user):
         return 0
     if getattr(user, "plan_set_by_hand", True):
         return 0
@@ -196,7 +210,7 @@ def trial_limit_usd(user, config):
 
 def trial_capped(user):
     return bool(getattr(user, "subscription_trial_capped", False)
-                and getattr(user, "subscription_status", None) == "trialing")
+                and under_trial_ceiling(user))
 
 
 def enforce_trial_cap(user, config, send_email=None):

@@ -1161,6 +1161,11 @@ class TestPastDue:
         _post_event(app, _event("customer.subscription.created",
                                 {"id": "sub_1"}, "evt_1"))
         assert access_state(_db.session.get(User, u.id)) == "active"
+        # Active is not a payment; the paid invoice is.
+        assert not _db.session.get(User, u.id).subscription_ever_paid
+        _post_event(app, _event("invoice.paid", {
+            "id": "in_1", "subscription": "sub_1", "amount_paid": 3000},
+            "evt_1b"))
         gateway.subscriptions["sub_1"]["status"] = "past_due"
         _post_event(app, _event("invoice.payment_failed", {
             "id": "in_2", "subscription": "sub_1"}, "evt_2"))
@@ -1200,6 +1205,94 @@ class TestPastDue:
         _post_event(app, _event("customer.subscription.deleted",
                                 {"id": "sub_1"}, "evt_3"))
         assert access_state(_db.session.get(User, u.id)) == "none"
+
+    def test_active_at_the_trials_end_is_not_a_payment(self, app, gateway):
+        # Stripe makes the subscription active at the trial's end and
+        # charges the first invoice about an hour later (sandbox: active
+        # with a draft invoice and amount_paid 0, past_due hours later).
+        from backend.utils.spend import trial_limit_usd, under_trial_ceiling
+        from backend.utils.subscriptions import access_state
+        u = _user(stripe_customer_id="cus_1")
+        gateway.subscriptions["sub_1"] = subscription(
+            status="trialing", trial=True)
+        _post_event(app, _event("customer.subscription.created",
+                                {"id": "sub_1"}, "evt_1"))
+        user = _db.session.get(User, u.id)
+        user.subscription_trial_capped = True
+        _db.session.commit()
+        gateway.subscriptions["sub_1"]["status"] = "active"
+        _post_event(app, _event("customer.subscription.updated",
+                                {"id": "sub_1"}, "evt_2"))
+        # The trial invoice of 0 is paid too: not a payment either.
+        _post_event(app, _event("invoice.paid", {
+            "id": "in_0", "subscription": "sub_1", "amount_paid": 0},
+            "evt_2b"))
+        user = _db.session.get(User, u.id)
+        assert not user.subscription_ever_paid
+        # The hour before the charge: access stays, with the trial's
+        # ceiling (and its block) still on.
+        assert access_state(user) == "active"
+        assert under_trial_ceiling(user)
+        assert trial_limit_usd(user, app.config) == 30
+        assert user.subscription_trial_capped
+        # The charge fails: never paid, not let in.
+        gateway.subscriptions["sub_1"]["status"] = "past_due"
+        _post_event(app, _event("invoice.payment_failed", {
+            "id": "in_1", "subscription": "sub_1"}, "evt_3"))
+        assert access_state(_db.session.get(User, u.id)) == "none"
+
+    def test_the_first_payment_ends_the_trial_ceiling(self, app, gateway):
+        from backend.utils.spend import trial_capped, under_trial_ceiling
+        u = _user(stripe_customer_id="cus_1")
+        gateway.subscriptions["sub_1"] = subscription(
+            status="active", trial=True)
+        _post_event(app, _event("customer.subscription.updated",
+                                {"id": "sub_1"}, "evt_1"))
+        user = _db.session.get(User, u.id)
+        user.subscription_trial_capped = True
+        _db.session.commit()
+        assert trial_capped(user)
+        _post_event(app, _event("invoice.paid", {
+            "id": "in_1", "subscription": "sub_1", "amount_paid": 3000},
+            "evt_2"))
+        user = _db.session.get(User, u.id)
+        assert user.subscription_ever_paid
+        assert not under_trial_ceiling(user)
+        assert not user.subscription_trial_capped and not trial_capped(user)
+
+    def test_an_unfinished_resubscribe_keeps_a_lapsed_account_lapsed(
+            self, app, gateway):
+        from backend.utils.subscriptions import access_state
+        u = _user(stripe_customer_id="cus_1")
+        gateway.subscriptions["sub_1"] = subscription(
+            status="canceled", trial=True,
+            ) | {"cancellation_details": {"reason": "cancellation_requested"}}
+        _post_event(app, _event("customer.subscription.deleted",
+                                {"id": "sub_1"}, "evt_1"))
+        assert access_state(_db.session.get(User, u.id)) == "lapsed"
+        # A new checkout whose first payment is still pending, then
+        # expires: it never granted anything and replaces nothing.
+        gateway.subscriptions["sub_2"] = subscription(
+            sub_id="sub_2", status="incomplete")
+        _post_event(app, _event("customer.subscription.created",
+                                {"id": "sub_2"}, "evt_2"))
+        user = _db.session.get(User, u.id)
+        assert access_state(user) == "lapsed"
+        assert user.stripe_subscription_id == "sub_1"
+        gateway.subscriptions["sub_2"]["status"] = "incomplete_expired"
+        _post_event(app, _event("customer.subscription.updated",
+                                {"id": "sub_2"}, "evt_3"))
+        assert access_state(_db.session.get(User, u.id)) == "lapsed"
+        # Once it goes through, it is the account's subscription.
+        gateway.subscriptions["sub_3"] = subscription(
+            sub_id="sub_3", status="active")
+        _post_event(app, _event("customer.subscription.created",
+                                {"id": "sub_3"}, "evt_4"))
+        user = _db.session.get(User, u.id)
+        assert user.stripe_subscription_id == "sub_3"
+        assert access_state(user) == "active"
+        # Its owner's cancellation of the trial is kept for good.
+        assert user.subscription_cancelled_by_owner
 
     def test_a_trial_its_owner_cancelled_lapses(self, app, gateway):
         from backend.utils.subscriptions import access_state
@@ -1699,6 +1792,32 @@ class TestDeletion:
             "update_subscription")
         assert gateway.subscriptions["sub_1"]["schedule"] is None
         assert _db.session.get(User, u.id).subscription_cancel_at_period_end
+
+    def test_a_failed_payment_is_cancelled_at_once_at_deletion(self, app,
+                                                               gateway):
+        # past_due gives nothing, but Stripe still retries the charge: an
+        # account being deleted is not charged again.
+        from backend.utils.subscriptions import access_state
+        u = _user(stripe_customer_id="cus_1", stripe_subscription_id="sub_1",
+                  subscription_status="past_due",
+                  subscription_level="standard")
+        gateway.subscriptions["sub_1"] = subscription(status="past_due")
+        assert stripe_billing.stop_renewal_for_deletion(u) is True
+        assert ("cancel_subscription", "sub_1") in gateway.calls
+        assert gateway.subscriptions["sub_1"]["status"] == "canceled"
+        assert gateway.subscriptions["sub_1"]["metadata"][
+            "loore_cancelled"] == "deletion"
+        user = _db.session.get(User, u.id)
+        assert user.subscription_status == "ended"
+        # Loore's cancellation is not the owner's: a never-paid account
+        # restored from its deletion is still not let in.
+        gateway.subscriptions["sub_1"]["cancellation_details"] = {
+            "reason": "cancellation_requested"}
+        _post_event(app, _event("customer.subscription.deleted",
+                                {"id": "sub_1"}, "evt_del"))
+        user = _db.session.get(User, u.id)
+        assert not user.subscription_cancelled_by_owner
+        assert access_state(user) == "none"
 
     def test_nothing_to_stop(self, app, gateway):
         assert stripe_billing.stop_renewal_for_deletion(_user()) is False

@@ -626,7 +626,7 @@ def delete_identity(user_id):
     # the merchant of record). A code's uses stay counted without the
     # account; the codes the account tried and its checkouts go.
     from backend.utils.stripe_billing import (
-        cancel_for_purge, delete_customer_for_purge)
+        BillingNotConfigured, cancel_for_purge, delete_customer_for_purge)
     try:
         if cancel_for_purge(user):
             counts["stripe_subscription_cancelled"] += 1
@@ -634,6 +634,15 @@ def delete_identity(user_id):
         # Checkout asked for do not outlive the account.
         if delete_customer_for_purge(user):
             counts["stripe_customer_deleted"] += 1
+    except BillingNotConfigured:
+        # No Stripe key on this server (payments taken down): waiting
+        # would never end. The deletion goes on; the job's counts and the
+        # log say what is left at Stripe, for an admin to remove there.
+        counts["stripe_not_removed_no_key"] += 1
+        logger.error("Account of user %s deleted with its Stripe customer "
+                     "%s (subscription %s) left at Stripe: no Stripe key "
+                     "configured", U, user.stripe_customer_id,
+                     user.stripe_subscription_id)
     except Exception as e:  # noqa: BLE001 - retried with the purge
         raise PurgeIncomplete("the subscription or the customer could not "
                               f"be removed at Stripe ({type(e).__name__})")

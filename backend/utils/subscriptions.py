@@ -142,15 +142,25 @@ def block_accounts_without_subscription():
     deleting itself; every other /api and /media route answers 402
     {"error": "no_subscription"} before the view runs. No-op while
     payments are off."""
+    from flask_login import current_user
+    if not current_user.is_authenticated:
+        return None
+    return refuse_not_let_in(current_user)
+
+
+def refuse_not_let_in(user):
+    """402 no_subscription when *user* (the session's, or the account an
+    API token belongs to: utils/api_tokens) is not let in and this
+    request is not one it may make; None otherwise. The same rule for
+    every way a request is authenticated."""
     if not payments_enabled():
         return None
     from flask import request
-    from flask_login import current_user
-    if not current_user.is_authenticated or not current_user.approved:
+    if user is None or not getattr(user, "approved", False):
         return None
     if open_without_subscription(request.method, request.path):
         return None
-    if access_state(current_user) != "none":
+    if access_state(user) != "none":
         return None
     return no_subscription_response()
 
@@ -167,31 +177,64 @@ def ai_replies_allowed(user, config=None):
     return bool(user.on_paid_plan)
 
 
-def subscription_required_message(user=None):
-    """Why there is no reply, for the web and the iPhone alike: it names
-    the state, never where or how to pay (the iPhone app shows it as it
-    is). The web adds its link to Settings."""
+# What stops, per kind of refused call: (the clause after "so", the
+# sentence without a subscription, what still works). Without the paid
+# set an account makes no billed call at all (decided under Peter's "no
+# AI replies and background jobs", 2026-11-12): replies, transcription,
+# search by meaning, todo merges and poll drafts alike.
+_PAUSED = {
+    "reply": ("Loore doesn't reply",
+              "Loore doesn't reply on an account without a subscription.",
+              "Your writing is saved."),
+    "transcribe": ("Loore doesn't transcribe recordings",
+                   "Loore doesn't transcribe recordings on an account "
+                   "without a subscription.",
+                   "Typing works as before."),
+    "search": ("search by meaning is paused",
+               "Search by meaning is paused on an account without a "
+               "subscription.",
+               "Search by words works as before."),
+    "ai": ("Loore doesn't use AI for this",
+           "Loore doesn't use AI on an account without a subscription.",
+           "Your writing is saved."),
+    "sync": ("Loore doesn't sync bookmarks from X",
+             "Loore doesn't sync bookmarks from X on an account without a "
+             "subscription.",
+             "Your saved references stay."),
+}
+
+
+def subscription_required_message(user=None, kind="reply"):
+    """Why the call is refused, for the web and the iPhone alike: it
+    names the state, never where or how to pay (the iPhone app shows it
+    as it is). The web adds its link to Settings."""
+    so, alone, works = _PAUSED.get(kind, _PAUSED["reply"])
     status = getattr(user, "subscription_status", None) if user else None
     if status == "ended":
-        return ("Your subscription has ended, so Loore doesn't reply. "
-                "Your writing is saved.")
+        return f"Your subscription has ended, so {so}. {works}"
     if status == "past_due":
-        return ("Your last payment didn't go through, so Loore doesn't "
-                "reply. Your writing is saved.")
-    return ("Loore doesn't reply on an account without a subscription. "
-            "Your writing is saved.")
+        return f"Your last payment didn't go through, so {so}. {works}"
+    return f"{alone} {works}"
 
 
-def subscription_required_payload(user=None):
+def subscription_required_payload(user=None, kind="reply"):
     return {
         "error": "subscription_required",
-        "message": subscription_required_message(user),
+        "message": subscription_required_message(user, kind),
     }
 
 
-def subscription_required_response(user=None):
+def subscription_required_response(user=None, kind="reply"):
     from flask import jsonify
-    return jsonify(subscription_required_payload(user)), 402
+    return jsonify(subscription_required_payload(user, kind)), 402
+
+
+def refuse_billed_call(user, kind="ai", config=None):
+    """402 subscription_required when *user* may make no billed call (no
+    paid set while payments are on); None otherwise."""
+    if ai_replies_allowed(user, config):
+        return None
+    return subscription_required_response(user, kind)
 
 
 def subscription_required_fields(user, config=None):

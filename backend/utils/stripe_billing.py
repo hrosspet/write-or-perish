@@ -559,19 +559,34 @@ def _first_item(sub):
 
 def _apply_payment_state(user, sub, status):
     """The columns that belong to one subscription start again with a new
-    one; the account has paid once a subscription of it was active (set
-    for good); why it ended; the trial ceiling ends with the trial."""
+    one; why it ended, and whether its owner ended it (kept for good);
+    the trial ceiling lasts until the first payment.
+
+    "Paid once" (User.subscription_ever_paid) is not set here: Stripe
+    makes a subscription active when its trial ends and charges the
+    first invoice about an hour later, so active is not proof of a
+    payment. Only a paid invoice above zero sets it (handle_event)."""
     if user.stripe_subscription_id != sub.get("id"):
         user.subscription_revoked = None
         user.subscription_trial_capped = False
-    if status != "trialing":
+    first_payment_pending = (status == "active"
+                             and not user.subscription_ever_paid
+                             and bool(sub.get("trial_start")))
+    if status != "trialing" and not first_payment_pending:
         user.subscription_trial_capped = False
-    if status == "active":
-        # Active after a trial or a checkout means an invoice was paid.
-        user.subscription_ever_paid = True
     details = sub.get("cancellation_details") or {}
     user.subscription_end_reason = (details.get("reason")
                                     if status == "ended" else None)
+    meta = sub.get("metadata") or {}
+    loore_cancelled = (meta.get(DUPLICATE_METADATA_KEY) == "1"
+                       or bool(meta.get(LOORE_CANCELLED_METADATA_KEY)))
+    if (user.subscription_end_reason == "cancellation_requested"
+            and not loore_cancelled):
+        # Its owner cancelled it (not Loore, which marks the duplicates
+        # and second trials it cancels): the account had a subscription
+        # and keeps its writing (lapsed), also once a later attempt to
+        # subscribe again replaces these columns.
+        user.subscription_cancelled_by_owner = True
 
 
 def apply_subscription(sub, config=None):
@@ -590,15 +605,24 @@ def apply_subscription(sub, config=None):
         return None
     status = STATUS_MAP.get(sub.get("status"), "none")
     granting = status in SUBSCRIPTION_GRANTING_STATUSES
-    if (user.stripe_subscription_id
-            and user.stripe_subscription_id != sub.get("id")
-            and not granting
+    other = (user.stripe_subscription_id
+             and user.stripe_subscription_id != sub.get("id"))
+    if (other and not granting
             and user.subscription_status in SUBSCRIPTION_GRANTING_STATUSES):
         # A late event about an older subscription: the one that gives
         # access now stays.
         logger.info("Stripe subscription %s ignored for user %s: %s is "
                     "current", sub.get("id"), user.id,
                     user.stripe_subscription_id)
+        return user
+    if other and sub.get("status") in ("incomplete", "incomplete_expired"):
+        # An attempt to subscribe again that never went through (its first
+        # payment is pending or expired) never granted anything: it does
+        # not replace the account's earlier subscription, so a lapsed
+        # account stays lapsed. It takes over once it is live.
+        logger.info("Stripe subscription %s (%s) not applied for user %s: "
+                    "it never went through", sub.get("id"),
+                    sub.get("status"), user.id)
         return user
     limit_before = get_user_spend_limit_usd(user, cfg)
 
@@ -684,6 +708,9 @@ def refund_latest_payment(gateway, sub):
 
 
 DUPLICATE_METADATA_KEY = "loore_duplicate"
+# Set on a subscription Loore cancels for another reason (an account
+# deletion while a payment failed): not the owner's cancellation.
+LOORE_CANCELLED_METADATA_KEY = "loore_cancelled"
 
 
 def cancel_duplicate(gateway, sub):
@@ -960,7 +987,10 @@ def handle_event(gateway, event, config=None):
                                        "invoice.payment_succeeded")
             and (obj.get("amount_paid") or 0) > 0
             and user.stripe_subscription_id == sub_id):
+        # The only proof of a payment (see _apply_payment_state). The
+        # trial's ceiling ends with it.
         user.subscription_ever_paid = True
+        user.subscription_trial_capped = False
     return "applied" if user is not None else "no_account"
 
 
@@ -969,12 +999,29 @@ def handle_event(gateway, event, config=None):
 def stop_renewal_for_deletion(user, config=None):
     """An account deletion was scheduled: its subscription does not renew
     (it ends at the end of the period already paid, before the purge).
-    Best effort: a failure is logged; the purge cancels it again."""
-    if not (user.stripe_subscription_id and user.subscription_grants_access
-            and not user.subscription_cancel_at_period_end):
+    One whose payment failed (past_due, live at Stripe, retried) is
+    cancelled at once: it gives nothing any more, and a retry must not
+    charge an account being deleted. Best effort: a failure is logged;
+    the purge cancels it again."""
+    live = user.subscription_status in SUBSCRIPTION_GRANTING_STATUSES
+    if not (user.stripe_subscription_id and live):
+        return False
+    if (user.subscription_status != "past_due"
+            and user.subscription_cancel_at_period_end):
         return False
     try:
         gateway = get_gateway(config)
+        if user.subscription_status == "past_due":
+            # Marked as Loore's cancellation, so it does not count as the
+            # owner cancelling (which would make a never-paid account
+            # lapsed if it is restored).
+            gateway.update_subscription(
+                user.stripe_subscription_id,
+                {"metadata": {LOORE_CANCELLED_METADATA_KEY: "deletion"}})
+            sub = gateway.cancel_subscription(user.stripe_subscription_id)
+            apply_subscription(sub, config)
+            db.session.commit()
+            return True
         # A downgrade waiting for the period end is a subscription
         # schedule, and Stripe refuses cancel_at_period_end on a
         # subscription a schedule manages: release it first (the

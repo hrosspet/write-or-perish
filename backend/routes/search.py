@@ -319,6 +319,12 @@ def semantic_search():
 
     if not q:
         return jsonify({"error": "Provide a query (q)."}), 400
+    # Embedding the query is a billed call: payments on, none without the
+    # paid set (#438). Search by words stays.
+    from backend.utils.subscriptions import refuse_billed_call
+    refused = refuse_billed_call(current_user, "search")
+    if refused is not None:
+        return refused
 
     try:
         dt_from, dt_to = _parse_date_range(

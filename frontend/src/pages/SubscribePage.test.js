@@ -23,7 +23,7 @@ import { render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import SubscribePage from './SubscribePage';
 import SubscriptionBanner from '../components/SubscriptionBanner';
-import { notLetIn } from '../utils/subscription';
+import { notLetIn, subscriptionStatusLine } from '../utils/subscription';
 
 const LEVELS = [
   { level: 'standard', amount_cents: 3000, currency: 'usd' },
@@ -59,6 +59,24 @@ test('the subscribe page: levels with tax, the code, sign out, deletion', async 
   expect(screen.getByLabelText('Code')).toBeInTheDocument();
   expect(screen.getByText('Sign out').closest('a').getAttribute('href')).toMatch(/\/auth\/logout$/);
   expect(screen.getByText('Delete my account')).toBeInTheDocument();
+});
+
+test('an ended subscription that never paid shows the not-let-in wording', async () => {
+  const ended = sub({ state: 'none', status: 'ended', level: 'standard', trial_available: false });
+  mockUserCtx = { user: user({ subscription: ended }), setUser: jest.fn() };
+  mockGet.mockResolvedValue({ data: { subscription: ended, levels: LEVELS } });
+  render(<MemoryRouter><SubscribePage /></MemoryRouter>);
+  expect(screen.getByText(/no active subscription yet/)).toBeInTheDocument();
+  expect(await screen.findByText(/free trial was used/)).toBeInTheDocument();
+  expect(screen.queryByText(/has ended/)).toBeNull();
+  expect(screen.queryByText(/writing, reading and export stay/)).toBeNull();
+});
+
+test('a first payment that failed says Loore stays closed', () => {
+  const line = subscriptionStatusLine(sub({ state: 'none', status: 'past_due', level: 'standard' }));
+  expect(line).toMatch(/first payment didn't go through, so Loore stays closed/);
+  expect(subscriptionStatusLine(sub({ state: 'lapsed', status: 'past_due', level: 'standard' })))
+    .toMatch(/AI replies, Voice mode and profile updates are paused/);
 });
 
 test('a failed payment is said on load, with the link to Settings', () => {

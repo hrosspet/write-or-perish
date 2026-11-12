@@ -311,7 +311,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
 
       // Refused by the monthly spend cap before the mic opened (#341). The
       // recorder already showed a toast; return to ready, not an error.
-      if (err?.spendCapped) {
+      if (err?.spendCapped || err?.subscriptionRequired) {
         stopSilentAudio();
         setIsStopping(false);
         setPhase('ready');
