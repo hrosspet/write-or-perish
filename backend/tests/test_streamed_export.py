@@ -319,10 +319,14 @@ def test_download_is_the_legacy_text(app, ex, alice, bob, monkeypatch):
     assert resp.headers["Content-Disposition"] == (
         f'attachment; filename="loore-export-{day}.txt"')
     assert resp.headers["X-Accel-Buffering"] == "no"
+    # The browser starts the download on the headers, without waiting
+    # for 1 KiB of the body to sniff its type.
+    assert resp.headers["X-Content-Type-Options"] == "nosniff"
     assert "Content-Length" not in resp.headers
     pieces = [p.decode() if isinstance(p, bytes) else p
               for p in resp.response]
     resp.close()
+    assert pieces[0] == ""               # the headers go out on it
     assert len(pieces) > 3
     assert _same("".join(pieces), legacy)
 
@@ -362,6 +366,37 @@ def test_header_goes_out_before_any_entry_is_read(app, ex, alice, bob,
     assert rendered == []
     rest = "".join(pieces)
     assert rendered and rest.endswith("*End of Export*")
+
+
+def test_headers_go_out_before_any_query(app, ex, alice, bob):
+    """The route's first piece is empty and comes before any query: the
+    app server sends the response's headers on it, and with "nosniff"
+    the browser starts the download (and shows its save dialog) on them.
+    The first piece of the file follows after the same few metadata
+    queries whatever the account's size: none reads an entry's text or
+    a pin, or walks a thread."""
+    def header_statements():
+        with _Statements() as statements:
+            pieces = ex._send_user_export(alice)
+            assert next(pieces) == ""
+            assert statements == []
+            first = next(pieces)
+        pieces.close()
+        assert first.startswith("# Loore - Thread Export\n")
+        return statements
+
+    _rich_account(alice, bob)
+    small = header_statements()
+    llm = User.query.filter_by(username="claude-x").one()
+    prompt = UserPrompt.query.first()
+    for _ in range(4):
+        _session(alice, llm, prompt, [], turns=6)
+    for i in range(20):
+        _node(alice, f"another tweet {i}", origin="twitter")
+    large = header_statements()
+    assert len(large) == len(small)
+    assert not [s for s in large
+                if "node.content" in s or "node_context_artifact" in s]
 
 
 def test_a_failure_part_way_ends_the_download_without_its_end(
@@ -412,9 +447,31 @@ def test_head_builds_nothing(app, ex, alice, monkeypatch):
         "/api/export/threads").status_code in (302, 401)
 
 
-# ── the batched alive check ────────────────────────────────────────────
+# ── the thread walks ───────────────────────────────────────────────────
 
-def test_alive_check_is_one_query_per_batch(app, ex, alice):
+class _Statements(list):
+    """The SQL statements run while it is entered."""
+
+    def _add(self, conn, cursor, statement, *a):
+        self.append(statement)
+
+    def __enter__(self):
+        event.listen(_db.engine, "before_cursor_execute", self._add)
+        return self
+
+    def __exit__(self, *exc):
+        event.remove(_db.engine, "before_cursor_execute", self._add)
+
+
+def _recursive(statements):
+    return [s for s in statements if "RECURSIVE" in s.upper()]
+
+
+def test_alive_check_walks_level_by_level(app, ex, alice):
+    """A recursive query was planned as a scan of the whole table per
+    level of the deepest thread; the walk is one query per batch of
+    roots, then one per level, and a thread's walk ends at its first
+    live entry."""
     live = _node(alice, "live root")
     deep = _node(alice, "deleted root", deleted=True)
     mid = _node(alice, "deleted middle", parent=deep, deleted=True)
@@ -422,22 +479,58 @@ def test_alive_check_is_one_query_per_batch(app, ex, alice):
     gone = _node(alice, "deleted thread", deleted=True)
     _node(alice, "deleted reply", parent=gone, deleted=True)
     lone = _node(alice, "deleted lone root", deleted=True)
-    roots = [live.id, deep.id, gone.id, lone.id]
+    early = _node(alice, "deleted root, live reply", deleted=True)
+    below = _node(alice, "live reply", parent=early)
+    for i in range(5):          # not walked: the thread is already alive
+        below = _node(alice, f"deeper {i}", parent=below)
+    roots = [live.id, deep.id, gone.id, lone.id, early.id]
 
-    statements = []
-
-    def count(conn, cursor, statement, *a):
-        statements.append(statement)
-    event.listen(_db.engine, "before_cursor_execute", count)
-    try:
+    with _Statements() as statements:
         alive = ex._threads_with_alive_node(roots, batch=3)
-    finally:
-        event.remove(_db.engine, "before_cursor_execute", count)
 
-    assert alive == {live.id, deep.id}
-    assert len(statements) == 2          # 4 threads, 3 per query
+    assert alive == {live.id, deep.id, early.id}
+    # 5 roots, 3 per query: 2 queries. The replies to the 4 deleted
+    # roots: 2. The replies to mid and to the deleted reply: 1. The 5
+    # levels below the live reply are not walked.
+    assert len(statements) == 5
+    assert _recursive(statements) == []
     assert alive == {r for r in roots if ex._thread_has_alive_node(r)}
     assert ex._threads_with_alive_node([]) == set()
+
+
+def test_preamble_pins_are_found_level_by_level(app, ex, alice):
+    """The pinning entries are found with one query per level of the
+    deepest thread, whatever the number of threads and imported tweets:
+    no recursive query, and no query per entry for its pins."""
+    llm = _user("claude-x")
+    prompt = _version(UserPrompt, alice, prompt_key="voice",
+                      title="Voice prompt", content="P")
+
+    def find():
+        kept = ex._export_roots(alice.id)
+        with _Statements() as statements:
+            entries = ex._pinning_entries(alice.id, kept)
+            for n in entries:
+                n.context_artifacts
+        return entries, statements
+
+    sessions = [_session(alice, llm, prompt, [], turns=6) for _ in range(2)]
+    for i in range(5):
+        _node(alice, f"tweet {i}", origin="twitter")
+    entries, statements = find()
+    assert {n.id for n in entries} == {s.id for s in sessions}
+    # 6 levels with replies and the empty one below them; the pins of
+    # those ids; the pinning entries; their pins.
+    assert len(statements) == 7 + 1 + 1 + 1
+    assert _recursive(statements) == []
+
+    sessions += [_session(alice, llm, prompt, [], turns=6)
+                 for _ in range(3)]
+    for i in range(20):
+        _node(alice, f"more tweet {i}", origin="twitter")
+    entries, more = find()
+    assert {n.id for n in entries} == {s.id for s in sessions}
+    assert len(more) == len(statements)
 
 
 def test_full_export_checks_only_threads_with_a_deleted_root(

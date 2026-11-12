@@ -60,11 +60,26 @@ final class ThreadModel {
     @ObservationIgnored private var quotesKey = ""
     @ObservationIgnored private var quotesVersion = 0
 
+    /// Write tool calls waiting for the user's approval in this thread (2026-11-12).
+    @ObservationIgnored let approvals: ToolApprovalsModel
+    /// The approval dialog opens by itself on the screen's first load only.
+    @ObservationIgnored private var firstLoadDone = false
+
     init(nodeId: Int, awaitLLM: Int?, app: AppState) {
         self.nodeId = nodeId
         self.initialAwaitLLM = awaitLLM
         self.app = app
         selectedModel = app.user?.preferredModel
+        approvals = ToolApprovalsModel(api: app.api, nodeId: nodeId)
+        approvals.onApproved = { [weak app] item in
+            // What the call wrote shows where it lives.
+            if item.isArtifactWrite { app?.signals.post(.artifactsChanged) }
+            if item.tool == "apply_todo_changes" { app?.signals.post(.todoChanged) }
+        }
+        approvals.onGroupDone = { [weak self] in
+            // The reply's Actions taken (and what it changed) are new.
+            Task { await self?.reload() }
+        }
     }
 
     // MARK: Derived
@@ -83,6 +98,41 @@ final class ThreadModel {
 
     var isLLMNode: Bool { node.map { $0.nodeType == .llm || $0.llmModel != nil } ?? false }
 
+    // MARK: "Only you see this reply" (2026-11-12)
+
+    /// A private AI reply of the viewer's under a node others can read.
+    func showsPrivateReplyNote(nodeType: NodeType, llmModel: String?, userId: Int?, parentUserId: Int?,
+                               deleted: Bool = false, privacy: PrivacyLevel?, parentPrivacy: PrivacyLevel?) -> Bool {
+        SharedThread.showsPrivateReplyNote(
+            isAIReply: nodeType == .llm || llmModel != nil,
+            owned: ownedByMe(userId: userId, parentUserId: parentUserId, nodeType: nodeType),
+            deleted: deleted, privacy: privacy, parentPrivacy: parentPrivacy)
+    }
+
+    /// The focal node; its parent is the last ancestor.
+    var focalShowsPrivateReplyNote: Bool {
+        guard let node else { return false }
+        return isOwner && SharedThread.showsPrivateReplyNote(
+            isAIReply: isLLMNode, owned: true, privacy: node.privacyLevel,
+            parentPrivacy: parentAncestor?.privacyLevel)
+    }
+
+    /// An ancestor; its parent is the one before it (the root has none shown).
+    func showsPrivateReplyNote(ancestorAt index: Int) -> Bool {
+        guard let ancestors = node?.ancestors, ancestors.indices.contains(index), index > 0 else { return false }
+        let n = ancestors[index]
+        return showsPrivateReplyNote(nodeType: n.nodeType, llmModel: n.llmModel, userId: n.userId,
+                                     parentUserId: n.parentUserId, deleted: n.deleted, privacy: n.privacyLevel,
+                                     parentPrivacy: ancestors[index - 1].privacyLevel)
+    }
+
+    /// A reply in the tree, under a parent with `parentPrivacy`.
+    func showsPrivateReplyNote(_ n: TreeNode, parentPrivacy: PrivacyLevel?) -> Bool {
+        showsPrivateReplyNote(nodeType: n.nodeType, llmModel: n.llmModel, userId: n.userId,
+                              parentUserId: n.parentUserId, deleted: n.deleted || n.inaccessible,
+                              privacy: n.privacyLevel, parentPrivacy: parentPrivacy)
+    }
+
     var isLLMPending: Bool { isLLMNode && (node?.llmTaskStatus?.isInFlight ?? false) }
 
     /// A read waiting in a provider batch (`_batch` submitted/cancelling).
@@ -92,14 +142,19 @@ final class ThreadModel {
 
     var isPublicThread: Bool { node?.privacyLevel == .public }
 
+    /// Other people can read the node a reply here would answer (public or
+    /// circles): Loore never replies by itself (Peter, 2026-11-12).
+    var isSharedThread: Bool { node?.privacyLevel.isSharedWithOthers ?? false }
+
     var autoGeneratePreference: Bool {
         get { UserDefaults.standard.object(forKey: DefaultsKey.autoGenerate) == nil
             ? true : UserDefaults.standard.bool(forKey: DefaultsKey.autoGenerate) }
         set { UserDefaults.standard.set(newValue, forKey: DefaultsKey.autoGenerate) }
     }
 
-    /// Public threads force auto-generate off (#228).
-    func autoGenerateActive(_ preference: Bool) -> Bool { isPublicThread ? false : preference }
+    /// Shared threads force auto-generate off (#228 for public; circles since
+    /// 2026-11-12) without touching the stored preference.
+    func autoGenerateActive(_ preference: Bool) -> Bool { isSharedThread ? false : preference }
 
     var parentAncestor: AncestorNode? { node?.ancestors.last }
 
@@ -133,9 +188,11 @@ final class ThreadModel {
         return isOwner && (me?.shareV1Enabled ?? false) && ProposalParser.hasShareBlocks(node.content)
     }
 
+    /// LLM Response: in craft mode, and in every shared thread, where it is the
+    /// only way to a reply (auto-generate is off there).
     func showCraftBar(craftMode: Bool, autoGenerate: Bool) -> Bool {
         guard let node else { return false }
-        return isOwner && (craftMode || isPublicThread) && !autoGenerateActive(autoGenerate)
+        return isOwner && (craftMode || isSharedThread) && !autoGenerateActive(autoGenerate)
             && node.aiUsage != .off && !isLLMPending
     }
 
@@ -169,6 +226,8 @@ final class ThreadModel {
             node = fetched
             pageError = nil
             loading = false
+            approvals.update(fetched.pendingApprovals, autoOpen: !firstLoadDone)
+            firstLoadDone = true
             refreshQuotesIfNeeded()
             resumePendingIfNeeded()
         } catch let error as APIError {
@@ -383,6 +442,7 @@ final class ThreadModel {
         streamTask?.cancel()
         streamTask = nil
         llmTaskNodeId = nil
+        approvals.stop()
     }
 
     /// Completion, failure or cancellation of the tracked reply (map D §5.5–5.6).
@@ -420,6 +480,8 @@ final class ThreadModel {
                 streamTask = nil
                 refreshQuotesIfNeeded()
                 if isReadReply { reloadFinishedGleaning() }
+                // Its write tool calls were kept while it was written: ask now.
+                Task { [approvals] in await approvals.refresh(autoOpen: true) }
             } else {
                 openThread(completedId, awaitLLM: nil)
             }
@@ -452,17 +514,22 @@ final class ThreadModel {
 
     // MARK: Requesting replies (map D §5.2, §5.7)
 
-    func requestLLM(for parentId: Int) async throws -> Int {
+    /// `automatic`: the request auto-generate makes after an entry, which the
+    /// server refuses under a node other people can read (409 `auto_generate_off`).
+    /// LLM Response is the user's own request and does not say so.
+    func requestLLM(for parentId: Int, automatic: Bool = false) async throws -> Int {
         guard let app else { throw CancellationError() }
-        let answer: LLMRequestResponse = try await app.api.post(APIPath.nodeLLM(parentId), json: .object([
-            "model": .optional(selectedModel), "source_mode": .string("textmode"),
-        ]))
+        var body: [String: JSONValue] = ["model": .optional(selectedModel), "source_mode": .string("textmode")]
+        if automatic { body["auto_generate"] = .bool(true) }
+        let answer: LLMRequestResponse = try await app.api.post(APIPath.nodeLLM(parentId), json: .object(body))
         return answer.nodeId
     }
 
     func handleLLMRequestError(_ error: Error) {
         guard let app else { return }
         if SpendCap.isSpendCapError(error) { return }
+        // No automatic reply under a shared node: not an error, LLM Response stays.
+        if (error as? APIError)?.isAutoGenerateOff == true { return }
         let message = (error as? APIError)?.userMessage(fallback: "Error requesting LLM response.")
             ?? "Error requesting LLM response."
         app.toasts.show(message, duration: 8)
@@ -484,15 +551,24 @@ final class ThreadModel {
     }
 
     /// Fires a reply when auto-generate is on and the whole chain allows AI;
-    /// otherwise turns auto-generate off with the web's toast.
-    func tryAutoGenerate(for parentId: Int, chainAIUsages: [AIUsage?], autoGenerate: Binding<Bool>) async throws -> Int? {
+    /// otherwise turns auto-generate off with the web's toast. `entryPrivacy` is
+    /// the new entry's: a public or circles entry gets no automatic reply,
+    /// whatever the page it was written on, and neither does one the server
+    /// refuses as shared (nil: no reply, nothing shown).
+    func tryAutoGenerate(for parentId: Int, chainAIUsages: [AIUsage?], autoGenerate: Binding<Bool>,
+                         entryPrivacy: PrivacyLevel? = nil) async throws -> Int? {
         guard autoGenerateActive(autoGenerate.wrappedValue) else { return nil }
+        if entryPrivacy.isSharedWithOthers { return nil }
         guard chainAIUsages.allSatisfy({ $0?.allowsAI == true }) else {
             autoGenerate.wrappedValue = false
             app?.toasts.show("Turning off auto-generate. AI usage on some nodes is turned off.", duration: 8)
             return nil
         }
-        return try await requestLLM(for: parentId)
+        do {
+            return try await requestLLM(for: parentId, automatic: true)
+        } catch let error as APIError where error.isAutoGenerateOff {
+            return nil
+        }
     }
 
     var chainAIUsages: [AIUsage?] {
@@ -506,7 +582,8 @@ final class ThreadModel {
     func inlineReplySent(_ result: NodeFormResult, autoGenerate: Binding<Bool>) async {
         guard app != nil, let newId = result.tipId ?? result.id else { return }
         do {
-            if let llmId = try await tryAutoGenerate(for: newId, chainAIUsages: chainAIUsages, autoGenerate: autoGenerate) {
+            if let llmId = try await tryAutoGenerate(for: newId, chainAIUsages: chainAIUsages, autoGenerate: autoGenerate,
+                                                     entryPrivacy: result.privacy) {
                 openThread(newId, awaitLLM: llmId)
             } else {
                 openThread(newId, awaitLLM: nil)
@@ -520,7 +597,7 @@ final class ThreadModel {
     /// A reply typed under a read reply is a Text-mode message (#323).
     func submitReadReply(_ submission: NodeFormSubmission, autoGenerate: Bool) async throws -> NodeFormResult {
         guard let app else { throw CancellationError() }
-        let auto = autoGenerateActive(autoGenerate)
+        let auto = autoGenerateActive(autoGenerate) && !submission.privacy.isSharedWithOthers
         if let sid = submission.streamingSessionId {
             let answer: SaveAsNodeResponse = try await app.api.post(APIPath.streamingSaveAsNode(sid), json: .object([
                 "content": .string(submission.content), "agentic": .bool(true), "auto_generate": .bool(auto),
@@ -863,7 +940,7 @@ final class ThreadModel {
         guard let updated = self.node, !(updated.nodeType == .llm || updated.llmModel != nil) else { return }
         do {
             if let llmId = try await tryAutoGenerate(for: updated.id, chainAIUsages: chainAIUsages,
-                                                     autoGenerate: autoGenerate) {
+                                                     autoGenerate: autoGenerate, entryPrivacy: updated.privacyLevel) {
                 openThread(llmId, awaitLLM: llmId)
             }
         } catch {

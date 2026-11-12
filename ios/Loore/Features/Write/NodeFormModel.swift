@@ -15,6 +15,9 @@ struct NodeFormConfig {
     }
 
     var parentId: Int?
+    /// The parent's privacy as the host shows it now (a reply). The form follows
+    /// it when it changes (an edit of the parent above the form).
+    var parentPrivacy: PrivacyLevel?
     var edit: Edit?
     var hidePowerFeatures = false
     var hideAudioUpload = false
@@ -26,6 +29,9 @@ struct NodeFormConfig {
     var aiUsageFromGlobalDefault = false
     /// A page-specific submit (Text mode, read replies). Skips `POST /nodes/`.
     var submitOverride: ((NodeFormSubmission) async throws -> NodeFormResult)?
+    /// A form in a sheet: closes the sheet before another node's page opens from
+    /// the form (a quoted entry in the "Not public yet" dialog).
+    var leaveForNode: (() -> Void)?
 
     var isEdit: Bool { edit != nil }
 }
@@ -54,6 +60,9 @@ struct NodeFormResult {
     var descendantsUpdated = 0
     var spendCapped = false
     var llmError: String?
+    /// The saved entry's privacy (the answer's, else what was sent): a public or
+    /// circles entry gets no automatic reply from the host.
+    var privacy: PrivacyLevel?
 }
 
 /// An audio file picked for upload (craft mode).
@@ -112,15 +121,20 @@ final class NodeFormModel {
     var isRecording = false
     private(set) var isRecoveringAudio = false
 
-    // Dialog chain (TTS → apply-to-replies → split → public reply). One
+    // Dialog chain (TTS → apply-to-replies → split → public reply), and the
+    // server's "quotes an entry that isn't public" refusal after a send. One
     // presenter shows whichever is current, so a chain swaps the card in place
     // (two full-screen covers cannot dismiss and present at once).
-    enum Dialog: Equatable { case tts, scope, split, publicReply }
+    enum Dialog: Equatable { case tts, scope, split, publicReply, quotesNotPublic(QuotesNotPublic) }
     var dialog: Dialog?
     var showTtsDialog: Bool { dialog == .tts }
     var showScopeDialog: Bool { dialog == .scope }
     var showSplitDialog: Bool { dialog == .split }
     var showPublicReplyDialog: Bool { dialog == .publicReply }
+    var quotesRefusal: QuotesNotPublic? {
+        if case .quotesNotPublic(let refusal)? = dialog { return refusal }
+        return nil
+    }
     private(set) var pendingPaste: String?
     @ObservationIgnored private var splitAcknowledged = false
     @ObservationIgnored private var pendingRegenerateTts: Bool?
@@ -170,10 +184,12 @@ final class NodeFormModel {
         guard !started else { return }
         started = true
         async let draftLoad: Void = drafts.load()
+        if config.parentId != nil, !config.isEdit, let known = config.parentPrivacy {
+            parentPrivacyChanged(known)
+        }
         if let parentId = config.parentId, !config.isEdit {
             if let parent = try? await app.api.nodeDetail(parentId) {
-                parentPrivacy = parent.privacyLevel
-                privacy = parent.privacyLevel
+                parentPrivacyChanged(parent.privacyLevel)
                 aiUsage = parent.replyAIUsage ?? parent.aiUsage
             }
         }
@@ -185,6 +201,16 @@ final class NodeFormModel {
         if let draft = drafts.draft, let sid = draft.sessionId, draft.hasStoredChunks {
             await recoverAudio(sessionId: sid)
         }
+    }
+
+    /// The parent's privacy now (on load, and after it was edited while the form
+    /// was open): the reply takes it. A public parent pins the reply to public
+    /// (and the public-reply question comes back); a private one returns it to
+    /// private. The text typed so far stays.
+    func parentPrivacyChanged(_ level: PrivacyLevel) {
+        guard config.parentId != nil, !config.isEdit else { return }
+        parentPrivacy = level
+        privacy = level
     }
 
     /// The form left the screen: save the pending draft now (the debounce and the
@@ -203,6 +229,14 @@ final class NodeFormModel {
     }
 
     var lockPrivacy: Bool { !config.isEdit && parentPrivacy == .public }
+
+    /// A public or circles entry gets no automatic reply (Peter, 2026-11-12): the
+    /// Auto-generate toggle shows off and can't be turned on. The stored
+    /// preference stays as the user set it, for private entries.
+    var autoGenerateLocked: Bool { effectivePrivacy.isSharedWithOthers }
+
+    /// What a send does about the automatic reply.
+    var autoGenerateOn: Bool { useAutoGenerate && !autoGenerateLocked }
 
     var showsAgenticToggles: Bool {
         config.allowAgenticPrompt && !config.isEdit && config.parentId == nil && !config.hidePowerFeatures
@@ -338,6 +372,23 @@ final class NodeFormModel {
         pendingPaste = nil
     }
 
+    /// A quoted entry tapped in "Not public yet": its page opens (once its node is
+    /// in, NodePrefetch). A form in a sheet closes the sheet first, after the
+    /// dialog's cover has gone; the text stays in the server draft.
+    func openQuoted(_ id: Int) {
+        dialog = nil
+        let app = app
+        guard let leave = config.leaveForNode else {
+            NodePrefetch.shared.openThread(id, app: app)
+            return
+        }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            leave()
+            NodePrefetch.shared.openThread(id, app: app)
+        }
+    }
+
     // MARK: Submit (map D §4.5)
 
     func submit(regenerateTts: Bool? = nil, splitConfirmed: Bool = false, publicConfirmed: Bool = false,
@@ -388,7 +439,10 @@ final class NodeFormModel {
             loading = false
             isUploading = false
             uploadProgress = 0
-            if uploadedFile != nil, SpendCap.isSpendCapError(error) {
+            if let refusal = QuotesNotPublic(error) {
+                // Nothing was saved: the form keeps its text and settings.
+                dialog = .quotesNotPublic(refusal)
+            } else if uploadedFile != nil, SpendCap.isSpendCapError(error) {
                 app.toasts.show(SpendCap.toastMessage(.upload), duration: 8)
             } else if let apiError = error as? APIError {
                 self.error = apiError.userMessage(fallback: "Error submitting form.")
@@ -422,7 +476,7 @@ final class NodeFormModel {
             && config.parentId == nil && aiUsage != .off {
             let body: JSONValue = .object([
                 "content": .string(content), "privacy_level": .string(privacyLevel.rawString),
-                "ai_usage": .string(aiUsage.rawString), "auto_generate": .bool(useAutoGenerate),
+                "ai_usage": .string(aiUsage.rawString), "auto_generate": .bool(autoGenerateOn),
             ])
             let answer: TextmodeStartResponse = try await api.post(APIPath.textmodeStart, json: body)
             await clearAfterSend()
@@ -438,7 +492,7 @@ final class NodeFormModel {
             let topLevelWithAI = config.parentId == nil && aiUsage != .off
             var body: [String: JSONValue] = ["content": .string(content)]
             if topLevelWithAI && useAgenticPrompt { body["agentic"] = .bool(true) }
-            if topLevelWithAI && useAutoGenerate && config.allowAgenticPrompt { body["auto_generate"] = .bool(true) }
+            if topLevelWithAI && autoGenerateOn && config.allowAgenticPrompt { body["auto_generate"] = .bool(true) }
             let answer: SaveAsNodeResponse = try await api.post(APIPath.streamingSaveAsNode(sid), json: .object(body))
             await clearAfterSend()
             streamingSessionId = nil
@@ -459,12 +513,12 @@ final class NodeFormModel {
             let answer: NodeUpdateResponse = try await api.put(APIPath.node(edit.nodeId), json: .object(body))
             await clearAfterSend()
             return NodeFormResult(id: answer.node.id, editedNode: answer.node,
-                                  descendantsUpdated: answer.descendantsUpdated)
+                                  descendantsUpdated: answer.descendantsUpdated, privacy: answer.node.privacyLevel)
         }
 
         if let file = uploadedFile {
             let nodeId = try await upload(file, privacy: privacyLevel)
-            try await awaitTranscription(nodeId: nodeId)
+            try await awaitTranscription(nodeId: nodeId, privacy: privacyLevel)
             return nil
         }
 
@@ -479,14 +533,18 @@ final class NodeFormModel {
 
         // Auto-generate without Agentic Reply (Write New Entry only). A long entry is
         // saved as a chain of parts: the reply goes under the last one so it reads all of it.
-        if useAutoGenerate && config.allowAgenticPrompt && config.parentId == nil && aiUsage != .off
-            && !useAgenticPrompt {
+        // The request says it is automatic: the server refuses it (409
+        // `auto_generate_off`) under a shared entry, and a refusal just means no reply.
+        let entryPrivacy = created.privacyLevel ?? privacyLevel
+        if autoGenerateOn && !entryPrivacy.isSharedWithOthers && config.allowAgenticPrompt && config.parentId == nil
+            && aiUsage != .off && !useAgenticPrompt {
             if let reply: LLMRequestResponse = try? await api.post(
-                APIPath.nodeLLM(created.tipId ?? created.id), json: .object(["source_mode": .string("textmode")])) {
-                return NodeFormResult(id: reply.nodeId, awaitLLM: reply.nodeId, tipId: created.tipId)
+                APIPath.nodeLLM(created.tipId ?? created.id),
+                json: .object(["source_mode": .string("textmode"), "auto_generate": .bool(true)])) {
+                return NodeFormResult(id: reply.nodeId, awaitLLM: reply.nodeId, tipId: created.tipId, privacy: entryPrivacy)
             }
         }
-        return NodeFormResult(id: created.id, tipId: created.tipId)
+        return NodeFormResult(id: created.id, tipId: created.tipId, privacy: entryPrivacy)
     }
 
     private func clearAfterSend() async {
@@ -569,7 +627,7 @@ final class NodeFormModel {
     }
 
     /// Polls `transcription-status` every 2 s until the node is transcribed.
-    private func awaitTranscription(nodeId: Int) async throws {
+    private func awaitTranscription(nodeId: Int, privacy: PrivacyLevel) async throws {
         transcriptionStatus = .pending
         let outcome = await Poller.runStatus(options: .init(interval: 2),
             fetch: { [app] in try await app.api.get(APIPath.transcriptionStatus(nodeId), poll: true, as: TranscriptionStatus.self) },
@@ -582,7 +640,7 @@ final class NodeFormModel {
         if case .finished(let status) = outcome, status.status == .completed {
             await clearAfterSend()
             uploadedFile = nil
-            onSuccess(NodeFormResult(id: status.nodeId ?? nodeId, tipId: status.tipId))
+            onSuccess(NodeFormResult(id: status.nodeId ?? nodeId, tipId: status.tipId, privacy: privacy))
         } else if case .finished(let status) = outcome {
             error = status.error ?? "Transcription failed"
         }

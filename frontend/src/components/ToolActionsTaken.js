@@ -32,8 +32,23 @@ export const sharedToolLabel = (tc) => {
 
 const KNOWN_TOOLS = ['propose_todo', 'propose_github_issue', 'propose_feedback', 'propose_share', 'apply_todo_changes', 'apply_github_issue', 'apply_feedback', 'apply_share', 'update_ai_preferences', 'update_artifact', 'read_artifact', 'read_todo', 'semantic_search', 'read_full'];
 
+// A call that waited for the user's approval (Peter, 2026-11-12): what
+// it would do, and that it waits or was declined. Approved, it reads as
+// the action it ran.
+const HELD_LABELS = {
+  apply_todo_changes: () => 'Todo changes',
+  apply_github_issue: () => 'Issue creation',
+  apply_feedback: () => 'Feedback',
+  apply_share: () => 'Share draft',
+  update_artifact: (tc) => (tc.kind ? `Change to ${tc.kind}` : 'Artifact change'),
+};
+export const isHeld = (tc) => ['pending_approval', 'rejected'].includes(tc?.status);
+const heldLabel = (tc) => `${(HELD_LABELS[tc.name] || (() => tc.name))(tc)} — ${
+  tc.status === 'rejected' ? 'declined' : 'waiting for your approval'}`;
+
 // The owner's line: the action with its details and links.
 function OwnerToolLabel({ tc }) {
+  if (isHeld(tc)) return <>{heldLabel(tc)}</>;
   return (
     <>
       {tc.name === 'propose_todo' && (
@@ -178,7 +193,7 @@ export default function ToolActionsTaken({ toolCallsMeta, detailed, expanded, on
               background: 'var(--bg-surface)', borderRadius: '6px',
               border: '1px solid var(--border)',
             }}>
-              {tc.status === 'success' ? '✓' : '✗'}{' '}
+              {tc.status === 'success' ? '✓' : isHeld(tc) ? '…' : '✗'}{' '}
               {detailed ? <OwnerToolLabel tc={tc} /> : sharedToolLabel(tc)}
               {detailed && tc.name === 'update_artifact' && tc.status === 'success'
                 && tc.artifact_id && <ArtifactWriteChanges tc={tc} />}

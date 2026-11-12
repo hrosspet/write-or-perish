@@ -114,6 +114,53 @@ struct PublicReplyDialog: View {
     }
 }
 
+/// "Not public yet" (web `QuotesNotPublicDialog`): something about to be public
+/// quotes an entry that isn't, and nothing was saved. One row per quoted entry;
+/// an entry the user can open is tappable. OK returns to the form.
+struct QuotesNotPublicDialog: View {
+    let refusal: QuotesNotPublic
+    let onOpen: (Int) -> Void
+    let onClose: () -> Void
+
+    var body: some View {
+        LooreDialogCard(title: "Not public yet") {
+            DialogBodyText(text: refusal.message)
+            VStack(spacing: 8) {
+                ForEach(refusal.quoted) { quoted in
+                    if quoted.canOpen {
+                        Button { onOpen(quoted.id) } label: { row(quoted) }
+                            .buttonStyle(.plain)
+                            .accessibilityHint("Opens the quoted entry")
+                            .accessibilityIdentifier("quotesNotPublic.open.\(quoted.id)")
+                    } else {
+                        row(quoted)
+                    }
+                }
+            }
+            HStack {
+                Spacer()
+                Button("OK", action: onClose)
+                    .buttonStyle(.looreOutline)
+                    .accessibilityIdentifier("quotesNotPublic.ok")
+            }
+        }
+    }
+
+    private func row(_ quoted: QuotesNotPublic.Quoted) -> some View {
+        Text(quoted.rowText)
+            .font(LooreFont.sans(13.8, .light))
+            .foregroundStyle(LooreColor.textSecondary)
+            .lineSpacing(3)
+            .multilineTextAlignment(.leading)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 10)
+            .padding(.horizontal, 12)
+            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(LooreColor.border))
+            .contentShape(Rectangle())
+    }
+}
+
 /// The delete dialog's variants (web `DeleteConfirmDialog`).
 struct DeleteConfirmDialog: View {
     enum Mode: Equatable {

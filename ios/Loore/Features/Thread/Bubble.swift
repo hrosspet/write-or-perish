@@ -76,6 +76,9 @@ struct BubbleData: Identifiable, Equatable {
     var promptKey: String?
     var hasOriginalAudio = false
     var isPublic = false
+    /// "Only you see this reply" under the footer (the owner's private AI reply
+    /// under a node others can read).
+    var privateReplyNote = false
 
     var text: String? { (content ?? preview).map(BubblePreview.stripQuoteMarkers) }
     var isPlaceholder: Bool { deleted || inaccessible }
@@ -170,6 +173,9 @@ struct BubbleView: View {
             if !data.inaccessible {
                 footerRow
             }
+            if data.privateReplyNote && !data.isPlaceholder {
+                PrivateReplyNote()
+            }
         }
         .padding(.vertical, LooreSpacing.cardVertical)
         .padding(.horizontal, LooreSpacing.cardHorizontal)
@@ -252,6 +258,25 @@ struct BubbleView: View {
             }
             .padding(.top, 12)
         }
+    }
+}
+
+/// A lock and "Only you see this reply": a private AI reply under a node others
+/// can read, shown to its owner only (2026-11-12). Footer type, muted; the lock
+/// of the Private privacy option, drawn as the footer's outline symbols are.
+struct PrivateReplyNote: View {
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "lock")
+                .font(.system(size: 10.5, weight: .regular))
+                .accessibilityHidden(true)
+            Text(SharedThread.privateReplyNote)
+        }
+        .font(LooreFont.meta)
+        .foregroundStyle(LooreColor.textMuted)
+        .padding(.top, 8)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("thread.privateReplyNote")
     }
 }
 

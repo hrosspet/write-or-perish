@@ -47,10 +47,15 @@ def apply_settings_to_descendants(root, user_id, *, privacy_level=None,
         # shape, so the same batching applies to a cascade that raises
         # usage: unwrap first, then the checks below are cache hits.
         prefetch_deks(n.content for n in editable if n.ai_usage != ai_usage)
+    from backend.utils.llm_nodes import reply_in_progress
     changed = []
     for n in editable:
         touched = False
-        if privacy_level is not None and n.privacy_level != privacy_level:
+        # An AI reply still being written keeps its privacy: its owner
+        # shares it once it is written (Peter, 2026-11-12).
+        if (privacy_level is not None and n.privacy_level != privacy_level
+                and not (privacy_level != "private"
+                         and reply_in_progress(n))):
             n.set_privacy_level(privacy_level)
             # Same rule as the focal node: a private node can't stay pinned.
             if privacy_level == "private" and n.pinned_at is not None:
