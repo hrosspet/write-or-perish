@@ -1624,6 +1624,13 @@ def get_node(node_id):
         "glean_thread": is_glean_root(
             ancestor_nodes[-1] if ancestor_nodes else node),
     }
+    # Write tool calls of the viewer's replies in this thread that wait
+    # for their approval (utils/tool_approvals, Peter 2026-11-12): one
+    # indexed query over the nodes already in hand.
+    from backend.utils.tool_approvals import pending_for_user
+    pending = pending_for_user(current_user.id, [n.id for n in render_set])
+    if pending:
+        node_data["pending_approvals"] = pending
     # A long entry is saved as a chain of parts, and its reply goes under
     # the last one: on an earlier part, the owner's page looks there for
     # a reply. The subtree is prefetched above, so this costs no query.

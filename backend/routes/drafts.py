@@ -64,7 +64,9 @@ def _session_dir(user_id, session_id):
 # must therefore exclude these labels, or composing a text reply under a
 # proposal node would hijack and then delete the pending proposal draft
 # (breaking "yes, send it" / "apply those changes" text confirmation). #158.
-_PROPOSAL_DRAFT_LABELS = tuple(PROPOSAL_TOOLS)
+# A write tool call kept for the user's approval (utils/tool_approvals)
+# is keyed on its reply node the same way.
+_PROPOSAL_DRAFT_LABELS = tuple(PROPOSAL_TOOLS) + ("tool_pending",)
 
 # The labels a recording may carry, as the web and iPhone recorders send
 # them: "Voice" (voice mode) or none (dictation). "Reflect" and "Orient"

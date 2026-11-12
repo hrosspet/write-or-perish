@@ -1,0 +1,281 @@
+"""Write tool calls that wait for the user's approval (Peter, 2026-11-12).
+
+"direct writing to artifacts should be in the case when other user's text
+is in the context, intercepted and via a dialog raised to the user. It
+should [show] what tool call is proposed, and show the proposed diff if
+it's about changing an artifact. The user would have to approve every
+single tool call in such a thread. If more the one such possibly
+destructive tool call is made in a single node, all of them should be
+raised inside one dialog"
+
+When a reply's history holds text the requester did not write
+(utils/foreign_text.history_by_others), a call to a tool that writes the
+requester's data directly is not run. It is kept as a Draft row of the
+reply node it was made in (label TOOL_PENDING_LABEL, its full input
+encrypted in the row's content), and the call's tool_calls_meta entry
+says it waits ("pending_approval"), so the model answers knowing nothing
+was done. The pages show every waiting call of one reply in one dialog;
+the user approves or rejects each. Approving runs the call then, through
+the same code the reply would have run (llm_completion._execute_tool_calls,
+with its version check), and rejecting changes nothing. Either way the
+Draft row goes, and the entry records the outcome, which the reply's
+later turns are told once.
+
+A todo proposal ("### New Tasks") is not a tool call: the user applies it
+with its own button, as before. apply_todo_changes and the other apply
+tools are the voice path that applies a proposal without that button, so
+they wait here like update_artifact.
+"""
+import json
+from datetime import datetime
+
+from backend.extensions import db
+from backend.models import Draft, Node, UserArtifact
+
+TOOL_PENDING_LABEL = "tool_pending"
+
+# Every tool that changes the user's data, or acts for them, when it runs.
+DIRECT_WRITE_TOOLS = (
+    "update_artifact",
+    "apply_todo_changes",
+    "apply_github_issue",
+    "apply_feedback",
+    "apply_share",
+)
+
+PENDING_STATUS = "pending_approval"
+REJECTED_STATUS = "rejected"
+
+# What each call does, as the dialog names it.
+_ACTION_LABELS = {
+    "apply_todo_changes": "Apply the proposed changes to your todo list",
+    "apply_github_issue": "File the proposed GitHub issue",
+    "apply_feedback": "Send the proposed feedback to the Loore team",
+    "apply_share": "Save the proposed share as a private draft",
+}
+
+# The proposal draft each apply tool acts on (its label).
+_PROPOSAL_LABELS = {
+    "apply_todo_changes": "todo_pending",
+    "apply_github_issue": "github_issue_pending",
+    "apply_feedback": "feedback_pending",
+    "apply_share": "share_pending",
+}
+
+
+class ApprovalHold:
+    """The calls of one reply that wait for approval: present (truthy)
+    when the reply's history holds text the requester did not write.
+    *kinds* is that text's kinds (foreign_text), *turn_node_id* the
+    reply's first node, which groups its calls into one dialog."""
+
+    def __init__(self, kinds, turn_node_id):
+        self.kinds = sorted(kinds or ())
+        self.turn_node_id = turn_node_id
+
+    def __bool__(self):
+        return bool(self.kinds)
+
+    def hold(self, name, inp, node, user_id, previous_artifact_id=None,
+             proposal_draft_id=None, kind=None):
+        """Keep the call *name*(*inp*) of *node* for approval. Returns the
+        fields its tool_calls_meta entry takes."""
+        draft = Draft(user_id=user_id, parent_id=node.id,
+                      label=TOOL_PENDING_LABEL)
+        draft.set_content(json.dumps({
+            "tool": name,
+            "input": inp,
+            "turn_node_id": self.turn_node_id,
+            "kinds": self.kinds,
+            "previous_artifact_id": previous_artifact_id,
+            "proposal_draft_id": proposal_draft_id,
+            "kind": kind,
+        }))
+        db.session.add(draft)
+        db.session.flush()
+        fields = {"status": PENDING_STATUS, "pending_id": draft.id}
+        if kind is not None:
+            fields["kind"] = kind
+        return fields
+
+
+def _payload(draft):
+    try:
+        data = json.loads(draft.get_content() or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def pending_drafts(user_id, node_ids):
+    """The user's waiting calls made in the nodes *node_ids*, oldest
+    first. One indexed query."""
+    ids = [i for i in set(node_ids or ()) if i is not None]
+    if not ids:
+        return []
+    rows = []
+    for start in range(0, len(ids), 900):
+        rows.extend(Draft.query.filter(
+            Draft.user_id == user_id,
+            Draft.label == TOOL_PENDING_LABEL,
+            Draft.parent_id.in_(ids[start:start + 900])).all())
+    return sorted(rows, key=lambda d: d.id)
+
+
+def _artifact_preview(payload, user_id):
+    """The dialog's view of an update_artifact call: the artifact, the
+    version the call was based on and the latest one, and the line diff
+    from the version it was based on to the text it would save."""
+    from backend.utils.artifact_versions import (
+        line_diff, stored_version, version_number,
+    )
+    from backend.tasks.llm_completion import _resolve_artifact_write
+    inp = payload.get("input") or {}
+    kind = payload.get("kind") or (inp.get("kind") or "").strip().lower()
+    previous = None
+    if payload.get("previous_artifact_id") is not None:
+        previous = stored_version(payload["previous_artifact_id"], user_id)
+    latest = UserArtifact.latest_for(user_id, kind)
+    title = ((latest.title if latest else None)
+             or (previous.title if previous else None)
+             or (inp.get("title") or "").strip()
+             or UserArtifact.DEFAULT_KINDS.get(kind)
+             or kind.replace("-", " ").title())
+    out = {
+        "kind": kind,
+        "artifact_title": title,
+        "created": payload.get("previous_artifact_id") is None,
+        "base_version": version_number(previous) if previous else None,
+        "current_version": version_number(latest) if latest else None,
+        # The artifact changed since the call was made: approving it
+        # saves nothing (the write's version check).
+        "stale": ((latest.id if latest else None)
+                  != payload.get("previous_artifact_id")),
+    }
+    if payload.get("previous_artifact_id") is not None and previous is None:
+        out["lines"] = []
+        return out
+    new_text, err = _resolve_artifact_write(inp, previous)
+    if err:
+        out["lines"] = []
+        out["error"] = err
+    else:
+        out["lines"] = line_diff(
+            (previous.get_content() or "") if previous is not None else None,
+            new_text or "")
+    return out
+
+
+def _proposal_preview(payload, user_id):
+    """The dialog's view of an apply call: the text of the proposal it
+    would apply, from the reply that proposed it."""
+    draft_id = payload.get("proposal_draft_id")
+    proposal = db.session.get(Draft, draft_id) if draft_id else None
+    if (proposal is None or proposal.user_id != user_id
+            or proposal.label != _PROPOSAL_LABELS.get(payload.get("tool"))):
+        # Applied or replaced since: approving finds nothing to apply.
+        return {"stale": True}
+    origin = db.session.get(Node, proposal.parent_id)
+    text = origin.get_content() if origin is not None else ""
+    return {"stale": False, "proposal_node_id": proposal.parent_id,
+            "proposal_text": text}
+
+
+def serialize_pending(draft, user_id):
+    """One waiting call as the dialog shows it."""
+    payload = _payload(draft)
+    name = payload.get("tool")
+    item = {
+        "id": draft.id,
+        "node_id": draft.parent_id,
+        "turn_node_id": payload.get("turn_node_id") or draft.parent_id,
+        "tool": name,
+        "kinds": payload.get("kinds") or [],
+        "created_at": (draft.created_at.isoformat() + "Z"
+                       if draft.created_at else None),
+    }
+    if name == "update_artifact":
+        item.update(_artifact_preview(payload, user_id))
+        verb = "Create" if item["created"] else "Change"
+        item["title"] = f"{verb} your {item['artifact_title']}"
+    else:
+        item.update(_proposal_preview(payload, user_id))
+        item["title"] = _ACTION_LABELS.get(name, name)
+    return item
+
+
+def pending_for_user(user_id, node_ids):
+    """Every waiting call of the user in *node_ids*, serialized, whose
+    reply node is alive."""
+    out = []
+    for draft in pending_drafts(user_id, node_ids):
+        node = db.session.get(Node, draft.parent_id)
+        if node is None or node.deleted_at is not None:
+            continue
+        out.append(serialize_pending(draft, user_id))
+    return out
+
+
+def _chain_above(node):
+    """*node*'s ancestors, root first: the history the reply had."""
+    chain = []
+    current = node.parent
+    seen = set()
+    while current is not None and current.id not in seen:
+        seen.add(current.id)
+        chain.insert(0, current)
+        current = current.parent
+    return chain
+
+
+def _record_outcome(node, pending_id, fields):
+    """Replace the waiting call's tool_calls_meta entry with *fields* (the
+    outcome). Marked unreported, so the reply's next turn is told once."""
+    try:
+        meta = json.loads(node.tool_calls_meta or "[]")
+    except (json.JSONDecodeError, TypeError):
+        meta = []
+    for i, entry in enumerate(meta):
+        if isinstance(entry, dict) and entry.get("pending_id") == pending_id:
+            meta[i] = {**fields, "pending_id": pending_id,
+                       "status_reported": False}
+            break
+    else:
+        meta.append({**fields, "pending_id": pending_id,
+                     "status_reported": False})
+    node.tool_calls_meta = json.dumps(meta)
+
+
+def decide(draft, user_id, approve):
+    """Approve (run) or reject the waiting call *draft*. Returns
+    (outcome, result): outcome "approved", "failed" (it ran and failed,
+    e.g. the artifact changed since: nothing was saved) or "rejected";
+    result the call's tool_calls_meta entry. The caller commits."""
+    from backend.tasks.llm_completion import (
+        _execute_tool_calls, _redact_tool_input,
+    )
+    from backend.utils.client_platform import CLIENT_MARKER
+    from backend.utils.tool_meta import get_tool_meta_entry
+    payload = _payload(draft)
+    name = payload.get("tool")
+    inp = payload.get("input") or {}
+    node = db.session.get(Node, draft.parent_id)
+    if not approve or node is None:
+        result = {"name": name, "input": _redact_tool_input(inp),
+                  "status": REJECTED_STATUS, "approval": "rejected"}
+        if payload.get("kind"):
+            result["kind"] = payload["kind"]
+        outcome = "rejected"
+    else:
+        client = (get_tool_meta_entry(node, CLIENT_MARKER) or {}).get(
+            "client")
+        result = _execute_tool_calls(
+            [{"name": name, "input": inp}], node, _chain_above(node),
+            user_id, client=client)[0]
+        outcome = "approved" if result.get("status") == "success" else "failed"
+        result["approval"] = outcome
+    result["decided_at"] = datetime.utcnow().isoformat() + "Z"
+    if node is not None:
+        _record_outcome(node, draft.id, result)
+    db.session.delete(draft)
+    return outcome, result
