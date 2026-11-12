@@ -112,9 +112,10 @@ protocol VoiceAudio: AnyObject {
     func startCue()
     func stopCue()
     func playErrorSound()
-    /// Says `text` aloud with the device's own speech on an active session (no
-    /// request; #648: a thread too long for another reply). Returns when it is said.
-    func speak(_ text: String) async
+    /// Says a refused turn's sentence aloud on an active session (#651, #648): its
+    /// clip in the replies' voice, else the device's own speech. Returns when it
+    /// is said.
+    func speak(_ refusal: SpokenRefusal) async
     /// Stops that sentence at once (a new recording starts); `speak` returns.
     func stopSpeaking()
     func playInterruptionAlert()

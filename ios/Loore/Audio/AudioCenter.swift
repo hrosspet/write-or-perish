@@ -16,6 +16,9 @@ final class AudioCenter {
     @ObservationIgnored let session = AudioSessionController()
     @ObservationIgnored let nowPlaying = NowPlayingController()
     @ObservationIgnored let liveActivity = VoiceLiveActivity()
+    /// A refused Voice turn's sentence (#651): its clip, else the device's speech.
+    @ObservationIgnored let refusalVoice = RefusalVoice()
+    @ObservationIgnored private let refusalClips = ClipSpeaker()
 
     /// The Voice screen is on screen (the mini-player hides there).
     var voiceScreenVisible = false
@@ -69,6 +72,11 @@ final class AudioCenter {
         }
         session.onEvent = { [weak self] event in self?.handleSessionEvent(event) }
         liveActivity.onEnded = { [weak self] in self?.refreshNowPlaying() }
+        refusalVoice.fetch = { [weak self] refusal in await self?.refusalClip(refusal) }
+        refusalVoice.playClip = { [refusalClips] data in await refusalClips.play(data) }
+        refusalVoice.stopClip = { [refusalClips] in refusalClips.stop() }
+        refusalVoice.sayOnDevice = { [sounds] text in await sounds.speak(text) }
+        refusalVoice.stopDevice = { [sounds] in sounds.stopSpeaking() }
         VoiceActivityCommands.handler = { [weak self] command in await self?.runLockScreenCommand(command) }
         observers.append(NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification,
                                                                 object: nil, queue: .main) { [weak self] _ in
@@ -451,7 +459,11 @@ extension AudioCenter {
         if app?.spendCapped == true {
             app?.notifySpendBlocked()
             _ = app?.toasts.show(SpendCap.toastMessage(.record), duration: 8)
-            return refuseLockScreenRecord(SpendCap.toastMessage(.record))
+            let body = refuseLockScreenRecord(SpendCap.toastMessage(.record))
+            // ...and said aloud (#651); the intent waits until it has been said,
+            // as the app may be suspended once it returns.
+            await voice.announceUsageLimit()
+            return body
         }
         // Checked before Continue stops the reply (the Voice screen disables it offline).
         guard NetworkStatus.shared.isOnline else {
@@ -468,7 +480,11 @@ extension AudioCenter {
         if voice.approvalWaiting { await voice.refreshApprovalsIfWaiting() }
         switch voice.newTurnRefusalReason {
         case .approvalWaiting?:
-            return refuseLockScreenRecord(voice.newTurnRefusal ?? LocalNotice.recordFailed.body)
+            let body = refuseLockScreenRecord(voice.newTurnRefusal ?? LocalNotice.recordFailed.body)
+            // Said aloud too when nothing plays (#651); a reply that plays goes on,
+            // and its own announcement says it at its end.
+            await voice.announceApprovalWaiting()
+            return body
         case .threadTooLong(let block)? where voice.phase == .ready || voice.phase == .playback:
             LocalNotifier.post(.recordFailed, body: block.body)
             await voice.announceBlock()
@@ -498,8 +514,8 @@ extension AudioCenter {
             // in the app) and the thread's length (the block says it, aloud).
             let reason = voice.newTurnRefusal ?? lastVoiceToast.flatMap { $0.at >= tapped ? $0.text : nil }
             let body = refuseLockScreenRecord(reason ?? LocalNotice.recordFailed.body)
-            // A start refused for the thread's length is being said: keep the app
-            // running until it has been (#648).
+            // A refused start is being said (#648, #651): keep the app running
+            // until it has been.
             await voice.untilSpoken()
             return body
         }
@@ -553,13 +569,38 @@ extension AudioCenter: VoiceAudio {
     func stopCue() { sounds.stopCue() }
     func playErrorSound() { sounds.playError() }
 
-    func speak(_ text: String) async {
+    func speak(_ refusal: SpokenRefusal) async {
         // Recording's session stays as it is (it plays too); otherwise playback.
         session.activateForPlayback()
-        await sounds.speak(text)
+        // The clip may have to be fetched before anything plays: a locked phone
+        // keeps the app running for that (as for a draft's save, #651).
+        let application = UIApplication.shared
+        final class Token { var id = UIBackgroundTaskIdentifier.invalid }
+        let token = Token()
+        token.id = application.beginBackgroundTask(withName: "loore.refusal") {
+            application.endBackgroundTask(token.id)
+            token.id = .invalid
+        }
+        await refusalVoice.say(refusal)
+        if token.id != .invalid {
+            application.endBackgroundTask(token.id)
+            token.id = .invalid
+        }
     }
 
-    func stopSpeaking() { sounds.stopSpeaking() }
+    func stopSpeaking() { refusalVoice.stop() }
+
+    /// The refusal's clip (`GET /api/voice/refusal/<code>.mp3`), or nil: offline,
+    /// refused (an account without Voice mode), not made (503), or slower than
+    /// `SpokenRefusal.clipWait`.
+    func refusalClip(_ refusal: SpokenRefusal) async -> Data? {
+        guard let api = app?.api else { return nil }
+        var request = APIRequest(.get, refusal.clipPath)
+        request.timeout = SpokenRefusal.clipWait
+        guard let (data, http) = try? await api.data(for: request), http.statusCode == 200,
+              !data.isEmpty else { return nil }
+        return data
+    }
 
     func playInterruptionAlert() { sounds.playInterruptionAlert() }
     func playLongRecordingWarning() { sounds.playLongRecordingWarning() }

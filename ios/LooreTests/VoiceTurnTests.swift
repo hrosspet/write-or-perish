@@ -245,12 +245,13 @@ final class FakeAudio: VoiceAudio {
     func stopCue() { if cueOn { events.append("cue.stop") }; cueOn = false }
     func playErrorSound() { events.append("sound.error") }
     /// Set: a sentence is "said" until `finishSpeech()` (or a new sentence, or
-    /// `stopSpeaking()`), as `SentenceSpeaker` holds its caller. Unset: at once.
+    /// `stopSpeaking()`), as `RefusalVoice` holds its caller. Unset: at once.
+    /// Logged as its words (the clip's and the device's).
     var holdSpeech = false
     private var speechWaiter: CheckedContinuation<Void, Never>?
     var isSpeaking: Bool { speechWaiter != nil }
-    func speak(_ text: String) async {
-        events.append("speak: \(text)")
+    func speak(_ refusal: SpokenRefusal) async {
+        events.append("speak: \(refusal.text)")
         guard holdSpeech else { return }
         // Like SentenceSpeaker: a new sentence ends the one being said.
         finishSpeech()
@@ -904,9 +905,10 @@ final class VoiceTurnTests: XCTestCase {
         XCTAssertFalse(backend.log.contains("legacy"))
     }
 
-    func testOtherSkippedRepliesStayQuiet() async throws {
-        // The monthly limit (and every other skip) stays a toast: nothing is said.
-        let warning = "Your recording is saved. Loore didn't reply because you've reached your monthly usage limit."
+    func testASkipThatNamesNoRefusalStaysQuiet() async throws {
+        // A warning without a refusal's code (nothing heard, #513) stays a toast.
+        // The refusals the server names are said: VoiceRefusalSpeechTests (#651).
+        let warning = "Loore didn't hear any words in this recording. It's saved with its audio, without a reply."
         backend.statuses = [try status("completed", warning: warning)]
         await recordAndStop()
         await wait("idle") { turn.state == .idle }

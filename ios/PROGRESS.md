@@ -1136,3 +1136,25 @@ price, token counts or percentages anywhere; the copy is the web's (`Core/Models
   Continue, not said), and the thread page's notice or limit on the turn it is reached. Nine more tests.
   At the limit the form and Voice show the server's reason (`thread_length_message`: the thread is long, or
   an entry or what it quotes is too large) after a refused request's own words; two more tests.
+
+## Every refusal of a Voice turn said aloud (#651, Peter 2026-11-12)
+
+Peter agreed that the refusals other than the thread's length be spoken too; his rule for the approval
+announcement ("TTSed as a separate chunk ... when it's not pending, it's not voiced out anymore") sets how.
+
+- `Audio/Voice/SpokenRefusal.swift`: one sentence per refusal code (`monthly_spend_limit_reached`,
+  `ai_usage_none`, `approval_pending`, `thread_too_long`), the server's words (`backend/utils/
+  voice_refusals.py`). `RefusalVoice` asks for the clip (`GET /api/voice/refusal/<code>.mp3`, at most
+  `SpokenRefusal.clipWait` = 4 s, kept for the app run), plays it on its own (`ClipSpeaker`, an
+  `AVAudioPlayer` on a private queue, never the reply queue), and falls back to `SentenceSpeaker` when
+  there is no clip. `AudioCenter.speak(_:)` holds a background task while it fetches, so a locked phone
+  is not suspended before the sentence.
+- `VoiceTurnController`: a refused start (402, 403 `ai_usage_none`, 409 `approval_pending`, 409
+  `thread_too_long`), a recording saved without a reply (`warning_code`; a waiting change also lists the
+  changes and opens the dialog) and the legacy request's refusals are said, without the error sound or
+  the red dot. `announceUsageLimit()` (Voice screen Record and Continue, lock screen Record while capped)
+  stops a playing reply first, as `announceBlock()` does; `announceApprovalWaiting()` (a stale lock-screen
+  card) speaks only when nothing plays. `VoiceAudio.speak` takes a `SpokenRefusal`.
+- Tests: `VoiceRefusalSpeechTests.swift` (`VoiceRefusalSpeechTurnTests`, `RefusalVoiceTests`,
+  `VoiceRefusalSpeechAppTests`); the lock-screen test of the waiting change now expects its sentence. Unit
+  tests only: no clip heard on a phone, and the lock screen not tried on a device.
