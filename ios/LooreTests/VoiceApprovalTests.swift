@@ -1,3 +1,4 @@
+import AVFoundation
 import SwiftUI
 import XCTest
 @testable import Loore
@@ -67,27 +68,83 @@ final class VoiceApprovalTurnTests: XCTestCase {
         await wait("attached") { backend.streams[101] != nil }
         backend.push(101, "chunk_ready", #"{"chunk_index":0,"audio_url":"/media/r0.mp3","duration":3}"#)
         await wait("playing") { turn.state == .playing }
-        // The audio's last chunk carries the server's spoken announcement: here
-        // it is one more chunk like any other.
         backend.push(101, "chunk_ready", #"{"chunk_index":1,"audio_url":"/media/r1.mp3","duration":4}"#)
+        await wait("second chunk") { audio.fakeQueue.urls.count == 2 }
         backend.push(101, "all_complete", #"{"continuation_node_id":null,"preview":"I noted it."}"#)
         await wait("generated") { !audio.fakeQueue.generatingTTS }
     }
 
-    func testTheDialogOpensOnceTheReplysAudioHasEnded() async throws {
+    private static let clip = "/api/voice/approval-announcement/one.mp3?v=k1"
+
+    func testTheAnnouncementFollowsTheReplyAndThenTheDialogOpens() async throws {
         backend.approvalLists[101] = [waitingCall(31, turn: 101)]
+        backend.announcements[101] = ApprovalAnnouncement(count: 1, url: Self.clip, duration: 4.5)
         try await runTurnToItsEnd()
         await wait("listed") { turn.approvalWaiting }
         XCTAssertEqual(backend.approvalRequests, [101], "asked once, when the reply was written")
+        XCTAssertEqual(backend.announcementRequests, [101])
+        // The reply's chunks, then the announcement as one more chunk of the same queue.
+        XCTAssertEqual(audio.fakeQueue.urls, ["/media/r0.mp3", "/media/r1.mp3", Self.clip])
+        // Not a chapter: the reply's chapters stay as they were.
+        XCTAssertEqual(audio.fakeQueue.chapters.map(\.0), [0])
+        XCTAssertEqual(audio.fakeQueue.chapters.map(\.1), ["I noted it."])
+        XCTAssertTrue(audio.events.contains("announcement 101 \(Self.clip)"))
         XCTAssertEqual(turn.state, .playing)
         XCTAssertFalse(turn.approvalDialogDue, "not over the reply while it plays (or is paused)")
-        XCTAssertEqual(audio.fakeQueue.urls, ["/media/r0.mp3", "/media/r1.mp3"], "the announcement's audio is queued")
 
+        // The queue (announcement included) played to its end: the dialog.
         turn.queueFinished()
         XCTAssertEqual(turn.state, .done)
         XCTAssertTrue(turn.approvalDialogDue)
         turn.approvalDialogOpened()
         XCTAssertFalse(turn.approvalDialogDue)
+        // Replaying the loaded queue while the change waits says it again.
+        XCTAssertEqual(audio.fakeQueue.urls.last, Self.clip)
+    }
+
+    func testWithoutAClipTheReplyEndsAsBeforeAndTheDialogStillOpens() async throws {
+        backend.approvalLists[101] = [waitingCall(31, turn: 101)]
+        // The clip could not be made (no TTS key, a provider error).
+        backend.announcements[101] = ApprovalAnnouncement(count: 1, url: nil)
+        try await runTurnToItsEnd()
+        await wait("listed") { turn.approvalWaiting }
+        XCTAssertEqual(audio.fakeQueue.urls, ["/media/r0.mp3", "/media/r1.mp3"])
+        XCTAssertFalse(audio.events.contains { $0.hasPrefix("announcement") })
+        turn.queueFinished()
+        XCTAssertTrue(turn.approvalDialogDue)
+    }
+
+    func testASlowAnswerEndsTheQueueWithoutTheAnnouncement() async throws {
+        turn.timings.announcementWait = 0.2
+        backend.announcementDelay = 1
+        backend.announcements[101] = ApprovalAnnouncement(count: 1, url: Self.clip, duration: 4.5)
+        let started = Date()
+        try await runTurnToItsEnd()
+        XCTAssertLessThan(Date().timeIntervalSince(started), 0.9, "the queue did not wait for the answer")
+        XCTAssertEqual(audio.fakeQueue.urls, ["/media/r0.mp3", "/media/r1.mp3"])
+        // The late answer adds nothing afterwards.
+        try? await Task.sleep(nanoseconds: 1_000_000_000)
+        XCTAssertEqual(audio.fakeQueue.urls, ["/media/r0.mp3", "/media/r1.mp3"])
+        XCTAssertEqual(backend.announcementRequests, [101])
+    }
+
+    func testAReplyWithNothingToSpeakStillSaysAChangeWaits() async throws {
+        backend.statuses = [try status("completed", llm: 101)]
+        backend.llmStatuses[101] = [try llm(101, "completed", content: "")]
+        backend.announcements[101] = ApprovalAnnouncement(count: 1, url: Self.clip, duration: 4.5)
+        turn.start()
+        await wait("recording") { turn.state == .recording }
+        turn.stop()
+        await wait("announcement loaded") { audio.fakeQueue.urls == [Self.clip] }
+        XCTAssertTrue(audio.fakeQueue.chapters.isEmpty)
+        XCTAssertEqual(turn.state, .playing)
+        await wait("generated") { !audio.fakeQueue.generatingTTS }
+    }
+
+    func testAThreadWithOnlyTheUsersTextGetsNoExtraChunk() async throws {
+        try await runTurnToItsEnd()
+        XCTAssertEqual(backend.announcementRequests, [101])
+        XCTAssertEqual(audio.fakeQueue.urls, ["/media/r0.mp3", "/media/r1.mp3"])
     }
 
     func testRecordAndContinueAreRefusedWhileAChangeWaitsAndWorkAfter() async throws {
@@ -391,6 +448,138 @@ final class VoiceApprovalAppTests: StubbedAppTestCase {
         XCTAssertFalse(voice.approvalWaiting)
         XCTAssertNil(voice.newTurnRefusal)
         voice.tearDown()
+    }
+
+    // MARK: The announcement in the shared player (no network: file URLs)
+
+    /// Silent local files of the given lengths, so the player loads them without
+    /// any network and keeps their durations (a missing file would fail and be
+    /// counted as 0 s).
+    private static let reply = silence("reply-77", seconds: 6)
+    private static let clip = silence("approval-announcement-one", seconds: 4.5)
+
+    private static func silence(_ name: String, seconds: Double) -> String {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("loore-tests-\(name).wav")
+        if !FileManager.default.fileExists(atPath: url.path) {
+            let format = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 8000, channels: 1, interleaved: true)!
+            let frames = AVAudioFrameCount(seconds * 8000)
+            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames)!
+            buffer.frameLength = frames
+            if let file = try? AVAudioFile(forWriting: url, settings: format.settings, commonFormat: .pcmFormatInt16,
+                                           interleaved: true) {
+                try? file.write(from: buffer)
+            }
+        }
+        return url.absoluteString
+    }
+
+    /// The Voice queue as a turn leaves it: the reply's chunk (a chapter) and the
+    /// announcement after it.
+    private func loadVoiceQueue() {
+        app.audio.player.load(urls: [Self.reply, Self.clip], durations: [6, 4.5], title: "Voice", source: .voice,
+                              chapters: [QueueChapter(title: "I noted it.", chunkIndex: 0, startTime: 0)],
+                              autoplay: false)
+        app.audio.announcementQueued(nodeId: 77, url: Self.clip)
+    }
+
+    private var queued: [String] { app.audio.player.entries.map(\.url.absoluteString) }
+
+    func testApprovedOrRejectedTheAnnouncementLeavesTheQueue() async throws {
+        let item = #"{"id":31,"node_id":77,"turn_node_id":77,"tool":"update_artifact","title":"Change your Memory","lines":[]}"#
+        var waiting = 1
+        StubURLProtocol.install { request in
+            switch request.url?.path(percentEncoded: true) ?? "" {
+            case "/api/tool-approvals": return .json(200, #"{"pending":[\#(item)]}"#)
+            case "/api/tool-approvals/31/reject":
+                waiting = 0
+                return .json(200, #"{"outcome":"rejected","pending":[]}"#)
+            case "/api/voice/approval-announcement":
+                return .json(200, waiting > 0 ? #"{"count":1,"url":"\#(Self.clip)","duration":4.5}"#
+                                               : #"{"count":0,"url":null,"duration":null}"#)
+            default: return .json(500, "{}")
+            }
+        }
+        loadVoiceQueue()
+        XCTAssertEqual(queued, [Self.reply, Self.clip])
+        let voice = app.audio.voice
+        await voice.refreshApprovals(nodeId: 77, openDialog: false)
+
+        // Asked again while the change still waits (the app came back): it stays.
+        app.audio.recheckQueuedAnnouncement()
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(queued, [Self.reply, Self.clip], "replay while it waits says it again")
+
+        let model = try XCTUnwrap(app.audio.voiceApprovals)
+        model.review()
+        await model.decide(model.pending[0], approve: false)
+        let dropped = await eventually { self.queued == [Self.reply] }
+        XCTAssertTrue(dropped, "the next replay has no announcement")
+        XCTAssertEqual(app.audio.player.chapters, [QueueChapter(title: "I noted it.", chunkIndex: 0, startTime: 0)])
+        XCTAssertEqual(app.audio.player.totalDuration, 6, accuracy: 0.01)
+        XCTAssertNil(app.audio.queuedAnnouncement)
+    }
+
+    func testTheSpeakerOfAReplyGetsTheAnnouncementAndLosesItOnceDecidedOnTheThread() async throws {
+        let item = #"{"id":31,"node_id":77,"turn_node_id":77,"tool":"update_artifact","title":"Change your Memory","lines":[]}"#
+        var waiting = 1
+        StubURLProtocol.install { request in
+            switch request.url?.path(percentEncoded: true) ?? "" {
+            case "/api/tool-approvals/31/approve":
+                waiting = 0
+                return .json(200, #"{"outcome":"approved","pending":[]}"#)
+            case "/api/voice/approval-announcement" where request.url?.query == "node=77":
+                return .json(200, waiting > 0 ? #"{"count":1,"url":"\#(Self.clip)","duration":4.5}"#
+                                               : #"{"count":0,"url":null,"duration":null}"#)
+            default: return .json(500, "{}")
+            }
+        }
+        // The thread screen's speaker loaded the reply's spoken audio.
+        app.audio.player.load(urls: [Self.reply], durations: [6], title: "Reply", source: .node(77), autoplay: false)
+        await app.audio.appendApprovalAnnouncement(nodeId: 77)
+        XCTAssertEqual(queued, [Self.reply, Self.clip])
+        XCTAssertTrue(app.audio.player.chapters.isEmpty)
+
+        let thread = ThreadModel(nodeId: 77, awaitLLM: nil, app: app)
+        let call = try decode(ToolApproval.self, item)
+        thread.approvals.update([call], autoOpen: false)
+        thread.approvals.review()
+        await thread.approvals.decide(call, approve: true)
+        let dropped = await eventually { self.queued == [Self.reply] }
+        XCTAssertTrue(dropped)
+
+        // Loaded again with nothing waiting: no extra chunk.
+        app.audio.player.load(urls: [Self.reply], durations: [6], title: "Reply", source: .node(77), autoplay: false)
+        await app.audio.appendApprovalAnnouncement(nodeId: 77)
+        XCTAssertEqual(queued, [Self.reply])
+    }
+
+    func testDropTrailingTakesOffOnlyThatLastChunk() {
+        let player = app.audio.player
+        player.load(urls: [Self.reply, Self.clip], durations: [6, 4.5], title: "Voice", source: .voice,
+                    chapters: [QueueChapter(title: "I noted it.", chunkIndex: 0, startTime: 0)], autoplay: false)
+        player.dropTrailing(url: Self.reply)
+        XCTAssertEqual(queued, [Self.reply, Self.clip], "not the last chunk: kept")
+        player.seek(to: 10.5)  // the end: as after the queue played through
+        player.dropTrailing(url: Self.clip)
+        XCTAssertEqual(queued, [Self.reply])
+        XCTAssertEqual(player.cumulativeTime, 6, accuracy: 0.01)
+        XCTAssertTrue(player.atEnd, "play then starts over, without the announcement")
+        XCTAssertEqual(player.chapters.count, 1)
+    }
+
+    func testAnAnnouncementThatIsPlayingFinishesBeforeItGoes() async throws {
+        let reply = Self.silence("short-reply", seconds: 0.3)
+        let clip = Self.silence("short-clip", seconds: 0.8)
+        let player = app.audio.player
+        player.load(urls: [reply, clip], durations: [0.3, 0.8], title: "Reply", source: .node(5), autoplay: true)
+        let inClip = await eventually { player.currentIndex == 1 && player.isPlaying }
+        try XCTSkipUnless(inClip, "no audio playback in this simulator")
+        player.dropTrailing(url: clip)
+        XCTAssertEqual(player.entries.count, 2, "it is not cut off")
+        let gone = await eventually { player.entries.count == 1 }
+        XCTAssertTrue(gone, "gone once it has played")
+        XCTAssertTrue(player.atEnd)
+        player.close()
     }
 
     func testOwnOnlyThreadsCostNoRequestOnReturn() async throws {

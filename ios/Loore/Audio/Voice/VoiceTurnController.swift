@@ -189,6 +189,9 @@ final class VoiceTurnController {
         var gleanPoll: Double = 2
         /// The session stays active this long after an error sound starts.
         var errorSound: Double = ToneSynth.errorSoundLength
+        /// The end of the reply's queue waits at most this long for the approval
+        /// announcement's answer (`VoiceApproval.announcementWait`).
+        var announcementWait: Double = VoiceApproval.announcementWait
     }
 
     // MARK: Dependencies
@@ -229,6 +232,12 @@ final class VoiceTurnController {
     /// Any newer generation (cancel, new turn, leaving Voice) drops it.
     @ObservationIgnored private var errorSoundAfterQueue: Int?
     @ObservationIgnored private var initialResume = false
+    /// The approval announcement of the turn's final reply: the node asked for,
+    /// and its answer once it came (`answered`; nil answer = no clip).
+    @ObservationIgnored private var announcementNode: Int?
+    @ObservationIgnored private var announcementAnswered = false
+    @ObservationIgnored private var announcementAnswer: ApprovalAnnouncement?
+    @ObservationIgnored private var announcementWaitTask: Task<Void, Never>?
     @ObservationIgnored private var toastedWarnings: Set<String> = []
     @ObservationIgnored private var failureToasted: Set<Int> = []
     @ObservationIgnored private var interruptionToast: Int?
@@ -864,15 +873,16 @@ final class VoiceTurnController {
                 audio.refreshNowPlaying()
                 // The reply's calls that change the user's data may wait for their
                 // approval: asked once it is written. The dialog opens when its
-                // audio (the server's spoken announcement last) is over.
+                // audio, with the spoken announcement last, is over.
                 Task { [weak self] in await self?.refreshApprovals(nodeId: nodeId, openDialog: true) }
+                askAnnouncement(nodeId, gen)
             }
             let content = (status.content ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             if content.isEmpty {
                 // Nothing to speak (e.g. only a proposal card): end any chain.
                 if status.continuationNodeId == nil {
                     closeStream()
-                    finishGenerating()
+                    finishReply(nodeId, gen)
                 } else {
                     advanceChain(to: status.continuationNodeId!, gen)
                 }
@@ -1044,7 +1054,66 @@ final class VoiceTurnController {
             advanceChain(to: next, gen)
             return
         }
-        finishGenerating()
+        finishReply(nodeId, gen)
+    }
+
+    /// The turn's final node has all its audio in the queue. While one of the
+    /// reply's changes waits for approval, the spoken announcement joins the
+    /// end of the same queue as one more chunk (no chapter: chapters and their
+    /// starts stay the reply's); then nothing more is coming. The queue keeps
+    /// waiting for the answer at most `timings.announcementWait`.
+    private func finishReply(_ nodeId: Int, _ gen: Int) {
+        sseTask?.cancel()
+        reconcileTask?.cancel()
+        askAnnouncement(nodeId, gen)
+        if announcementAnswered {
+            appendAnnouncement(nodeId)
+            finishGenerating()
+            return
+        }
+        let deadline = Date().addingTimeInterval(timings.announcementWait)
+        announcementWaitTask?.cancel()
+        announcementWaitTask = Task { [weak self] in
+            while let self, !Task.isCancelled, gen == self.generation, !self.announcementAnswered, Date() < deadline {
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+            guard let self, !Task.isCancelled, gen == self.generation else { return }
+            if !self.announcementAnswered { self.log.info("approval announcement not in time; the reply ends without it") }
+            self.appendAnnouncement(nodeId)
+            self.finishGenerating()
+        }
+    }
+
+    /// Asks once per reply, as soon as its final node is written, so the answer
+    /// is usually in before its audio ends.
+    private func askAnnouncement(_ nodeId: Int, _ gen: Int) {
+        guard announcementNode != nodeId else { return }
+        announcementNode = nodeId
+        announcementAnswered = false
+        announcementAnswer = nil
+        Task { [weak self] in
+            guard let self else { return }
+            let answer = try? await self.backend.approvalAnnouncement(nodeId: nodeId)
+            guard gen == self.generation, self.announcementNode == nodeId else { return }
+            self.announcementAnswer = answer
+            self.announcementAnswered = true
+        }
+    }
+
+    private func appendAnnouncement(_ nodeId: Int) {
+        guard announcementNode == nodeId, let answer = announcementAnswer, let url = answer.clip else { return }
+        if turnHasAudio {
+            guard audio.queue.append(url: url, duration: answer.duration, chapterTitle: nil) else { return }
+        } else {
+            // The reply had nothing to speak (only a proposal card): the
+            // announcement alone, so a listener still hears that a change waits.
+            turnHasAudio = true
+            audio.queue.generatingTTS = true
+            audio.queue.loadFirst(url: url, duration: answer.duration, chapterTitle: nil) {}
+        }
+        awaitingNextNode = false
+        state = .playing
+        audio.announcementQueued(nodeId: nodeId, url: url)
     }
 
     /// Nothing more will be appended for this turn.
@@ -1095,8 +1164,7 @@ final class VoiceTurnController {
         if let next = nodes[nodeId]?.continuation {
             advanceChain(to: next, gen)
         } else {
-            sseTask?.cancel()
-            finishGenerating()
+            finishReply(nodeId, gen)
         }
         audio.refreshNowPlaying()
     }
@@ -1556,8 +1624,11 @@ final class VoiceTurnController {
 
     private func resetTurn(keepQueue: Bool) {
         generation += 1
-        [flowTask, tickTask, llmTask, sseTask, reconcileTask].forEach { $0?.cancel() }
-        flowTask = nil; tickTask = nil; llmTask = nil; sseTask = nil; reconcileTask = nil
+        [flowTask, tickTask, llmTask, sseTask, reconcileTask, announcementWaitTask].forEach { $0?.cancel() }
+        flowTask = nil; tickTask = nil; llmTask = nil; sseTask = nil; reconcileTask = nil; announcementWaitTask = nil
+        announcementNode = nil
+        announcementAnswered = false
+        announcementAnswer = nil
         if state == .recording || state == .starting { recorder.cancel() }
         cueOff()
         if !keepQueue {

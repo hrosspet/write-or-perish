@@ -73,7 +73,11 @@ final class AudioCenter {
         observers.append(NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification,
                                                                 object: nil, queue: .main) { [weak self] _ in
             RecordingLog.shared.note("app active")
-            MainActor.assumeIsolated { self?.voiceController?.appDidBecomeActive() }
+            MainActor.assumeIsolated {
+                self?.voiceController?.appDidBecomeActive()
+                // A change may have been decided on another device meanwhile.
+                self?.recheckQueuedAnnouncement()
+            }
         })
         observers.append(NotificationCenter.default.addObserver(forName: UIApplication.didEnterBackgroundNotification,
                                                                 object: nil, queue: .main) { [weak self] _ in
@@ -140,7 +144,10 @@ final class AudioCenter {
         guard let app else { return nil }
         let model = ToolApprovalsModel(api: app.api, nodeId: voiceController?.approvalsNodeId ?? 0)
         model.onApproved = { [weak app] item in ToolApprovalsModel.signalApproved(item, signals: app?.signals) }
-        model.onPendingChanged = { [weak self] items in self?.voiceController?.approvalsChanged(items) }
+        model.onPendingChanged = { [weak self] items in
+            self?.voiceController?.approvalsChanged(items)
+            self?.recheckQueuedAnnouncement()
+        }
         model.onGroupDone = { [weak model] in
             // The next reply's calls, if any, follow at once: the Voice screen's
             // dialog has no "Later", and it closes when nothing waits.
@@ -151,10 +158,66 @@ final class AudioCenter {
     }
 
     /// A call was decided on a thread screen: a voice conversation waiting for
-    /// it asks the server again (only while something waits there).
+    /// it asks the server again (only while something waits there), and so does
+    /// an announcement at the end of the loaded queue.
     func toolApprovalsDecidedElsewhere() {
+        recheckQueuedAnnouncement()
         guard let voice = voiceController, voice.approvalWaiting else { return }
         Task { await voice.refreshApprovalsIfWaiting() }
+    }
+
+    // MARK: The spoken approval announcement in the queue (2026-11-12)
+
+    struct QueuedAnnouncement: Equatable {
+        var nodeId: Int
+        var url: String
+    }
+
+    /// Peter, 2026-11-12: "the announcement should be TTSed as a separate chunk
+    /// and appended to the queue. So that when it's not pending, it's not voiced
+    /// out anymore". The announcement at the end of the loaded queue (voice turn
+    /// or a reply's speaker), and its reply.
+    var queuedAnnouncement: QueuedAnnouncement? { queuedAnnouncementValue }
+    @ObservationIgnored private var queuedAnnouncementValue: QueuedAnnouncement?
+
+    func noteQueuedAnnouncement(nodeId: Int, url: String) {
+        queuedAnnouncementValue = QueuedAnnouncement(nodeId: nodeId, url: url)
+    }
+
+    /// After a decision (any screen) or a return to the app: asks whether the
+    /// reply of the announcement at the end of the queue still has changes
+    /// waiting; when none do, the announcement leaves the queue (if it is
+    /// playing, after it ends), so a replay no longer says it. Costs a request
+    /// only while such an announcement is loaded.
+    func recheckQueuedAnnouncement() {
+        guard let queued = queuedAnnouncementValue, let api = app?.api else { return }
+        guard let url = player.urlResolver(queued.url), player.entries.last?.url == url else {
+            queuedAnnouncementValue = nil  // the queue moved on
+            return
+        }
+        Task { [weak self] in
+            guard let answer: ApprovalAnnouncement = try? await api.get(APIPath.voiceApprovalAnnouncement, query: [
+                URLQueryItem(name: "node", value: String(queued.nodeId)),
+            ]), let self, self.queuedAnnouncementValue == queued, answer.count == 0 else { return }
+            self.player.dropTrailing(url: queued.url)
+            self.queuedAnnouncementValue = nil
+        }
+    }
+
+    /// A reply's spoken audio was loaded from its speaker: its announcement
+    /// joins the end while one of its changes waits. Waits at most
+    /// `VoiceApproval.announcementWait` for the answer.
+    func appendApprovalAnnouncement(nodeId: Int) async {
+        guard let api = app?.api else { return }
+        var request = APIRequest(.get, APIPath.voiceApprovalAnnouncement,
+                                 query: [URLQueryItem(name: "node", value: String(nodeId))])
+        request.timeout = VoiceApproval.announcementWait
+        guard let (data, http) = try? await api.data(for: request), http.statusCode == 200,
+              let answer = try? api.decode(ApprovalAnnouncement.self, from: data), let clip = answer.clip,
+              player.source == .node(nodeId) else { return }
+        if player.append(url: clip, duration: answer.duration) {
+            noteQueuedAnnouncement(nodeId: nodeId, url: clip)
+        }
     }
 
     /// A glean from the Voice screen (or its lock screen) landed (#475): the view
@@ -194,6 +257,7 @@ final class AudioCenter {
         voiceController?.tearDown()
         voiceController = nil
         voiceApprovals = nil
+        queuedAnnouncementValue = nil
         activeDictation?.cancel()
         ChunkUploader.shared.reset()
         PrivateFiles.sweepTemporary()
@@ -463,6 +527,10 @@ extension AudioCenter: VoiceAudio {
 
     func voiceConversationEnded() {
         liveActivity.end()
+    }
+
+    func announcementQueued(nodeId: Int, url: String) {
+        noteQueuedAnnouncement(nodeId: nodeId, url: url)
     }
 
     func startCue() { sounds.startCue() }

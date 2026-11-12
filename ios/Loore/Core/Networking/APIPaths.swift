@@ -48,6 +48,8 @@ enum APIPath {
     static let toolApprovals = "/api/tool-approvals"
     static func toolApprovalApprove(_ id: Int) -> String { "/api/tool-approvals/\(id)/approve" }
     static func toolApprovalReject(_ id: Int) -> String { "/api/tool-approvals/\(id)/reject" }
+    /// `?node=<reply id>`: the spoken announcement while that reply's changes wait.
+    static let voiceApprovalAnnouncement = "/api/voice/approval-announcement"
 
     // MARK: Nodes
     static let nodes = "/api/nodes/"

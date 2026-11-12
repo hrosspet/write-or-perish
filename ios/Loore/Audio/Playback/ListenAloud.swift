@@ -72,6 +72,7 @@ extension AudioCenter {
         if let cached = listenCache[cacheKey] {
             player.load(urls: cached.urls, durations: cached.durations, title: title, source: target.source,
                         chapters: cached.chapters)
+            announceWaitingChanges(target, spoken: cached.tts)
             return
         }
         setLoading(target.source)
@@ -105,10 +106,12 @@ extension AudioCenter {
             }
             if let path = urls?.originalURL ?? urls?.ttsURL {
                 // Chapters only for TTS audio (a recording has no sections, #145).
-                let chapters = urls?.originalURL == nil ? await self.fetchChapters(target, singleFile: true) : []
-                let entry = ListenCacheEntry(urls: [path], durations: [nil], chapters: chapters)
+                let spoken = urls?.originalURL == nil
+                let chapters = spoken ? await self.fetchChapters(target, singleFile: true) : []
+                let entry = ListenCacheEntry(urls: [path], durations: [nil], chapters: chapters, tts: spoken)
                 self.listenCache[cacheKey] = entry
                 self.player.load(urls: [path], title: title, source: target.source, chapters: chapters)
+                self.announceWaitingChanges(target, spoken: spoken)
                 return
             }
             // Nothing exists: only voice-mode users may generate TTS.
@@ -156,12 +159,15 @@ extension AudioCenter {
                     }
                 case .allComplete(let complete):
                     if player.source == target.source {
+                        // The queue waits for the announcement before it may end.
+                        if case .node(let id) = target { await appendApprovalAnnouncement(nodeId: id) }
                         player.generatingTTS = false
                         player.setChapters(await fetchChapters(target, singleFile: false))
                     }
                     if let url = complete.ttsURL {
                         listenCache[cacheKey] = ListenCacheEntry(urls: [url], durations: [nil],
-                                                                 chapters: await fetchChapters(target, singleFile: true))
+                                                                 chapters: await fetchChapters(target, singleFile: true),
+                                                                 tts: true)
                     }
                     onTtsGenerated?()
                     return
@@ -232,6 +238,14 @@ extension AudioCenter {
         }
     }
 
+    /// A reply's spoken audio was loaded: while one of its changes waits for
+    /// approval, the announcement joins the end (2026-11-12). Not for a
+    /// recording, and nothing at all for anything but a node.
+    private func announceWaitingChanges(_ target: ListenTarget, spoken: Bool) {
+        guard spoken, case .node(let id) = target else { return }
+        Task { [weak self] in await self?.appendApprovalAnnouncement(nodeId: id) }
+    }
+
     /// Whether a speaker icon for `target` shows as playing (accent colour).
     func isPlaying(_ target: ListenTarget) -> Bool {
         player.source == target.source && player.isPlaying
@@ -268,6 +282,8 @@ struct ListenCacheEntry {
     var urls: [String]
     var durations: [Double?]
     var chapters: [QueueChapter]
+    /// Spoken (TTS) audio, which may get the approval announcement after it.
+    var tts = false
 }
 
 /// Download a node's audio (web `DownloadAudioIcon`): the original recording,
