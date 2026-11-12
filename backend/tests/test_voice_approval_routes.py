@@ -488,7 +488,7 @@ def _set_plan(user, plan="free", **subscription):
 
 @pytest.mark.parametrize("payments", [False, True])
 def test_an_account_without_voice_mode_gets_no_clip(app, thread, clips,
-                                                     payments):
+                                                    payments):
     """Switch off: a free plan. Switch on: a subscription that ended."""
     ben, anna, nodes, reply, pending_id = thread
     _voice_reply(reply)
