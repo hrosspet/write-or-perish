@@ -36,6 +36,11 @@ struct NodeFormView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .background { model?.drafts.flushInBackground() }
         }
+        // The parent was edited above the form (made public or private): the
+        // reply follows, keeping its text.
+        .onChange(of: config.parentPrivacy) { _, level in
+            if let level { model?.parentPrivacyChanged(level) }
+        }
     }
 }
 

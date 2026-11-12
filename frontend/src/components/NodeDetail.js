@@ -16,7 +16,8 @@ import { useLlmTextStream } from "../hooks/useSSE";
 import { peekPrefetchedNode, takePrefetchedNode } from "../hooks/useNodePrefetch";
 import api from "../api";
 import {
-  AUTO_GENERATE_OFF_HINT, isAutoGenerateOff, isSharedPrivacy,
+  AUTO_GENERATE_OFF_HINT, ONLY_YOU_SEE_REPLY, isAutoGenerateOff,
+  isSharedPrivacy, onlyYouSeeReply,
 } from "../utils/sharedThread";
 import { useCheckboxToggle, useTaskInsert } from "../utils/markdown";
 import { contextAllowsAi, isAiUsageRefusedError } from "../utils/aiUsage";
@@ -56,7 +57,7 @@ function findInSubtree(node, targetId) {
 }
 
 // Recursive component to render children nodes.
-function RenderChildTree({ nodes, onBubbleClick, buildActions }) {
+function RenderChildTree({ nodes, onBubbleClick, buildActions, parentPrivacy, privateNoteFor }) {
   return (
     <div>
       {nodes.map((child, index) => {
@@ -72,9 +73,16 @@ function RenderChildTree({ nodes, onBubbleClick, buildActions }) {
                 onClick={onBubbleClick}
                 leftAlign={true}
                 actions={buildActions ? buildActions(child) : null}
+                privateNote={!!privateNoteFor && privateNoteFor(child, parentPrivacy)}
               />
               {child.children && child.children.length > 0 &&
-                <RenderChildTree nodes={child.children} onBubbleClick={onBubbleClick} buildActions={buildActions} />
+                <RenderChildTree
+                  nodes={child.children}
+                  onBubbleClick={onBubbleClick}
+                  buildActions={buildActions}
+                  parentPrivacy={child.privacy_level}
+                  privateNoteFor={privateNoteFor}
+                />
               }
             </div>
             {index < nodes.length - 1 && (
@@ -657,6 +665,11 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
 
   // For user-typed nodes: owner must match current user
   // For LLM nodes: parent node's owner must match current user (they requested the response)
+  // "Only you see this reply": the viewer's own AI reply, private, under
+  // a node other people can read.
+  const privateNoteFor = (n, parentPrivacy) => onlyYouSeeReply(
+    n, parentPrivacy, ownedByMe(n));
+
   const isOwner = node.user && currentUser && (
     node.user.id === currentUser.id ||
     (node.node_type === "llm" && node.parent_user_id === currentUser.id)
@@ -1086,13 +1099,14 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // Ancestors section rendered as a list of bubbles.
   const ancestorsSection = node.ancestors && node.ancestors.length > 0 && (
     <div style={{ display: "flex", flexDirection: "column", marginBottom: "10px" }}>
-      {node.ancestors.map((ancestor) => (
+      {node.ancestors.map((ancestor, i) => (
         <Bubble
           key={ancestor.id}
           node={ancestor}
           onClick={handleBubbleClick}
           leftAlign={true}
           actions={buildActions(ancestor)}
+          privateNote={privateNoteFor(ancestor, node.ancestors[i - 1]?.privacy_level)}
         />
       ))}
     </div>
@@ -1745,6 +1759,16 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
           expanded={toolActionsExpanded}
           onToggle={() => setToolActionsExpanded(!toolActionsExpanded)}
         />
+        {onlyYouSeeReply(
+          node, node.ancestors?.[node.ancestors.length - 1]?.privacy_level,
+          isOwner) && (
+          <div style={{
+            marginTop: '10px', fontFamily: 'var(--sans)', fontSize: '0.75rem',
+            fontWeight: 300, color: 'var(--text-muted)',
+          }}>
+            🔒 {ONLY_YOU_SEE_REPLY}
+          </div>
+        )}
       </div>
       <div style={actionContainerStyle}>
         <NodeFooter
@@ -1856,6 +1880,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
           <NodeForm
             key={`inline-${id}`}
             parentId={parseInt(id, 10)}
+            parentPrivacyLevel={node.privacy_level}
             hidePowerFeatures={!craftMode}
             hideAudioUpload={!craftMode}
             compact
@@ -1877,6 +1902,8 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
       {node.children && node.children.length > 0 && (
         <RenderChildTree
           nodes={node.children}
+          parentPrivacy={node.privacy_level}
+          privateNoteFor={privateNoteFor}
           onBubbleClick={handleBubbleClick}
           buildActions={buildActions}
         />

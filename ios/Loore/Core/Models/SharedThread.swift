@@ -35,11 +35,22 @@ enum SharedThread {
     static let autoGenerateOffCode = "auto_generate_off"
     /// 409 on a privacy change of an AI reply still being written.
     static let replyInProgressCode = "reply_in_progress"
-    /// A locked auto-generate toggle's hint (web `AUTO_GENERATE_OFF_HINT`).
-    static let autoGenerateOffHint = "Auto-generate is off in public threads."
+    /// A locked auto-generate toggle's hint and caption (web `AUTO_GENERATE_OFF_HINT`).
+    static let autoGenerateOffHint = "Auto-generate is off in public and shared threads."
     /// The Write New Entry toggle's line while it is locked (web NodeForm).
     static let autoGenerateLockedFormText = autoGenerateOffHint
-        + " You can click LLM Response on the created node; the reply stays private until you change it."
+        + " You can tap LLM Response on the created node; the reply stays private until you change it."
+
+    /// The owner's sign on a private AI reply under a node others can read.
+    static let privateReplyNote = "Only you see this reply"
+
+    /// An AI reply only its owner can read, answering a node other people can
+    /// read (public or circles): its owner sees `privateReplyNote` on it.
+    /// Nobody else sees the reply, and a user's own entry never gets the note.
+    static func showsPrivateReplyNote(isAIReply: Bool, owned: Bool, deleted: Bool = false,
+                                      privacy: PrivacyLevel?, parentPrivacy: PrivacyLevel?) -> Bool {
+        isAIReply && owned && !deleted && privacy == .private && parentPrivacy.isSharedWithOthers
+    }
 }
 
 extension APIError {

@@ -62,6 +62,30 @@ final class SharedPrivacyTests: XCTestCase {
         XCTAssertEqual(QuotesNotPublic.Quoted(id: 3, canOpen: true).rowText, "Entry #3")
     }
 
+    func testTheLockedAutoGenerateWordsFitPublicAndSharedThreads() {
+        XCTAssertEqual(SharedThread.autoGenerateOffHint, "Auto-generate is off in public and shared threads.")
+        XCTAssertEqual(SharedThread.autoGenerateLockedFormText,
+                       "Auto-generate is off in public and shared threads. You can tap LLM Response on the created node; the reply stays private until you change it.")
+        XCTAssertEqual(SharedThread.privateReplyNote, "Only you see this reply")
+    }
+
+    func testThePrivateReplyNoteRule() {
+        func shows(ai: Bool = true, owned: Bool = true, deleted: Bool = false,
+                   _ privacy: PrivacyLevel?, under parent: PrivacyLevel?) -> Bool {
+            SharedThread.showsPrivateReplyNote(isAIReply: ai, owned: owned, deleted: deleted,
+                                               privacy: privacy, parentPrivacy: parent)
+        }
+        XCTAssertTrue(shows(.private, under: .public))
+        XCTAssertTrue(shows(.private, under: .circles))
+        XCTAssertFalse(shows(.private, under: .private), "a private thread: nothing to point out")
+        XCTAssertFalse(shows(.private, under: nil))
+        XCTAssertFalse(shows(.public, under: .public), "shared by its owner")
+        XCTAssertFalse(shows(.circles, under: .public))
+        XCTAssertFalse(shows(owned: false, .private, under: .public), "only its owner sees it")
+        XCTAssertFalse(shows(ai: false, .private, under: .public), "a user's own entry")
+        XCTAssertFalse(shows(deleted: true, .private, under: .public))
+    }
+
     func testAutoGenerateOffAndReplyInProgressCodes() {
         let off = apiError(409, autoGenerateOffJSON)
         XCTAssertTrue(off.isAutoGenerateOff)
@@ -132,6 +156,48 @@ final class SharedEntryFormTests: StubbedAppTestCase {
         let (model, _) = form(NodeFormConfig(parentId: 7))
         await model.start()
         XCTAssertTrue(model.autoGenerateLocked)
+    }
+
+    /// The parent was edited while the reply form under it was open.
+    func testAReplyFormFollowsItsParentsPrivacyAndKeepsItsText() async {
+        StubURLProtocol.install { request in
+            switch (request.httpMethod ?? "", request.url?.path(percentEncoded: true) ?? "") {
+            case ("GET", "/api/nodes/7"):
+                return .json(200, #"{"id":7,"content":"p","privacy_level":"private","ai_usage":"chat"}"#)
+            case ("GET", "/api/drafts/"): return .json(404, #"{"error":"No draft"}"#)
+            default: return .json(200, "{}")
+            }
+        }
+        defaults.removeObject(forKey: DefaultsKey.publicReplyAck)
+        var config = NodeFormConfig(parentId: 7)
+        config.parentPrivacy = .private
+        let (model, _) = form(config)
+        await model.start()
+        XCTAssertEqual(model.privacy, .private)
+        model.content = "half a thought"
+
+        // Made public: the reply is pinned to public and the public-reply question comes back.
+        model.parentPrivacyChanged(.public)
+        XCTAssertEqual(model.privacy, .public)
+        XCTAssertTrue(model.lockPrivacy)
+        XCTAssertTrue(model.autoGenerateLocked)
+        XCTAssertEqual(model.content, "half a thought")
+        await model.submit()
+        XCTAssertTrue(model.showPublicReplyDialog)
+        XCTAssertFalse(calls.contains("POST /api/nodes/"))
+        model.cancelDialog()
+
+        // Made private again: the form returns to private.
+        model.parentPrivacyChanged(.private)
+        XCTAssertEqual(model.privacy, .private)
+        XCTAssertFalse(model.lockPrivacy)
+        XCTAssertFalse(model.autoGenerateLocked)
+        XCTAssertEqual(model.content, "half a thought")
+
+        // An edit form never follows a parent.
+        let (edit, _) = form(NodeFormConfig(edit: .init(nodeId: 9, initialContent: "x", initialPrivacy: .private)))
+        edit.parentPrivacyChanged(.public)
+        XCTAssertEqual(edit.privacy, .private)
     }
 
     func testAPublicAgenticEntryAsksForNoReply() async {
@@ -381,5 +447,88 @@ final class SharedThreadModelTests: StubbedAppTestCase {
         _ = try await model.submitReadReply(NodeFormSubmission(content: "why?", parentId: 10, privacy: .circles, aiUsage: .chat),
                                             autoGenerate: true)
         XCTAssertEqual(body(of: "POST /api/textmode/from-node/10")?["auto_generate"] as? Bool, false)
+    }
+
+    // MARK: "Only you see this reply"
+
+    private func loadedThread(_ json: String, id: Int) async -> ThreadModel {
+        StubURLProtocol.install { _ in .json(200, json) }
+        let model = ThreadModel(nodeId: id, awaitLLM: nil, app: app)
+        await model.load()
+        return model
+    }
+
+    /// The viewer is user 5. Under the public entry 10: their private AI reply
+    /// (11, with their private AI reply 15 under it), their public AI reply (12),
+    /// their own private entry (13), and someone else's entry (16) with that
+    /// person's private AI reply (14).
+    func testTheNoteShowsOnTheOwnersPrivateAIRepliesUnderASharedNode() async throws {
+        let model = await loadedThread("""
+        {"id":10,"content":"entry","node_type":"user","user":{"id":5,"username":"seowriter"},"privacy_level":"public",
+         "ai_usage":"chat","children":[
+          {"id":11,"node_type":"llm","llm_model":"gpt-6-luna","user_id":99,"parent_user_id":5,"privacy_level":"private",
+           "children":[{"id":15,"node_type":"llm","llm_model":"gpt-6-luna","user_id":99,"parent_user_id":5,
+                        "privacy_level":"private","children":[]}]},
+          {"id":12,"node_type":"llm","llm_model":"gpt-6-luna","user_id":99,"parent_user_id":5,"privacy_level":"public","children":[]},
+          {"id":13,"node_type":"user","user_id":5,"privacy_level":"private","children":[]},
+          {"id":16,"node_type":"user","user_id":7,"privacy_level":"public",
+           "children":[{"id":14,"node_type":"llm","llm_model":"gpt-6-luna","user_id":99,"parent_user_id":7,
+                        "privacy_level":"private","children":[]}]}]}
+        """, id: 10)
+        let rows = ChildRow.flatten(try XCTUnwrap(model.node).children, parentPrivacy: model.node?.privacyLevel)
+        var shown: [Int: Bool] = [:]
+        for row in rows {
+            if case .bubble(let child) = row.kind {
+                shown[child.id] = model.showsPrivateReplyNote(child, parentPrivacy: row.parentPrivacy)
+            }
+        }
+        XCTAssertEqual(shown, [11: true, 15: false, 12: false, 13: false, 16: false, 14: false])
+        XCTAssertFalse(model.focalShowsPrivateReplyNote, "a user entry")
+    }
+
+    func testTheNoteOnTheFocalReplyAndOnAncestors() async {
+        let focal = """
+        {"id":77,"content":"Answer","node_type":"llm","llm_model":"gpt-6-luna","user":{"id":99,"username":"gpt-6-luna"},
+         "parent_user_id":5,"privacy_level":"private","ai_usage":"chat","children":[],
+         "ancestors":[{"id":9,"node_type":"user","user_id":5,"privacy_level":"circles"},
+                      {"id":20,"node_type":"llm","llm_model":"gpt-6-luna","user_id":99,"parent_user_id":5,"privacy_level":"private"},
+                      {"id":21,"node_type":"user","user_id":5,"privacy_level":"PARENT"}]}
+        """
+        let underCircles = await loadedThread(focal.replacingOccurrences(of: "PARENT", with: "circles"), id: 77)
+        XCTAssertTrue(underCircles.focalShowsPrivateReplyNote)
+        XCTAssertFalse(underCircles.showsPrivateReplyNote(ancestorAt: 0), "the root answers nothing shown")
+        XCTAssertTrue(underCircles.showsPrivateReplyNote(ancestorAt: 1), "an AI reply under the circles root")
+        XCTAssertFalse(underCircles.showsPrivateReplyNote(ancestorAt: 2), "a user entry")
+
+        let underPrivate = await loadedThread(focal.replacingOccurrences(of: "PARENT", with: "private"), id: 77)
+        XCTAssertFalse(underPrivate.focalShowsPrivateReplyNote)
+    }
+
+    /// The note in a bubble, dark and light. With `TEST_RUNNER_LOORE_SNAPSHOT_DIR`
+    /// set, the images are written there.
+    func testThePrivateReplyNoteRenders() throws {
+        for scheme in [ColorScheme.dark, .light] {
+            let bubble = BubbleData(id: 11, content: "A reply only its owner reads.", username: "gpt-6-luna",
+                                    llmModel: "gpt-6-luna", createdAt: Date(timeIntervalSince1970: 1_794_000_000),
+                                    privateReplyNote: true)
+            let view = VStack(spacing: 16) {
+                BubbleView(data: bubble)
+                BubbleView(data: BubbleData(id: 12, content: "Without the note.", username: "gpt-6-luna",
+                                            llmModel: "gpt-6-luna"))
+            }
+            .padding(24)
+            .frame(width: 402)
+            .background(LooreColor.bgDeep)
+            .environment(app)
+            .environment(\.colorScheme, scheme)
+            let renderer = ImageRenderer(content: view)
+            renderer.scale = 3
+            let image = try XCTUnwrap(renderer.uiImage)
+            XCTAssertGreaterThan(image.size.height, 200)
+            if let dir = ProcessInfo.processInfo.environment["LOORE_SNAPSHOT_DIR"], !dir.isEmpty {
+                try image.pngData()?.write(to: URL(fileURLWithPath: dir)
+                    .appendingPathComponent("private-reply-note-\(scheme == .dark ? "dark" : "light").png"))
+            }
+        }
     }
 }

@@ -9,7 +9,16 @@ export const isSharedPrivacy = (privacyLevel) =>
   !!privacyLevel && privacyLevel !== 'private';
 
 export const AUTO_GENERATE_OFF_CODE = 'auto_generate_off';
-export const AUTO_GENERATE_OFF_HINT = 'Auto-generate is off in public threads.';
+export const AUTO_GENERATE_OFF_HINT = 'Auto-generate is off in public and shared threads.';
+
+// An AI reply is created private, also in a shared thread (Peter,
+// 2026-11-12): its owner sees a small note saying so while the node it
+// answers is public or shared, until they change who sees it.
+export const ONLY_YOU_SEE_REPLY = 'Only you see this reply';
+export const isLlmNode = (n) => !!n && (n.node_type === 'llm' || !!n.llm_model);
+export const onlyYouSeeReply = (n, parentPrivacy, ownedByViewer) =>
+  !!ownedByViewer && isLlmNode(n) && !n.deleted && !n.inaccessible
+  && n.privacy_level === 'private' && isSharedPrivacy(parentPrivacy);
 
 // The server's refusal of an automatic reply under a shared node (409).
 export const isAutoGenerateOff = (err) =>
