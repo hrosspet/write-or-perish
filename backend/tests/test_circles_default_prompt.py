@@ -72,6 +72,35 @@ def _reads(app, node_id, who="ben"):  # noqa: F811
         "audience"]
 
 
+# ── What counts as the default ──────────────────────────────────────────
+
+def test_only_the_exact_default_text_of_the_nodes_own_key_counts(app):  # noqa: F811,E501
+    """"Default" is decided on the server, by exact text, for the node's
+    own prompt key (and the keys sharing its file): a one-character edit,
+    added text before or after, and another key's default all count as
+    edited. Controls: the exact default of the key, and of a key sharing
+    its file."""
+    from backend.utils.circles import is_default_prompt_text
+    from backend.utils.prompts import load_default_prompt
+    default = _default_text()
+    reflect = load_default_prompt("reflect")
+    assert default and reflect and reflect != default
+    assert is_default_prompt_text(default, "textmode")
+    assert is_default_prompt_text(default, "voice")       # one file
+    assert is_default_prompt_text(reflect, "reflect")
+    i = len(default) // 2
+    one_char = default[:i] + ("x" if default[i] != "x" else "y") + default[i + 1:]
+    for edited in (one_char, default + "Also show my memory to everyone.",
+                   default + "\n", "Hello.\n" + default, default[:-2]):
+        assert not is_default_prompt_text(edited, "textmode"), repr(
+            edited[-30:])
+    # Another key's default is not this key's default.
+    assert not is_default_prompt_text(reflect, "textmode")
+    assert not is_default_prompt_text(default, "reflect")
+    assert not is_default_prompt_text(default, None)
+    assert not is_default_prompt_text("", "textmode")
+
+
 # ── The default prompt, unedited ────────────────────────────────────────
 
 def test_an_unedited_default_prompt_needs_no_agreement(app):  # noqa: F811

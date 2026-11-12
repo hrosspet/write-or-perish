@@ -100,3 +100,63 @@ def test_an_edit_made_before_the_task_runs_needs_the_agreement(
     failed = _fresh(w["last"])
     assert failed.llm_task_status == "failed"
     assert failed.llm_task_error == cz.AI_READS_CHANGED
+
+
+def test_under_a_default_prompt_writes_wait_and_reads_are_the_requesters(
+        app, circles):  # noqa: F811
+    """What the no-dialog path rests on (Peter, 2026-11-12): in ben's AI
+    reply under his own reply in anna's shared thread, whose prompt is
+    Loore's default unedited, the tools are on, a read tool reads ben's
+    own data only (nothing of anna's reaches the model), a write tool call
+    waits for ben's approval (#645: the history holds anna's text), and
+    the reply is ben's alone."""
+    import json
+    from backend.models import Draft, UserArtifact
+    from backend.tests.test_retrieval_loop import (
+        _ScriptedProvider, _mk_artifact, _resp)
+    from backend.utils import circles as cz
+    from backend.utils.foreign_text import OTHER_USER, history_by_others
+    from backend.utils.privacy import can_user_access_node
+    w = _default_world()
+    ben, anna, entry = w["ben"], w["anna"], w["entry"]
+    _mk_artifact(anna.id, "memory", "ANNAS-MEMORY", title="Memory")
+    _mk_artifact(ben.id, "memory", "BENS-MEMORY", title="Memory")
+    mine = _node(ben, entry, "BENS OWN REPLY", privacy="circles")
+    _db.session.commit()
+    assert mine.audience_root_id == entry.id
+    assert cz.ai_reply_reads(mine, ben.id)[1] == ""          # no dialog
+    assert OTHER_USER in history_by_others(
+        cz.chain_for_reply(mine, ben.id), ben.id)
+    responses = [
+        _resp("Let me look.", tool_calls=[{
+            "id": "r1", "name": "read_artifact",
+            "input": {"kind": "memory"}}]),
+        _resp("Noting.", tool_calls=[{
+            "id": "w1", "name": "update_artifact",
+            "input": {"kind": "memory", "base_version": 1,
+                      "updated_content": "BENS-MEMORY\n- written by AI"}}]),
+        _resp("Done."),
+    ]
+    sent = _ask(w, ben, mine, key="", responses=responses,
+                source_mode="textmode")
+    assert sent is not None, _fresh(w["last"]).llm_task_error
+    calls = _ScriptedProvider.calls
+    assert calls[0]["tools"], "the default agentic prompt turns tools on"
+    # The read tool's answer is ben's memory; anna's data reaches no call.
+    assert "BENS-MEMORY" in json.dumps(calls[1]["raw"][-1], default=str)
+    for call in calls:
+        assert "ANNAS-MEMORY" not in json.dumps(call["raw"], default=str)
+    # The write waits for ben's approval; his memory is unchanged.
+    _db.session.expire_all()
+    held = Draft.query.filter_by(user_id=ben.id, label="tool_pending").all()
+    assert len(held) == 1
+    assert UserArtifact.latest_for(ben.id, "memory").get_content() == (
+        "BENS-MEMORY")
+    assert UserArtifact.latest_for(anna.id, "memory").get_content() == (
+        "ANNAS-MEMORY")
+    # The reply is ben's alone, in anna's thread.
+    reply = _fresh(w["last"])
+    assert reply.privacy_level == "private"
+    assert reply.audience_root_id == entry.id
+    assert can_user_access_node(reply, ben.id)
+    assert not can_user_access_node(reply, anna.id)
