@@ -7,6 +7,9 @@ import App from './App';
 jest.mock('./components/ProtectedRoute', () => ({ children }) => children);
 jest.mock('./pages/ProfilePage', () => () => <div>profile-page</div>);
 jest.mock('./pages/ArtifactsPage', () => () => <div>artifacts-page</div>);
+jest.mock('./pages/ConfirmAccountDeletionPage', () => () => <div>confirm-deletion-page</div>);
+jest.mock('./pages/AccountDeletedPage', () => () => <div>account-deleted-page</div>);
+jest.mock('./pages/AccountRestorePage', () => () => <div>account-restore-page</div>);
 jest.mock('./contexts/UserContext', () => ({
   useUser: () => ({ user: { id: 1, approved: true, username: 'u' }, loading: false }),
 }));
@@ -74,6 +77,21 @@ test('/terms and /privacy render the legal pages without the terms dialog over t
   renderAt('/privacy');
   expect(screen.getByRole('heading', { level: 1, name: 'Privacy Policy' })).toBeTruthy();
   expect(screen.queryByText('terms-modal')).toBeNull();
+});
+
+// A deletion started from the dialog is confirmed from the emailed link,
+// on a page the dialog doesn't cover.
+test('the account deletion pages have no terms dialog over them', () => {
+  for (const [path, page] of [
+    ['/confirm-account-deletion?token=abc', 'confirm-deletion-page'],
+    ['/account-deleted', 'account-deleted-page'],
+    ['/account-restore', 'account-restore-page'],
+  ]) {
+    const { unmount } = renderAt(path);
+    expect(screen.getByText(page)).toBeTruthy();
+    expect(screen.queryByText('terms-modal')).toBeNull();
+    unmount();
+  }
 });
 
 test('elsewhere the terms dialog shows while the terms are not accepted', () => {

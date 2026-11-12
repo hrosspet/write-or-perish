@@ -81,9 +81,10 @@ test('links to loore.org stay on the site they are read on', () => {
 test('placeholders are found, and links are not mistaken for them', () => {
   const doc = { blocks: [
     { type: 'paragraph', text: 'Run by [OPERATOR NAME], ID [COMPANY ID]. See [the page](https://loore.org/terms).' },
-    { type: 'bullets', items: ['At [ADDRESS].', 'Again [OPERATOR NAME].'] },
+    { type: 'bullets', items: ['At [ADDRESS].', 'Again [OPERATOR NAME].', 'Kept [TODO: check this] and [Address].'] },
   ] };
-  expect(findPlaceholders(doc)).toEqual(['[OPERATOR NAME]', '[COMPANY ID]', '[ADDRESS]']);
+  expect(findPlaceholders(doc)).toEqual(
+    ['[OPERATOR NAME]', '[COMPANY ID]', '[ADDRESS]', '[TODO: check this]', '[Address]']);
 });
 
 test('the renderer shows a table, a box and a plain list', () => {

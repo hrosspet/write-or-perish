@@ -31,7 +31,7 @@
     { "type": "subheading", "text": "Messages you send us" },
     { "type": "paragraph", "text": "Feedback and answers to polls. We read them, with your username, because they are written to us. Bug reports and ideas you ask the AI to file go to GitHub (section 5)." },
     { "type": "subheading", "text": "Your subscription" },
-    { "type": "paragraph", "text": "If you subscribe: its level, its state and dates, and the reference numbers Stripe gives your customer record and subscription. Your card and billing details stay with Link and Stripe; we never see your card number." },
+    { "type": "paragraph", "text": "If you subscribe: its level, its state and dates, whether you have used the trial and have ever paid, why a subscription ended (for example, a failed payment or a dispute), which reduced-price code you used, if any, and the reference numbers Stripe gives your customer record and subscription. Your card and billing details stay with Link and Stripe; we never see your card number." },
     { "type": "subheading", "text": "Technical records" },
     { "type": "paragraph", "text": "Our server logs record each request: the address it came from (your IP address), your browser or app, the page or API path and the time. Some log lines also hold your email address, for example when we send you a sign-in link. Error reports go to Sentry (section 5). We use these for security and to fix faults." },
     { "type": "subheading", "text": "Legal bases" },
@@ -55,7 +55,7 @@
         "embeddings;",
         "metadata, such as dates, privacy settings and which entry replies to which;",
         "your email address, username and X handle;",
-        "a few short texts: the titles, links and authors of saved references, the titles of your documents, the headings of text read aloud, and the words the AI searched for while replying;",
+        "a few short texts: the titles, links and authors of saved references, the titles and one-line descriptions of your documents, the headings of text read aloud, and the words the AI searched for while replying;",
         "an X archive you are importing, for up to 24 hours, until you confirm the import."
       ]
     },
@@ -70,18 +70,21 @@
       "rows": [
         ["AI replies", "The thread, the documents the AI may read (such as your profile) and what it finds in your entries", "The provider of the model you use"],
         ["Background work: your profile, intentions, recent context, todo list", "Entries and documents the AI may read", "Your model's provider, or both if you chose \"Anthropic and OpenAI\" under Background tasks"],
-        ["Turning a recording into text", "The audio", "OpenAI, **also when the entry is set to None**"],
+        ["A nightly summary of your saved references", "Your saved tweets, bookmarks and clipped pages", "Your model's provider"],
+        ["A draft answer to a poll, only if you ask for one", "Your profile, recent context and intentions, or your recent writing the AI may read, as the poll says", "The model the poll names when you ask, which can be the other provider"],
+        ["Turning a recording into text", "The audio", "OpenAI"],
         ["Reading text aloud", "The text", "OpenAI"],
-        ["Search by meaning", "Entries the AI may read, and saved references", "OpenAI"],
+        ["Search by meaning", "**The words you search for**, entries the AI may read, and saved references", "OpenAI, **the words you search for also when your account is set to None**"],
         ["Glean", "The thread, your profile and intentions, and the day's public tweets from the Community Archive", "OpenAI by default, or the model you pick"],
-        ["Training, only for content marked Train", "That content", "OpenAI; with an Anthropic model, Anthropic, with a separate key"]
+        ["Training, only for content marked Train", "That content", "The provider of the model you use, with our training key for it where we have one"]
       ]
     },
     {
       "type": "bullets",
       "items": [
-        "Apart from turning recordings into text, nothing set to None is sent to AI.",
-        "Under OpenAI's and Anthropic's API terms, they don't train their models on what we send, except content you mark Train. Content set to Chat is never sent with the key we use for training.",
+        "Nothing set to None is sent to AI, with one exception: the words you type into search go to OpenAI to search by meaning, also when your account is set to None.",
+        "Loore's apps offer recording only for entries the AI may read, because OpenAI turns every recording into text. A recording sent to Loore's API in another way is turned into text by OpenAI even if its entry is set to None.",
+        "Under OpenAI's and Anthropic's API terms, they don't train their models on what we send, except content you mark Train. Where we have a separate training key for a provider, content set to Chat is never sent with it.",
         "With each request, OpenAI receives a code that stands for your account, so that it can act on one account's requests if its safety filter flags them. The code is not your name, email or account number, and nobody without our key can tell whose it is.",
         "Background work often goes through the providers' batch services. Loore does not delete the files of a batch from OpenAI afterwards; how long OpenAI keeps them is set by OpenAI's terms."
       ]
@@ -94,10 +97,10 @@
       "rows": [
         ["**Google Cloud**", "Everything Loore stores: our server, database, backups and encryption keys", "USA (Iowa)"],
         ["**[EMAIL PROVIDER]**", "Your email address and the emails we send you: sign-in links, confirmations and account notices. They contain nothing you wrote.", "[EMAIL PROVIDER LOCATION]"],
-        ["**Sentry**", "Error reports: where the code failed, the page or API path, your browser or app, sometimes your account number or email address. They are built to contain nothing you wrote. Your browser sends its reports directly, so Sentry sees your IP address.", "[SENTRY REGION]"],
+        ["**Sentry**", "Error reports: where the code failed, the page or API path, your browser or app, sometimes your account number or email address. They are built to contain nothing you wrote. On every page load, the website also sends Sentry a short session record (that a session started, and whether it ended in an error). Your browser sends these directly, so Sentry sees your IP address.", "[SENTRY REGION]"],
         ["**Link and Stripe**", "If you subscribe: what you enter at checkout, such as your name, email, card and billing address. Link sells the subscription and handles that data under its own privacy policy.", "See Link's privacy policy"],
         ["**X**", "If you sign in with X or connect it: X tells us your X user ID and handle, and with bookmark sync, your bookmarks, every night. We send X the IDs of saved tweets to check they are still public. We never post to X.", "USA"],
-        ["**GitHub**", "If you ask the AI to file a bug report or an idea, and confirm it: its title and text become a **public** issue in Loore's GitHub repository, labelled with your username.", "USA"],
+        ["**GitHub**", "If you ask the AI to file a bug report or an idea, and confirm it: its title and text become a **public** issue in Loore's GitHub repository, labelled loore:<your username>. They stay public after you delete your account.", "USA"],
         ["**Google Fonts**", "Your IP address and browser details, when a page loads Loore's fonts", "Google (worldwide)"],
         ["**YouTube**", "Only if you open a saved YouTube video: the player loads from youtube-nocookie.com", "Google (worldwide)"],
         ["**Community Archive**", "The X handles and user IDs we look up. We download public tweets from it; we send it nothing you wrote.", "Its hosting provider"]
@@ -127,8 +130,8 @@
       "type": "bullets",
       "items": [
         "**Private entries:** only you.",
-        "**Public entries:** every signed-in Loore member can open them. Once public sharing is on for your account, they are also on the open web: on your public page, in its feed and in our sitemap. Search engines and AI crawlers are welcome to read them, for AI training too. Public entries are stored unencrypted.",
-        "**Your username** appears with everything you make public. If you signed up by email, it starts as the part of your address before the @; you can change it on the Account page. If you signed up with X, it is your X handle, and your public pages also name your X account."
+        "**Public entries:** every signed-in Loore member can open them. Once public sharing is on for your account, they are also on the open web: on your public page and in its feed, and a public reply also inside the thread it answers, on that thread's page. Our sitemap lists the public entries that start a thread. Search engines and other crawlers, AI companies' crawlers included, are allowed to read public pages. Public entries are stored unencrypted.",
+        "**Your username** appears with everything you make public. If you signed up by email, it starts as the part of your address before the @, without characters other than letters, digits and _, and with a number added if that name is taken. If you signed up with X, it is your X handle, and public entry pages carry your numeric X user ID in data meant for search engines. You can change your username on the Account page; links with the old name then lead to the new one, so the two names can be connected."
       ]
     },
 
@@ -141,7 +144,7 @@
         "**Delete all my content:** you can restore it for 30 days; then it is deleted forever.",
         "**Your account:** if you delete it, you can recover it within 30 days by signing in; after that it is deleted forever, with everything in it.",
         "**Backups:** daily copies are kept for 28 days and server snapshots for 14 days, so what is deleted forever leaves the backups within another 30 days. A weekly copy kept outside Google follows the same limit.",
-        "**What stays after an account is deleted:** a record of what your AI use cost, without your name; an empty placeholder where other people replied under your entries; and your username, reserved for a year so that nobody else can take it over.",
+        "**What stays after an account is deleted:** a record of what your AI use cost, without your name; an empty placeholder where other people replied under your entries; your username, reserved for a year so that nobody else can take it over; bug reports and ideas filed on GitHub through Loore, which stay public with the label loore:<your username>; if you used a reduced-price code, the record of that use with the subscription's Stripe reference number but without your account; and the reference numbers of the payment events Stripe sent us.",
         "**A prefilled account nobody signed in to:** until we delete it, or until you ask us to.",
         "**Server logs:** [LOG RETENTION].",
         "**Error reports in Sentry:** 30 days.",
@@ -154,12 +157,12 @@
     {
       "type": "bullets",
       "items": [
-        "**See and copy your data.** With craft mode on, **Export data** in the menu downloads your threads as a text file. For everything else we hold about you, such as recordings, documents and account data, write to us and we send you a copy.",
+        "**See and copy your data.** With craft mode on, **Export data** in the menu downloads the threads you started as a text file: your entries, the AI's replies, and documents pinned to them. It leaves out your replies in other people's threads, your saved references and documents not pinned to a thread. You can download each recording from its entry. For everything else we hold about you, write to us and we send you a copy.",
         "**Correct it.** Edit or delete your entries, edit your profile, intentions and other documents, and change your username and email on the Account page.",
         "**Delete it.** Delete single entries, all your content, or your account, as described in section 9.",
         "**Take it with you.** Use the export, or ask us for a copy in a common format.",
         "**Object, or ask us to restrict processing.** For example, object to a profile we built before you joined.",
-        "**Withdraw your consent** at any time: set content back from Train to Chat or None, choose one provider for background tasks, or say no to seeding from your tweets.",
+        "**Withdraw your consent** at any time: set content back from Train to Chat or None, or choose one provider for background tasks. To take back a yes to seeding your Loore from your tweets, write to us; there is no setting for it yet.",
         "**Complain** to the Czech data protection authority, Úřad pro ochranu osobních údajů (ÚOOÚ), or to the authority in the country where you live."
       ]
     },
@@ -170,8 +173,9 @@
       "type": "bullets",
       "items": [
         "Loore sets only the cookies that keep you signed in: a session cookie, and a cookie that keeps you signed in for 30 days. There are no advertising or analytics cookies, so we don't ask for cookie consent.",
-        "Your browser also keeps a few of your Loore settings, such as the theme, your last privacy and AI choice, and craft mode. They stay on your device.",
-        "The iPhone app keeps your sign-in in the phone's Keychain. It contains no analytics or tracking."
+        "Your browser also keeps a few of your Loore settings, such as the theme, your last privacy and AI choice, and craft mode. They stay on your device; craft mode is also saved with your account.",
+        "The iPhone app keeps your sign-in in the phone's Keychain and its settings on the phone. While a recording uploads, its audio is kept on the phone; parts that failed to upload stay there, also after the app restarts, until they are sent. The app also keeps logs of its last 20 recordings, without audio or words, for diagnosing recording problems. It contains no analytics or tracking.",
+        "The Chrome clipper keeps its access token and the address and title of the last page you clipped in Chrome's storage for the extension."
       ]
     },
 

@@ -44,12 +44,14 @@ export function renderInline(text, { newTab = false } = {}) {
   });
 }
 
-// Every bracketed capital placeholder ("[OPERATOR NAME]") still in a document.
+// Every bracketed marker still in a document ("[OPERATOR NAME]",
+// "[TODO: …]"), apart from the text of Markdown links. The same rule as
+// ios/scripts/check_terms_text.py --release.
 export function findPlaceholders(doc) {
   const found = new Set();
   const visit = (value) => {
     if (typeof value === "string") {
-      for (const m of value.matchAll(/\[([A-Z][A-Z0-9 /&.,'-]+)\](?!\()/g)) found.add(m[0]);
+      for (const m of value.matchAll(/\[[^[\]\n]+\](?!\()/g)) found.add(m[0]);
     } else if (Array.isArray(value)) {
       value.forEach(visit);
     } else if (value && typeof value === "object") {

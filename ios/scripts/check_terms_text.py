@@ -9,8 +9,10 @@ Usage, from the repo root:
   python3 ios/scripts/check_terms_text.py            # exit 1 if TermsText.swift is not
                                                       # what terms.json generates
   python3 ios/scripts/check_terms_text.py --write    # regenerate TermsText.swift
-  python3 ios/scripts/check_terms_text.py --release  # also exit 1 while a [PLACEHOLDER]
-                                                      # is left in terms.json or privacy.json
+  python3 ios/scripts/check_terms_text.py --release  # also exit 1 while any bracketed
+                                                      # marker ([PLACEHOLDER], [TODO: …]) is
+                                                      # left in terms.json or privacy.json
+                                                      # (not in CI: run it before merging)
 
 The check also validates both JSON files: known block types, balanced **bold**,
 and links the app can open (https:// or mailto:).
@@ -28,7 +30,9 @@ SWIFT = ROOT / "ios/Loore/Features/Onboarding/TermsText.swift"
 
 TEXT_BLOCKS = ("title", "sectionTitle", "subheading", "paragraph", "footnote")
 LIST_BLOCKS = ("bullets", "plainList", "quoteBox")
-PLACEHOLDER = re.compile(r"\[[A-Z][A-Z0-9 /&.,'-]+\](?!\()")
+# Any bracketed marker that is not a Markdown link's text: "[OPERATOR NAME]",
+# "[TODO: check]", "[Address]".
+PLACEHOLDER = re.compile(r"\[[^\[\]\n]+\](?!\()")
 LINK = re.compile(r"\]\(([^)]*)\)")
 
 HEADER = """\

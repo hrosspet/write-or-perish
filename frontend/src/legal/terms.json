@@ -48,14 +48,15 @@
       "type": "bullets",
       "items": [
         "**The seller.** Subscriptions are sold through Link, Stripe's checkout service. Link is the merchant of record: it is the seller on your receipt, charges you, adds and pays the tax, sends receipts and answers payment questions. Link's own terms for the purchase are shown at checkout, and your card statement shows the charge under LINK.COM*.",
-        "**Price.** The levels and their prices are shown on the subscribe page and at checkout, before you pay. Tax is added where it applies.",
+        "**Price.** The prices of the levels are shown on the subscribe page of the Loore website. Every price, including a reduced one that a code opens, is shown at checkout before you pay. Tax is added where it applies. The iPhone app shows no prices.",
         "**Free trial.** A subscription starts with a 14-day free trial. You enter a card at the start, and the first charge comes when the trial ends. If you cancel before then, you pay nothing. Each account gets one trial.",
-        "**Renewal.** After the trial, the subscription renews every month and is charged at the start of each month, until you cancel.",
-        "**Cancelling.** Cancel at any time in Settings on the Loore website, or on link.com. The subscription then runs to the end of the month you paid for and is not renewed.",
-        "**Changing level.** Moving up is charged at once, for the rest of the month. Moving down takes effect when the month you paid for ends.",
-        "**A failed payment** stops the AI features until the payment goes through. If the first payment fails, Loore stays closed until it does.",
-        "**Usage limit.** AI use has a monthly limit on what it may cost. When you reach it, Loore tells you, and AI replies pause until the limit lifts, usually on the first day of the next month. Your writing is saved.",
-        "**After a subscription ends,** your account stays. You can read, write by typing, export your writing and delete your account. AI replies, transcription and the other AI features stop."
+        "**Renewal.** After the trial, the subscription renews every month, counted from the day the trial ended (or from the day you subscribed, if you had no trial). Each renewal is charged on that day, until you cancel. We call each such month a billing period.",
+        "**Cancelling.** Cancel at any time in Settings on the Loore website, or on link.com. The subscription then runs to the end of the billing period you paid for and is not renewed.",
+        "**Changing level.** Moving up is charged at once, for the rest of the billing period. Moving down takes effect when the period you paid for ends.",
+        "**A failed payment** stops the AI features at once. Stripe tries the charge again for some days; if a retry succeeds, they come back. If the retries end without a payment, the subscription ends. A new subscription after that is paid at checkout, without another trial.",
+        "**Usage limit.** Your subscription includes AI use up to a cost limit per calendar month (UTC). When you reach it, Loore tells you, and everything that costs money pauses: AI replies, recording and dictation, uploads, read-aloud, and updates of your profile, recent context and todo list. Typing and reading still work, and your writing is saved. The limit lifts on the first day of the next month, or later if the month before went far over it. During the free trial, a separate limit applies to the whole trial; it lifts with your first payment.",
+        "**After a subscription ends,** if you paid for it at least once, or you cancelled it yourself (a trial included), your account stays open: you can read, write by typing, export your writing and delete your account. AI replies, transcription and the other AI features stop.",
+        "**If a subscription ends without ever being paid** and without you cancelling it (for example, because the first payment failed until the retries ran out), Loore stays closed, including what you wrote during the trial, until a new subscription starts. You can still delete your account, and we send you a copy of your writing if you ask."
       ]
     },
 
@@ -64,9 +65,10 @@
       "type": "bullets",
       "items": [
         "**The free trial** is not charged, so there is nothing to refund for it.",
-        "**Part of a month.** We don't refund the rest of a month when you cancel, move down a level or delete your account, unless the law requires it.",
+        "**Part of a billing period.** We don't refund the rest of a period when you cancel, move down a level or delete your account, unless the law requires it.",
         "**Your right to withdraw.** If you are a consumer in the EU, the law of your country may let you withdraw from a purchase within 14 days, without giving a reason. Because Link sells the subscription, you withdraw with Link: contact [Link's support](https://support.link.com/topics/sold-through-link), or write to us and we pass it on. If the paid service had already started at your request, the seller may keep an amount for the days you used it.",
-        "**Other refunds.** Link may also refund a payment under its own rules. For anything else about a payment, write to us."
+        "**Other refunds.** Link may also refund a payment under its own rules. For anything else about a payment, write to us.",
+        "**Disputes and full refunds.** If you dispute a payment with your bank, or your latest payment is refunded in full (also by Link), the subscription stops at once and is cancelled, and section 4 says what stays open after it ends."
       ]
     },
 
@@ -106,7 +108,7 @@
       "items": [
         "It may be sent to OpenAI or Anthropic so the AI can read it and reply to you, and for the other work listed in the [Privacy Policy](https://loore.org/privacy#ai).",
         "Under these providers' API terms, content sent through the API is **not used to train** their models.",
-        "Content set to Chat is never sent with the API key we use for training.",
+        "Where we have a separate training key for a provider, content set to Chat is never sent with it.",
         "If you later set it to None, AI no longer reads it from then on. We can't recall what was already sent."
       ]
     },
@@ -117,7 +119,7 @@
     {
       "type": "bullets",
       "items": [
-        "Your content is sent to AI providers (currently OpenAI) and may be used to **train future AI models**.",
+        "Your content is sent to the AI provider of the model you use (OpenAI or Anthropic), with our training key for that provider where we have one, and may be used to **train future AI models**.",
         "**Loore** may also use it to train its own models in the future.",
         "In exchange, OpenAI gives Loore free daily API credits that help keep it running."
       ]
@@ -136,7 +138,7 @@
     {
       "type": "bullets",
       "items": [
-        "**To the AI providers concerned** (currently OpenAI): a license to use it to develop and improve their services, including model training, research, evaluation and testing.",
+        "**To the AI provider it is sent to** (OpenAI or Anthropic): a license to use it to develop and improve their services, including model training, research, evaluation and testing.",
         "**To Loore:** a license to use it for training machine learning models, research, and developing Loore and related products."
       ]
     },
@@ -180,7 +182,7 @@
       "items": [
         "You can export your threads at any time (with craft mode on, **Export data** in the menu), and ask us for a copy of everything else we hold about you.",
         "You can delete your account on the Account page. If you change your mind, you can still recover your account within 30 days by signing in; after that it is deleted forever, with everything in it. Copies in our backups are erased within another 30 days. Loore keeps a record of what your AI use cost, without your name.",
-        "Deleting your account stops your subscription from renewing.",
+        "Deleting your account asks Stripe to stop your subscription from renewing. If that fails, we try again when the account is deleted forever. If you recover your account, the subscription still ends when the billing period you paid for ends.",
         "We may suspend or close an account that seriously or repeatedly breaks these terms. If we do, we tell you why."
       ]
     },
@@ -196,7 +198,7 @@
     },
 
     { "type": "sectionTitle", "text": "13. Changes to these terms" },
-    { "type": "paragraph", "text": "When we change these terms in a way that matters, we tell you in Loore and ask you to accept the new version before you go on. If you don't want to accept it, you can export your writing and delete your account." },
+    { "type": "paragraph", "text": "When we change these terms in a way that matters, we tell you in Loore and ask you to accept the new version before you go on. If you don't want to accept it, the same screen lets you export your writing, delete your account or sign out, without accepting." },
 
     { "type": "sectionTitle", "text": "14. Law and disputes" },
     {

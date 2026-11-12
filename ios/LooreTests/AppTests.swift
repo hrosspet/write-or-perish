@@ -252,6 +252,56 @@ final class TermsTextTests: XCTestCase {
     }
 }
 
+/// "I Agree" sends the version the screen showed (#440). The server records only
+/// the current one; an older build gets 409 `terms_version_mismatch` and is asked
+/// to update, while export, deletion and sign-out stay on the screen.
+@MainActor
+final class TermsAcceptTests: StubbedAppTestCase {
+    /// The stub user, with Terms that are out of date.
+    private func useUserWithOldTerms() throws {
+        let json = Self.userJSON.replacingOccurrences(
+            of: #""terms_up_to_date":true"#, with: #""terms_up_to_date":false"#)
+        app.useForTesting(api: makeStubbedClient(environment: .local), user: try decode(CurrentUser.self, json))
+        XCTAssertEqual(app.user?.termsUpToDate, false)
+    }
+
+    func testAcceptingSendsTheBundledVersion() async throws {
+        StubURLProtocol.install { _ in
+            .json(200, #"{"message":"Terms accepted","accepted_terms_version":"3.0"}"#)
+        }
+        try useUserWithOldTerms()
+        try await app.acceptTerms()
+        let request = try XCTUnwrap(StubURLProtocol.requests.first {
+            $0.httpMethod == "POST" && $0.url?.path == "/api/terms/accept"
+        })
+        let sent = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(request.httpBody)) as? [String: Any])
+        XCTAssertEqual(sent["version"] as? String, TermsText.version)
+        XCTAssertEqual(app.user?.termsUpToDate, true)
+    }
+
+    func testNewerTermsOnTheServerAreNotAcceptedHere() async throws {
+        StubURLProtocol.install { _ in
+            .json(409, #"{"error":"terms_version_mismatch","current_version":"3.1","message":"x"}"#)
+        }
+        try useUserWithOldTerms()
+        do {
+            try await app.acceptTerms()
+            XCTFail("a 409 must not accept")
+        } catch {
+            XCTAssertTrue(TermsAcceptance.isOutdated(error))
+        }
+        XCTAssertEqual(app.user?.termsUpToDate, false)
+        XCTAssertTrue(TermsAcceptance.outdatedMessage.contains("Update Loore"))
+        XCTAssertTrue(TermsAcceptance.outdatedMessage.contains("sign out"))
+    }
+
+    func testOtherFailuresAreNotMistakenForOutdatedTerms() {
+        XCTAssertFalse(TermsAcceptance.isOutdated(APIError.server(status: 409, body: ServerErrorBody(error: "other"))))
+        XCTAssertFalse(TermsAcceptance.isOutdated(APIError.server(status: 500, body: nil)))
+        XCTAssertFalse(TermsAcceptance.isOutdated(APIError.transport(code: -1009, description: "offline")))
+    }
+}
+
 /// The app's "who am I" call (`AppState.loadUser`, at launch and after an X login or
 /// an import) reads only `user`, so it asks the server to leave out the profile and
 /// its decryption (#481). The Profile page asks for the profile itself.

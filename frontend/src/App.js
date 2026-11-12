@@ -110,6 +110,12 @@ function AtRoute() {
   return <PublicSharePage usernameOverride={username} />;
 }
 
+// Pages the Terms dialog stays off (#440): the legal pages, and the
+// signed-out pages of an account deletion (#269).
+export const TERMS_DIALOG_EXEMPT_PATHS = [
+  ...LEGAL_PATHS, "/confirm-account-deletion", "/account-deleted", "/account-restore",
+];
+
 function RootRoute() {
   const { user, loading } = useUser();
   if (loading) return null;
@@ -214,8 +220,10 @@ function App() {
 
       {/* Render the Terms Modal if the user hasn't accepted the terms yet.
           Not over /terms and /privacy themselves (#440): the dialog's links
-          open them in a new tab, to be read before agreeing. */}
-      {showTerms && !LEGAL_PATHS.includes(pathname) && (
+          open them in a new tab, to be read before agreeing. Nor over the
+          pages of an account deletion started from the dialog, so a person
+          who doesn't accept can confirm it from the emailed link. */}
+      {showTerms && !TERMS_DIALOG_EXEMPT_PATHS.includes(pathname) && (
         <TermsModal
           onAccepted={() => {
             setUser({ ...user, terms_up_to_date: true });
