@@ -767,14 +767,17 @@ def _batch_keys(key_type="chat"):
 
 def _cancel_provider_batch(provider_key, batch_id, key_type="chat"):
     """Best-effort provider cancel of a batch that carries only this
-    user's requests. Returns None, or the error class name."""
+    user's requests. Returns None, or the error class name. Nothing
+    reads the batch again, so an OpenAI batch's files (the user's
+    requests and what came back) are deleted too (#667)."""
     from backend.utils import llm_batch
     try:
         keys = _batch_keys(key_type)
         if provider_key == "anthropic":
             llm_batch.anthropic_batch_cancel_one(keys.get("anthropic"), batch_id)
         elif provider_key.startswith("openai"):
-            llm_batch.openai_batch_cancel_one(keys.get("openai"), batch_id)
+            llm_batch.openai_batch_cancel_one(keys.get("openai"), batch_id,
+                                              delete_files=True)
         else:
             return "UnknownProvider"
         return None

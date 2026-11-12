@@ -185,13 +185,109 @@ class CollectedResults(dict):
     overloaded, a rate limit, or an account reason such as a spend limit,
     billing or the key; #369). They are not billed, and the same request
     can succeed later, so a caller that counts failed items against a
-    retry limit leaves these out, as for an account-refused submit."""
+    retry limit leaves these out, as for an account-refused submit.
+
+    And ``batch_files``: the OpenAI file ids (input, output, error) of
+    the ended batches read here, for delete_collected_batch_files once
+    the caller has saved what it needs (#667)."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.queue_full = set()
         self.blocked = {}
         self.transient_failures = set()
+        self.batch_files = []
+
+
+# ── OpenAI batch files are deleted after use (#667) ─────────────────────
+# A batch's requests are uploaded as a file (purpose "batch"), and OpenAI
+# adds an output file and, for failed requests, an error file. The prompts
+# hold users' writing, so once a batch has ended and its results have
+# been read and saved, the three files are deleted. Anthropic's Message
+# Batches API takes the requests inline: there is no file to delete.
+# A delete that fails is logged (ids and the error's type) and left: it
+# never fails the batch or its job. The SDK itself retries a delete that
+# meets a connection error, a 429 or a 5xx (max_retries, 2 by default).
+
+class _NeverRaised(Exception):
+    """Stands in for openai.NotFoundError where the SDK lacks it."""
+
+
+def _openai_not_found():
+    """openai.NotFoundError (a 404: the file or batch is gone)."""
+    try:
+        import openai
+    except ImportError:  # pragma: no cover - the SDK is a dependency
+        return _NeverRaised
+    return getattr(openai, "NotFoundError", _NeverRaised)
+
+
+def openai_batch_file_ids(batch):
+    """The ids of an OpenAI batch's input, output and error files that it
+    names."""
+    ids = []
+    for attr in ("input_file_id", "output_file_id", "error_file_id"):
+        file_id = getattr(batch, attr, None)
+        if isinstance(file_id, str) and file_id and file_id not in ids:
+            ids.append(file_id)
+    return ids
+
+
+def delete_openai_files(client, file_ids):
+    """Delete *file_ids* at OpenAI. One already gone counts as deleted.
+    Returns how many are gone; never raises."""
+    not_found = _openai_not_found()
+    gone = 0
+    for file_id in file_ids or ():
+        try:
+            client.files.delete(file_id)
+            gone += 1
+        except not_found:
+            gone += 1
+        except Exception as e:  # noqa: BLE001 - never fails the batch
+            log.warning("Deleting OpenAI batch file %s failed (%s); left",
+                        file_id, type(e).__name__)
+    return gone
+
+
+def delete_collected_batch_files(results, api_keys):
+    """Delete the files of the OpenAI batches a batch_check_and_collect
+    read as ended (``results.batch_files``). Call it once the results are
+    saved: a file deleted before then could not be read again by a
+    collect that has to start over. Never raises."""
+    file_ids = list(getattr(results, "batch_files", None) or ())
+    if not file_ids:
+        return 0
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=(api_keys or {}).get("openai"))
+        gone = delete_openai_files(client, file_ids)
+    except Exception as e:  # noqa: BLE001 - never fails the batch
+        log.warning("Deleting OpenAI batch files failed (%s); left",
+                    type(e).__name__)
+        return 0
+    log.info("Deleted %s of %s OpenAI batch file(s)", gone, len(file_ids))
+    return gone
+
+
+def delete_openai_batch_files_by_id(api_key, batch_id):
+    """Delete the files of one ended OpenAI batch, read again by its id
+    (the one-item batches of a Read, whose outcome the reply node keeps).
+    Nothing is deleted while the batch has not ended. Never raises;
+    returns how many files are gone."""
+    if not api_key or not batch_id:
+        return 0
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key)
+        batch = client.batches.retrieve(batch_id)
+        if getattr(batch, "status", None) not in OPENAI_BATCH_TERMINAL:
+            return 0
+        return delete_openai_files(client, openai_batch_file_ids(batch))
+    except Exception as e:  # noqa: BLE001 - never fails the batch
+        log.warning("Deleting the files of OpenAI batch %s failed (%s); "
+                    "left", batch_id, type(e).__name__)
+        return 0
 
 
 def blocked_items(results):
@@ -814,8 +910,10 @@ def batch_check_and_collect(batch_ids, api_keys, known=None):
                 # Failed in validation on the enqueued-token limit: nothing
                 # ran, nothing was billed, and the requests go out again on
                 # a later pass. A warning, not an error: no Sentry event
-                # for each such batch while the queue stays full.
+                # for each such batch while the queue stays full. The
+                # later pass uploads its own file: this one can go (#667).
                 results.queue_full.add(key)
+                results.batch_files.extend(openai_batch_file_ids(batch))
                 log.warning(f"OpenAI batch {batch_id} failed: the "
                             f"enqueued-token limit for its model is full")
                 continue
@@ -913,6 +1011,8 @@ def batch_check_and_collect(batch_ids, api_keys, known=None):
                           f"status={batch.status}: {collected} result(s) "
                           f"collected, counts={batch.request_counts}"
                           + (f", errors={errors}" if errors else ""))
+            # Read in full: its files go once the caller has saved (#667).
+            results.batch_files.extend(openai_batch_file_ids(batch))
 
     return results, still_pending, batch_durations
 
@@ -977,10 +1077,12 @@ def anthropic_batch_submit_one(api_key, custom_id, api_model, messages,
     return batch.id
 
 
-def anthropic_batch_cancel_one(api_key, batch_id):
+def anthropic_batch_cancel_one(api_key, batch_id, delete_files=False):
     """Cancel a batch (the admin's cancel-and-rerun). Best effort: a
     batch that already ended cannot be cancelled and the API says so;
-    the caller only needs the item not to be collected any more."""
+    the caller only needs the item not to be collected any more.
+    *delete_files* is the OpenAI twin's; an Anthropic batch has no
+    uploaded files."""
     from anthropic import Anthropic
     client = Anthropic(api_key=api_key)
     batch = client.messages.batches.cancel(batch_id)
@@ -1096,14 +1198,28 @@ def openai_batch_submit_one(api_key, custom_id, api_model, messages,
     return batch.id
 
 
-def openai_batch_cancel_one(api_key, batch_id):
+def openai_batch_cancel_one(api_key, batch_id, delete_files=False):
     """Cancel a batch (the admin's cancel-and-rerun); see the Anthropic
-    twin."""
+    twin. *delete_files*: nothing will read the batch again (a rerun, an
+    account's purge), so its files are deleted now, best effort (#667):
+    the input file, and the output and error files the batch already has.
+    One a cancelling batch writes later stays until the next manual
+    clean-up. A cancel whose result is still collected (a withdrawal at
+    the spend cap) keeps them; the collect deletes them."""
     from openai import OpenAI
     client = OpenAI(api_key=api_key)
-    batch = client.batches.cancel(batch_id)
+    try:
+        batch = client.batches.cancel(batch_id)
+    except Exception:
+        if delete_files:
+            # Refused for a batch that has already ended: its files can
+            # all go.
+            delete_openai_batch_files_by_id(api_key, batch_id)
+        raise
     log.info("OpenAI batch %s cancel requested: status=%s", batch_id,
              batch.status)
+    if delete_files:
+        delete_openai_files(client, openai_batch_file_ids(batch))
     return batch.status
 
 
@@ -1126,6 +1242,18 @@ def openai_batch_collect_one(api_key, batch_id, custom_id):
              batch.status, batch.request_counts)
     if batch.status not in OPENAI_BATCH_TERMINAL:
         return batch.status, None
+    try:
+        return _openai_collect_ended(client, batch, batch_id, custom_id)
+    except _openai_not_found():
+        # The files are deleted once an outcome is saved (#667): a second
+        # collect of the same batch (an overlapping poll) gets a verdict,
+        # not a poll that can never succeed.
+        raise BatchItemFailed(
+            f"OpenAI batch {batch_id}: its files are no longer available")
+
+
+def _openai_collect_ended(client, batch, batch_id, custom_id):
+    """openai_batch_collect_one for a batch that has ended."""
     output_file_id = getattr(batch, "output_file_id", None)
     if output_file_id:
         for entry in _file_lines(client, output_file_id):

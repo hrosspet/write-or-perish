@@ -3278,6 +3278,26 @@ def _request_batch_cancel(entry, api_key, provider):
         return None
 
 
+def _delete_batch_files(entry):
+    """Delete the files of the ended one-item OpenAI batch in *entry* once
+    its outcome is saved on the node (#667): its input, output and error
+    files at OpenAI. Best effort, never raises. An Anthropic batch has no
+    uploaded files."""
+    if not entry or (entry.get("provider") or "anthropic") != "openai":
+        return
+    from backend.utils import llm_batch
+    try:
+        keys = llm_batch.apply_batch_key_override(
+            get_api_keys_for_usage(flask_app.config,
+                                   entry.get("key_type") or "chat"),
+            flask_app.config)
+        llm_batch.delete_openai_batch_files_by_id(
+            keys.get("openai"), entry.get("batch_id"))
+    except Exception as e:  # noqa: BLE001 - never fails the reply
+        logger.warning("Deleting the files of batch %s failed (%s)",
+                       entry.get("batch_id"), type(e).__name__)
+
+
 def _withdraw_batch_reply(llm_node, meta, entry):
     """The provider confirmed the withdrawn batch never ran: nothing was
     billed, so no cost row; the node ends 'cancelled', its text says the
@@ -3297,6 +3317,7 @@ def _withdraw_batch_reply(llm_node, meta, entry):
     logger.warning("Node %s: batch %s withdrawn before it ran (%s); "
                    "not billed", llm_node.id, entry.get("batch_id"),
                    entry.get("cancel_reason"))
+    _delete_batch_files(entry)
 
 
 def _ca_batch_poll(task, llm_node, parent_node, meta, entry, user_id):
@@ -4801,6 +4822,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 db.session.commit()
                 logger.info("Node %s: Read result dropped, the owner's "
                             "writing is on hold for deletion", llm_node.id)
+                if resp.get("batch"):
+                    _delete_batch_files(batch_entry)   # #667
                 return {
                     'parent_node_id': parent_node_id,
                     'llm_node_id': llm_node.id,
@@ -5746,6 +5769,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     f_speech.release()
                 if f_dispatch_tts:
                     _dispatch_voice_tts(target_node.id, user_id)
+                if resp.get("batch"):
+                    # The reply is saved: the batch's files can go (#667).
+                    _delete_batch_files(batch_entry)
 
                 logger.info(
                     f"LLM completion successful, updated node "
@@ -6199,6 +6225,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             current_node.llm_task_error = error_message
             current_node.streaming_content = None
             db.session.commit()
+            if batch_entry is not None and isinstance(
+                    e, (BatchItemFailed, FeedReplyError,
+                        EmptyTruncatedReplyError)):
+                # The batch has ended and its outcome is saved on the
+                # node: its files can go (#667). Not after the poll cap,
+                # when the batch may still be running.
+                _delete_batch_files(batch_entry)
             if speech_turn is not None:
                 speech_turn.abort()
             raise error

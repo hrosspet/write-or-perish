@@ -40,7 +40,7 @@ from backend.utils.refusal_backoff import REFUSED_REF
 from backend.utils.privacy import account_allows_ai
 from backend.utils.llm_batch import (
     BATCH_JOB_MAX_AGE, apply_batch_key_override, batch_check_and_collect,
-    batch_submit, blocked_items,
+    batch_submit, blocked_items, delete_collected_batch_files,
 )
 from backend.utils.timefmt import user_local_hour
 
@@ -463,6 +463,8 @@ def _collect_digest_batches():
         job.status = "collected"
         job.collected_at = now
         db.session.commit()
+        # Saved: the batch's files at OpenAI can go (#667).
+        delete_collected_batch_files(results, keys)
         collected += 1
     return {"collected": collected, "abandoned": abandoned}
 
