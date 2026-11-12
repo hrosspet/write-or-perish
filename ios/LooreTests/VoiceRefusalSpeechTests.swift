@@ -189,6 +189,64 @@ final class VoiceRefusalSpeechTurnTests: XCTestCase {
         XCTAssertEqual(backend.log.filter { $0.hasPrefix("init") }.count, 1, "no new turn")
     }
 
+    /// A turn whose reply played to its end (`.done`), then replayed from the
+    /// player: the turn stays `.done` while the reply plays again.
+    private func replayingAFinishedReply(threadLength: String? = nil) async throws {
+        backend.statuses = [try decode(StreamingSessionStatus.self,
+            #"{"session_id":"sid-1","streaming_status":"completed","content":"hello there","chunks":[],"llm_node_id":101}"#)]
+        let length = threadLength.map { #","thread_length":"\#($0)""# } ?? ""
+        backend.llmStatuses[101] = [try decode(LLMStatus.self,
+            #"{"node_id":101,"status":"completed","tts_task_status":"processing","content":"The ice moves.","warnings":[]\#(length)}"#)]
+        await recordAndStop()
+        await wait("attached") { self.backend.streams[101] != nil }
+        backend.push(101, "chunk_ready", #"{"chunk_index":0,"audio_url":"/media/a0.mp3","duration":4.2}"#)
+        await wait("playing") { self.turn.state == .playing }
+        backend.push(101, "all_complete", #"{"continuation_node_id":null,"preview":"The ice moves."}"#)
+        await wait("generated") { !self.audio.fakeQueue.generatingTTS }
+        turn.queueFinished()
+        XCTAssertEqual(turn.state, .done)
+        // Play pressed again on the reply.
+        audio.fakeQueue.isPlaying = true
+    }
+
+    func testALimitPressDuringAReplayStopsTheReplayFirst() async throws {
+        // Review of #675: Continue (or the lock screen's Record) while capped,
+        // with the finished reply replaying: the sentence never plays over it.
+        try await replayingAFinishedReply()
+        let stopsBefore = audio.fakeQueue.stopped
+
+        await turn.announceUsageLimit()
+
+        XCTAssertEqual(audio.fakeQueue.stopped, stopsBefore + 1, "the replay stopped before the sentence")
+        XCTAssertEqual(spoken, [SpokenRefusal.usageLimit.text])
+        XCTAssertEqual(audio.fakeQueue.urls, ["/media/a0.mp3"], "still loaded: it can be replayed")
+        XCTAssertEqual(turn.state, .done)
+    }
+
+    func testTheLengthPressDuringAReplayStopsTheReplayFirst() async throws {
+        // The same for the thread's length said from the lock screen (#648).
+        try await replayingAFinishedReply(threadLength: "limit")
+        XCTAssertEqual(turn.aiBlock?.isThreadTooLong, true)
+        let stopsBefore = audio.fakeQueue.stopped
+
+        await turn.announceBlock()
+
+        XCTAssertEqual(audio.fakeQueue.stopped, stopsBefore + 1)
+        XCTAssertEqual(spoken, [ThreadLength.spokenText])
+    }
+
+    func testAPressAfterTheReplyEndedStopsNothing() async throws {
+        // A control for the two above: nothing plays, nothing is stopped.
+        try await replayingAFinishedReply()
+        audio.fakeQueue.isPlaying = false  // heard to its end, not replayed
+        let stopsBefore = audio.fakeQueue.stopped
+
+        await turn.announceUsageLimit()
+
+        XCTAssertEqual(audio.fakeQueue.stopped, stopsBefore)
+        XCTAssertEqual(spoken, [SpokenRefusal.usageLimit.text])
+    }
+
     func testTheLockScreensWaitingChangeIsSaidOnlyWhenNothingPlays() async throws {
         backend.approvalLists[60] = [ToolApproval(id: 40, nodeId: 58, turnNodeId: 58, tool: "update_artifact",
                                                   kinds: [.otherUser], title: "Change your Memory", kind: "memory",

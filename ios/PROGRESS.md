@@ -1158,3 +1158,6 @@ announcement ("TTSed as a separate chunk ... when it's not pending, it's not voi
 - Tests: `VoiceRefusalSpeechTests.swift` (`VoiceRefusalSpeechTurnTests`, `RefusalVoiceTests`,
   `VoiceRefusalSpeechAppTests`); the lock-screen test of the waiting change now expects its sentence. Unit
   tests only: no clip heard on a phone, and the lock screen not tried on a device.
+- Review fix (PR #675): a finished reply being replayed leaves the turn `.done`, so `announce` (the usage
+  limit, and the length said from the lock screen) now stops a queue that plays whatever the state; the
+  reply stays loaded. Three tests.

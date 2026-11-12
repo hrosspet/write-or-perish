@@ -61,12 +61,17 @@ export function speakSentence(text) {
 // The sentence waits for the error sound (three tones, ~0.6 s) to end.
 export const SENTENCE_AFTER_SOUND_MS = 700;
 let pendingSentence = null;
-// The clip playing or loading, and the sentence it belongs to: stopSpeaking
-// bumps the token, so a clip or a fallback that comes late says nothing.
+// The clip playing or loading, its wait for the browser's speech
+// (CLIP_START_TIMEOUT_MS), and the sentence it belongs to: stopSpeaking
+// bumps the token and clears the wait, so a clip or a fallback that comes
+// late says nothing.
 let currentClip = null;
+let clipTimer = null;
 let sentenceToken = 0;
 
 function dropClip() {
+  clearTimeout(clipTimer);
+  clipTimer = null;
   const el = currentClip;
   currentClip = null;
   if (!el) return;
@@ -108,6 +113,7 @@ function sayNow(text, token) {
     clearTimeout(timer);
   };
   timer = setTimeout(fallBack, CLIP_START_TIMEOUT_MS);
+  clipTimer = timer;
   el.addEventListener('error', fallBack);
   el.addEventListener('ended', () => {
     if (currentClip === el) currentClip = null;
@@ -149,8 +155,9 @@ export function sayRefusal(code, playSound) {
   if (text) soundThenSay(text, playSound);
 }
 
-// A new recording starts: a sentence still waiting or being said stops, so
-// it is never recorded into the entry.
+// A new recording starts, or the Voice screen closes: a sentence still
+// waiting, loading or being said stops (with its wait for the browser's
+// speech), so it is never recorded into the entry nor heard on another page.
 export function stopSpeaking() {
   sentenceToken += 1;
   if (pendingSentence) {
@@ -186,6 +193,8 @@ export function resetSpeechForTests() {
   speechPrimed = false;
   if (pendingSentence) clearTimeout(pendingSentence);
   pendingSentence = null;
+  clearTimeout(clipTimer);
+  clipTimer = null;
   currentClip = null;
   sentenceToken += 1;
 }

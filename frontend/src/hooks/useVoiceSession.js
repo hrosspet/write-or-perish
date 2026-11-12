@@ -1367,6 +1367,9 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   useEffect(() => {
     return () => {
       turnRef.current += 1;
+      // A refusal's sentence goes with the screen (#651), its clip and its
+      // wait for the browser's speech too, as on the iPhone.
+      stopSpeaking();
       stopSilentAudio();
       audio.stop();
       ttsSSE.disconnect();

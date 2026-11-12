@@ -60,18 +60,21 @@ jest.mock('../utils/errorSound', () => ({
 import { renderHook, act } from '@testing-library/react';
 import { useVoiceSession } from './useVoiceSession';
 import {
-  AI_USAGE_REFUSAL, APPROVAL_REFUSAL, LENGTH_REFUSAL, REFUSAL_SENTENCES,
-  SENTENCE_AFTER_SOUND_MS, SPEND_CAP_REFUSAL, refusalClipUrl,
-  resetSpeechForTests,
+  AI_USAGE_REFUSAL, APPROVAL_REFUSAL, CLIP_START_TIMEOUT_MS, LENGTH_REFUSAL,
+  REFUSAL_SENTENCES, SENTENCE_AFTER_SOUND_MS, SPEND_CAP_REFUSAL,
+  refusalClipUrl, resetSpeechForTests,
 } from '../utils/spokenRefusal';
 
 const IDLE_POLLING = { data: null, status: 'idle', error: null };
 
-// Clips the page asked to play (they play), and what the browser said.
+// Clips the page asked to play (they play, unless *clipsHang*: still
+// loading), and what the browser said.
 let clips;
 let spoken;
+let clipsHang;
 class FakeAudio {
   constructor(src) {
+    this.requested = src;
     this.src = src;
     this.paused = true;
     clips.push(this);
@@ -80,17 +83,18 @@ class FakeAudio {
   addEventListener() {}
 
   play() {
+    if (clipsHang) return { then: () => {} };
     this.paused = false;
     return { then: (ok) => ok() };
   }
 
   pause() { this.paused = true; }
 
-  removeAttribute() {}
+  removeAttribute(name) { if (name === 'src') this.src = ''; }
 
   load() {}
 }
-const played = () => clips.map((c) => c.src);
+const played = () => clips.map((c) => c.requested);
 
 let onAiUsageRefused;
 let onApprovalPending;
@@ -123,6 +127,7 @@ beforeEach(() => {
   resetSpeechForTests();
   jest.useFakeTimers();
   clips = [];
+  clipsHang = false;
   spoken = [];
   window.Audio = FakeAudio;
   window.speechSynthesis = { cancel: jest.fn(), speak: (u) => { spoken.push(u.text); } };
@@ -230,6 +235,43 @@ test('a Record press the page refused for the known limit: the reply pauses, the
   expect(spoken).toEqual(['']);
   afterSound();
   expect(played()).toEqual([refusalClipUrl(SPEND_CAP_REFUSAL)]);
+});
+
+test('leaving the Voice screen stops the sentence, and its fallback never speaks', () => {
+  // Review of #675: a clip still loading when the user leaves.
+  clipsHang = true;
+  const { unmount } = renderSession();
+  act(() => { mockStreamingOptions.onError({ startup: true, spendCapped: true }); });
+  afterSound();
+  expect(played()).toEqual([refusalClipUrl(SPEND_CAP_REFUSAL)]);
+
+  unmount();
+
+  expect(clips[0].paused).toBe(true);
+  expect(clips[0].src).toBe('');
+  expect(jest.getTimerCount()).toBe(0);
+  act(() => { jest.advanceTimersByTime(CLIP_START_TIMEOUT_MS + 1000); });
+  expect(spoken).toEqual([]);
+});
+
+test('a clip that does not start in time is said by the browser while the screen is open', () => {
+  // The control for the test above.
+  clipsHang = true;
+  renderSession();
+  act(() => { mockStreamingOptions.onError({ startup: true, spendCapped: true }); });
+  afterSound();
+  act(() => { jest.advanceTimersByTime(CLIP_START_TIMEOUT_MS); });
+  expect(spoken).toEqual([REFUSAL_SENTENCES[SPEND_CAP_REFUSAL]]);
+});
+
+test('leaving before the sentence starts: nothing plays at all', () => {
+  const { unmount } = renderSession();
+  act(() => { mockStreamingOptions.onError({ startup: true, approvalPending: true }); });
+  unmount();
+  afterSound();
+  act(() => { jest.advanceTimersByTime(CLIP_START_TIMEOUT_MS + 1000); });
+  expect(played()).toEqual([]);
+  expect(spoken).toEqual([]);
 });
 
 test('a new recording stops the sentence before the microphone opens', () => {

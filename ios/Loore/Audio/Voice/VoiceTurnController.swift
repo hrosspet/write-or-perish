@@ -1803,11 +1803,18 @@ final class VoiceTurnController {
         await untilSpoken()
     }
 
+    /// The refusal's sentence for a press refused on the phone. Never over a
+    /// reply (review of #675): a turn in progress ends, as Continue ends it, and
+    /// a finished reply being replayed (the turn stays `.done` then) stops, still
+    /// loaded and replayable.
     private func announce(_ refusal: SpokenRefusal) async {
         if state != .idle && state != .done {
             timing.endTurn()
             resetTurn(keepQueue: false)
             state = .idle
+            audio.refreshNowPlaying()
+        } else if audio.queue.hasAudio && audio.queue.isPlaying {
+            audio.queue.stop()
             audio.refreshNowPlaying()
         }
         speakThenDeactivate(refusal)
