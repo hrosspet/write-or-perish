@@ -514,13 +514,39 @@ def test_a_share_quoting_a_private_node_stays_a_draft(app):
     assert _db.session.get(ShareDraft, share.id).status == "draft"
 
 
-def test_a_quote_of_someone_elses_private_node_is_named_without_its_text(app):
-    theirs = _node("anna", "anna's private", privacy="private")
-    note = _node("ben", f"see {{quote:{theirs.id}}}", privacy="private")
-
-    resp = _client(app, "ben").put(f"/api/nodes/{note.id}", json={
-        "content": note.get_content(), "privacy_level": "public"})
-
+def _publish(app, node_id, content):
+    resp = _client(app, "ben").put(f"/api/nodes/{node_id}", json={
+        "content": content, "privacy_level": "public"})
     data = resp.get_json()
-    assert resp.status_code == 409
-    assert data["quoted"] == [{"id": theirs.id, "can_open": False}]
+    for key in ("updated_at", "permalink"):
+        data.get("node", {}).pop(key, None)
+    return resp.status_code, data
+
+
+def test_a_quote_of_a_node_i_cannot_open_reads_like_a_missing_one(app):
+    """Publishing answers the same whether a quoted id does not exist or
+    belongs to a node the author cannot open: no reader is shown its
+    text through the quote, so it neither blocks nor is named."""
+    content = "see {quote:5000}"
+    note = _node("ben", content, privacy="private")
+    missing = _publish(app, note.id, content)
+    note = _db.session.get(Node, note.id)
+    note.set_privacy_level("private")
+    _db.session.commit()
+    theirs = Node(id=5000, user_id=_user("anna").id,
+                  human_owner_id=_user("anna").id, node_type="user",
+                  privacy_level="private", ai_usage="chat")
+    theirs.set_content("anna's private")
+    _db.session.add(theirs)
+    _db.session.commit()
+
+    not_mine = _publish(app, note.id, content)
+
+    assert missing[0] == 200, missing
+    assert not_mine == missing
+    # Nobody but the quoted node's author is shown its text through the
+    # quote: here the public node's own author.
+    resolved = _client(app, "ben").get(
+        f"/api/nodes/{note.id}/resolve-quotes")
+    assert resolved.status_code == 200
+    assert "anna's private" not in resolved.get_data(as_text=True)

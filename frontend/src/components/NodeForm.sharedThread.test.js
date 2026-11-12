@@ -104,7 +104,6 @@ test('a refused publish opens the dialog naming the quoted entry', async () => {
         error: "This can't be made public yet: it quotes an entry that isn't public.",
         quoted: [
           { id: 7, can_open: true, preview: 'my private draft', permalink: '/node/7' },
-          { id: 9, can_open: false },
         ],
       },
     },
@@ -119,7 +118,6 @@ test('a refused publish opens the dialog naming the quoted entry', async () => {
   expect(screen.getByText("This can't be made public yet: it quotes an entry that isn't public."))
     .toBeInTheDocument();
   expect(screen.getByText('my private draft').closest('a')).toHaveAttribute('href', '/node/7');
-  expect(screen.getByText(/An entry you can't open \(#9\)/)).toBeInTheDocument();
   expect(onSuccess).not.toHaveBeenCalled();
   expect(screen.getByRole('textbox')).toHaveValue('see {quote:7}');
 });

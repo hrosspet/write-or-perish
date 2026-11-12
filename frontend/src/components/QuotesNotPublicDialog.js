@@ -65,7 +65,7 @@ export const QUOTES_NOT_PUBLIC_FALLBACK = (
  * Shown when something about to be public quotes an entry that isn't
  * (Peter, 2026-11-12): nothing was saved. Names each quoted entry and
  * links it, so the user can make it public first. *quoted* is the
- * server's list ({ id, can_open, preview, permalink }).
+ * server's list ({ id, preview, permalink }): entries the user can open.
  */
 function QuotesNotPublicDialog({ open, message, quoted, onClose }) {
   useEffect(() => {
@@ -92,7 +92,7 @@ function QuotesNotPublicDialog({ open, message, quoted, onClose }) {
           Not public yet
         </h2>
         <p style={bodyStyle}>{message || QUOTES_NOT_PUBLIC_FALLBACK}</p>
-        {(quoted || []).map((q) => (q.can_open ? (
+        {(quoted || []).map((q) => (
           <Link
             key={q.id}
             to={`/node/${q.id}`}
@@ -101,11 +101,7 @@ function QuotesNotPublicDialog({ open, message, quoted, onClose }) {
           >
             {q.preview || `Entry #${q.id}`}
           </Link>
-        ) : (
-          <div key={q.id} style={quoteStyle}>
-            An entry you can't open (#{q.id}). Remove its quote to publish.
-          </div>
-        )))}
+        ))}
         <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "1rem" }}>
           <button
             onClick={onClose}
