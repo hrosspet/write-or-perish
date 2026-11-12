@@ -13,10 +13,13 @@ new public entry (a reply under a public node, a public Text-mode entry,
 a recorded entry, a published share). The answer names the quoted nodes
 that are not public, so the page can link them.
 
-What is checked is a {quote:ID} marker, followed into the quoted text to
-the depth the quote resolver follows (quotes.DEFAULT_MAX_DEPTH). A
-deleted quoted node is not counted: it is shown as deleted to everyone.
-A saved reference ({quote_ext:ID}) is not a node and is not checked.
+What is checked is a {quote:ID} marker of a node the user can open,
+followed into the quoted text to the depth the quote resolver follows
+(quotes.DEFAULT_MAX_DEPTH). A quoted node the user cannot open is treated
+like one that does not exist or was deleted: no reader is shown its text
+through the quote (each reader's own access decides), so it is neither
+counted nor named. A saved reference ({quote_ext:ID}) is not a node and
+is not checked.
 Making a quoted node private later is not refused: its readers then see
 the quote as one they cannot open, as before.
 """
@@ -36,13 +39,14 @@ QUOTED_PREVIEW_CHARS = 120
 
 def unpublished_quotes(texts, user_id, becoming_public=(), skip_ids=(),
                        max_depth=DEFAULT_MAX_DEPTH):
-    """The nodes the {quote:ID} markers in *texts* show that are not
-    public, in the order found, each once. *becoming_public* are ids made
-    public by the same change: they count as public. Quotes are followed
-    into the quoted node's text to *max_depth*, the resolver's depth,
-    but only into nodes *user_id* can open (nobody's text is read for
-    them otherwise). *skip_ids*: quotes at the first level that are not
-    checked (an edit of a public node keeps the quotes it already had).
+    """The nodes *user_id* can open that the {quote:ID} markers in
+    *texts* show and that are not public, in the order found, each once.
+    *becoming_public* are ids made public by the same change: they count
+    as public. Quotes are followed into the quoted node's text to
+    *max_depth*, the resolver's depth. A quoted node the user cannot open
+    is passed over like a missing one. *skip_ids*: quotes at the first
+    level that are not checked (an edit of a public node keeps the
+    quotes it already had).
     """
     from backend.utils.privacy import can_user_access_node, owner_hidden
     becoming_public = set(becoming_public)
@@ -59,13 +63,13 @@ def unpublished_quotes(texts, user_id, becoming_public=(), skip_ids=(),
             seen.add(qid)
             node = db.session.get(Node, qid)
             if (node is None or node.deleted_at is not None
-                    or owner_hidden(node)):
+                    or owner_hidden(node)
+                    or not can_user_access_node(node, user_id)):
                 continue
             if (node.privacy_level != "public"
                     and node.id not in becoming_public):
                 found.append(node)
-            if can_user_access_node(node, user_id):
-                walk(node.get_content(), depth - 1, False)
+            walk(node.get_content(), depth - 1, False)
 
     for text in texts:
         walk(text, max_depth, True)
@@ -73,22 +77,18 @@ def unpublished_quotes(texts, user_id, becoming_public=(), skip_ids=(),
 
 
 def quotes_not_public_response(nodes, user_id):
-    """The 409 answer naming *nodes*: each with its id, and for a node
-    *user_id* can open a short preview of its text and its link, so the
-    dialog can say which entry to make public first."""
-    from backend.utils.privacy import can_user_access_node
+    """The 409 answer naming *nodes* (nodes *user_id* can open): each with
+    its id, a short preview of its text and its link, so the dialog can
+    say which entry to make public first."""
     from backend.utils.slugs import permalink_for
     quoted = []
     for node in nodes:
-        entry = {"id": node.id, "can_open": False}
-        if can_user_access_node(node, user_id):
-            text = " ".join((node.get_content() or "").split())
-            if len(text) > QUOTED_PREVIEW_CHARS:
-                text = text[:QUOTED_PREVIEW_CHARS].rstrip() + "…"
-            entry.update(can_open=True, preview=text,
-                         permalink=permalink_for(node),
-                         privacy_level=node.privacy_level)
-        quoted.append(entry)
+        text = " ".join((node.get_content() or "").split())
+        if len(text) > QUOTED_PREVIEW_CHARS:
+            text = text[:QUOTED_PREVIEW_CHARS].rstrip() + "…"
+        quoted.append({"id": node.id, "can_open": True, "preview": text,
+                       "permalink": permalink_for(node),
+                       "privacy_level": node.privacy_level})
     return jsonify({
         "error": QUOTES_NOT_PUBLIC_MESSAGE,
         "code": QUOTES_NOT_PUBLIC_CODE,
