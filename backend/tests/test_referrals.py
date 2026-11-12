@@ -190,7 +190,8 @@ def test_the_payload_flag_on(app):
 
 
 def test_the_payload_flag_off(app_off):
-    """Payments off: no new key on the user object (#649's rule)."""
+    """Control: payments off, no new key on the user object (#649's
+    rule)."""
     user = _client(app_off, _user()).get(
         "/api/dashboard/?profile=0").get_json()["user"]
     assert "referrals_enabled" not in user
@@ -283,6 +284,7 @@ class TestReward:
             assert "paid" not in text and "subscri" not in text
 
     def test_a_trial_start_gives_nothing(self, app, gateway):
+        """Control: a 0.00 trial invoice is not a payment."""
         _pair()
         invoice = _paid(gateway, amount=0, status="trialing")
         r = _post_event(app, _event("invoice.paid", invoice))
@@ -435,7 +437,8 @@ class TestReward:
         assert _db.session.get(User, friend.id).subscription_ever_paid
 
     def test_a_self_referral_row_gives_nothing(self, app, gateway):
-        """Defence: a row naming one account twice is never paid out."""
+        """Control (defence): a row naming one account twice is never
+        paid out; record_invite never writes one."""
         u = _user("solo", stripe_customer_id="cus_f",
                   stripe_subscription_id="sub_f",
                   subscription_status="active",
@@ -525,6 +528,7 @@ class TestAdmin:
         assert r.status_code == 403
 
     def test_off_with_payments(self, app_off):
+        """Control: 404 while payments are off, as #649's admin lists."""
         admin = _client(app_off, _user("root", is_admin=True))
         assert admin.get("/api/admin/referrals").status_code == 404
 
@@ -626,6 +630,7 @@ class TestSignup:
 
     def test_an_existing_x_account_is_not_brought_by_a_link(
             self, signup_app):
+        """Control: a code changes nothing for an existing account."""
         _inviter, code = _inviter_code()
         member = User(username="old", twitter_id="77", approved=True,
                       last_seen_at=datetime.utcnow())
@@ -656,8 +661,9 @@ class TestSignup:
         assert Referral.query.one().inviter_id == inviter.id
 
     def test_a_code_changes_no_answer(self, signup_app):
-        """The send answer is the same for a real, a made-up and no code:
-        nothing tells whether a code belongs to anyone."""
+        """Control (privacy): the send answer is the same for a real, a
+        made-up and no code: nothing tells whether a code belongs to
+        anyone."""
         _inviter, code = _inviter_code()
         answers = []
         with patch("backend.routes.auth.send_magic_link_email",
