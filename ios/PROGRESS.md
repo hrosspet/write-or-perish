@@ -1099,3 +1099,40 @@ approved one by one; one reply's calls share one dialog. Dismissing it decides n
   for others), `rejected` rows "<action> — Declined"; an approved call is a normal success row.
 - Tests: `ToolApprovalTests.swift` (`ToolApprovalDecodingTests`, `ToolApprovalsModelTests`). Unit tests
   only; the dialog was not seen on screen.
+
+## Long threads: a notice, then no AI reply (#648, Peter 2026-11-12)
+
+Peter: "a notice at 90% of the hard limit, and a hard limit"; "Users shouldn't be shown price in this case".
+The server measures the next reply's prompt (`backend/utils/thread_size.py`); the app shows the result. No
+price, token counts or percentages anywhere; the copy is the web's (`Core/Models/ThreadLength.swift`).
+
+- Models: `NodeDetail.threadLength` (`thread_length`: notice / limit, owner only), `LLMStatus.errorCode`,
+  `StreamingSessionStatus.warningCode`, `llm_error_code` on `TextmodeStartResponse` / `SaveAsNodeResponse`
+  (and `NodeFormResult.llmErrorCode`), `VoiceAvailability.threadLength`, `APIError.isThreadTooLong` (409
+  `thread_too_long`).
+- Thread: above the reply form, `ThreadLengthNotice`: at "notice" the calm line with a "Start a new thread"
+  link; at "limit" the server's text (fallback `ThreadLength.limitText`) with a "Start a new thread" button
+  (the Write screen). At the limit LLM Response and Glean are not offered and no automatic reply is asked
+  for; writing still works. A 409 on LLM Response switches the form to the limit (no toast); an entry whose
+  automatic reply or Text-mode reply came back `thread_too_long` opens quietly (its page shows the limit); a
+  reply refused by the server (llm-status `error_code`) goes back to its entry without the failure toast.
+- Voice: `VoiceAIBlock` has a reason (`.aiUsage`, `.threadTooLong`): "This thread is too long", the server's
+  text, "Start a new thread" (a fresh Voice conversation) and "Back to the thread". It comes from
+  availability, a refused `streaming/init`, a recording whose reply was skipped (`warning_code`, also
+  toasted as before), a reply the server refused (`error_code`) and the legacy turn's 409. Those refusals
+  (not the screen merely opening on a blocked thread) say "This thread is too long for another reply. Start
+  a new thread to keep talking." on the device (`SentenceSpeaker`, `AVSpeechSynthesizer`, an English voice;
+  no request) instead of the error sound, then the session ends; the lock screen's Record says it again.
+  Other refusals (the monthly limit, AI usage) are unchanged: a toast, no sound. A notice line sits above the
+  record / Continue button while the screen's availability, or the last reply's llm-status, says "notice".
+- Tests: `ThreadLengthTests.swift` (`ThreadLengthDecodingTests`, `ThreadLengthModelTests`,
+  `ThreadLengthFormTests`) and six in `VoiceTurnTests`. Unit tests only; not walked in the simulator, and the
+  spoken sentence not heard on a phone.
+- Review fixes (PR #650): only the latest sentence ends the session (a second refusal's sentence is not cut
+  off by the first one's end); a new recording stops the sentence before the session turns to recording;
+  the lock screen's Record waits until the sentence has been said (`announceBlock` / `untilSpoken` are
+  awaited), and a press while the reply plays at the limit stops it first; a completed reply's llm-status
+  `thread_length` sets the Voice notice line or, at the limit, the block (shown under the reply in place of
+  Continue, not said), and the thread page's notice or limit on the turn it is reached. Nine more tests.
+  At the limit the form and Voice show the server's reason (`thread_length_message`: the thread is long, or
+  an entry or what it quotes is too large) after a refused request's own words; two more tests.

@@ -168,9 +168,13 @@ struct StreamingSessionStatus: Decodable, Sendable {
     var userNodeId: Int?
     /// The reply was skipped (spend cap, bad placeholder, …).
     var warning: String?
+    /// The skipped reply's reason as a code the app acts on: `thread_too_long`
+    /// (#648), which Voice mode says aloud.
+    var warningCode: String?
 
     enum CodingKeys: String, CodingKey {
         case chunks, content, warning
+        case warningCode = "warning_code"
         case sessionId = "session_id"
         case draftId = "draft_id"
         case streamingStatus = "streaming_status"
@@ -196,6 +200,7 @@ struct StreamingSessionStatus: Decodable, Sendable {
         llmNodeId = c.tolerant(.llmNodeId)
         userNodeId = c.tolerant(.userNodeId)
         warning = c.tolerant(.warning)
+        warningCode = c.tolerant(.warningCode)
     }
 
     /// Next chunk index to use when resuming (map B R3).
@@ -236,9 +241,13 @@ struct SaveAsNodeResponse: Decodable, Sendable {
     /// Payments on, no AI replies (#438): the entry is saved, the reply skipped.
     var subscriptionRequired: Bool
     var subscriptionMessage: String?
+    /// Why the reply was skipped, as a code: `thread_too_long` (#648),
+    /// `auto_generate_off`, `ai_usage_none`, `model_read_only`.
+    var llmErrorCode: String?
 
     enum CodingKeys: String, CodingKey {
         case id, content
+        case llmErrorCode = "llm_error_code"
         case userNodeId = "user_node_id"
         case tipId = "tip_id"
         case parentId = "parent_id"
@@ -271,6 +280,7 @@ struct SaveAsNodeResponse: Decodable, Sendable {
         llmError = c.tolerant(.llmError)
         subscriptionRequired = c.tolerant(.subscriptionRequired, default: false)
         subscriptionMessage = c.tolerant(.subscriptionMessage)
+        llmErrorCode = c.tolerant(.llmErrorCode)
     }
 }
 
@@ -290,9 +300,13 @@ struct TextmodeStartResponse: Decodable, Sendable {
     /// Payments on, no AI replies (#438): the entry is saved, the reply skipped.
     var subscriptionRequired: Bool
     var subscriptionMessage: String?
+    /// Why the reply was skipped, as a code: `thread_too_long` (#648),
+    /// `auto_generate_off`.
+    var llmErrorCode: String?
 
     enum CodingKeys: String, CodingKey {
         case conversationId = "conversation_id"
+        case llmErrorCode = "llm_error_code"
         case promptNodeId = "prompt_node_id"
         case userNodeId = "user_node_id"
         case tipId = "tip_id"
@@ -316,6 +330,7 @@ struct TextmodeStartResponse: Decodable, Sendable {
         llmError = c.tolerant(.llmError)
         subscriptionRequired = c.tolerant(.subscriptionRequired, default: false)
         subscriptionMessage = c.tolerant(.subscriptionMessage)
+        llmErrorCode = c.tolerant(.llmErrorCode)
     }
 }
 

@@ -8,10 +8,16 @@ import { useInterruptedRecovery } from '../hooks/useInterruptedRecovery';
 import RecoveryBanner from '../components/RecoveryBanner';
 import OfflineBanner from '../components/OfflineBanner';
 import ProposalInline from '../components/ProposalInline';
+import ToolApprovalDialog from '../components/ToolApprovalDialog';
+import { useToolApprovals } from '../hooks/useToolApprovals';
+import { voiceWaitingLine } from '../utils/toolApprovals';
 import { useToast } from '../contexts/ToastContext';
 import { isSpendBlocked, notifySpendBlocked, spendCapToastMessage } from '../utils/spendCap';
 import { isSubscriptionRequired, notifySubscriptionRequired } from '../utils/subscription';
 import { isAiAllowed } from '../utils/aiUsage';
+import {
+  THREAD_LIMIT_TEXT, THREAD_NOTICE_TEXT, THREAD_TOO_LONG_CODE,
+} from '../utils/threadLength';
 import api from '../api';
 import { entryQuestion, EVERYDAY_QUESTION } from '../utils/entryPrompt';
 
@@ -219,6 +225,23 @@ const gleanButtonStyle = (enabled) => ({
   opacity: enabled ? 1 : 0.5,
 });
 
+// Under the disabled record button while a change the AI proposed waits
+// for the user's approval (the thread page's waiting line, centred).
+const waitingLineStyle = {
+  marginTop: '16px',
+  maxWidth: '320px',
+  background: 'none',
+  border: 'none',
+  padding: '4px 8px',
+  cursor: 'pointer',
+  fontFamily: 'var(--sans)',
+  fontSize: '0.85rem',
+  fontWeight: 300,
+  lineHeight: 1.5,
+  color: 'var(--accent)',
+  textAlign: 'center',
+};
+
 // Shown instead of the record button when AI usage keeps the account (a
 // fresh thread) or the thread Voice would continue away from AI. Voice mode
 // sends what is said to a model to get a reply, so it does not record
@@ -244,7 +267,83 @@ const needsAiLinkStyle = {
   paddingBottom: '2px',
 };
 
-export function VoiceNeedsAi({ scope, threadId }) {
+// The way on from a thread too long for another reply (#648): a new thread
+// (*onNewThread*: a fresh Voice session), and back to this one.
+function ThreadLimitActions({ threadId, onNewThread }) {
+  return (
+    <div style={{ display: 'flex', gap: '24px', flexWrap: 'wrap', justifyContent: 'center', alignItems: 'center' }}>
+      <button
+        type="button"
+        onClick={onNewThread}
+        style={{
+          padding: '10px 24px',
+          background: 'transparent',
+          border: '1px solid var(--accent)',
+          borderRadius: '6px',
+          color: 'var(--accent)',
+          fontFamily: 'var(--sans)',
+          fontSize: '0.85rem',
+          cursor: 'pointer',
+        }}
+      >
+        Start a new thread
+      </button>
+      {threadId && (
+        <Link to={`/node/${threadId}`} style={needsAiLinkStyle}>
+          Back to the thread
+        </Link>
+      )}
+    </div>
+  );
+}
+
+// Shown instead of the record button when the thread Voice would continue
+// is too long for another reply (#648): every reply reads the whole
+// thread. The way on is a new thread (*onNewThread*: a fresh Voice
+// session). Same text as the server's refusal and the iPhone app.
+// *footer*: shown under the buttons (a change still waiting's line).
+export function VoiceThreadTooLong({ threadId, onNewThread, message, footer = null }) {
+  return (
+    <div style={containerStyle}>
+      <p style={{
+        fontFamily: 'var(--serif)',
+        fontStyle: 'italic',
+        fontSize: 'clamp(1.2rem, 2.5vw, 1.6rem)',
+        fontWeight: 300,
+        color: 'var(--text-muted)',
+        margin: '0 0 32px 0',
+        textAlign: 'center',
+      }}>
+        This thread is too long
+      </p>
+      <EcgAnimation active={false} dim={true} showScanline={false} />
+      <p style={{
+        fontFamily: 'var(--sans)',
+        fontSize: '0.95rem',
+        fontWeight: 300,
+        color: 'var(--text-secondary)',
+        lineHeight: 1.7,
+        maxWidth: '380px',
+        margin: '0 0 28px 0',
+        textAlign: 'center',
+      }}>
+        {message || THREAD_LIMIT_TEXT}
+      </p>
+      <ThreadLimitActions threadId={threadId} onNewThread={onNewThread} />
+      {footer}
+    </div>
+  );
+}
+
+export function VoiceNeedsAi({ scope, threadId, onNewThread, limitMessage, footer = null }) {
+  if (scope === 'too_long') {
+    return (
+      <VoiceThreadTooLong
+        threadId={threadId} onNewThread={onNewThread} message={limitMessage}
+        footer={footer}
+      />
+    );
+  }
   return (
     <div style={containerStyle}>
       <p style={{
@@ -281,6 +380,7 @@ export function VoiceNeedsAi({ scope, threadId }) {
           Account settings
         </Link>
       </div>
+      {footer}
     </div>
   );
 }
@@ -292,18 +392,38 @@ export function VoiceNeedsAi({ scope, threadId }) {
 export const FINISH_WITHOUT_REPLY_TEXT = "AI usage is set to None, so Loore "
   + "won't reply. If you continue, your recording is saved as an entry when "
   + "you finish.";
+// ...and where the thread is too long for another reply (#648).
+export const FINISH_TOO_LONG_TEXT = "This thread is too long for another AI "
+  + "reply, so Loore won't reply. If you continue, your recording is saved as "
+  + "an entry when you finish.";
 
 // GET /voice/availability for the thread *parent* continues (none: the
-// account's Default AI usage decides): null when Voice may record there and
-// reply, else the scope that keeps it away from AI. Rejects when the server
-// cannot be asked.
-function fetchVoiceRefusal(parent) {
+// account's Default AI usage decides): `refusal` null when Voice may record
+// there and reply, else what blocks it: the scope that keeps it away from
+// AI ('account' | 'thread'), or 'too_long' when the thread is too long for
+// another reply (#648). `threadLength` "notice" when it is getting long.
+// Rejects when the server cannot be asked.
+function fetchVoiceAvailability(parent) {
   return api.get('/voice/availability', parent != null ? { params: { parent } } : {})
     .then((res) => {
       const data = res.data || {};
-      if (data.allowed !== false) return null;
-      return data.scope === 'thread' ? 'thread' : 'account';
+      if (data.allowed !== false) {
+        return { refusal: null, threadLength: data.thread_length || null };
+      }
+      if (data.code === THREAD_TOO_LONG_CODE) {
+        return {
+          refusal: 'too_long', threadLength: 'limit', message: data.error || null,
+        };
+      }
+      return {
+        refusal: data.scope === 'thread' ? 'thread' : 'account',
+        threadLength: null,
+      };
     });
+}
+
+function fetchVoiceRefusal(parent) {
+  return fetchVoiceAvailability(parent).then((r) => r.refusal);
 }
 
 // Voice mode records only where a reply may follow: a fresh thread when the
@@ -318,10 +438,18 @@ function fetchVoiceRefusal(parent) {
 // as in the iPhone app.
 export default function VoicePage() {
   const [searchParams] = useSearchParams();
+  const navigate = useNavigate();
   const { user } = useUser();
   const threadId = searchParams.get('parent') || searchParams.get('resume');
   // undefined while the server is asked; null: record; else the scope.
   const [refusal, setRefusal] = useState(threadId ? undefined : null);
+  // "notice" when the thread is getting long (#648): a line on the screen.
+  const [threadNotice, setThreadNotice] = useState(null);
+  // The server's text for the limit (the thread's length, or an entry or
+  // what it quotes too large), when it sent one.
+  const [limitMessage, setLimitMessage] = useState(null);
+  // A new thread (#648) starts a fresh session: its key changes.
+  const [sessionKey, setSessionKey] = useState(0);
   const recovery = useInterruptedRecovery();
   // Continue was chosen on an interrupted recording while blocked: the
   // session stays mounted to finish it, and its ready phase shows the block.
@@ -330,13 +458,17 @@ export default function VoicePage() {
   useEffect(() => {
     if (!threadId) {
       setRefusal(null);
+      setThreadNotice(null);
       return undefined;
     }
     let cancelled = false;
     setRefusal(undefined);
-    fetchVoiceRefusal(threadId)
-      .then((scope) => {
-        if (!cancelled) setRefusal(scope);
+    fetchVoiceAvailability(threadId)
+      .then(({ refusal: scope, threadLength, message }) => {
+        if (cancelled) return;
+        setRefusal(scope);
+        setThreadNotice(threadLength === 'notice' ? 'notice' : null);
+        setLimitMessage(message || null);
       })
       .catch(() => {
         // Offline, or a server without the route: record as before; the
@@ -347,21 +479,46 @@ export default function VoicePage() {
     return () => { cancelled = true; };
   }, [threadId]);
 
+  // The thread is too long for another reply: Voice goes on in a new one,
+  // a fresh session without a parent.
+  const startNewThread = useCallback(() => {
+    setRefusal(null);
+    setThreadNotice(null);
+    setLimitMessage(null);
+    setFinishing(false);
+    setSessionKey((k) => k + 1);
+    navigate('/voice', { replace: true });
+  }, [navigate]);
+
   const accountRefuses = !threadId && !!user && !isAiAllowed(user.default_ai_usage);
   const shown = accountRefuses ? 'account' : refusal;
   if (shown === undefined || (shown && !recovery.checked)) {
     return <div style={containerStyle} />;
   }
   if (shown && !recovery.interruptedDraft && !finishing) {
-    return <VoiceNeedsAi scope={shown} threadId={threadId} />;
+    return (
+      <VoiceNeedsAi
+        scope={shown} threadId={threadId} onNewThread={startNewThread}
+        limitMessage={limitMessage}
+      />
+    );
   }
   return (
     <VoiceSession
+      key={`${sessionKey}:${threadId || ''}`}
       recovery={recovery}
       blocked={shown || null}
       threadId={threadId}
-      onAiUsageRefused={setRefusal}
+      threadNotice={threadNotice}
+      onThreadNotice={setThreadNotice}
+      limitMessage={limitMessage}
+      onLimitMessage={setLimitMessage}
+      onAiUsageRefused={(scope, message) => {
+        if (scope === 'too_long' && message) setLimitMessage(message);
+        setRefusal(scope);
+      }}
       onFinishInterrupted={() => setFinishing(true)}
+      onNewThread={startNewThread}
     />
   );
 }
@@ -397,7 +554,11 @@ function useFinishRefusal(draft, pageParentId) {
 // record). The session is mounted while blocked only to finish an
 // interrupted recording; its ready phase then shows the block, never the
 // record button, and a ?resume= reply is not played.
-function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishInterrupted }) {
+function VoiceSession({
+  recovery, blocked, threadId, threadNotice, onThreadNotice,
+  limitMessage, onLimitMessage,
+  onAiUsageRefused, onFinishInterrupted, onNewThread,
+}) {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const resumeId = searchParams.get('resume');
@@ -442,6 +603,43 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
   const [gleanNodeId, setGleanNodeId] = useState(null);
   const gleanDescId = useId();
   const getThreadParentIdRef = useRef(null);
+  // The reply that just finished took the thread to its limit (#648). The
+  // session stays mounted, so its audio, the approval announcement after it
+  // and a waiting change's dialog play out (a change waiting is decided
+  // first); Continue gives way to the limit, and the ready screen shows
+  // the block. (Unmounting here stopped the player mid-reply.)
+  const [limitReached, setLimitReached] = useState(false);
+  // A finished reply's `thread_length` and its text (llm-status, #648).
+  const applyThreadLength = (threadLength, message) => {
+    if (threadLength === undefined) return; // a server without it
+    if (onThreadNotice) onThreadNotice(threadLength === 'notice' ? 'notice' : null);
+    if (threadLength === 'limit') {
+      if (onLimitMessage) onLimitMessage(message || null);
+      setLimitReached(true);
+    }
+  };
+  // What closes Voice mode here: the page's refusal, or the limit this
+  // session's last reply reached.
+  const blockedHere = blocked || (limitReached ? 'too_long' : null);
+
+  // The AI's calls in this thread that wait for the user's approval
+  // (Peter, 2026-11-12): no new turn starts until each is approved or
+  // rejected. Looked up when the screen opens on a thread and after each
+  // reply; the dialog opens by itself once the reply has been heard (its
+  // audio ends saying a change waits), and the record button is disabled
+  // meanwhile, with a line that opens it.
+  const approvals = useToolApprovals();
+  const waitingCount = approvals.pending.length;
+  const recordBlocked = waitingCount > 0;
+  // The thread's latest node: where the waiting calls are looked up, and
+  // the thread page "Open the thread" leads to.
+  const threadTip = () => lastLlmNodeIdRef.current
+    ?? getThreadParentIdRef.current?.()
+    ?? (threadId ? Number(threadId) : null);
+  const refreshApprovals = approvals.refresh;
+  useEffect(() => {
+    if (threadId) refreshApprovals(Number(threadId), { open: false });
+  }, [threadId, refreshApprovals]);
 
   const {
     phase, isStopping, hasError, isOnline, streaming, audio, handleStart, handleStop,
@@ -464,9 +662,13 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
       setLastEntryNoText(!!info?.noText);
       // A new turn: Glean waits for its reply, so the glean reads it too.
       setGleanAnchor(null);
+      // Saved without a reply: one reason is a change waiting here.
+      if (info?.warning) refreshApprovals(threadTip(), { open: false });
     },
     onLLMComplete: (nodeId, content) => {
       lastLlmNodeIdRef.current = nodeId;
+      // Calls this reply made that wait for the user's approval.
+      refreshApprovals(nodeId, { open: false });
       setGleanAnchor(getThreadParentIdRef.current?.() ?? nodeId);
       setLlmContent(content);
       // ProposalInline handles its own parsing + apply-status derivation
@@ -475,6 +677,11 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
         if (res.data.tool_calls_meta) {
           setToolCallsMeta(res.data.tool_calls_meta);
         }
+        // The thread grew with this turn (#648): the notice once it is
+        // getting long, the limit (in place of the record button, once the
+        // reply has played) when it has no room for another reply.
+        applyThreadLength(res.data.thread_length,
+          res.data.thread_length_message);
       }).catch(() => { /* non-fatal */ });
     },
     // The reply failed: no reply is coming, so Glean stops waiting for it.
@@ -485,6 +692,9 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
     // The user cancelled the reply: none is coming, so Glean starts under
     // their message instead of waiting for it (#514).
     onCancelled: (userNodeId) => setGleanAnchor(userNodeId),
+    // The server refused a recording: a change waits here (one this page
+    // had not seen, e.g. made on another device).
+    onApprovalPending: () => refreshApprovals(threadTip(), { open: true }),
   });
 
   setThreadParentIdRef.current = setThreadParentId;
@@ -658,6 +868,59 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
     }
   }, [showRecovery, audio]);
 
+  // The reply has been heard to its end, or nothing plays: the dialog of a
+  // waiting change opens by itself now ("right after the reply"). The
+  // player counts each queue that played to its end; the count when the
+  // turn began is kept here. A reply paused partway doesn't count; the line
+  // under the record button opens the dialog then.
+  const finishedAtTurnStartRef = useRef(audio.queueFinishedCount);
+  useEffect(() => {
+    if (phase === 'processing' || phase === 'recording') {
+      finishedAtTurnStartRef.current = audio.queueFinishedCount;
+    }
+    // Only a new phase starts a turn: the count is read, not watched.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase]);
+  const replyHeard = !showRecovery && (phase === 'ready' || (phase === 'playback'
+    && !audio.generatingTTS
+    && (!audio.currentAudio
+      || audio.queueFinishedCount > finishedAtTurnStartRef.current)));
+  const setApprovalsOpen = approvals.setOpen;
+  useEffect(() => {
+    if (recordBlocked && replyHeard) setApprovalsOpen(true);
+  }, [recordBlocked, replyHeard, setApprovalsOpen]);
+
+  // The thread page's dialog, without "Later": deciding is the way on in
+  // Voice mode. "Open the thread" leaves for the thread page, where it
+  // works as everywhere else.
+  const approvalDialog = (
+    <ToolApprovalDialog
+      voice
+      open={approvals.open && approvals.groups.length > 0}
+      items={approvals.groups[0]}
+      busy={approvals.busy}
+      errors={approvals.errors}
+      onDecide={approvals.decide}
+      onClose={() => {}}
+      onOpenThread={() => {
+        const tip = threadTip();
+        navigate(tip ? `/node/${tip}` : '/textmode');
+      }}
+    />
+  );
+  const waitingLine = recordBlocked ? (
+    <button
+      type="button"
+      onClick={() => setApprovalsOpen(true)}
+      style={waitingLineStyle}
+    >
+      {voiceWaitingLine(waitingCount)}{' · Review'}
+    </button>
+  ) : null;
+  const canRecord = isOnline && !gleaning && !recordBlocked;
+  const recordTitle = recordBlocked
+    ? 'Approve or reject the waiting change first' : undefined;
+
   if (!recoveryChecked) {
     return <div style={containerStyle}>{textModeButton}</div>;
   }
@@ -668,7 +931,10 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
         {!blocked && textModeButton}
         <RecoveryBanner
           draft={interruptedDraft}
-          note={blocked && finishRefusal ? FINISH_WITHOUT_REPLY_TEXT : null}
+          note={blocked && finishRefusal
+            ? (finishRefusal === 'too_long' ? FINISH_TOO_LONG_TEXT
+              : FINISH_WITHOUT_REPLY_TEXT)
+            : null}
           onContinue={() => {
             // No spend-cap check: resuming finishes a recording that has
             // already started, which is always allowed (#341). Where Voice
@@ -699,9 +965,22 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
   }
 
   // Blocked: no fresh turn. Shown after an interrupted recording was
-  // finished or could not be resumed.
-  if (blocked && phase === 'ready') {
-    return <VoiceNeedsAi scope={blocked} threadId={threadId} />;
+  // finished or could not be resumed, or once a reply took the thread to
+  // its limit. A change still waiting keeps its line and dialog here: it is
+  // decided first.
+  if (blockedHere && phase === 'ready') {
+    return (
+      <>
+        <VoiceNeedsAi
+          scope={blockedHere}
+          threadId={getThreadParentId?.() || threadId}
+          onNewThread={onNewThread}
+          limitMessage={limitMessage}
+          footer={waitingLine}
+        />
+        {approvalDialog}
+      </>
+    );
   }
 
   // --- READY / RECORDING STATE ---
@@ -764,6 +1043,21 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
 
         {phase === 'ready' && <OfflineBanner />}
 
+        {phase === 'ready' && threadNotice === 'notice' && (
+          <p role="status" style={{
+            fontFamily: 'var(--sans)',
+            fontSize: '0.85rem',
+            fontWeight: 300,
+            color: 'var(--text-muted)',
+            lineHeight: 1.6,
+            maxWidth: '380px',
+            margin: '0 0 20px 0',
+            textAlign: 'center',
+          }}>
+            {THREAD_NOTICE_TEXT}
+          </p>
+        )}
+
         {hasError && phase === 'ready' && (
           <div style={{ marginBottom: '16px' }}>
             <PulsingDot color="var(--error)" />
@@ -787,15 +1081,17 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
               }
               handleStart();
             }}
-            disabled={!isOnline || gleaning}
+            disabled={!canRecord}
+            title={recordTitle}
+            aria-label="Record"
             style={{
               width: '72px', height: '72px', borderRadius: '50%',
               border: `2px solid ${isOnline ? 'var(--accent)' : 'var(--text-muted)'}`,
               background: 'transparent',
-              cursor: isOnline && !gleaning ? 'pointer' : 'not-allowed',
+              cursor: canRecord ? 'pointer' : 'not-allowed',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
               transition: 'all 0.2s ease',
-              opacity: isOnline && !gleaning ? 1 : 0.4,
+              opacity: canRecord ? 1 : 0.4,
             }}
           >
             <svg width="24" height="24" viewBox="0 0 24 24" fill={isOnline ? 'var(--accent)' : 'var(--text-muted)'}>
@@ -803,6 +1099,8 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
             </svg>
           </button>
         )}
+
+        {phase === 'ready' && waitingLine}
 
         {phase === 'ready' && gleanButton}
 
@@ -849,6 +1147,7 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
             </button>
           )
         )}
+        {approvalDialog}
       </div>
     );
   }
@@ -1080,7 +1379,29 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
 
       <OfflineBanner style={{ marginBottom: '8px' }} />
 
-      {/* Record button to continue */}
+      {blockedHere === 'too_long' ? (
+        // This reply took the thread to its limit (#648): no Continue (and
+        // no Glean, an AI reply too); the reply stays playable above.
+        <>
+          <p style={{
+            fontFamily: 'var(--sans)',
+            fontSize: '0.9rem',
+            fontWeight: 300,
+            color: 'var(--text-secondary)',
+            lineHeight: 1.7,
+            maxWidth: '380px',
+            margin: '0 0 20px 0',
+            textAlign: 'center',
+          }}>
+            {limitMessage || THREAD_LIMIT_TEXT}
+          </p>
+          <ThreadLimitActions
+            threadId={getThreadParentId?.() || threadId}
+            onNewThread={onNewThread}
+          />
+        </>
+      ) : (
+      /* Record button to continue */
       <button
         onClick={() => {
           if (isSpendBlocked()) {
@@ -1094,26 +1415,31 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
           }
           handleContinue(voiceReset);
         }}
-        disabled={!isOnline || gleaning}
-        title={isOnline ? 'Continue' : "You're offline"}
+        disabled={!canRecord}
+        title={recordTitle || (isOnline ? 'Continue' : "You're offline")}
+        aria-label="Continue"
         style={{
           width: '56px', height: '56px', borderRadius: '50%',
           border: `2px solid ${isOnline ? 'var(--accent)' : 'var(--text-muted)'}`,
           background: 'transparent',
-          cursor: isOnline && !gleaning ? 'pointer' : 'not-allowed',
+          cursor: canRecord ? 'pointer' : 'not-allowed',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           transition: 'all 0.2s ease',
-          opacity: isOnline && !gleaning ? 0.7 : 0.3,
+          opacity: canRecord ? 0.7 : 0.3,
         }}
-        onMouseEnter={(e) => { if (isOnline && !gleaning) e.currentTarget.style.opacity = '1'; }}
-        onMouseLeave={(e) => { if (isOnline && !gleaning) e.currentTarget.style.opacity = '0.7'; }}
+        onMouseEnter={(e) => { if (canRecord) e.currentTarget.style.opacity = '1'; }}
+        onMouseLeave={(e) => { if (canRecord) e.currentTarget.style.opacity = '0.7'; }}
       >
         <svg width="20" height="20" viewBox="0 0 24 24" fill={isOnline ? 'var(--accent)' : 'var(--text-muted)'}>
           <circle cx="12" cy="12" r="8" />
         </svg>
       </button>
+      )}
 
-      {gleanButton}
+      {waitingLine}
+
+      {blockedHere === 'too_long' ? null : gleanButton}
+      {approvalDialog}
     </div>
   );
 }

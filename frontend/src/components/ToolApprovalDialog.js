@@ -129,25 +129,37 @@ function ItemBody({ item }) {
   );
 }
 
+// On the Voice screen the next turn waits for the decision (Peter,
+// 2026-11-12), so the dialog says so and has no "Later".
+export const VOICE_WAITS_TEXT = "Voice mode continues once you've approved "
+  + "or rejected each change.";
+
 /**
  * *items*: the waiting calls of one reply (the server's pending_approvals
  * entries). *busy* / *errors*: per item id. *onDecide(item, approve)*.
+ *
+ * *voice*: shown on the Voice screen, where no new turn starts while a
+ * change waits. Nothing closes it but deciding (no "Later", no Escape, no
+ * click outside); *onOpenThread* leaves the Voice screen for the thread
+ * page instead, where the dialog works as everywhere else.
  */
-function ToolApprovalDialog({ open, items, busy, errors, onDecide, onClose }) {
+function ToolApprovalDialog({
+  open, items, busy, errors, onDecide, onClose, voice = false, onOpenThread,
+}) {
   useEffect(() => {
-    if (!open) return undefined;
+    if (!open || voice) return undefined;
     const handleKeyDown = (e) => {
       if (e.key === "Escape") onClose();
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [open, onClose]);
+  }, [open, onClose, voice]);
 
   if (!open || !items || items.length === 0) return null;
   const kinds = [...new Set(items.flatMap((i) => i.kinds || []))];
 
   return (
-    <div style={overlayStyle} onClick={onClose}>
+    <div style={overlayStyle} onClick={voice ? undefined : onClose}>
       <div
         style={cardStyle}
         role="dialog"
@@ -156,7 +168,10 @@ function ToolApprovalDialog({ open, items, busy, errors, onDecide, onClose }) {
         onClick={(e) => e.stopPropagation()}
       >
         <h2 id="tool-approval-title" style={titleStyle}>Approve changes?</h2>
-        <p style={bodyStyle}>{approvalReason(kinds)}</p>
+        <p style={bodyStyle}>
+          {approvalReason(kinds)}
+          {voice ? ` ${VOICE_WAITS_TEXT}` : null}
+        </p>
         {items.map((item) => (
           <div key={item.id} style={itemStyle} data-testid={`approval-${item.id}`}>
             <div style={itemTitleStyle}>{item.title}</div>
@@ -191,9 +206,17 @@ function ToolApprovalDialog({ open, items, busy, errors, onDecide, onClose }) {
           </div>
         ))}
         <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "4px" }}>
-          <button type="button" style={buttonStyle(false)} onClick={onClose}>
-            Later
-          </button>
+          {voice ? (
+            onOpenThread && (
+              <button type="button" style={buttonStyle(false)} onClick={onOpenThread}>
+                Open the thread
+              </button>
+            )
+          ) : (
+            <button type="button" style={buttonStyle(false)} onClick={onClose}>
+              Later
+            </button>
+          )}
         </div>
       </div>
     </div>

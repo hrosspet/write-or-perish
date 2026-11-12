@@ -33,10 +33,13 @@ final class VoiceLiveActivity {
     /// The lock screen for the conversation's state. In a Glean-card conversation
     /// (#475) a glean in flight is its own phase, and `glean` is the Glean button
     /// where Record shows (it is not offered while recording or thinking).
+    /// `approvalWaiting`: a change in the thread waits for approval, so the card
+    /// has no Record button where it would show (2026-11-12).
     nonisolated static func state(turn: VoiceTurnController.State, isPaused: Bool, isInterrupted: Bool,
                                   awaitingNextNode: Bool, elapsed: Double, now: Date = Date(),
                                   glean: State.GleanButton? = nil, gleaning: Bool = false,
-                                  gleanAccepted: Bool = false, gleaned: Bool = false) -> State {
+                                  gleanAccepted: Bool = false, gleaned: Bool = false,
+                                  approvalWaiting: Bool = false) -> State {
         if gleaning {
             var state = State(phase: .gleaning)
             state.gleanAccepted = gleanAccepted
@@ -48,6 +51,7 @@ final class VoiceLiveActivity {
         case .ready, .replying, .finished:
             state.glean = glean
             state.gleaned = gleaned && state.phase == .ready
+            state.approvalWaiting = approvalWaiting
         default:
             break
         }

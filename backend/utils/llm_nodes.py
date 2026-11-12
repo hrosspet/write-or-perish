@@ -250,11 +250,14 @@ class _Chain:
     def __init__(self, node):
         from backend.models import NodeContextArtifact, UserPrompt
         from backend.utils.thread_tree import ancestor_chain
+        # token_count and continuation_node_id: the size of the reply's
+        # prompt (utils/thread_size, #648).
         self.nodes = [] if node is None else ancestor_chain(
             node.id, Node.id, Node.parent_id, Node.node_type, Node.llm_model,
             Node.deleted_at, Node.prompt_key, Node.tool_calls_meta,
             Node.ai_usage, Node.user_id, Node.human_owner_id,
-            Node.privacy_level, max_depth=_MAX_ANCESTRY_HOPS)
+            Node.privacy_level, Node.token_count, Node.continuation_node_id,
+            max_depth=_MAX_ANCESTRY_HOPS)
         self.keys = {n.id: n.prompt_key for n in self.nodes if n.prompt_key}
         linked = [n.id for n in self.nodes if not n.prompt_key]
         if linked:
@@ -772,6 +775,9 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
 
     Raises SubscriptionRequired, also before any write, while payments
     are on and the owner has no AI replies (utils/subscriptions).
+
+    Raises ThreadTooLong (utils/thread_size), also before any write, when
+    the reply's prompt would be over THREAD_PROMPT_TOKEN_LIMIT (#648).
     """
     # Spend-cap guard: a blocked user must never get an LLM placeholder node
     # (and never incur generation spend). Raised before any DB write so no
@@ -884,6 +890,16 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     # never gets here (reply_refusal above).
     if turn in ("read", "read_again") and ai_usage == "train":
         ai_usage = FEED_AI_USAGE
+
+    # A thread whose next prompt would be over the limit gets no reply
+    # (#648; Peter, 2026-11-12), before anything is written. The measure
+    # reads no content (utils/thread_size); the task measures the
+    # assembled prompt again before its first call.
+    from backend.utils.thread_size import thread_length_refusal
+    too_long = thread_length_refusal(parent, human_owner_id, model_id,
+                                     chain=chain, user=owner)
+    if too_long is not None:
+        raise too_long
 
     llm_user = User.query.filter_by(username=model_id).first()
     if not llm_user:

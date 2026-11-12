@@ -139,6 +139,7 @@ final class ChunkQueuePlayer {
               chapters: [QueueChapter] = [], autoplay: Bool = true, onPlaying: (() -> Void)? = nil) {
         teardownItems()
         entries = []
+        dropAfterPlaying = nil
         for (i, raw) in urls.enumerated() {
             guard let url = urlResolver(raw) else { continue }
             entries.append(Entry(url: url, duration: (i < durations.count ? durations[i] : nil) ?? 0))
@@ -183,6 +184,42 @@ final class ChunkQueuePlayer {
         return true
     }
 
+    /// Takes the last chunk off the queue when it is `raw`: the approval
+    /// announcement once none of its reply's changes waits (2026-11-12). While
+    /// it plays it finishes first; it is gone from the next replay either way.
+    func dropTrailing(url raw: String) {
+        guard let url = urlResolver(raw), let last = entries.indices.last, entries[last].url == url else { return }
+        if isPlaying && currentIndex == last && !waitingForChunks {
+            dropAfterPlaying = url
+            return
+        }
+        removeEntry(last)
+    }
+
+    /// A trailing chunk to take off once it has played (`dropTrailing`).
+    @ObservationIgnored private var dropAfterPlaying: URL?
+
+    private func dropPendingTrailing() {
+        guard let url = dropAfterPlaying else { return }
+        dropAfterPlaying = nil
+        if let last = entries.indices.last, entries[last].url == url { removeEntry(last) }
+    }
+
+    private func removeEntry(_ index: Int) {
+        for item in player.items() where itemIndex[ObjectIdentifier(item)] == index {
+            let id = ObjectIdentifier(item)
+            itemIndex[id] = nil
+            itemObservations.removeValue(forKey: id)?.invalidate()
+            player.remove(item)
+        }
+        entries.remove(at: index)
+        chapters.removeAll { $0.chunkIndex == index }
+        isLoaded = !entries.isEmpty
+        currentIndex = min(currentIndex, max(0, entries.count - 1))
+        cumulativeTime = min(cumulativeTime, totalDuration)
+        onStateChange?()
+    }
+
     func renameChapter(atChunk index: Int, to title: String) {
         guard let i = chapters.firstIndex(where: { $0.chunkIndex == index }) else { return }
         chapters[i].title = title
@@ -223,6 +260,7 @@ final class ChunkQueuePlayer {
     func stop() {
         isPlaying = false
         player.pause()
+        dropPendingTrailing()
         teardownItems()
         currentIndex = 0
         cumulativeTime = 0
@@ -244,6 +282,8 @@ final class ChunkQueuePlayer {
     }
 
     func seek(to t: Double) {
+        // A jump leaves an announcement that was to go once it had played.
+        dropPendingTrailing()
         guard let spot = math.locate(t) else { return }
         if spot.atEnd && !generatingTTS {
             // Web: seeking to within 0.1 s of the end just shows the end.
@@ -354,6 +394,9 @@ final class ChunkQueuePlayer {
         } else {
             currentIndex = index
             finish()
+        }
+        if let pending = dropAfterPlaying, index < entries.count, entries[index].url == pending {
+            dropPendingTrailing()
         }
         onStateChange?()
     }

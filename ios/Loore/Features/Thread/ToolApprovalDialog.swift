@@ -6,17 +6,31 @@ import Observation
 /// the oldest reply first. It opens by itself once when the screen loads (or a
 /// reply on it finishes) with calls waiting, and again from the waiting line.
 /// "Later" decides nothing: the calls keep waiting.
+///
+/// The Voice screen uses the same model and dialog (`AudioCenter.voiceApprovals`):
+/// there the dialog has no "Later", since no new turn starts while a call waits.
 @MainActor
 @Observable
 final class ToolApprovalsModel {
     @ObservationIgnored private let api: APIClient
-    @ObservationIgnored let nodeId: Int
+    /// A node of the thread, to list its calls with. The Voice screen moves it
+    /// along as the conversation goes on.
+    @ObservationIgnored var nodeId: Int
     /// Before the dialog opens by itself: lets the page's push finish first.
     @ObservationIgnored var autoOpenDelay: Double = 0.6
     /// A call was approved and run (the host refreshes what it wrote).
     @ObservationIgnored var onApproved: (ToolApproval) -> Void = { _ in }
     /// Every call of the dialog's reply was decided: the dialog closed.
     @ObservationIgnored var onGroupDone: () -> Void = {}
+    /// A decision changed what waits (the Voice conversation lets Record go
+    /// again once nothing does).
+    @ObservationIgnored var onPendingChanged: ([ToolApproval]) -> Void = { _ in }
+
+    /// What an approved call wrote shows where it lives.
+    static func signalApproved(_ item: ToolApproval, signals: AppSignals?) {
+        if item.isArtifactWrite { signals?.post(.artifactsChanged) }
+        if item.tool == "apply_todo_changes" { signals?.post(.todoChanged) }
+    }
 
     /// Every waiting call in the thread, as the server listed them.
     private(set) var pending: [ToolApproval] = []
@@ -124,6 +138,7 @@ final class ToolApprovalsModel {
             errors[item.id] = (error as? APIError)?.serverMessage ?? Self.notRunMessage
             return
         }
+        onPendingChanged(pending)
         if shownTurnId == turn, !pending.contains(where: { $0.turnNodeId == turn }) {
             shownTurnId = nil
             onGroupDone()
@@ -162,6 +177,10 @@ struct ToolApprovalDialog: View {
     let model: ToolApprovalsModel
     /// The screen's height (a parameter so renders can take other phones').
     var screenHeight: CGFloat = UIScreen.main.bounds.height
+    /// Set on the Voice screen: no "Later" (no new turn starts while a call
+    /// waits, Peter 2026-11-12), and the way out is "Open the thread", which
+    /// leaves Voice for the thread screen, where the calls wait as before.
+    var onOpenThread: (() -> Void)?
 
     /// The calls' list, scrolled inside the dialog (heuristic: half the screen, so
     /// the whole card fits an iPhone SE's safe area with the four-line reason).
@@ -192,10 +211,17 @@ struct ToolApprovalDialog: View {
             .frame(maxHeight: Self.listMaxHeight(screen: screenHeight))
             HStack {
                 Spacer()
-                Button("Later", action: model.later)
-                    .buttonStyle(.looreOutline)
-                    .accessibilityHint("Nothing is decided; the changes keep waiting")
-                    .accessibilityIdentifier("approvals.later")
+                if let onOpenThread {
+                    Button("Open the thread", action: onOpenThread)
+                        .buttonStyle(.looreOutline)
+                        .accessibilityHint("Leaves Voice for the thread; the changes keep waiting")
+                        .accessibilityIdentifier("approvals.openThread")
+                } else {
+                    Button("Later", action: model.later)
+                        .buttonStyle(.looreOutline)
+                        .accessibilityHint("Nothing is decided; the changes keep waiting")
+                        .accessibilityIdentifier("approvals.later")
+                }
             }
         }
         .accessibilityIdentifier("approvals.dialog")

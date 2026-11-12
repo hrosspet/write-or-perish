@@ -89,7 +89,8 @@ struct TextModeView: View {
                                                                     json: .object(body))
             return NodeFormResult(id: answer.id, userNodeId: answer.userNodeId, llmNodeId: answer.llmNodeId,
                                   spendCapped: answer.spendCapped, llmError: answer.llmError,
-                                  subscriptionMessage: answer.subscriptionNotice)
+                                  subscriptionMessage: answer.subscriptionNotice,
+                                  llmErrorCode: answer.llmErrorCode)
         }
         var body: [String: JSONValue] = [
             "content": .string(s.content), "privacy_level": .string(s.privacy.rawString),
@@ -100,7 +101,8 @@ struct TextModeView: View {
         app.signals.post(.nodeCreated(answer.userNodeId))
         return NodeFormResult(id: answer.userNodeId, userNodeId: answer.userNodeId, llmNodeId: answer.llmNodeId,
                               spendCapped: answer.spendCapped, llmError: answer.llmError,
-                                  subscriptionMessage: answer.subscriptionNotice)
+                              subscriptionMessage: answer.subscriptionNotice,
+                              llmErrorCode: answer.llmErrorCode)
     }
 
     /// Where a Text-mode send lands (web `WritePage.handleSuccess`). The entry's

@@ -554,6 +554,15 @@ def draft_transcription_stream(session_id):
                         # was dispatched (e.g. misconfigured placeholder,
                         # spend cap). The transcript was saved as a node.
                         complete_data["warning"] = current_draft.streaming_warning
+                        # A reply skipped for the thread's length (#648):
+                        # the Voice screen says it aloud.
+                        from backend.utils.thread_size import (
+                            skipped_reply_code,
+                        )
+                        warning_code = skipped_reply_code(
+                            current_draft.streaming_warning)
+                        if warning_code:
+                            complete_data["warning_code"] = warning_code
                     if current_draft.llm_node_id:
                         complete_data["llm_node_id"] = current_draft.llm_node_id
                         user_node_id = draft_user_node_id(current_draft)

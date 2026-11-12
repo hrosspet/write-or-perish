@@ -232,6 +232,19 @@ class Config:
     SUBSCRIPTION_CONTACT_EMAIL = (
         os.environ.get("SUBSCRIPTION_CONTACT_EMAIL") or "info@loore.org")
 
+    # Long threads (#648; Peter, 2026-11-12): every AI reply sends the
+    # whole thread above it. A reply whose prompt would be over
+    # THREAD_PROMPT_TOKEN_LIMIT tokens is refused before any model call,
+    # and from THREAD_PROMPT_NOTICE_FRACTION of it the reply form says the
+    # thread is getting long (backend/utils/thread_size.py). 250k sits
+    # below the 272k tier at which some models reprice the whole request
+    # and above last month's 99th percentile (234k). 0 turns the limit
+    # (and the notice) off.
+    THREAD_PROMPT_TOKEN_LIMIT = int(
+        float_from_env("THREAD_PROMPT_TOKEN_LIMIT", 250_000))
+    THREAD_PROMPT_NOTICE_FRACTION = float_from_env(
+        "THREAD_PROMPT_NOTICE_FRACTION", 0.9)
+
     # --- Profile-generation batch processing (issue #173, Part A) ---
     # A user takes the Batch API path if the global switch is on OR their id
     # is in the canary allowlist. Both default off → batch ships dark.
