@@ -43,12 +43,18 @@ CACHE_TTL_SECONDS = 24 * 3600
 # render ending in a newline would keep the ongoing-thread warm missing.
 # v4: inline artifacts carry their version header (#604); a v3 render
 # would leave an ongoing thread without the versions its writes name.
-_KEY_PREFIX = "wop:sysprompt:v4:"
+# v5: in a call with tools, the recent raw window names a quoted saved
+# reference in one line instead of giving its text (2026-11-12); a v4
+# render would keep the text for the rest of its TTL.
+_KEY_PREFIX = "wop:sysprompt:v5:"
 
 # *unlicensed* is why the render's own rows keep a payload off the
 # training key (``ContextUsage.reason``), or None when they are all
 # licensed.
-CachedRender = namedtuple("CachedRender", ["text", "unlicensed"])
+# *references* are the saved references its recent raw window names by
+# the name read_full opens them by (ContextUsage.named_references).
+CachedRender = namedtuple("CachedRender", ["text", "unlicensed", "references"],
+                          defaults=((),))
 
 
 def _client(config):
@@ -84,7 +90,8 @@ def get_cached_render(config, node, variant=""):
                 logger.info("Cached render of node %s: %s; re-rendering",
                             node.id, lost)
                 return None
-        return CachedRender(entry["text"], unlicensed)
+        return CachedRender(entry["text"], unlicensed,
+                            tuple(entry.get("references") or ()))
     except Exception:
         logger.warning("Prompt cache read failed; re-rendering",
                        exc_info=True)
@@ -92,13 +99,15 @@ def get_cached_render(config, node, variant=""):
 
 
 def store_render(config, node, rendered_text, variant="",
-                 unlicensed=None, rows=None):
+                 unlicensed=None, rows=None, references=()):
     """Store the rendered text (encrypted) with its training-key verdict
-    (see ``CachedRender``) and, for a licensed one, the rows it rests on
-    (``ContextUsage.rows``). Failures are non-fatal."""
+    (see ``CachedRender``), for a licensed one the rows it rests on
+    (``ContextUsage.rows``), and the saved references its window names
+    (*references*). Failures are non-fatal."""
     entry = json.dumps({
         "text": rendered_text, "unlicensed": unlicensed,
         "rows": None if unlicensed else rows,
+        "references": sorted(references or ()),
     })
     try:
         _client(config).setex(
