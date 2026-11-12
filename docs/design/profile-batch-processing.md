@@ -685,16 +685,34 @@ the set's final is re-tipped the same way (`_window_set_under`). No window
 ends before the date: the set's base is re-tipped as a chain, when the set
 has a final (that copy is written through `retip_profile_chain`, which
 decrypts and encrypts the version it copies, as main's chain re-tip
-does). Anything of the user's set in the batch, a profile run under way
-(an advance holding the user's run lock renders into the set it chose
-before anything is in the batch; or a profile task holding the guard),
-the window path off, or a set built on the user's edit of an older set's
-final with nothing to keep: the rebuild from scratch, as before.
+does). The window path off, or a set built on the user's edit of an
+older set's final with nothing to keep: the rebuild from scratch, as
+before. The same when no window ends before the date and the set has no
+final yet (its base cannot be re-tipped: the set's tip stays the update
+base until a final replaces it).
 
-**Known limits.** An import older than a set's windows while the set is in
-flight is not seen by that set (as for a chained build's first chunk); its
-hand-off flags a rebuild from scratch. A revert from the history during a
-build is merged into the final as a full profile.
+**An import while the set is in flight (#639).** A set with work in the
+batch, or one an advance is rendering (it holds the user's run lock, or
+has claimed the build: the guard with `profile_batch_pending`), would not
+see a re-tip made now: its windows land in the set they were built for,
+and a first build's window, once collected, clears a rebuild flag
+(`_collect_window`), which left the import unread. So the hand-off does
+not re-tip yet (`exports.import_retip_waits`): the date waits on the user
+(`User.profile_import_retip_from`; several imports keep the oldest), also
+when a first build in flight has no version yet. Once nothing is in
+flight, `exports.apply_waiting_import_date` re-tips from it as above: the
+advance before `resolve_set` (its own run excluded), the seeder's gate
+(`_should_seed`) and the synchronous check. A collected window never
+clears it. With no profile version yet it is dropped: the first build
+reads everything. A synchronous task's guard alone does not hold the
+re-tip: it chooses its base when it starts, `base_moved` stops it at its
+next step, and one that hands off to the window path claims the build
+first.
+
+**Known limits.** A from-scratch chained build (the one-chunk window
+switches off) whose first chunk is in flight still clears a rebuild flag
+an import sets meanwhile. A revert from the history during a build is
+merged into the final as a full profile.
 
 ### One-chunk builds as one window (2026-11-03)
 

@@ -342,6 +342,10 @@ def _should_seed(user, ignore_backoff=False):
     # unless the admin confirmed the override (force).
     if not ignore_backoff and refusal_backoff.profile_in_backoff(user.id):
         return False
+    # An import whose re-tip waited for the user's window work in flight
+    # (#639) is applied first: the gates below then see the re-tipped set
+    # (its unread range) or the rebuild flag.
+    _exports.apply_waiting_import_date(user)
     # A pending full rebuild overrides the volume/interval gates: the
     # rebuild was explicitly requested (regen button, failure recovery,
     # repair script) and the gates measure "new tokens since cutoff" —

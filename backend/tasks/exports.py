@@ -1134,7 +1134,8 @@ def _retip_lineage(tip):
     return lineage
 
 
-def revert_profile_for_import(user_id, earliest_imported_created_at):
+def revert_profile_for_import(user_id, earliest_imported_created_at,
+                              own_run=None):
     """Invalidate only the profile versions an import touches.
 
     A version is invalid when its window would have held the imported
@@ -1155,10 +1156,38 @@ def revert_profile_for_import(user_id, earliest_imported_created_at):
     import's oldest change on is regenerated), also when the profile in
     use is a version the user saved on the set's final.
 
-    Returns ``("full", None)`` (flag set), ``("revert", copy)`` or
-    ``("none", tip)`` when nothing is invalidated: no parseable timestamp,
-    or the import is newer than the tip's cutoff.
+    While the user's window work is in the Batch queue or being rendered
+    (``import_retip_waits``), nothing is invalidated yet (#639): the work
+    in flight would land in the set it was built for and leave a re-tip
+    made now behind, and a first build's window, once collected, would
+    clear a rebuild flag set now. The date is kept on the user
+    (``User.profile_import_retip_from``, the oldest of several imports')
+    and applied once nothing is in flight (``apply_waiting_import_date``);
+    a date kept that way is applied with this one, whichever is older.
+    ``own_run``: the task id of the advance that applies it, whose own
+    run does not count as work under way.
+
+    Returns ``("full", None)`` (flag set), ``("revert", copy)``,
+    ``("deferred", None)`` (the date waits) or ``("none", tip)`` when
+    nothing is invalidated: no parseable timestamp, or the import is newer
+    than the tip's cutoff.
     """
+    user = db.session.get(User, user_id)
+    waiting = user.profile_import_retip_from if user is not None else None
+    dates = [d for d in (earliest_imported_created_at, waiting)
+             if d is not None]
+    earliest_imported_created_at = min(dates) if dates else None
+    if (earliest_imported_created_at is not None and user is not None
+            and import_retip_waits(user, own_run)):
+        if waiting != earliest_imported_created_at:
+            user.profile_import_retip_from = earliest_imported_created_at
+        logger.info(
+            "User %d: import dated %s waits for the profile work in flight; "
+            "the profile is re-tipped from it once that work is collected",
+            user_id, earliest_imported_created_at)
+        return "deferred", None
+    if waiting is not None:
+        user.profile_import_retip_from = None
     profiles = UserProfile.query.filter(
         UserProfile.user_id == user_id,
         UserProfile.generation_type != 'integration'
@@ -1243,17 +1272,68 @@ def _window_set_under(lineage):
     return None
 
 
-def _profile_run_active(user):
-    """Whether a profile run of ``user``'s is under way: an advance holds
-    the user's run lock, or a profile task holds the user's guard and is
-    not stale. An advance renders its windows for minutes before anything
-    is in the batch, into the set it chose when it started; a re-tip made
-    meanwhile would be left behind by the windows it saves later (review
-    of #637)."""
+def _profile_run_active(user, own_run=None):
+    """Whether a profile window run of ``user``'s other than ``own_run``
+    is under way: an advance holds the user's run lock, or an advance has
+    claimed the user's build (its guard, with ``profile_batch_pending``,
+    which ``profile_windows._claim`` sets) and the guard is not stale. An
+    advance renders its windows for minutes before anything is in the
+    batch, into the set it chose when it started; a re-tip made meanwhile
+    would be left behind by the windows it saves later (review of #637).
+    The claim counts too when the run lock cannot be read (no Redis). A
+    synchronous task's guard alone does not count: it chooses its base
+    when it starts and stops at the next step when an import moves it
+    (``base_moved``), and one that hands off to the window path claims
+    the build first (#639)."""
     from backend.tasks import profile_windows as pw
-    if pw._running_run(user.id) is not None:
+    running = pw._running_run(user.id)
+    if running is not None and running != own_run:
         return True
-    return bool(user.profile_generation_task_id) and not _is_task_stale(user)
+    guard = user.profile_generation_task_id
+    return bool(guard and guard != own_run and user.profile_batch_pending
+                and not _is_task_stale(user))
+
+
+def import_retip_waits(user, own_run=None):
+    """Whether an import's re-tip of ``user``'s profile waits (#639):
+    window work of the user's is in the Batch queue, or a window run other
+    than ``own_run`` is under way (``_profile_run_active``). Metadata
+    only."""
+    from backend.tasks import profile_windows as pw
+    if pw.inflight_items(user.id):
+        return True
+    return _profile_run_active(user, own_run)
+
+
+def apply_waiting_import_date(user, own_run=None):
+    """Apply the import date that waited for the user's window work in
+    flight (``User.profile_import_retip_from``, #639), once nothing is in
+    flight: the profile is re-tipped from it as the import's hand-off
+    would have done (``revert_profile_for_import``), so the windows that
+    end before it are kept and the rest is read again. Called before the
+    next build is chosen: by the advance before it picks its set
+    (``own_run``: its task id), by the batch seeder's gate and by the
+    synchronous check. With no profile version yet there is nothing to
+    invalidate: the first build reads everything anyway.
+
+    Returns the action (``revert_profile_for_import``'s), "deferred" while
+    the work is still in flight, or None when no date waits. Commits."""
+    if user is None or user.profile_import_retip_from is None:
+        return None
+    if import_retip_waits(user, own_run):
+        return "deferred"
+    has_profile = db.session.query(UserProfile.id).filter(
+        UserProfile.user_id == user.id,
+        UserProfile.generation_type != 'integration').first() is not None
+    if has_profile:
+        action, _version = revert_profile_for_import(user.id, None, own_run)
+    else:
+        user.profile_import_retip_from = None
+        action = "none"
+    db.session.commit()
+    logger.info("User %d: the import date that waited for the profile work "
+                "in flight is applied: %s", user.id, action)
+    return action
 
 
 def _copy_set_row(row, set_id, created_at, parent_id):
@@ -1298,16 +1378,15 @@ def _retip_window_set(user_id, set_id, earliest):
     before the date, when the set has a final for that copy to replace.
 
     Returns ``("revert", copy)``, or None when the set is not re-tipped:
-    the window path is off, something of the user's set is in the batch
-    or a profile run of the user's is under way (``_profile_run_active``;
-    a set in flight does not see an import, a known limit of #545), or
-    nothing before the date can be kept. The caller then flags a rebuild
-    from scratch, as before."""
+    the window path is off, or nothing before the date can be kept. The
+    caller then flags a rebuild from scratch, as before. Never called while
+    something of the user's set is in the batch or a window run of the
+    user's is under way: the caller keeps the date until that work is
+    collected (``import_retip_waits``, #639)."""
     from backend.tasks import profile_windows as pw
     from backend.utils.profile_versions import latest_set_final
     user = db.session.get(User, user_id)
-    if (user is None or not set_id or not pw.enabled()
-            or pw.inflight_items(user_id) or _profile_run_active(user)):
+    if user is None or not set_id or not pw.enabled():
         return None
     windows = pw.set_windows(user_id, set_id)
     kept = [w for w in windows if w.source_data_cutoff is not None
@@ -2732,6 +2811,12 @@ def maybe_trigger_incremental_profile_update(user, ignore_backoff=False):
     if refusal_backoff.policy_block_for(
             user.id, refusal_backoff.PROFILE_REQUEST_TYPES):
         return None
+    # An import whose re-tip waited for window work in flight (#639) is
+    # applied now, and its build starts as the import's hand-off starts it.
+    waited = apply_waiting_import_date(user)
+    if waited in ("full", "revert"):
+        return maybe_trigger_profile_update(
+            user.id, force_full_regen=(waited == "full"))
 
     latest_profile = profile_update_base(user.id)
 

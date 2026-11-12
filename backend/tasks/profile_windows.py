@@ -1675,14 +1675,14 @@ def _merge_requests(user, state, models, sub, keys, history):
     return False
 
 
-def next_work(user, keys, deadline, wait_for_imports=True):
+def next_work(user, keys, deadline, wait_for_imports=True, task_id=None):
     """One pass: everything of the user's set that is due and whose inputs
     are ready, in one submission: windows for every missing range, the
     groups whose windows are all in, and the final when everything is.
     Returns "submitted", "partial" (render budget used; the caller hands
     the rest to a new task), "idle", "held", "waiting", "blocked" (a
     content-policy block of a group or final stops the account's build) or
-    "failed"."""
+    "failed". ``task_id``: the advance running this pass."""
     run_locks.beat()
     # Before anything of the user's is read: the read time of the groups
     # and the final this pass builds (#590, review of #630). A "Delete all
@@ -1702,6 +1702,10 @@ def next_work(user, keys, deadline, wait_for_imports=True):
         # stop, so the next import is read by the same windows and merges.
         # The import's deferred seed or the hourly seeder resumes the set.
         return "waiting"
+    # An import that arrived while this user's windows were in the batch
+    # or being rendered waited for them (#639): once nothing is in flight,
+    # the set is re-tipped from its date before the pass chooses its set.
+    _exports.apply_waiting_import_date(user, own_run=task_id)
     set_id, base, fresh = resolve_set(user)
     if fresh and not wants_window_build(user):
         # A set is started only for a build that plans into two or more
@@ -2182,7 +2186,7 @@ def advance(user_id, task_id, wait_for_imports=True):
                 submitted = False
                 for _ in range(2):
                     outcome = next_work(user, keys, deadline,
-                                        wait_for_imports)
+                                        wait_for_imports, task_id)
                     if outcome == "partial":
                         redispatch = True
                     if outcome != "submitted":
