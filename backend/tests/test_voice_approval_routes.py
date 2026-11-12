@@ -127,6 +127,90 @@ def test_the_voice_reply_route_refuses_too(app, thread):
     assert Node.query.count() == before
 
 
+def _entry_under(reply, ben, with_prompt):
+    """Ben's entry under the reply whose change waits (typed in Text mode,
+    or a recording saved without a reply), in a thread with or without an
+    agentic prompt above."""
+    if with_prompt:
+        from backend.models import UserPrompt
+        from backend.utils.context_artifacts import attach_context_artifacts
+        prompt = UserPrompt(user_id=ben.id, prompt_key="voice", title="Voice",
+                            generated_by="default")
+        prompt.set_content("system prompt body")
+        _db.session.add(prompt)
+        _db.session.flush()
+        root = reply
+        while root.parent is not None:
+            root = root.parent
+        attach_context_artifacts(root.id, ben.id, prompt_record=prompt)
+    entry = Node(user_id=ben.id, human_owner_id=ben.id, parent_id=reply.id,
+                 node_type="user", privacy_level="private", ai_usage="chat")
+    entry.set_content("typed after the reply")
+    _db.session.add(entry)
+    _db.session.commit()
+    return entry
+
+
+@pytest.mark.parametrize("with_prompt", [True, False])
+def test_voice_from_an_entry_makes_no_reply_while_a_change_waits(
+        app, thread, monkeypatch, with_prompt):
+    """Voice Mode pressed on an entry under the reply whose change waits
+    (web NodeDetail, iPhone ThreadModel.startVoice): no reply is made; the
+    Voice screen opens ready (where the dialog shows), as for a gleaning.
+    Once the change is decided, the same press starts a reply."""
+    import backend.routes.voice as voice_mod
+    ben, anna, nodes, reply, pending_id = thread
+    entry = _entry_under(reply, ben, with_prompt)
+    started = []
+
+    def placeholder(parent_id, model_id, user_id, **kwargs):
+        started.append(parent_id)
+        return Node.query.get(parent_id)
+
+    monkeypatch.setattr(voice_mod, "create_llm_placeholder_node", placeholder)
+    client = _client(app, ben)
+
+    resp = client.post(f"/api/voice/from-node/{entry.id}", json={})
+
+    assert resp.status_code == 200, resp.get_json()
+    data = resp.get_json()
+    assert data["mode"] == "ready"
+    assert started == []
+    assert Node.query.filter_by(node_type="llm").count() == 1   # R only
+    if with_prompt:
+        assert data["parent_id"] == entry.id
+    else:
+        # The Voice prompt is attached under the entry, as for a gleaning.
+        assert Node.query.get(data["parent_id"]).parent_id == entry.id
+
+    client.post(f"/api/tool-approvals/{pending_id}/reject")
+    resp = client.post(f"/api/voice/from-node/{entry.id}", json={})
+    assert resp.get_json()["mode"] == "processing"
+    assert len(started) == 1
+
+
+def test_a_voice_reply_through_llm_response_waits_too(app, thread, monkeypatch):
+    """POST /nodes/<id>/llm with source_mode "voice" (no client sends it)
+    is refused like a Voice turn; LLM Response in Text mode is not."""
+    import backend.routes.nodes as nodes_mod
+    ben, anna, nodes, reply, pending_id = thread
+    asked = []
+
+    def placeholder(parent_id, model_id, user_id, **kwargs):
+        asked.append(kwargs.get("source_mode"))
+        return Node.query.get(parent_id), "task-1"
+
+    monkeypatch.setattr(nodes_mod, "create_llm_placeholder", placeholder)
+    client = _client(app, ben)
+
+    _refused(client.post(f"/api/nodes/{reply.id}/llm",
+                         json={"source_mode": "voice"}))
+    resp = client.post(f"/api/nodes/{reply.id}/llm",
+                       json={"source_mode": "textmode"})
+    assert resp.status_code != 409
+    assert asked == ["textmode"]
+
+
 def test_dictation_and_other_threads_are_not_affected(app, thread):
     ben, anna, nodes, reply, pending_id = thread
     client = _client(app, ben)

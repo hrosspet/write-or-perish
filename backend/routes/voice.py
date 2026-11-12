@@ -28,11 +28,13 @@ PROMPT_KEY = 'voice'
 # a second prompt node.
 
 
-def _ready_under_gleaning(node, has_prompt, ai_usage):
-    """Voice continuing from a gleaning (#435): the next recording goes
-    under it (under a Voice prompt attached below it when the thread has
-    no agentic prompt yet), and nothing is played: a gleaning is never
-    read aloud."""
+def _ready_under(node, has_prompt, ai_usage):
+    """Voice opens on *node* ready to record, with no reply made: the next
+    recording goes under it (under a Voice prompt attached below it when
+    the thread has no agentic prompt yet), and nothing is played. For a
+    gleaning, which is never read aloud (#435), and for an entry in a
+    thread where a change waits for the user's approval (Peter,
+    2026-11-12)."""
     parent_id = node.id
     if not has_prompt:
         prompt_record = get_user_prompt_record(current_user.id, PROMPT_KEY)
@@ -64,6 +66,9 @@ def create_voice_from_node(node_id):
     A thread that keeps AI out gets 403 ``code: ai_usage_none`` and
     nothing is created: the clients then open the Voice screen on it,
     which explains instead of recording.
+    An entry in a thread where a change the AI proposed waits for the
+    user's approval gets "ready" and no reply (the Voice screen shows the
+    change; utils/tool_approvals).
     A deleted node (a page opened before the delete) gets the 410 that
     POST /nodes/ gives for a deleted parent, before any prompt node or
     reply is created (#480). The check locks the row as POST /nodes/
@@ -100,9 +105,16 @@ def create_voice_from_node(node_id):
     # opens the record button under it instead of playing it first.
     from backend.utils.glean import is_gleaning
     if is_llm and is_gleaning(node):
-        return _ready_under_gleaning(node, has_prompt, ai_usage)
+        return _ready_under(node, has_prompt, ai_usage)
 
     if not is_llm:
+        # No new Voice reply while a change the AI proposed in this thread
+        # waits for the user's approval (Peter, 2026-11-12): the Voice
+        # screen opens ready, where the approval dialog shows and recording
+        # waits for the decision. (On a reply, Voice only plays it.)
+        from backend.utils.tool_approvals import waiting_in_thread
+        if waiting_in_thread(current_user.id, node):
+            return _ready_under(node, has_prompt, ai_usage)
         # A reply starts here: directly under *node* inside an agentic
         # thread, else under the Voice prompt added below it. A read-only
         # model is refused before anything is written.
