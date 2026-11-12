@@ -198,6 +198,8 @@ Users have a `plan` column (string, max 16 chars) on the User model. The plan co
 
 **These items must be addressed before Loore moves beyond the small alpha circle. See `docs/LICENSE-TODO.md` for full details.**
 
+🔧 **Drafted (#440, draft PR):** public `/terms` and `/privacy` pages with one source for the Terms text (`frontend/src/legal/terms.json`, also generating the iPhone copy), Terms 3.0 for the Beta and a privacy policy. The draft covers legal entity disclosure (placeholders until the owner publishes the details), jurisdiction, GDPR rights, the age limit (18 in the draft), cookies and the third-party services (Google Fonts included). Waits for the owner's details and decisions and a legal check.
+
 **Legal entity disclosure** - Identify the legal entity operating Loore (personal name, OSVČ, s.r.o.) and add to the terms so users know who they're contracting with
 
 **Jurisdiction & governing law** - Specify Czech Republic / EU jurisdiction and applicable law (required for enforceable agreement and GDPR compliance)

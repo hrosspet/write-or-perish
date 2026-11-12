@@ -74,8 +74,9 @@ with app.app_context():
         elif mode == "unapproved":
             u.approved = False
         elif mode == "restore":
+            from backend.routes.terms import CURRENT_TERMS_VERSION
             u.approved = True
-            u.accepted_terms_version = "2.0"
+            u.accepted_terms_version = CURRENT_TERMS_VERSION
         elif mode == "tz_utc":
             u.timezone = "UTC"
         elif mode == "add_notification":

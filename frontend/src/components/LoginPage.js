@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import { useUser } from "../contexts/UserContext";
 import useSubmitShortcut from "../hooks/useSubmitShortcut";
+import LegalLinks from "../legal/LegalLinks";
 
 const backendUrl = process.env.REACT_APP_BACKEND_URL;
 
@@ -439,6 +440,11 @@ function LoginPage() {
             </div>
           )}
         </div>
+
+        <LegalLinks style={{
+          position: "relative", zIndex: 1, marginTop: "1.5rem",
+          opacity: 0, animation: "loore-login-fade 1s cubic-bezier(0.22,1,0.36,1) 0.4s forwards",
+        }} />
       </div>
     </>
   );

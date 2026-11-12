@@ -1,0 +1,187 @@
+{
+  "version": "1.0",
+  "blocks": [
+    { "type": "title", "text": "Privacy Policy" },
+    {
+      "type": "summaryBox",
+      "title": "The short version",
+      "items": [
+        "**Your writing is private by default.** Only you can read it, unless you make an entry public.",
+        "**It is encrypted, but not end to end.** Loore's server decrypts it to show it to you and to send it to AI. We don't read it.",
+        "**AI reads what you allow, and new entries allow it by default.** You can set any entry, or your whole account, to None.",
+        "**No ads, no tracking, no selling.** We never sell your data or use it for advertising.",
+        "**You can take your data and leave.** Export it, ask us for a copy, or delete it. A deleted account can be recovered for 30 days; after that it is deleted forever."
+      ]
+    },
+    { "type": "rule" },
+
+    { "type": "sectionTitle", "id": "who", "text": "1. Who is responsible" },
+    { "type": "paragraph", "text": "Loore is run by [OPERATOR NAME], [LEGAL FORM], company ID (IČO) [COMPANY ID], [ADDRESS], Czech Republic. We decide what happens to the personal data described here: we are its controller." },
+    { "type": "paragraph", "text": "For anything about your data, write to [info@loore.org](mailto:info@loore.org). We answer within one month." },
+
+    { "type": "sectionTitle", "id": "what", "text": "2. What we keep, and why" },
+    { "type": "subheading", "text": "Your account" },
+    { "type": "paragraph", "text": "Your email address and username. If you sign in with X: your X user ID and handle. Your settings (such as your model, your privacy defaults and your time zone), when you accepted the Terms, and whether your account is approved. We need these to run your account." },
+    { "type": "subheading", "text": "What you write and record" },
+    { "type": "paragraph", "text": "Your entries, voice recordings and their transcripts, and the AI's replies. Earlier versions of what you edit. Drafts and thread names. What you save or import: bookmarks, clipped web pages, documents, tweets and conversations from other apps. And what Loore makes from it for you: your profile, intentions, todo list, AI preferences and other documents, and the audio when Loore reads text aloud. This is the service you use." },
+    { "type": "subheading", "text": "Search data" },
+    { "type": "paragraph", "text": "Embeddings: lists of numbers that describe the meaning of a text. We make them for every entry the AI may read and for every saved reference, so that you and the AI can search by meaning." },
+    { "type": "subheading", "text": "Use and cost" },
+    { "type": "paragraph", "text": "For each AI request: the model, the amount of text, the cost and the time. When you were last active and on which page. Which documents and references you opened, and what you said about Glean's picks. We use this to apply usage limits, to see what works and to fix what doesn't." },
+    { "type": "subheading", "text": "Messages you send us" },
+    { "type": "paragraph", "text": "Feedback and answers to polls. We read them, with your username, because they are written to us. Bug reports and ideas you ask the AI to file go to GitHub (section 5)." },
+    { "type": "subheading", "text": "Your subscription" },
+    { "type": "paragraph", "text": "If you subscribe: its level, its state and dates, and the reference numbers Stripe gives your customer record and subscription. Your card and billing details stay with Link and Stripe; we never see your card number." },
+    { "type": "subheading", "text": "Technical records" },
+    { "type": "paragraph", "text": "Our server logs record each request: the address it came from (your IP address), your browser or app, the page or API path and the time. Some log lines also hold your email address, for example when we send you a sign-in link. Error reports go to Sentry (section 5). We use these for security and to fix faults." },
+    { "type": "subheading", "text": "Legal bases" },
+    {
+      "type": "bullets",
+      "items": [
+        "**Our contract with you**, for running Loore: your account, your content, search, AI replies, usage limits and your subscription.",
+        "**Your consent**, where we ask for it: marking content for training, using both AI providers for background work, and seeding your Loore from your tweets. You can withdraw it at any time; that does not undo what happened before.",
+        "**Our legitimate interest**, for security, logs, error reports and statistics on use, and for the profiles we build for invited people before they join (section 7).",
+        "**Legal obligations**, for the records the law requires us to keep."
+      ]
+    },
+
+    { "type": "sectionTitle", "id": "security", "text": "3. How we protect it" },
+    { "type": "paragraph", "text": "What you write and record is **encrypted at rest** with AES-256-GCM, with keys managed by Google Cloud KMS (envelope encryption). That includes your recordings, the audio Loore generates, your profile and your other documents. Sign-in links and access tokens are stored only as fingerprints (hashes)." },
+    { "type": "paragraph", "text": "**Not encrypted:**" },
+    {
+      "type": "bullets",
+      "items": [
+        "entries you made public;",
+        "embeddings;",
+        "metadata, such as dates, privacy settings and which entry replies to which;",
+        "your email address, username and X handle;",
+        "a few short texts: the titles, links and authors of saved references, the titles of your documents, the headings of text read aloud, and the words the AI searched for while replying;",
+        "an X archive you are importing, for up to 24 hours, until you confirm the import."
+      ]
+    },
+    { "type": "paragraph", "text": "Encryption at rest is **not end-to-end encryption**. Our server decrypts your content whenever it has to: to show it to you, to search it, and to send it to AI. The operator has access to the server and can technically decrypt your data. Our rule is that nobody reads users' content, not for debugging and not for experiments. We would only do it if the law required it, or if you asked us to. This rests on trust, not on cryptography." },
+    { "type": "paragraph", "text": "Backups hold the data as it is stored: what is encrypted stays encrypted." },
+
+    { "type": "sectionTitle", "id": "ai", "text": "4. What AI providers receive" },
+    { "type": "paragraph", "text": "Loore works with two AI providers, OpenAI and Anthropic, through their APIs. You choose your model, and with it the provider for your replies. Some work always goes to OpenAI:" },
+    {
+      "type": "table",
+      "header": ["When", "What is sent", "To whom"],
+      "rows": [
+        ["AI replies", "The thread, the documents the AI may read (such as your profile) and what it finds in your entries", "The provider of the model you use"],
+        ["Background work: your profile, intentions, recent context, todo list", "Entries and documents the AI may read", "Your model's provider, or both if you chose \"Anthropic and OpenAI\" under Background tasks"],
+        ["Turning a recording into text", "The audio", "OpenAI, **also when the entry is set to None**"],
+        ["Reading text aloud", "The text", "OpenAI"],
+        ["Search by meaning", "Entries the AI may read, and saved references", "OpenAI"],
+        ["Glean", "The thread, your profile and intentions, and the day's public tweets from the Community Archive", "OpenAI by default, or the model you pick"],
+        ["Training, only for content marked Train", "That content", "OpenAI; with an Anthropic model, Anthropic, with a separate key"]
+      ]
+    },
+    {
+      "type": "bullets",
+      "items": [
+        "Apart from turning recordings into text, nothing set to None is sent to AI.",
+        "Under OpenAI's and Anthropic's API terms, they don't train their models on what we send, except content you mark Train. Content set to Chat is never sent with the key we use for training.",
+        "With each request, OpenAI receives a code that stands for your account, so that it can act on one account's requests if its safety filter flags them. The code is not your name, email or account number, and nobody without our key can tell whose it is.",
+        "Background work often goes through the providers' batch services. Loore does not delete the files of a batch from OpenAI afterwards; how long OpenAI keeps them is set by OpenAI's terms."
+      ]
+    },
+
+    { "type": "sectionTitle", "id": "processors", "text": "5. Who else receives data" },
+    {
+      "type": "table",
+      "header": ["Service", "What it receives", "Where"],
+      "rows": [
+        ["**Google Cloud**", "Everything Loore stores: our server, database, backups and encryption keys", "USA (Iowa)"],
+        ["**[EMAIL PROVIDER]**", "Your email address and the emails we send you: sign-in links, confirmations and account notices. They contain nothing you wrote.", "[EMAIL PROVIDER LOCATION]"],
+        ["**Sentry**", "Error reports: where the code failed, the page or API path, your browser or app, sometimes your account number or email address. They are built to contain nothing you wrote. Your browser sends its reports directly, so Sentry sees your IP address.", "[SENTRY REGION]"],
+        ["**Link and Stripe**", "If you subscribe: what you enter at checkout, such as your name, email, card and billing address. Link sells the subscription and handles that data under its own privacy policy.", "See Link's privacy policy"],
+        ["**X**", "If you sign in with X or connect it: X tells us your X user ID and handle, and with bookmark sync, your bookmarks, every night. We send X the IDs of saved tweets to check they are still public. We never post to X.", "USA"],
+        ["**GitHub**", "If you ask the AI to file a bug report or an idea, and confirm it: its title and text become a **public** issue in Loore's GitHub repository, labelled with your username.", "USA"],
+        ["**Google Fonts**", "Your IP address and browser details, when a page loads Loore's fonts", "Google (worldwide)"],
+        ["**YouTube**", "Only if you open a saved YouTube video: the player loads from youtube-nocookie.com", "Google (worldwide)"],
+        ["**Community Archive**", "The X handles and user IDs we look up. We download public tweets from it; we send it nothing you wrote.", "Its hosting provider"]
+      ]
+    },
+    { "type": "paragraph", "text": "We use no advertising, analytics or tracking services, and we never sell your data." },
+
+    { "type": "sectionTitle", "id": "transfers", "text": "6. Transfers outside the EU" },
+    { "type": "paragraph", "text": "Our server is in the USA, and OpenAI, Anthropic, Google, X and GitHub are US companies, so your data leaves the EU. For each transfer we rely on a safeguard the GDPR allows: the EU–US Data Privacy Framework where the company is certified under it, or the European Commission's standard contractual clauses in the company's data processing terms." },
+
+    { "type": "sectionTitle", "id": "prefill", "text": "7. Profiles we build before you join" },
+    { "type": "paragraph", "text": "We invite some people by hand. For some of them, before they sign up, we open a closed account under their X handle and fill it with their own public posts, from the Community Archive (a public archive of tweets) or from X's API. Loore's AI then drafts a private profile and intentions from those posts, with OpenAI and Anthropic models." },
+    {
+      "type": "bullets",
+      "items": [
+        "Nobody can see the account. It holds only posts that were already public. Posts fetched from X's API are also kept as files on our server, unencrypted, until the account's content is deleted.",
+        "We do this so that the person can start from their own words instead of a blank page. Our legal basis is our legitimate interest in that, weighed against theirs.",
+        "When you first sign in with X, Loore asks whether to seed your Loore from your public tweets. If you answer **Not now**, we import and build nothing more.",
+        "To remove what was already built, use **Delete all my content** on the Account page, or delete your account.",
+        "If you haven't signed up and want us to delete such an account, or not to build one, write to [info@loore.org](mailto:info@loore.org) with your X handle. We delete it.",
+        "We also keep our own copy of the Community Archive's public tweets, for this and for Glean."
+      ]
+    },
+
+    { "type": "sectionTitle", "id": "public", "text": "8. What others can see" },
+    {
+      "type": "bullets",
+      "items": [
+        "**Private entries:** only you.",
+        "**Public entries:** every signed-in Loore member can open them. Once public sharing is on for your account, they are also on the open web: on your public page, in its feed and in our sitemap. Search engines and AI crawlers are welcome to read them, for AI training too. Public entries are stored unencrypted.",
+        "**Your username** appears with everything you make public. If you signed up by email, it starts as the part of your address before the @; you can change it on the Account page. If you signed up with X, it is your X handle, and your public pages also name your X account."
+      ]
+    },
+
+    { "type": "sectionTitle", "id": "retention", "text": "9. How long we keep it" },
+    {
+      "type": "bullets",
+      "items": [
+        "**Your account and content:** until you delete them.",
+        "**An entry you delete:** its text and recording are wiped 30 days later.",
+        "**Delete all my content:** you can restore it for 30 days; then it is deleted forever.",
+        "**Your account:** if you delete it, you can recover it within 30 days by signing in; after that it is deleted forever, with everything in it.",
+        "**Backups:** daily copies are kept for 28 days and server snapshots for 14 days, so what is deleted forever leaves the backups within another 30 days. A weekly copy kept outside Google follows the same limit.",
+        "**What stays after an account is deleted:** a record of what your AI use cost, without your name; an empty placeholder where other people replied under your entries; and your username, reserved for a year so that nobody else can take it over.",
+        "**A prefilled account nobody signed in to:** until we delete it, or until you ask us to.",
+        "**Server logs:** [LOG RETENTION].",
+        "**Error reports in Sentry:** 30 days.",
+        "**Purchases:** Link keeps the records the law requires for sales and tax."
+      ]
+    },
+
+    { "type": "sectionTitle", "id": "rights", "text": "10. Your rights" },
+    { "type": "paragraph", "text": "Under the GDPR you can:" },
+    {
+      "type": "bullets",
+      "items": [
+        "**See and copy your data.** With craft mode on, **Export data** in the menu downloads your threads as a text file. For everything else we hold about you, such as recordings, documents and account data, write to us and we send you a copy.",
+        "**Correct it.** Edit or delete your entries, edit your profile, intentions and other documents, and change your username and email on the Account page.",
+        "**Delete it.** Delete single entries, all your content, or your account, as described in section 9.",
+        "**Take it with you.** Use the export, or ask us for a copy in a common format.",
+        "**Object, or ask us to restrict processing.** For example, object to a profile we built before you joined.",
+        "**Withdraw your consent** at any time: set content back from Train to Chat or None, choose one provider for background tasks, or say no to seeding from your tweets.",
+        "**Complain** to the Czech data protection authority, Úřad pro ochranu osobních údajů (ÚOOÚ), or to the authority in the country where you live."
+      ]
+    },
+    { "type": "paragraph", "text": "To use any of these rights, write to [info@loore.org](mailto:info@loore.org) from your account's email address. We answer within one month." },
+
+    { "type": "sectionTitle", "id": "cookies", "text": "11. Cookies and your device" },
+    {
+      "type": "bullets",
+      "items": [
+        "Loore sets only the cookies that keep you signed in: a session cookie, and a cookie that keeps you signed in for 30 days. There are no advertising or analytics cookies, so we don't ask for cookie consent.",
+        "Your browser also keeps a few of your Loore settings, such as the theme, your last privacy and AI choice, and craft mode. They stay on your device.",
+        "The iPhone app keeps your sign-in in the phone's Keychain. It contains no analytics or tracking."
+      ]
+    },
+
+    { "type": "sectionTitle", "id": "age", "text": "12. Age" },
+    { "type": "paragraph", "text": "Loore is for people aged 18 and older. If you believe someone younger uses Loore, write to us and we delete the account." },
+
+    { "type": "sectionTitle", "id": "changes", "text": "13. Changes to this policy" },
+    { "type": "paragraph", "text": "When we change this policy in a way that matters, we tell you in Loore. The date below shows the last change." },
+
+    { "type": "rule" },
+    { "type": "footnote", "text": "*Privacy Policy, version 1.0. Last updated: [EFFECTIVE DATE].*" }
+  ]
+}

@@ -1,5 +1,25 @@
 import SwiftUI
 
+/// A block of the Terms text. `TermsText` (generated from
+/// `frontend/src/legal/terms.json` by `ios/scripts/check_terms_text.py`) lists
+/// them; the web renders the same JSON (`frontend/src/legal/LegalDocument.js`).
+enum TermsBlock: Hashable {
+    case title(String)
+    /// The summary box: a bold heading and a numbered list.
+    case summaryBox(title: String, items: [String])
+    /// A quoted agreement in a box.
+    case quoteBox([String])
+    case sectionTitle(String)
+    case subheading(String)
+    case paragraph(String)
+    case bullets([String])
+    /// A list without bullets (the web's `listStyle: none`).
+    case plainList([String])
+    case table(header: [String], rows: [[String]])
+    case rule
+    case footnote(String)
+}
+
 /// The blocking Terms screen (web `TermsModal`): shown over everything while the
 /// signed-in user's accepted terms are out of date. No close, no swipe-away.
 /// "I Agree" → `POST /api/terms/accept`.
@@ -20,6 +40,7 @@ struct TermsView: View {
                     ForEach(Array(TermsText.blocks.enumerated()), id: \.offset) { _, block in
                         TermsBlockView(block: block)
                     }
+                    TermsBlockView(block: .paragraph(TermsText.acceptNote))
                     if let error {
                         Text(error)
                             .font(LooreFont.body)

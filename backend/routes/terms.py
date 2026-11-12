@@ -10,7 +10,10 @@ logger = logging.getLogger(__name__)
 
 terms_bp = Blueprint("terms_bp", __name__)
 
-CURRENT_TERMS_VERSION = "2.0"
+# Must equal "version" in frontend/src/legal/terms.json, the one source of
+# the Terms text (#440; test_terms_version.py checks it). A new version asks
+# every user to accept the Terms again.
+CURRENT_TERMS_VERSION = "3.0"
 
 
 @terms_bp.route("/accept", methods=["POST"])

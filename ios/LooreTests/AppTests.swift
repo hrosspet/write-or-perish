@@ -42,6 +42,9 @@ final class AppRouteTests: XCTestCase {
         XCTAssertNil(AppRoute.permalink(in: "/@seowriter"))
         XCTAssertNil(AppRoute.permalink(in: "/@/a-slug"))
         XCTAssertEqual(AppRoute.parse("/vision", environment: env), .webPage(path: "/vision"))
+        // The legal pages (#440) open as web pages, also from a link in an entry.
+        XCTAssertEqual(AppRoute.parse("/terms", environment: env), .webPage(path: "/terms"))
+        XCTAssertEqual(AppRoute.parse("/privacy", environment: env), .webPage(path: "/privacy"))
         XCTAssertEqual(AppRoute.parse("/somewhere/else", environment: env), .home)
         XCTAssertEqual(AppRoute.parse("/", environment: env), .home)
         XCTAssertNil(AppRoute.parse("", environment: env))
@@ -187,17 +190,32 @@ final class DesignSystemTests: XCTestCase {
     }
 }
 
+/// `TermsText` is generated from `frontend/src/legal/terms.json` (#440);
+/// `ios/scripts/check_terms_text.py` keeps the two identical.
 final class TermsTextTests: XCTestCase {
     func testStructure() {
         let sections = TermsText.blocks.compactMap { block -> String? in
             if case .sectionTitle(let t) = block { return t }
             return nil
         }
-        XCTAssertEqual(sections.count, 10)
-        XCTAssertEqual(sections.first, "1. What Loore Is")
-        XCTAssertEqual(sections.last, "10. Contact")
-        XCTAssertEqual(TermsText.version, "2.0")
-        XCTAssertTrue(TermsText.blocks.contains(.footnote("*Terms Version: 2.0 — Last updated: February 9, 2026*")))
+        XCTAssertEqual(TermsText.blocks.first, .title("Terms of Service"))
+        XCTAssertEqual(sections.first, "1. Who runs Loore")
+        XCTAssertEqual(sections.last, "\(sections.count). Contact")
+        XCTAssertEqual(TermsText.version, "3.0")
+        XCTAssertTrue(TermsText.blocks.contains { block in
+            if case .footnote(let t) = block { return t.contains("Terms version 3.0") }
+            return false
+        })
+        XCTAssertTrue(TermsText.acceptNote.contains("I Agree"))
+        XCTAssertTrue(TermsText.acceptNote.contains("[Privacy Policy](https://loore.org/privacy)"))
+    }
+
+    /// The Beta terms (#440) drop the alpha disclaimer and "no refunds".
+    func testNoAlphaDisclaimer() {
+        let all = TermsText.blocks.map { "\($0)" }.joined(separator: "\n")
+        XCTAssertFalse(all.localizedCaseInsensitiveContains("alpha software"))
+        XCTAssertFalse(all.localizedCaseInsensitiveContains("no refunds"))
+        XCTAssertTrue(all.contains("Beta"))
     }
 
     /// Account deletion (#269): the web's sentence, Peter's text of

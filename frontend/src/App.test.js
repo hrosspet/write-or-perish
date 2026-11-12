@@ -27,7 +27,8 @@ jest.mock('./components/MarkdownBody', () => () => null);
 jest.mock('./components/NavBar',() => () => null);
 jest.mock('./components/SpendCapBanner', () => () => null);
 jest.mock('./components/DataDeletionBanner', () => () => null);
-jest.mock('./components/TermsModal', () => () => null);
+// The stub user has not accepted the current terms, so the dialog is up.
+jest.mock('./components/TermsModal', () => () => <div>terms-modal</div>);
 jest.mock('./components/UpdatesModal', () => () => null);
 jest.mock('./components/SearchModal', () => () => null);
 jest.mock('./components/NodeFormModal', () => () => null);
@@ -60,4 +61,22 @@ test('other artifact kinds still use the artifacts page', () => {
   renderAt('/artifacts/memory');
   expect(screen.getByTestId('where').textContent).toBe('/artifacts/memory');
   expect(screen.getByText('artifacts-page')).toBeTruthy();
+});
+
+// #440: the legal pages are public routes, and the terms dialog stays off
+// them, so its links (opened in a new tab) can be read before agreeing.
+test('/terms and /privacy render the legal pages without the terms dialog over them', () => {
+  window.scrollTo = () => {};
+  const { unmount } = renderAt('/terms');
+  expect(screen.getByRole('heading', { level: 1, name: 'Terms of Service' })).toBeTruthy();
+  expect(screen.queryByText('terms-modal')).toBeNull();
+  unmount();
+  renderAt('/privacy');
+  expect(screen.getByRole('heading', { level: 1, name: 'Privacy Policy' })).toBeTruthy();
+  expect(screen.queryByText('terms-modal')).toBeNull();
+});
+
+test('elsewhere the terms dialog shows while the terms are not accepted', () => {
+  renderAt('/profile');
+  expect(screen.getByText('terms-modal')).toBeTruthy();
 });

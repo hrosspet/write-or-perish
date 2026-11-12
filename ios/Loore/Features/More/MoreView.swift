@@ -63,6 +63,11 @@ struct MoreView: View {
                     MenuRow(title: "Why Loore") { app.open(.webPage(path: "/why-loore")) }
                     MenuRow(title: "Vision") { app.open(.webPage(path: "/vision")) }
                     MenuRow(title: "How To") { app.open(.webPage(path: "/how-to")) }
+                    // The public legal pages (#440), as on the web.
+                    MenuRow(title: "Terms of Service") { app.open(.webPage(path: "/terms")) }
+                        .accessibilityIdentifier("more.terms")
+                    MenuRow(title: "Privacy Policy") { app.open(.webPage(path: "/privacy")) }
+                        .accessibilityIdentifier("more.privacy")
                 }
 
                 MenuGroup {

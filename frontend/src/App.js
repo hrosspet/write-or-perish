@@ -16,6 +16,7 @@ import ProtectedRoute from "./components/ProtectedRoute";
 import VisionPage from "./pages/VisionPage";
 import WhyLoorePage from "./pages/WhyLoorePage";
 import HowToPage from "./pages/HowToPage";
+import LegalPage, { LEGAL_PATHS } from "./pages/LegalPage";
 import AlphaThankYouPage from "./pages/AlphaThankYouPage";
 import WelcomePage from "./pages/WelcomePage";
 import HomePage from "./pages/HomePage";
@@ -211,8 +212,10 @@ function App() {
         <SearchModal scope={searchScope} onClose={() => setShowSearch(false)} onOpenNode={openThread} />
       )}
 
-      {/* Render the Terms Modal if the user hasn't accepted the terms yet */}
-      {showTerms && (
+      {/* Render the Terms Modal if the user hasn't accepted the terms yet.
+          Not over /terms and /privacy themselves (#440): the dialog's links
+          open them in a new tab, to be read before agreeing. */}
+      {showTerms && !LEGAL_PATHS.includes(pathname) && (
         <TermsModal
           onAccepted={() => {
             setUser({ ...user, terms_up_to_date: true });
@@ -242,6 +245,9 @@ function App() {
           <Route path="/vision" element={<VisionPage />} />
           <Route path="/why-loore" element={<WhyLoorePage />} />
           <Route path="/how-to" element={<HowToPage />} />
+          {/* Legal pages (#440): public, no sign-in. */}
+          <Route path="/terms" element={<LegalPage kind="terms" />} />
+          <Route path="/privacy" element={<LegalPage kind="privacy" />} />
           {/* Alpha thank you - public (for unapproved users) */}
           <Route path="/alpha-thank-you" element={<AlphaThankYouPage />} />
           {/* Confirms a new sign-in email (#260). Not ProtectedRoute: waitlisted
