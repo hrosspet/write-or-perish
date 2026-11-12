@@ -213,8 +213,12 @@ final class ThreadModel {
     /// offered; writing still works.
     var atThreadLimit: Bool { isOwner && node?.threadLength == .limit }
 
-    /// The limit state's text: the server's when a request brought one.
-    var threadLimitText: String { threadLimitMessage ?? ThreadLength.limitText }
+    /// The limit state's text: a refused request's own words first, then the
+    /// server's reason with the node (`thread_length_message`: the thread is long,
+    /// or an entry or what it quotes is too large), else the app's.
+    var threadLimitText: String {
+        threadLimitMessage ?? node?.threadLengthMessage ?? ThreadLength.limitText
+    }
 
     /// A reply request came back `thread_too_long`: the form switches to its
     /// limit state (the GET that opened the page was under the notice, or older).
@@ -509,6 +513,10 @@ final class ThreadModel {
                 if let meta = data.toolCallsMeta { node?.toolCallsMeta = meta }
                 if let picks = data.feedPicksCount { node?.feedPicksCount = picks }
                 node?.llmTaskStatus = .completed
+                // How long the thread is now (#648): the notice or the limit shows
+                // on the turn it is reached, not on the next page load.
+                node?.threadLength = data.threadLength
+                node?.threadLengthMessage = data.threadLengthMessage
                 streamTask?.cancel()
                 streamTask = nil
                 refreshQuotesIfNeeded()

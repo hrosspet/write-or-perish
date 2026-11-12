@@ -109,6 +109,8 @@ protocol VoiceAudio: AnyObject {
     /// Says `text` aloud with the device's own speech on an active session (no
     /// request; #648: a thread too long for another reply). Returns when it is said.
     func speak(_ text: String) async
+    /// Stops that sentence at once (a new recording starts); `speak` returns.
+    func stopSpeaking()
     func playInterruptionAlert()
     func playLongRecordingWarning()
     /// Something the lock screen shows changed.

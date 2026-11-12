@@ -1124,7 +1124,15 @@ price, token counts or percentages anywhere; the copy is the web's (`Core/Models
   a new thread to keep talking." on the device (`SentenceSpeaker`, `AVSpeechSynthesizer`, an English voice;
   no request) instead of the error sound, then the session ends; the lock screen's Record says it again.
   Other refusals (the monthly limit, AI usage) are unchanged: a toast, no sound. A notice line sits above the
-  record / Continue button while availability says "notice", checked again after each reply.
+  record / Continue button while the screen's availability, or the last reply's llm-status, says "notice".
 - Tests: `ThreadLengthTests.swift` (`ThreadLengthDecodingTests`, `ThreadLengthModelTests`,
   `ThreadLengthFormTests`) and six in `VoiceTurnTests`. Unit tests only; not walked in the simulator, and the
   spoken sentence not heard on a phone.
+- Review fixes (PR #650): only the latest sentence ends the session (a second refusal's sentence is not cut
+  off by the first one's end); a new recording stops the sentence before the session turns to recording;
+  the lock screen's Record waits until the sentence has been said (`announceBlock` / `untilSpoken` are
+  awaited), and a press while the reply plays at the limit stops it first; a completed reply's llm-status
+  `thread_length` sets the Voice notice line or, at the limit, the block (shown under the reply in place of
+  Continue, not said), and the thread page's notice or limit on the turn it is reached. Nine more tests.
+  At the limit the form and Voice show the server's reason (`thread_length_message`: the thread is long, or
+  an entry or what it quotes is too large) after a refused request's own words; two more tests.

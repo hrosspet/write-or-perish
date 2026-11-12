@@ -205,6 +205,11 @@ final class SoundPlayer {
     func speak(_ text: String) async {
         await speaker.speak(text)
     }
+
+    /// Stops the sentence being said at once (a new recording starts).
+    func stopSpeaking() {
+        speaker.stop()
+    }
 }
 
 /// A short sentence said on the device (`AVSpeechSynthesizer`, on the app's audio
@@ -245,6 +250,13 @@ final class SentenceSpeaker: NSObject, AVSpeechSynthesizerDelegate {
                 self?.finish(id)
             }
         }
+    }
+
+    /// Stops the sentence at once: a recording is about to start, and the
+    /// microphone must not hear it. The caller waiting for it goes on.
+    func stop() {
+        if synthesizer.isSpeaking { synthesizer.stopSpeaking(at: .immediate) }
+        if let current = waiting { finish(current.utterance) }
     }
 
     /// Ends the wait for `utterance` (said, cancelled, or timed out); a late

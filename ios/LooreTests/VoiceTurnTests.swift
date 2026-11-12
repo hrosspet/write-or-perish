@@ -222,7 +222,27 @@ final class FakeAudio: VoiceAudio {
     func startCue() { if !cueOn { events.append("cue.start") }; cueOn = true }
     func stopCue() { if cueOn { events.append("cue.stop") }; cueOn = false }
     func playErrorSound() { events.append("sound.error") }
-    func speak(_ text: String) async { events.append("speak: \(text)") }
+    /// Set: a sentence is "said" until `finishSpeech()` (or a new sentence, or
+    /// `stopSpeaking()`), as `SentenceSpeaker` holds its caller. Unset: at once.
+    var holdSpeech = false
+    private var speechWaiter: CheckedContinuation<Void, Never>?
+    var isSpeaking: Bool { speechWaiter != nil }
+    func speak(_ text: String) async {
+        events.append("speak: \(text)")
+        guard holdSpeech else { return }
+        // Like SentenceSpeaker: a new sentence ends the one being said.
+        finishSpeech()
+        await withCheckedContinuation { speechWaiter = $0 }
+    }
+    func finishSpeech() {
+        let waiter = speechWaiter
+        speechWaiter = nil
+        waiter?.resume()
+    }
+    func stopSpeaking() {
+        events.append("speak.stop")
+        finishSpeech()
+    }
     func playInterruptionAlert() { events.append("sound.interruption") }
     func playLongRecordingWarning() { events.append("sound.59") }
     func refreshNowPlaying() {}
@@ -915,19 +935,163 @@ final class VoiceTurnTests: XCTestCase {
         backend.startResult = .failure(threadTooLong())
         turn.start()
         await wait("blocked") { turn.aiBlock != nil && self.spoken.count == 1 }
-        turn.announceBlock()
-        await wait("said again") { self.spoken.count == 2 }
+        await turn.announceBlock()
+        XCTAssertEqual(spoken.count, 2)
 
         turn.clearAIBlock()
         turn.startNewConversation(parentId: nil)
         XCTAssertNil(turn.aiBlock)
         XCTAssertNil(turn.threadParentId)
-        turn.announceBlock()  // nothing to say any more
+        await turn.announceBlock()  // nothing to say any more
         backend.startResult = .success(StreamingInitResponse(sessionId: "sid-2", draftId: 8, sseURL: nil))
         turn.start()
         await wait("recording") { turn.state == .recording }
         XCTAssertEqual(backend.log.last, "init parent=nil ai=chat")
         XCTAssertEqual(spoken.count, 2)
+    }
+
+    // Review of #650: sentences, recordings and the session.
+
+    private func events(after marker: String) -> [String] {
+        guard let i = audio.events.lastIndex(of: marker) else { return [] }
+        return Array(audio.events[(i + 1)...])
+    }
+
+    func testASecondRefusalsSentenceKeepsTheSessionUntilItIsSaid() async throws {
+        // Review 7: the first sentence's end (cut short by the second) must not
+        // deactivate the session while the second is being said.
+        audio.holdSpeech = true
+        backend.startResult = .failure(threadTooLong())
+        turn.start()
+        await wait("first said") { self.spoken.count == 1 && self.audio.isSpeaking }
+        let lockScreen = Task { await turn.announceBlock() }
+        await wait("second said") { self.spoken.count == 2 && self.audio.isSpeaking }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertFalse(events(after: "speak: \(ThreadLength.spokenText)").contains("deactivate"),
+                       "the session stays while the second sentence is said")
+
+        audio.finishSpeech()
+        await lockScreen.value
+        XCTAssertEqual(events(after: "speak: \(ThreadLength.spokenText)"), ["deactivate"],
+                       "then it ends, once")
+    }
+
+    func testANewRecordingStopsTheSentenceFirst() async throws {
+        // Review 8: the sentence is never recorded into the new entry.
+        audio.holdSpeech = true
+        backend.startResult = .failure(threadTooLong())
+        turn.start()
+        await wait("said") { self.audio.isSpeaking }
+
+        backend.startResult = .success(StreamingInitResponse(sessionId: "sid-2", draftId: 8, sseURL: nil))
+        turn.clearAIBlock()
+        turn.start()
+        await wait("recording") { turn.state == .recording }
+        XCTAssertFalse(audio.isSpeaking)
+        let stop = try XCTUnwrap(audio.events.lastIndex(of: "speak.stop"))
+        let record = try XCTUnwrap(audio.events.lastIndex(of: "activate.record"))
+        XCTAssertLessThan(stop, record, "stopped before the session turns to recording")
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertFalse(events(after: "activate.record").contains("deactivate"),
+                       "the stopped sentence leaves the recording's session alone")
+        XCTAssertEqual(turn.state, .recording)
+    }
+
+    func testTheLockScreenWaitsUntilTheSentenceIsSaid() async throws {
+        // Review 10: the intent returns only after the sentence, so the app is not
+        // suspended mid-sentence; a refused start is waited for the same way.
+        audio.holdSpeech = true
+        backend.startResult = .failure(threadTooLong())
+        turn.start()
+        await wait("said") { self.audio.isSpeaking }
+        final class Flag { var done = false }
+        let refusedDone = Flag()
+        let refused = Task { await turn.untilSpoken(); refusedDone.done = true }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertFalse(refusedDone.done, "still being said")
+        audio.finishSpeech()
+        await refused.value
+        XCTAssertTrue(refusedDone.done)
+
+        let announced = Flag()
+        let press = Task { await turn.announceBlock(); announced.done = true }
+        await wait("said again") { self.spoken.count == 2 && self.audio.isSpeaking }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertFalse(announced.done, "the press waits for the sentence")
+        audio.finishSpeech()
+        await press.value
+        XCTAssertTrue(announced.done)
+        await turn.untilSpoken()  // nothing being said: returns at once
+    }
+
+    func testAPressDuringTheReplyAtTheLimitStopsItAndSaysWhy() async throws {
+        backend.statuses = [try status("completed", llm: 101)]
+        backend.llmStatuses[101] = [try decode(LLMStatus.self, #"""
+            {"node_id":101,"status":"completed","tts_task_status":"processing","content":"The ice moves.",
+             "warnings":[],"thread_length":"limit"}
+            """#)]
+        await recordAndStop()
+        await wait("limit known") { turn.aiBlock?.isThreadTooLong == true }
+        XCTAssertTrue(spoken.isEmpty, "known, not refused: nothing said yet")
+        XCTAssertEqual(turn.phase, .processing)
+        await wait("attached") { self.backend.streams[101] != nil }
+        backend.push(101, "chunk_ready", #"{"chunk_index":0,"audio_url":"/media/a0.mp3","duration":4.2}"#)
+        await wait("playing") { turn.phase == .playback }
+
+        await turn.announceBlock()
+        XCTAssertEqual(spoken, [ThreadLength.spokenText])
+        XCTAssertEqual(turn.state, .idle, "the reply stopped, as Continue stops it")
+        XCTAssertTrue(audio.fakeQueue.urls.isEmpty)
+    }
+
+    // MARK: The thread's length after a reply (#648, review 11)
+
+    func testAReplyIntoTheNoticeRangeShowsTheLine() async throws {
+        backend.statuses = [try status("completed", llm: 101)]
+        backend.llmStatuses[101] = [try decode(LLMStatus.self, #"""
+            {"node_id":101,"status":"completed","tts_task_status":"processing","content":"Hello.",
+             "warnings":[],"thread_length":"notice"}
+            """#)]
+        XCTAssertFalse(turn.lengthNotice)
+        await recordAndStop()
+        await wait("notice") { turn.lengthNotice }
+        XCTAssertNil(turn.aiBlock, "not the limit")
+        XCTAssertTrue(spoken.isEmpty)
+
+        // A new conversation starts without it.
+        turn.tearDown()
+        XCTAssertFalse(turn.lengthNotice)
+    }
+
+    func testAReplyAtTheLimitShowsTheBlockNotAnEmptyLine() async throws {
+        turn.noteThreadLength(.notice)
+        XCTAssertTrue(turn.lengthNotice)
+        backend.statuses = [try status("completed", llm: 101)]
+        backend.llmStatuses[101] = [try decode(LLMStatus.self, #"""
+            {"node_id":101,"status":"completed","tts_task_status":"processing","content":"Hello.",
+             "warnings":[],"thread_length":"limit"}
+            """#)]
+        await recordAndStop()
+        await wait("limit") { turn.aiBlock != nil }
+        XCTAssertEqual(turn.aiBlock, .threadTooLong())
+        XCTAssertEqual(turn.aiBlock?.body, ThreadLength.limitText)
+        XCTAssertFalse(turn.lengthNotice, "the block replaces the line")
+        XCTAssertTrue(spoken.isEmpty, "shown, not said: nothing was refused yet")
+    }
+
+    func testAReplyUnderTheNoticeClearsTheLineAndRecordingIgnoresIt() async throws {
+        turn.noteThreadLength(.notice)
+        backend.statuses = [try status("completed", llm: 101)]
+        backend.llmStatuses[101] = [try llm(101, "completed", tts: "processing", content: "Hello.")]
+        await recordAndStop()
+        await wait("completed") { turn.lastReplyNodeId == 101 }
+        XCTAssertFalse(turn.lengthNotice, "an answer without thread_length (an older server too): no line")
+
+        let other = VoiceTurnController(backend: backend, recorder: recorder, audio: audio, notices: notices, parentId: 50)
+        other.start()
+        await wait("recording") { other.state == .recording }
+        other.noteThreadLength(.limit)
+        XCTAssertNil(other.aiBlock, "not while a recording runs")
     }
 
     // MARK: Leaving the screen (Peter, 2026-10-06: a session left before its

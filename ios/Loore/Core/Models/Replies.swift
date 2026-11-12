@@ -26,6 +26,11 @@ struct LLMStatus: Decodable, Sendable {
     /// Why the server refused the reply, as a code the app acts on (owner
     /// only): `thread_too_long` (#648), the thread is too long for another reply.
     var errorCode: String?
+    /// A completed reply: how close the thread it ends is to its limit (#648;
+    /// owner only, absent on an interim step and on older servers).
+    var threadLength: ThreadLength?
+    /// At the limit, the server's words for why (`thread_length_message`).
+    var threadLengthMessage: String?
     var taskInfo: JSONValue?
     /// The answer continues on another node (within-turn chain, #158): follow it.
     var continuationNodeId: Int?
@@ -62,6 +67,8 @@ struct LLMStatus: Decodable, Sendable {
         case status, progress, error, content, stage, warnings, node
         case nodeId = "node_id"
         case errorCode = "error_code"
+        case threadLength = "thread_length"
+        case threadLengthMessage = "thread_length_message"
         case taskInfo = "task_info"
         case continuationNodeId = "continuation_node_id"
         case ttsTaskStatus = "tts_task_status"
@@ -78,6 +85,8 @@ struct LLMStatus: Decodable, Sendable {
         progress = c.tolerant(.progress, default: 0)
         error = c.tolerant(.error)
         errorCode = c.tolerant(.errorCode)
+        threadLength = ThreadLength(rawString: c.tolerant(.threadLength))
+        threadLengthMessage = ThreadLength.message(c.tolerant(.threadLengthMessage))
         taskInfo = c.tolerant(.taskInfo)
         continuationNodeId = c.tolerant(.continuationNodeId)
         ttsTaskStatus = c.tolerant(.ttsTaskStatus)

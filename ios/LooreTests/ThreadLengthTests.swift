@@ -11,6 +11,10 @@ private let limitText = "This thread is too long for another AI reply. Each repl
     + "including what it quotes, and this one has grown too large. You can still write here. "
     + "To keep talking with AI, start a new thread."
 private let tooLongJSON = #"{"error":"\#(limitText)","code":"thread_too_long"}"#
+/// The server's other reason at the limit (#650 review 4): one entry, or what it quotes.
+private let largeEntryText = "An entry in this thread, or what it quotes, is too large for an AI reply: each reply "
+    + "reads all of it. You can still write here. To talk about it with AI, shorten it, or split it and ask about "
+    + "one part at a time, each in its own thread."
 
 final class ThreadLengthDecodingTests: XCTestCase {
     private func apiError(_ status: Int, _ body: String) -> APIError {
@@ -43,6 +47,22 @@ final class ThreadLengthDecodingTests: XCTestCase {
         XCTAssertNil(try decode(NodeDetail.self, #"{\#(base),"thread_length":3}"#).threadLength)
     }
 
+    func testTheLimitsReasonDecodes() throws {
+        let base = #""id":10,"content":"entry","node_type":"user","privacy_level":"private","ai_usage":"chat""#
+        let node = try decode(NodeDetail.self,
+                              #"{\#(base),"thread_length":"limit","thread_length_message":"\#(largeEntryText)"}"#)
+        XCTAssertEqual(node.threadLengthMessage, largeEntryText)
+        XCTAssertNil(try decode(NodeDetail.self, #"{\#(base),"thread_length":"limit"}"#).threadLengthMessage)
+        XCTAssertNil(try decode(NodeDetail.self, #"{\#(base),"thread_length_message":"  "}"#).threadLengthMessage)
+        XCTAssertNil(try decode(NodeDetail.self, #"{\#(base),"thread_length_message":7}"#).threadLengthMessage)
+
+        let status = try decode(LLMStatus.self, #"""
+            {"node_id":7,"status":"completed","thread_length":"limit","thread_length_message":"\#(largeEntryText)"}
+            """#)
+        XCTAssertEqual(status.threadLengthMessage, largeEntryText)
+        XCTAssertNil(try decode(LLMStatus.self, #"{"node_id":7,"status":"completed"}"#).threadLengthMessage)
+    }
+
     func testTheRefusalCodes() throws {
         let error = apiError(409, tooLongJSON)
         XCTAssertTrue(error.isThreadTooLong)
@@ -57,6 +77,12 @@ final class ThreadLengthDecodingTests: XCTestCase {
                                 #"{"node_id":7,"status":"failed","error":"\#(limitText)","error_code":"thread_too_long"}"#)
         XCTAssertEqual(status.errorCode, "thread_too_long")
         XCTAssertNil(try decode(LLMStatus.self, #"{"node_id":7,"status":"failed","error":"x"}"#).errorCode)
+        // A completed reply says how long the thread it ends is; absent or unknown: nothing.
+        XCTAssertEqual(try decode(LLMStatus.self, #"{"node_id":7,"status":"completed","thread_length":"notice"}"#).threadLength,
+                       .notice)
+        XCTAssertNil(try decode(LLMStatus.self, #"{"node_id":7,"status":"completed","thread_length":null}"#).threadLength)
+        XCTAssertNil(try decode(LLMStatus.self, #"{"node_id":7,"status":"completed"}"#).threadLength)
+        XCTAssertNil(try decode(LLMStatus.self, #"{"node_id":7,"status":"completed","thread_length":"soon"}"#).threadLength)
 
         let session = try decode(StreamingSessionStatus.self,
                                  #"{"streaming_status":"completed","content":"hi","warning":"saved","warning_code":"thread_too_long"}"#)
@@ -117,8 +143,9 @@ final class ThreadLengthDecodingTests: XCTestCase {
 /// The reply form against a stubbed server.
 @MainActor
 final class ThreadLengthModelTests: StubbedAppTestCase {
-    private func focalJSON(_ length: String?) -> String {
-        let field = length.map { #","thread_length":"\#($0)""# } ?? ""
+    private func focalJSON(_ length: String?, message: String? = nil) -> String {
+        let field = (length.map { #","thread_length":"\#($0)""# } ?? "")
+            + (message.map { #","thread_length_message":"\#($0)""# } ?? "")
         return """
         {"id":10,"content":"entry","node_type":"user","user":{"id":5,"username":"seowriter"},"privacy_level":"private",
          "ai_usage":"chat","child_count":0,"children":[]\(field),
@@ -126,8 +153,9 @@ final class ThreadLengthModelTests: StubbedAppTestCase {
         """
     }
 
-    private func loadedModel(_ length: String?, llm: StubResponse = .json(202, #"{"node_id":77,"status":"pending"}"#)) async -> ThreadModel {
-        let focal = focalJSON(length)
+    private func loadedModel(_ length: String?, message: String? = nil,
+                             llm: StubResponse = .json(202, #"{"node_id":77,"status":"pending"}"#)) async -> ThreadModel {
+        let focal = focalJSON(length, message: message)
         StubURLProtocol.install { request in
             let path = request.url?.path(percentEncoded: true) ?? ""
             if path == "/api/nodes/10" { return .json(200, focal) }
@@ -207,6 +235,77 @@ final class ThreadLengthModelTests: StubbedAppTestCase {
         XCTAssertTrue(app.toasts.toasts.isEmpty, "no error toast")
         let opened = await eventually { self.lastRoute == .thread(id: 11, awaitLLM: nil) }
         XCTAssertTrue(opened, "the entry's page shows the limit")
+    }
+
+    /// A reply that finishes on its own page (review 11): the thread's length
+    /// comes with its llm-status, so the notice or the limit shows on this turn.
+    private func watchReply(threadLength: String?, message: String? = nil) async -> ThreadModel {
+        let pending = """
+        {"id":32,"node_type":"llm","llm_model":"claude-opus-5.5","user":{"id":3,"username":"claude-opus-5.5"},
+         "parent_user_id":5,"privacy_level":"private","ai_usage":"chat","child_count":0,"children":[],
+         "content":"[LLM response generation pending...]","llm_task_status":"pending",
+         "ancestors":[{"id":31,"content":"entry","node_type":"user","user_id":5,"ai_usage":"chat","privacy_level":"private"}]}
+        """
+        let field = (threadLength.map { #","thread_length":"\#($0)""# } ?? "")
+            + (message.map { #","thread_length_message":"\#($0)""# } ?? "")
+        let done = #"{"node_id":32,"status":"completed","content":"The ice moves.","warnings":[]\#(field)}"#
+        StubURLProtocol.install { request in
+            switch request.url?.path(percentEncoded: true) ?? "" {
+            case "/api/nodes/32": return .json(200, pending)
+            case "/api/nodes/32/llm-status": return .json(200, done)
+            default: return .json(200, "{}")
+            }
+        }
+        let tab = app.router.selectedTab
+        app.router.setPath([.thread(id: 31, awaitLLM: nil), .thread(id: 32, awaitLLM: 32)], for: tab)
+        let model = ThreadModel(nodeId: 32, awaitLLM: 32, app: app)
+        await model.start()
+        return model
+    }
+
+    func testAReplyFinishedInPlaceBringsTheNotice() async {
+        let model = await watchReply(threadLength: "notice")
+        XCTAssertTrue(model.isOwner)
+        let shown = await eventually { model.node?.llmTaskStatus == .completed }
+        XCTAssertTrue(shown)
+        XCTAssertEqual(model.threadLength, .notice, "on this turn, without another page load")
+        XCTAssertFalse(model.atThreadLimit)
+        model.stop()
+    }
+
+    func testAReplyFinishedInPlaceAtTheLimitClosesTheForm() async {
+        let model = await watchReply(threadLength: "limit")
+        let shown = await eventually { model.node?.llmTaskStatus == .completed }
+        XCTAssertTrue(shown)
+        XCTAssertEqual(model.threadLength, .limit)
+        XCTAssertTrue(model.atThreadLimit)
+        XCTAssertFalse(model.showCraftBar(craftMode: true, autoGenerate: false))
+        model.stop()
+
+        let older = await watchReply(threadLength: nil)
+        _ = await eventually { older.node?.llmTaskStatus == .completed }
+        XCTAssertNil(older.threadLength, "an answer without it (an older server): nothing shown")
+        older.stop()
+    }
+
+    /// Review 4 of #650: at the limit the form says the server's reason (a large
+    /// entry, not a long thread), after a refused request's own words.
+    func testTheLimitSaysTheServersReason() async {
+        let model = await loadedModel("limit", message: largeEntryText)
+        XCTAssertTrue(model.atThreadLimit)
+        XCTAssertEqual(model.threadLimitText, largeEntryText)
+        model.threadReachedLimit(message: limitText)
+        XCTAssertEqual(model.threadLimitText, limitText, "a refusal's own words win")
+
+        let plain = await loadedModel("limit")
+        XCTAssertEqual(plain.threadLimitText, ThreadLength.limitText, "no reason sent: the app's text")
+
+        // A reply that finishes in place brings it too.
+        let reply = await watchReply(threadLength: "limit", message: largeEntryText)
+        _ = await eventually { reply.node?.llmTaskStatus == .completed }
+        XCTAssertTrue(reply.atThreadLimit)
+        XCTAssertEqual(reply.threadLimitText, largeEntryText)
+        reply.stop()
     }
 
     func testOnlyTheOwnerSeesIt() async {

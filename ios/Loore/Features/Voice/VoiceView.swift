@@ -27,8 +27,6 @@ struct VoiceView: View {
     /// The server's answer for the route's thread (`GET /api/voice/availability`).
     @State private var threadAvailability: VoiceAvailability?
     @State private var availabilityChecked = false
-    /// The thread is getting long (#648): a calm line under the record button.
-    @State private var lengthNotice = false
 
     init(parentId: Int?, resumeLLMId: Int?, glean: Bool = false) {
         self.parentId = parentId
@@ -88,7 +86,6 @@ struct VoiceView: View {
             await checkAvailability()
             await checkInterrupted()
         }
-        .task(id: voice.lastReplyNodeId) { await checkLength(after: voice.lastReplyNodeId) }
     }
 
     // MARK: Phases
@@ -140,7 +137,7 @@ struct VoiceView: View {
                 }
             } else {
                 OfflineNotice()
-                if lengthNotice { threadLengthNotice }
+                if voice.lengthNotice { threadLengthNotice }
                 if voice.hasError {
                     PulsingDot(color: LooreColor.error).padding(.bottom, 16)
                         // The web shows only the red dot; VoiceOver users get words for it.
@@ -216,14 +213,31 @@ struct VoiceView: View {
                               onApplied: { voice.updateToolMeta($0, $1) })
             Spacer().frame(height: 32)
             OfflineNotice()
-            if lengthNotice { threadLengthNotice }
-            VoiceRoundButton(size: 56, enabled: online && !voice.isGleaning, dimmed: 0.7,
-                             action: continueConversation) {
-                RecordGlyph(enabled: online).scaleEffect(0.84)
+            if let block = voice.aiBlock, block.isThreadTooLong {
+                // This reply took the thread to its limit (#648): no Continue; the
+                // reply stays playable above.
+                Text(block.body)
+                    .font(LooreFont.sans(14.4, .light))
+                    .foregroundStyle(LooreColor.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .lineSpacing(5)
+                    .frame(maxWidth: 340)
+                    .padding(.bottom, 24)
+                    .accessibilityIdentifier("voice.aiBlock")
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 16) { aiBlockButtons(block) }
+                    VStack(spacing: 12) { aiBlockButtons(block) }
+                }
+            } else {
+                if voice.lengthNotice { threadLengthNotice }
+                VoiceRoundButton(size: 56, enabled: online && !voice.isGleaning, dimmed: 0.7,
+                                 action: continueConversation) {
+                    RecordGlyph(enabled: online).scaleEffect(0.84)
+                }
+                .accessibilityLabel(online ? "Continue" : "You're offline")
+                .accessibilityIdentifier("voice.continue")
+                gleanButton
             }
-            .accessibilityLabel(online ? "Continue" : "You're offline")
-            .accessibilityIdentifier("voice.continue")
-            gleanButton
         }
     }
 
@@ -393,23 +407,11 @@ struct VoiceView: View {
     /// a fresh Voice conversation, as the Voice tab opens one.
     private func startNewThread() {
         voice.clearAIBlock()
-        lengthNotice = false
         voice.startNewConversation(parentId: nil, glean: glean && app.capabilities.gleanEnabled)
         if routeThreadId != nil {
             // A new screen without the thread: its route check finds no block.
             app.router.replaceTop(with: .voice(parentId: nil, resumeLLMId: nil, glean: glean))
         }
-    }
-
-    /// After each reply, whether the thread it continues is getting long (#648):
-    /// the notice under the record button. The limit itself shows when the next
-    /// recording is refused (said aloud, then the block).
-    private func checkLength(after replyId: Int?) async {
-        guard replyId != nil, let threadId = voice.threadParentId else { return }
-        guard let answer = try? await app.api.get(
-            APIPath.voiceAvailability, query: [URLQueryItem(name: "parent", value: String(threadId))],
-            as: VoiceAvailability.self) else { return }
-        lengthNotice = answer.showsNotice
     }
 
     private func appear() {
@@ -428,9 +430,16 @@ struct VoiceView: View {
     /// default is read from the user; a thread asks the server. The route's
     /// `parent` / `resume` are applied only when Voice mode is open.
     private func checkAvailability() async {
+        let firstCheck = !availabilityChecked
         defer {
             availabilityChecked = true
             if aiBlock == nil { applyRoute() }
+            // The thread the screen opened on is getting long (#648): noted after
+            // the route set up the conversation, which starts without the line.
+            // Later replies bring their own (llm-status `thread_length`).
+            if firstCheck, aiBlock == nil, threadAvailability?.showsNotice == true {
+                voice.noteThreadLength(.notice)
+            }
         }
         if availabilityChecked && aiBlock == nil { return }
         voice.clearAIBlock()
@@ -438,7 +447,6 @@ struct VoiceView: View {
         threadAvailability = try? await app.api.get(
             APIPath.voiceAvailability, query: [URLQueryItem(name: "parent", value: String(threadId))],
             as: VoiceAvailability.self)
-        lengthNotice = threadAvailability?.showsNotice ?? false
     }
 
     private func disappear() {

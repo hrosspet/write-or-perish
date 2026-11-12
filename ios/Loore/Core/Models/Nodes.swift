@@ -231,11 +231,15 @@ struct NodeDetail: Decodable, Identifiable, Sendable {
     /// How close the next AI reply under this node is to the thread's limit
     /// (#648; the node's owner only): nil, a notice, or the limit.
     var threadLength: ThreadLength?
+    /// At the limit, the server's words for why (the thread is long, or an entry
+    /// or what it quotes is too large); the form shows them in its limit state.
+    var threadLengthMessage: String?
 
     enum CodingKeys: String, CodingKey {
         case id, content, permalink, user, origin, ancestors, children
         case pendingApprovals = "pending_approvals"
         case threadLength = "thread_length"
+        case threadLengthMessage = "thread_length_message"
         case nodeType = "node_type"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
@@ -294,6 +298,7 @@ struct NodeDetail: Decodable, Identifiable, Sendable {
         gleanThread = c.tolerant(.gleanThread, default: false)
         pendingApprovals = ToolApproval.decodeList(c, .pendingApprovals)
         threadLength = ThreadLength(rawString: c.tolerant(.threadLength))
+        threadLengthMessage = ThreadLength.message(c.tolerant(.threadLengthMessage))
     }
 
     var isLLM: Bool { nodeType == .llm }

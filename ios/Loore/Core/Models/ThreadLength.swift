@@ -42,6 +42,13 @@ enum ThreadLength: String, Equatable, Sendable {
 
     /// Whether `code` is this refusal's.
     static func isRefusal(_ code: String?) -> Bool { code == Self.code }
+
+    /// A server text (`thread_length_message`, a refusal's `error`) trimmed, or
+    /// nil when there is none to show.
+    static func message(_ raw: String?) -> String? {
+        let text = raw?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (text?.isEmpty ?? true) ? nil : text
+    }
 }
 
 extension APIError {
