@@ -700,13 +700,22 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
   }, [showRecovery, audio]);
 
   // The reply has been heard to its end, or nothing plays: the dialog of a
-  // waiting change opens by itself now ("right after the reply"). A reply
-  // paused partway doesn't count; the line under the record button opens
-  // the dialog then.
+  // waiting change opens by itself now ("right after the reply"). The
+  // player counts each queue that played to its end; the count when the
+  // turn began is kept here. A reply paused partway doesn't count; the line
+  // under the record button opens the dialog then.
+  const finishedAtTurnStartRef = useRef(audio.queueFinishedCount);
+  useEffect(() => {
+    if (phase === 'processing' || phase === 'recording') {
+      finishedAtTurnStartRef.current = audio.queueFinishedCount;
+    }
+    // Only a new phase starts a turn: the count is read, not watched.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase]);
   const replyHeard = !showRecovery && (phase === 'ready' || (phase === 'playback'
-    && !audio.isPlaying && !audio.generatingTTS
-    && (!(audio.totalDuration > 0)
-      || audio.cumulativeTime >= audio.totalDuration - 0.5)));
+    && !audio.generatingTTS
+    && (!audio.currentAudio
+      || audio.queueFinishedCount > finishedAtTurnStartRef.current)));
   const setApprovalsOpen = approvals.setOpen;
   useEffect(() => {
     if (recordBlocked && replyHeard) setApprovalsOpen(true);

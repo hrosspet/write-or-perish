@@ -87,16 +87,27 @@ const call = (id, turn = 41) => ({
 });
 
 let mockPending;
+// The player: queueFinishedCount goes up when a queue has played to its end.
 const audioState = (extra = {}) => ({
   isPlaying: false, generatingTTS: false, cumulativeTime: 0, totalDuration: 0,
+  queueFinishedCount: 0,
   pause: jest.fn(), play: jest.fn(), stop: jest.fn(),
   skipBackward: jest.fn(), skipForward: jest.fn(),
   seekToCumulativeTime: jest.fn(), chapterStartTime: () => 0,
   currentAudio: null, ...extra,
 });
-const playing = () => audioState({ isPlaying: true, cumulativeTime: 3, totalDuration: 10 });
-const heard = () => audioState({ cumulativeTime: 10, totalDuration: 10 });
-const pausedPartway = () => audioState({ cumulativeTime: 4, totalDuration: 10 });
+const reply = { title: 'Voice', chapters: [] };
+// Loaded but its duration not known yet (the moment playback starts).
+const starting = () => audioState({ currentAudio: reply });
+const playing = () => audioState({
+  currentAudio: reply, isPlaying: true, cumulativeTime: 3, totalDuration: 10,
+});
+const heard = () => audioState({
+  currentAudio: reply, cumulativeTime: 10, totalDuration: 10, queueFinishedCount: 1,
+});
+const pausedPartway = () => audioState({
+  currentAudio: reply, cumulativeTime: 4, totalDuration: 10,
+});
 
 beforeEach(() => {
   mockGet.mockReset();
@@ -147,11 +158,17 @@ test('opened on a thread where a change waits: the dialog, no Later, recording o
 });
 
 test('after a reply: the dialog waits until the reply has been heard', async () => {
-  mockPhase = 'playback';
-  mockAudio = playing();
+  mockPhase = 'processing';
   mockThreadParent = 41;
   const { rerender } = renderAt('/voice?parent=40');
   await waitFor(() => expect(approvalsAsked()).toHaveLength(1));
+  // Playback starts: loaded, not playing yet, no duration (a moment the
+  // dialog must not take for the end).
+  mockPhase = 'playback';
+  mockAudio = starting();
+  rerender(tree('/voice?parent=40'));
+  mockAudio = playing();
+  rerender(tree('/voice?parent=40'));
 
   mockPending = [call(7)];
   await act(async () => { mockSessionOptions.onLLMComplete(41, 'I asked first.'); });
@@ -162,6 +179,9 @@ test('after a reply: the dialog waits until the reply has been heard', async () 
   expect(screen.queryByRole('dialog')).toBeNull();
   expect(screen.getByRole('button', { name: 'Continue' })).toBeDisabled();
   expect(screen.getByText(/A change to your data waits for your approval/)).toBeInTheDocument();
+  mockAudio = starting();
+  rerender(tree('/voice?parent=40'));
+  expect(screen.queryByRole('dialog')).toBeNull();
 
   mockAudio = heard();
   rerender(tree('/voice?parent=40'));
