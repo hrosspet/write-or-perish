@@ -254,6 +254,40 @@ describe('what the reply reads is agreed to exactly (ai_reads_key)', () => {
     expect(localStorage.getItem('loore_circle_ai_reply_ack_2_10')).toBe('private:key-1');
   });
 
+  test('an older version of Loore\'s own prompt: the dialog says it is old, and the agreement carries the key', async () => {
+    routes['/nodes/11'] = bensReply({
+      audience: audienceFor(BEN, {
+        ai_reads: READS, ai_reads_key: 'key-old', ai_reads_older_default: true,
+      }),
+    });
+    renderAt('/node/11');
+    await screen.findByText('A reply by ben.');
+    await press('LLM Response');
+    const dialog = screen.getByRole('dialog');
+    expect(dialog).toHaveTextContent(
+      "This thread uses an older version of Loore's own prompt. Only you will see the reply. "
+      + 'Your AI reads your profile and memory for it.');
+    expect(dialog).not.toHaveTextContent('as the prompt shared in this thread asks');
+    await press('Generate');
+    await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
+    expect(mockPost.mock.calls[0][1].ai_reads_ack).toBe('private:key-old');
+  });
+
+  test('the server says the prompt is now an older default: the dialog opens again in those words', async () => {
+    routes['/nodes/11'] = withKey('', []);
+    mockPost.mockRejectedValueOnce({ response: { status: 409, data: {
+      code: 'circle_ai_reads_changed', error: 'changed',
+      ai_reads: ['profile'], ai_reads_key: 'key-old', ai_reads_older_default: true,
+    } } });
+    renderAt('/node/11');
+    await screen.findByText('A reply by ben.');
+    await press('LLM Response');
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog).toHaveTextContent(
+      "This thread uses an older version of Loore's own prompt. Only you will see the reply. "
+      + 'Your AI reads your profile for it.');
+  });
+
   test('Cancel sends nothing', async () => {
     routes['/nodes/11'] = withKey();
     renderAt('/node/11');

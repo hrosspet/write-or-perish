@@ -132,11 +132,15 @@ struct NodeAudience: Decodable, Hashable, Sendable {
     /// server takes a shared AI reply only with the current key as
     /// `ai_reads_ack`, so the agreement is to the list the user was shown.
     var aiReadsKey: String
+    /// The prompt the key covers is an older version of Loore's own default:
+    /// the dialog says so (Peter, 2026-11-12). False on an older server.
+    var aiReadsOlderDefault: Bool
 
     enum CodingKeys: String, CodingKey {
         case author, readers, usernames
         case aiReads = "ai_reads"
         case aiReadsKey = "ai_reads_key"
+        case aiReadsOlderDefault = "ai_reads_older_default"
         case entryId = "entry_id"
         case isAuthor = "is_author"
         case isEntry = "is_entry"
@@ -146,7 +150,7 @@ struct NodeAudience: Decodable, Hashable, Sendable {
 
     init(entryId: Int, author: String, isAuthor: Bool, readers: [String], isEntry: Bool = true,
          entryAIUsage: AIUsage = .chat, circleIds: [Int]? = nil, usernames: [String]? = nil,
-         aiReads: [String] = [], aiReadsKey: String = "") {
+         aiReads: [String] = [], aiReadsKey: String = "", aiReadsOlderDefault: Bool = false) {
         self.entryId = entryId
         self.author = author
         self.isAuthor = isAuthor
@@ -157,6 +161,7 @@ struct NodeAudience: Decodable, Hashable, Sendable {
         self.usernames = usernames
         self.aiReads = aiReads
         self.aiReadsKey = aiReadsKey
+        self.aiReadsOlderDefault = aiReadsOlderDefault
     }
 
     init(from decoder: Decoder) throws {
@@ -171,6 +176,7 @@ struct NodeAudience: Decodable, Hashable, Sendable {
         usernames = c.tolerant(.usernames)
         aiReads = c.tolerant(.aiReads, default: [])
         aiReadsKey = c.tolerant(.aiReadsKey, default: "")
+        aiReadsOlderDefault = c.tolerant(.aiReadsOlderDefault, default: false)
     }
 }
 
@@ -181,17 +187,21 @@ struct ThreadAIReads: Decodable, Equatable, Hashable, Sendable {
     var entryId: Int
     var aiReads: [String]
     var aiReadsKey: String
+    /// As `NodeAudience.aiReadsOlderDefault`.
+    var aiReadsOlderDefault: Bool
 
     enum CodingKeys: String, CodingKey {
         case entryId = "entry_id"
         case aiReads = "ai_reads"
         case aiReadsKey = "ai_reads_key"
+        case aiReadsOlderDefault = "ai_reads_older_default"
     }
 
-    init(entryId: Int, aiReads: [String] = [], aiReadsKey: String = "") {
+    init(entryId: Int, aiReads: [String] = [], aiReadsKey: String = "", aiReadsOlderDefault: Bool = false) {
         self.entryId = entryId
         self.aiReads = aiReads
         self.aiReadsKey = aiReadsKey
+        self.aiReadsOlderDefault = aiReadsOlderDefault
     }
 
     init(from decoder: Decoder) throws {
@@ -199,6 +209,7 @@ struct ThreadAIReads: Decodable, Equatable, Hashable, Sendable {
         entryId = try c.decode(Int.self, forKey: .entryId)
         aiReads = c.tolerant(.aiReads, default: [])
         aiReadsKey = c.tolerant(.aiReadsKey, default: "")
+        aiReadsOlderDefault = c.tolerant(.aiReadsOlderDefault, default: false)
     }
 }
 

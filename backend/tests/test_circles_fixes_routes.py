@@ -254,7 +254,7 @@ def test_a_members_only_me_ai_reply_tells_the_client_what_to_agree_to(app):  # n
     from backend.utils import circles as cz
     assert data["thread_ai_reads"] == {
         "entry_id": entry, "ai_reads": ["profile", cz.TOOLS_NAME],
-        "ai_reads_key": key}
+        "ai_reads_key": key, "ai_reads_older_default": False}
     assert ben.post(f"/api/nodes/{mine}/llm", json={}).status_code == 409
     r = ben.post(f"/api/nodes/{mine}/llm",
                  json={"ai_reads_ack": f"private:{key}"})

@@ -595,47 +595,62 @@ def others_prompts(chain, user_id):
     return out
 
 
-def _default_prompt_keys(prompt_key):
-    """*prompt_key* and the keys whose default is the same file (Voice
-    and Text mode share one): a default of one is a default of the
-    other."""
-    from backend.utils.prompts import PROMPT_DEFAULTS
-    meta = PROMPT_DEFAULTS.get(prompt_key) or {}
-    same = {k for k, m in PROMPT_DEFAULTS.items()
-            if meta.get("file") and m.get("file") == meta.get("file")}
-    return sorted(same | {prompt_key})
+DEFAULT_CURRENT = "current"
+DEFAULT_OLDER = "older"
 
 
-def is_default_prompt_text(text, prompt_key) -> bool:
-    """*text* is, byte for byte, one of Loore's own default prompts for
-    *prompt_key*, unedited (Peter, 2026-11-12): the current default (the
-    file in backend/prompts), or an earlier default the database
-    recorded. Decided from the text alone, never from what a client
-    says.
+def default_prompt_state(node, text):
+    """Whether *node*, a prompt node, is one of Loore's own default
+    prompts, unedited (Peter, 2026-11-12: "Default sys prompts are only
+    referenced on the nodes - plus there needs to be a check of the
+    version"): DEFAULT_CURRENT, DEFAULT_OLDER, or None (edited, or written
+    from scratch). Loore's own text needs all of:
 
-    Earlier defaults: every prompt version saved since 2026-02-25 (the
-    automatic upgrade to a new default, a user's save, a revert, a
-    reset) records the SHA-256 of the file default current at that
-    moment (UserPrompt.based_on_default_hash, written only by the server,
-    from the file). A prompt node holds its version's text, so a node
-    started under an earlier default matches that recorded hash. A
-    default from before then is not recorded anywhere: such a text
-    counts as edited. Whitespace counts: a default changed only in its
-    whitespace counts as edited too.
+    (a) the node still links a prompt version (the "prompt" artifact): a
+        per-thread edit detaches the link, and the node then holds its own
+        text;
+    (b) that version was seeded by the server from Loore's default file
+        (``generated_by == "default"``); a version saved from the Prompts
+        page ("user"), restored ("revert") or loaded from a dump without
+        its hash is not;
+    (c) the version check: the SHA-256 of *text*, the version's text as
+        the reply uses it (the completion task holds it), equals the hash
+        of the default file the version was made from
+        (``based_on_default_hash``, computed by default_prompt_hash from
+        the same text when the version was made);
+    (d) the node's stamped prompt key, when it has one, is the version's
+        (the key decides the tools).
 
-    No content is decrypted here: the hashes are of Loore's files."""
-    if not text or not prompt_key:
-        return False
+    DEFAULT_CURRENT when that hash is also the current default file's for
+    the version's key; DEFAULT_OLDER when the version came from an earlier
+    default file (Peter, 2026-11-12: "show the dialog for older defaults,
+    but warn the user that they are old"). Decided on the server only;
+    nothing a client sends counts. *text* is the version's content, read
+    once by the caller; this reads only the link and the version's
+    metadata."""
     import hashlib
-    from backend.models import UserPrompt
+    from backend.models import NodeContextArtifact, UserPrompt
     from backend.utils.prompts import default_prompt_hash
-    digest = hashlib.sha256(text.encode()).hexdigest()
-    keys = _default_prompt_keys(prompt_key)
-    if any(default_prompt_hash(k) == digest for k in keys):
-        return True
-    return db.session.query(UserPrompt.id).filter(
-        UserPrompt.prompt_key.in_(keys),
-        UserPrompt.based_on_default_hash == digest).first() is not None
+    if node is None or node.id is None or not text:
+        return None
+    link = NodeContextArtifact.query.filter_by(
+        node_id=node.id, artifact_type="prompt").first()
+    if link is None:
+        return None                                     # (a)
+    version = db.session.get(UserPrompt, link.artifact_id)
+    if version is None or version.generated_by != "default":
+        return None                                     # (b)
+    if not version.based_on_default_hash:
+        return None                                     # (c)
+    if node.prompt_key and node.prompt_key != version.prompt_key:
+        return None                                     # (d)
+    if hashlib.sha256(text.encode()).hexdigest() != (
+            version.based_on_default_hash):
+        return None                                     # (c)
+    if version.based_on_default_hash == default_prompt_hash(
+            version.prompt_key):
+        return DEFAULT_CURRENT
+    return DEFAULT_OLDER
 
 
 def uses_personal_placeholder(text) -> bool:
@@ -648,15 +663,16 @@ def uses_personal_placeholder(text) -> bool:
 def needs_agreement(node, text, user_id) -> bool:
     """A prompt of others_prompts, with *text* (the text the reply is
     built from), needs *user_id*'s agreement before a reply in a shared
-    thread: it is not one of Loore's defaults unedited
-    (is_default_prompt_text; Peter, 2026-11-12: "The dialog should be
+    thread: it is not Loore's current default unedited
+    (default_prompt_state; Peter, 2026-11-12: "The dialog should be
     there if the sys prompt is edited, or created from scratch and is
-    using any Loore placeholders"), and it fills the requester's data
-    (a prompt shared with them that names a personal placeholder) or
-    turns tools on (builder's addition: an edited agentic prompt acts on
-    the requester's account through its tools, placeholders or not)."""
+    using any Loore placeholders"; an older default version asks too, in
+    words of its own), and it fills the requester's data (a prompt
+    shared with them that names a personal placeholder) or turns tools on
+    (builder's addition: an edited agentic prompt acts on the requester's
+    account through its tools, placeholders or not)."""
     from backend.utils.session_helpers import chain_has_agentic_prompt
-    if is_default_prompt_text(text, node.get_prompt_key()):
+    if default_prompt_state(node, text) == DEFAULT_CURRENT:
         return False
     if chain_has_agentic_prompt([node]):
         return True
@@ -706,9 +722,16 @@ def chain_for_reply(node, user_id):
 
 
 def ai_reply_reads(node, user_id):
+    """``(names, key)`` of ai_reply_reads_info."""
+    info = ai_reply_reads_info(node, user_id)
+    return info["ai_reads"], info["ai_reads_key"]
+
+
+def ai_reply_reads_info(node, user_id):
     """What an AI reply under *node* would read of *user_id*'s own data,
     for the dialog shown before it is generated in a shared thread:
-    ``(names, key)``.
+    ``{"ai_reads": names, "ai_reads_key": key,
+    "ai_reads_older_default": older}``.
 
     *names*: the personal placeholders of every prompt node in the chain
     the reply is built from that resolves for the user (their own
@@ -725,6 +748,12 @@ def ai_reply_reads(node, user_id):
     every prompt someone else wrote that acts here is a Loore default
     unedited (Peter, 2026-11-12). The clients show the dialog only for a
     key.
+
+    *older*: every prompt the key covers is an older version of Loore's
+    own default (default_prompt_state): the dialog says the thread uses an
+    older version of Loore's prompt (Peter, 2026-11-12: "show the dialog
+    for older defaults, but warn the user that they are old"). False
+    when any of them is edited or written from scratch, and with no key.
 
     The walk is the task's (chain_for_reply). Decrypts only prompt
     nodes, each once."""
@@ -754,7 +783,12 @@ def ai_reply_reads(node, user_id):
         names.append(TOOLS_NAME if names else TOOLS_ONLY_NAME)
     theirs = agreement_prompts(
         chain, user_id, texts={n.id: text_of(n) for n in others})
-    return names, prompts_key({n.id: texts[n.id] for n in theirs})
+    older = bool(theirs) and all(
+        default_prompt_state(n, texts[n.id]) == DEFAULT_OLDER
+        for n in theirs)
+    return {"ai_reads": names,
+            "ai_reads_key": prompts_key({n.id: texts[n.id] for n in theirs}),
+            "ai_reads_older_default": older}
 
 
 def ai_reads(node, user_id):

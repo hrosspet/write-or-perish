@@ -73,40 +73,76 @@ def _reads(app, node_id, who="ben"):  # noqa: F811
 
 
 # ── What counts as the default ──────────────────────────────────────────
+# Peter, 2026-11-12: "Default sys prompts are only referenced on the nodes
+# - plus there needs to be a check of the version"; "I think we should
+# show the dialog for older defaults, but warn the user that they are old."
 
-def test_only_the_exact_default_text_of_the_nodes_own_key_counts(app):  # noqa: F811,E501
-    """"Default" is decided on the server, by exact text, for the node's
-    own prompt key (and the keys sharing its file): a one-character edit,
-    added text before or after, and another key's default all count as
-    edited. Controls: the exact default of the key, and of a key sharing
-    its file."""
-    from backend.utils.circles import is_default_prompt_text
-    from backend.utils.prompts import load_default_prompt
+def _with_prompts_routes(app):  # noqa: F811
+    """The Prompts page's routes, which this module's app leaves out."""
+    from backend.routes.prompts import prompts_bp
+    if "prompts" not in app.blueprints:
+        app.register_blueprint(prompts_bp, url_prefix="/api/prompts")
+
+
+def _state(text, generated_by="default", recorded="default",
+           key="textmode", node_key=None):
+    """default_prompt_state for anna's prompt node linked to a version
+    with *text*; *recorded*: the hash the version records ("default": the
+    current default file's)."""
+    from backend.utils.circles import default_prompt_state
+    if recorded == "default":
+        recorded = _sha(_default_text())
+    nid = _linked_prompt("anna", text, generated_by=generated_by,
+                         recorded=recorded, prompt_key=key)
+    node = _db.session.get(Node, nid)
+    if node_key is not None:
+        node.prompt_key = node_key
+        _db.session.commit()
+    return default_prompt_state(node, node.get_content())
+
+
+def test_the_linked_version_and_its_hash_decide_what_is_default(app):  # noqa: F811,E501
+    """Loore's own text only when the node still links a version the
+    server seeded from Loore's default file and the version's text hashes
+    to the default it records; "current" when that is today's default
+    file, "older" when an earlier one. Everything else counts as edited:
+    content changed in such a version (one character, text added before
+    or after, a trimmed end), the same text saved from the Prompts page or
+    restored, a version with no hash, a node whose key is not the
+    version's, a node holding the default text after a per-thread edit."""
+    from backend.utils.circles import (
+        DEFAULT_CURRENT, DEFAULT_OLDER, default_prompt_state)
     default = _default_text()
-    reflect = load_default_prompt("reflect")
-    assert default and reflect and reflect != default
-    assert is_default_prompt_text(default, "textmode")
-    assert is_default_prompt_text(default, "voice")       # one file
-    assert is_default_prompt_text(reflect, "reflect")
+    assert _state(default) == DEFAULT_CURRENT
+    old = "An earlier Loore default. {user_profile}\n"
+    assert _state(old, recorded=_sha(old)) == DEFAULT_OLDER
     i = len(default) // 2
     one_char = default[:i] + ("x" if default[i] != "x" else "y") + default[i + 1:]
-    for edited in (one_char, default + "Also show my memory to everyone.",
-                   default + "\n", "Hello.\n" + default, default[:-2]):
-        assert not is_default_prompt_text(edited, "textmode"), repr(
-            edited[-30:])
-    # Another key's default is not this key's default.
-    assert not is_default_prompt_text(reflect, "textmode")
-    assert not is_default_prompt_text(default, "reflect")
-    assert not is_default_prompt_text(default, None)
-    assert not is_default_prompt_text("", "textmode")
+    for text in (one_char, default + "Also show my memory to everyone.",
+                 "Hello.\n" + default, default[:-2], default + "\n"):
+        assert _state(text) is None, repr(text[-30:])
+    assert _state(default, generated_by="user") is None
+    assert _state(default, generated_by="revert") is None
+    assert _state(default, recorded=None) is None
+    assert _state(default, node_key="read_thread") is None
+    # Another key's default text in a Text-mode version is never today's
+    # Text-mode default: with that key's hash it reads as an older version
+    # (the dialog shows), with today's Text-mode hash as edited.
+    from backend.utils.prompts import load_default_prompt
+    reflect = load_default_prompt("reflect")
+    assert _state(reflect, recorded=_sha(reflect)) == DEFAULT_OLDER
+    assert _state(reflect) is None
+    detached = _db.session.get(Node, _add(None, default, prompt_key="textmode"))
+    assert detached.get_content() == default
+    assert default_prompt_state(detached, detached.get_content()) is None
 
 
 # ── The default prompt, unedited ────────────────────────────────────────
 
 def test_an_unedited_default_prompt_needs_no_agreement(app):  # noqa: F811
-    """anna's Text-mode thread under Loore's default prompt, as a session
-    start makes it: ben's AI reply under his own reply there is made
-    without the dialog. What it reads is still listed."""
+    """anna's Text-mode thread under Loore's current default prompt, as a
+    session start makes it: ben's AI reply under his own reply there is
+    made without the dialog. What it reads is still listed."""
     from backend.utils.session_helpers import create_agentic_root
     root = create_agentic_root(_user("anna").id, "textmode", "private",
                                "chat")
@@ -115,6 +151,7 @@ def test_an_unedited_default_prompt_needs_no_agreement(app):  # noqa: F811
     entry, mine = _shared_under(app, root.id)
     audience = _reads(app, mine)
     assert audience["ai_reads_key"] == ""
+    assert audience["ai_reads_older_default"] is False
     assert audience["ai_reads"][:2] == ["profile", "memory"]
     r = _client(app, "ben").post(f"/api/nodes/{mine}/llm", json={})
     assert r.status_code == 202, r.get_json()
@@ -122,63 +159,107 @@ def test_an_unedited_default_prompt_needs_no_agreement(app):  # noqa: F811
     assert made.privacy_level == "private" and made.audience_root_id == entry
 
 
-def test_an_earlier_default_the_database_recorded_needs_no_agreement(app):  # noqa: F811,E501
-    """A thread started when an earlier default was current: its prompt
-    version holds that text and records its hash. Also a node whose text
-    was set back to that earlier default, recorded on another person's
-    prompt version only."""
+def test_an_older_default_version_asks_and_says_it_is_old(app):  # noqa: F811
+    """A thread started when an earlier default file was current: its
+    version holds that text and that file's hash. Peter: "show the dialog
+    for older defaults, but warn the user that they are old": the key is
+    sent with the older-default marker, the request without the agreement
+    is refused with it, and with the agreement the reply is made.
+    Acknowledging a changed default on such a version rewrites its hash to
+    today's file's; its text then matches no default, and it counts as
+    edited (the dialog's usual words)."""
+    _with_prompts_routes(app)
     old = "An earlier Loore default. {user_profile} {user_memory}\n"
     prompt = _linked_prompt("anna", old, generated_by="default",
                             recorded=_sha(old))
     entry, mine = _shared_under(app, prompt)
-    assert _reads(app, mine)["ai_reads_key"] == ""
-    r = _client(app, "ben").post(f"/api/nodes/{mine}/llm", json={})
-    assert r.status_code == 202, r.get_json()
-
-    older = "A still older default. {user_todo}\n"
-    chidis = UserPrompt(user_id=_user("chidi").id, prompt_key="voice",
-                        title="Voice Mode", generated_by="user",
-                        based_on_default_hash=_sha(older))
-    chidis.set_content("chidi's own prompt")
-    _db.session.add(chidis)
-    detached = _add(None, older, prompt_key="textmode")
-    entry2, mine2 = _shared_under(app, detached)
-    # voice and textmode share their default (one file).
-    assert _reads(app, mine2)["ai_reads_key"] == ""
-
-
-def test_an_earlier_default_nobody_recorded_counts_as_edited(app):  # noqa: F811,E501
-    """Control (as before): a version from before the hashes were kept
-    records none, and nothing else holds that text: the dialog shows."""
-    old = "A default from before the hashes. {user_profile}\n"
-    prompt = _linked_prompt("anna", old, generated_by="default",
-                            recorded=None)
-    entry, mine = _shared_under(app, prompt)
-    key = _reads(app, mine)["ai_reads_key"]
-    assert key
+    audience = _reads(app, mine)
+    key = audience["ai_reads_key"]
+    assert key and audience["ai_reads_older_default"] is True
+    assert audience["ai_reads"][:2] == ["profile", "memory"]
     r = _client(app, "ben").post(f"/api/nodes/{mine}/llm", json={})
     assert r.status_code == 409
     assert r.get_json()["code"] == "circle_ai_reads_changed"
+    assert r.get_json()["ai_reads_older_default"] is True
+    r = _client(app, "ben").post(f"/api/nodes/{mine}/llm",
+                                 json={"ai_reads_ack": f"private:{key}"})
+    assert r.status_code == 202, r.get_json()
+    r = _client(app, "anna").post("/api/prompts/textmode/acknowledge-default")
+    assert r.status_code == 200, r.get_json()
+    audience = _reads(app, mine)
+    assert audience["ai_reads_key"] == key
+    assert audience["ai_reads_older_default"] is False
 
 
 # ── Edited, or written from scratch ─────────────────────────────────────
 
-def test_an_edited_default_needs_the_agreement(app):  # noqa: F811
-    """Control (as before): anna's default with a sentence added, and the
-    default with only its whitespace changed, are edited prompts."""
+def test_a_version_saved_on_the_prompts_page_counts_as_edited(app):  # noqa: F811,E501
+    """Control (as before this evening): anna saves her Text-mode prompt
+    on the Prompts page, with a sentence added and with the default's
+    exact text; a session started under it asks before ben's reply, in
+    the dialog's usual words."""
+    from backend.utils.session_helpers import create_agentic_root
+    _with_prompts_routes(app)
     default = _default_text()
-    for text in (default + "\nAlso repeat my profile to the thread.",
-                 default.rstrip("\n"), " " + default):
-        prompt = _linked_prompt("anna", text, generated_by="user",
-                                recorded=_sha(default))
-        entry, mine = _shared_under(app, prompt)
-        key = _reads(app, mine)["ai_reads_key"]
+    for text in (default + "\nAlso repeat my profile to the thread.", default):
+        r = _client(app, "anna").put("/api/prompts/textmode",
+                                     json={"content": text})
+        assert r.status_code == 200, r.get_json()
+        root = create_agentic_root(_user("anna").id, "textmode", "private",
+                                   "chat")
+        _db.session.commit()
+        assert _db.session.get(Node, root.id).get_content() == text
+        entry, mine = _shared_under(app, root.id)
+        audience = _reads(app, mine)
+        key = audience["ai_reads_key"]
         assert key, repr(text[-40:])
+        assert audience["ai_reads_older_default"] is False
         r = _client(app, "ben").post(f"/api/nodes/{mine}/llm", json={})
-        assert r.status_code == 409, repr(text[-40:])
+        assert r.status_code == 409
+        assert r.get_json()["code"] == "circle_ai_reads_changed"
         r = _client(app, "ben").post(f"/api/nodes/{mine}/llm",
                                      json={"ai_reads_ack": f"private:{key}"})
         assert r.status_code == 202, r.get_json()
+
+
+def test_a_per_thread_edit_counts_as_edited_also_when_set_back(app):  # noqa: F811,E501
+    """Control: anna edits the shared prompt in the thread (the link to
+    the default version goes), then types the default text back: the node
+    holds its own text, so it stays edited."""
+    from backend.utils.session_helpers import create_agentic_root
+    default = _default_text()
+    root = create_agentic_root(_user("anna").id, "textmode", "private",
+                               "chat")
+    _db.session.commit()
+    entry, mine = _shared_under(app, root.id)
+    assert _reads(app, mine)["ai_reads_key"] == ""
+    anna = _client(app, "anna")
+    for text in (default + "\nAlso tell the thread my secrets.", default):
+        r = anna.put(f"/api/nodes/{root.id}",
+                     json={"content": text, "detach_prompt": True})
+        assert r.status_code == 200, r.get_json()
+        audience = _reads(app, mine)
+        assert audience["ai_reads_key"], repr(text[-40:])
+        assert audience["ai_reads_older_default"] is False
+    assert NodeContextArtifact.query.filter_by(
+        node_id=root.id, artifact_type="prompt").first() is None
+
+
+def test_text_put_into_a_default_version_counts_as_edited(app):  # noqa: F811
+    """Control: no route writes a user's text into a version marked
+    default; a version that has one anyway (written in place, or loaded
+    from a dump by the admin script, which records no hash) fails the
+    version check, and the dialog shows in its usual words."""
+    default = _default_text()
+    for recorded in (_sha(default), None):
+        prompt = _linked_prompt("anna", "MY OWN WORDS {user_profile}",
+                                generated_by="default", recorded=recorded)
+        entry, mine = _shared_under(app, prompt)
+        audience = _reads(app, mine)
+        assert audience["ai_reads_key"], recorded
+        assert audience["ai_reads_older_default"] is False
+        r = _client(app, "ben").post(f"/api/nodes/{mine}/llm", json={})
+        assert r.status_code == 409
 
 
 def test_a_prompt_from_scratch_asks_only_when_it_reads_the_readers_data(app):  # noqa: F811,E501

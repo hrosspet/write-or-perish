@@ -102,6 +102,28 @@ def test_an_edit_made_before_the_task_runs_needs_the_agreement(
     assert failed.llm_task_error == cz.AI_READS_CHANGED
 
 
+def test_an_older_default_version_is_made_only_with_the_agreement(
+        app, circles):  # noqa: F811
+    """anna's thread was started under an earlier default file (its
+    version holds that text and that file's hash): the task re-checks it
+    like an edited prompt (Peter, 2026-11-12: "show the dialog for older
+    defaults"): no reply without the agreement, the reply with it."""
+    import hashlib
+    from backend.utils import circles as cz
+    w = _default_world()
+    old = "An earlier Loore default. profile=[{user_profile}]\n"
+    w["prompt"].set_content(old)
+    w["prompt"].based_on_default_hash = hashlib.sha256(
+        old.encode()).hexdigest()
+    _db.session.commit()
+    info = cz.ai_reply_reads_info(w["entry"], w["ben"].id)
+    assert info["ai_reads_key"] and info["ai_reads_older_default"] is True
+    assert _ask(w, w["ben"], w["entry"], key="") is None
+    assert _fresh(w["last"]).llm_task_error == cz.AI_READS_CHANGED
+    sent = _ask(w, w["ben"], w["entry"], key=info["ai_reads_key"])
+    assert sent is not None and "profile=[BENS-PROFILE]" in sent
+
+
 def test_under_a_default_prompt_writes_wait_and_reads_are_the_requesters(
         app, circles):  # noqa: F811
     """What the no-dialog path rests on (Peter, 2026-11-12): in ben's AI

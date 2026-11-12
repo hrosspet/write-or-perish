@@ -908,6 +908,11 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   const aiReadsKey = (aiReadsChanged
     ? aiReadsChanged.ai_reads_key
     : (audience || threadReads)?.ai_reads_key) || '';
+  // The prompt is an older version of Loore's own default: the dialog
+  // says so (Peter, 2026-11-12).
+  const aiReadsOlder = !!(aiReadsChanged
+    ? aiReadsChanged.ai_reads_older_default
+    : (audience || threadReads)?.ai_reads_older_default);
   // The shared entry whose thread the next AI reply is written in, for
   // what "Don't ask again in this thread" stores.
   const aiReplyEntryId = audience?.entry_id ?? threadReads?.entry_id;
@@ -927,6 +932,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // agreed to (to send as ai_reads_ack), or null when there is none.
   const confirmAiReply = (changed = null) => new Promise((resolve) => {
     const reads = changed ? changed.ai_reads : aiReads;
+    const older = changed ? !!changed.ai_reads_older_default : aiReadsOlder;
     const key = (changed ? changed.ai_reads_key : aiReadsKey) || '';
     if ((!isSharedThread && !threadReads) || !key) {
       resolve({ ack: null });
@@ -939,7 +945,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
       resolve({ ack: stored });
       return;
     }
-    setAiReplyDialog({ resolve, reads, ack: privateAck, store: privateAck });
+    setAiReplyDialog({ resolve, reads, older, ack: privateAck, store: privateAck });
   });
 
   // *auto*: the request auto-generate makes after an entry, which the
@@ -984,6 +990,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
         const changed = {
           ai_reads: data.ai_reads || [],
           ai_reads_key: data.ai_reads_key || '',
+          ai_reads_older_default: !!data.ai_reads_older_default,
         };
         // The server refused the very key it now names (or names none):
         // asking again would send the same request again. The refusal
@@ -2244,6 +2251,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
         open={!!aiReplyDialog}
         ai
         aiReads={aiReplyDialog?.reads}
+        olderDefault={!!aiReplyDialog?.older}
         onClose={() => {
           aiReplyDialog?.resolve(false);
           setAiReplyDialog(null);

@@ -1640,15 +1640,16 @@ def _focal_own_fields(node, viewer_id):
                 # (the dialog before the reply names them).
                 # ai_reads_key: what the viewer agrees to in that
                 # dialog; sent back with the request for the reply.
+                # ai_reads_older_default: the prompt is an older version
+                # of Loore's own default (the dialog says so).
                 # Only under the viewer's own node: nobody asks for an
                 # AI reply under someone else's (the public rule, Peter
                 # 2026-11-12), so nothing is read for one.
                 if is_node_owner(node, viewer_id):
-                    (audience["ai_reads"],
-                     audience["ai_reads_key"]) = cz.ai_reply_reads(
-                        node, viewer_id)
+                    audience.update(cz.ai_reply_reads_info(node, viewer_id))
                 else:
-                    audience["ai_reads"], audience["ai_reads_key"] = [], ""
+                    audience.update(ai_reads=[], ai_reads_key="",
+                                    ai_reads_older_default=False)
                 data["audience"] = audience
     # Circles: the viewer's own node that only they read, written in
     # someone else's shared thread (an AI reply kept to Only me, a reply
@@ -1671,10 +1672,9 @@ def _focal_own_fields(node, viewer_id):
             if node.audience_root_id is not None or elsewhere:
                 entry = cz.reply_thread_entry(node, viewer_id)
                 if entry is not None:
-                    reads, key = cz.ai_reply_reads(node, viewer_id)
                     data["thread_ai_reads"] = {
-                        "entry_id": entry.id, "ai_reads": reads,
-                        "ai_reads_key": key}
+                        "entry_id": entry.id,
+                        **cz.ai_reply_reads_info(node, viewer_id)}
     # A Community Archive read reply: the thread page shows what the read
     # covered (the window, from the pinned render) and offers to read
     # the day again. Focal node only — two small lookups. The window goes
@@ -2386,8 +2386,9 @@ def request_llm_response(node_id):
         # edited in between).
         reads_meta = None
         if in_thread:
-            reads, reads_key = cz.ai_reply_reads(
+            reads_info = cz.ai_reply_reads_info(
                 parent_node, current_user.id)
+            reads_key = reads_info["ai_reads_key"]
             if reads_key:
                 # The dialog sends "private:<key>". The bare key, sent
                 # by clients from before every AI reply was private
@@ -2399,8 +2400,7 @@ def request_llm_response(node_id):
                     return jsonify({
                         "error": cz.AI_READS_CHANGED,
                         "code": cz.AI_READS_CHANGED_CODE,
-                        "ai_reads": reads,
-                        "ai_reads_key": reads_key,
+                        **reads_info,
                     }), 409
                 reads_meta = [{"name": cz.AI_READS_MARKER,
                                "key": reads_key}]

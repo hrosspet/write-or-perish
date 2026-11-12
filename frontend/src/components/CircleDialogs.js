@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import {
-  aiReadsPrivateSentence, atName, joinNames,
+  aiReadsOlderDefaultBody, aiReadsPrivateSentence, atName, joinNames,
 } from '../utils/circles';
 
 // The dialogs of Circles, in the shape of the app's other dialogs
@@ -92,19 +92,26 @@ function Shell({ onClose, labelledBy, children }) {
  * reply is generated in the thread whose prompt, written by someone
  * else, reads the requester's own data: the reply is the requester's
  * alone (every AI reply is created private, Peter 2026-11-12), so nobody
- * is named, and `aiReads` names what that prompt reads. "Don't ask again
+ * is named, and `aiReads` names what that prompt reads; `olderDefault`
+ * (the prompt is an older version of Loore's own default) says so instead
+ * of naming the prompt as shared. "Don't ask again
  * in this thread" is remembered by the caller (per thread, per user, on
  * this device; typed replies and AI replies are remembered separately).
  */
-export function CircleReplyDialog({ open, names, ai = false, aiReads = null, onClose, onConfirm }) {
+export function CircleReplyDialog({
+  open, names, ai = false, aiReads = null, olderDefault = false, onClose, onConfirm,
+}) {
   const [skip, setSkip] = useState(false);
   useEscape(open, onClose);
   useEffect(() => { if (open) setSkip(false); }, [open]);
   if (!open) return null;
   const privateReads = aiReadsPrivateSentence(aiReads);
-  const body = ai
-    ? `Only you will see it.${privateReads ? ` ${privateReads}` : ''}`
-    : `${joinNames(names)} will see it, with your name.`;
+  let body = `${joinNames(names)} will see it, with your name.`;
+  if (ai) {
+    body = olderDefault
+      ? aiReadsOlderDefaultBody(aiReads)
+      : `Only you will see it.${privateReads ? ` ${privateReads}` : ''}`;
+  }
   return (
     <Shell onClose={onClose} labelledBy="circle-reply-title">
       <h2 id="circle-reply-title" style={titleStyle}>

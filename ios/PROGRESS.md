@@ -1137,8 +1137,11 @@ privacy select is greyed out (`SelectField.unavailable`), as on the web.
   `human_owner_username` in the tree too), and its requester shares it with the thread through Edit.
   The `CircleReplyDialog` AI variant ("Only you will see it. Your AI reads your ...") comes only when the
   server sends a key: a prompt someone else wrote, edited or from scratch, reads the requester's data or
-  turns tools on; one of Loore's default prompts unedited sends none (Peter, 2026-11-12, decided on the
-  server) (`confirmAIReply`; `DefaultsKey.circleAiReplyAck`).
+  turns tools on; Loore's current default prompt unedited sends none (Peter, 2026-11-12, decided on the
+  server). For an older version of Loore's default the server marks the key (`ai_reads_older_default`,
+  `NodeAudience.aiReadsOlderDefault`) and the dialog says so ("This thread uses an older version of
+  Loore's own prompt. Only you will see the reply. Your AI reads your ... for it.",
+  `CirclesWording.aiReplyOlderDefaultDialogBody`) (`confirmAIReply`; `DefaultsKey.circleAiReplyAck`).
   Off states: `CirclesWording.aiReplyOffReason`. An AI reply shows
   `llm_label` in place of the model id (`NodeFooterText.author`) and belongs to
   `human_owner_username` (`ThreadModel.ownedByMe`); its edit form offers Only me and Circles

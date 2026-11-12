@@ -44,6 +44,17 @@ export function aiReadsPrivateSentence(aiReads) {
     : '';
 }
 
+// The dialog before an AI reply when the thread's prompt is an older
+// version of Loore's own default prompt (audience.ai_reads_older_default,
+// from the server; Peter, 2026-11-12: "show the dialog for older
+// defaults, but warn the user that they are old").
+export function aiReadsOlderDefaultBody(aiReads) {
+  const list = joinPlain(aiReads);
+  return "This thread uses an older version of Loore's own prompt. "
+    + 'Only you will see the reply.'
+    + (list ? ` Your AI reads your ${list} for it.` : '');
+}
+
 // Names typed into "for this entry only": commas or spaces, @ optional.
 export function splitNames(text) {
   const seen = new Set();

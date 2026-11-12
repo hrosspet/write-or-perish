@@ -187,6 +187,9 @@ final class ThreadModel {
     private var aiReplyEntryId: Int? { audience?.entryId ?? threadReads?.entryId }
     /// What the open dialog says the reply reads of the user's data.
     var aiReplyReads: [String] { audience?.aiReads ?? threadReads?.aiReads ?? [] }
+    /// The thread's prompt is an older version of Loore's own default: the
+    /// dialog says so (Peter, 2026-11-12).
+    var aiReplyOlderDefault: Bool { audience?.aiReadsOlderDefault ?? threadReads?.aiReadsOlderDefault ?? false }
     /// A prompt someone else wrote shows the user's own artifacts in place of
     /// its placeholders only in a shared thread (Circles); everywhere else a
     /// placeholder without an artifact reads "[… not available]", as before.
@@ -313,11 +316,14 @@ final class ThreadModel {
             var reads: [String] = []
             if case .array(let items)? = extra["ai_reads"] { reads = items.compactMap(\.stringValue) }
             let key = extra["ai_reads_key"]?.stringValue ?? ""
+            let older = extra["ai_reads_older_default"]?.boolValue ?? false
             if node?.audience != nil {
                 node?.audience?.aiReads = reads
                 node?.audience?.aiReadsKey = key
+                node?.audience?.aiReadsOlderDefault = older
             } else if let entryId = node?.threadAIReads?.entryId {
-                node?.threadAIReads = ThreadAIReads(entryId: entryId, aiReads: reads, aiReadsKey: key)
+                node?.threadAIReads = ThreadAIReads(entryId: entryId, aiReads: reads, aiReadsKey: key,
+                                                    aiReadsOlderDefault: older)
             }
             return try await requestConfirmedLLM(for: parentId, automatic: automatic, force: true, retried: true)
         } catch {

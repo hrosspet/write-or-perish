@@ -41,6 +41,8 @@ struct CircleReplyDialog: View {
     var aiReply = false
     /// With `aiReply`: the requester's own artifacts the reply's prompt reads.
     var aiReads: [String] = []
+    /// With `aiReply`: the prompt is an older version of Loore's own default.
+    var olderDefault = false
     /// `dontAskAgain`
     let onConfirm: (Bool) -> Void
     let onCancel: () -> Void
@@ -48,16 +50,18 @@ struct CircleReplyDialog: View {
 
     static func title(aiReply: Bool) -> String { aiReply ? CirclesWording.aiReplyDialogTitle : "Send this reply?" }
 
-    static func body(names: [String], aiReply: Bool, aiReads: [String] = []) -> String {
+    static func body(names: [String], aiReply: Bool, aiReads: [String] = [], olderDefault: Bool = false) -> String {
         guard aiReply else { return "\(CirclesWording.joinNames(names)) will see it, with your name." }
-        return CirclesWording.aiReplyPrivateDialogBody(aiReads: aiReads)
+        return olderDefault ? CirclesWording.aiReplyOlderDefaultDialogBody(aiReads: aiReads)
+            : CirclesWording.aiReplyPrivateDialogBody(aiReads: aiReads)
     }
 
     static func confirmLabel(aiReply: Bool) -> String { aiReply ? CirclesWording.aiReplyDialogConfirm : "Send reply" }
 
     var body: some View {
         LooreDialogCard(title: Self.title(aiReply: aiReply)) {
-            CircleDialogBody(text: Self.body(names: names, aiReply: aiReply, aiReads: aiReads))
+            CircleDialogBody(text: Self.body(names: names, aiReply: aiReply, aiReads: aiReads,
+                                             olderDefault: olderDefault))
             Button {
                 dontAskAgain.toggle()
             } label: {

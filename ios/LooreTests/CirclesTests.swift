@@ -872,6 +872,30 @@ final class CirclesFormTests: StubbedAppTestCase {
         XCTAssertEqual(same.llmRequestBody(ack: go?.ack)["ai_reads_ack"], .string("private:k1"))
     }
 
+    func testAnOlderDefaultPromptSaysItIsOld() async {
+        // Peter, 2026-11-12: "show the dialog for older defaults, but warn the user that they are old".
+        clearAIReplyMemory()
+        defer { clearAIReplyMemory() }
+        XCTAssertEqual(CircleReplyDialog.body(names: [], aiReply: true, aiReads: ["profile", "memory"], olderDefault: true),
+                       "This thread uses an older version of Loore's own prompt. Only you will see the reply. Your AI reads your profile and memory for it.")
+        XCTAssertEqual(CircleReplyDialog.body(names: [], aiReply: true, aiReads: [], olderDefault: true),
+                       "This thread uses an older version of Loore's own prompt. Only you will see the reply.")
+        let older = keyedParent("k1", reads: #"["profile","memory"]"#)
+            .replacingOccurrences(of: #""ai_reads_key": "k1""#, with: #""ai_reads_key": "k1", "ai_reads_older_default": true"#)
+        let model = await thread(older)
+        XCTAssertTrue(model.aiReplyOlderDefault)
+        model.aiReplyPressed()
+        await waitForDialog(model)
+        XCTAssertTrue(model.showAIReplyDialog)
+        XCTAssertFalse(calls.contains("POST /api/nodes/31/llm"))
+        model.aiReplyConfirmed(dontAskAgain: false)
+        await waitFor("POST /api/nodes/31/llm")
+        XCTAssertEqual(body(of: "POST /api/nodes/31/llm")?["ai_reads_ack"] as? String, "private:k1")
+        // An edited prompt keeps the usual words.
+        let edited = await thread(keyedParent("k2"))
+        XCTAssertFalse(edited.aiReplyOlderDefault)
+    }
+
     func testAStoredKeyThatDiffersShowsTheDialogAgain() async {
         clearAIReplyMemory()
         defer { clearAIReplyMemory() }

@@ -142,6 +142,15 @@ enum CirclesWording {
         return aiReadsPrivateSentence(aiReads).map { "\(first) \($0)" } ?? first
     }
 
+    /// The same when the thread's prompt is an older version of Loore's own
+    /// default (`ai_reads_older_default`; Peter, 2026-11-12: "show the dialog
+    /// for older defaults, but warn the user that they are old").
+    static func aiReplyOlderDefaultDialogBody(aiReads: [String]) -> String {
+        let first = "This thread uses an older version of Loore's own prompt. Only you will see the reply."
+        let list = joinPlain(aiReads)
+        return list.isEmpty ? first : "\(first) Your AI reads your \(list) for it."
+    }
+
     // MARK: Sharing the discussion above an entry
 
     static let sharePathLabel = "Share also the discussion leading up to this node?"
