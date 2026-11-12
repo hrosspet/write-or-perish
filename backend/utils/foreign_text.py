@@ -47,11 +47,13 @@ def _is_llm(node):
     return node.node_type == "llm" or bool(node.llm_model)
 
 
-def _quoted_by_others(text, user_id, depth, seen):
+def _quoted_by_others(text, user_id, depth, seen, ext_ids):
     """True when a {quote:ID} in *text* (the requester's own) resolves to
     a node another person wrote, at any depth the resolver follows: the
     quoted node is readable by the requester, alive and AI-readable, as
-    resolve_quotes requires before it shows a quote's text."""
+    resolve_quotes requires before it shows a quote's text. The saved
+    references the requester's quoted entries carry are added to
+    *ext_ids*: the message's reference pass resolves them too."""
     if depth <= 0 or not text:
         return False
     for qid in find_quote_ids(text):
@@ -66,7 +68,9 @@ def _quoted_by_others(text, user_id, depth, seen):
             continue
         if not written_by(quoted, user_id):
             return True
-        if _quoted_by_others(quoted.get_content(), user_id, depth - 1, seen):
+        quoted_text = quoted.get_content()
+        ext_ids.extend(find_ext_quote_ids(quoted_text or ""))
+        if _quoted_by_others(quoted_text, user_id, depth - 1, seen, ext_ids):
             return True
     return False
 
@@ -105,8 +109,9 @@ def history_by_others(node_chain, user_id, read_reply_ids=()):
                 kinds.add(GLEAN)
             continue
         content = node.get_content() or ""
-        if OTHER_USER not in kinds and _quoted_by_others(
-                content, user_id, DEFAULT_MAX_DEPTH, seen):
+        ext_ids = find_ext_quote_ids(content)
+        if _quoted_by_others(content, user_id, DEFAULT_MAX_DEPTH, seen,
+                             ext_ids):
             kinds.add(OTHER_USER)
-        kinds |= _reference_kinds(find_ext_quote_ids(content), user_id)
+        kinds |= _reference_kinds(ext_ids, user_id)
     return kinds

@@ -390,6 +390,19 @@ def test_what_counts_in_the_history(app, people):
     _db.session.commit()
     assert history_by_others([system, unreadable], ben.id) == set()
 
+    item = ExternalItem(user_id=ben.id, source="twitter_bookmark",
+                        external_id="bm-1", url="https://example.org/t")
+    item.set_content("a bookmarked tweet")
+    _db.session.add(item)
+    _db.session.flush()
+    holding = _node(ben, None, f"kept {{quote_ext:{item.id}}}",
+                    privacy_level="private")
+    quoting_holding = _node(ben, system, f"see {{quote:{holding.id}}}",
+                            privacy_level="private")
+    _db.session.commit()
+    assert history_by_others([system, quoting_holding], ben.id) == {
+        "saved_reference"}
+
     glean = _llm(quoting_mine, ben, "picks", status="completed")
     assert history_by_others([system, quoting_mine, glean], ben.id,
                              read_reply_ids={glean.id}) == {GLEAN}
