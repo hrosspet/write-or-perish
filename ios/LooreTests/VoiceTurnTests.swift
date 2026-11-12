@@ -110,6 +110,17 @@ final class FakeVoiceBackend: VoiceBackend {
         log.append("discard")
         discarded.append(sessionId)
     }
+
+    /// `GET /api/tool-approvals?node=`: the waiting calls per node asked (none
+    /// listed: nothing waits). Not in `log`, so the turn sequences stay as they were.
+    var approvalLists: [Int: [ToolApproval]] = [:]
+    var approvalRequests: [Int] = []
+    var approvalError: Error?
+    func pendingApprovals(nodeId: Int) async throws -> [ToolApproval] {
+        approvalRequests.append(nodeId)
+        if let approvalError { throw approvalError }
+        return approvalLists[nodeId] ?? []
+    }
     func timingClock() async throws -> Double { Date().timeIntervalSince1970 }
     func postTiming(nodeId: Int, marks: [String: Double], offsetMs: Double, rttMs: Double) async {
         timingPosts.append((nodeId, marks))

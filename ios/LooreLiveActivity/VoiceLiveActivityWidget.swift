@@ -13,7 +13,8 @@ struct LooreLiveActivityBundle: WidgetBundle {
 /// The voice conversation on the lock screen and in the Dynamic Island (#397):
 /// while recording only Pause/Resume and Stop; once Loore replies, Record, and
 /// in a Glean-card conversation a labeled Glean button beside it (#475). The
-/// reply's own play/pause and ±10 s stay in the Now Playing controls.
+/// reply's own play/pause and ±10 s stay in the Now Playing controls. While a
+/// change in the thread waits for approval there is no Record (2026-11-12).
 struct VoiceLiveActivityWidget: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: VoiceActivityAttributes.self) { context in
@@ -112,6 +113,15 @@ private struct StatusText: View {
     }
 
     @ViewBuilder private var detail: some View {
+        if state.approvalWaiting && [.ready, .replying, .finished].contains(state.phase) {
+            // In place of the Record button (2026-11-12): the change waits in the app.
+            Text(VoiceActivityAttributes.ContentState.approvalWaitingLine)
+        } else {
+            phaseDetail
+        }
+    }
+
+    @ViewBuilder private var phaseDetail: some View {
         switch state.phase {
         case .recording:
             if let start = state.clockStart {
@@ -183,8 +193,12 @@ private struct Controls: View {
                 RoundButton(intent: StopVoiceRecordingIntent(), symbol: "stop.fill",
                             label: "Stop and send", filled: true, size: size)
             case .replying, .finished, .ready:
-                RoundButton(intent: RecordVoiceReplyIntent(), symbol: "mic.fill",
-                            label: state.phase == .ready ? "Record" : "Record a reply", filled: true, size: size)
+                // No Record while a change waits for approval (Peter, 2026-11-12):
+                // the status line says why. The reply's play/pause stays in Now Playing.
+                if state.offersRecord {
+                    RoundButton(intent: RecordVoiceReplyIntent(), symbol: "mic.fill",
+                                label: state.phase == .ready ? "Record" : "Record a reply", filled: true, size: size)
+                }
             case .starting, .sending, .thinking, .gleaning:
                 EmptyView()
             }

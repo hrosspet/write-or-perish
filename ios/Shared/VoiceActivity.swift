@@ -51,6 +51,19 @@ struct VoiceActivityAttributes: ActivityAttributes {
         /// the app after this, so the card says what will happen instead of a
         /// progress state that cannot update.
         var gleanAccepted = false
+        /// A change to the user's data in this thread waits for their approval
+        /// (Peter, 2026-11-12: "the lockscreen controls shouldn't allow next
+        /// recording"): no Record button, a line that says why instead. The
+        /// reply's play/pause stays in the Now Playing controls.
+        var approvalWaiting = false
+
+        /// The card's line while a change waits, where Record would be.
+        static let approvalWaitingLine = "Approve or reject the change in Loore"
+
+        /// The phases whose card has a Record button (when no change waits).
+        var offersRecord: Bool {
+            [.ready, .replying, .finished].contains(phase) && !approvalWaiting
+        }
     }
 }
 

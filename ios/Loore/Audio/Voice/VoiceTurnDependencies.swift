@@ -31,6 +31,9 @@ protocol VoiceBackend: AnyObject {
     /// highest chunk seen.
     func ttsStream(nodeId: Int, lastChunk: Int?) -> AsyncThrowingStream<SSEMessage, Error>
     func discard(sessionId: String) async
+    /// `GET /api/tool-approvals?node=<id>`: the write tool calls waiting for the
+    /// user's approval in that node's thread (Peter, 2026-11-12).
+    func pendingApprovals(nodeId: Int) async throws -> [ToolApproval]
     /// Server clock (`GET /api/voice/timing/clock`, seconds).
     func timingClock() async throws -> Double
     func postTiming(nodeId: Int, marks: [String: Double], offsetMs: Double, rttMs: Double) async
@@ -259,6 +262,13 @@ final class LiveVoiceBackend: VoiceBackend {
 
     func discard(sessionId: String) async {
         _ = try? await api().data(for: APIRequest(.delete, APIPath.streamingDiscard(sessionId)))
+    }
+
+    func pendingApprovals(nodeId: Int) async throws -> [ToolApproval] {
+        let list: ToolApprovalList = try await api().get(APIPath.toolApprovals, query: [
+            URLQueryItem(name: "node", value: String(nodeId)),
+        ])
+        return list.pending
     }
 
     func timingClock() async throws -> Double {

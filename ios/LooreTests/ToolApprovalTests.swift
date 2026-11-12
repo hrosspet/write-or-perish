@@ -381,11 +381,13 @@ final class ToolApprovalDialogRenderingTests: StubbedAppTestCase {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let bounds = scene.screen.bounds
         let model = ToolApprovalsModel(api: app.api, nodeId: 10)
-        for scheme in [ColorScheme.dark, .light] {
+        // The thread screen's dialog, and the Voice screen's ("Open the thread", no "Later").
+        for (scheme, voice) in [(ColorScheme.dark, false), (.light, false), (.dark, true)] {
             // As `looreDialog` shows it: the card centred in the safe area over the dimmed page.
             let view = ZStack {
                 LooreColor.bgDeep.overlay(LooreColor.dialogBackdrop).ignoresSafeArea()
-                ToolApprovalDialog(group: group(), model: model, screenHeight: bounds.height)
+                ToolApprovalDialog(group: group(), model: model, screenHeight: bounds.height,
+                                   onOpenThread: voice ? {} : nil)
             }
             .environment(app)
             let window = UIWindow(windowScene: scene)
@@ -402,7 +404,8 @@ final class ToolApprovalDialogRenderingTests: StubbedAppTestCase {
             if let dir = ProcessInfo.processInfo.environment["LOORE_SNAPSHOT_DIR"], !dir.isEmpty {
                 let phone = "\(Int(bounds.width))x\(Int(bounds.height))"
                 try image.pngData()?.write(to: URL(fileURLWithPath: dir)
-                    .appendingPathComponent("approval-dialog-\(phone)-\(scheme == .dark ? "dark" : "light").png"))
+                    .appendingPathComponent("approval-dialog-\(phone)-\(scheme == .dark ? "dark" : "light")"
+                                            + (voice ? "-voice" : "") + ".png"))
             }
         }
     }

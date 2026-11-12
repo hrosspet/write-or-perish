@@ -73,8 +73,12 @@ final class ThreadModel {
         approvals = ToolApprovalsModel(api: app.api, nodeId: nodeId)
         approvals.onApproved = { [weak app] item in
             // What the call wrote shows where it lives.
-            if item.isArtifactWrite { app?.signals.post(.artifactsChanged) }
-            if item.tool == "apply_todo_changes" { app?.signals.post(.todoChanged) }
+            ToolApprovalsModel.signalApproved(item, signals: app?.signals)
+        }
+        approvals.onPendingChanged = { [weak app] _ in
+            // A Voice conversation in this thread may be waiting for this decision
+            // (its Record, the lock screen's too, comes back when nothing waits).
+            app?.audio.toolApprovalsDecidedElsewhere()
         }
         approvals.onGroupDone = { [weak self] in
             // The reply's Actions taken (and what it changed) are new.

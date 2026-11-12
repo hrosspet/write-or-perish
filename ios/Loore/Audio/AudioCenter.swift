@@ -117,8 +117,44 @@ final class AudioCenter {
         controller.aiUsage = { [weak self] in self?.app?.user?.defaultAIUsage.rawString ?? "none" }
         controller.onGleaningReady = { [weak self] id in self?.openGleaning(id) }
         controller.appIsActive = { UIApplication.shared.applicationState == .active }
+        controller.onApprovalsListed = { [weak self] node, items in
+            guard let model = self?.makeVoiceApprovals() else { return }
+            model.nodeId = node
+            model.update(items, autoOpen: false)
+        }
         voiceController = controller
         return controller
+    }
+
+    // MARK: Changes waiting for approval in the voice conversation (2026-11-12)
+
+    /// The Voice screen's approval dialog: the thread screen's model and dialog,
+    /// fed by the conversation's list (`VoiceTurnController.waitingApprovals`).
+    /// Kept here, with the conversation, so a decision reaches the lock screen
+    /// whichever screen is showing.
+    private(set) var voiceApprovals: ToolApprovalsModel?
+
+    @discardableResult
+    func makeVoiceApprovals() -> ToolApprovalsModel? {
+        if let voiceApprovals { return voiceApprovals }
+        guard let app else { return nil }
+        let model = ToolApprovalsModel(api: app.api, nodeId: voiceController?.approvalsNodeId ?? 0)
+        model.onApproved = { [weak app] item in ToolApprovalsModel.signalApproved(item, signals: app?.signals) }
+        model.onPendingChanged = { [weak self] items in self?.voiceController?.approvalsChanged(items) }
+        model.onGroupDone = { [weak model] in
+            // The next reply's calls, if any, follow at once: the Voice screen's
+            // dialog has no "Later", and it closes when nothing waits.
+            if model?.pending.isEmpty == false { model?.review() }
+        }
+        voiceApprovals = model
+        return model
+    }
+
+    /// A call was decided on a thread screen: a voice conversation waiting for
+    /// it asks the server again (only while something waits there).
+    func toolApprovalsDecidedElsewhere() {
+        guard let voice = voiceController, voice.approvalWaiting else { return }
+        Task { await voice.refreshApprovalsIfWaiting() }
     }
 
     /// A glean from the Voice screen (or its lock screen) landed (#475): the view
@@ -157,6 +193,7 @@ final class AudioCenter {
     func signedOut() {
         voiceController?.tearDown()
         voiceController = nil
+        voiceApprovals = nil
         activeDictation?.cancel()
         ChunkUploader.shared.reset()
         PrivateFiles.sweepTemporary()
@@ -242,7 +279,8 @@ final class AudioCenter {
                                                       glean: voice.lockScreenGlean,
                                                       gleaning: voice.isGleaning,
                                                       gleanAccepted: voice.gleanAccepted,
-                                                      gleaned: voice.gleaningDone),
+                                                      gleaned: voice.gleaningDone,
+                                                      approvalWaiting: voice.approvalWaiting),
                               start: voice.state == .starting)
         }
         if let voice = voiceController, voice.isActive || (player.source == .voice && player.isLoaded) {
@@ -341,31 +379,38 @@ extension AudioCenter {
     /// Record from the lock screen: the next turn, also while the reply plays
     /// (the Voice screen's Continue), or a new one between turns. On a locked
     /// phone a toast is not seen, so a refusal or a failed start also notifies.
-    private func recordFromLockScreen(_ voice: VoiceTurnController) async {
+    /// Returns what that notification said (nil: none was posted).
+    @discardableResult
+    func recordFromLockScreen(_ voice: VoiceTurnController) async -> String? {
         // A glean runs: its card shows no Record button (a stale tap does nothing).
-        guard !voice.isGleaning else { return }
+        guard !voice.isGleaning else { return nil }
         if app?.spendCapped == true {
             app?.notifySpendBlocked()
             _ = app?.toasts.show(SpendCap.toastMessage(.record), duration: 8)
-            LocalNotifier.post(.recordFailed, body: SpendCap.toastMessage(.record))
-            return
+            return refuseLockScreenRecord(SpendCap.toastMessage(.record))
         }
         // Checked before Continue stops the reply (the Voice screen disables it offline).
         guard NetworkStatus.shared.isOnline else {
-            LocalNotifier.post(.recordFailed, body: "You're offline. Record again when you're back online.")
-            return
+            return refuseLockScreenRecord("You're offline. Record again when you're back online.")
+        }
+        // A change in the thread waits for approval (Peter, 2026-11-12): no new
+        // turn, and the reply keeps playing. The card has no Record button then;
+        // a tap on a card not yet updated asks the server once more, since the
+        // change may have been decided on another device.
+        if voice.newTurnRefusal != nil { await voice.refreshApprovalsIfWaiting() }
+        if let refusal = voice.newTurnRefusal {
+            return refuseLockScreenRecord(refusal)
         }
         switch voice.phase {
         case .playback:
             voice.continueConversation()
         case .ready:
             if let block = voice.aiBlock {
-                LocalNotifier.post(.recordFailed, body: block.body)
-                return
+                return refuseLockScreenRecord(block.body)
             }
             voice.start()
         default:
-            return
+            return nil
         }
         let tapped = Date()
         let deadline = tapped.addingTimeInterval(Self.lockScreenStartWait)
@@ -373,10 +418,17 @@ extension AudioCenter {
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
         if voice.state == .idle {
-            // The start failed; its toast says why.
-            let reason = lastVoiceToast.flatMap { $0.at >= tapped ? $0.text : nil }
-            LocalNotifier.post(.recordFailed, body: reason ?? LocalNotice.recordFailed.body)
+            // The start failed; its toast says why (a change waiting for approval
+            // that the server named has no toast: the dialog waits in the app).
+            let reason = voice.newTurnRefusal ?? lastVoiceToast.flatMap { $0.at >= tapped ? $0.text : nil }
+            return refuseLockScreenRecord(reason ?? LocalNotice.recordFailed.body)
         }
+        return nil
+    }
+
+    private func refuseLockScreenRecord(_ body: String) -> String {
+        LocalNotifier.post(.recordFailed, body: body)
+        return body
     }
 }
 
