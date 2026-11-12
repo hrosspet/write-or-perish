@@ -1,21 +1,17 @@
-"""A Voice reply whose write calls wait for approval ends its audio saying
-so (Peter, 2026-11-12):
+"""A Voice reply whose write calls wait for approval keeps its own audio as
+it is (Peter, 2026-11-12):
 
-"A spoken announcement should also be added after the model reply,
-informing the user they need to confirm, or reject the tool called. Also,
-the lockscreen controls shouldn't allow next recording (replay of the
-reply should be still possible, but the announcement should still be
-there after the LLM reply)"
+"the announcement should be TTSed as a separate chunk and appended to the
+queue. So that when it's not pending, it's not voiced out anymore"
 
-The sentence is spoken by the reply's own TTS after its last words, in its
-last chapter: it is in the reply's audio file (a replay says it too), the
-stored text does not hold it (so later prompts are byte-identical), and
-the chapter list stays as it was. Runs the real task body on the
-test_retrieval_loop / test_live_streaming harness.
+The spoken announcement is its own cached clip that the players append
+after the reply while its calls wait (utils/announcement_audio,
+test_voice_approval_routes). The reply's audio is what it would be without
+any waiting call: the same chunks, sections and joined file, live and in
+the batch task. Runs the real task body on the test_retrieval_loop /
+test_live_streaming harness.
 """
 import copy
-import json
-import re
 import sys
 import types
 from unittest.mock import MagicMock
@@ -31,11 +27,8 @@ from backend.tests.test_personal_context_owner import (
     _llm, _node, _system_node)
 from backend.models import Draft, UserArtifact
 from backend.utils import tool_approvals, tts_stream
-from backend.utils.audio_processing import tts_chapters
-from backend.utils.tool_approvals import approval_announcement
-from backend.utils.tts_stream_text import ChunkPlanner
+from backend.utils.announcement_audio import ANNOUNCEMENT_TEXTS
 
-ONE = approval_announcement(1)
 generate_llm_response = _llm_task_mod.generate_llm_response
 
 
@@ -149,79 +142,59 @@ def _memory(ben):
     return UserArtifact.latest_for(ben.id, "memory").get_content()
 
 
-# ── The live path: spoken while written ─────────────────────────────────
+def _rows(node_id):
+    return [(r.chunk_index, r.section_index, r.section_title, r.duration)
+            for r in _chunks(node_id)]
 
 
-def test_the_reply_ends_saying_a_change_waits(app, spoken):
+def _heard_turn(anna_in_thread):
+    """A fresh database; one Voice turn whose memory write waits (Anna's
+    reply in the thread) or runs (Ben's own thread). Returns what the TTS
+    was asked to speak, the joined files, and each node's chunk rows."""
+    _db.session.remove()
+    _db.drop_all()
+    _db.create_all()
+    _FakeAudio.spoken = []
+    _Audio.joined = []
     ben, anna = _people()
-    reply = _talk(_thread(ben, anna), ben, _turn())
-
+    reply = _talk(_thread(ben, anna if anna_in_thread else None), ben,
+                  _turn())
     answer = _fresh(reply.continuation_node_id)
-    assert _memory(ben) == "- likes tea"          # the call waits
-    # The written reply is as the model wrote it.
-    assert reply.get_content() == "Noting that."
-    assert answer.get_content() == "I asked before changing your memory."
-    # Heard first time: the interim step, then the answer and the sentence.
-    assert _texts() == [
-        "Noting that.", f"I asked before changing your memory.\n\n{ONE}"]
-    # The replay is the joined file, which holds the sentence too.
-    assert _Audio.joined[-1] == [
-        f"I asked before changing your memory.\n\n{ONE}"]
-    assert answer.tts_task_status == "completed" and answer.audio_tts_url
-    # One untitled section: no chapter list, as without the sentence.
-    rows = _chunks(answer.id)
-    assert {(r.section_index, r.section_title) for r in rows} == {(0, None)}
-    assert tts_chapters(rows) == []
+    return {
+        "spoken": list(_FakeAudio.spoken),
+        "joined": list(_Audio.joined),
+        "rows": [_rows(reply.id), _rows(answer.id)],
+        "urls": [reply.audio_tts_url, answer.audio_tts_url],
+        "held": Draft.query.filter_by(label="tool_pending").count(),
+        "texts": [reply.get_content(), answer.get_content()],
+    }
 
 
-def test_several_waiting_calls_are_counted(app, spoken):
-    ben, anna = _people()
-    reply = _talk(_thread(ben, anna), ben, _turn(writes=2))
+def test_the_reply_audio_is_the_same_whether_or_not_a_change_waits(
+        app, spoken):
+    """The reply's audio holds no announcement: what the TTS speaks, the
+    chunks and their sections, and the joined file a replay plays are
+    those of the same reply with nothing waiting (as on main)."""
+    waiting = _heard_turn(anna_in_thread=True)
+    own = _heard_turn(anna_in_thread=False)
 
-    assert len(Draft.query.filter_by(label="tool_pending").all()) == 2
-    assert _texts()[-1].endswith(approval_announcement(2))
-    assert approval_announcement(2).startswith(
-        "2 changes to your data are waiting.")
-    assert _fresh(reply.continuation_node_id).get_content() == (
-        "I asked before changing your memory.")
-
-
-def test_own_thread_reply_is_spoken_as_before(app, spoken):
-    """Only Ben's text in the thread: the write runs, nothing is said."""
-    ben, _ = _people()
-    _talk(_thread(ben), ben, _turn())
-
-    assert _memory(ben) == "- likes tea\n- note 0"
-    assert _texts() == ["Noting that.", "I asked before changing your memory."]
-    assert Draft.query.filter_by(label="tool_pending").count() == 0
-
-
-def test_chapters_keep_their_starts(app, spoken):
-    """The sentence joins the last chapter: the chapter list and each
-    chapter's start are what they would be without it."""
-    ben, anna = _people()
-    answer_text = "# Plan\nFirst do this. Then that.\n\n## Later\nThe rest."
-    reply = _talk(_thread(ben, anna), ben, _turn(answer=answer_text))
-
-    answer = _fresh(reply.continuation_node_id)
-    assert answer.get_content() == answer_text
-    rows = _chunks(answer.id)
-    assert [(r.section_title, r.section_index) for r in rows] == [
-        ("Plan", 0), ("Later", 1)]
-    texts = _texts()
-    assert texts[1] == "Plan.\n\nFirst do this. Then that."
-    assert texts[2] == f"Later.\n\nThe rest.\n\n{ONE}"
-    chapters = tts_chapters(rows)
-    assert [c["title"] for c in chapters] == ["Plan", "Later"]
-    # Chapter II starts where chapter I's audio ends, as before.
-    assert chapters[1]["start_time"] == round(rows[0].duration, 2)
-    # The chapter pause stays on the chunk that closes chapter I only.
-    assert [end for _, end in _FakeAudio.spoken] == [False, True, False]
+    assert waiting["held"] == 1 and own["held"] == 0
+    assert waiting["spoken"] == own["spoken"] == [
+        ("Noting that.", False),
+        ("I asked before changing your memory.", False)]
+    assert waiting["joined"] == own["joined"]
+    assert waiting["rows"] == own["rows"]
+    # Each node's audio file is made and kept (paths name the node ids).
+    assert all(waiting["urls"]) and all(own["urls"])
+    assert waiting["texts"] == own["texts"] == [
+        "Noting that.", "I asked before changing your memory."]
+    for text in ANNOUNCEMENT_TEXTS.values():
+        assert not any(text in t for t, _ in waiting["spoken"])
 
 
 def test_a_reply_whose_last_round_holds_the_call(app, spoken, monkeypatch):
-    """No tool round left: the call is made and held in the final answer,
-    whose speech a tool call has closed already. The sentence follows."""
+    """No tool round left: the call is held in the final answer. Its
+    audio is still the reply alone, and the reply counts the call."""
     monkeypatch.setattr(_llm_task_mod, "MAX_RETRIEVAL_ROUNDS", 0)
     ben, anna = _people()
     reply = _talk(_thread(ben, anna), ben, [
@@ -229,58 +202,33 @@ def test_a_reply_whose_last_round_holds_the_call(app, spoken, monkeypatch):
          _resp("Noting that.", tool_calls=[_write("- likes tea\n- x")])),
     ])
 
-    assert reply.get_content() == "Noting that."
-    assert _texts() == [f"Noting that.\n\n{ONE}"]
+    assert _texts() == ["Noting that."]
     assert _memory(ben) == "- likes tea"
+    assert tool_approvals.announcement_count(_fresh(reply.id)) == 1
 
 
-# ── Later prompts are byte-identical ───────────────────────────────────
-
-_STAMP = re.compile(
-    r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?: ?UTC|Z)?")
-
-
-def _next_turn_payload(app, announce, monkeypatch):
-    """A Voice turn in Ben's thread with Anna's reply holds a memory
-    write; Ben rejects it and talks on. Returns the next turn's provider
-    payload (messages and tools, timestamps normalised), from a fresh
-    database each time so the ids match. Run with *announce* first."""
-    _db.session.remove()
-    _db.drop_all()
-    _db.create_all()
-    _FakeAudio.spoken = []
-    if not announce:
-        monkeypatch.setattr(tool_approvals, "approval_announcement_for",
-                            lambda node: None)
+def test_the_reply_counts_its_waiting_calls(app, spoken):
+    """announcement_count, what the players ask before appending the
+    clip: the final node of a Voice reply counts the calls of its interim
+    steps; the interim step itself, and a decided call, count nothing."""
     ben, anna = _people()
-    reply = _talk(_thread(ben, anna), ben, _turn())
-    heard = _texts()
-    [held] = Draft.query.filter_by(label="tool_pending").all()
-    tool_approvals.decide(held, ben.id, approve=False)
-    _db.session.commit()
+    reply = _talk(_thread(ben, anna), ben, _turn(writes=2))
     answer = _fresh(reply.continuation_node_id)
-    again = _node(ben, answer, "fine, leave it")
+
+    assert tool_approvals.announcement_count(answer) == 2
+    assert tool_approvals.announcement_count(_fresh(reply.id)) == 0
+    first, second = Draft.query.filter_by(label="tool_pending").order_by(
+        Draft.id).all()
+    tool_approvals.decide(first, ben.id, approve=False)
     _db.session.commit()
-    _talk(again, ben, [(["All right."], _resp("All right."))])
-    payload = json.dumps(_Recorder.calls[0], sort_keys=True, default=str)
-    return heard, _STAMP.sub("<time>", payload)
-
-
-def test_later_prompts_are_byte_identical(app, spoken, monkeypatch):
-    heard_with, with_sentence = _next_turn_payload(app, True, monkeypatch)
-    heard_without, without = _next_turn_payload(app, False, monkeypatch)
-
-    # The sentence was spoken in the first run only ...
-    assert heard_with[-1].endswith(ONE)
-    assert not any(ONE in t for t in heard_without)
-    # ... and the next turn sent the same bytes either way.
-    assert with_sentence == without
-    assert ONE not in with_sentence
-    assert "The user declined it; nothing was done." in with_sentence
+    assert tool_approvals.announcement_count(_fresh(answer.id)) == 1
+    tool_approvals.decide(_db.session.get(Draft, second.id), ben.id,
+                          approve=False)
+    _db.session.commit()
+    assert tool_approvals.announcement_count(_fresh(answer.id)) == 0
 
 
 # ── The batch path (a reply not spoken while written) ──────────────────
-
 
 def _load_tts_tasks(app):
     """backend.tasks.tts with its tasks as plain functions running against
@@ -318,8 +266,7 @@ def _load_tts_tasks(app):
     return tts
 
 
-def test_batch_audio_says_it_too_while_the_call_waits(
-        app, spoken, tmp_path):
+def test_batch_audio_is_the_reply_alone(app, spoken, tmp_path):
     app.config["STREAMING_VOICE_TTS"] = False
     ben, anna = _people()
     reply = _talk(_thread(ben, anna), ben, _turn())
@@ -335,64 +282,4 @@ def test_batch_audio_says_it_too_while_the_call_waits(
     tts._generate_tts_chunks = speak
     tts.generate_tts_audio(None, reply.id, str(tmp_path))
     tts.generate_tts_audio(None, answer.id, str(tmp_path))
-    assert texts == ["Noting that.",
-                     f"I asked before changing your memory.\n\n{ONE}"]
-
-    # Decided: an audio made again (e.g. regenerated) no longer says it.
-    [held] = Draft.query.filter_by(label="tool_pending").all()
-    tool_approvals.decide(held, ben.id, approve=False)
-    _db.session.commit()
-    answer = _fresh(answer.id)
-    answer.audio_tts_url = None
-    _db.session.commit()
-    tts.generate_tts_audio(None, answer.id, str(tmp_path))
-    assert texts[-1] == "I asked before changing your memory."
-
-
-# ── The planner on its own ──────────────────────────────────────────────
-
-
-def _drain(planner):
-    out = []
-    while True:
-        chunk = planner.take(10_000)
-        if chunk is None:
-            return out
-        out.append(chunk)
-
-
-def test_coda_added_before_close_ends_the_last_section():
-    planner = ChunkPlanner()
-    planner.add([("heading", "A"), ("text", "Body a. "),
-                 ("heading", "B"), ("text", "Body b.")])
-    planner.add_coda("Coda.")
-    planner.close()
-    chunks = _drain(planner)
-    assert [(c.text, c.section_title, c.section_index, c.section_end)
-            for c in chunks] == [
-        ("A.\n\nBody a.", "A", 0, True),
-        ("B.\n\nBody b.\n\nCoda.", "B", 1, False)]
-
-
-def test_coda_after_everything_was_cut_keeps_the_last_section():
-    planner = ChunkPlanner()
-    planner.add([("heading", "A"), ("text", "Body a. More of it. ")])
-    first = planner.take(12, jit=True)
-    assert first.text == "A.\n\nBody a."
-    planner.close()
-    rest = _drain(planner)
-    assert [c.text for c in rest] == ["More of it."]
-    planner.add_coda("Coda.")
-    [coda] = _drain(planner)
-    assert (coda.text, coda.section_title, coda.section_index,
-            coda.section_end) == ("Coda.", "A", 0, False)
-    assert planner.done
-
-
-def test_coda_alone_when_nothing_was_spoken():
-    planner = ChunkPlanner()
-    planner.add_coda("Coda.")
-    planner.close()
-    [coda] = _drain(planner)
-    assert (coda.text, coda.section_title, coda.section_index) == (
-        "Coda.", None, 0)
+    assert texts == ["Noting that.", "I asked before changing your memory."]

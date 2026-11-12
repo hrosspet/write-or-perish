@@ -239,3 +239,153 @@ def test_the_thread_walk_is_bounded_in_queries(app, thread):
     # ancestors (walk + row load), descendants, the drafts, the one
     # reply's row: no query per level.
     assert len(statements) <= 6, statements
+
+
+# ── The spoken announcement: its own cached clip ────────────────────────
+# Peter, 2026-11-12: "the announcement should be TTSed as a separate chunk
+# and appended to the queue. So that when it's not pending, it's not voiced
+# out anymore". The players ask GET /api/voice/approval-announcement for
+# the reply they play and append the clip while its calls wait.
+
+@pytest.fixture
+def clips(monkeypatch, tmp_path):
+    """The TTS side of the clip, faked: each call is recorded and writes
+    a small file; the model and voice can be changed."""
+    from backend.utils import announcement_audio
+    monkeypatch.setenv("AUDIO_STORAGE_PATH", str(tmp_path))
+    state = {"voice": "alloy", "calls": [], "costs": [], "fail": False}
+    monkeypatch.setattr(announcement_audio, "_tts_settings",
+                        lambda: ("gpt-4o-mini-tts", state["voice"]))
+
+    def synthesize(text, path):
+        if state["fail"]:
+            raise RuntimeError("no TTS key")
+        state["calls"].append(text)
+        path.write_bytes(b"ID3" + text.encode())
+        return 4.2
+
+    monkeypatch.setattr(announcement_audio, "_synthesize", synthesize)
+    monkeypatch.setattr(announcement_audio, "_log_cost",
+                        lambda user_id, seconds: state["costs"].append(
+                            (user_id, seconds)))
+    return state
+
+
+def _voice_reply(reply):
+    meta = json.loads(reply.tool_calls_meta)
+    meta.append({"name": "_mode", "source_mode": "voice"})
+    reply.tool_calls_meta = json.dumps(meta)
+    _db.session.commit()
+
+
+def _announcement(client, node):
+    return client.get(f"/api/voice/approval-announcement?node={node.id}")
+
+
+def test_a_reply_with_a_waiting_change_gets_the_clip(app, thread, clips):
+    from backend.utils.announcement_audio import ANNOUNCEMENT_TEXTS
+    ben, anna, nodes, reply, pending_id = thread
+    _voice_reply(reply)
+    client = _client(app, ben)
+
+    data = _announcement(client, reply).get_json()
+
+    assert data["count"] == 1 and data["duration"] == 4.2
+    assert data["url"].startswith(
+        "/api/voice/approval-announcement/one.mp3?v=")
+    assert clips["calls"] == [ANNOUNCEMENT_TEXTS["one"]]
+    assert clips["costs"] == [(ben.id, 4.2)]
+    audio = client.get(data["url"])
+    assert audio.status_code == 200 and audio.mimetype == "audio/mpeg"
+    assert audio.data == b"ID3" + ANNOUNCEMENT_TEXTS["one"].encode()
+
+
+def test_the_clip_is_made_once(app, thread, clips):
+    """Cached on disk: later replies, replays and the audio route cost no
+    speech call."""
+    ben, anna, nodes, reply, pending_id = thread
+    _voice_reply(reply)
+    client = _client(app, ben)
+    first = _announcement(client, reply).get_json()
+    second = _announcement(client, reply).get_json()
+    client.get(first["url"])
+
+    assert first == second
+    assert len(clips["calls"]) == 1 and len(clips["costs"]) == 1
+
+
+def test_another_voice_makes_another_clip(app, thread, clips):
+    ben, anna, nodes, reply, pending_id = thread
+    _voice_reply(reply)
+    client = _client(app, ben)
+    alloy = _announcement(client, reply).get_json()["url"]
+    clips["voice"] = "nova"
+    nova = _announcement(client, reply).get_json()["url"]
+
+    assert alloy != nova
+    assert len(clips["calls"]) == 2
+
+
+def test_several_waiting_changes_get_the_plural_clip(app, thread, clips):
+    from backend.utils.announcement_audio import ANNOUNCEMENT_TEXTS
+    ben, anna, nodes, reply, pending_id = thread
+    memory = UserArtifact.latest_for(ben.id, "memory")
+    fields = ApprovalHold(["other_user"], reply.id).hold(
+        "update_artifact", {"kind": "memory", "updated_content": "- tea",
+                            "base_version": 1}, reply, ben.id,
+        previous_artifact_id=memory.id, kind="memory")
+    meta = json.loads(reply.tool_calls_meta)
+    meta.append({"name": "update_artifact", "input": {"kind": "memory"},
+                 **fields})
+    reply.tool_calls_meta = json.dumps(meta)
+    _voice_reply(reply)
+
+    data = _announcement(_client(app, ben), reply).get_json()
+
+    assert data["count"] == 2
+    assert "/several.mp3?v=" in data["url"]
+    assert clips["calls"] == [ANNOUNCEMENT_TEXTS["several"]]
+    assert "2" not in ANNOUNCEMENT_TEXTS["several"]
+
+
+@pytest.mark.parametrize("approve", [True, False])
+def test_no_clip_once_the_change_is_decided(app, thread, clips, approve):
+    """A replay after the decision plays the reply alone."""
+    ben, anna, nodes, reply, pending_id = thread
+    _voice_reply(reply)
+    client = _client(app, ben)
+    assert _announcement(client, reply).get_json()["count"] == 1
+
+    verb = "approve" if approve else "reject"
+    client.post(f"/api/tool-approvals/{pending_id}/{verb}")
+
+    assert _announcement(client, reply).get_json() == {
+        "count": 0, "url": None, "duration": None}
+
+
+def test_no_clip_when_it_cannot_be_made(app, thread, clips):
+    """No TTS key or a provider error: no clip, the reply plays alone; the
+    change still waits and still blocks Voice."""
+    ben, anna, nodes, reply, pending_id = thread
+    _voice_reply(reply)
+    clips["fail"] = True
+    client = _client(app, ben)
+
+    assert _announcement(client, reply).get_json() == {
+        "count": 1, "url": None, "duration": None}
+    assert client.get(
+        "/api/voice/approval-announcement/one.mp3").status_code == 503
+    assert clips["costs"] == []
+    _refused(_init(client, reply))
+
+
+def test_only_the_users_own_voice_reply(app, thread, clips):
+    ben, anna, nodes, reply, pending_id = thread
+    # Not made in Voice mode (no "_mode" entry): nothing to announce.
+    assert _announcement(_client(app, ben), reply).get_json()["count"] == 0
+    _voice_reply(reply)
+    # Someone else's reply looks like no reply at all.
+    assert _announcement(_client(app, anna), reply).status_code == 404
+    assert _client(app, ben).get(
+        "/api/voice/approval-announcement/loud.mp3").status_code == 404
+    assert clips["calls"] == []

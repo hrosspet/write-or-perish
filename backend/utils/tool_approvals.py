@@ -29,11 +29,14 @@ they wait here like update_artifact.
 Voice mode (Peter, 2026-11-12): "A spoken announcement should also be
 added after the model reply, informing the user they need to confirm, or
 reject the tool called. Also, the lockscreen controls shouldn't allow next
-recording". A Voice reply whose calls wait ends its audio with a fixed
-sentence (approval_announcement, spoken by the reply's own TTS, so a
-replay says it too; the stored text is unchanged), and no Voice turn
-starts in a thread where a call waits (waiting_in_thread; the routes
-answer APPROVAL_PENDING_CODE).
+recording". And: "the announcement should be TTSed as a separate chunk
+and appended to the queue. So that when it's not pending, it's not voiced
+out anymore". A Voice reply whose calls wait is followed by a fixed spoken
+sentence: its own cached clip, which the players append after the reply
+while its calls wait (announcement_count, utils/announcement_audio). The
+reply's audio and text are unchanged. No Voice turn starts in a thread
+where a call waits (waiting_in_thread; the routes answer
+APPROVAL_PENDING_CODE).
 """
 import json
 from datetime import datetime, timedelta
@@ -411,18 +414,6 @@ def approval_pending_response(count):
                     "pending": count}), 409
 
 
-def approval_announcement(count):
-    """The fixed sentence a Voice reply's audio ends with when *count* of
-    its calls wait. Spoken by the reply's own TTS after its last words,
-    so it is in the reply's audio file and a replay says it too; the
-    reply's stored text (and so every later prompt) does not hold it."""
-    if count == 1:
-        return ("A change to your data is waiting. Approve or reject it on "
-                "the screen to continue.")
-    return (f"{count} changes to your data are waiting. Approve or reject "
-            "them on the screen to continue.")
-
-
 def _meta_entries(node):
     try:
         meta = json.loads(node.tool_calls_meta or "[]")
@@ -459,16 +450,15 @@ def waiting_in_reply(node):
     return count
 
 
-def approval_announcement_for(node):
-    """The sentence *node*'s audio ends with, or None: only the final node
-    of a Voice reply whose calls wait when its audio is made. Both TTS
-    paths ask it (tts_stream's live speech at the reply's finalize, and
-    the batch task), so a regenerated audio after the user decided has
-    none."""
+def announcement_count(node):
+    """How many calls of the Voice reply ending at *node* wait now: the
+    count its spoken announcement is for (utils/announcement_audio). 0 for
+    anything else: a reply not made in Voice mode, an interim step, a
+    reply whose calls were all decided. Read when the reply is played, so
+    once every call is decided a replay has no announcement."""
     if node is None or not _is_voice_reply(node):
-        return None
-    count = waiting_in_reply(node)
-    return approval_announcement(count) if count else None
+        return 0
+    return waiting_in_reply(node)
 
 
 def _chain_above(node):

@@ -120,15 +120,6 @@ class NodeSpeech:
             self.planner.close()
             self._turn.cv.notify_all()
 
-    def add_coda(self, text):
-        """End the node's audio with *text*, which its stored text does
-        not hold (the approval announcement, Peter 2026-11-12), in the
-        node's last chapter (ChunkPlanner.add_coda). Called before
-        release(), also when a tool call has closed the text already."""
-        with self._turn.cv:
-            self.planner.add_coda(text)
-            self._turn.cv.notify_all()
-
     def release(self):
         """The node is committed: once its chunks are done, its TTS can
         be completed (the SSE's all_complete then carries the node's

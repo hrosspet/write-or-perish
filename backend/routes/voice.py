@@ -339,6 +339,56 @@ def voice_availability():
                     "scope": refused.scope, "error": refused.message})
 
 
+# ── The approval announcement (Peter, 2026-11-12) ────────────────────────
+# "the announcement should be TTSed as a separate chunk and appended to the
+# queue. So that when it's not pending, it's not voiced out anymore"
+
+@voice_bp.route("/approval-announcement", methods=["GET"])
+@login_required
+def approval_announcement_info():
+    """Whether the Voice reply ending at ``?node=<id>`` is followed by the
+    spoken announcement now: ``{"count", "url", "duration"}``. *count* is
+    how many of its write calls wait for the user's approval (0 for a
+    reply not made in Voice mode, an interim step, or calls all decided);
+    *url* the cached clip the players append after the reply's last chunk
+    (utils/announcement_audio), or null when count is 0 or the clip can't
+    be made. Asked when the reply is played, so a replay after the user
+    decided has no announcement. A node that is not the user's reply
+    answers 404, like one that does not exist."""
+    from backend.utils.announcement_audio import ensure_clip, variant_for
+    from backend.utils.privacy import can_user_access_node
+    from backend.utils.tool_approvals import announcement_count
+    try:
+        node = Node.query.get(int(request.args.get("node", "")))
+    except (TypeError, ValueError):
+        return jsonify({"error": "node is required"}), 400
+    if (node is None or node.human_owner_id != current_user.id
+            or not can_user_access_node(node, current_user.id)):
+        return jsonify({"error": "Node not found"}), 404
+    count = announcement_count(node)
+    clip = ensure_clip(variant_for(count), current_user.id) if count else None
+    return jsonify({"count": count,
+                    "url": clip.url if clip else None,
+                    "duration": clip.duration if clip else None})
+
+
+@voice_bp.route("/approval-announcement/<variant>.mp3", methods=["GET"])
+@login_required
+def approval_announcement_audio(variant):
+    """The announcement clip (one change / several), made on the first
+    request and cached; 404 for another name, 503 when it can't be made."""
+    from flask import send_file
+    from backend.utils.announcement_audio import (
+        ANNOUNCEMENT_TEXTS, ensure_clip,
+    )
+    if variant not in ANNOUNCEMENT_TEXTS:
+        return jsonify({"error": "Not found"}), 404
+    clip = ensure_clip(variant, current_user.id)
+    if clip is None:
+        return jsonify({"error": "The announcement is not available."}), 503
+    return send_file(str(clip.path), mimetype="audio/mpeg", max_age=86400)
+
+
 # ── Where a voice turn's wait goes (#371 step 0) ─────────────────────────
 
 @voice_bp.route("/timing/clock", methods=["GET"])

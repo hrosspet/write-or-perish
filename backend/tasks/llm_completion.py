@@ -5588,16 +5588,6 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 if f_dispatch_tts:
                     target_node.tts_task_status = 'pending'
                 db.session.commit()
-                if f_speech is not None and write_hold:
-                    # Calls of this reply wait for the user's approval:
-                    # its audio ends saying so (Peter, 2026-11-12). The
-                    # batch path adds the same in generate_tts_audio.
-                    from backend.utils.tool_approvals import (
-                        approval_announcement_for,
-                    )
-                    f_coda = approval_announcement_for(target_node)
-                    if f_coda:
-                        f_speech.add_coda(f_coda)
                 if f_speech is not None:
                     f_speech.release()
                 if f_dispatch_tts:
