@@ -595,9 +595,9 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
         // A refusal says why aloud (#651); the thread's length is said with
         // its screen below.
         if (!isThreadTooLong(err)) sayTurnRefusal(responseRefusalCode(err));
-        // The monthly usage limit (#341): refused, not failed (no failure
-        // sound: the sentence has its own); the server's text says when it
-        // resets.
+        // The monthly usage limit (#341): refused, not failed, so no failure
+        // sound and no red dot; the server's text says when it resets (it
+        // used to show the bare code).
         if (isSpendCapError(err)) {
           addToast(err.response.data.message || REFUSAL_SENTENCES[SPEND_CAP_REFUSAL], 8000);
           setPhase('ready');
