@@ -121,14 +121,14 @@ def app_referrals_off(gateway):
 def _pair(inviter_kw=None, friend_kw=None):
     """An inviter with a live Standard subscription, and a friend it
     invited whose subscription has just been created."""
-    inviter = _user("ines", stripe_customer_id="cus_i",
-                    stripe_subscription_id="sub_i",
-                    subscription_status="active",
-                    subscription_level="standard", **(inviter_kw or {}))
-    friend = _user("fred", stripe_customer_id="cus_f",
-                   stripe_subscription_id="sub_f",
-                   subscription_status="trialing",
-                   subscription_level="standard", **(friend_kw or {}))
+    inviter = _user("ines", **{
+        "stripe_customer_id": "cus_i", "stripe_subscription_id": "sub_i",
+        "subscription_status": "active", "subscription_level": "standard",
+        **(inviter_kw or {})})
+    friend = _user("fred", **{
+        "stripe_customer_id": "cus_f", "stripe_subscription_id": "sub_f",
+        "subscription_status": "trialing", "subscription_level": "standard",
+        **(friend_kw or {})})
     _db.session.add(Referral(inviter_id=inviter.id, friend_id=friend.id))
     _db.session.commit()
     return inviter, friend
@@ -140,7 +140,7 @@ def _paid(gateway, sub_id="sub_f", customer="cus_f", amount=3570,
         sub_id, customer=customer, status=status)
     return {"id": invoice_id, "object": "invoice", "customer": customer,
             "subscription": sub_id, "amount_paid": amount, "total": amount,
-            "status": "paid"}
+            "currency": "usd", "status": "paid"}
 
 
 def _referral():
@@ -308,6 +308,8 @@ class TestReward:
         _post_event(app, _event("invoice.payment_succeeded", invoice,
                                 event_id="evt_b"))
         assert len(gateway.credits()) == 2
+        assert UserNotification.query.count() == 2
+        assert gateway.names().count("create_balance_transaction") == 2
 
     def test_a_retry_after_stripe_failed_part_way(self, app, gateway):
         """The friend's credit is made, then Stripe fails on the
@@ -354,6 +356,8 @@ class TestReward:
         _post_event(app, _event("invoice.paid", _paid(
             gateway, invoice_id="in_2"), event_id="e2"))
         assert len(gateway.credits()) == 2
+        assert UserNotification.query.count() == 2
+        assert gateway.names().count("create_balance_transaction") == 2
 
     def test_a_refund_after_the_reward_takes_nothing_back(
             self, app, gateway):
@@ -381,6 +385,7 @@ class TestReward:
         _post_event(app, _event("invoice.paid", _paid(
             gateway, invoice_id="in_9"), event_id="e3"))
         assert len(gateway.credits()) == 2
+        assert UserNotification.query.count() == 2
 
     def test_a_dispute_after_the_reward_takes_nothing_back(
             self, app, gateway):
@@ -395,6 +400,51 @@ class TestReward:
         assert r.status_code == 200
         assert len(gateway.credits()) == 2
         assert _referral().friend_reward == "granted"
+
+    def test_the_inviters_week_is_at_most_what_the_friend_paid(
+            self, app, gateway):
+        """A Supporter inviter, a friend on the discounted price: the
+        inviter's week is capped at the friend's first payment; the
+        friend's own week is 7/30 of their next invoice."""
+        _pair(inviter_kw={"subscription_level": "supporter"},
+              friend_kw={"subscription_level": "discounted"})
+        gateway.previews["sub_i"] = {"total": 11781, "currency": "usd"}
+        gateway.previews["sub_f"] = {"total": 1428, "currency": "usd"}
+        r = _post_event(app, _event("invoice.paid", dict(
+            _paid(gateway, amount=1428), currency="usd")))
+        assert r.status_code == 200
+        credits = {t["customer"]: t["amount"] for t in gateway.credits()}
+        assert credits["cus_i"] == -1428          # not -2749
+        assert credits["cus_f"] == -round(1428 * 7 / 30)
+        assert _referral().inviter_credit_cents == 1428
+
+    def test_a_cheaper_inviter_keeps_their_own_week(self, app, gateway):
+        """Control: below the cap, the inviter's own 7/30."""
+        _pair()
+        gateway.previews["sub_i"] = {"total": 1428, "currency": "usd"}
+        _post_event(app, _event("invoice.paid", dict(
+            _paid(gateway, amount=3570), currency="usd")))
+        credits = {t["customer"]: t["amount"] for t in gateway.credits()}
+        assert credits["cus_i"] == -round(1428 * 7 / 30)
+
+    def test_two_currencies_cap_at_a_standard_week(self, app, gateway):
+        """The friend paid in another currency: the inviter's week is at
+        most a week of the Standard price (7.00 USD)."""
+        _pair(inviter_kw={"subscription_level": "supporter"})
+        gateway.previews["sub_i"] = {"total": 11781, "currency": "usd"}
+        _post_event(app, _event("invoice.paid", dict(
+            _paid(gateway, amount=3200), currency="eur")))
+        credits = {t["customer"]: t["amount"] for t in gateway.credits()}
+        assert credits["cus_i"] == -700
+
+    def test_the_credit_key_differs_between_databases(self, app):
+        """Two databases sharing the sandbox have the same referral ids:
+        the key carries the referral's creation time."""
+        from backend.utils.referrals import _credit_key
+        a = Referral(id=3, created_at=datetime(2026, 11, 1))
+        b = Referral(id=3, created_at=datetime(2026, 11, 2))
+        assert _credit_key(a, "inviter") != _credit_key(b, "inviter")
+        assert _credit_key(a, "inviter").startswith("loore-referral-3-")
 
     def test_an_inviter_without_a_stripe_customer(self, app, gateway):
         """An account set by hand (alpha) never checked out: a customer is
@@ -652,13 +702,43 @@ class TestSignup:
             r = client.post("/auth/magic-link/send", json={
                 "email": "fred@example.com", "invite": code})
         assert r.status_code == 200
-        # Opened later, in another browser: the token carries the invite.
+        # Opened later in the same browser: the link records the invite.
         path = sent["url"].split("://", 1)[1].split("/", 1)[1]
-        r = signup_app.test_client().get("/" + path)
+        r = client.get("/" + path)
         assert r.status_code == 302
         friend = User.query.filter_by(email="fred@example.com").one()
         assert not friend.approved
         assert Referral.query.one().inviter_id == inviter.id
+
+    def _mail(self, client, email, invite):
+        sent = {}
+        with patch("backend.routes.auth.send_magic_link_email",
+                   lambda e, url: sent.update(url=url)):
+            client.post("/auth/magic-link/send",
+                        json={"email": email, "invite": invite})
+        return "/" + sent["url"].split("://", 1)[1].split("/", 1)[1]
+
+    def test_a_code_put_on_someone_elses_sign_in_records_nothing(
+            self, signup_app):
+        """Someone asks for a sign-in link for another person's address
+        with their own code: that person signs in through it, and no
+        referral is recorded (nor would its reward be sent)."""
+        _inviter, code = _inviter_code()
+        link = self._mail(signup_app.test_client(), "vic@example.com", code)
+        victim = signup_app.test_client()
+        r = victim.get(link)
+        assert r.status_code == 302
+        assert User.query.filter_by(email="vic@example.com").one()
+        assert Referral.query.count() == 0
+
+    def test_the_link_opened_in_another_browser_records_nothing(
+            self, signup_app):
+        """The price of the rule above: the invite is followed on one
+        device and the mail opened on another."""
+        _inviter, code = _inviter_code()
+        link = self._mail(signup_app.test_client(), "fred@example.com", code)
+        signup_app.test_client().get(link)
+        assert Referral.query.count() == 0
 
     def test_a_code_changes_no_answer(self, signup_app):
         """Control (privacy): the send answer is the same for a real, a

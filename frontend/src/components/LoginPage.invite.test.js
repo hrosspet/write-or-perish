@@ -50,4 +50,6 @@ test('the email link request carries the invite', async () => {
   const body = JSON.parse(global.fetch.mock.calls[0][1].body);
   expect(body.email).toBe('fred@example.com');
   expect(body.invite).toBe(CODE);
+  // The session cookie goes along: the link counts for this browser only.
+  expect(global.fetch.mock.calls[0][1].credentials).toBe('include');
 });

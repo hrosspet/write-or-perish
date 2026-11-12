@@ -311,9 +311,12 @@ def magic_link_send():
     data = request.get_json() or {}
     email = (data.get("email") or "").strip().lower()
     next_url = data.get("next_url")
-    # An invite code (#439) rides in the signed link; nothing in the answer
-    # depends on it.
+    # An invite code (#439) rides in the signed link, and waits in this
+    # browser's session: the link records it only when opened in the
+    # browser that asked for it. Nothing in the answer depends on it.
     invite = referrals.clean_code(data.get("invite"))
+    if invite:
+        session[referrals.SESSION_KEY] = invite
 
     if not is_valid_email(email):
         return jsonify({"error": "Please enter a valid email address."}), 400
@@ -363,7 +366,13 @@ def magic_link_verify():
         return redirect(f"{frontend_url}/login?error=invalid_or_expired")
 
     token_h = hash_token(token)
+    # The invite in the link counts only when this browser holds the same
+    # code (it asked for the link, or followed the invite link): a link
+    # someone else asked for with their code records nothing.
+    held = session.pop(referrals.SESSION_KEY, None)
     invite = payload.get("invite")
+    if not invite or invite != held:
+        invite = None
 
     user = User.query.filter_by(email=email).first()
     new_account = user is None

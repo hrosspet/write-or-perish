@@ -187,6 +187,25 @@ def week_credit(gateway, user, config=None):
             (cfg.get("SUBSCRIPTION_CURRENCY") or "usd").lower())
 
 
+def inviter_cap(invoice, currency, config=None):
+    """The most the inviter's week may be: what the friend paid on the
+    first invoice, when both are in one currency (always, while every
+    price is in SUBSCRIPTION_CURRENCY). In two currencies, a week of the
+    Standard price when the inviter's currency is the prices' own; None
+    when there is no sound comparison (the credit is then left to be
+    given by hand)."""
+    from backend.utils.subscriptions import level_price_cents
+    cfg = _config(config)
+    paid_currency = (invoice.get("currency") or "").lower()
+    if paid_currency and paid_currency == currency:
+        return int(invoice.get("amount_paid") or 0)
+    if currency == (cfg.get("SUBSCRIPTION_CURRENCY") or "usd").lower():
+        days = int(cfg.get("REFERRAL_REWARD_DAYS") or 7)
+        return round(level_price_cents("standard", cfg) * days
+                     / DAYS_PER_MONTH)
+    return None
+
+
 def _customer_for(gateway, user):
     """The account's Stripe customer, made now when it has none (the same
     idempotency key as a checkout's, so the two never make two). Does not
@@ -215,11 +234,22 @@ def _existing_credit(gateway, customer, referral, side):
     return None
 
 
-def _grant_side(gateway, referral, side, user, config=None):
-    """Give *user* (the inviter or the friend) its free week, once. A
-    refusal Stripe would repeat is recorded as "failed" and logged, so the
-    friend's subscription event still applies; anything else raises, and
-    the event is sent again."""
+def _credit_key(referral, side):
+    """Stripe's idempotency key for one side's credit. The referral's
+    creation time is in it: databases sharing one Stripe account (staging
+    and local development on the sandbox) have the same referral ids. The
+    mark in the credit's metadata, looked up first, is the real guard."""
+    created = referral.created_at
+    stamp = f"-{int(created.timestamp())}" if created else ""
+    return f"loore-referral-{referral.id}{stamp}-{side}"
+
+
+def _grant_side(gateway, referral, side, user, config=None, invoice=None):
+    """Give *user* (the inviter or the friend) its free week, once. The
+    inviter's is at most what the friend paid on *invoice* (inviter_cap).
+    A refusal Stripe would repeat is recorded as "failed" and logged, so
+    the friend's subscription event still applies; anything else raises,
+    and the event is sent again."""
     if user is None:
         setattr(referral, f"{side}_reward", "skipped_no_account")
         return False
@@ -231,6 +261,11 @@ def _grant_side(gateway, referral, side, user, config=None):
         txn = _existing_credit(gateway, customer, referral, side)
         if txn is None:
             cents, currency = week_credit(gateway, user, config)
+            if side == "inviter" and invoice is not None:
+                cap = inviter_cap(invoice, currency, config)
+                if cap is None:
+                    raise RewardRefused("no sound comparison of currencies")
+                cents = min(cents, cap)
             if cents <= 0:
                 raise RewardRefused("nothing to credit")
             txn = gateway.create_balance_transaction(
@@ -238,7 +273,7 @@ def _grant_side(gateway, referral, side, user, config=None):
                 {"amount": -cents, "currency": currency,
                  "description": "Loore: a free week for an invitation",
                  "metadata": {"loore_referral": _marker(referral, side)}},
-                idempotency_key=f"loore-referral-{referral.id}-{side}")
+                idempotency_key=_credit_key(referral, side))
     except Exception as e:  # noqa: BLE001
         if not _permanent(e):
             raise
@@ -295,7 +330,8 @@ def grant_on_first_payment(gateway, friend, invoice, config=None):
                if referral.inviter_id else None)
     if _grant_side(gateway, referral, "friend", friend, config):
         _notify(friend.id, FRIEND_NOTICE)
-    if _grant_side(gateway, referral, "inviter", inviter, config):
+    if _grant_side(gateway, referral, "inviter", inviter, config,
+                   invoice=invoice):
         _notify(inviter.id, INVITER_NOTICE)
     logger.info("Referral %s rewarded: friend %s, inviter %s",
                 referral.id, referral.friend_reward, referral.inviter_reward)

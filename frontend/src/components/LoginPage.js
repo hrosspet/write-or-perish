@@ -257,6 +257,9 @@ function LoginPage() {
       const res = await fetch(`${backendUrl}/auth/magic-link/send`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        // The session cookie goes along: an invite code (#439) counts only
+        // when the link is opened in the browser that asked for it.
+        credentials: "include",
         // The invite code (#439) rides in the signed link the email carries.
         body: JSON.stringify({
           email: emailInput,
