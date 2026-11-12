@@ -2,8 +2,9 @@
 // proposed waits for approval (409 `approval_pending`) and in a thread too
 // long for another reply (409 `thread_too_long`, #648). The server asks the
 // waiting change first, so where both apply the first press shows the change
-// (no sound, nothing said) and, once it is decided, the next press meets the
-// length (the error sound, then the sentence, then the limit).
+// and, once it is decided, the next press meets the length (the error sound,
+// then the sentence, then the limit). Since #651 the waiting change is said
+// too, in its own sentence, never as the length.
 let mockStreamingOptions;
 jest.mock('./useStreamingTranscription', () => ({
   useStreamingTranscription: (options) => {
@@ -57,9 +58,11 @@ import { useVoiceSession } from './useVoiceSession';
 import {
   SENTENCE_AFTER_SOUND_MS, THREAD_LIMIT_SPOKEN, resetSpeechForTests,
 } from '../utils/threadLength';
+import { APPROVAL_REFUSAL, REFUSAL_SENTENCES } from '../utils/spokenRefusal';
 
 const APPROVAL_SKIPPED = "Your recording is saved. Loore didn't reply because a "
   + 'change to your data waits for your approval. Approve or reject it, then continue.';
+const APPROVAL_SPOKEN = REFUSAL_SENTENCES[APPROVAL_REFUSAL];
 
 let spoken;
 let onAiUsageRefused;
@@ -90,18 +93,28 @@ beforeEach(() => {
     speak: (u) => { spoken.push(u.text); },
   };
   window.SpeechSynthesisUtterance = function Utterance(text) { this.text = text; };
+  // A browser that plays no clip outside a tap: its own speech says it.
+  window.Audio = function RefusedAudio() {
+    this.addEventListener = () => {};
+    this.play = () => ({ then: (ok, bad) => bad(new Error('NotAllowedError')) });
+    this.pause = () => {};
+    this.removeAttribute = () => {};
+    this.load = () => {};
+  };
 });
 
 afterEach(() => {
   jest.useRealTimers();
   delete window.speechSynthesis;
   delete window.SpeechSynthesisUtterance;
+  delete window.Audio;
 });
 
 test('both: the first press shows the waiting change, the next one meets the length', () => {
   const { result } = renderSession();
 
-  // The server answers approval_pending first.
+  // The server answers approval_pending first: shown, and said (#651), not
+  // a failure: no error sound.
   act(() => {
     mockStreamingOptions.onError({ startup: true, approvalPending: true });
   });
@@ -109,7 +122,7 @@ test('both: the first press shows the waiting change, the next one meets the len
   expect(onApprovalPending).toHaveBeenCalledTimes(1);
   expect(onAiUsageRefused).not.toHaveBeenCalled();
   expect(mockPlayErrorSound).not.toHaveBeenCalled();
-  expect(said()).toEqual([]);
+  expect(said()).toEqual([APPROVAL_SPOKEN]);
   expect(result.current.phase).toBe('ready');
   expect(result.current.hasError).toBe(false);
 
@@ -119,21 +132,21 @@ test('both: the first press shows the waiting change, the next one meets the len
   });
   expect(mockPlayErrorSound).toHaveBeenCalledTimes(1);
   afterSound();
-  expect(said()).toEqual([THREAD_LIMIT_SPOKEN]);
+  expect(said()).toEqual([APPROVAL_SPOKEN, THREAD_LIMIT_SPOKEN]);
   expect(onAiUsageRefused.mock.calls[0][0]).toBe('too_long');
   expect(onApprovalPending).toHaveBeenCalledTimes(1);
   expect(result.current.phase).toBe('ready');
 });
 
-test('the waiting change alone: shown, nothing said', () => {
+test('the waiting change alone: shown and said, not as the length', () => {
   renderSession();
   act(() => {
     mockStreamingOptions.onError({ startup: true, approvalPending: true });
   });
   afterSound();
   expect(onApprovalPending).toHaveBeenCalledTimes(1);
-  expect(said()).toEqual([]);
-  expect(mockPlayErrorSound).not.toHaveBeenCalled();
+  expect(said()).toEqual([APPROVAL_SPOKEN]);
+  expect(onAiUsageRefused).not.toHaveBeenCalled();
 });
 
 test('the length alone: said and shown, no dialog asked for', () => {
@@ -147,7 +160,7 @@ test('the length alone: said and shown, no dialog asked for', () => {
   expect(onApprovalPending).not.toHaveBeenCalled();
 });
 
-test('the fallback POST: approval_pending shows the change, thread_too_long is said', async () => {
+test('the fallback POST: approval_pending shows the change; each is said', async () => {
   renderSession();
 
   mockPost.mockRejectedValueOnce(refusal('approval_pending', { pending: 1 }));
@@ -157,7 +170,7 @@ test('the fallback POST: approval_pending shows the change, thread_too_long is s
   afterSound();
   expect(onApprovalPending).toHaveBeenCalledTimes(1);
   expect(mockAddToast).toHaveBeenCalledWith('refused: approval_pending', 8000);
-  expect(said()).toEqual([]);
+  expect(said()).toEqual([APPROVAL_SPOKEN]);
   expect(mockPlayErrorSound).not.toHaveBeenCalled();
 
   mockPost.mockRejectedValueOnce(refusal('thread_too_long', { user_node_id: 8 }));
@@ -165,21 +178,21 @@ test('the fallback POST: approval_pending shows the change, thread_too_long is s
     await mockStreamingOptions.onComplete({ sessionId: 's2', content: 'more words', llmNodeId: null });
   });
   afterSound();
-  expect(said()).toEqual([THREAD_LIMIT_SPOKEN]);
+  expect(said()).toEqual([APPROVAL_SPOKEN, THREAD_LIMIT_SPOKEN]);
   expect(onAiUsageRefused.mock.calls[0][0]).toBe('too_long');
   expect(onApprovalPending).toHaveBeenCalledTimes(1);
 });
 
-test('a recording saved without a reply for a waiting change is not said as the length', async () => {
+test('a recording saved without a reply for a waiting change is said as the change, not the length', async () => {
   renderSession();
   await act(async () => {
     await mockStreamingOptions.onComplete({
       sessionId: 's1', content: 'my words', llmNodeId: null,
-      warning: APPROVAL_SKIPPED, warningCode: null,
+      warning: APPROVAL_SKIPPED, warningCode: 'approval_pending',
     });
   });
   afterSound();
   expect(mockAddToast).toHaveBeenCalledWith(APPROVAL_SKIPPED, 8000);
-  expect(said()).toEqual([]);
+  expect(said()).toEqual([APPROVAL_SPOKEN]);
   expect(onAiUsageRefused).not.toHaveBeenCalled();
 });

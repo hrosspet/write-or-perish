@@ -643,7 +643,7 @@ function VoiceSession({
   const {
     phase, isStopping, hasError, isOnline, streaming, audio, handleStart, handleStop,
     handleContinue, handleResumeSession, handleCancelProcessing, setThreadParentId,
-    handleResumeRecording, getThreadParentId,
+    handleResumeRecording, getThreadParentId, refuseForUsageLimit,
   } = useVoiceSession({
     apiEndpoint: '/voice',
     ttsTitle: 'Voice',
@@ -1067,6 +1067,8 @@ function VoiceSession({
               if (isSpendBlocked()) {
                 notifySpendBlocked();
                 addToast(spendCapToastMessage('record'), 8000);
+                // ...and says it (#651): the user may not be looking.
+                refuseForUsageLimit();
                 return;
               }
               handleStart();
@@ -1397,6 +1399,8 @@ function VoiceSession({
           if (isSpendBlocked()) {
             notifySpendBlocked();
             addToast(spendCapToastMessage('record'), 8000);
+            // ...and says it (#651), the reply paused first.
+            refuseForUsageLimit();
             return;
           }
           handleContinue(voiceReset);

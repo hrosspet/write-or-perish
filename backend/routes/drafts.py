@@ -1420,8 +1420,8 @@ def get_streaming_status(session_id):
     # a skipped reply as "no server-side chain" and saves the entry again.
     if draft.streaming_warning:
         status_data["warning"] = draft.streaming_warning
-        # A reply skipped for the thread's length (#648): Voice says it.
-        from backend.utils.thread_size import skipped_reply_code
+        # A reply skipped for a refusal (#648, #651): Voice says it.
+        from backend.utils.voice_refusals import skipped_reply_code
         code = skipped_reply_code(draft.streaming_warning)
         if code:
             status_data["warning_code"] = code
