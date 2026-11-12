@@ -26,6 +26,7 @@ import BubbleKebabMenu from "./BubbleKebabMenu";
 import QuotedContent from "./QuotedContent";
 import FeedPicks from "./FeedPicks";
 import ToolActionsTaken from "./ToolActionsTaken";
+import ToolApprovalDialog, { groupByTurn } from "./ToolApprovalDialog";
 import { ReadWindowLine, ReadReplyTail, ReadCancelledLine } from "./ReadReply";
 
 import DeleteConfirmDialog from "./DeleteConfirmDialog";
@@ -200,6 +201,24 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     });
   }, []);
   const highlightedNodeRef = useRef(null);
+  // The AI's calls that change the user's data and wait for their
+  // approval (Peter, 2026-11-12): the server's pending_approvals for this
+  // thread. The dialog shows one reply's calls at a time, opens by itself
+  // when calls are found, and closing it decides nothing.
+  const [pendingApprovals, setPendingApprovals] = useState([]);
+  const [approvalsOpen, setApprovalsOpen] = useState(false);
+  const [approvalBusy, setApprovalBusy] = useState({});
+  const [approvalErrors, setApprovalErrors] = useState({});
+  const showApprovals = useCallback((items) => {
+    const list = items || [];
+    setPendingApprovals(list);
+    if (list.length) setApprovalsOpen(true);
+  }, []);
+  const refreshApprovals = useCallback(() => {
+    api.get('/tool-approvals', { params: { node: id } })
+      .then((res) => showApprovals(res.data?.pending))
+      .catch(() => {});
+  }, [id, showApprovals]);
 
   // `autoGenerate` is the single source of truth. Defaults to true on
   // a fresh install (see useState initializer) and persists across
@@ -269,6 +288,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
       .then((response) => {
         setNode(response.data);
         setLoading(false);
+        showApprovals(response.data?.pending_approvals);
         // /node/<id> is server-rendered: a private node arrives in the
         // "Not found" shell (404 for private-or-missing alike, so ids can't
         // be probed), so the tab title has to be set here once the
@@ -298,7 +318,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     return () => {
       document.title = 'Loore';
     };
-  }, [id]);
+  }, [id, showApprovals]);
 
   // Keep the tab title with the content: a pending reply loads as its
   // placeholder text and is patched in place when the batch lands, so
@@ -448,6 +468,8 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
           feed_picks_count: llmData.feed_picks_count ?? prev.feed_picks_count,
           llm_task_status: 'completed',
         } : prev);
+        // Calls the reply made that wait for the user's approval.
+        refreshApprovals();
         // A finished gleaning also has its render now (which day it read,
         // how many tweets: the window line and the empty day's count),
         // which the poll does not carry: fetch the node once more.
@@ -840,6 +862,41 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
 
   // The reply is watched on its own node from the start (#367): the
   // model thinking, then the text as it is written.
+  // Approve or reject one waiting call. The answer lists the reply's calls
+  // still waiting; a call another device decided (404) just goes.
+  const decideApproval = async (item, approve) => {
+    setApprovalBusy((b) => ({ ...b, [item.id]: true }));
+    setApprovalErrors((e) => ({ ...e, [item.id]: null }));
+    const replaceTurn = (rest) => setPendingApprovals((all) => [
+      ...all.filter((p) => p.turn_node_id !== item.turn_node_id),
+      ...(rest || []),
+    ]);
+    try {
+      const res = await api.post(
+        `/tool-approvals/${item.id}/${approve ? 'approve' : 'reject'}`);
+      replaceTurn(res.data?.pending);
+      if (res.data?.outcome === 'failed') {
+        setApprovalErrors((e) => ({ ...e, [item.id]: res.data.error }));
+      } else {
+        // The reply's Actions taken now say what happened.
+        api.get(`/nodes/${id}`).then((r) => setNode(r.data)).catch(() => {});
+      }
+    } catch (err) {
+      if (err?.response?.status === 404) {
+        setPendingApprovals((all) => all.filter((p) => p.id !== item.id));
+      } else {
+        setApprovalErrors((e) => ({
+          ...e,
+          [item.id]: err?.response?.data?.error
+            || "Loore couldn't make this change. It still waits for your approval.",
+        }));
+      }
+    } finally {
+      setApprovalBusy((b) => ({ ...b, [item.id]: false }));
+    }
+  };
+  const approvalGroups = groupByTurn(pendingApprovals);
+
   const handleLLMResponse = () => {
     setError("");
     setLlmRequesting(true);
@@ -1745,6 +1802,22 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
           expanded={toolActionsExpanded}
           onToggle={() => setToolActionsExpanded(!toolActionsExpanded)}
         />
+        {pendingApprovals.length > 0 && !approvalsOpen && (
+          <button
+            type="button"
+            onClick={() => setApprovalsOpen(true)}
+            style={{
+              marginTop: '10px', background: 'none', border: 'none', padding: 0,
+              cursor: 'pointer', fontFamily: 'var(--sans)', fontSize: '0.8rem',
+              fontWeight: 300, color: 'var(--accent)', textAlign: 'left',
+            }}
+          >
+            {pendingApprovals.length === 1
+              ? '1 change waits for your approval'
+              : `${pendingApprovals.length} changes wait for your approval`}
+            {' · Review'}
+          </button>
+        )}
       </div>
       <div style={actionContainerStyle}>
         <NodeFooter
@@ -1997,6 +2070,14 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
           }}
         />
       )}
+      <ToolApprovalDialog
+        open={approvalsOpen && approvalGroups.length > 0}
+        items={approvalGroups[0]}
+        busy={approvalBusy}
+        errors={approvalErrors}
+        onDecide={decideApproval}
+        onClose={() => setApprovalsOpen(false)}
+      />
       <DeleteConfirmDialog
         open={!!deleteTarget}
         mode="single"
