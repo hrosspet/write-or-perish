@@ -55,9 +55,11 @@ from backend.utils.audio_storage import (
 )
 from backend.utils.llm_nodes import (
     AIUsageRefused, ReadOnlyModelRefused, ai_usage_refused_response,
-    create_llm_placeholder, pick_model_for_generation,
+    REPLY_IN_PROGRESS_CODE, REPLY_IN_PROGRESS_MESSAGE,
+    auto_generate_off_response, auto_generate_refusal,
+    create_llm_placeholder, pick_model_for_generation, reply_in_progress,
     read_only_model_refusal, read_only_model_response, resolve_chat_model,
-    resolve_read_model,
+    resolve_read_model, shared_with_others,
 )
 from backend.utils.placeholders import UserExportValidationError
 
@@ -126,17 +128,20 @@ def _allowed_file(filename: str) -> bool:
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
-def _upload_reply_options(values, parent_id, ai_usage):
+def _upload_reply_options(values, parent_id, ai_usage, privacy_level=None):
     """Parse an audio upload's Text-mode decisions (#342): `agentic` (the
     new thread gets a system node with the textmode prompt, as a typed or
     recorded entry does) and `auto_generate` (an LLM reply once the
     transcript exists; `model` optional). *values* is the multipart form or
     the chunked-upload init JSON.
 
-    Returns (agentic, auto_reply_model, error_response). The reply model is
-    None when no reply was asked for. Both decisions start a new thread, so
-    they are refused under a parent; and like /textmode/start they need an
-    AI-readable ai_usage.
+    Returns (agentic, auto_reply_model, error_response, auto_off). The
+    reply model is None when no reply was asked for, and when the upload
+    is shared with others (*privacy_level* public or circles): then
+    *auto_off* is the AutoGenerateOff the answer reports, and the entry is
+    kept without a reply (Peter, 2026-11-12). Both decisions start a new
+    thread, so they are refused under a parent; and like /textmode/start
+    they need an AI-readable ai_usage.
     """
     def _flag(key):
         v = values.get(key)
@@ -144,14 +149,18 @@ def _upload_reply_options(values, parent_id, ai_usage):
 
     agentic, auto_generate = _flag("agentic"), _flag("auto_generate")
     if not (agentic or auto_generate):
-        return False, None, None
+        return False, None, None, None
     if parent_id:
         return False, None, (jsonify({
             "error": "agentic / auto_generate uploads start a new thread",
-        }), 400)
+        }), 400), None
     from backend.utils.privacy import AI_ALLOWED
     if ai_usage not in AI_ALLOWED:
-        return False, None, ai_usage_refused_response()
+        return False, None, ai_usage_refused_response(), None
+    auto_off = (auto_generate_refusal(privacy_level=privacy_level)
+                if auto_generate else None)
+    if auto_off is not None:
+        auto_generate = False
     model_id = None
     if auto_generate:
         model_id = values.get("model") or pick_model_for_generation(
@@ -159,13 +168,13 @@ def _upload_reply_options(values, parent_id, ai_usage):
         if model_id not in current_app.config["SUPPORTED_MODELS"]:
             return False, None, (jsonify({
                 "error": f"Unsupported model: {model_id}",
-            }), 400)
+            }), 400), None
         # A new thread is never a read: a read-only model is refused here,
         # before the upload is stored, not after the transcript.
         refused = read_only_model_refusal(model_id)
         if refused is not None:
-            return False, None, read_only_model_response(refused)
-    return agentic, model_id, None
+            return False, None, read_only_model_response(refused), None
+    return agentic, model_id, None, auto_off
 
 
 def _save_audio_file(file_storage, user_id: int, node_id: int, variant: str) -> str:
@@ -770,8 +779,8 @@ def create_node():
                     "code": "public_reply_required",
                 }), 400
 
-        agentic, auto_reply_model, err = _upload_reply_options(
-            request.form, parent_id, ai_usage)
+        agentic, auto_reply_model, err, auto_off = _upload_reply_options(
+            request.form, parent_id, ai_usage, privacy_level)
         if err is not None:
             return err
         system_node = None
@@ -845,6 +854,9 @@ def create_node():
         }
         if system_node is not None:
             response["conversation_id"] = system_node.id
+        if auto_off is not None:
+            response.update(llm_error=auto_off.message,
+                            llm_error_code=auto_off.code)
         return jsonify(response), 201
 
     # ------------------------------------------------------------------
@@ -887,6 +899,13 @@ def create_node():
                 "error": "Replies under public posts are public.",
                 "code": "public_reply_required",
             }), 400
+
+    # A public entry quotes only public nodes (Peter, 2026-11-12).
+    if privacy_level == PrivacyLevel.PUBLIC:
+        from backend.utils.publish_quotes import publish_refusal
+        refusal = publish_refusal(content, current_user.id)
+        if refusal is not None:
+            return refusal
 
     # Content above the per-node cap is auto-split into a serial chain
     # of nodes (first segment keeps this node's id). A single oversized
@@ -990,6 +1009,15 @@ def update_node(node_id):
         privacy_level = data["privacy_level"]
         if not validate_privacy_level(privacy_level):
             return jsonify({"error": f"Invalid privacy_level: {privacy_level}"}), 400
+        # An AI reply is shared by its owner once it is written, after
+        # they have read it (Peter, 2026-11-12): not while it is.
+        if (shared_with_others(privacy_level=privacy_level)
+                and privacy_level != node.privacy_level
+                and reply_in_progress(node)):
+            return jsonify({
+                "error": REPLY_IN_PROGRESS_MESSAGE,
+                "code": REPLY_IN_PROGRESS_CODE,
+            }), 409
         node.set_privacy_level(privacy_level)
         # Auto-unpin if node is made private
         if privacy_level == "private" and node.pinned_at is not None:
@@ -1084,6 +1112,34 @@ def update_node(node_id):
             privacy_level=node.privacy_level if privacy_changed else None,
             ai_usage=node.ai_usage if ai_usage_changed else None,
         )
+
+    # A public node quotes only public nodes (Peter, 2026-11-12): a node
+    # made public here, with the replies it carries along, and new quotes
+    # in a public node's edited text. Nothing is saved when one quotes a
+    # node that is not public; the answer names it.
+    if node.privacy_level == "public" and (privacy_changed or content_changed):
+        from backend.utils.publish_quotes import publish_refusal
+        from backend.utils.quotes import find_quote_ids
+        made_public = []
+        if privacy_changed:
+            made_public = [node] + [n for n in cascaded
+                                    if n.privacy_level == "public"]
+        becoming = {n.id for n in made_public}
+        refusal = None
+        if made_public:
+            refusal = publish_refusal(
+                [new_content if n is node else n.get_content()
+                 for n in made_public],
+                current_user.id, becoming_public=becoming)
+        if refusal is None and not privacy_changed:
+            # An edit of a public node: the quotes it already had stay
+            # as they are (nodes published before this rule).
+            refusal = publish_refusal(
+                new_content, current_user.id, becoming_public=becoming,
+                skip_ids=find_quote_ids(old_content or ""))
+        if refusal is not None:
+            db.session.rollback()
+            return refusal
     try:
         db.session.commit()
     except Exception as e:
@@ -1578,6 +1634,13 @@ def get_node(node_id):
         "glean_thread": is_glean_root(
             ancestor_nodes[-1] if ancestor_nodes else node),
     }
+    # Write tool calls of the viewer's replies in this thread that wait
+    # for their approval (utils/tool_approvals, Peter 2026-11-12): one
+    # indexed query over the nodes already in hand.
+    from backend.utils.tool_approvals import pending_for_user
+    pending = pending_for_user(current_user.id, [n.id for n in render_set])
+    if pending:
+        node_data["pending_approvals"] = pending
     # A long entry is saved as a chain of parts, and its reply goes under
     # the last one: on an earlier part, the owner's page looks there for
     # a reply. The subtree is prefetched above, so this costs no query.
@@ -1853,6 +1916,14 @@ def request_llm_response(node_id):
     model_id = data.get("model")
     source_mode = data.get("source_mode")
 
+    # The clients' automatic request (auto-generate after an entry) says
+    # so: none under a node other people can read (Peter, 2026-11-12).
+    # LLM Response, the user's own request, is not automatic.
+    if data.get("auto_generate") is True:
+        refused = auto_generate_refusal(parent_node)
+        if refused is not None:
+            return auto_generate_off_response(refused)
+
     if source_mode is not None and source_mode not in ("voice", "textmode"):
         return jsonify({"error": f"Invalid source_mode: {source_mode}"}), 400
 
@@ -1867,13 +1938,13 @@ def request_llm_response(node_id):
             "supported_models": list(current_app.config["SUPPORTED_MODELS"].keys())
         }), 400
 
-    # Create placeholder LLM node and enqueue task
-    # AI nodes inherit privacy settings from their parent node
+    # Create placeholder LLM node and enqueue task. The reply takes the
+    # parent's AI usage; it is private whatever the parent's privacy
+    # (create_llm_placeholder, Peter 2026-11-12).
     from backend.utils.node_deletion import ParentDeletedError
     try:
         llm_node, task_id = create_llm_placeholder(
             parent_node.id, model_id, current_user.id,
-            privacy_level=parent_node.privacy_level,
             ai_usage=parent_node.ai_usage,
             source_mode=source_mode,
         )
@@ -2622,8 +2693,8 @@ def init_chunked_upload():
     if err is not None:
         return err
 
-    agentic, auto_reply_model, err = _upload_reply_options(
-        data, parent_id, ai_usage)
+    agentic, auto_reply_model, err, auto_off = _upload_reply_options(
+        data, parent_id, ai_usage, privacy_level)
     if err is not None:
         return err
     system_node = None
@@ -2682,6 +2753,9 @@ def init_chunked_upload():
     }
     if system_node is not None:
         response["conversation_id"] = system_node.id
+    if auto_off is not None:
+        response.update(llm_error=auto_off.message,
+                        llm_error_code=auto_off.code)
     return jsonify(response), 201
 
 

@@ -59,7 +59,10 @@ struct TextModeView: View {
 
     /// The page's own submit (web `WritePage.handleSubmit`). `glean` sends
     /// `entry: "glean"` with the entry that starts the thread (typed or dictated).
-    static func submit(_ s: NodeFormSubmission, app: AppState, glean: Bool = false) async throws -> NodeFormResult {
+    /// A public or circles entry asks for no automatic reply, whatever the stored
+    /// auto-generate choice (which stays as it is).
+    static func submit(_ s: NodeFormSubmission, app: AppState, glean: Bool = false,
+                       defaults: UserDefaults = .standard) async throws -> NodeFormResult {
         if !s.aiUsage.allowsAI {
             app.toasts.show("Turning off auto-generate. AI usage on some nodes is turned off.", duration: 8)
             if let sid = s.streamingSessionId {
@@ -74,8 +77,9 @@ struct TextModeView: View {
             app.signals.post(.nodeCreated(created.id))
             return NodeFormResult(id: created.id)
         }
-        let stored = UserDefaults.standard.object(forKey: DefaultsKey.autoGenerate)
-        let autoGenerate = stored == nil ? true : UserDefaults.standard.bool(forKey: DefaultsKey.autoGenerate)
+        let stored = defaults.object(forKey: DefaultsKey.autoGenerate)
+        let autoGenerate = (stored == nil ? true : defaults.bool(forKey: DefaultsKey.autoGenerate))
+            && !s.privacy.isSharedWithOthers
         if let sid = s.streamingSessionId {
             var body: [String: JSONValue] = [
                 "content": .string(s.content), "agentic": .bool(true), "auto_generate": .bool(autoGenerate),

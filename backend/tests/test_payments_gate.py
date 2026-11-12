@@ -54,8 +54,18 @@ def _affected(k):
             or k == "backend.models")
 
 
+def _stubbed_backend_modules():
+    """backend.* modules an earlier test replaced with a MagicMock (e.g. the
+    llm_completion task module): the real app needs the real ones."""
+    return {k: v for k, v in sys.modules.items()
+            if k.startswith("backend.") and isinstance(v, MagicMock)}
+
+
 @pytest.fixture
 def real_app(monkeypatch):
+    stubs = _stubbed_backend_modules()
+    for k in stubs:
+        del sys.modules[k]
     saved = {k: sys.modules[k] for k in list(sys.modules) if _affected(k)}
     sys.modules["flask_login"] = _real_flask_login
     sys.modules["backend.models"] = _real_backend_models
@@ -80,6 +90,7 @@ def real_app(monkeypatch):
             del sys.modules[k]
     for k, mod in saved.items():
         sys.modules[k] = mod
+    sys.modules.update(stubs)
 
 
 def _user(name, **kw):
@@ -161,6 +172,108 @@ def test_other_accounts_are_not_stopped(real_app, kw):
         r = c.get(url)
         body = r.get_json(silent=True) or {}
         assert body.get("error") != "no_subscription", (url, kw)
+
+
+# Routes main added in merge train #652, listed by name so a later route
+# change shows up here: waiting write tool calls (Peter, 2026-11-12) and
+# the re-import's profile-rebuild answer (#625).
+NEW_ROUTES = [
+    ("GET", "/api/tool-approvals?node=1"),
+    ("POST", "/api/tool-approvals/1/approve"),
+    ("POST", "/api/tool-approvals/1/reject"),
+    ("POST", "/api/import/profile-rebuild"),
+]
+
+
+def test_the_routes_from_main_are_in_the_url_map(real_app):
+    rules = {(m, r) for m, r, _u in _routes(real_app)}
+    for method, rule in [("GET", "/api/tool-approvals"),
+                         ("POST", "/api/tool-approvals/<int:draft_id>/approve"),
+                         ("POST", "/api/tool-approvals/<int:draft_id>/reject"),
+                         ("POST", "/api/import/profile-rebuild")]:
+        assert (method, rule) in rules, (method, rule)
+
+
+def test_the_routes_from_main_refuse_an_account_not_let_in(real_app):
+    u = _user("newcomer")
+    c = _client(real_app, u)
+    for method, url in NEW_ROUTES:
+        r = c.open(url, method=method, json={})
+        assert r.status_code == 402, (method, url)
+        assert r.get_json()["error"] == "no_subscription", (method, url)
+
+
+def _waiting_memory_change(owner):
+    """owner's thread with another person's reply, and owner's AI reply
+    whose change to owner's memory waits (as test_tool_approval_routes)."""
+    import json
+    from backend.models import Node, UserArtifact
+    from backend.utils.tool_approvals import ApprovalHold
+    anna = _user("anna-gate")
+    bot = User(username="gpt-5", twitter_id="llm-gpt-5")
+    _db.session.add(bot)
+    _db.session.flush()
+    memory = UserArtifact(user_id=owner.id, kind="memory", title="Memory",
+                          generated_by="test", ai_usage="chat")
+    memory.set_content("- likes tea")
+    _db.session.add(memory)
+    parent = None
+    first = None
+    for author, text in ((owner, "a note"), (anna, "anna replies"),
+                         (owner, "an answer")):
+        node = Node(user_id=author.id, human_owner_id=author.id,
+                    parent_id=parent.id if parent else None,
+                    node_type="user", privacy_level="public", ai_usage="chat")
+        node.set_content(text)
+        _db.session.add(node)
+        _db.session.flush()
+        first = first or node
+        parent = node
+    reply = Node(user_id=bot.id, human_owner_id=owner.id, parent_id=parent.id,
+                 node_type="llm", llm_model="gpt-5",
+                 llm_task_status="completed", privacy_level="private",
+                 ai_usage="chat")
+    reply.set_content("I proposed a change to your memory.")
+    _db.session.add(reply)
+    _db.session.flush()
+    inp = {"kind": "memory", "updated_content": "- likes tea\n- trusts anna",
+           "base_version": 1}
+    fields = ApprovalHold(["other_user"], reply.id).hold(
+        "update_artifact", inp, reply, owner.id,
+        previous_artifact_id=memory.id, kind="memory")
+    reply.tool_calls_meta = json.dumps([{
+        "name": "update_artifact", "input": {"kind": "memory"}, **fields}])
+    _db.session.commit()
+    return first, fields["pending_id"]
+
+
+def test_a_lapsed_account_lists_and_approves_a_waiting_change(real_app):
+    # A waiting change is the user's own data change, not an AI call: a
+    # lapsed account may still list, approve and reject it.
+    from backend.models import UserArtifact
+    u = _user("lapsed", default_ai_usage="chat", subscription_status="ended",
+              subscription_level="standard", subscription_ever_paid=True)
+    first, pending_id = _waiting_memory_change(u)
+    c = _client(real_app, u)
+    r = c.get(f"/api/tool-approvals?node={first.id}")
+    assert r.status_code == 200, r.get_json()
+    assert [p["id"] for p in r.get_json()["pending"]] == [pending_id]
+    c = _client(real_app, u)
+    r = c.post(f"/api/tool-approvals/{pending_id}/approve")
+    assert r.status_code == 200, r.get_json()
+    assert r.get_json()["outcome"] == "approved"
+    _db.session.expire_all()
+    assert UserArtifact.latest_for(u.id, "memory").get_content() == \
+        "- likes tea\n- trusts anna"
+
+
+def test_a_lapsed_account_rejects_a_waiting_change(real_app):
+    u = _user("lapsed", default_ai_usage="chat", subscription_status="ended",
+              subscription_level="standard", subscription_ever_paid=True)
+    _first, pending_id = _waiting_memory_change(u)
+    r = _client(real_app, u).post(f"/api/tool-approvals/{pending_id}/reject")
+    assert r.status_code == 200, r.get_json()
+    assert r.get_json()["outcome"] == "rejected"
 
 
 def test_payments_off_nobody_is_stopped(real_app):

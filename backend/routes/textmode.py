@@ -9,7 +9,7 @@ from backend.utils.tool_meta import tool_calls_meta_for
 from backend.utils.prompts import get_user_prompt_record
 from backend.utils.placeholders import UserExportValidationError
 from backend.utils.llm_nodes import (
-    ai_usage_refused_response, create_llm_placeholder,
+    ai_usage_refused_response, auto_generate_refusal, create_llm_placeholder,
     pick_model_for_generation, read_only_model_refusal,
     read_only_model_response, reply_ai_usage, reply_refusal,
 )
@@ -89,9 +89,23 @@ def start_conversation():
 
     if privacy_level not in VALID_PRIVACY_LEVELS:
         return jsonify({"error": f"Invalid privacy_level: {privacy_level}"}), 400
+    # A public entry quotes only public nodes (Peter, 2026-11-12).
+    if privacy_level == "public":
+        from backend.utils.publish_quotes import publish_refusal
+        refusal = publish_refusal(content, current_user.id)
+        if refusal is not None:
+            return refusal
 
     if not validate_ai_usage(ai_usage):
         return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
+
+    # A public (or circles) thread gets no automatic reply (Peter,
+    # 2026-11-12): the entry is written, the reply is skipped and the
+    # answer says why, like the spend cap below.
+    auto_off = auto_generate_refusal(privacy_level=privacy_level) \
+        if auto_generate else None
+    if auto_off is not None:
+        auto_generate = False
 
     # /textmode/start exists specifically to start an agentic text
     # conversation (system prompt attached + LLM response fired). An
@@ -195,7 +209,6 @@ def start_conversation():
         try:
             llm_node, task_id = create_llm_placeholder(
                 tip_node.id, model_id, current_user.id,
-                privacy_level=privacy_level,
                 ai_usage=ai_usage,
                 source_mode='textmode',
             )
@@ -222,11 +235,15 @@ def start_conversation():
         }), 202
 
     db.session.commit()
-    return jsonify({
+    response = {
         "conversation_id": system_node.id,
         "user_node_id": user_node.id,
         "tip_id": tip_node.id,
-    }), 202
+    }
+    if auto_off is not None:
+        response.update(llm_error=auto_off.message,
+                        llm_error_code=auto_off.code)
+    return jsonify(response), 202
 
 
 @textmode_bp.route("/<int:conversation_id>/message", methods=["POST"])
@@ -288,6 +305,17 @@ def add_message(conversation_id):
 
     ai_usage = reply_ai_usage(last_node, current_user)
     privacy_level = last_node.privacy_level or "private"
+    # The reply is automatic: none in a public (or circles) thread. The
+    # message is written and the answer says why (Peter, 2026-11-12).
+    auto_off = auto_generate_refusal(last_node)
+
+    # A message under a public node is public: it quotes only public
+    # nodes (Peter, 2026-11-12).
+    if privacy_level == "public":
+        from backend.utils.publish_quotes import publish_refusal
+        refusal = publish_refusal(content, current_user.id)
+        if refusal is not None:
+            return refusal
 
     # This route always replies: refused before the message is written
     # when the thread (or the message's own setting) keeps AI out.
@@ -321,12 +349,19 @@ def add_message(conversation_id):
         db.session.commit()
         return jsonify({"user_node_id": user_node.id, **skipped}), 202
 
+    if auto_off is not None:
+        db.session.commit()
+        return jsonify({
+            "user_node_id": user_node.id,
+            "llm_error": auto_off.message,
+            "llm_error_code": auto_off.code,
+        }), 202
+
     # Create placeholder LLM node and enqueue task. Same stance as
     # /start: a refused {user_export} keeps the message, skips the reply.
     try:
         llm_node, task_id = create_llm_placeholder(
             user_node.id, model_id, current_user.id,
-            privacy_level=privacy_level,
             ai_usage=ai_usage,
             source_mode='textmode',
         )
@@ -447,7 +482,19 @@ def continue_from_node(node_id):
     if ai_usage == 'none':
         return ai_usage_refused_response()
     privacy_level = node.privacy_level or "private"
+    # A message under a public node is public: it quotes only public
+    # nodes (Peter, 2026-11-12).
+    if privacy_level == "public":
+        from backend.utils.publish_quotes import publish_refusal
+        refusal = publish_refusal(content, current_user.id)
+        if refusal is not None:
+            return refusal
     auto_generate = bool(data.get("auto_generate", True))
+    # No automatic reply in a public (or circles) thread: the message is
+    # written, the answer says why (Peter, 2026-11-12).
+    auto_off = auto_generate_refusal(node) if auto_generate else None
+    if auto_off is not None:
+        auto_generate = False
     if auto_generate:
         # The reply would read the thread above *node*: refused before
         # anything is written when a node there keeps AI out.
@@ -490,6 +537,9 @@ def continue_from_node(node_id):
         "prompt_node_id": prompt_node.id if prompt_node is not None else None,
         "user_node_id": user_node.id,
     }
+    if auto_off is not None:
+        response.update(llm_error=auto_off.message,
+                        llm_error_code=auto_off.code)
     # Spend cap and a refused {user_export}: the message is kept, only
     # the reply is skipped — the same stance as /start and /message.
     from backend.utils.spend import spend_capped_fields, user_is_capped
@@ -507,7 +557,6 @@ def continue_from_node(node_id):
         try:
             llm_node, task_id = create_llm_placeholder(
                 user_node.id, model_id, current_user.id,
-                privacy_level=privacy_level,
                 ai_usage=ai_usage,
                 source_mode='textmode',
             )

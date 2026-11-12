@@ -431,6 +431,11 @@ struct VersionDiff: Equatable, Sendable {
         ops = LineDiff.refineWordDiffs(LineDiff.computeLineDiff(old, new))
     }
 
+    /// Lines the server already diffed (a waiting artifact write), word-refined.
+    init(lines: [LineDiff.Op]) {
+        ops = LineDiff.refineWordDiffs(lines)
+    }
+
     /// "Changes (n)".
     var changedCount: Int { LineDiff.changedCount(ops) }
     /// Opens in full-text mode instead of the diff.

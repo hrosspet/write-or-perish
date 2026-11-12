@@ -69,8 +69,8 @@ private struct ThreadContent: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         header(node)
-                        ForEach(node.ancestors) { ancestor in
-                            BubbleView(data: BubbleData(ancestor), actions: actions(model.target(ancestor),
+                        ForEach(Array(node.ancestors.enumerated()), id: \.element.id) { index, ancestor in
+                            BubbleView(data: bubbleData(ancestor, at: index), actions: actions(model.target(ancestor),
                                        userId: ancestor.userId, parentUserId: ancestor.parentUserId, nodeType: ancestor.nodeType,
                                        deleted: ancestor.deleted, isSystemPrompt: ancestor.systemPrompt.isSystemPrompt)) {
                                 openNode(ancestor.id)
@@ -79,11 +79,14 @@ private struct ThreadContent: View {
                         }
                         HairlineDivider().padding(.top, node.ancestors.isEmpty ? 0 : 2)
                             .id("focal")
+                        ToolApprovalsLine(model: model.approvals)
+                            .padding(.leading, 8)
+                            .padding(.top, 8)
                         focalSection(node)
                         HairlineDivider().padding(.vertical, 8)
-                        ForEach(ChildRow.flatten(node.children)) { row in
+                        ForEach(ChildRow.flatten(node.children, parentPrivacy: node.privacyLevel)) { row in
                             ChildRowView(row: row) { child in
-                                AnyView(BubbleView(data: BubbleData(child),
+                                AnyView(BubbleView(data: bubbleData(child, parentPrivacy: row.parentPrivacy),
                                                    actions: actions(model.target(child), userId: child.userId,
                                                                     parentUserId: child.parentUserId, nodeType: child.nodeType,
                                                                     deleted: child.deleted,
@@ -109,6 +112,18 @@ private struct ThreadContent: View {
             }
             .modifier(ThreadSheets(model: model, autoGenerate: $autoGenerate))
         }
+    }
+
+    private func bubbleData(_ ancestor: AncestorNode, at index: Int) -> BubbleData {
+        var data = BubbleData(ancestor)
+        data.privateReplyNote = model.showsPrivateReplyNote(ancestorAt: index)
+        return data
+    }
+
+    private func bubbleData(_ child: TreeNode, parentPrivacy: PrivacyLevel?) -> BubbleData {
+        var data = BubbleData(child)
+        data.privateReplyNote = model.showsPrivateReplyNote(child, parentPrivacy: parentPrivacy)
+        return data
     }
 
     private func actions(_ target: NodeTarget, userId: Int?, parentUserId: Int?, nodeType: NodeType,
@@ -152,12 +167,29 @@ private struct ThreadContent: View {
                     .disabled(model.voiceLoading)
                     .accessibilityHint("Continue this conversation by voice")
                     if craftMode && node.aiUsage != .off {
+                        // A circles thread: off and locked; the stored choice is kept
+                        // (public threads have no header controls at all).
+                        let locked = model.isSharedThread
+                        let on = model.autoGenerateActive(autoGenerate)
                         TopRightButton(title: "Auto-generate") {
-                            LoorePillSwitch(isOn: autoGenerate)
+                            LoorePillSwitch(isOn: on)
                         } action: { autoGenerate.toggle() }
-                        .accessibilityValue(autoGenerate ? "On" : "Off")
-                        .accessibilityHint(autoGenerate ? "Auto-generate is on — tap to turn off"
+                        .disabled(locked)
+                        .opacity(locked ? 0.5 : 1)
+                        .accessibilityValue(on ? "On" : "Off")
+                        .accessibilityHint(locked ? SharedThread.autoGenerateOffHint
+                                           : autoGenerate ? "Auto-generate is on — tap to turn off"
                                            : "Auto-generate is off — tap to turn on")
+                        if locked {
+                            // Why the switch is dimmed (VoiceOver reads it as the hint).
+                            Text(SharedThread.autoGenerateOffHint)
+                                .font(LooreFont.sans(11.5, .light))
+                                .foregroundStyle(LooreColor.textMuted)
+                                .multilineTextAlignment(.trailing)
+                                .frame(maxWidth: 200, alignment: .trailing)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .accessibilityHidden(true)
+                        }
                     }
                 }
             }
@@ -202,6 +234,9 @@ private struct ThreadContent: View {
                                       onTtsGenerated: { model.ttsGenerated() },
                                       ownRecording: app.user?.paymentsEnabled == true && node.hasOriginalAudio
                                           && node.user?.id == app.user?.id)
+                }
+                if model.focalShowsPrivateReplyNote {
+                    PrivateReplyNote()
                 }
                 if showCraftBar && !(model.inReadThread && !model.readReplyAbove) {
                     llmResponseRow(node).padding(.top, 8)
@@ -249,8 +284,8 @@ private struct ThreadContent: View {
     }
 
     private func inlineConfig(_ node: NodeDetail) -> NodeFormConfig {
-        var config = NodeFormConfig(parentId: node.id, hidePowerFeatures: !craftMode, hideAudioUpload: !craftMode,
-                                    compact: true,
+        var config = NodeFormConfig(parentId: node.id, parentPrivacy: node.privacyLevel,
+                                    hidePowerFeatures: !craftMode, hideAudioUpload: !craftMode, compact: true,
                                     placeholder: model.isReadReply ? "Ask about these picks, or say what you make of them…"
                                         : "Type what's on your mind…")
         if model.isReadReply {
@@ -609,12 +644,19 @@ private struct ToolCallsDisclosure: View {
 
     private func row(_ tc: ToolCallMeta) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 4) {
-            Text(tc.status == "success" ? "✓" : "✗")
-                .accessibilityLabel(tc.status == "success" ? "Succeeded:" : "Failed:")
-            if detailed {
-                label(tc)
+            if let approval = tc.approvalLabel(owner: detailed) {
+                // Kept for the user's approval, or declined (2026-11-12).
+                Text(tc.status == ToolCallMeta.pendingApprovalStatus ? "…" : "–")
+                    .accessibilityHidden(true)
+                Text("\(tc.approvalActionName) — \(approval)")
             } else {
-                Text(tc.sharedLabel)
+                Text(tc.status == "success" ? "✓" : "✗")
+                    .accessibilityLabel(tc.status == "success" ? "Succeeded:" : "Failed:")
+                if detailed {
+                    label(tc)
+                } else {
+                    Text(tc.sharedLabel)
+                }
             }
             if detailed, let err = tc["error"]?.stringValue, !err.isEmpty {
                 Text(" — \(err)").foregroundStyle(LooreColor.accent)
@@ -753,16 +795,18 @@ struct ChildRow: Identifiable {
     let id: String
     let kind: Kind
     let guides: [Bool]
+    /// The privacy of the node this row's bubble answers.
+    var parentPrivacy: PrivacyLevel?
 
-    static func flatten(_ nodes: [TreeNode], guides: [Bool] = []) -> [ChildRow] {
+    static func flatten(_ nodes: [TreeNode], parentPrivacy: PrivacyLevel? = nil, guides: [Bool] = []) -> [ChildRow] {
         var rows: [ChildRow] = []
         let indented = nodes.count > 1
         for (i, child) in nodes.enumerated() {
             let own = guides + [indented]
-            rows.append(ChildRow(id: "n\(child.id)", kind: .bubble(child), guides: own))
-            rows.append(contentsOf: flatten(child.children, guides: own))
+            rows.append(ChildRow(id: "n\(child.id)", kind: .bubble(child), guides: own, parentPrivacy: parentPrivacy))
+            rows.append(contentsOf: flatten(child.children, parentPrivacy: child.privacyLevel, guides: own))
             if i < nodes.count - 1 {
-                rows.append(ChildRow(id: "s\(child.id)", kind: .separator, guides: own))
+                rows.append(ChildRow(id: "s\(child.id)", kind: .separator, guides: own, parentPrivacy: parentPrivacy))
             }
         }
         return rows

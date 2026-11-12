@@ -14,6 +14,8 @@ struct ShareView: View {
     @State private var saving = false
     @State private var confirmPublishId: Int?
     @State private var confirmDeleteId: Int?
+    /// Publish refused: the share quotes an entry that isn't public (it stays a draft).
+    @State private var quotesRefusal: QuotesNotPublic?
 
     static let shareTypes = ["need", "offering", "insight", "exploration", "intention", "other"]
     private static let newId = -1
@@ -31,6 +33,14 @@ struct ShareView: View {
         }
         .loorePageBackground()
         .navigationBarTitleDisplayMode(.inline)
+        .looreDialog(isPresented: Binding(get: { quotesRefusal != nil }, set: { if !$0 { quotesRefusal = nil } })) {
+            if let refusal = quotesRefusal {
+                QuotesNotPublicDialog(refusal: refusal, onOpen: { id in
+                    quotesRefusal = nil
+                    NodePrefetch.shared.openThread(id, app: app)  // opens once the node is in
+                }, onClose: { quotesRefusal = nil })
+            }
+        }
     }
 
     private var page: some View {
@@ -341,7 +351,12 @@ struct ShareView: View {
     private func publish(_ id: Int) {
         confirmPublishId = nil
         Task {
-            _ = try? await app.api.post(APIPath.sharePublish(id), as: EmptyResponse.self)
+            do {
+                _ = try await app.api.post(APIPath.sharePublish(id), as: EmptyResponse.self)
+            } catch {
+                // Other failures are logged only on the web.
+                quotesRefusal = QuotesNotPublic(error)
+            }
             await fetch()
         }
     }
