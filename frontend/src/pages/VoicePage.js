@@ -11,6 +11,9 @@ import ProposalInline from '../components/ProposalInline';
 import { useToast } from '../contexts/ToastContext';
 import { isSpendBlocked, notifySpendBlocked, spendCapToastMessage } from '../utils/spendCap';
 import { isAiAllowed } from '../utils/aiUsage';
+import {
+  THREAD_LIMIT_TEXT, THREAD_NOTICE_TEXT, THREAD_TOO_LONG_CODE,
+} from '../utils/threadLength';
 import api from '../api';
 import { entryQuestion, EVERYDAY_QUESTION } from '../utils/entryPrompt';
 
@@ -243,7 +246,72 @@ const needsAiLinkStyle = {
   paddingBottom: '2px',
 };
 
-export function VoiceNeedsAi({ scope, threadId }) {
+// Shown instead of the record button when the thread Voice would continue
+// is too long for another reply (#648): every reply reads the whole
+// thread. The way on is a new thread (*onNewThread*: a fresh Voice
+// session). Same text as the server's refusal and the iPhone app.
+export function VoiceThreadTooLong({ threadId, onNewThread, message }) {
+  return (
+    <div style={containerStyle}>
+      <p style={{
+        fontFamily: 'var(--serif)',
+        fontStyle: 'italic',
+        fontSize: 'clamp(1.2rem, 2.5vw, 1.6rem)',
+        fontWeight: 300,
+        color: 'var(--text-muted)',
+        margin: '0 0 32px 0',
+        textAlign: 'center',
+      }}>
+        This thread is too long
+      </p>
+      <EcgAnimation active={false} dim={true} showScanline={false} />
+      <p style={{
+        fontFamily: 'var(--sans)',
+        fontSize: '0.95rem',
+        fontWeight: 300,
+        color: 'var(--text-secondary)',
+        lineHeight: 1.7,
+        maxWidth: '380px',
+        margin: '0 0 28px 0',
+        textAlign: 'center',
+      }}>
+        {message || THREAD_LIMIT_TEXT}
+      </p>
+      <div style={{ display: 'flex', gap: '24px', flexWrap: 'wrap', justifyContent: 'center', alignItems: 'center' }}>
+        <button
+          type="button"
+          onClick={onNewThread}
+          style={{
+            padding: '10px 24px',
+            background: 'transparent',
+            border: '1px solid var(--accent)',
+            borderRadius: '6px',
+            color: 'var(--accent)',
+            fontFamily: 'var(--sans)',
+            fontSize: '0.85rem',
+            cursor: 'pointer',
+          }}
+        >
+          Start a new thread
+        </button>
+        {threadId && (
+          <Link to={`/node/${threadId}`} style={needsAiLinkStyle}>
+            Back to the thread
+          </Link>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export function VoiceNeedsAi({ scope, threadId, onNewThread, limitMessage }) {
+  if (scope === 'too_long') {
+    return (
+      <VoiceThreadTooLong
+        threadId={threadId} onNewThread={onNewThread} message={limitMessage}
+      />
+    );
+  }
   return (
     <div style={containerStyle}>
       <p style={{
@@ -291,18 +359,38 @@ export function VoiceNeedsAi({ scope, threadId }) {
 export const FINISH_WITHOUT_REPLY_TEXT = "AI usage is set to None, so Loore "
   + "won't reply. If you continue, your recording is saved as an entry when "
   + "you finish.";
+// ...and where the thread is too long for another reply (#648).
+export const FINISH_TOO_LONG_TEXT = "This thread is too long for another AI "
+  + "reply, so Loore won't reply. If you continue, your recording is saved as "
+  + "an entry when you finish.";
 
 // GET /voice/availability for the thread *parent* continues (none: the
-// account's Default AI usage decides): null when Voice may record there and
-// reply, else the scope that keeps it away from AI. Rejects when the server
-// cannot be asked.
-function fetchVoiceRefusal(parent) {
+// account's Default AI usage decides): `refusal` null when Voice may record
+// there and reply, else what blocks it: the scope that keeps it away from
+// AI ('account' | 'thread'), or 'too_long' when the thread is too long for
+// another reply (#648). `threadLength` "notice" when it is getting long.
+// Rejects when the server cannot be asked.
+function fetchVoiceAvailability(parent) {
   return api.get('/voice/availability', parent != null ? { params: { parent } } : {})
     .then((res) => {
       const data = res.data || {};
-      if (data.allowed !== false) return null;
-      return data.scope === 'thread' ? 'thread' : 'account';
+      if (data.allowed !== false) {
+        return { refusal: null, threadLength: data.thread_length || null };
+      }
+      if (data.code === THREAD_TOO_LONG_CODE) {
+        return {
+          refusal: 'too_long', threadLength: 'limit', message: data.error || null,
+        };
+      }
+      return {
+        refusal: data.scope === 'thread' ? 'thread' : 'account',
+        threadLength: null,
+      };
     });
+}
+
+function fetchVoiceRefusal(parent) {
+  return fetchVoiceAvailability(parent).then((r) => r.refusal);
 }
 
 // Voice mode records only where a reply may follow: a fresh thread when the
@@ -317,10 +405,18 @@ function fetchVoiceRefusal(parent) {
 // as in the iPhone app.
 export default function VoicePage() {
   const [searchParams] = useSearchParams();
+  const navigate = useNavigate();
   const { user } = useUser();
   const threadId = searchParams.get('parent') || searchParams.get('resume');
   // undefined while the server is asked; null: record; else the scope.
   const [refusal, setRefusal] = useState(threadId ? undefined : null);
+  // "notice" when the thread is getting long (#648): a line on the screen.
+  const [threadNotice, setThreadNotice] = useState(null);
+  // The server's text for the limit (the thread's length, or an entry or
+  // what it quotes too large), when it sent one.
+  const [limitMessage, setLimitMessage] = useState(null);
+  // A new thread (#648) starts a fresh session: its key changes.
+  const [sessionKey, setSessionKey] = useState(0);
   const recovery = useInterruptedRecovery();
   // Continue was chosen on an interrupted recording while blocked: the
   // session stays mounted to finish it, and its ready phase shows the block.
@@ -329,13 +425,17 @@ export default function VoicePage() {
   useEffect(() => {
     if (!threadId) {
       setRefusal(null);
+      setThreadNotice(null);
       return undefined;
     }
     let cancelled = false;
     setRefusal(undefined);
-    fetchVoiceRefusal(threadId)
-      .then((scope) => {
-        if (!cancelled) setRefusal(scope);
+    fetchVoiceAvailability(threadId)
+      .then(({ refusal: scope, threadLength, message }) => {
+        if (cancelled) return;
+        setRefusal(scope);
+        setThreadNotice(threadLength === 'notice' ? 'notice' : null);
+        setLimitMessage(message || null);
       })
       .catch(() => {
         // Offline, or a server without the route: record as before; the
@@ -346,21 +446,46 @@ export default function VoicePage() {
     return () => { cancelled = true; };
   }, [threadId]);
 
+  // The thread is too long for another reply: Voice goes on in a new one,
+  // a fresh session without a parent.
+  const startNewThread = useCallback(() => {
+    setRefusal(null);
+    setThreadNotice(null);
+    setLimitMessage(null);
+    setFinishing(false);
+    setSessionKey((k) => k + 1);
+    navigate('/voice', { replace: true });
+  }, [navigate]);
+
   const accountRefuses = !threadId && !!user && !isAiAllowed(user.default_ai_usage);
   const shown = accountRefuses ? 'account' : refusal;
   if (shown === undefined || (shown && !recovery.checked)) {
     return <div style={containerStyle} />;
   }
   if (shown && !recovery.interruptedDraft && !finishing) {
-    return <VoiceNeedsAi scope={shown} threadId={threadId} />;
+    return (
+      <VoiceNeedsAi
+        scope={shown} threadId={threadId} onNewThread={startNewThread}
+        limitMessage={limitMessage}
+      />
+    );
   }
   return (
     <VoiceSession
+      key={`${sessionKey}:${threadId || ''}`}
       recovery={recovery}
       blocked={shown || null}
       threadId={threadId}
-      onAiUsageRefused={setRefusal}
+      threadNotice={threadNotice}
+      onThreadNotice={setThreadNotice}
+      limitMessage={limitMessage}
+      onLimitMessage={setLimitMessage}
+      onAiUsageRefused={(scope, message) => {
+        if (scope === 'too_long' && message) setLimitMessage(message);
+        setRefusal(scope);
+      }}
       onFinishInterrupted={() => setFinishing(true)}
+      onNewThread={startNewThread}
     />
   );
 }
@@ -396,7 +521,11 @@ function useFinishRefusal(draft, pageParentId) {
 // record). The session is mounted while blocked only to finish an
 // interrupted recording; its ready phase then shows the block, never the
 // record button, and a ?resume= reply is not played.
-function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishInterrupted }) {
+function VoiceSession({
+  recovery, blocked, threadId, threadNotice, onThreadNotice,
+  limitMessage, onLimitMessage,
+  onAiUsageRefused, onFinishInterrupted, onNewThread,
+}) {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const resumeId = searchParams.get('resume');
@@ -441,6 +570,15 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
   const [gleanNodeId, setGleanNodeId] = useState(null);
   const gleanDescId = useId();
   const getThreadParentIdRef = useRef(null);
+  // A finished reply's `thread_length` and its text (llm-status, #648).
+  const applyThreadLength = (threadLength, message) => {
+    if (threadLength === undefined) return; // a server without it
+    if (onThreadNotice) onThreadNotice(threadLength === 'notice' ? 'notice' : null);
+    if (threadLength === 'limit') {
+      if (onLimitMessage) onLimitMessage(message || null);
+      if (onAiUsageRefused) onAiUsageRefused('too_long');
+    }
+  };
 
   const {
     phase, isStopping, hasError, isOnline, streaming, audio, handleStart, handleStop,
@@ -474,6 +612,11 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
         if (res.data.tool_calls_meta) {
           setToolCallsMeta(res.data.tool_calls_meta);
         }
+        // The thread grew with this turn (#648): the notice once it is
+        // getting long, the limit (in place of the record button, once the
+        // reply has played) when it has no room for another reply.
+        applyThreadLength(res.data.thread_length,
+          res.data.thread_length_message);
       }).catch(() => { /* non-fatal */ });
     },
     // The reply failed: no reply is coming, so Glean stops waiting for it.
@@ -663,7 +806,10 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
         {!blocked && textModeButton}
         <RecoveryBanner
           draft={interruptedDraft}
-          note={blocked && finishRefusal ? FINISH_WITHOUT_REPLY_TEXT : null}
+          note={blocked && finishRefusal
+            ? (finishRefusal === 'too_long' ? FINISH_TOO_LONG_TEXT
+              : FINISH_WITHOUT_REPLY_TEXT)
+            : null}
           onContinue={() => {
             // No spend-cap check: resuming finishes a recording that has
             // already started, which is always allowed (#341). Where Voice
@@ -696,7 +842,14 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
   // Blocked: no fresh turn. Shown after an interrupted recording was
   // finished or could not be resumed.
   if (blocked && phase === 'ready') {
-    return <VoiceNeedsAi scope={blocked} threadId={threadId} />;
+    return (
+      <VoiceNeedsAi
+        scope={blocked}
+        threadId={getThreadParentId?.() || threadId}
+        onNewThread={onNewThread}
+        limitMessage={limitMessage}
+      />
+    );
   }
 
   // --- READY / RECORDING STATE ---
@@ -758,6 +911,21 @@ function VoiceSession({ recovery, blocked, threadId, onAiUsageRefused, onFinishI
         )}
 
         {phase === 'ready' && <OfflineBanner />}
+
+        {phase === 'ready' && threadNotice === 'notice' && (
+          <p role="status" style={{
+            fontFamily: 'var(--sans)',
+            fontSize: '0.85rem',
+            fontWeight: 300,
+            color: 'var(--text-muted)',
+            lineHeight: 1.6,
+            maxWidth: '380px',
+            margin: '0 0 20px 0',
+            textAlign: 'center',
+          }}>
+            {THREAD_NOTICE_TEXT}
+          </p>
+        )}
 
         {hasError && phase === 'ready' && (
           <div style={{ marginBottom: '16px' }}>

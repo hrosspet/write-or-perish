@@ -355,6 +355,14 @@ extension AudioCenter {
             LocalNotifier.post(.recordFailed, body: "You're offline. Record again when you're back online.")
             return
         }
+        // A thread too long for another reply (#648), known before the press (the
+        // last reply reached the limit): it is said aloud, and the intent waits
+        // until it has been said, as the app may be suspended once it returns.
+        if let block = voice.aiBlock, block.isThreadTooLong, voice.phase == .ready || voice.phase == .playback {
+            LocalNotifier.post(.recordFailed, body: block.body)
+            await voice.announceBlock()
+            return
+        }
         switch voice.phase {
         case .playback:
             voice.continueConversation()
@@ -373,10 +381,15 @@ extension AudioCenter {
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
         if voice.state == .idle {
-            // The start failed; its toast says why.
+            // The start failed; its toast says why (a refusal for the thread's
+            // length has no toast: the block says it).
             let reason = lastVoiceToast.flatMap { $0.at >= tapped ? $0.text : nil }
-            LocalNotifier.post(.recordFailed, body: reason ?? LocalNotice.recordFailed.body)
+            let block = voice.aiBlock?.isThreadTooLong == true ? voice.aiBlock?.body : nil
+            LocalNotifier.post(.recordFailed, body: reason ?? block ?? LocalNotice.recordFailed.body)
         }
+        // A start refused for the thread's length is being said: keep the app
+        // running until it has been (#648).
+        await voice.untilSpoken()
     }
 }
 
@@ -416,6 +429,15 @@ extension AudioCenter: VoiceAudio {
     func startCue() { sounds.startCue() }
     func stopCue() { sounds.stopCue() }
     func playErrorSound() { sounds.playError() }
+
+    func speak(_ text: String) async {
+        // Recording's session stays as it is (it plays too); otherwise playback.
+        session.activateForPlayback()
+        await sounds.speak(text)
+    }
+
+    func stopSpeaking() { sounds.stopSpeaking() }
+
     func playInterruptionAlert() { sounds.playInterruptionAlert() }
     func playLongRecordingWarning() { sounds.playLongRecordingWarning() }
 }

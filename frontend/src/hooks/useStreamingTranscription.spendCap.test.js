@@ -109,3 +109,30 @@ test.each(['account', 'thread'])(
     expect(err.startup).toBe(true);
   },
 );
+
+// #648: a Voice recording that would continue a thread already too long for
+// another reply is refused by init with 409 {"code": "thread_too_long"}.
+// Like the AI-usage refusal: no mic, back to idle, no toast here; the
+// parent says it aloud and shows the limit.
+test('a thread_too_long refusal never opens the mic and returns to idle', async () => {
+  const refusal = new Error('Request failed with status code 409');
+  refusal.response = {
+    status: 409,
+    data: { error: 'This thread is too long', code: 'thread_too_long' },
+  };
+  mockPost.mockRejectedValue(refusal);
+  const onError = jest.fn();
+  const { result } = renderHook(() => useStreamingTranscription({
+    onError, label: 'Voice', aiUsage: 'chat',
+  }));
+
+  await act(async () => { await result.current.startStreaming(); });
+
+  expect(mockStartRecording).not.toHaveBeenCalled();
+  expect(result.current.sessionState).toBe('idle');
+  expect(mockAddToast).not.toHaveBeenCalled();
+  expect(onError).toHaveBeenCalledTimes(1);
+  const err = onError.mock.calls[0][0];
+  expect(err.threadTooLong).toBe(true);
+  expect(err.startup).toBe(true);
+});

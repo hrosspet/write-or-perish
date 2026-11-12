@@ -56,6 +56,10 @@ from backend.utils.error_privacy import UserMessageError
 from backend.utils.cache_diagnostics import (
     ConversationCacheDiagnostics, system_prefix_hash,
 )
+from backend.utils.thread_size import (
+    REFUSED_MARKER, assembled_prompt_size, prompt_chars as _prompt_chars,
+    prompt_limit,
+)
 from backend.utils.llm_batch import (
     BatchItemFailed, BatchItemCancelled, BatchItemPolicyBlocked,
 )
@@ -1857,6 +1861,52 @@ def _pinned_inline_versions(node, user_id, kinds):
                 and _INLINE_PLACEHOLDER_OF[kind] in text):
             ids.add(row.id)
     return ids
+
+
+def _export_budget_for_limit(export_content, prompt_tokens, prompt_chars,
+                             limit, config):
+    """The {user_export} budget (stored units) that brings a prompt of
+    *prompt_tokens* under the thread limit (#648), or None when the
+    archive cannot shrink enough: the rest of the prompt alone is at the
+    limit. The archive's share of the tokens is its share of the
+    prompt's characters; the excess (to RETRY_SAFETY_FACTOR of the
+    limit) comes off the archive alone, so one rebuild fits, where
+    scaling the whole budget by limit / prompt took several."""
+    if not export_content or not prompt_chars:
+        return None
+    safety = config.get("RETRY_SAFETY_FACTOR", 0.99)
+    export_tokens = prompt_tokens * len(export_content) / prompt_chars
+    room = export_tokens - (prompt_tokens - limit * safety)
+    if room <= 0 or export_tokens <= 0:
+        return None
+    budget = int(approximate_token_count(export_content)
+                 * room / export_tokens)
+    return budget if budget > 0 else None
+
+
+def _counted_prompt_tokens(model_id, messages, tools, api_keys, size):
+    """The prompt's tokens as the provider counts them, for a thread size
+    estimate that is not certain (#648): LLMProvider.count_tokens (the
+    free count endpoint on Anthropic, tiktoken on OpenAI; not a billed
+    call), plus the tool definitions at the estimate's tokens per
+    character (the count helper takes messages only). None when counting
+    is not possible: the estimate then decides."""
+    count = getattr(LLMProvider, "count_tokens", None)
+    if count is None:
+        return None
+    try:
+        counted = count(model_id, messages, api_keys)
+    except Exception:
+        logger.warning("Thread size count failed for %s; the estimate "
+                       "decides", model_id, exc_info=True)
+        return None
+    if not isinstance(counted, int) or isinstance(counted, bool):
+        return None
+    if tools and size.chars:
+        per_char = size.tokens / size.chars
+        counted += int(len(json.dumps(tools, sort_keys=True, default=str))
+                       * per_char)
+    return counted
 
 
 def _messages_text(messages):
@@ -4638,6 +4688,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                          and bool(model_config.get("cache_diagnostics"))),
                 user_id=user_id, node_chain=node_chain)
 
+            # Characters of the prompt the next call sends (#648): set
+            # before each call, logged with its cost row, so the next turn
+            # knows the thread's tokens per character (thread_size).
+            prompt_size = {"chars": None}
+
             def _log_api_cost(resp, node):
                 """Log an APICostLog row for one model call. Every model call
                 costs money — the retrieval loop logs once per round.
@@ -4670,9 +4725,50 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     user_id=user_id,
                     model_id=model_id,
                     request_type="conversation",
+                    prompt_chars=prompt_size["chars"],
                     **llm_cost_log_fields(model_id, resp),
                     **diag_fields,
                 ))
+
+            def _refuse_thread_too_long(size):
+                """The assembled prompt is over THREAD_PROMPT_TOKEN_LIMIT
+                (#648): the reply fails with the limit's message (for
+                its reason) before any generation call, and the
+                measurement is recorded ($0 row) under the node it was
+                asked under, so the reply form and the next request know
+                it: with the prompt's characters only when the size was
+                certain (a count, or the thread's own ratio), else the
+                row is never a base and the next request measures again.
+                The marker gives the clients the code (llm-status
+                ``error_code``)."""
+                from backend.utils.thread_size import (
+                    THREAD_TOO_LONG_CODE, prompt_limit, record_refusal,
+                    refusal_message,
+                )
+                logger.warning(
+                    "Node %s: prompt ~%d tokens >= limit %d (%s, %s); "
+                    "reply refused before any generation call",
+                    llm_node_id, size.tokens, prompt_limit(flask_app.config),
+                    size.reason, "certain" if size.certain else "estimate")
+                record_refusal(user_id, model_id, parent_node_id,
+                               size.tokens,
+                               size.chars if size.certain else None)
+                llm_node.llm_task_status = 'failed'
+                llm_node.llm_task_error = refusal_message(size.reason)
+                llm_node.llm_task_progress = 100
+                llm_node.streaming_content = None
+                update_tool_meta(llm_node, REFUSED_MARKER,
+                                 {"code": THREAD_TOO_LONG_CODE},
+                                 append_if_missing=True)
+                db.session.commit()
+                if speech_turn is not None:
+                    speech_turn.abort()
+                return {
+                    'parent_node_id': parent_node_id,
+                    'llm_node_id': llm_node_id,
+                    'status': 'refused',
+                    'reason': THREAD_TOO_LONG_CODE,
+                }
 
             def _read_on_hold():
                 """The Read's owner pressed "Delete all my content" after it
@@ -4853,6 +4949,10 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                            else "UTC")
 
                 messages = []
+                # The index of each chain node's first message: what was
+                # written since the thread's last measured prompt is
+                # measured from there (#648, thread_size).
+                msg_start = {}
                 system_msg_index = None
                 last_assistant_index = None
                 latest_user_msg_index = None
@@ -4872,6 +4972,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 replay_numbers = {}
                 replay_known = set(inline_shown)
                 for node in node_chain:
+                    msg_start[node.id] = len(messages)
                     author = node.user.username if node.user else "Unknown"
                     is_llm_node = node.node_type == "llm" or (node.llm_model is not None)
                     time_prefix = local_stamp(node.updated_at or node.created_at, user_tz)
@@ -5181,6 +5282,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             known=replay_known)
                         messages[-1]["content"].extend(calls)
                         messages.append({"role": "user", "content": answers})
+                # Where the nodes' messages end and the notes begin (#648).
+                nodes_end = len(messages)
 
                 # Inject agentic context notes as a final user message
                 agentic_notes = (
@@ -5325,6 +5428,57 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 total_content = _messages_text(messages)
                 estimated_tokens = approximate_token_count(total_content)
                 logger.info(f"Calling LLM API: model_id={model_id}, api_model={api_model}, provider={provider}, key_type={key_type}, estimated_tokens={estimated_tokens}, total_chars={len(total_content)}")
+
+                # #648: the assembled prompt's size, before the first call
+                # (thread_size.assembled_prompt_size: the prompt's
+                # characters, the base's part as it is now, at the
+                # thread's measured tokens per character; a Read turn's
+                # whole prompt, its tweets at the tweets prior). At or over
+                # THREAD_PROMPT_TOKEN_LIMIT, an estimate that is not certain
+                # is counted first (free, no billed call), so a prompt
+                # under the limit is never refused or cut on a guess. Over
+                # it, an archive ({user_export}), the one part that can
+                # shrink, is fitted, as it is fitted to the model's window
+                # below; anything else is refused here, no generation
+                # call. Nothing here changes what is sent under the limit.
+                # Tool rounds are not measured: a reply that started under
+                # the limit finishes. A batch already submitted is
+                # collected, never refused.
+                thread_limit = prompt_limit(flask_app.config)
+                size = assembled_prompt_size(
+                    list(reversed(node_chain)), user_id, model_id, messages,
+                    msg_start, nodes_end, tools=agentic_tools,
+                    reads=ca_reply_ids, whole=needs_ca,
+                    dense_chars=(len(ca_tweets_content)
+                                 if needs_ca and ca_tweets_content
+                                 and ca_tweets_content != CA_TWEETS_STUB
+                                 else 0))
+                prompt_size["chars"] = size.chars
+                if (batch_resp is None and thread_limit
+                        and size.tokens >= thread_limit
+                        and not size.certain):
+                    counted = _counted_prompt_tokens(
+                        model_id, messages, agentic_tools, api_keys, size)
+                    if counted is not None:
+                        size = size._replace(tokens=counted, certain=True)
+                if (batch_resp is None and thread_limit
+                        and size.tokens >= thread_limit):
+                    fitted = (
+                        _export_budget_for_limit(
+                            user_export_content, size.tokens, size.chars,
+                            thread_limit, flask_app.config)
+                        if (needs_export and user_export_content
+                            and max_export_tokens != 0
+                            and attempt < MAX_RETRIES) else None)
+                    if fitted:
+                        max_export_tokens = fitted
+                        logger.warning(
+                            "Prompt ~%d tokens >= thread limit %d; "
+                            "rebuilding with max_export_tokens=%d "
+                            "(attempt %d/%d)", size.tokens, thread_limit,
+                            max_export_tokens, attempt + 2, MAX_RETRIES + 1)
+                        continue
+                    return _refuse_thread_too_long(size)
 
                 # #189: stable per-thread key improves OpenAI's
                 # automatic prefix-cache routing.
@@ -5908,6 +6062,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     # injection and let the model answer with what it has.
 
                     def _continuation_completion(listener):
+                        # This call's prompt size, for its cost row (#648).
+                        prompt_size["chars"] = _prompt_chars(
+                            messages, agentic_tools)
                         return cache_diag.call(
                             lambda baseline_id: LLMProvider.get_completion(
                                 model_id, messages, api_keys,

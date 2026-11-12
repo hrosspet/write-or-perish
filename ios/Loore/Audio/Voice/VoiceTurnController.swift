@@ -45,9 +45,15 @@ final class VoiceTurnController {
     private(set) var replyContent: String?
     private(set) var toolCallsMeta: [ToolCallMeta]?
     private(set) var threadParentId: Int?
-    /// The server refused to start because AI usage is `none` (`ai_usage_none`):
-    /// the Voice screen shows why instead of the record button.
+    /// The server refused to start because AI usage is `none` (`ai_usage_none`),
+    /// or a turn met a thread too long for another reply (`thread_too_long`,
+    /// #648): the Voice screen shows why instead of the record button.
     private(set) var aiBlock: VoiceAIBlock?
+    /// The thread is getting long (#648): a calm line above the record button.
+    private(set) var lengthNotice = false
+    /// The refusal's sentence being said (#648), and which one is the latest.
+    @ObservationIgnored private var speechTask: Task<Void, Never>?
+    @ObservationIgnored private var speechToken = 0
     /// Between an interim node's audio and its continuation's first chunk.
     private(set) var awaitingNextNode = false
 
@@ -245,6 +251,8 @@ final class VoiceTurnController {
         }
         threadParentId = parentId
         lastReplyNodeId = nil
+        // The screen's availability says how long the thread is (#648).
+        lengthNotice = false
         resetGlean(session: glean)
         // A continued thread has its messages already; a glean starts under
         // the node the screen opened on (web VoicePage).
@@ -300,6 +308,9 @@ final class VoiceTurnController {
     }
 
     private func beginRecording(resume draft: InterruptedDraft?) {
+        // A refusal's sentence still being said stops first: the new
+        // recording must not hear it (#648).
+        stopSpeech()
         generation += 1
         let gen = generation
         state = .starting
@@ -341,12 +352,18 @@ final class VoiceTurnController {
                         self.audio.refreshNowPlaying()
                     } else if let block = VoiceAIBlock.from(
                         error, fallback: self.threadParentId == nil ? .account : .thread) {
-                        // AI usage is `none`: no draft exists and the mic never opens.
-                        // The screen explains instead of a toast and the red dot.
-                        self.aiBlock = block
-                        self.state = .idle
-                        self.audio.deactivate()
-                        self.audio.refreshNowPlaying()
+                        // AI usage is `none`, or the thread is too long for another
+                        // reply (#648): no draft exists and the mic never opens. The
+                        // screen explains instead of a toast and the red dot; a thread
+                        // too long is also said aloud.
+                        if block.isThreadTooLong {
+                            self.threadTooLong(block)
+                        } else {
+                            self.aiBlock = block
+                            self.state = .idle
+                            self.audio.deactivate()
+                            self.audio.refreshNowPlaying()
+                        }
                     } else {
                         self.failStart((error as? APIError)?.userMessage(fallback: "Could not start recording. Please try again.")
                                        ?? "Could not start recording. Please try again.")
@@ -673,7 +690,13 @@ final class VoiceTurnController {
             // A failure note alone is the server's "no text" entry (#513).
             entrySaved(noText: status.content.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("*Note:"))
             notices.toast(warning, duration: 8)
-            finishQuietly()
+            if ThreadLength.isRefusal(status.warningCode) {
+                // This recording took the thread past its limit (#648): said
+                // aloud, then the screen offers a new thread.
+                threadTooLong(.threadTooLong())
+            } else {
+                finishQuietly()
+            }
             return
         }
         if let nodeId = status.llmNodeId {
@@ -697,9 +720,16 @@ final class VoiceTurnController {
         } catch {
             guard gen == generation else { return }
             if let block = VoiceAIBlock.from(error, fallback: threadParentId == nil ? .account : .thread) {
-                // A blocked state with its own screen, not a failure: no sound.
-                aiBlock = block
-                finishQuietly()
+                if block.isThreadTooLong {
+                    // The thread is too long for another reply (#648): the entry
+                    // may be saved (the answer names it), the refusal is said aloud.
+                    if (error as? APIError)?.body?.extra["user_node_id"]?.intValue != nil { entrySaved() }
+                    threadTooLong(block)
+                } else {
+                    // A blocked state with its own screen, not a failure: no sound.
+                    aiBlock = block
+                    finishQuietly()
+                }
             } else if let apiError = error as? APIError, apiError.status == 400 {
                 endTurnWithError(apiError.userMessage(fallback: "Could not start the reply."), sound: true)
             } else {
@@ -799,6 +829,8 @@ final class VoiceTurnController {
                 }
                 // Glean starts under the last finished reply (web `onLLMComplete`).
                 gleanAnchor = threadParentId ?? nodeId
+                // On the turn it is reached (#648): the notice, or the limit's block.
+                noteThreadLength(status.threadLength, message: status.threadLengthMessage)
                 audio.refreshNowPlaying()
             }
             let content = (status.content ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -826,6 +858,14 @@ final class VoiceTurnController {
             // No reply is coming: Glean stops waiting. It starts under the failed
             // reply, which the server turns into its parent (web `onLLMFailed`).
             gleanAnchor = nodeId
+            if ThreadLength.isRefusal(status.errorCode), !track.failureHandled {
+                // Refused before any model call: the thread is too long for
+                // another reply (#648). Said aloud instead of the error sound.
+                nodes[nodeId]?.failureHandled = true
+                closeStream()
+                threadTooLong(.threadTooLong(message: status.error))
+                return true
+            }
             replyFailed(nodeId, gen)
             return true
         case .cancelled?:
@@ -1410,6 +1450,9 @@ final class VoiceTurnController {
         }
         state = .idle
         aiBlock = nil
+        lengthNotice = false
+        // A refusal's sentence goes with the screen (#648).
+        stopSpeech()
         // The next Voice screen is a new conversation, not a reply to this one.
         threadParentId = nil
         lastReplyNodeId = nil
@@ -1449,6 +1492,94 @@ final class VoiceTurnController {
         state = .idle
         audio.deactivate()
         audio.refreshNowPlaying()
+    }
+
+    // MARK: Thread too long (#648)
+
+    /// The thread is too long for another AI reply (a refused start, a recording
+    /// whose reply was skipped, a reply the server refused): the turn ends, the
+    /// sentence is said aloud on the device (no request), and the screen shows
+    /// the block with a way to start a new thread. Not a failure: no error sound
+    /// and no red dot. Other refusals (the monthly limit) stay a toast.
+    private func threadTooLong(_ block: VoiceAIBlock) {
+        [llmTask, sseTask, reconcileTask, tickTask].forEach { $0?.cancel() }
+        cueOff()
+        audio.queue.generatingTTS = false
+        aiBlock = block
+        state = .idle
+        audio.refreshNowPlaying()
+        speakThenDeactivate(ThreadLength.spokenText)
+    }
+
+    /// A record press where Voice mode is already known to be closed for a thread
+    /// too long (the lock screen's Record, also on Continue while the reply
+    /// plays): the reply stops, as Continue stops it, and the sentence says why,
+    /// as a refused start does. Returns once it has been said: the lock screen's
+    /// intent keeps the app running only until it returns.
+    func announceBlock() async {
+        guard let block = aiBlock, block.isThreadTooLong, phase == .ready || phase == .playback else { return }
+        if state != .idle && state != .done {
+            timing.endTurn()
+            resetTurn(keepQueue: false)
+            state = .idle
+            audio.refreshNowPlaying()
+        }
+        speakThenDeactivate(ThreadLength.spokenText)
+        await untilSpoken()
+    }
+
+    /// Returns once the sentence being said (if any) has been said, or stopped.
+    func untilSpoken() async {
+        while let task = speechTask {
+            await task.value
+            if speechTask == task { speechTask = nil }
+        }
+    }
+
+    /// The sentence, then the session's end (as the error sound: deactivating
+    /// while it is said would cut it off). Only the latest sentence ends the
+    /// session: a second refusal's sentence starts while the first is said, and
+    /// the first one's end must not cut it off. A new turn meanwhile keeps the
+    /// session.
+    private func speakThenDeactivate(_ text: String) {
+        speechToken += 1
+        let token = speechToken
+        let gen = generation
+        speechTask = Task { [weak self] in
+            guard let self else { return }
+            await self.audio.speak(text)
+            guard token == self.speechToken else { return }
+            self.speechTask = nil
+            guard gen == self.generation, self.state == .idle || self.state == .done else { return }
+            self.audio.deactivate()
+        }
+    }
+
+    /// A new recording starts (or Voice closes): the sentence stops at once, so
+    /// the microphone never hears it, and its end leaves the session alone.
+    private func stopSpeech() {
+        guard speechTask != nil else { return }
+        speechToken += 1
+        speechTask = nil
+        audio.stopSpeaking()
+    }
+
+    /// How close the thread the last reply reached is to its limit (#648; the
+    /// reply's llm-status `thread_length`, or the screen's availability): the
+    /// notice line under the record button, or at the limit the block, shown
+    /// without being said (nothing was refused yet; the next record press says
+    /// it). Not while a recording runs.
+    func noteThreadLength(_ length: ThreadLength?, message: String? = nil) {
+        guard phase != .recording else { return }
+        switch length {
+        case .limit?:
+            aiBlock = .threadTooLong(message: message)
+            lengthNotice = false
+        case .notice?:
+            lengthNotice = true
+        case nil:
+            lengthNotice = false
+        }
     }
 
     private func endTurnWithError(_ message: String?, sound: Bool) {

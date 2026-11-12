@@ -189,11 +189,48 @@ final class ThreadModel {
     }
 
     /// LLM Response: in craft mode, and in every shared thread, where it is the
-    /// only way to a reply (auto-generate is off there).
+    /// only way to a reply (auto-generate is off there). Not where the thread is
+    /// too long for another reply (#648): the form offers a new thread instead.
     func showCraftBar(craftMode: Bool, autoGenerate: Bool) -> Bool {
         guard let node else { return false }
         return isOwner && (craftMode || isSharedThread) && !autoGenerateActive(autoGenerate)
-            && node.aiUsage != .off && !isLLMPending
+            && node.aiUsage != .off && !isLLMPending && !atThreadLimit
+    }
+
+    // MARK: Long threads (#648)
+
+    /// The server's text from a refused reply request, shown in the form's limit state.
+    private(set) var threadLimitMessage: String?
+
+    /// How close the next AI reply here is to the thread's limit, for the owner:
+    /// what the form shows above the composer (nil: nothing).
+    var threadLength: ThreadLength? {
+        guard isOwner, !isLLMPending else { return nil }
+        return node?.threadLength
+    }
+
+    /// No AI reply here: LLM Response, Glean and the automatic reply are not
+    /// offered; writing still works.
+    var atThreadLimit: Bool { isOwner && node?.threadLength == .limit }
+
+    /// The limit state's text: a refused request's own words first, then the
+    /// server's reason with the node (`thread_length_message`: the thread is long,
+    /// or an entry or what it quotes is too large), else the app's.
+    var threadLimitText: String {
+        threadLimitMessage ?? node?.threadLengthMessage ?? ThreadLength.limitText
+    }
+
+    /// A reply request came back `thread_too_long`: the form switches to its
+    /// limit state (the GET that opened the page was under the notice, or older).
+    func threadReachedLimit(message: String?) {
+        let text = message?.trimmingCharacters(in: .whitespacesAndNewlines)
+        threadLimitMessage = (text?.isEmpty ?? true) ? nil : text
+        node?.threadLength = .limit
+    }
+
+    /// "Start a new thread": the Write screen (Text mode), the app's way to start one.
+    func startNewThread() {
+        app?.open(.textMode())
     }
 
     var tabTitle: String {
@@ -476,6 +513,10 @@ final class ThreadModel {
                 if let meta = data.toolCallsMeta { node?.toolCallsMeta = meta }
                 if let picks = data.feedPicksCount { node?.feedPicksCount = picks }
                 node?.llmTaskStatus = .completed
+                // How long the thread is now (#648): the notice or the limit shows
+                // on the turn it is reached, not on the next page load.
+                node?.threadLength = data.threadLength
+                node?.threadLengthMessage = data.threadLengthMessage
                 streamTask?.cancel()
                 streamTask = nil
                 refreshQuotesIfNeeded()
@@ -497,7 +538,11 @@ final class ThreadModel {
             }
             llmTaskNodeId = nil
         case .failed?:
-            app.toasts.show(data.error ?? "Task failed", duration: 8)
+            // A reply refused for the thread's length (#648) is not a failure to
+            // toast: the entry's page, where this goes back to, shows the limit.
+            if !ThreadLength.isRefusal(data.errorCode) {
+                app.toasts.show(data.error ?? "Task failed", duration: 8)
+            }
             if trackedId == nodeId, let parent = parentAncestor, !parent.deleted {
                 // Back to the entry: pop when we came from it, else replace this dead node.
                 if case .thread(let prevId, _)? = app.router.previousRoute, prevId == parent.id {
@@ -530,6 +575,12 @@ final class ThreadModel {
         if SpendCap.isSpendCapError(error) { return }
         // No automatic reply under a shared node: not an error, LLM Response stays.
         if (error as? APIError)?.isAutoGenerateOff == true { return }
+        // The thread is too long for another reply (#648): the form says so and
+        // offers a new thread, instead of a toast.
+        if let apiError = error as? APIError, apiError.isThreadTooLong {
+            threadReachedLimit(message: apiError.body?.error)
+            return
+        }
         let message = (error as? APIError)?.userMessage(fallback: "Error requesting LLM response.")
             ?? "Error requesting LLM response."
         app.toasts.show(message, duration: 8)
@@ -559,6 +610,9 @@ final class ThreadModel {
                          entryPrivacy: PrivacyLevel? = nil) async throws -> Int? {
         guard autoGenerateActive(autoGenerate.wrappedValue) else { return nil }
         if entryPrivacy.isSharedWithOthers { return nil }
+        // The thread is already too long for another reply (#648): the entry is
+        // written, no reply is asked for (the new entry's page says why).
+        if atThreadLimit { return nil }
         guard chainAIUsages.allSatisfy({ $0?.allowsAI == true }) else {
             autoGenerate.wrappedValue = false
             app?.toasts.show("Turning off auto-generate. AI usage on some nodes is turned off.", duration: 8)
@@ -566,7 +620,8 @@ final class ThreadModel {
         }
         do {
             return try await requestLLM(for: parentId, automatic: true)
-        } catch let error as APIError where error.isAutoGenerateOff {
+        } catch let error as APIError where error.isAutoGenerateOff || error.isThreadTooLong {
+            // This entry took the thread past the limit (#648): its page shows it.
             return nil
         }
     }
@@ -604,7 +659,8 @@ final class ThreadModel {
                 "model": .optional(selectedModel),
             ]))
             return NodeFormResult(id: answer.id, userNodeId: answer.userNodeId, llmNodeId: answer.llmNodeId,
-                                  spendCapped: answer.spendCapped, llmError: answer.llmError)
+                                  spendCapped: answer.spendCapped, llmError: answer.llmError,
+                                  llmErrorCode: answer.llmErrorCode)
         }
         if submission.aiUsage == .off {
             let created: NodeCreateResponse = try await app.api.post(APIPath.nodes, json: .object([
@@ -618,7 +674,8 @@ final class ThreadModel {
             "model": .optional(selectedModel), "auto_generate": .bool(auto),
         ]))
         return NodeFormResult(id: answer.userNodeId, userNodeId: answer.userNodeId, llmNodeId: answer.llmNodeId,
-                              promptNodeId: answer.promptNodeId, spendCapped: answer.spendCapped, llmError: answer.llmError)
+                              promptNodeId: answer.promptNodeId, spendCapped: answer.spendCapped, llmError: answer.llmError,
+                              llmErrorCode: answer.llmErrorCode)
     }
 
     func readReplySent(_ result: NodeFormResult) {
@@ -657,6 +714,7 @@ final class ThreadModel {
         guard let node else { return false }
         return isOwner && gleanEnabled && (gleanThread || isGleanEntry) && node.aiUsage != .off
             && !isLLMPending && (!node.systemPrompt.isSystemPrompt || isGleanEntry)
+            && !atThreadLimit  // a glean reads the thread too (#648)
     }
 
     /// A gleaning that failed (#435): the page says so instead of its placeholder.

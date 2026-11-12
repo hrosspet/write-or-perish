@@ -11,6 +11,9 @@ from backend.utils.llm_nodes import (
     read_only_model_response, reply_ai_usage, voice_turn_refusal,
 )
 from backend.utils.placeholders import UserExportValidationError
+from backend.utils.thread_size import (
+    thread_length_refusal, thread_size, thread_too_long_response,
+)
 from backend.utils.audio_storage import is_storage_id
 from backend.utils.context_artifacts import attach_context_artifacts
 from backend.utils import voice_timing
@@ -89,6 +92,13 @@ def create_voice_from_node(node_id):
         model_id = pick_model_for_generation(node, current_user)
     if model_id not in current_app.config["SUPPORTED_MODELS"]:
         return jsonify({"error": f"Unsupported model: {model_id}"}), 400
+    # A thread too long for another reply (#648) gets 409 ``code:
+    # thread_too_long`` and nothing is created: the clients open the Voice
+    # screen on it, which says so and offers a new thread.
+    too_long = thread_length_refusal(node, current_user.id, model_id,
+                                     user=current_user)
+    if too_long is not None:
+        return thread_too_long_response(too_long)
 
     # Inherit ai_usage from the target node, looking through a read (#362)
     ai_usage = reply_ai_usage(node, current_user)
@@ -236,6 +246,13 @@ def create_voice_session():
     refused = read_only_model_refusal(model_id, parent_node, new_entry=True)
     if refused is not None:
         return read_only_model_response(refused)
+    # Nor in a thread already too long for another reply (#648), as at
+    # streaming init.
+    if parent_node is not None:
+        too_long = thread_length_refusal(parent_node, current_user.id,
+                                         model_id, user=current_user)
+        if too_long is not None:
+            return thread_too_long_response(too_long)
 
     if not parent_id:
         prompt_record = get_user_prompt_record(current_user.id, PROMPT_KEY)
@@ -280,6 +297,7 @@ def create_voice_session():
             session_id, user_node, current_user.id
         )
 
+    from backend.utils.thread_size import ThreadTooLong
     try:
         llm_node, task_id = create_llm_placeholder(
             user_node.id, model_id, current_user.id,
@@ -288,6 +306,15 @@ def create_voice_session():
         )
     except UserExportValidationError as e:
         return jsonify({"error": str(e)}), 400
+    except ThreadTooLong as e:
+        # This turn took the thread past the limit (#648): what was said
+        # is kept (its audio has moved to the entry), only the reply is
+        # skipped.
+        db.session.commit()
+        response, status = thread_too_long_response(e)
+        body = response.get_json()
+        body["user_node_id"] = user_node.id
+        return jsonify(body), status
 
     current_app.logger.info(
         f"Voice session: parent={user_parent_id}, "
@@ -324,10 +351,22 @@ def voice_availability():
                 parent, current_user.id):
             return jsonify({"error": "Node not found"}), 404
     refused = voice_turn_refusal(current_user, parent)
-    if refused is None:
-        return jsonify({"allowed": True})
-    return jsonify({"allowed": False, "code": refused.code,
-                    "scope": refused.scope, "error": refused.message})
+    if refused is not None:
+        return jsonify({"allowed": False, "code": refused.code,
+                        "scope": refused.scope, "error": refused.message})
+    # A thread too long for another reply (#648): ``{"allowed": false,
+    # "code": "thread_too_long", "error"}``, which the screen shows with
+    # a way to start a new thread. Near it, ``thread_length: "notice"``.
+    if parent is not None:
+        from backend.utils.thread_size import LIMIT, ThreadTooLong
+        size, state = thread_size(parent, current_user.id, user=current_user)
+        if state == LIMIT:
+            too_long = ThreadTooLong(reason=size.reason)
+            return jsonify({"allowed": False, "code": too_long.code,
+                            "error": too_long.message})
+        if state is not None:
+            return jsonify({"allowed": True, "thread_length": state})
+    return jsonify({"allowed": True})
 
 
 # ── Where a voice turn's wait goes (#371 step 0) ─────────────────────────

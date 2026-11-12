@@ -253,6 +253,12 @@ private struct ThreadContent: View {
                 }
             }
             .padding(.bottom, 10)
+            if let length = model.threadLength {
+                ThreadLengthNotice(state: length, limitText: model.threadLimitText,
+                                   onNewThread: model.startNewThread)
+                    .padding(.top, 4)
+                    .padding(.bottom, 8)
+            }
             NodeFormView(config: inlineConfig(node)) { result in
                 formToken += 1
                 if model.isReadReply {
@@ -364,6 +370,36 @@ private struct ThreadContent: View {
             Spacer(minLength: 0)
         }
         .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// Long threads (#648), above the reply form: from 90 % of the limit a calm
+/// notice; at the limit why no AI reply follows here, with the way to a new
+/// thread. Writing below still works. No price, no numbers.
+struct ThreadLengthNotice: View {
+    let state: ThreadLength
+    var limitText: String = ThreadLength.limitText
+    let onNewThread: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(state == .limit ? limitText : ThreadLength.noticeText)
+                .font(LooreFont.sans(14.4, .light))
+                .foregroundStyle(LooreColor.textSecondary)
+                .lineSpacing(4)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button(ThreadLength.newThreadLabel, action: onNewThread)
+                .buttonStyle(state == .limit ? .loorePrimary : .looreLink)
+                .accessibilityIdentifier("thread.newThread")
+        }
+        .padding(.vertical, 14)
+        .padding(.horizontal, 16)
+        .background(LooreColor.bgCard, in: RoundedRectangle(cornerRadius: LooreRadius.small))
+        .overlay(RoundedRectangle(cornerRadius: LooreRadius.small)
+            .strokeBorder(state == .limit ? LooreColor.accent : LooreColor.border))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(state == .limit ? "thread.lengthLimit" : "thread.lengthNotice")
     }
 }
 

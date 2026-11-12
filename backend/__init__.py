@@ -533,6 +533,21 @@ def create_app():
         db.session.rollback()
         return read_only_model_response(exc)
 
+    # A reply whose prompt would be over THREAD_PROMPT_TOKEN_LIMIT (#648):
+    # create_llm_placeholder raises ThreadTooLong before any write. Routes
+    # that keep the user's entry answer it themselves; any that lets it
+    # escape gets 409 {"error", "code": "thread_too_long"}, and whatever it
+    # flushed before the call is not kept (nothing to keep without the
+    # reply: a Glean's prompt node, a Voice prompt node).
+    from backend.utils.thread_size import ThreadTooLong
+
+    @app.errorhandler(ThreadTooLong)
+    def _handle_thread_too_long(exc):
+        from backend.extensions import db
+        from backend.utils.thread_size import thread_too_long_response
+        db.session.rollback()
+        return thread_too_long_response(exc)
+
     # --------------------------------------------------------------------
     # Health checks – liveness/readiness for monitoring (no auth).
     # --------------------------------------------------------------------
