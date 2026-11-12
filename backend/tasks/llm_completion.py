@@ -37,7 +37,8 @@ from backend.utils.tokens import (
 from backend.utils.quotes import (
     resolve_quotes, has_quotes,
     resolve_ext_quotes, has_ext_quotes, find_ext_quote_ids,
-    quotes_inside, release_quotes,
+    quotes_inside, release_quotes, reference_id_from_name, reference_name,
+    REFERENCE_LINE, REFERENCE_LINE_NAMED, ReferenceLines,
 )
 from backend.utils.node_split import NODE_CHAR_CAP
 from backend.utils.session_helpers import (
@@ -175,16 +176,28 @@ def _render_variant(user_id):
             + (f"d{deleted}" if deleted else ""))
 
 
-def _system_render_variant(system_node, user_id):
+def _system_render_variant(system_node, user_id, tools=None):
     """The #192 render-cache variant of *system_node* rendered for
     *user_id*. The owner's is _render_variant alone (the key their cached
     renders already use). Someone else's render of it (a reply in a
     public thread) has the personal placeholders blanked and its own
     toggles, so it is keyed by that user: it never reads the owner's
-    render, and never overwrites it."""
+    render, and never overwrites it.
+
+    *tools*: whether the call rendering it has tools (an agentic chain);
+    None reads it from the node's own prompt, as render_system_message
+    does. A call without tools renders the recent raw window with the
+    text of the saved references it quotes, one with tools names them
+    (_recent_raw_reference_lines), so the two never share a render: a
+    render without tools takes the "t0" suffix, and the agentic renders
+    keep the key they had."""
     variant = _render_variant(user_id)
     if not node_is_users(system_node, user_id):
         variant += f"r{user_id}"
+    if tools is None:
+        tools = chain_has_agentic_prompt([system_node])
+    if not tools:
+        variant += "t0"
     return variant
 
 
@@ -443,7 +456,10 @@ def _dispatch_voice_tts(node_id, user_id):
 # BEFORE the text is stored or scanned for pulls — the stored lore is
 # self-contained, and the model never copies a multi-digit id (which it
 # reliably typos; labels it doesn't).
-_LABEL_QUOTE_RE = re.compile(r'\{quote:([A-Za-z]{1,2})\}')
+# A saved reference read or named this turn is quoted by its name too,
+# {quote:reference N} (quotes.reference_name).
+_LABEL_QUOTE_RE = re.compile(
+    r'\{quote:([A-Za-z]{1,2}|reference\s*#?\s*\d+)\}', re.IGNORECASE)
 
 
 def _quote_label(n):
@@ -456,15 +472,36 @@ def _quote_label(n):
     return label
 
 
+def _next_quote_label(quote_labels):
+    """The next search-result label of the turn: the letter labels
+    count, the saved references' names ("REFERENCE 12") do not."""
+    return _quote_label(sum(1 for k in quote_labels if k.isalpha()))
+
+
+def _label_key(label):
+    """The quote_labels key of *label*: a letter label upper-cased, a
+    saved reference's name in its one written form ("REFERENCE 12")."""
+    ref_id = reference_id_from_name(label)
+    if ref_id is not None:
+        return reference_name(ref_id).upper()
+    return label.upper()
+
+
 def _canonicalize_quote_labels(text, quote_labels):
     """Rewrite {quote:<label>} markers to absolute references using this
     turn's label map ({label: ("node"|"external", id)}). Unknown labels are
-    left as-is (they render as literal text — visible, not wrong)."""
+    left as-is (they render as literal text — visible, not wrong).
+
+    A saved reference's name is a label too, {quote:reference N}, for a
+    reference of the user's this turn read by name or its recent raw
+    window names (both put it in the map); any other N stays as written.
+    A bare {quote:N} is an entry's id and is never rewritten: nothing in
+    it says whether the model meant reference N."""
     if not text or not quote_labels:
         return text
 
     def repl(match):
-        target = quote_labels.get(match.group(1).upper())
+        target = quote_labels.get(_label_key(match.group(1)))
         if target is None:
             return match.group(0)
         kind, ref_id = target
@@ -778,12 +815,14 @@ VOICE_TOOLS = [
         "description": (
             "Read one semantic_search match in full — pass its label from "
             "this turn's search results (e.g. 'B'), or a numeric archive "
-            "entry id from your context. Use it BEFORE quoting or building "
-            "your answer on anything longer than its preview (previews "
-            "mark themselves truncated). The full text comes back the next "
-            "step; then write your final reply — with {quote:<label>} if "
-            "you want the user to see it quoted. Always produce a text "
-            "response alongside the call."
+            "entry id from your context, or 'reference N' for a saved "
+            "reference your context names that way. Use it BEFORE quoting "
+            "or building your answer on anything longer than its preview "
+            "(previews mark themselves truncated). The full text comes "
+            "back the next step; then write your final reply — with "
+            "{quote:<label>}, or {quote:reference N} for a saved reference "
+            "read by name, if you want the user to see it quoted. Always "
+            "produce a text response alongside the call."
         ),
         "input_schema": {
             "type": "object",
@@ -792,7 +831,8 @@ VOICE_TOOLS = [
                     "type": "string",
                     "description": (
                         "A label from this turn's search results ('A', "
-                        "'B', …) or a numeric archive entry id."
+                        "'B', …), a numeric archive entry id, or "
+                        "'reference N' for a saved reference."
                     ),
                 },
             },
@@ -1433,8 +1473,17 @@ def _retrieval_injection_text(tr, user_id, with_labels=False, licence=None):
             q_text = (q_text[:MAX_QUOTE_PULL_CHARS]
                       + "\n[…content truncated to fit the context window…]")
         what = "reference" if kind == "external" else "entry"
+        how = ""
+        if (kind == "external"
+                and reference_id_from_name(tr.get("ref")) is not None):
+            # Read by name: within the turn the name quotes it
+            # (_canonicalize_quote_labels); a later turn's map may not
+            # hold it, so there the absolute marker does.
+            how = (f" To quote it, write {{quote:{reference_name(ref_id)}}}."
+                   if with_labels else
+                   f" To quote it, write {{quote_ext:{ref_id}}}.")
         return (f"[Full content of the {what} you asked to read "
-                f"([{tr.get('ref', '?')}]):\n{q_text}]")
+                f"([{tr.get('ref', '?')}]):{how}\n{q_text}]")
     if name == "semantic_search":
         # Re-resolve each matched node from its id (content never stored in
         # meta); re-check ai_usage, soft-delete and the user's access at
@@ -2668,7 +2717,27 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                 # re-resolved at injection time like every retrieval tool.
                 ref = (inp.get("ref") or "").strip()
                 target = None
-                if quote_labels and ref.upper() in quote_labels:
+                # A saved reference by the name the recent raw window
+                # gives it ("reference 12", quotes.reference_title_lines),
+                # only one of the user's own. With the "External
+                # references" toggle on, any of them; with it off, only
+                # the ones this call's window names (in the turn's map,
+                # seeded from the window): the user's setting keeps the
+                # rest out, and any other id reads as a missing one. A
+                # reference opened by name joins the map, so the reply
+                # can quote it as {quote:reference N}.
+                named_id = reference_id_from_name(ref)
+                if named_id is not None:
+                    key = reference_name(named_id).upper()
+                    item = db.session.get(ExternalItem, named_id)
+                    if (item is not None and item.user_id == user_id
+                            and ((quote_labels and key in quote_labels)
+                                 or _external_references_for_user(
+                                     user_id))):
+                        target = ("external", item.id)
+                        if quote_labels is not None:
+                            quote_labels[key] = target
+                elif quote_labels and ref.upper() in quote_labels:
                     target = quote_labels[ref.upper()]
                 elif ref.isdigit():
                     target = ("node", int(ref))
@@ -2676,8 +2745,9 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                     result["status"] = "error"
                     result["error"] = (
                         f"Unknown reference {ref!r} — pass a label from "
-                        "this turn's search results or a numeric entry id.")
-                elif (target[0] == "external"
+                        "this turn's search results, a numeric entry id, "
+                        "or a saved reference's name ('reference N').")
+                elif (target[0] == "external" and named_id is None
                         and not _external_references_for_user(user_id)):
                     # Defense in depth (#329): a search never hands out an
                     # external label to a user without the toggle, so this
@@ -2933,7 +3003,29 @@ def get_user_recent_content(user_id, pinned_node=None, usage=None):
     return None
 
 
-def get_user_recent_raw_content(user_id, created_before=None, usage=None):
+def _recent_raw_reference_lines(tools):
+    """How the recent raw window of a call shows each saved reference
+    the user's entries quote (Peter, voice review 2026-11-12: recent
+    entries show a saved reference by title). A call with *tools* (any
+    voice / textmode chain, and its pre-warm) gets a line naming the
+    reference instead of its text: REFERENCE_LINE_NAMED, which adds the
+    name read_full opens it by, while read_full is in the tool list;
+    REFERENCE_LINE under the SEMANTIC_SEARCH_AGENTIC killswitch, which
+    drops read_full. A call without tools (Reflect, Orient, a
+    placeholder typed into a message with no agentic prompt) keeps the
+    text: None. Depends on *tools* and config only, so the pre-warm
+    render and the generation loop agree byte for byte (#187); the
+    render cache key carries both (#192, _system_render_variant)."""
+    if not tools:
+        return None
+    if any(t.get("name") == "read_full"
+           for t in gated_voice_tools(flask_app.config)):
+        return REFERENCE_LINE_NAMED
+    return REFERENCE_LINE
+
+
+def get_user_recent_raw_content(user_id, created_before=None, usage=None,
+                                reference_titles=None):
     """Get the most recent ~10K tokens of raw user writing.
 
     Always returns a fixed window of the last ~10K tokens regardless of
@@ -2951,6 +3043,14 @@ def get_user_recent_raw_content(user_id, created_before=None, usage=None):
             time are excluded to avoid duplicating current session context.
         usage: A ContextUsage; every entry, quote and reference the window
             renders reports to it (#326).
+        reference_titles: REFERENCE_LINE or REFERENCE_LINE_NAMED names
+            each saved reference the user's entries quote by a line
+            (title or author, source; NAMED adds the name read_full
+            opens it by) instead of giving its text; see
+            _recent_raw_reference_lines. A window that quotes none is
+            the same bytes either way. The ids of the references named
+            by the name read_full opens them by go into
+            *usage*.named_references.
 
     The markers left as written in other people's text come back held
     (quotes.hold_quotes); the caller releases them (quotes.release_quotes)
@@ -2966,6 +3066,8 @@ def get_user_recent_raw_content(user_id, created_before=None, usage=None):
     if not user:
         return None
 
+    lines = (ReferenceLines(named=reference_titles == REFERENCE_LINE_NAMED)
+             if reference_titles else None)
     result = _build_export(
         user,
         max_tokens=10000,
@@ -2977,9 +3079,12 @@ def get_user_recent_raw_content(user_id, created_before=None, usage=None):
         licence=(usage.licence(USER_RECENT_RAW_PLACEHOLDER)
                  if usage is not None else None),
         hold_others_markers=True,
+        reference_titles=lines,
     )
     if not result:
         return None
+    if lines is not None and usage is not None:
+        usage.named_references.update(lines.ids)
 
     return {
         "content": result["content"],
@@ -3539,7 +3644,9 @@ def _own_system_values(text, system_node, user_id, usage):
         values[USER_RECENT_PLACEHOLDER] = rc.get_content() if rc else ""
     if USER_RECENT_RAW_PLACEHOLDER in text:
         raw_result = get_user_recent_raw_content(
-            user_id, created_before=system_node.created_at, usage=usage)
+            user_id, created_before=system_node.created_at, usage=usage,
+            reference_titles=_recent_raw_reference_lines(
+                chain_has_agentic_prompt([system_node])))
         raw_text = ""
         if raw_result:
             raw_text = format_date_metadata(
@@ -3589,7 +3696,9 @@ def render_system_message(system_node, user_id, usage=None):
     {quote:..}, {quote_ext:..}) — callers must check first. The rows the
     placeholders resolve to report to *usage* (a ContextUsage, #326).
     A system node that is not *user_id*'s own renders its personal
-    placeholders empty, as the generation loop does.
+    placeholders empty, as the generation loop does. Whether the call
+    has tools is read from the node's own prompt (an agentic prompt:
+    the pre-warm's call), as _system_render_variant reads it.
     All placeholders are filled in one pass (fill_placeholders), so text
     filled in for one is never searched for another (#518).
     """
@@ -3719,7 +3828,7 @@ def _prewarm_anthropic_cache(system_node_id, user_id, model_id,
             cached = get_cached_render(
                 flask_app.config, system_node, render_variant)
             if cached is not None:
-                sys_text, unlicensed = cached
+                sys_text, unlicensed = cached.text, cached.unlicensed
             else:
                 usage = ContextUsage()
                 sys_text = render_system_message(
@@ -3730,7 +3839,8 @@ def _prewarm_anthropic_cache(system_node_id, user_id, model_id,
                 unlicensed = usage.reason(sys_content)
                 store_render(flask_app.config, system_node, sys_text,
                              render_variant, unlicensed=unlicensed,
-                             rows=usage.rows(sys_content))
+                             rows=usage.rows(sys_content),
+                             references=usage.named_references)
 
             key_type = determine_api_key_type([system_node], logger=logger)
             # The render carries the user's own rows, each licensed by
@@ -4183,11 +4293,17 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 (n for n in node_chain
                  if not _gone(n) and n.has_artifact("prompt")),
                 None)
+            # Whether this call has tools (an agentic chain): the recent
+            # raw window and the render cache key depend on it.
+            chain_tools = _is_agentic_prompt(node_chain)
             system_render_cacheable = False
             cached_system_render = None
             # Why the cached render's own rows are not licensed for
             # training, or None (#326) — replayed into the licence below.
             cached_system_unlicensed = None
+            # The saved references a cached render's window names
+            # (prompt_cache.CachedRender.references).
+            cached_system_references = ()
             if system_node is not None:
                 _sys_text = system_node.get_content() or ""
                 # Exclude prompts carrying per-call volatile placeholders.
@@ -4200,13 +4316,15 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     and not has_quotes(_sys_text)
                     and not has_ext_quotes(_sys_text)
                 )
-                render_variant = _system_render_variant(system_node, user_id)
+                render_variant = _system_render_variant(
+                    system_node, user_id, tools=chain_tools)
                 if system_render_cacheable:
                     _cached = get_cached_render(
                         flask_app.config, system_node, render_variant)
                     if _cached is not None:
-                        cached_system_render, cached_system_unlicensed = (
-                            _cached)
+                        cached_system_render = _cached.text
+                        cached_system_unlicensed = _cached.unlicensed
+                        cached_system_references = _cached.references
 
             def _placeholder_node(placeholder):
                 """The first of the user's own nodes carrying
@@ -4290,7 +4408,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             if needs_recent_raw:
                 raw_cutoff = recent_raw_node.created_at if recent_raw_node else None
                 raw_result = get_user_recent_raw_content(
-                    user_id, created_before=raw_cutoff, usage=context_usage
+                    user_id, created_before=raw_cutoff, usage=context_usage,
+                    reference_titles=_recent_raw_reference_lines(
+                        chain_tools),
                 )
                 if raw_result:
                     # Raw data is dynamic — add metadata on the fly
@@ -4315,7 +4435,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 )
 
             # Detect if this is an agentic session (enables tools)
-            is_agentic = _is_agentic_prompt(node_chain)
+            is_agentic = chain_tools
             # A reply others can read, in someone else's thread: no tool,
             # no earlier tool result delivered again, no proposal (#483).
             in_others_thread = _reply_in_others_thread(
@@ -4614,6 +4734,14 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # text is stored or shown (the streamed partial text too, so
             # it lives from the first call on).
             quote_labels = {}
+            # The saved references this call's recent raw window names
+            # ("reference N", fresh or from the cached render): read_full
+            # opens them by that name, and {quote:reference N} quotes
+            # them (_canonicalize_quote_labels).
+            for _ref_id in (set(context_usage.named_references)
+                            | set(cached_system_references)):
+                quote_labels[reference_name(_ref_id).upper()] = (
+                    "external", _ref_id)
             streaming_replies = flask_app.config.get(
                 "STREAMING_REPLIES", True)
 
@@ -5032,7 +5160,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                 flask_app.config, system_node, message_text,
                                 render_variant,
                                 unlicensed=context_usage.reason(_verdict_text),
-                                rows=context_usage.rows(_verdict_text))
+                                rows=context_usage.rows(_verdict_text),
+                                references=(
+                                    context_usage.named_references
+                                    if USER_RECENT_RAW_PLACEHOLDER
+                                    in _verdict_text else ()))
                     if role == "assistant":
                         last_assistant_index = len(messages)
                     messages.append({
@@ -5589,11 +5721,11 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                 or tr.get("status") != "success"):
                             continue
                         for m in tr.get("matches") or []:
-                            label = _quote_label(len(quote_labels))
+                            label = _next_quote_label(quote_labels)
                             m["label"] = label
                             quote_labels[label] = ("node", m["node_id"])
                         for m in tr.get("ext_matches") or []:
-                            label = _quote_label(len(quote_labels))
+                            label = _next_quote_label(quote_labels)
                             m["label"] = label
                             quote_labels[label] = ("external", m["item_id"])
 
