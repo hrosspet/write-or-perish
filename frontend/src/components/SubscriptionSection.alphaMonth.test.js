@@ -83,6 +83,8 @@ test('during the free month: its end, the price after it, no card yet', async ()
   expect(screen.queryByText(/The first 14 days are free/)).toBeNull();
 });
 
+// Control: the web sends the level the server lists; the server is what
+// lets a tester have it without a code (test_alpha_free_month.py).
 test('a tester subscribes at the reduced price without a code', async () => {
   mockPost.mockResolvedValue({ data: { url: 'https://checkout.stripe.test/a' } });
   renderSection(sub());
@@ -141,6 +143,7 @@ test('the banner says the month ends soon, once', () => {
   expect(screen.queryByText(/Your free month ends on/)).toBeNull();
 });
 
+// Control: no notice before the month's last week.
 test('no banner while the month has more than a week left', () => {
   const later = new Date(Date.now() + 20 * 86400000).toISOString();
   renderBanner(sub({ free_month_until: later }));

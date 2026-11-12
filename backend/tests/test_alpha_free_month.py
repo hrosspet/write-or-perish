@@ -109,6 +109,7 @@ class TestAccess:
         assert "free month" not in subs.subscription_required_message(u)
 
     def test_payments_off_changes_nothing(self, app_off):
+        """Control: with the switch off every account has everything."""
         u = _tester(until=datetime.utcnow() - timedelta(days=1))
         assert subs.access_state(u) == "full"
         assert subs.ai_replies_allowed(u)
@@ -248,8 +249,8 @@ class TestCheckout:
 
     def test_a_trialing_subscription_from_the_month_is_kept(
             self, app, gateway):
-        """The subscription a tester starts during the month arrives in a
-        trial; it is the account's first, so it is kept."""
+        """Control: the subscription a tester starts during the month
+        arrives in a trial; it is the account's first, so #649 keeps it."""
         u = _tester(until=datetime.utcnow() + timedelta(days=20))
         u.stripe_customer_id = "cus_t"
         _db.session.commit()
@@ -273,6 +274,8 @@ class TestCeiling:
         assert get_user_spend_limit_usd(u, app.config) == 45.0
 
     def test_after_the_month_the_ceiling_is_the_default(self, app):
+        """Control: after the month, the default cap as for any account
+        without a subscription."""
         from backend.utils.spend import get_user_spend_limit_usd
         app.config["SUBSCRIPTION_SPEND_LIMIT_USD_DISCOUNTED"] = 45.0
         u = _tester(until=datetime.utcnow() - timedelta(days=5))
