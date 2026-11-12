@@ -1196,7 +1196,13 @@ def _reply_in_others_thread(llm_node, parent_node, node_chain, system_node,
     The prompt is checked the way tools are turned on: every node of the
     chain whose prompt key is an agentic one (a prompt edited in its
     thread keeps its key after its prompt link is removed), and the
-    linked prompt node *system_node*."""
+    linked prompt node *system_node*.
+
+    Since every AI reply is created private (Peter, 2026-11-12;
+    llm_nodes.create_llm_placeholder) and is shared only once it is
+    written, a new reply never meets this rule. It stays as a second
+    layer for a reply generated while it is not private: one created
+    before that rule and queued or run again since."""
     if llm_node.privacy_level == "private":
         return False
     if system_node is not None and not node_is_users(system_node, user_id):
@@ -5599,7 +5605,9 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                          else None),
                         tts_task_id=(LIVE_TTS_TASK_ID
                                      if speech_turn is not None else None),
-                        privacy_level=current_node.privacy_level,
+                        # A new AI reply node: private, like the
+                        # placeholder (Peter, 2026-11-12).
+                        privacy_level="private",
                         ai_usage=current_node.ai_usage,
                     )
                     continuation.set_content(

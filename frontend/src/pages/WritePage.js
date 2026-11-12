@@ -7,6 +7,7 @@ import { useUser } from '../contexts/UserContext';
 import { useToast } from '../contexts/ToastContext';
 import { isAiAllowed } from '../utils/aiUsage';
 import api from '../api';
+import { isSharedPrivacy } from "../utils/sharedThread";
 import { entryQuestion } from '../utils/entryPrompt';
 
 export default function WritePage() {
@@ -57,7 +58,10 @@ export default function WritePage() {
     // true on a fresh install (matches the backend default). When off,
     // the thread is created without firing an LLM reply.
     const stored = localStorage.getItem('loore_auto_generate');
-    const autoGenerate = stored === null ? true : stored === 'true';
+    // A public (or circles) entry gets no automatic reply (Peter,
+    // 2026-11-12); the stored preference stays for private entries.
+    const autoGenerate = (stored === null ? true : stored === 'true')
+      && !isSharedPrivacy(privacy_level);
     if (streaming_session_id) {
       const res = await api.post(
         `/drafts/streaming/${streaming_session_id}/save-as-node`,
@@ -75,7 +79,7 @@ export default function WritePage() {
   // polls the transcription), so the form asks for the same two decisions
   // here and sends them with the upload (#342). Same fallback as above
   // when AI usage is off.
-  const uploadReplyOptions = ({ ai_usage }) => {
+  const uploadReplyOptions = ({ ai_usage, privacy_level }) => {
     if (!isAiAllowed(ai_usage)) {
       addToast(
         'Turning off auto-generate. AI usage on some nodes is turned off.',
@@ -84,7 +88,8 @@ export default function WritePage() {
       return {};
     }
     const stored = localStorage.getItem('loore_auto_generate');
-    const autoGenerate = stored === null ? true : stored === 'true';
+    const autoGenerate = (stored === null ? true : stored === 'true')
+      && !isSharedPrivacy(privacy_level);
     return { agentic: true, ...(autoGenerate && { auto_generate: true }), ...entry };
   };
 

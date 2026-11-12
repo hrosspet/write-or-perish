@@ -9,6 +9,10 @@ import RegenerateTtsDialog from "./RegenerateTtsDialog";
 import ApplyToRepliesDialog from "./ApplyToRepliesDialog";
 import SplitContentDialog, { NODE_CHAR_CAP } from "./SplitContentDialog";
 import PublicReplyDialog, { PUBLIC_REPLY_ACK_KEY } from "./PublicReplyDialog";
+import QuotesNotPublicDialog from "./QuotesNotPublicDialog";
+import {
+  AUTO_GENERATE_OFF_HINT, isSharedPrivacy, quotesNotPublicError,
+} from "../utils/sharedThread";
 import { useOnlineStatus } from "../hooks/useOnlineStatus";
 import { useToast } from "../contexts/ToastContext";
 import RecoveryBanner from './RecoveryBanner';
@@ -123,6 +127,10 @@ const NodeForm = forwardRef(
     // explicit /nodes/<id>/llm call.
     const [useAutoGenerate, setUseAutoGenerate] = usePersistedToggle(
       'loore_auto_generate', allowAgenticPrompt);
+    // Something about to be public quoted an entry that isn't: the
+    // server's answer ({ message, quoted }), shown as a dialog; nothing
+    // was saved (Peter, 2026-11-12).
+    const [quotesRefusal, setQuotesRefusal] = useState(null);
 
     // Draft auto-save hook
     const {
@@ -199,6 +207,13 @@ const NodeForm = forwardRef(
         setPrivacyLevel("public");
       }
     }, [parentPrivacy, privacyLevel, editMode]);
+
+    // A public (or circles) entry gets no automatic reply (Peter,
+    // 2026-11-12): the toggle shows off and can't be turned on, and the
+    // stored preference is left as the user set it for private entries.
+    const autoGenerateLocked = isSharedPrivacy(
+      !editMode && parentPrivacy === "public" ? "public" : privacyLevel);
+    const autoGenerateOn = useAutoGenerate && !autoGenerateLocked;
 
     // Auto-populate form with draft when loaded
     useEffect(() => {
@@ -539,7 +554,7 @@ const NodeForm = forwardRef(
             content,
             privacy_level: privacyLevel,
             ai_usage: aiUsage,
-            auto_generate: useAutoGenerate,
+            auto_generate: autoGenerateOn,
           });
           deleteDraft();
           setHasDraft(false);
@@ -579,7 +594,7 @@ const NodeForm = forwardRef(
           const response = await api.post(`/drafts/streaming/${streamingSessionId}/save-as-node`, {
             content,
             ...(topLevelWithAi && useAgenticPrompt && { agentic: true }),
-            ...(topLevelWithAi && useAutoGenerate && allowAgenticPrompt
+            ...(topLevelWithAi && autoGenerateOn && allowAgenticPrompt
               && { auto_generate: true }),
           });
           deleteDraft();
@@ -623,10 +638,10 @@ const NodeForm = forwardRef(
           // entries only, as in the recorded branch above.
           const topLevelWithAi = !parentId && aiUsage !== 'none';
           const replyOptions = uploadReplyOptions
-            ? (uploadReplyOptions({ ai_usage: aiUsage }) || {})
+            ? (uploadReplyOptions({ ai_usage: aiUsage, privacy_level: privacyLevel }) || {})
             : {
               ...(topLevelWithAi && useAgenticPrompt && { agentic: true }),
-              ...(topLevelWithAi && useAutoGenerate && allowAgenticPrompt
+              ...(topLevelWithAi && autoGenerateOn && allowAgenticPrompt
                 && { auto_generate: true }),
             };
 
@@ -707,7 +722,7 @@ const NodeForm = forwardRef(
         // the plain /nodes/ entry, trigger an LLM response so the user
         // doesn't have to click LLM Response manually. Only fires when
         // the toggle is visible (top-level text entry with AI allowed).
-        const shouldAutoGenerate = useAutoGenerate
+        const shouldAutoGenerate = autoGenerateOn
           && allowAgenticPrompt
           && !editMode
           && !uploadedFile
@@ -722,7 +737,7 @@ const NodeForm = forwardRef(
             // under the last one (tip_id), so it reads the whole entry.
             const llmRes = await api.post(
               `/nodes/${response.data.tip_id || response.data.id}/llm`,
-              { source_mode: 'textmode' },
+              { source_mode: 'textmode', auto_generate: true },
             );
             succeed({
               ...response.data,
@@ -742,7 +757,11 @@ const NodeForm = forwardRef(
         setLoading(false);
       } catch (err) {
         console.error("Error in NodeForm:", err);
-        if (uploadedFile && isSpendCapError(err)) {
+        const quotesErr = quotesNotPublicError(err);
+        if (quotesErr) {
+          // Nothing was saved: the form keeps its text and settings.
+          setQuotesRefusal(quotesErr);
+        } else if (uploadedFile && isSpendCapError(err)) {
           // The client-side cap flag was stale; the server refused the
           // upload before storing anything (#341). The banner is up; the
           // toast says what happened to this press.
@@ -951,7 +970,9 @@ const NodeForm = forwardRef(
             <button
               type="button"
               onClick={() => setUseAutoGenerate(v => !v)}
-              disabled={loading}
+              disabled={loading || autoGenerateLocked}
+              aria-pressed={autoGenerateOn}
+              title={autoGenerateLocked ? AUTO_GENERATE_OFF_HINT : undefined}
               style={{
                 display: 'inline-flex',
                 justifyContent: 'flex-start',
@@ -960,7 +981,8 @@ const NodeForm = forwardRef(
                 background: 'none',
                 border: 'none',
                 padding: 0,
-                cursor: loading ? 'not-allowed' : 'pointer',
+                cursor: (loading || autoGenerateLocked) ? 'not-allowed' : 'pointer',
+                opacity: autoGenerateLocked ? 0.5 : 1,
                 textAlign: 'left',
               }}
             >
@@ -980,7 +1002,7 @@ const NodeForm = forwardRef(
                 width: '32px',
                 height: '18px',
                 borderRadius: '9px',
-                background: useAutoGenerate ? 'var(--accent)' : 'var(--border)',
+                background: autoGenerateOn ? 'var(--accent)' : 'var(--border)',
                 position: 'relative',
                 transition: 'background 0.2s ease',
                 flexShrink: 0,
@@ -992,7 +1014,7 @@ const NodeForm = forwardRef(
                   background: 'var(--text-primary)',
                   position: 'absolute',
                   top: '2px',
-                  left: useAutoGenerate ? '16px' : '2px',
+                  left: autoGenerateOn ? '16px' : '2px',
                   transition: 'left 0.2s ease',
                 }} />
               </span>
@@ -1004,9 +1026,11 @@ const NodeForm = forwardRef(
               fontFamily: 'var(--sans)',
               fontWeight: 300,
             }}>
-              {useAutoGenerate
-                ? 'AI will reply automatically after you submit.'
-                : 'No AI reply. You can click LLM Response on the created node later.'}
+              {autoGenerateLocked
+                ? `${AUTO_GENERATE_OFF_HINT} You can click LLM Response on the created node; the reply stays private until you change it.`
+                : autoGenerateOn
+                  ? 'AI will reply automatically after you submit.'
+                  : 'No AI reply. You can click LLM Response on the created node later.'}
             </div>
           </div>
         )}
@@ -1244,6 +1268,12 @@ const NodeForm = forwardRef(
             undefined, undefined, applyToReplies,
           );
         }}
+      />
+      <QuotesNotPublicDialog
+        open={!!quotesRefusal}
+        message={quotesRefusal?.message}
+        quoted={quotesRefusal?.quoted}
+        onClose={() => setQuotesRefusal(null)}
       />
       <PublicReplyDialog
         open={showPublicReplyDialog}

@@ -152,11 +152,18 @@ private struct ThreadContent: View {
                     .disabled(model.voiceLoading)
                     .accessibilityHint("Continue this conversation by voice")
                     if craftMode && node.aiUsage != .off {
+                        // A circles thread: off and locked; the stored choice is kept
+                        // (public threads have no header controls at all).
+                        let locked = model.isSharedThread
+                        let on = model.autoGenerateActive(autoGenerate)
                         TopRightButton(title: "Auto-generate") {
-                            LoorePillSwitch(isOn: autoGenerate)
+                            LoorePillSwitch(isOn: on)
                         } action: { autoGenerate.toggle() }
-                        .accessibilityValue(autoGenerate ? "On" : "Off")
-                        .accessibilityHint(autoGenerate ? "Auto-generate is on — tap to turn off"
+                        .disabled(locked)
+                        .opacity(locked ? 0.5 : 1)
+                        .accessibilityValue(on ? "On" : "Off")
+                        .accessibilityHint(locked ? SharedThread.autoGenerateOffHint
+                                           : autoGenerate ? "Auto-generate is on — tap to turn off"
                                            : "Auto-generate is off — tap to turn on")
                     }
                 }

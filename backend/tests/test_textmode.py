@@ -503,15 +503,19 @@ class TestTextmodeAddMessage:
         )
         conv = resp.get_json()
 
+        # A public thread gets no automatic reply (Peter, 2026-11-12), so
+        # the message goes under the entry itself.
+        assert "llm_node_id" not in conv
         resp = client.post(
             f"/api/textmode/{conv['conversation_id']}/message",
             json={
                 "content": "still public?",
-                "parent_id": conv["llm_node_id"],
+                "parent_id": conv["user_node_id"],
             },
         )
         data = resp.get_json()
         assert Node.query.get(data["user_node_id"]).privacy_level == "public"
+        assert data["llm_error_code"] == "auto_generate_off"
 
 
 # ── /textmode/from-node/<id> ─────────────────────────────────────────────

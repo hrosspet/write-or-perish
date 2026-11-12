@@ -15,6 +15,9 @@ import { useAsyncTaskPolling } from "../hooks/useAsyncTaskPolling";
 import { useLlmTextStream } from "../hooks/useSSE";
 import { peekPrefetchedNode, takePrefetchedNode } from "../hooks/useNodePrefetch";
 import api from "../api";
+import {
+  AUTO_GENERATE_OFF_HINT, isAutoGenerateOff, isSharedPrivacy,
+} from "../utils/sharedThread";
 import { useCheckboxToggle, useTaskInsert } from "../utils/markdown";
 import { contextAllowsAi, isAiUsageRefusedError } from "../utils/aiUsage";
 import NodeFormModal from "./NodeFormModal";
@@ -207,8 +210,12 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // PUBLIC threads (#228) are the exception: generation there is always a
   // deliberate act — auto-generate is forced off (and its toggle hidden),
   // and the explicit LLM Response bar shows for the node's owner instead.
+  // The same holds for a node shared with circles (Peter, 2026-11-12:
+  // "autogenerate is off in public threads and circles and can't be
+  // turned on"); there the toggle shows, off and disabled.
   const isPublicThread = node?.privacy_level === 'public';
-  const autoGenerateActive = isPublicThread ? false : autoGenerate;
+  const autoGenerateLocked = isSharedPrivacy(node?.privacy_level);
+  const autoGenerateActive = autoGenerateLocked ? false : autoGenerate;
 
   // LLM completion polling - enabled automatically when llmTaskNodeId is set
   // Batch stage ({ca_tweets}): the synchronous part is done and the turn
@@ -800,10 +807,14 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
       });
   };
 
-  const requestLlmFor = async (parentNodeId, { sourceMode = 'textmode' } = {}) => {
+  // *auto*: the request auto-generate makes after an entry, which the
+  // server refuses under a node other people can read (409
+  // auto_generate_off); LLM Response is the user's own request.
+  const requestLlmFor = async (parentNodeId, { sourceMode = 'textmode', auto = false } = {}) => {
     const response = await api.post(`/nodes/${parentNodeId}/llm`, {
       model: selectedModel,
       source_mode: sourceMode,
+      ...(auto && { auto_generate: true }),
     });
     const newNodeId = response.data.node_id;
     if (!newNodeId) throw new Error("Failed to get a task ID for the new LLM node.");
@@ -822,6 +833,8 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     const status = err?.response?.status;
     const apiErr = err?.response?.data?.error;
     if (status === 402) return;
+    // No automatic reply under a shared node: LLM Response stays offered.
+    if (isAutoGenerateOff(err)) return;
     addToast(apiErr || err.message || "Error requesting LLM response.", 8000);
   };
 
@@ -844,8 +857,12 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // train}, auto-generate silently skips and toasts the user. Prevents
   // firing an LLM call that would omit parts of the thread from context
   // and produce partial / confusing replies.
-  const tryAutoGenerateFor = async (parentNodeId, chainNodes) => {
+  // *privacyLevel* is the new entry's: a public (or circles) entry gets
+  // no automatic reply, whatever the page it was written on (Peter,
+  // 2026-11-12).
+  const tryAutoGenerateFor = async (parentNodeId, chainNodes, privacyLevel) => {
     if (!autoGenerateActive) return null;
+    if (isSharedPrivacy(privacyLevel)) return null;
     if (!contextAllowsAi(chainNodes)) {
       setAutoGenerate(false);
       addToast(
@@ -854,7 +871,12 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
       );
       return null;
     }
-    return await requestLlmFor(parentNodeId);
+    try {
+      return await requestLlmFor(parentNodeId, { auto: true });
+    } catch (err) {
+      if (isAutoGenerateOff(err)) return null;
+      throw err;
+    }
   };
 
   // Called by NodeForm after it successfully POSTs /nodes/.
@@ -867,7 +889,8 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     setError("");
     try {
       const chain = [node, ...(node.ancestors || [])];
-      const llmNodeId = await tryAutoGenerateFor(newNodeId, chain);
+      const llmNodeId = await tryAutoGenerateFor(
+        newNodeId, chain, data?.privacy_level);
       if (llmNodeId) {
         // Through the NEW USER node so it gets its own URL/history step
         // (a back press then walks the actual entries); ?awaitLlm takes
@@ -975,7 +998,8 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     if (editedIsLlm) return;
     try {
       const chain = [updated, ...(updated.ancestors || [])];
-      const llmNodeId = await tryAutoGenerateFor(updated.id, chain);
+      const llmNodeId = await tryAutoGenerateFor(
+        updated.id, chain, updated.privacy_level);
       // The edited node keeps its history entry; the response is watched
       // on its own node from the start (#367).
       if (llmNodeId) {
@@ -1232,7 +1256,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     && !['pending', 'processing', 'failed'].includes(node.transcription_status)
     && !(entryEnd.children || []).some(c => !c.deleted
       && !['failed', 'cancelled'].includes(c.llm_task_status));
-  const showCraftBar = isOwner && (craftMode || isPublicThread)
+  const showCraftBar = isOwner && (craftMode || autoGenerateLocked)
     && (!autoGenerateActive || awaitsReply)
     && node.ai_usage !== 'none' && !isLlmPending;
   // In a thread started from the Glean card (#435) the action row under
@@ -1457,15 +1481,21 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
         <button
           type="button"
           onClick={() => setAutoGenerate(v => !v)}
-          title={autoGenerate ? 'Auto-generate is on — click to turn off' : 'Auto-generate is off — click to turn on'}
-          style={{ ...topRightButtonStyle, justifyContent: 'space-between' }}
+          disabled={autoGenerateLocked}
+          aria-pressed={autoGenerateActive}
+          title={autoGenerateLocked ? AUTO_GENERATE_OFF_HINT
+            : autoGenerate ? 'Auto-generate is on — click to turn off' : 'Auto-generate is off — click to turn on'}
+          style={{
+            ...topRightButtonStyle, justifyContent: 'space-between',
+            ...(autoGenerateLocked && { opacity: 0.5, cursor: 'not-allowed' }),
+          }}
         >
           <span>Auto-generate</span>
           <span style={{
             width: '32px',
             height: '18px',
             borderRadius: '9px',
-            background: autoGenerate ? 'var(--accent)' : 'var(--border)',
+            background: autoGenerateActive ? 'var(--accent)' : 'var(--border)',
             position: 'relative',
             transition: 'background 0.2s ease',
             flexShrink: 0,
@@ -1477,7 +1507,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
               background: 'var(--text-primary)',
               position: 'absolute',
               top: '2px',
-              left: autoGenerate ? '16px' : '2px',
+              left: autoGenerateActive ? '16px' : '2px',
               transition: 'left 0.2s ease',
             }} />
           </span>

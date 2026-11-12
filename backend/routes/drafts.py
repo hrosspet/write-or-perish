@@ -1479,10 +1479,25 @@ def save_streaming_as_node(session_id):
     privacy_level = draft.privacy_level or "private"
     ai_usage = draft.ai_usage or "none"
 
+    # A public entry quotes only public nodes (Peter, 2026-11-12); the
+    # session stays, so the text can be changed and saved again.
+    if privacy_level == "public":
+        from backend.utils.publish_quotes import publish_refusal
+        refusal = publish_refusal(content, current_user.id)
+        if refusal is not None:
+            return refusal
+
     if (agentic or auto_generate) and ai_usage == "none":
         # Same contract as /textmode/start: an AI reply / agentic prompt
         # contradicts ai_usage 'none'. The frontend gates on this too.
         return ai_usage_refused_response()
+    # A public (or circles) entry gets no automatic reply (Peter,
+    # 2026-11-12): the entry is saved, the answer says why.
+    from backend.utils.llm_nodes import auto_generate_refusal
+    auto_off = (auto_generate_refusal(privacy_level=privacy_level)
+                if auto_generate else None)
+    if auto_off is not None:
+        auto_generate = False
     if auto_generate:
         if not model_id:
             # Walks ancestry from the parent (if any) → user.preferred_model
@@ -1582,6 +1597,9 @@ def save_streaming_as_node(session_id):
     }
     if system_node is not None:
         response["conversation_id"] = system_node.id
+    if auto_off is not None:
+        response["llm_error"] = auto_off.message
+        response["llm_error_code"] = auto_off.code
 
     if auto_generate:
         # The entry (and its audio) is already saved above: the user's
@@ -1597,7 +1615,6 @@ def save_streaming_as_node(session_id):
             try:
                 llm_node, task_id = create_llm_placeholder(
                     tip_node.id, model_id, current_user.id,
-                    privacy_level=privacy_level,
                     ai_usage=ai_usage,
                     source_mode="textmode",
                 )

@@ -81,6 +81,14 @@ struct NodeFormSheet: View {
     let onSuccess: (NodeFormResult) -> Void
     let onClose: () -> Void
 
+    /// A node opened from the form (a quoted entry in "Not public yet") shows
+    /// with this sheet closed.
+    private var sheetConfig: NodeFormConfig {
+        var config = config
+        config.leaveForNode = onClose
+        return config
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
@@ -99,7 +107,7 @@ struct NodeFormSheet: View {
                     .accessibilityLabel("Close")
                     .keyboardShortcut(.cancelAction)
                 }
-                NodeFormView(config: config, onSuccess: onSuccess)
+                NodeFormView(config: sheetConfig, onSuccess: onSuccess)
             }
             .padding(LooreSpacing.lg)
         }

@@ -167,6 +167,12 @@ def publish_share(share_id):
         return jsonify(_serialize(share)), 200
 
     content = share.get_content()
+    # A public node quotes only public nodes (Peter, 2026-11-12): the
+    # share stays a draft until the quoted entry is public.
+    from backend.utils.publish_quotes import publish_refusal
+    refusal = publish_refusal(content or "", current_user.id)
+    if refusal is not None:
+        return refusal
 
     # Identity follows content: republishing UNCHANGED content restores the
     # same node (deleted_at cleared) so an existing discussion reattaches —
