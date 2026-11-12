@@ -191,10 +191,22 @@ def _artifact_preview(payload, user_id):
         "base_version": version_number(previous) if previous else None,
         "current_version": version_number(latest) if latest else None,
         # The artifact changed since the call was made: approving it
-        # saves nothing (the write's version check).
+        # saves nothing (the write's version check, which also keeps the
+        # title and description below as shown).
         "stale": ((latest.id if latest else None)
                   != payload.get("previous_artifact_id")),
     }
+    # The write also sets the title and description the call names
+    # (llm_completion._execute_tool_calls): shown when they change.
+    new_title = (inp.get("title") or "").strip()[:128]
+    old_title = previous.title if previous is not None else None
+    if new_title and new_title != (old_title or ""):
+        out["title_change"] = {"from": old_title, "to": new_title}
+    new_description = (inp.get("description") or "").strip()
+    old_description = previous.description if previous is not None else None
+    if new_description and new_description != (old_description or ""):
+        out["description_change"] = {"from": old_description,
+                                      "to": new_description}
     if payload.get("previous_artifact_id") is not None and previous is None:
         out["lines"] = []
         return out
@@ -209,19 +221,89 @@ def _artifact_preview(payload, user_id):
     return out
 
 
+def _issues_to_file(origin, inp):
+    """The issues apply_github_issue(*inp*) would file from *origin*'s
+    proposal, as [(1-based number, issue)]: the numbers it names, else
+    every issue not filed yet with ``all``, else the last one; never one
+    filed already (issue_proposals.file_issues_for_tool)."""
+    from backend.utils.tool_meta import (
+        get_tool_meta_entry, parse_github_issues,
+    )
+    issues = parse_github_issues(origin.get_content() or "")
+    if not issues:
+        return []
+    entry = get_tool_meta_entry(origin, "propose_github_issue") or {}
+    filed = [f for f in (entry.get("filed") or []) if isinstance(f, dict)]
+    if entry.get("apply_status") == "completed" and not filed:
+        filed = [{"index": len(issues) - 1}]
+    done = {f.get("index") for f in filed}
+    numbers = inp.get("issue_numbers")
+    if numbers:
+        try:
+            targets = sorted({int(n) - 1 for n in numbers})
+        except (TypeError, ValueError):
+            return []
+        targets = [i for i in targets if 0 <= i < len(issues)]
+    elif inp.get("all"):
+        targets = list(range(len(issues)))
+    else:
+        targets = [len(issues) - 1]
+    return [(i + 1, issues[i]) for i in targets if i not in done]
+
+
 def _proposal_preview(payload, user_id):
-    """The dialog's view of an apply call: the text of the proposal it
-    would apply, from the reply that proposed it."""
+    """The dialog's view of an apply call: exactly what approving it
+    applies, from the reply that proposed it. The todo changes: the
+    proposal the merge reads. Issues: the ones the call's input selects.
+    Feedback: the feedback text. Shares: the blocks not saved yet."""
+    from backend.utils.tool_meta import (
+        get_tool_meta_entry, parse_feedback, parse_share,
+    )
+    name = payload.get("tool")
+    inp = payload.get("input") or {}
     draft_id = payload.get("proposal_draft_id")
     proposal = db.session.get(Draft, draft_id) if draft_id else None
-    if (proposal is None or proposal.user_id != user_id
-            or proposal.label != _PROPOSAL_LABELS.get(payload.get("tool"))):
+    origin = (db.session.get(Node, proposal.parent_id)
+              if proposal is not None else None)
+    if (proposal is None or origin is None or proposal.user_id != user_id
+            or proposal.label != _PROPOSAL_LABELS.get(name)):
         # Applied or replaced since: approving finds nothing to apply.
         return {"stale": True}
-    origin = db.session.get(Node, proposal.parent_id)
-    text = origin.get_content() if origin is not None else ""
-    return {"stale": False, "proposal_node_id": proposal.parent_id,
-            "proposal_text": text}
+    out = {"stale": False, "proposal_node_id": proposal.parent_id}
+    text = origin.get_content() or ""
+    if name == "apply_github_issue":
+        picked = _issues_to_file(origin, inp)
+        out["issues"] = [{"number": n, "title": i.get("title", "")}
+                         for n, i in picked]
+        out["proposal_text"] = "\n\n".join(
+            f"{i.get('title', '')}\n{i.get('description', '')}".strip()
+            for _, i in picked)
+        if not picked:
+            out["stale"] = True
+    elif name == "apply_feedback":
+        out["proposal_text"] = (parse_feedback(text).get("content")
+                                or "").strip()
+    elif name == "apply_share":
+        entry = get_tool_meta_entry(origin, "propose_share") or {}
+        saved = set(entry.get("saved_indexes") or [])
+        out["proposal_text"] = "\n\n".join(
+            s["content"] for i, s in enumerate(
+                parse_share(text).get("shares") or [])
+            if i not in saved)
+    else:
+        out["proposal_text"] = text
+    if not out.get("proposal_text"):
+        out["stale"] = True
+    return out
+
+
+def _issue_title(item):
+    issues = item.get("issues") or []
+    if len(issues) == 1:
+        return f"File the proposed GitHub issue: {issues[0]['title']}"
+    if issues:
+        return f"File {len(issues)} proposed GitHub issues"
+    return _ACTION_LABELS["apply_github_issue"]
 
 
 def serialize_pending(draft, user_id):
@@ -243,17 +325,26 @@ def serialize_pending(draft, user_id):
         item["title"] = f"{verb} your {item['artifact_title']}"
     else:
         item.update(_proposal_preview(payload, user_id))
-        item["title"] = _ACTION_LABELS.get(name, name)
+        item["title"] = (_issue_title(item) if name == "apply_github_issue"
+                         else _ACTION_LABELS.get(name, name))
     return item
+
+
+def reply_alive(node):
+    """The reply a call was made in still stands: not deleted, nor hidden
+    with its owner's deleted account or content. A call of a reply that
+    is gone is void: not listed, never run."""
+    from backend.utils.privacy import owner_hidden
+    return (node is not None and node.deleted_at is None
+            and not owner_hidden(node))
 
 
 def pending_for_user(user_id, node_ids):
     """Every waiting call of the user in *node_ids*, serialized, whose
-    reply node is alive."""
+    reply node still stands (reply_alive)."""
     out = []
     for draft in pending_drafts(user_id, node_ids):
-        node = db.session.get(Node, draft.parent_id)
-        if node is None or node.deleted_at is not None:
+        if not reply_alive(db.session.get(Node, draft.parent_id)):
             continue
         out.append(serialize_pending(draft, user_id))
     return out
@@ -292,7 +383,8 @@ def _record_outcome(node, pending_id, fields):
 def decide(draft, user_id, approve):
     """Approve (run) or reject the waiting call *draft* (claimed by the
     caller, claim). Returns (outcome, result): "approved" or "rejected",
-    recorded on the reply and the draft deleted; or "failed": the call
+    recorded on the reply and the draft deleted; "gone": the reply was
+    deleted, the call is void and deleted, nothing ran; or "failed": the call
     ran and did not succeed (e.g. the artifact changed since), nothing
     was saved or recorded, and the caller puts it back to waiting
     (release). *result* is the call's tool_calls_meta entry. The caller
@@ -306,7 +398,11 @@ def decide(draft, user_id, approve):
     name = payload.get("tool")
     inp = payload.get("input") or {}
     node = db.session.get(Node, draft.parent_id)
-    if not approve or node is None:
+    if not reply_alive(node):
+        # The reply was deleted: its call is void, never run.
+        db.session.delete(draft)
+        return "gone", None
+    if not approve:
         result = {"name": name, "input": _redact_tool_input(inp),
                   "status": REJECTED_STATUS, "approval": "rejected"}
         if payload.get("kind"):

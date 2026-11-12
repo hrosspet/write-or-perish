@@ -75,6 +75,10 @@ def _decide(draft_id, approve):
     anchor = db.session.get(Node, draft.parent_id)
     try:
         outcome, result = decide(draft, current_user.id, approve)
+        if outcome == "gone":
+            # The reply was deleted: as for a call that does not exist.
+            db.session.commit()
+            return jsonify({"error": "Not found"}), 404
         if outcome == "failed":
             db.session.rollback()
             release(draft_id)

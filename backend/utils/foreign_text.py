@@ -47,19 +47,21 @@ def _is_llm(node):
     return node.node_type == "llm" or bool(node.llm_model)
 
 
-def _quoted_by_others(text, user_id, depth, seen, ext_ids):
+def _quoted_by_others(text, user_id, depth, path, ext_ids):
     """True when a {quote:ID} in *text* (the requester's own) resolves to
     a node another person wrote, at any depth the resolver follows: the
     quoted node is readable by the requester, alive and AI-readable, as
-    resolve_quotes requires before it shows a quote's text. The saved
-    references the requester's quoted entries carry are added to
+    resolve_quotes requires before it shows a quote's text. *path* holds
+    the ids quoted on the way here: only a quote back into it is passed
+    over (the resolver's cycle rule, its _seen_ids), so a node quoted
+    again elsewhere is followed again, as the message builder does. The
+    saved references the requester's quoted entries carry are added to
     *ext_ids*: the message's reference pass resolves them too."""
     if depth <= 0 or not text:
         return False
     for qid in find_quote_ids(text):
-        if qid in seen:
+        if qid in path:
             continue
-        seen.add(qid)
         quoted = db.session.get(Node, qid)
         if (quoted is None or quoted.deleted_at is not None
                 or owner_hidden(quoted)
@@ -70,7 +72,8 @@ def _quoted_by_others(text, user_id, depth, seen, ext_ids):
             return True
         quoted_text = quoted.get_content()
         ext_ids.extend(find_ext_quote_ids(quoted_text or ""))
-        if _quoted_by_others(quoted_text, user_id, depth - 1, seen, ext_ids):
+        if _quoted_by_others(quoted_text, user_id, depth - 1,
+                             path | {qid}, ext_ids):
             return True
     return False
 
@@ -94,7 +97,6 @@ def history_by_others(node_chain, user_id, read_reply_ids=()):
     Glean replies in the chain whose picks the history gives back as
     tweets."""
     kinds = set()
-    seen = set()
     read_reply_ids = set(read_reply_ids or ())
     for node in node_chain:
         if shown_as_deleted(node, user_id):
@@ -110,8 +112,8 @@ def history_by_others(node_chain, user_id, read_reply_ids=()):
             continue
         content = node.get_content() or ""
         ext_ids = find_ext_quote_ids(content)
-        if _quoted_by_others(content, user_id, DEFAULT_MAX_DEPTH, seen,
-                             ext_ids):
+        if _quoted_by_others(content, user_id, DEFAULT_MAX_DEPTH,
+                             frozenset(), ext_ids):
             kinds.add(OTHER_USER)
         kinds |= _reference_kinds(ext_ids, user_id)
     return kinds

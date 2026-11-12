@@ -181,3 +181,18 @@ test('a stale write cannot be approved, only rejected', async () => {
   expect(screen.getByText(/changed since \(now v2\)/)).toBeInTheDocument();
   expect(screen.getByText('Reject')).not.toBeDisabled();
 });
+
+test('an artifact change shows the title and description it sets', async () => {
+  routes['/nodes/90'] = reply({
+    pending_approvals: [{
+      ...MEMORY,
+      title_change: { from: 'Memory', to: 'What I keep' },
+      description_change: { from: null, to: 'Kept facts' },
+    }],
+  });
+  renderAt('/node/90');
+  await screen.findByRole('dialog');
+
+  expect(screen.getByText('Title: Memory → What I keep')).toBeInTheDocument();
+  expect(screen.getByText('Description: Kept facts')).toBeInTheDocument();
+});

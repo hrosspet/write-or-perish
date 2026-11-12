@@ -321,3 +321,21 @@ def test_each_call_of_one_dialog_is_decided_on_its_own(app, thread):
     resp = client.post(f"/api/tool-approvals/{second}/approve")
     assert resp.get_json() == {"outcome": "approved", "pending": []}
     assert _memory(ben) == "- likes tea"
+
+
+def test_a_call_of_a_deleted_reply_is_void(app, thread):
+    """The reply was deleted: its call is not listed, and approving it
+    answers as for a call that does not exist and writes nothing."""
+    from datetime import datetime
+    ben, anna, nodes, reply, pending_id = thread
+    reply.deleted_at = datetime.utcnow()
+    _db.session.commit()
+    client = _client(app, ben)
+
+    assert client.get(
+        f"/api/tool-approvals?node={nodes[0].id}").get_json()["pending"] == []
+    resp = client.post(f"/api/tool-approvals/{pending_id}/approve")
+
+    assert resp.status_code == 404
+    assert _versions(ben) == 1
+    assert _db.session.get(Draft, pending_id) is None

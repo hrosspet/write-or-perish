@@ -105,6 +105,14 @@ function ItemBody({ item }) {
           </p>
         )}
         {item.error && <p style={noteStyle}>{item.error}</p>}
+        {/* The write also sets these: approving applies them as shown. */}
+        {[['Title', item.title_change], ['Description', item.description_change]]
+          .filter(([, change]) => change)
+          .map(([label, change]) => (
+            <p key={label} style={{ ...noteStyle, color: "var(--text-secondary)" }}>
+              {label}: {change.from ? `${change.from} → ${change.to}` : change.to}
+            </p>
+          ))}
         <div style={previewStyle}><DiffRows rows={rows} /></div>
       </>
     );

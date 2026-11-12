@@ -426,3 +426,125 @@ def test_the_payload_is_the_same_until_a_write_is_held(app, people):
     without_rule = _ScriptedProvider.calls[0]
     assert with_rule["tools"] == without_rule["tools"]
     assert with_rule["raw"] == without_rule["raw"]
+
+
+# ── What the dialog shows is what approval applies ─────────────────────
+
+
+def test_a_title_and_description_change_is_shown_and_applied(
+        app, people, task_module):
+    from backend.utils.tool_approvals import decide, serialize_pending
+    ben, anna = people
+    _memory(ben)
+    bens = _thread_with_annas_reply(ben, anna)
+    _ask(bens, ben, [
+        _resp("Renaming.", tool_calls=[{
+            "id": "w1", "name": "update_artifact",
+            "input": {"kind": "memory", "base_version": 1,
+                      "updated_content": "- likes tea\n- more",
+                      "title": "What I keep", "description": "Kept facts"}}]),
+        _resp("Proposed."),
+    ])
+    [held] = _held(ben)
+
+    item = serialize_pending(held, ben.id)
+    assert item["title_change"] == {"from": "Memory", "to": "What I keep"}
+    assert item["description_change"] == {"from": None, "to": "Kept facts"}
+    decide(held, ben.id, approve=True)
+    _db.session.commit()
+
+    _db.session.expire_all()
+    row = UserArtifact.latest_for(ben.id, "memory")
+    assert (row.title, row.description, row.get_content()) == (
+        "What I keep", "Kept facts", "- likes tea\n- more")
+
+
+def _proposal(ben, parent, text, meta_name, label):
+    node = _llm(parent, ben, text, status="completed")
+    node.privacy_level = "private"
+    node.tool_calls_meta = json.dumps([{
+        "name": meta_name, "status": "success",
+        "apply_status": "pending_approval"}])
+    draft = Draft(user_id=ben.id, parent_id=node.id, label=label)
+    draft.set_content("")
+    _db.session.add(draft)
+    _db.session.commit()
+    return node
+
+
+def test_an_issue_call_names_exactly_the_issues_it_files(
+        app, people, task_module):
+    from backend.utils.tool_approvals import serialize_pending
+    ben, anna = people
+    bens = _thread_with_annas_reply(ben, anna)
+    proposal = _proposal(ben, bens, (
+        "### Issue Title\nFirst bug\n### Description\none\n"
+        "### Issue Title\nSecond bug\n### Description\ntwo\n"
+        "### Issue Title\nThird bug\n### Description\nthree"),
+        "propose_github_issue", "github_issue_pending")
+    follow = _node(ben, proposal, "file the first and third")
+    _db.session.commit()
+
+    _ask(follow, ben, [
+        _resp("Filing.", tool_calls=[{
+            "id": "a1", "name": "apply_github_issue",
+            "input": {"issue_numbers": [1, 3]}}]),
+        _resp("Proposed."),
+    ])
+    [held] = _held(ben)
+    item = serialize_pending(held, ben.id)
+
+    assert item["title"] == "File 2 proposed GitHub issues"
+    assert item["issues"] == [{"number": 1, "title": "First bug"},
+                              {"number": 3, "title": "Third bug"}]
+    assert "Second bug" not in item["proposal_text"]
+
+
+def test_a_feedback_call_shows_only_the_feedback(app, people, task_module):
+    from backend.utils.tool_approvals import serialize_pending
+    ben, anna = people
+    bens = _thread_with_annas_reply(ben, anna)
+    proposal = _proposal(ben, bens, (
+        "Some chat first.\n\n### Feedback\nThe dialog is slow.\n"
+        "### Feedback category\nbug"), "propose_feedback",
+        "feedback_pending")
+    follow = _node(ben, proposal, "send it")
+    _db.session.commit()
+
+    _ask(follow, ben, [
+        _resp("Sending.", tool_calls=[{
+            "id": "a1", "name": "apply_feedback", "input": {}}]),
+        _resp("Proposed."),
+    ])
+    item = serialize_pending(_held(ben)[0], ben.id)
+
+    assert item["proposal_text"] == "The dialog is slow."
+
+
+def test_the_check_flags_what_the_message_builder_resolves(app, people):
+    """Own entries A1 quotes A2, A2 quotes B, B quotes Anna's public post.
+    The first message quotes A1 (B is met at the last level the resolver
+    follows), the second quotes B directly (B's quote of Anna's post
+    resolves there). Anna's text is in the payload, and the write waits."""
+    ben, anna = people
+    _memory(ben)
+    annas = _node(anna, None, "ANNAS PUBLIC WORDS")
+    b = _node(ben, None, f"b {{quote:{annas.id}}}", privacy_level="private")
+    a2 = _node(ben, None, f"a2 {{quote:{b.id}}}", privacy_level="private")
+    a1 = _node(ben, None, f"a1 {{quote:{a2.id}}}", privacy_level="private")
+    system = _system_node(ben, privacy_level="private")
+    first = _node(ben, system, f"first {{quote:{a1.id}}}",
+                  privacy_level="private")
+    second = _node(ben, first, f"second {{quote:{b.id}}}",
+                   privacy_level="private")
+    _db.session.commit()
+
+    _ask(second, ben, [
+        _resp("Noting.", tool_calls=[_write_memory("- likes tea\n- x")]),
+        _resp("Proposed."),
+    ])
+
+    sent = "\n".join(m["text"] for m in _ScriptedProvider.calls[0]["messages"])
+    assert "ANNAS PUBLIC WORDS" in sent
+    assert _latest_memory(ben) == "- likes tea"
+    assert len(_held(ben)) == 1
