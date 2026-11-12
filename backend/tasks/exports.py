@@ -1313,8 +1313,9 @@ def apply_waiting_import_date(user, own_run=None):
     end before it are kept and the rest is read again. Called before the
     next build is chosen: by the advance before it picks its set
     (``own_run``: its task id), by the batch seeder's gate and by the
-    synchronous check. With no profile version yet there is nothing to
-    invalidate: the first build reads everything anyway.
+    synchronous check. With no profile version yet, or a rebuild from
+    scratch flagged, there is nothing to invalidate: that build reads
+    everything anyway.
 
     Returns the action (``revert_profile_for_import``'s), "deferred" while
     the work is still in flight, or None when no date waits. Commits."""
@@ -1322,10 +1323,12 @@ def apply_waiting_import_date(user, own_run=None):
         return None
     if import_retip_waits(user, own_run):
         return "deferred"
-    has_profile = db.session.query(UserProfile.id).filter(
-        UserProfile.user_id == user.id,
-        UserProfile.generation_type != 'integration').first() is not None
-    if has_profile:
+    retip = (not user.profile_needs_full_regen
+             and db.session.query(UserProfile.id).filter(
+                 UserProfile.user_id == user.id,
+                 UserProfile.generation_type != 'integration'
+             ).first() is not None)
+    if retip:
         action, _version = revert_profile_for_import(user.id, None, own_run)
     else:
         user.profile_import_retip_from = None

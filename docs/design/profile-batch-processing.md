@@ -696,15 +696,19 @@ batch, or one an advance is rendering (it holds the user's run lock, or
 has claimed the build: the guard with `profile_batch_pending`), would not
 see a re-tip made now: its windows land in the set they were built for,
 and a first build's window, once collected, clears a rebuild flag
-(`_collect_window`), which left the import unread. So the hand-off does
+(`_collect_window`), which left the import unread. An import inside the
+range of windows still in flight, after the set's saved windows, was
+taken for new writing and never read either. So the hand-off does
 not re-tip yet (`exports.import_retip_waits`): the date waits on the user
 (`User.profile_import_retip_from`; several imports keep the oldest), also
 when a first build in flight has no version yet. Once nothing is in
 flight, `exports.apply_waiting_import_date` re-tips from it as above: the
 advance before `resolve_set` (its own run excluded), the seeder's gate
 (`_should_seed`) and the synchronous check. A collected window never
-clears it. With no profile version yet it is dropped: the first build
-reads everything. A synchronous task's guard alone does not hold the
+clears it. With no profile version yet, or a rebuild from scratch
+flagged, it is dropped: that build reads everything. The import's result
+still says that the profile is built once the imports stop
+(`_profile_waits_for_imports`). A synchronous task's guard alone does not hold the
 re-tip: it chooses its base when it starts, `base_moved` stops it at its
 next step, and one that hands off to the window path claims the build
 first.

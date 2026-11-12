@@ -1949,8 +1949,10 @@ def _profile_waits_for_imports(user_id):
     """Whether the import's result tells the user that their profile is
     built once their imports stop (#598): the batch hand-off marked this
     import, and the seeder's other gates would build. Evaluating them sets
-    the regen flag for a due ladder build, as the seed would. Best-effort:
-    False on any error."""
+    the regen flag for a due ladder build, as the seed would. An import
+    whose date waits for the profile work in flight (#639) is built from
+    once that work is in and the imports have stopped, so it says so too.
+    Best-effort: False on any error."""
     from backend.tasks.profile_batch import _should_seed, use_batch_for_user
     try:
         user = db.session.get(User, user_id)
@@ -1958,6 +1960,8 @@ def _profile_waits_for_imports(user_id):
                 or (user.plan or "free") not in User.VOICE_MODE_PLANS
                 or not use_batch_for_user(user, current_app.config)):
             return False
+        if user.profile_import_retip_from is not None:
+            return True
         return bool(_should_seed(user, ignore_backoff=True))
     except Exception as e:
         db.session.rollback()
