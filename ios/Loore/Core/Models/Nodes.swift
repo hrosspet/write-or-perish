@@ -195,6 +195,11 @@ struct NodeDetail: Decodable, Identifiable, Sendable {
     var aiUsage: AIUsage
     var pinnedAt: Date?
     var llmModel: String?
+    /// An AI reply in a shared thread (Circles): "<model name> via @<requester>",
+    /// shown in place of the model id.
+    var llmLabel: String?
+    /// Whose AI wrote the reply (the person who asked for it).
+    var humanOwnerUsername: String?
     /// nil = written in Loore; "twitter" | "chatgpt" | "claude" | "markdown" for imports.
     var origin: String?
     var llmTaskStatus: TaskStatus?
@@ -225,6 +230,14 @@ struct NodeDetail: Decodable, Identifiable, Sendable {
     /// The thread was started from the Glean card (#435): every turn offers
     /// the Glean button. Any other thread offers "Glean for this reflection".
     var gleanThread: Bool
+    /// Circles: who reads this node, on a shared node for its author and readers.
+    var audience: NodeAudience?
+    /// Circles: the viewer's own node that only they read, in a thread someone
+    /// else shared. A reply under it is Only me (the server refuses anything else).
+    var replyOnlyPrivate: Bool
+    /// Circles: the viewer's own Only-me node in a shared thread; what an AI
+    /// reply under it reads of their data and the key it must carry.
+    var threadAIReads: ThreadAIReads?
     /// The viewer's write tool calls waiting for approval anywhere in the thread
     /// shown (ancestors, this node, every reply below); empty when none.
     var pendingApprovals: [ToolApproval]
@@ -248,6 +261,8 @@ struct NodeDetail: Decodable, Identifiable, Sendable {
         case aiUsage = "ai_usage"
         case pinnedAt = "pinned_at"
         case llmModel = "llm_model"
+        case llmLabel = "llm_label"
+        case humanOwnerUsername = "human_owner_username"
         case llmTaskStatus = "llm_task_status"
         case llmTaskError = "llm_task_error"
         case hasOriginalAudio = "has_original_audio"
@@ -262,11 +277,17 @@ struct NodeDetail: Decodable, Identifiable, Sendable {
         case readReplyAbove = "read_reply_above"
         case replyAIUsage = "reply_ai_usage"
         case gleanThread = "glean_thread"
+        case audience
+        case replyOnlyPrivate = "reply_only_private"
+        case threadAIReads = "thread_ai_reads"
     }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(Int.self, forKey: .id)
+        audience = c.tolerant(.audience)
+        replyOnlyPrivate = c.tolerant(.replyOnlyPrivate, default: false)
+        threadAIReads = c.tolerant(.threadAIReads)
         content = c.tolerant(.content, default: "")
         nodeType = c.tolerant(.nodeType, default: .user)
         createdAt = c.tolerant(.createdAt)
@@ -278,6 +299,8 @@ struct NodeDetail: Decodable, Identifiable, Sendable {
         aiUsage = c.tolerant(.aiUsage, default: .off)
         pinnedAt = c.tolerant(.pinnedAt)
         llmModel = c.tolerant(.llmModel)
+        llmLabel = c.tolerant(.llmLabel)
+        humanOwnerUsername = c.tolerant(.humanOwnerUsername)
         origin = c.tolerant(.origin)
         llmTaskStatus = c.tolerant(.llmTaskStatus)
         llmTaskError = c.tolerant(.llmTaskError)
@@ -313,6 +336,11 @@ struct AncestorNode: Decodable, Identifiable, Hashable, Sendable {
     var deletedAt: Date?
     var username: String?
     var llmModel: String?
+    /// An AI reply in a shared thread (Circles): "<model name> via @<requester>",
+    /// shown in place of the model id.
+    var llmLabel: String?
+    /// Whose AI wrote the reply (the person who asked for it).
+    var humanOwnerUsername: String?
     var content: String?
     var preview: String?
     var nodeType: NodeType
@@ -329,6 +357,8 @@ struct AncestorNode: Decodable, Identifiable, Hashable, Sendable {
         case id, deleted, username, content, preview
         case deletedAt = "deleted_at"
         case llmModel = "llm_model"
+        case llmLabel = "llm_label"
+        case humanOwnerUsername = "human_owner_username"
         case nodeType = "node_type"
         case childCount = "child_count"
         case createdAt = "created_at"
@@ -345,6 +375,8 @@ struct AncestorNode: Decodable, Identifiable, Hashable, Sendable {
         deletedAt = c.tolerant(.deletedAt)
         username = c.tolerant(.username)
         llmModel = c.tolerant(.llmModel)
+        llmLabel = c.tolerant(.llmLabel)
+        humanOwnerUsername = c.tolerant(.humanOwnerUsername)
         content = c.tolerant(.content)
         preview = c.tolerant(.preview)
         nodeType = c.tolerant(.nodeType, default: .user)
@@ -374,6 +406,11 @@ struct TreeNode: Decodable, Identifiable, Hashable, Sendable {
     var updatedAt: Date?
     var username: String?
     var llmModel: String?
+    /// An AI reply in a shared thread (Circles): "<model name> via @<requester>",
+    /// shown in place of the model id.
+    var llmLabel: String?
+    /// Whose AI wrote the reply (the person who asked for it).
+    var humanOwnerUsername: String?
     var origin: String?
     var descendantCount: Int
     var userId: Int?
@@ -392,6 +429,8 @@ struct TreeNode: Decodable, Identifiable, Hashable, Sendable {
         case createdAt = "created_at"
         case updatedAt = "updated_at"
         case llmModel = "llm_model"
+        case llmLabel = "llm_label"
+        case humanOwnerUsername = "human_owner_username"
         case descendantCount = "descendant_count"
         case userId = "user_id"
         case parentUserId = "parent_user_id"
@@ -413,6 +452,8 @@ struct TreeNode: Decodable, Identifiable, Hashable, Sendable {
         updatedAt = c.tolerant(.updatedAt)
         username = c.tolerant(.username)
         llmModel = c.tolerant(.llmModel)
+        llmLabel = c.tolerant(.llmLabel)
+        humanOwnerUsername = c.tolerant(.humanOwnerUsername)
         origin = c.tolerant(.origin)
         descendantCount = c.tolerant(.descendantCount, default: 0)
         userId = c.tolerant(.userId)
@@ -458,6 +499,9 @@ struct NodeCreateResponse: Decodable, Sendable {
     var permalink: String?
     var splitInto: Int?
     var tipId: Int?
+    /// Circles: the audience sent with the entry was saved. Absent or false
+    /// on a path that carries none: the form then shares in a second step.
+    var audienceSet: Bool?
 
     enum CodingKeys: String, CodingKey {
         case id, content, username, permalink
@@ -468,6 +512,7 @@ struct NodeCreateResponse: Decodable, Sendable {
         case aiUsage = "ai_usage"
         case splitInto = "split_into"
         case tipId = "tip_id"
+        case audienceSet = "audience_set"
     }
 }
 
@@ -693,6 +738,9 @@ struct LogCard: Decodable, Identifiable, Hashable, Sendable {
     var username: String
     var humanOwnerUsername: String?
     var llmModel: String?
+    /// An AI reply in a shared thread (Circles): "<model name> via @<requester>",
+    /// shown in place of the model id.
+    var llmLabel: String?
     var origin: String?
     var hasOriginalAudio: Bool
     var promptKey: String?
@@ -709,6 +757,7 @@ struct LogCard: Decodable, Identifiable, Hashable, Sendable {
         case pinnedAt = "pinned_at"
         case humanOwnerUsername = "human_owner_username"
         case llmModel = "llm_model"
+        case llmLabel = "llm_label"
         case hasOriginalAudio = "has_original_audio"
         case promptKey = "prompt_key"
     }
@@ -728,6 +777,7 @@ struct LogCard: Decodable, Identifiable, Hashable, Sendable {
         username = c.tolerant(.username, default: "")
         humanOwnerUsername = c.tolerant(.humanOwnerUsername)
         llmModel = c.tolerant(.llmModel)
+        llmLabel = c.tolerant(.llmLabel)
         origin = c.tolerant(.origin)
         hasOriginalAudio = c.tolerant(.hasOriginalAudio, default: false)
         promptKey = c.tolerant(.promptKey)

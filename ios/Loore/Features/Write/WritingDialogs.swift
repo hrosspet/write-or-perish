@@ -123,7 +123,7 @@ struct QuotesNotPublicDialog: View {
     let onClose: () -> Void
 
     var body: some View {
-        LooreDialogCard(title: "Not public yet") {
+        LooreDialogCard(title: refusal.title) {
             DialogBodyText(text: refusal.message)
             VStack(spacing: 8) {
                 ForEach(refusal.quoted) { quoted in

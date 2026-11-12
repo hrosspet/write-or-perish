@@ -12,6 +12,9 @@ struct NodeFormConfig {
         var detachPrompt = false
         var hasGeneratedTTS = false
         var hasChildren = false
+        /// The node is an AI reply (Circles: in a shared thread it is read by
+        /// the one who generated it or by the thread's people, never by everyone).
+        var isAIReply = false
     }
 
     var parentId: Int?
@@ -105,6 +108,15 @@ final class NodeFormModel {
     }
     /// The parent's privacy (replying): a public parent makes the reply public.
     private(set) var parentPrivacy: PrivacyLevel?
+    /// Circles. What the author picks for an entry of their own (circles and
+    /// names for this entry only), and who that resolves to.
+    let audience: CircleAudienceState
+    /// Set instead when the node is a reply in a shared thread: its readers
+    /// are the thread's, named before sending.
+    private(set) var threadAudience: NodeAudience?
+    /// A reply under the user's own node that only they read, in a thread
+    /// someone else shared (`reply_only_private`): Only me is the one choice.
+    private(set) var replyOnlyPrivate = false
     var useAgenticPrompt: Bool {
         didSet { if config.allowAgenticPrompt { defaults.set(useAgenticPrompt, forKey: DefaultsKey.agenticReply) } }
     }
@@ -128,7 +140,7 @@ final class NodeFormModel {
     // server's "quotes an entry that isn't public" refusal after a send. One
     // presenter shows whichever is current, so a chain swaps the card in place
     // (two full-screen covers cannot dismiss and present at once).
-    enum Dialog: Equatable { case tts, scope, split, publicReply, quotesNotPublic(QuotesNotPublic) }
+    enum Dialog: Equatable { case tts, scope, split, publicReply, circleReply, quotesNotPublic(QuotesNotPublic) }
     var dialog: Dialog?
     var showTtsDialog: Bool { dialog == .tts }
     var showScopeDialog: Bool { dialog == .scope }
@@ -153,6 +165,9 @@ final class NodeFormModel {
         self.defaults = defaults
         drafts = DraftAutosaver(api: app.api, nodeId: config.edit?.nodeId,
                                 parentId: config.isEdit ? nil : config.parentId)
+        audience = CircleAudienceState(api: app.api)
+        // Editing: the sentence names who can read this very entry.
+        audience.entryId = config.edit?.nodeId
         content = config.edit?.initialContent ?? ""
         let user = app.user
         let remembers = !config.isEdit && config.parentId == nil
@@ -194,6 +209,34 @@ final class NodeFormModel {
             if let parent = try? await app.api.nodeDetail(parentId) {
                 parentPrivacyChanged(parent.privacyLevel)
                 aiUsage = parent.replyAIUsage ?? parent.aiUsage
+                // A shared thread (Circles): the reply is read by its people.
+                if circlesOn { threadAudience = parent.audience }
+                // Under the user's own Only-me node in someone else's shared
+                // thread the reply is Only me (the server refuses the rest).
+                if circlesOn, parent.replyOnlyPrivate {
+                    replyOnlyPrivate = true
+                    privacy = .private
+                }
+                // A new entry under the user's own node, in a thread that is
+                // not shared: sharing it can take the discussion above along.
+                if circlesOn, threadAudience == nil, !replyOnlyPrivate, ownsNode(parent) {
+                    audience.offerSharePath()
+                }
+            }
+        }
+        // Editing: what the entry is shared with now, to seed the picker; or,
+        // for a reply in a shared thread, the thread's people.
+        if let edit = config.edit, circlesOn,
+           let answer = try? await app.api.get(APIPath.nodeAudience(edit.nodeId), as: NodeAudienceAnswer.self) {
+            if let own = answer.audience, own.isEntry, own.isAuthor {
+                audience.seed(circleIds: own.circleIds ?? [], usernames: own.usernames ?? [])
+            } else {
+                threadAudience = answer.threadAudience ?? answer.audience.flatMap { $0.isEntry ? nil : $0 }
+            }
+            // The entry has a discussion above it: that can be shared with
+            // the entry's people too, or taken back.
+            if let path = answer.threadPath, threadAudience == nil {
+                audience.offerSharePath(shared: path.shared)
             }
         }
         await draftLoad
@@ -227,11 +270,68 @@ final class NodeFormModel {
     }
 
     /// Replying under a public node: the reply is public, whatever was remembered.
+    /// Replying in a shared thread (Circles): the reply is "circles", read by
+    /// the thread's people (the server enforces both).
     var effectivePrivacy: PrivacyLevel {
-        !config.isEdit && parentPrivacy == .public ? .public : privacy
+        if !config.isEdit && parentPrivacy == .public { return .public }
+        if !config.isEdit && threadAudience != nil { return .circles }
+        if !config.isEdit && replyOnlyPrivate { return .private }
+        return privacy
     }
 
-    var lockPrivacy: Bool { !config.isEdit && parentPrivacy == .public }
+    /// The form offers Only me alone (see `replyOnlyPrivate`).
+    var onlyMe: Bool { !config.isEdit && replyOnlyPrivate }
+
+    /// The node is the user's own (an AI reply: the one they asked for).
+    private func ownsNode(_ node: NodeDetail) -> Bool {
+        guard let me = app.user else { return false }
+        if node.user?.id == me.id { return true }
+        guard node.nodeType == .llm else { return false }
+        if let human = node.humanOwnerUsername, !human.isEmpty { return human == me.username }
+        return node.parentUserId == me.id
+    }
+
+    var lockPrivacy: Bool { !config.isEdit && (parentPrivacy == .public || threadAudience != nil) }
+
+    // MARK: Circles
+
+    var circlesOn: Bool { app.capabilities.circlesEnabled }
+
+    /// An entry of the author's own that is being shared with circles / named
+    /// people (not a reply in a shared thread, whose readers are the thread's).
+    var sharesEntry: Bool { circlesOn && privacy == .circles && threadAudience == nil }
+
+    /// The people who see a reply in the shared thread, except the one writing.
+    var threadAudienceNames: [String]? {
+        threadAudience.map { CirclesWording.replyAudienceNames($0, me: app.user?.username) }
+    }
+
+    /// An existing reply in someone else's shared thread: Everyone is not its
+    /// writer's to choose.
+    var lockPublic: Bool { config.isEdit && threadAudience != nil && threadAudience?.isAuthor == false }
+
+    /// An AI reply in a shared thread: the choices are Only me and the
+    /// thread's people. Everyone is left out.
+    var hidePublic: Bool { config.edit?.isAIReply == true && threadAudience != nil }
+
+    private var audienceChanged: Bool { sharesEntry && audience.changed }
+
+    /// The second step for entries created on a path that carries no audience
+    /// (a recording, an upload, a Text-mode start): until this lands the entry
+    /// is "circles" with nobody chosen, which only its author reads. A failure
+    /// leaves it that way and says so.
+    private func shareCreated(_ createdId: Int?) async {
+        guard sharesEntry, let createdId else { return }
+        // The entry only: an AI reply made along with it stays the
+        // author's own until they choose to share it.
+        let body = audience.fields
+        do {
+            _ = try await app.api.put(APIPath.nodeAudience(createdId), json: .object(body), as: NodeAudienceSetAnswer.self)
+        } catch {
+            let why = (error as? APIError)?.userMessage(fallback: "") ?? error.localizedDescription
+            app.toasts.show("The entry is saved and only you can read it. Sharing it did not work: \(why)", duration: 12)
+        }
+    }
 
     /// A public or circles entry gets no automatic reply (Peter, 2026-11-12): the
     /// Auto-generate toggle shows off and can't be turned on. The stored
@@ -265,6 +365,7 @@ final class NodeFormModel {
         }
         if loading && transcriptionStatus == .pending { return "Waiting to transcribe..." }
         if loading { return "Sending..." }
+        if sharesEntry && !config.hidePowerFeatures { return audience.shareLabel() }
         return "Send"
     }
 
@@ -357,6 +458,15 @@ final class NodeFormModel {
         dialogSubmit = Task { await submit(publicConfirmed: true) }
     }
 
+    /// "Send reply" in the shared thread's dialog; `dontAskAgain` is remembered
+    /// per thread and per user on this device.
+    func answerCircleReply(_ dontAskAgain: Bool) {
+        if dontAskAgain, let threadAudience {
+            defaults.set("true", forKey: DefaultsKey.circleReplyAck(entryId: threadAudience.entryId, userId: app.user?.id))
+        }
+        dialogSubmit = Task { await submit(circleConfirmed: true) }
+    }
+
     func confirmSplit() {
         splitAcknowledged = true
         if let paste = pendingPaste {
@@ -395,7 +505,7 @@ final class NodeFormModel {
     // MARK: Submit (map D §4.5)
 
     func submit(regenerateTts: Bool? = nil, splitConfirmed: Bool = false, publicConfirmed: Bool = false,
-                applyToReplies: Bool? = nil) async {
+                applyToReplies: Bool? = nil, circleConfirmed: Bool = false) async {
         let edit = config.edit
         if !(edit == nil && uploadedFile != nil) && content.jsTrimmed.isEmpty {
             dialog = nil
@@ -406,9 +516,29 @@ final class NodeFormModel {
             dialog = .tts
             return
         }
+        // Circles: the readers are checked before anything is saved. A name
+        // nobody has, or nobody in the audience, is refused with a plain
+        // message (the server refuses it too). An edit that leaves a shared
+        // entry's audience as it was needs no check.
+        if sharesEntry, !(edit != nil && !audienceChanged && edit?.initialPrivacy == .circles) {
+            // The text goes along: it may not quote an entry one of these
+            // people cannot read (nothing is saved, the dialog names it).
+            if let refusal = await audience.refusalBeforeSaving(content: uploadedFile == nil ? content : nil,
+                                                                parentId: config.parentId) {
+                if let quotes = audience.quotesRefusal {
+                    error = nil
+                    dialog = .quotesNotPublic(quotes)
+                    return
+                }
+                dialog = nil
+                error = refusal
+                return
+            }
+        }
         if let edit, edit.hasChildren, applyToReplies == nil,
            (edit.initialPrivacy != nil && privacy != edit.initialPrivacy)
-            || (edit.initialAIUsage != nil && aiUsage != edit.initialAIUsage) {
+            || (edit.initialAIUsage != nil && aiUsage != edit.initialAIUsage)
+            || audienceChanged {
             pendingRegenerateTts = regenerateTts
             dialog = .scope
             return
@@ -427,6 +557,14 @@ final class NodeFormModel {
         if edit == nil, parentPrivacy == .public, !publicConfirmed,
            defaults.string(forKey: DefaultsKey.publicReplyAck) != "true" {
             dialog = .publicReply
+            return
+        }
+        // Replying in a shared thread (Circles): name the people who will see
+        // the reply, unless "Don't ask again in this thread".
+        if edit == nil, let threadAudience, !circleConfirmed,
+           defaults.string(forKey: DefaultsKey.circleReplyAck(entryId: threadAudience.entryId,
+                                                              userId: app.user?.id)) != "true" {
+            dialog = .circleReply
             return
         }
 
@@ -466,6 +604,7 @@ final class NodeFormModel {
             let result = try await override(NodeFormSubmission(content: content, parentId: config.parentId,
                                                                privacy: privacyLevel, aiUsage: aiUsage,
                                                                streamingSessionId: streamingSessionId))
+            await shareCreated(result.userNodeId ?? result.id)
             await clearAfterSend()
             streamingSessionId = nil
             if result.spendCapped { app.notifySpendBlocked() }
@@ -484,6 +623,7 @@ final class NodeFormModel {
                 "ai_usage": .string(aiUsage.rawString), "auto_generate": .bool(autoGenerateOn),
             ])
             let answer: TextmodeStartResponse = try await api.post(APIPath.textmodeStart, json: body)
+            await shareCreated(answer.userNodeId)
             await clearAfterSend()
             if answer.spendCapped { app.notifySpendBlocked() }
             // A first entry too large for a reply (#648): its page shows the limit.
@@ -502,6 +642,7 @@ final class NodeFormModel {
             if topLevelWithAI && useAgenticPrompt { body["agentic"] = .bool(true) }
             if topLevelWithAI && autoGenerateOn && config.allowAgenticPrompt { body["auto_generate"] = .bool(true) }
             let answer: SaveAsNodeResponse = try await api.post(APIPath.streamingSaveAsNode(sid), json: .object(body))
+            await shareCreated(answer.id)
             await clearAfterSend()
             streamingSessionId = nil
             if answer.spendCapped { app.notifySpendBlocked() }
@@ -518,6 +659,9 @@ final class NodeFormModel {
             if edit.detachPrompt && content != edit.initialContent { body["detach_prompt"] = .bool(true) }
             if regenerateTts == true { body["regenerate_tts"] = .bool(true) }
             if applyToReplies == true { body["apply_to_descendants"] = .bool(true) }
+            // Circles: who reads the entry (only when it is the author's to
+            // choose; a reply in a shared thread sends none).
+            if sharesEntry { body.merge(audience.fields) { _, new in new } }
             let answer: NodeUpdateResponse = try await api.put(APIPath.node(edit.nodeId), json: .object(body))
             await clearAfterSend()
             return NodeFormResult(id: answer.node.id, editedNode: answer.node,
@@ -526,6 +670,7 @@ final class NodeFormModel {
 
         if let file = uploadedFile {
             let nodeId = try await upload(file, privacy: privacyLevel)
+            await shareCreated(nodeId)
             try await awaitTranscription(nodeId: nodeId, privacy: privacyLevel)
             return nil
         }
@@ -535,7 +680,9 @@ final class NodeFormModel {
             "ai_usage": .string(aiUsage.rawString),
         ]
         body["parent_id"] = .optional(config.parentId)
+        if sharesEntry { body.merge(audience.fields) { _, new in new } }
         let created: NodeCreateResponse = try await api.post(APIPath.nodes, json: .object(body))
+        if sharesEntry && created.audienceSet != true { await shareCreated(created.id) }
         await clearAfterSend()
         app.signals.post(.nodeCreated(created.id))
 

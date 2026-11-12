@@ -235,6 +235,15 @@ def soft_delete_node(node_id: int, user_id: int, *,
     flagged: list[int] = []
     pinned_ids: list[int] = []
 
+    # Circles: entries of the user's that are (or were) shared, among the
+    # nodes flagged. The user's own nodes of such an entry's thread (the
+    # discussion leading up to it when that was shared, their AI replies
+    # there) go back to the user alone (Only me): they are the user's own
+    # writing and are neither closed nor deleted with the entry
+    # (circles.release_deleted_entry). An attribute check per node:
+    # nothing else runs for a node that was never a shared entry.
+    entries = []
+
     # Process the root first so we can clear pinned_at on it specifically.
     visited.add(root.id)
     if root.deleted_at is None:
@@ -243,8 +252,11 @@ def soft_delete_node(node_id: int, user_id: int, *,
         root.deleted_at = now
         root.pinned_at = None
         flagged.append(root.id)
+        if root.audience_root_id is not None and root.audience_root_id == root.id:
+            entries.append(root)
 
     if not with_descendants:
+        _release_paths(entries)
         return Deleted(flagged, pinned_ids)
 
     # BFS-style queue, sorted ascending each iteration for deterministic
@@ -288,6 +300,9 @@ def soft_delete_node(node_id: int, user_id: int, *,
             # undeletes the node brings it back pinned.
             locked.pinned_at = None
             flagged.append(locked.id)
+            if (locked.audience_root_id is not None
+                    and locked.audience_root_id == locked.id):
+                entries.append(locked)
 
         # Re-query children under the lock — catches concurrent inserts that
         # may have raced in before we acquired this node's lock.
@@ -300,4 +315,14 @@ def soft_delete_node(node_id: int, user_id: int, *,
         )
         to_visit.extend(cid for (cid,) in child_rows if cid not in visited)
 
+    _release_paths(entries)
     return Deleted(flagged, pinned_ids)
+
+
+def _release_paths(entries):
+    """circles.release_deleted_entry for each deleted entry."""
+    if not entries:
+        return
+    from backend.utils.circles import release_deleted_entry
+    for entry in entries:
+        release_deleted_entry(entry)

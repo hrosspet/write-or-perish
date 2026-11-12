@@ -459,6 +459,11 @@ def create_app():
     from backend.routes.public_pages import public_pages_bp
     app.register_blueprint(public_pages_bp)
 
+    # Circles: sharing with chosen people (dark behind CIRCLES_V1 /
+    # CIRCLES_USER_IDS; the routes answer 404 while off for the user).
+    from backend.routes.circles import circles_bp
+    app.register_blueprint(circles_bp, url_prefix="/api/circles")
+
     # Dev-update channel: changelog + notifications + polls (#207).
     from backend.routes.updates import updates_bp
     app.register_blueprint(updates_bp, url_prefix="/api/updates")

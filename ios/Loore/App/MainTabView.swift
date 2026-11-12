@@ -99,6 +99,10 @@ struct RouteDestination: View {
             ShareView()
         case .commons:
             CommonsView()
+        case .circles:
+            CirclesView()
+        case .sharedWithYou:
+            SharedWithYouView()
         case .welcome:
             WelcomeView()
         case .confirmEmail(let token):

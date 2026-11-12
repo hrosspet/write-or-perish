@@ -3,7 +3,7 @@ from flask import (
 )
 from flask_login import login_required, current_user
 from backend.models import (
-    Node, NodeContextArtifact, UserProfile, UserPrompt, UserTodo,
+    Node, NodeContextArtifact, User, UserProfile, UserPrompt, UserTodo,
     UserArtifact,
 )
 from backend.extensions import db
@@ -85,7 +85,7 @@ def _export_visible_filter(model, user_id):
     deleter's username/timestamp into someone else's export.
     """
     return or_(
-        accessible_nodes_filter(model, user_id),
+        accessible_nodes_filter(model, user_id, as_ai=True, corpus=True),
         and_(
             model.deleted_at.isnot(None),
             or_(
@@ -351,6 +351,16 @@ def _note_entry(licence, node):
     (the user's own data download). A licensed entry is only recorded, in
     case the licence tracks rows for a cached render."""
     if licence is None:
+        return
+    # Circles: what the user wrote into someone else's shared thread is
+    # part of their export, and never licensed for training in it. (Other
+    # people's nodes in the user's own shared threads are not in it at
+    # all: the export reads with privacy's corpus rule.)
+    from backend.utils.privacy import is_others_shared_writing
+    if is_others_shared_writing(node):
+        licence.track_row(node.__tablename__, (node.id,))
+        licence.to_chat(f"archive entry {node.id} is another person's "
+                        "writing in a shared thread")
         return
     if node.ai_usage == AIUsage.TRAIN.value:
         licence.track_row(node.__tablename__, (node.id,))
@@ -793,11 +803,11 @@ def iter_node_tree(
             for child in _children(current, kind != "inaccessible"):
                 if _deleted(child):
                     if user_id is None or can_user_view_tombstone(
-                            child, user_id):
+                            child, user_id, as_ai=True, corpus=True):
                         kids.append(("tombstone", child))
                     else:
                         dead.add(child.id)
-                elif user_id and not can_user_access_node(child, user_id):
+                elif user_id and not can_user_access_node(child, user_id, as_ai=True, corpus=True):
                     kids.append(("inaccessible", child))
                 else:
                     kids.append(("node", child))
@@ -854,10 +864,10 @@ def iter_node_tree(
             # Not accessible to the user: the inaccessible shell.
             if _deleted(current):
                 if user_id is not None and not can_user_view_tombstone(
-                        current, user_id):
+                        current, user_id, as_ai=True, corpus=True):
                     continue
                 kind = "tombstone"
-            elif user_id and not can_user_access_node(current, user_id):
+            elif user_id and not can_user_access_node(current, user_id, as_ai=True, corpus=True):
                 kind = "inaccessible"
 
         if kind == "node":
@@ -894,7 +904,7 @@ def iter_node_tree(
                         or kids[0].id in processed_nodes
                         or (user_id is not None
                             and not can_user_view_tombstone(
-                                kids[0], user_id))):
+                                kids[0], user_id, as_ai=True, corpus=True))):
                     break
                 processed_nodes.add(last.id)
                 last = kids[0]
@@ -954,7 +964,7 @@ def _collect_all_nodes_in_tree(node, filter_ai_usage=False, created_before=None,
 
         # Include the node only if it's accessible (or no user_id check);
         # descend into children regardless — they may be accessible.
-        if not (user_id and not can_user_access_node(current, user_id)):
+        if not (user_id and not can_user_access_node(current, user_id, as_ai=True, corpus=True)):
             result.append(current)
 
         children = current.children
@@ -1769,10 +1779,10 @@ def _entry_point_top_level_started(node, user_id):
     # Allow soft-deleted-with-pre-access roots through (the user's own
     # tombstoned thread roots): the entry-point preamble's start-date
     # is the user's own data and is fine to surface in their export.
-    if not can_user_access_node(cur, user_id):
+    if not can_user_access_node(cur, user_id, as_ai=True, corpus=True):
         from backend.utils.privacy import can_user_view_tombstone
         if not (cur.deleted_at is not None
-                and can_user_view_tombstone(cur, user_id)):
+                and can_user_view_tombstone(cur, user_id, as_ai=True, corpus=True)):
             return None
     return cur.created_at
 
@@ -3020,11 +3030,81 @@ class _DekLookahead:
         prefetch_deks(r.content for r in ahead)
 
 
+CIRCLE_REPLIES_HEADING = "# Your replies in threads shared with you"
+CIRCLE_REPLIES_INTRO = (
+    "The replies you wrote, and the AI replies you asked for, under "
+    "entries other people shared with you. The other people's entries "
+    "and replies are theirs and are not part of your data.")
+
+
+def circle_reply_rows(user_id):
+    """Circles: the user's own nodes in other people's shared threads
+    (typed replies and the AI replies they asked for), oldest first, as
+    rows of id, created_at, node_type, llm_model and audience_root_id.
+    Metadata only. Such a thread is rooted in someone else's entry, so
+    the thread export above never reaches these nodes; the download
+    lists them in a section of their own (_circle_reply_pieces)."""
+    from backend.utils.privacy import audience_entry_owner, pointers_may_exist
+    if not pointers_may_exist():
+        return []
+    rows = (
+        db.session.query(Node.id, Node.created_at, Node.node_type,
+                         Node.llm_model, Node.audience_root_id)
+        .filter(or_(Node.user_id == user_id, Node.human_owner_id == user_id),
+                Node.audience_root_id.isnot(None),
+                Node.audience_root_id != Node.id,
+                Node.deleted_at.is_(None))
+        .order_by(Node.created_at, Node.id).all())
+    return [r for r in rows
+            if audience_entry_owner(r.audience_root_id) != user_id]
+
+
+def _circle_reply_pieces(user, rows):
+    """The download's section of the user's replies in other people's
+    shared threads: each reply the user can read now, with its date and
+    whose thread it is in (only while the thread is open to them). An AI
+    reply is closed to its requester while the thread is, and is then
+    left out, as on the thread page. Nobody else's text is read."""
+    from backend.utils.llm_nodes import model_display_name
+    from backend.utils.privacy import (
+        audience_entry_owner, can_user_access_node, in_audience)
+    first = True
+    for start in range(0, len(rows), EXPORT_STREAM_BATCH):
+        batch = rows[start:start + EXPORT_STREAM_BATCH]
+        loaded = {n.id: n for n in Node.query.filter(
+            Node.id.in_([r.id for r in batch]))}
+        for row in batch:
+            node = loaded.get(row.id)
+            if node is None or not can_user_access_node(node, user.id):
+                continue
+            where = "in a shared thread"
+            if in_audience(row.audience_root_id, user.id):
+                author = db.session.get(
+                    User, audience_entry_owner(row.audience_root_id))
+                if author is not None:
+                    where = f"in a thread shared by @{author.username}"
+            kind = ("AI reply you asked for ("
+                    f"{model_display_name(node.llm_model)})"
+                    if node.node_type == "llm" else "Your reply")
+            stamp = node.created_at.strftime('%Y-%m-%d %H:%M:%S UTC')
+            text = ""
+            if first:
+                text = (f"{CIRCLE_REPLIES_HEADING}\n\n"
+                        f"{CIRCLE_REPLIES_INTRO}\n\n")
+                first = False
+            yield (text + f"## {kind} · {stamp} · {where}\n\n"
+                   f"{node.get_content() or ''}\n\n")
+    if not first:
+        yield "---\n\n"
+
+
 def iter_user_export(user):
     """The user's own data download (/export/threads), piece by piece,
     built while it is sent (#591). The pieces join to the text of
     ``build_user_export_content(user, filter_ai_usage=False)``, or to
-    NO_THREADS_TEXT where that returns None.
+    NO_THREADS_TEXT where that returns None; for a user with replies in
+    other people's shared threads (Circles) a section with those replies
+    follows the threads (_circle_reply_pieces; download only).
 
     A piece is yielded once it is due (_Pieces). Every
     EXPORT_PAUSE_EVERY_SECONDS of work the generator sleeps briefly
@@ -3035,8 +3115,16 @@ def iter_user_export(user):
     alive = _threads_with_alive_node(
         r.id for r in roots if r.deleted_at is not None)
     kept = [r for r in roots if r.deleted_at is None or r.id in alive]
+    circle_rows = circle_reply_rows(user.id)
     if not kept:
-        yield NO_THREADS_TEXT
+        pieces = list(_circle_reply_pieces(user, circle_rows))
+        if not pieces:
+            yield NO_THREADS_TEXT
+            return
+        yield "\n".join(_export_header_lines(user, len(roots))) + "\n"
+        for piece in pieces:
+            yield piece
+        yield "*End of Export*"
         return
 
     out = _Pieces()
@@ -3109,6 +3197,10 @@ def iter_user_export(user):
         # after the header went out. Fail loudly rather than send a
         # different file.
         raise RuntimeError(f"export of user {user.id}: no thread rendered")
+    for piece in _circle_reply_pieces(user, circle_rows):
+        out.add(piece)
+        if out.due():
+            yield out.take()
     out.add("*End of Export*")
     yield out.take()
 

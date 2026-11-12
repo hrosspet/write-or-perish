@@ -64,7 +64,9 @@ extension APIError {
 
 /// 409 `quotes_not_public`: something about to be public (an entry, a reply, an
 /// edit, a share) quotes an entry that isn't. Nothing was saved; the answer
-/// names each quoted entry so the user can make it public first.
+/// names each quoted entry so the user can make it public first. Circles: 409
+/// `quotes_not_shared`, the same for something about to be shared with a circle
+/// that quotes an entry not all of its readers can read (`shared`).
 struct QuotesNotPublic: Equatable, Sendable {
     struct Quoted: Equatable, Identifiable, Sendable {
         var id: Int
@@ -99,23 +101,34 @@ struct QuotesNotPublic: Equatable, Sendable {
     }
 
     static let code = "quotes_not_public"
+    static let sharedCode = "quotes_not_shared"
     static let fallbackMessage = "This can't be made public yet: it quotes an entry that isn't public. "
         + "Make the quoted entry public first, then try again."
+    static let sharedFallbackMessage = "This can't be shared with these people yet: it quotes an entry that "
+        + "not all of them can read. Share the quoted entry with them first, or make it public, then try again."
 
     var message: String
     var quoted: [Quoted]
+    /// A share with a circle was refused, not a publication.
+    var shared = false
 
-    init(message: String, quoted: [Quoted]) {
+    /// "Not public yet", or "Not shared yet" for a circle share.
+    var title: String { shared ? "Not shared yet" : "Not public yet" }
+
+    init(message: String, quoted: [Quoted], shared: Bool = false) {
         self.message = message
         self.quoted = quoted
+        self.shared = shared
     }
 
     /// The refusal in `error`, or nil for any other error.
     init?(_ error: Error) {
-        guard let apiError = error as? APIError, apiError.status == 409, apiError.code == Self.code else { return nil }
+        guard let apiError = error as? APIError, apiError.status == 409,
+              apiError.code == Self.code || apiError.code == Self.sharedCode else { return nil }
         let body = apiError.body
         let text = body?.error ?? ""
-        message = text.isEmpty ? Self.fallbackMessage : text
+        shared = apiError.code == Self.sharedCode
+        message = text.isEmpty ? (shared ? Self.sharedFallbackMessage : Self.fallbackMessage) : text
         quoted = (body?.extra["quoted"]?.arrayValue ?? []).compactMap(Quoted.init(json:))
     }
 }

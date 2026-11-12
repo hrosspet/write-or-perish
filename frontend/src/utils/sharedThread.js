@@ -27,12 +27,20 @@ export const isAutoGenerateOff = (err) =>
 
 // The server's answer when something about to be public quotes an entry
 // that isn't (backend/utils/publish_quotes.py): 409 with the quoted
-// entries. Returns { message, quoted } or null.
+// entries. Circles: the same when something about to be shared with a
+// circle quotes an entry not all of its readers can read
+// (quotes_not_shared). Returns { message, quoted, shared } or null.
 export const QUOTES_NOT_PUBLIC_CODE = 'quotes_not_public';
+export const QUOTES_NOT_SHARED_CODE = 'quotes_not_shared';
 export const quotesNotPublicError = (err) => {
   const data = err?.response?.data;
-  if (err?.response?.status !== 409 || data?.code !== QUOTES_NOT_PUBLIC_CODE) {
+  if (err?.response?.status !== 409
+      || ![QUOTES_NOT_PUBLIC_CODE, QUOTES_NOT_SHARED_CODE].includes(data?.code)) {
     return null;
   }
-  return { message: data.error, quoted: Array.isArray(data.quoted) ? data.quoted : [] };
+  return {
+    message: data.error,
+    quoted: Array.isArray(data.quoted) ? data.quoted : [],
+    shared: data.code === QUOTES_NOT_SHARED_CODE,
+  };
 };

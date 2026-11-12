@@ -1,0 +1,14 @@
+{
+  "circles": [
+    {
+      "id": 3,
+      "name": "Close friends",
+      "members": [
+        {"username": "anna", "only_new": false},
+        {"username": "ben", "only_new": true}
+      ],
+      "shared_count": 12
+    },
+    {"id": 4, "name": "Family", "members": [], "shared_count": 0}
+  ]
+}

@@ -68,10 +68,14 @@ private struct ThreadContent: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
+                        if model.isForeignShared, let audience = model.audience {
+                            SharedEntryBanner(audience: audience).padding(.bottom, 14)
+                        }
                         header(node)
                         ForEach(Array(node.ancestors.enumerated()), id: \.element.id) { index, ancestor in
                             BubbleView(data: bubbleData(ancestor, at: index), actions: actions(model.target(ancestor),
                                        userId: ancestor.userId, parentUserId: ancestor.parentUserId, nodeType: ancestor.nodeType,
+                                       humanOwnerUsername: ancestor.humanOwnerUsername,
                                        deleted: ancestor.deleted, isSystemPrompt: ancestor.systemPrompt.isSystemPrompt)) {
                                 openNode(ancestor.id)
                             }
@@ -89,6 +93,7 @@ private struct ThreadContent: View {
                                 AnyView(BubbleView(data: bubbleData(child, parentPrivacy: row.parentPrivacy),
                                                    actions: actions(model.target(child), userId: child.userId,
                                                                     parentUserId: child.parentUserId, nodeType: child.nodeType,
+                                                                    humanOwnerUsername: child.humanOwnerUsername,
                                                                     deleted: child.deleted,
                                                                     isSystemPrompt: child.systemPrompt.isSystemPrompt)) {
                                     openNode(child.id)
@@ -127,9 +132,11 @@ private struct ThreadContent: View {
     }
 
     private func actions(_ target: NodeTarget, userId: Int?, parentUserId: Int?, nodeType: NodeType,
+                         humanOwnerUsername: String? = nil,
                          deleted: Bool = false, isSystemPrompt: Bool = false) -> [BubbleAction] {
         var list = [BubbleAction(label: "Reply", kind: .reply) { model.beginReply(target) }]
-        if model.ownedByMe(userId: userId, parentUserId: parentUserId, nodeType: nodeType) {
+        if model.ownedByMe(userId: userId, parentUserId: parentUserId, nodeType: nodeType,
+                           humanOwnerUsername: humanOwnerUsername) {
             list.append(BubbleAction(label: "Edit") { model.beginEdit(target) })
             list.append(BubbleAction(label: "Delete", destructive: true) { model.beginDelete(target) })
             if model.offersGleanInMenu(owned: true, deleted: deleted, isSystemPrompt: isSystemPrompt,
@@ -159,7 +166,7 @@ private struct ThreadContent: View {
             // Voice screen says why it is closed. Auto-generate keeps the AI-usage
             // rule. Glean is not up here (#435): it is in the action row of a
             // Glean-card thread, else in the entry's ⋯ menu.
-            if model.isOwner && !model.isPublicThread {
+            if model.isOwner && !model.isPublicThread && !model.isForeignShared {
                 VStack(alignment: .trailing, spacing: 6) {
                     TopRightButton(title: model.voiceLoading ? "Starting…" : "Voice Mode") {
                         Image(systemName: "mic.fill").font(.system(size: 11)).accessibilityHidden(true)
@@ -216,8 +223,13 @@ private struct ThreadContent: View {
             .padding(.bottom, 10)
             VStack(alignment: .leading, spacing: 0) {
                 NodeFooterView(username: node.authorUsername, createdAt: node.createdAt, childCount: node.childCount,
-                               humanOwnerUsername: humanOwner(node), llmModel: node.llmModel, origin: node.origin,
+                               humanOwnerUsername: humanOwner(node), llmModel: node.llmModel, llmLabel: node.llmLabel,
+                               origin: node.origin,
                                isPublic: node.privacyLevel == .public) {
+                    // A shared entry (Circles): who can read it and its replies.
+                    if let audience = model.audience {
+                        CircleReadersButton(audience: audience, me: app.user?.username)
+                    }
                     Button(action: model.togglePin) {
                         Image(systemName: node.pinnedAt != nil ? "pin.fill" : "pin")
                             .font(.system(size: 11))
@@ -236,7 +248,9 @@ private struct ThreadContent: View {
                 if model.focalShowsPrivateReplyNote {
                     PrivateReplyNote()
                 }
-                if showCraftBar && !(model.inReadThread && !model.readReplyAbove) {
+                if model.isCircleThread {
+                    sharedAIReplyArea(node, showControl: showCraftBar && !(model.inReadThread && !model.readReplyAbove))
+                } else if showCraftBar && !(model.inReadThread && !model.readReplyAbove) {
                     llmResponseRow(node).padding(.top, 8)
                 }
                 if model.readActions(craftMode: craftMode) {
@@ -274,6 +288,35 @@ private struct ThreadContent: View {
         .padding(.leading, 8)
     }
 
+    /// AI replies in a shared thread (Circles): for a reader, what happens to
+    /// a typed reply and to an AI reply; why no AI reply can be generated,
+    /// when AI usage closes it; and the AI-reply control, for every member under
+    /// their own nodes (the public rule). An AI reply is its requester's alone until they share it
+    /// (Peter, 2026-11-12), so there is no choice of who reads it here.
+    private func sharedAIReplyArea(_ node: NodeDetail, showControl: Bool) -> some View {
+        let offReason = model.aiReplyOffReason
+        return VStack(alignment: .leading, spacing: 10) {
+            if model.isForeignShared && !model.isLLMPending {
+                Text(model.isOwner ? CirclesWording.foreignSharedNote : CirclesWording.foreignSharedNoteOthers)
+                    .font(LooreFont.sans(12.8, .light))
+                    .foregroundStyle(LooreColor.textSecondary)
+                    .lineSpacing(3)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if showControl, let offReason {
+                Text(offReason)
+                    .font(LooreFont.sans(12.8, .light))
+                    .foregroundStyle(LooreColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("thread.aiReply.reason")
+            }
+            if showControl {
+                llmResponseRow(node, offReason: offReason, showPicker: craftMode)
+            }
+        }
+        .padding(.top, 8)
+    }
+
     private func focalActions(_ node: NodeDetail) -> [BubbleAction] {
         var list = [
             BubbleAction(label: "Edit") { model.beginEdit(model.target(focal: node)) },
@@ -302,6 +345,7 @@ private struct ThreadContent: View {
 
     /// An AI reply's human owner (walk the ancestors for the nearest user node).
     private func humanOwner(_ node: NodeDetail) -> String? {
+        if let human = node.humanOwnerUsername, !human.isEmpty { return human }
         guard node.nodeType == .llm, node.parentUserId != nil else { return nil }
         return node.ancestors.last(where: { $0.nodeType != .llm })?.username
     }
@@ -335,14 +379,20 @@ private struct ThreadContent: View {
         .fixedSize(horizontal: false, vertical: true)
     }
 
-    private func llmResponseRow(_ node: NodeDetail) -> some View {
+    /// The AI-reply control. `offReason`: a shared thread where AI usage
+    /// closes it (shown disabled; the sentence stands above it). `showPicker`
+    /// false leaves the model picker out: the request then carries the
+    /// user's own preferred model.
+    private func llmResponseRow(_ node: NodeDetail, offReason: String? = nil, showPicker: Bool = true) -> some View {
         let working = model.llmRequesting || model.llmTaskNodeId != nil
         // Another node is loading (NodePrefetch): disabled too, as a second press would
         // start a second reply, but without the button's own spinner.
         let busy = working || NodePrefetch.shared.isPending
         let underReadReply = model.isReadReply && node.llmTaskStatus == .completed
+        let off = busy || underReadReply || offReason != nil
+        let trailingRadius: CGFloat = showPicker ? 0 : LooreRadius.control
         return AdaptiveStack(spacing: 0, verticalSpacing: 6) {
-            Button(action: model.llmResponsePressed) {
+            Button(action: model.aiReplyPressed) {
                 HStack(spacing: 8) {
                     if working { ProgressView().controlSize(.mini).tint(LooreColor.textSecondary) }
                     Text(model.llmRequesting ? "Requesting…"
@@ -353,20 +403,23 @@ private struct ThreadContent: View {
                 .foregroundStyle(LooreColor.textSecondary)
                 .padding(.vertical, 10)
                 .padding(.horizontal, 16)
-                .overlay(UnevenRoundedRectangle(topLeadingRadius: LooreRadius.control, bottomLeadingRadius: LooreRadius.control)
+                .overlay(UnevenRoundedRectangle(topLeadingRadius: LooreRadius.control, bottomLeadingRadius: LooreRadius.control,
+                                                bottomTrailingRadius: trailingRadius, topTrailingRadius: trailingRadius)
                     .strokeBorder(LooreColor.border))
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .disabled(busy || underReadReply)
-            .opacity(busy || underReadReply ? 0.45 : 1)
-            .accessibilityHint(underReadReply
+            .disabled(off)
+            .opacity(off ? 0.45 : 1)
+            .accessibilityHint(offReason ?? (underReadReply
                                ? "To chat about the gleaning, send your reply first."
                                  + (model.readActions(craftMode: craftMode) ? " To glean again, use Glean." : "")
-                               : "")
+                               : ""))
             .accessibilityIdentifier("thread.llmResponse")
-            ModelPicker(nodeId: node.id, selectedModel: $model.selectedModel, disabled: busy || underReadReply)
-                .padding(.leading, -1)
+            if showPicker {
+                ModelPicker(nodeId: node.id, selectedModel: $model.selectedModel, disabled: off)
+                    .padding(.leading, -1)
+            }
             Spacer(minLength: 0)
         }
         .fixedSize(horizontal: false, vertical: true)
@@ -442,11 +495,13 @@ private struct FocalCard: View {
             if node.systemPrompt.isSystemPrompt, let title = node.systemPrompt.promptTitle {
                 FlowLayout(spacing: 6, lineSpacing: 2) {
                     Text(title + (node.systemPrompt.promptVersionNumber.map { " v\($0)" } ?? ""))
-                    if let v = node.systemPrompt.contextArtifacts?.profile {
-                        Text("· Profile v\(v.versionNumber.map(String.init) ?? "")").opacity(0.7)
+                    // The pinned versions, for the prompt's owner. A reader of a
+                    // shared prompt gets their own artifacts without versions: no line.
+                    if let v = node.systemPrompt.contextArtifacts?.profile?.versionNumber {
+                        Text("· Profile v\(v)").opacity(0.7)
                     }
-                    if let v = node.systemPrompt.contextArtifacts?.todo {
-                        Text("· TODO v\(v.versionNumber.map(String.init) ?? "")").opacity(0.7)
+                    if let v = node.systemPrompt.contextArtifacts?.todo?.versionNumber {
+                        Text("· TODO v\(v)").opacity(0.7)
                     }
                 }
                 .font(LooreFont.sans(12.8, .light))
@@ -495,7 +550,8 @@ private struct FocalCard: View {
         let partial = ContentSegmenter.partialReplyText(model.streamText)
         if model.isLLMPending && !partial.jsTrimmed.isEmpty {
             VStack(alignment: .leading, spacing: 0) {
-                QuotedContentView(content: partial, contextArtifacts: node.systemPrompt.contextArtifacts, nodeId: node.id)
+                QuotedContentView(content: partial, contextArtifacts: node.systemPrompt.contextArtifacts,
+                                  artifactsForOwner: model.artifactsForOwner, nodeId: node.id)
                 PulsingDots().padding(.vertical, 6).accessibilityLabel("Still writing")
             }
         } else if model.isLLMPending {
@@ -518,7 +574,7 @@ private struct FocalCard: View {
             if !showProposal || !display.isEmpty {
                 QuotedContentView(
                     content: display, quotes: model.quotes, contextArtifacts: node.systemPrompt.contextArtifacts,
-                    nodeId: node.id,
+                    artifactsForOwner: model.artifactsForOwner, nodeId: node.id,
                     checklist: model.isOwner ? ChecklistActions(toggle: { model.toggleCheckbox($0, checked: $1) },
                                                                 add: { model.insertTask(after: $0, $1) }) : nil,
                     onExternalReadChange: { model.updateExternalRead($0, readAt: $1) },
@@ -532,7 +588,8 @@ private struct FocalCard: View {
                              onApplied: { model.updateToolMeta($0, $1) })
                 if let after = split?.after, !after.isEmpty {
                     QuotedContentView(content: after, quotes: model.quotes,
-                                      contextArtifacts: node.systemPrompt.contextArtifacts, nodeId: node.id)
+                                      contextArtifacts: node.systemPrompt.contextArtifacts,
+                                      artifactsForOwner: model.artifactsForOwner, nodeId: node.id)
                         .padding(.top, 20)
                 }
             }

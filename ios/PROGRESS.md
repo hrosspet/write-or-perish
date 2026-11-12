@@ -1100,6 +1100,117 @@ approved one by one; one reply's calls share one dialog. Dismissing it decides n
 - Tests: `ToolApprovalTests.swift` (`ToolApprovalDecodingTests`, `ToolApprovalsModelTests`). Unit tests
   only; the dialog was not seen on screen.
 
+## Circles (2026-11-10, rebuilt 2026-11-11 after the voice review; run in the simulator, not yet on a phone)
+
+Everything shows only with `circles_enabled` in the current user (`UserCapabilities.circlesEnabled`,
+default off, absent on an older server). Off: today's app, except that the Circles option of the
+privacy select is greyed out (`SelectField.unavailable`), as on the web.
+
+- **Models** `Core/Models/Circles.swift`: `PeopleCircle` (not `Circle`: that is SwiftUI's shape),
+  `CircleMember`, `CircleMemberPreview`, `AudiencePreview`, `NodeAudience` (also `NodeDetail.audience`),
+  `NodeAudienceAnswer`, `SharedWithMe`. `UpdateNotification` gained `nodeId` / `actorUsername`
+  (`isCircleShare`), `NodeCreateResponse` `audienceSet`.
+- **Wording** `Core/Util/CirclesWording.swift`: the port of `frontend/src/utils/circles.js` plus the
+  dialogs' sentences, so the copy is tested (`CirclesWordingTests`) and stays the web's.
+- **Picker** `PrivacySelectorView`: "Who can read this" Only me / Circles / Everyone;
+  `CircleAudiencePicker` + `CircleAudienceState` (circle chips, "Edit circles" as a sheet over the form,
+  names "for this entry only" looked up when a separator is typed or the field is left, the readers
+  sentence). Imports pass `allowCircles: false`.
+- **Form** `NodeFormModel`: `sharesEntry` (own entry) sends `circle_ids` / `circle_usernames` on
+  `POST /nodes/` and `PUT /nodes/<id>`; the other creation paths (Text-mode start, a recording, an upload,
+  a custom submit) share in a second step, `PUT /nodes/<id>/audience`, and toast when it fails (the entry
+  then stays readable by its author only). The readers are checked before saving. A reply in a shared
+  thread (`threadAudience`, from the parent's `audience`) is sent as `circles` after `CircleReplyDialog`;
+  "Don't ask again in this thread" is `DefaultsKey.circleReplyAck(entryId:userId:)`.
+- **Thread**: `SharedEntryBanner` for a reader, `CircleReadersButton` (a tap opens a popover) in the focal
+  footer for author and readers. In someone else's shared thread: no Voice Mode or auto-generate
+  switch. Auto-generate is off in every circle thread, for the author too (Peter, 2026-11-12; main's
+  `isSharedThread`, privacy-based); the circles audience test is `ThreadModel.isCircleThread`.
+- **AI replies in a shared thread** (2026-11-11; "Ask my AI" and `circle_ask` are gone): every member has
+  the normal LLM Response control under their own nodes of the thread (`ThreadModel.showCraftBar`; a
+  reader without Craft mode too, then without the model picker; the author as well, since auto-generate
+  is off there). Since 2026-11-12 evening it follows the public rule (Peter: "public rule"): none under
+  someone else's node, where the note says to write a reply first (`CirclesWording.foreignSharedNoteOthers`).
+  The request is the normal `POST /nodes/<id>/llm {model, source_mode}`. Since 2026-11-12
+  every AI reply is created private (Peter): "AI reply: Shared with this thread / Only me" is gone, the
+  reply carries "Only you see this reply" (`SharedThread.showsPrivateReplyNote`, by
+  `human_owner_username` in the tree too), and its requester shares it with the thread through Edit.
+  The `CircleReplyDialog` AI variant ("Only you will see it. Your AI reads your ...") comes only when the
+  server sends a key: a prompt someone else wrote, edited or from scratch, reads the requester's data or
+  turns tools on; Loore's current default prompt unedited sends none (Peter, 2026-11-12, decided on the
+  server). For an older version of Loore's default the server marks the key (`ai_reads_older_default`,
+  `NodeAudience.aiReadsOlderDefault`) and the dialog says so ("This thread uses an older version of
+  Loore's own prompt. Only you will see the reply. Your AI reads your ... for it.",
+  `CirclesWording.aiReplyOlderDefaultDialogBody`) (`confirmAIReply`; `DefaultsKey.circleAiReplyAck`).
+  Off states: `CirclesWording.aiReplyOffReason`. An AI reply shows
+  `llm_label` in place of the model id (`NodeFooterText.author`) and belongs to
+  `human_owner_username` (`ThreadModel.ownedByMe`); its edit form offers Only me and Circles
+  (`NodeFormModel.hidePublic`).
+- **Sharing the discussion above an entry**: `GET /nodes/<id>/audience` `thread_path {count, shared}`
+  (edit) or a new entry under the user's own node offers "Share also the discussion leading up to this
+  node?" in the picker (`CircleAudienceState.offerSharePath`); `share_path` goes with `circle_ids` /
+  `circle_usernames` (true when on; false only when it was shared and is turned off).
+- **A shared prompt, for a reader**: placeholders are filled from the `context_artifacts` the server
+  sends (the reader's own); a missing one shows as its own text, e.g. `{user_memory}`
+  (`InlineArtifactSection.missingText`); no version line without `version_number`.
+- **Names** are printed with "@" (`CirclesWording.at`, `joinNames`).
+- **Adding a person**: the emphasized "Add @name" is for new entries only; "Also show earlier entries"
+  sends `include_existing: true` and is offered when the circle has shared entries.
+- **Screens** `Features/Circles/`: `CirclesView` ("Your circles", route `.circles`, `/circles`) and
+  `SharedWithYouView` (`.sharedWithYou`, `/shared`); linked from Account ("Circles" row), More ("Shared
+  with you") and each other. **Updates**: `CircleShareItemView` ("Read it" / "Don't show <name>'s entries").
+- **The agreement before an AI reply**: `audience.ai_reads` names what the thread's prompts fill from
+  the requester's own data, `ai_reads_key` identifies the shared prompts as they are. The request
+  sends `ai_reads_ack: private:<key>` (only a key the user was shown; a bare key stored by an earlier
+  build counts too); "Don't ask again in this thread" stores it (`DefaultsKey.circleAiReplyAck`), so it
+  stops applying when a prompt changes. On 409 `circle_ai_reads_changed` the dialog opens again with
+  the response's list and Generate retries with the new key. Without a key, no dialog.
+- **A quote the circle cannot read** (2026-11-12): the check before sharing sends the text with
+  `/circles/audience-preview`; 409 `quotes_not_shared` opens `QuotesNotPublicDialog` titled "Not
+  shared yet" (`QuotesNotPublic.shared`) and saves nothing.
+- **The discussion above an entry**: `thread_path` from `GET /nodes/<id>/audience`, the toggle "Share
+  also the discussion leading up to this node?" (off by default), `share_path` in the requests.
+- **A shared prompt** is shown to a reader with the `context_artifacts` the server sends (the reader's
+  own); a placeholder without one shows as its own text.
+- The footer of a labelled AI reply ("GPT-6 Luna via @ben") puts the label on its own line: in one row
+  with the date and the icons it was cut to "GPT-6 Luna…" (found in the simulator run).
+- **A reply under one's own Only-me node in someone else's shared thread** (2026-11-11, third review):
+  `NodeDetail.replyOnlyPrivate` (`reply_only_private`, sent by `GET /nodes/<id>` for such a node);
+  `NodeFormModel.onlyMe` then sends `private`, offers no discussion share, and `PrivacySelectorView(onlyMe:)`
+  shows "Only you. You are replying under a node only you can read, in a thread someone else shared."
+  instead of the three choices (the server refuses Everyone and another audience there).
+- A shared prompt for a reader also carries the reader's own `recent` summary and `recent_raw` window
+  (server side; the views already show both).
+- **Second review of the fixes (2026-11-11)**: `NodeDetail.threadAIReads` (`thread_ai_reads`: entry,
+  what an AI reply reads, its key) on the user's own Only-me node in a shared thread. `ThreadModel`
+  (`threadReads`, `aiReplyReads`) then asks in the dialog's private variant and sends `private:<key>`;
+  `requestConfirmedLLM` repeats a refused request once at most (`retried`), then the error toast shows.
+  An AI reply in one's Only-me branch (a note under one's private AI reply) works the same way.
+  `CircleAudienceState.refusalBeforeSaving` stops a save whose readers differ from the ones the
+  sentence named (`readersChangedMessage`) and updates the sentence; `entryId` (set by the edit form)
+  goes to `audience-preview` as `node_id`, so an edited entry's sentence leaves out a person added to
+  its circle since with "Only new entries". `ThreadModel.artifactsForOwner` keeps main's
+  "[… not available]" for placeholders of someone else's prompt outside shared threads.
+- `-LooreResetState YES` also forgets the per-thread Circles choices (keys starting `loore_circle_`).
+- Tests: `CirclesTests.swift` (48: decoding from hand-written fixtures, wording, routes, the form's
+  submit paths, the thread's rules, the agreement key, the Only-me reply form, the agreement under one's
+  own Only-me node, one retry, the placeholders outside shared threads). `CirclesUITests` (13 methods) walks the screens
+  against a scratch backend (native Flask on sqlite on its own port, fake users, the model call
+  stubbed): the add-person dialog, rename, new circle, the picker's readers sentence and Share button,
+  the discussion toggle in the edit form, the readers popover, the reply dialog, the AI dialog with
+  and without the artifacts sentence, a generated reply with its label, "Only me", a shared prompt
+  with the reader's own profile and bare placeholders, the Updates note, the reply form under one's own
+  Only-me AI reply, an AI reply under one's own Only-me AI reply and in one's Only-me branch, the edit
+  sentence without a person added with "Only new entries", a share stopped for a name not yet looked
+  up. Inputs: `TEST_RUNNER_LOORE_E2E_DIR`
+  (folder with `cookies.json` and `ids.json`, which also needs `bens_private_ai`,
+  `bens_agentic_private_ai` and `bens_private_note`; a fourth user `dana` in "Close friends" added with
+  "Only new entries" after the entry was shared), `TEST_RUNNER_LOORE_BACKEND_URL`,
+  `TEST_RUNNER_LOORE_FRONTEND_URL`, `TEST_RUNNER_LOORE_SCREENSHOT_DIR`. Run 2026-11-11 on the
+  "Loore Circles iPhone 17" simulator: 8 of 8 pass; after the third review 9 of 9 (a fresh scratch
+  backend on its own port, three fake users, the model call stubbed).
+- Not checked: a phone; light theme; Dynamic Type at accessibility sizes on the Circles screens.
+
 ## Long threads: a notice, then no AI reply (#648, Peter 2026-11-12)
 
 Peter: "a notice at 90% of the hard limit, and a hard limit"; "Users shouldn't be shown price in this case".

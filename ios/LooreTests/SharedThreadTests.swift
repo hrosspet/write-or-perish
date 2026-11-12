@@ -400,7 +400,7 @@ final class SharedThreadModelTests: StubbedAppTestCase {
         // LLM Response waits while another node loads (the entry just opened).
         let settled = await eventually { !NodePrefetch.shared.isPending }
         XCTAssertTrue(settled)
-        model.llmResponsePressed()
+        model.aiReplyPressed()          // LLM Response (circles: the same control in every thread)
         let asked = await eventually { self.calls.contains("POST /api/nodes/10/llm") }
         XCTAssertTrue(asked)
         XCTAssertNotNil(body(of: "POST /api/nodes/10/llm"))

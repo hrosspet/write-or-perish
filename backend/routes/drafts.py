@@ -657,6 +657,17 @@ def init_streaming():
         return err
     privacy_level = data.get("privacy_level", "private")
     ai_usage = data.get("ai_usage", "none")
+    from backend.utils.privacy import validate_privacy_level
+    if not validate_privacy_level(privacy_level):
+        return jsonify({"error": f"Invalid privacy_level: {privacy_level}"}), 400
+    # A recording under a shared node is read by the thread's audience
+    # (Circles), as a typed reply is.
+    if parent_id:
+        from backend.utils import circles as cz
+        if cz.reply_requires_circles(
+                Node.query.get(int(parent_id)), privacy_level,
+                current_user.id):
+            privacy_level = "circles"
     if label == "Voice":
         parent = Node.query.get(int(parent_id)) if parent_id else None
         refused = voice_turn_refusal(
@@ -1598,11 +1609,27 @@ def save_streaming_as_node(session_id):
         transcription_status="completed",
         streaming_transcription=True  # Mark as having chunked audio
     )
+    # Circles: a recorded reply into a shared thread joins its audience
+    # (the explicit act; only directly under the node replied to).
+    if draft.parent_id is not None and user_parent_id == draft.parent_id:
+        from backend.utils import circles as cz
+        cz.join_reply(node, Node.query.get(draft.parent_id), current_user.id)
     from backend.utils.tokens import approximate_token_count
     node.set_content(content)
     node.token_count = approximate_token_count(content)
     db.session.add(node)
     db.session.flush()
+    # A recorded reply that joined a shared thread quotes only nodes all
+    # of the thread's people can read (Peter, 2026-11-12, as for a
+    # public entry above); the session stays, so the text can be changed
+    # and saved again.
+    if node.privacy_level == "circles":
+        from backend.utils.publish_quotes import circle_share_refusal
+        refusal = circle_share_refusal(
+            [(node, content, set(), None)], current_user.id)
+        if refusal is not None:
+            db.session.rollback()
+            return refusal
     # Per-node cap: split very long transcripts into a serial chain
     # (audio stays on this head node). An LLM reply chains after the
     # tip so its context walk sees the whole transcript (as the Voice

@@ -491,7 +491,7 @@ final class ThreadModelTests: StubbedAppTestCase {
         }
         NodePrefetch.shared.open(9, app: app) {}
         XCTAssertTrue(NodePrefetch.shared.isPending)
-        model.llmResponsePressed()
+        model.aiReplyPressed()
         try? await Task.sleep(nanoseconds: 200_000_000)
         XCTAssertFalse(calls.contains("POST /api/nodes/10/llm"), "a second reply started while another node loaded")
         XCTAssertFalse(model.llmRequesting)

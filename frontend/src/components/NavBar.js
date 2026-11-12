@@ -400,6 +400,13 @@ function NavBar({ onNewEntryClick }) {
                       Account
                     </Link>
 
+                    {/* Circles: what people shared with the user. */}
+                    {user.circles_enabled && (
+                      <Link to="/shared" onClick={() => setOverflowOpen(false)} style={dropdownItemStyle}>
+                        Shared with you
+                      </Link>
+                    )}
+
                     {/* The user's own public page (#228) — what visitors
                         see at /@<username>. */}
                     {user.share_v1_enabled && user.username && (

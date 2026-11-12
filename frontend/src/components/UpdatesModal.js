@@ -4,6 +4,7 @@ import api from "../api";
 import MarkdownBody from "./MarkdownBody";
 import { useIsMobile } from "../hooks/useIsMobile";
 import { formatDate } from "../utils/date";
+import { atName, possessive } from "../utils/circles";
 
 /**
  * The dev-update channel surface (#207): shows unread changelog sections,
@@ -228,6 +229,54 @@ function NotificationItem({ notification, onDone, onCloseModal }) {
         )}
         <button style={accentButtonStyle} onClick={() => mark("read")}>
           Got it
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// A note about a shared entry (Circles): "<name> shared an entry with
+// you." with its two actions. "Read it" opens the entry and settles the
+// note; "Don't show <name>'s entries" stops both the notes and the
+// entries from that person (the server settles their waiting notes),
+// and the sender is never told. Closing the modal leaves the note for
+// the next visit, like every other item.
+function CircleShareItem({ notification, onDone, onDoneFrom, onCloseModal }) {
+  const navigate = useNavigate();
+  const [busy, setBusy] = useState(false);
+  const name = notification.actor_username;
+  const readIt = () => {
+    api.post(`/updates/notifications/${notification.id}/read`)
+      .catch(() => {});
+    onCloseModal();
+    navigate(notification.link);
+  };
+  const hide = () => {
+    setBusy(true);
+    api.post('/circles/mutes', { username: name })
+      .catch(() => {})
+      .finally(() => onDoneFrom(name));
+  };
+  return (
+    <div style={itemStyle}>
+      <h3 style={itemTitleStyle}>{notification.title}</h3>
+      <p style={{
+        fontFamily: "var(--sans)", fontSize: "1rem", fontWeight: 300,
+        color: "var(--text-primary)", lineHeight: 1.55,
+        margin: "0.9rem 0 0",
+      }}>
+        {notification.body}
+      </p>
+      <p style={{ ...mutedNoteStyle, fontSize: "0.875rem", margin: "0.6rem 0 0",
+                  color: "var(--text-secondary)" }}>
+        {atName(name)} is not told what you choose.
+      </p>
+      <div style={buttonRowStyle}>
+        <button style={ghostButtonStyle} onClick={hide} disabled={busy}>
+          Don't show {possessive(name)} entries
+        </button>
+        <button style={accentButtonStyle} onClick={readIt} disabled={busy}>
+          Read it
         </button>
       </div>
     </div>
@@ -467,14 +516,24 @@ function UpdatesModal({ data, onClose }) {
           What's new in Loore since your last visit.
         </p>
 
-        {notifications.map((n) => (
+        {notifications.map((n) => (n.type === "circle_share" ? (
+          <CircleShareItem
+            key={`n-${n.id}`}
+            notification={n}
+            onDone={() => removeFrom(setNotifications)(n.id, "id")}
+            onDoneFrom={(name) => setNotifications((list) => list.filter(
+              (x) => !(x.type === "circle_share"
+                       && x.actor_username === name)))}
+            onCloseModal={onClose}
+          />
+        ) : (
           <NotificationItem
             key={`n-${n.id}`}
             notification={n}
             onDone={() => removeFrom(setNotifications)(n.id, "id")}
             onCloseModal={onClose}
           />
-        ))}
+        )))}
 
         {polls.map((p) => (
           <PollItem

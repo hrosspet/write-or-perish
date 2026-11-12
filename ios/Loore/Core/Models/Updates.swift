@@ -62,6 +62,13 @@ struct UpdateNotification: Decodable, Identifiable, Hashable, Sendable {
     var link: String?
     var createdAt: Date?
     var meta: Meta?
+    /// A note about a shared entry (`type == "circle_share"`): the entry and
+    /// the name of the person who shared it.
+    var nodeId: Int?
+    var actorUsername: String?
+
+    static let circleShareType = "circle_share"
+    var isCircleShare: Bool { type == Self.circleShareType }
 
     struct Meta: Decodable, Hashable, Sendable {
         var version: Int?
@@ -87,10 +94,14 @@ struct UpdateNotification: Decodable, Identifiable, Hashable, Sendable {
     enum CodingKeys: String, CodingKey {
         case id, type, title, body, link, meta
         case createdAt = "created_at"
+        case nodeId = "node_id"
+        case actorUsername = "actor_username"
     }
 
     init(id: Int, type: String, title: String, body: String? = nil, link: String? = nil,
-         createdAt: Date? = nil, meta: Meta? = nil) {
+         createdAt: Date? = nil, meta: Meta? = nil, nodeId: Int? = nil, actorUsername: String? = nil) {
+        self.nodeId = nodeId
+        self.actorUsername = actorUsername
         self.id = id
         self.type = type
         self.title = title
@@ -107,6 +118,8 @@ struct UpdateNotification: Decodable, Identifiable, Hashable, Sendable {
         title = c.tolerant(.title, default: "")
         body = c.tolerant(.body)
         link = c.tolerant(.link)
+        nodeId = c.flexibleInt(.nodeId)
+        actorUsername = c.tolerant(.actorUsername)
         createdAt = c.tolerant(.createdAt)
         meta = c.tolerant(.meta)
     }

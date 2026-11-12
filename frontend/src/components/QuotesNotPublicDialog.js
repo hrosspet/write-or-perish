@@ -60,14 +60,21 @@ export const QUOTES_NOT_PUBLIC_FALLBACK = (
   "This can't be made public yet: it quotes an entry that isn't public. "
   + "Make the quoted entry public first, then try again."
 );
+export const QUOTES_NOT_SHARED_FALLBACK = (
+  "This can't be shared with these people yet: it quotes an entry that "
+  + "not all of them can read. Share the quoted entry with them first, or "
+  + "make it public, then try again."
+);
 
 /**
  * Shown when something about to be public quotes an entry that isn't
  * (Peter, 2026-11-12): nothing was saved. Names each quoted entry and
  * links it, so the user can make it public first. *quoted* is the
  * server's list ({ id, preview, permalink }): entries the user can open.
+ * *shared* (Circles): the same for something about to be shared with a
+ * circle that quotes an entry not all of its readers can read.
  */
-function QuotesNotPublicDialog({ open, message, quoted, onClose }) {
+function QuotesNotPublicDialog({ open, message, quoted, shared = false, onClose }) {
   useEffect(() => {
     if (!open) return undefined;
     const handleKeyDown = (e) => {
@@ -89,9 +96,11 @@ function QuotesNotPublicDialog({ open, message, quoted, onClose }) {
         onClick={(e) => e.stopPropagation()}
       >
         <h2 id="quotes-not-public-title" style={titleStyle}>
-          Not public yet
+          {shared ? "Not shared yet" : "Not public yet"}
         </h2>
-        <p style={bodyStyle}>{message || QUOTES_NOT_PUBLIC_FALLBACK}</p>
+        <p style={bodyStyle}>
+          {message || (shared ? QUOTES_NOT_SHARED_FALLBACK : QUOTES_NOT_PUBLIC_FALLBACK)}
+        </p>
         {(quoted || []).map((q) => (
           <Link
             key={q.id}

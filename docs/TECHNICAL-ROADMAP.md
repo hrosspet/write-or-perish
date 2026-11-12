@@ -26,6 +26,7 @@ The roadmap includes both feature-specific infrastructure and cross-cutting conc
 These technical capabilities are production-ready and form the foundation:
 
 ### Core Features
+- **Circles: entries shared with people the author chose** (A.82; 2026-11-10) - ✅ built, dark behind `CIRCLES_V1` / `CIRCLES_USER_IDS` (both off by default; awaiting review). A circle is a named list of people owned by one user; an entry is shared with circles and/or with Loore names for that entry only ("Who can read this": Only me / Circles / Everyone). Readers are worked out from current membership each time an entry is opened, so removing a person, deleting a circle or taking the entry back closes it at once. Readers get "Shared with you", one note per shared entry, and can hide a sender without the sender being told. Replies in a shared thread are read by exactly its audience. AI replies work as in a private thread (Peter, 2026-11-11): every current member may ask for one under their own nodes of the thread, as in a public thread (Peter, 2026-11-12: "public rule": a member writes a reply first and asks under it); it is the requester's (their model, the chat key, their spend), is named "<model> via @<requester>" on screen and in other members' prompts, and, like every AI reply (Peter, 2026-11-12), is created private: only its requester reads it until they share it with the thread through Edit, never while it is still being written. Auto-generate is off in a circle thread, for the author too, and LLM Response shows there without Craft mode. "Share also the discussion leading up to this node?" shares the path from the thread's start to the entry, the prompt included; a shared prompt is filled and shown with the requester's own artifacts; when it is edited or written from scratch and reads the requester's data or turns tools on, the dialog before the reply names what it reads (the server makes no reply for a prompt changed since), and Loore's current default prompt, unedited, needs no dialog: the prompt node still links a version the server seeded from the default file, and that version's text hashes to today's default; an older default version asks, saying it is old (Peter, 2026-11-12). An entry, a reply or an AI reply shared with a circle never quotes an entry one of its readers cannot read: the save is refused and a dialog ("Not shared yet") names the quoted entry. A quote of another person's circle entry in the requester's own entry counts for the approval of AI writes exactly when the model is shown its text. Other people's entries never enter a reader's Log, export, profile builds, recent context or search; the reader's own replies there, typed or asked of their AI, are theirs. Web and iPhone. Open: invitations for people not on Loore, shared groups that every member posts into. Access rule in `backend/utils/privacy.py` (a person / a model acting for a person), logic in `backend/utils/circles.py`, routes in `backend/routes/circles.py`; tables `circle`, `circle_member`, `node_circle`, `node_reader`, `circle_mute`, plus `node.audience_root_id` and two columns on `user_notification`.
 - **Verified email change + rename-safe permalinks** (#260, #253; 2026-09-15) - Email changes go through a confirmation link to the new address (binds only when confirmed from inside the requesting account's session — the link alone signs nobody in; old address notified; the only unconfirmed write left is the admin's `update_email`); username renames of an account with public writing append `username_history`, so old `/@handle/...` URLs 301 (uncacheable, query string kept) to the current handle on every public route, in the permalink API and in the public profile API, and the former handle stays reserved on every path that issues a username (rename, magic-link and X signup, whitelist); the redirect exists only where the target page is public (an account gone private answers 404, like a handle nobody held), handles resolve case-insensitively to one canonical URL, and a rename by an account with nothing published leaves no history (the sharing toggle does not matter: paused sharing around a rename keeps the handle reserved, the redirect resumes with the sharing)
 - **Asynchronous processing via Celery** - Long-running tasks (transcription, LLM, TTS) run in background with polling
 - **No AI reply where AI usage is None (2026-10-01)** - `llm_nodes.reply_refusal`: a reply needs the node it answers, every node above it the model would read (the `_load_node_chain` walk) and the reply itself to be 'chat'/'train'. `create_llm_placeholder` raises `AIUsageRefused` before any write and the routes answer 403 `{"code": "ai_usage_none", "scope"}`; `generate_llm_response` asks again at run start and before a continuation; `_load_node_chain` leaves 'none' nodes out. Voice: `voice_turn_refusal` gates streaming init (label Voice), `/voice/from-node`, legacy `POST /voice` and the finalize chain (a late refusal saves the entry with a warning, no reply, no cache warm); `GET /api/voice/availability` drives the Voice screen's explanation. `speech_allowed` no longer exempts LLM replies
@@ -439,7 +440,7 @@ Based on current project state, dependencies, and strategic value, here's the re
 ### NOT Implemented (Future Work):
 
 - **Email infrastructure at scale** - Basic SMTP works for magic link auth; SendGrid/AWS SES needed for notifications and digests
-- **Circles implementation** - Privacy level exists but circles functionality not yet built (moved to Phase 4)
+- ✅ **Circles implementation** - built 2026-11-10 (A.82), dark behind `CIRCLES_V1` / `CIRCLES_USER_IDS`; see "Current State: Already Built"
 
 **Deliverable:** Two-column privacy system for Nodes and UserProfiles with authorization enforcement and comprehensive tests
 
@@ -452,7 +453,7 @@ Based on current project state, dependencies, and strategic value, here's the re
 
 **Privacy Level Options:**
 - 🔒 **private** - Only owner can see
-- 👥 **circles** - Shared with specific groups (coming soon)
+- 👥 **circles** - Shared with the people the author chooses (A.82)
 - 🌐 **public** - Anyone can see
 
 **AI Usage Options:**
@@ -543,14 +544,14 @@ Based on current project state, dependencies, and strategic value, here's the re
 
 **Note:** This phase includes Circles implementation, which was deferred from Phase -1 as it's not blocking for basic privacy functionality.
 
-33. **Circles data model and management** - Create Circle model with membership, privacy-aware share targeting (implements the 'circles' privacy level from Phase -1)
+33. ✅ **Circles data model and management** - Create Circle model with membership, privacy-aware share targeting (implements the 'circles' privacy level from Phase -1). Built 2026-11-10 (A.82, dark): circles, members with an "Only new entries" cut-off, names for one entry only, audience read from current membership.
 34. **Content analysis pipeline** - LLM-based shareability scoring and insight extraction (only analyzes training/public nodes unless user opts in)
 35. **Privacy analysis system** - Detect sensitive information and flag risks before sharing
 36. **Share approval workflow** - State machine for suggested/approved/published status with audit trail
 37. **Content transformation engine** - Convert journal entries to polished shares while preserving attribution to encrypted source
 38. **User preference learning system** - Track accept/reject patterns to personalize suggestions
 39. **Audit logging for shares** - Log who shared what to whom and when for compliance
-40. **Frontend: Circles management UI** - Create/edit circles, add/remove members
+40. ✅ **Frontend: Circles management UI** - Create/edit circles, add/remove members. Built 2026-11-10 (A.82, dark): "Your circles", the audience picker, "Shared with you", on web and iPhone.
 41. **Frontend: Share suggestion UI** - Preview, edit, approve/reject with clear privacy indicators
 42. **Tests for analysis and transformation** - Mock LLM responses, test scoring logic, verify privacy enforcement
 

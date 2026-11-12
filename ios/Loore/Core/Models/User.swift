@@ -43,6 +43,9 @@ struct CurrentUser: Decodable, Equatable, Sendable {
     /// The gate and the user's own switch: every Glean card, button and menu
     /// entry shows only when this is true (#475).
     var gleanEnabled: Bool
+    /// Circles: every Circles screen and the Circles choice in the pickers
+    /// show only when this is true. Absent (an older server): off.
+    var circlesEnabled: Bool
 
     enum CodingKeys: String, CodingKey {
         case id, username, email, plan, timezone
@@ -73,6 +76,7 @@ struct CurrentUser: Decodable, Equatable, Sendable {
         case dataDeletion = "data_deletion"
         case gleanAvailable = "glean_available"
         case gleanEnabled = "glean_enabled"
+        case circlesEnabled = "circles_enabled"
     }
 
     init(from decoder: Decoder) throws {
@@ -109,6 +113,7 @@ struct CurrentUser: Decodable, Equatable, Sendable {
         dataDeletion = c.tolerant(.dataDeletion)
         gleanAvailable = c.tolerant(.gleanAvailable, default: false)
         gleanEnabled = c.tolerant(.gleanEnabled, default: false)
+        circlesEnabled = c.tolerant(.circlesEnabled, default: false)
     }
 
     /// Applies an email-state answer from any `/api/dashboard/email*` call
@@ -141,6 +146,8 @@ struct UserCapabilities: Equatable, Sendable {
     /// Glean (#475): the Reflect / Glean home cards, the Glean buttons and
     /// "Glean for this reflection". Off: today's app.
     var gleanEnabled = false
+    /// Circles: sharing with chosen people, "Your circles", "Shared with you".
+    var circlesEnabled = false
 
     init() {}
 
@@ -160,6 +167,7 @@ struct UserCapabilities: Equatable, Sendable {
         twitterLogin = user.twitterLogin
         spendBlocked = user.spendBlocked
         gleanEnabled = user.gleanEnabled
+        circlesEnabled = user.circlesEnabled
     }
 
     /// Commons tab and Share card (map A §2.1: approved and `share_v1_enabled`).
