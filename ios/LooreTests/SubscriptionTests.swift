@@ -105,6 +105,12 @@ final class SubscriptionTests: XCTestCase {
                 XCTAssertFalse(lower.contains(word), "\(text) mentions \(word)")
             }
         }
+        // Before the Beta release date: the dates, as the alpha plan.
+        let upcoming = SubscriptionState(status: "none", state: "set_by_hand", planSetByHand: true,
+                                         alphaTester: true, freeMonthUpcoming: true,
+                                         freeMonthStart: ISO8601DateFormatter().date(from: "2026-12-01T00:00:00Z"),
+                                         freeMonthUntil: ISO8601DateFormatter().date(from: "2026-12-31T00:00:00Z"))
+        XCTAssertEqual(upcoming.statusText(plan: "free"), "Free month from December 1, 2026 to December 31, 2026.")
         // An older server without the fields: not a tester.
         let older = try decode(SubscriptionState.self, #"{"status": "none", "ai_replies": false}"#)
         XCTAssertFalse(older.alphaTester)

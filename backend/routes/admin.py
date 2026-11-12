@@ -1498,9 +1498,9 @@ def list_subscriptions():
         # withdrawn ("dispute", "refund").
         "access": bool(u.subscription_grants_access),
         "revoked": u.subscription_revoked,
-        # The alpha free month: given (an alpha tester) and when it ends;
-        # None while it has not started (no visit since it was given).
+        # The alpha free month: given (an alpha tester), and its dates.
         "alpha_tester": bool(u.is_alpha_tester),
+        "free_month_start": iso_utc(u.alpha_free_start),
         "free_month_until": iso_utc(u.alpha_free_until),
     } for u in users]
     return jsonify({"subscriptions": rows}), 200

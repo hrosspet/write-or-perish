@@ -1763,7 +1763,7 @@ class TestAdmin:
             "current_period_end", "trial_end", "cancel_at_period_end",
             "trial_used", "access", "revoked",
             # The alpha free month (#438).
-            "alpha_tester", "free_month_until"}
+            "alpha_tester", "free_month_start", "free_month_until"}
 
 
 # ── Account deletion ─────────────────────────────────────────────────────

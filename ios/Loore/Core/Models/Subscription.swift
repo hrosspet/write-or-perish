@@ -21,10 +21,14 @@ struct SubscriptionState: Decodable, Equatable, Sendable {
     var planSetByHand: Bool
     /// Whether Loore replies on this account now.
     var aiReplies: Bool
-    /// An alpha tester with the free month after the opening (#438), which
-    /// still runs (`freeMonthActive`) until `freeMonthUntil`.
+    /// An alpha tester with the free month from the Beta release date
+    /// (#438), the same dates for everyone: still to come
+    /// (`freeMonthUpcoming`: nothing has changed for them yet), or running
+    /// (`freeMonthActive`) from `freeMonthStart` until `freeMonthUntil`.
     var alphaTester: Bool
+    var freeMonthUpcoming: Bool
     var freeMonthActive: Bool
+    var freeMonthStart: Date?
     var freeMonthUntil: Date?
 
     enum CodingKeys: String, CodingKey {
@@ -35,14 +39,16 @@ struct SubscriptionState: Decodable, Equatable, Sendable {
         case planSetByHand = "plan_set_by_hand"
         case aiReplies = "ai_replies"
         case alphaTester = "alpha_tester"
+        case freeMonthUpcoming = "free_month_upcoming"
         case freeMonthActive = "free_month_active"
+        case freeMonthStart = "free_month_start"
         case freeMonthUntil = "free_month_until"
     }
 
     init(level: String? = nil, status: String = "none", state: String? = nil, currentPeriodEnd: Date? = nil,
          trialEnd: Date? = nil, cancelAtPeriodEnd: Bool = false, planSetByHand: Bool = false,
-         aiReplies: Bool = true, alphaTester: Bool = false, freeMonthActive: Bool = false,
-         freeMonthUntil: Date? = nil) {
+         aiReplies: Bool = true, alphaTester: Bool = false, freeMonthUpcoming: Bool = false,
+         freeMonthActive: Bool = false, freeMonthStart: Date? = nil, freeMonthUntil: Date? = nil) {
         self.level = level
         self.status = status
         self.state = state
@@ -52,7 +58,9 @@ struct SubscriptionState: Decodable, Equatable, Sendable {
         self.planSetByHand = planSetByHand
         self.aiReplies = aiReplies
         self.alphaTester = alphaTester
+        self.freeMonthUpcoming = freeMonthUpcoming
         self.freeMonthActive = freeMonthActive
+        self.freeMonthStart = freeMonthStart
         self.freeMonthUntil = freeMonthUntil
     }
 
@@ -67,7 +75,9 @@ struct SubscriptionState: Decodable, Equatable, Sendable {
         planSetByHand = c.tolerant(.planSetByHand, default: false)
         aiReplies = c.tolerant(.aiReplies, default: true)
         alphaTester = c.tolerant(.alphaTester, default: false)
+        freeMonthUpcoming = c.tolerant(.freeMonthUpcoming, default: false)
         freeMonthActive = c.tolerant(.freeMonthActive, default: false)
+        freeMonthStart = c.tolerant(.freeMonthStart)
         freeMonthUntil = c.tolerant(.freeMonthUntil)
     }
 
@@ -86,6 +96,12 @@ struct SubscriptionState: Decodable, Equatable, Sendable {
         // A live subscription is shown also on a plan set by hand: it still
         // renews until it is cancelled on the web.
         let live = ["trialing", "active", "past_due"].contains(status)
+        // An alpha tester before the free month: its dates (they keep the
+        // alpha access until it starts).
+        if alphaTester && freeMonthUpcoming && !live {
+            let from = freeMonthStart.map(Self.day) ?? "—"
+            return "Free month from \(from) to \(freeMonthUntil.map(Self.day) ?? "—")."
+        }
         if planSetByHand && !live {
             return "Included with your plan (\(plan.capitalized))."
         }

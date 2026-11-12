@@ -163,9 +163,10 @@ export function subscriptionStatusLine(sub) {
 }
 
 // ── The alpha free month (#438) ──────────────────────────────────────
-// Alpha testers have a free month after the opening, then the discounted
-// price without a code. `sub.free_month_until` is its end (expected, while
-// it has not started); `sub.free_month_active` whether it still runs.
+// Alpha testers have a free month from the Beta release date, the same
+// dates for everyone (`sub.free_month_start`, `sub.free_month_until`), then
+// the discounted price without a code. Before it (`free_month_upcoming`)
+// nothing changes for them; `free_month_active` while it runs.
 
 // Days before the end of the free month when the web says it ends soon.
 export const FREE_MONTH_NOTICE_DAYS = 7;
@@ -175,6 +176,10 @@ export const FREE_MONTH_NOTICE_DAYS = 7;
 export function freeMonthLine(sub, price) {
   if (!sub || !sub.alpha_tester) return null;
   const until = formatDay(sub.free_month_until);
+  if (sub.free_month_upcoming) {
+    const after = price ? ` After it, Loore is ${price} a month for you, plus tax where it applies.` : '';
+    return `Your free month as an alpha tester runs from ${formatDay(sub.free_month_start)} to ${until}. Until it starts, nothing changes.${after}`;
+  }
   if (sub.free_month_active) {
     const after = price ? ` After it, Loore is ${price} a month for you, plus tax where it applies.` : '';
     return `Your free month as an alpha tester runs until ${until}.${after}`;

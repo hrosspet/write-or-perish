@@ -38,6 +38,7 @@ const sub = (over = {}) => ({
   trial_end: null, cancel_at_period_end: false, trial_available: false,
   trial_days: 14, plan_set_by_hand: false, ai_replies: true,
   has_customer: false, alpha_tester: true, free_month_active: true,
+  free_month_upcoming: false, free_month_start: '2026-11-12T00:00:00Z',
   free_month_until: '2026-12-12T10:00:00Z', ...over,
 });
 
@@ -81,6 +82,21 @@ test('during the free month: its end, the price after it, no card yet', async ()
   // No code needed, and no 14-day trial offered on top of the month.
   expect(screen.queryByLabelText('Code')).toBeNull();
   expect(screen.queryByText(/The first 14 days are free/)).toBeNull();
+});
+
+test('before the free month: its dates, nothing to buy yet', async () => {
+  // The Beta release date is ahead: the tester keeps the alpha access.
+  renderSection(sub({
+    state: 'set_by_hand', plan_set_by_hand: true, free_month_active: false,
+    free_month_upcoming: true, free_month_start: '2026-12-01T00:00:00Z',
+    free_month_until: '2026-12-31T00:00:00Z',
+  }));
+  expect(await screen.findByText(
+    'Your free month as an alpha tester runs from December 1, 2026 to December 31, 2026. '
+    + 'Until it starts, nothing changes. After it, Loore is $12 a month for you, plus tax where it applies.',
+  )).toBeInTheDocument();
+  expect(screen.queryByText('Reduced')).toBeNull();
+  expect(screen.queryByText(/nothing to pay/)).toBeNull();
 });
 
 // Control: the web sends the level the server lists; the server is what

@@ -391,10 +391,6 @@ def create_app():
     # /media route answers 402 {"error": "no_subscription"}. No-op while
     # payments are off.
     from backend.utils.subscriptions import block_accounts_without_subscription
-    # An alpha tester's free month starts at their first request after
-    # `flask alpha-free-month --apply` (#438). No-op while payments are off.
-    from backend.utils.subscriptions import start_alpha_free_month_hook
-    app.before_request(start_alpha_free_month_hook)
     app.before_request(block_accounts_without_subscription)
     # --------------------------------------------------------------------
 

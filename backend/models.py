@@ -212,9 +212,12 @@ class User(db.Model, UserMixin):
     # alpha tester for good: the discounted price is theirs without a code,
     # and an ended free month leaves the account lapsed, never shut out.
     alpha_free_granted_at = db.Column(db.DateTime, nullable=True)
-    # When the free month ends (UTC). Set at the account's first request
-    # after the grant, ALPHA_FREE_MONTH_DAYS from then, so every tester gets
-    # a whole month of use however late they come back. NULL: not started.
+    # The free month, UTC: one start for every tester, the Beta release
+    # date the owner gives the command (Peter, 2026-11-13: "at the beta
+    # release date"), and its end ALPHA_FREE_MONTH_DAYS later, whether or
+    # not the tester visits. Before the start the tester keeps the alpha
+    # plan's access.
+    alpha_free_start = db.Column(db.DateTime, nullable=True)
     alpha_free_until = db.Column(db.DateTime, nullable=True)
 
     # Per-user monthly spend hard cap (issue: free-alpha guardrail). Stores the
@@ -380,8 +383,11 @@ class User(db.Model, UserMixin):
     @property
     def plan_set_by_hand(self):
         """A plan that gives the paid feature set by itself (alpha, pro):
-        a subscription neither adds to it nor takes from it (#438)."""
-        return (self.plan or "free") in self.VOICE_MODE_PLANS
+        a subscription neither adds to it nor takes from it (#438). An alpha
+        tester whose free month is still to come keeps the alpha plan's
+        access until it starts."""
+        return ((self.plan or "free") in self.VOICE_MODE_PLANS
+                or self.alpha_free_month_upcoming)
 
     @property
     def subscription_grants_access(self):
@@ -398,14 +404,23 @@ class User(db.Model, UserMixin):
         return self.alpha_free_granted_at is not None
 
     @property
-    def alpha_free_month_active(self):
-        """An alpha tester whose free month has not ended: it gives the
-        paid feature set like a subscription. Not started yet (no first
-        request since the grant) counts as running."""
-        if self.alpha_free_granted_at is None:
+    def alpha_free_month_upcoming(self):
+        """An alpha tester before the free month's start: nothing has
+        changed for them yet (plan_set_by_hand)."""
+        if self.alpha_free_granted_at is None or self.alpha_free_start is None:
             return False
-        return (self.alpha_free_until is None
-                or datetime.utcnow() < self.alpha_free_until)
+        return datetime.utcnow() < self.alpha_free_start
+
+    @property
+    def alpha_free_month_active(self):
+        """An alpha tester inside the free month (from its start to its
+        end): it gives the paid feature set like a subscription."""
+        if (self.alpha_free_granted_at is None
+                or self.alpha_free_start is None
+                or self.alpha_free_until is None):
+            return False
+        return self.alpha_free_start <= datetime.utcnow() < \
+            self.alpha_free_until
 
     @property
     def subscription_access_state(self):
@@ -463,10 +478,11 @@ class User(db.Model, UserMixin):
 
     @classmethod
     def alpha_free_month_clause(cls):
-        """alpha_free_month_active in SQL."""
+        """In SQL: an alpha tester whose free month has not ended, the
+        month itself or the alpha access before it (both give the paid
+        feature set)."""
         return and_(cls.alpha_free_granted_at.isnot(None),
-                    or_(cls.alpha_free_until.is_(None),
-                        cls.alpha_free_until > datetime.utcnow()))
+                    cls.alpha_free_until > datetime.utcnow())
 
     @classmethod
     def paid_features_clause(cls):

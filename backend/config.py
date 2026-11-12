@@ -233,8 +233,8 @@ class Config:
         os.environ.get("SUBSCRIPTION_CONTACT_EMAIL") or "info@loore.org")
     # The alpha free month (Peter, 2026-11-12: alpha testers are "free for
     # one month after the opening, then the discounted price"; "The number
-    # of months may still change"). Days, counted from each tester's first
-    # request after `flask alpha-free-month --apply`.
+    # of months may still change"). Days, counted from the start date given
+    # to `flask alpha-free-month --apply --start` (the Beta release date).
     ALPHA_FREE_MONTH_DAYS = int(
         os.environ.get("ALPHA_FREE_MONTH_DAYS") or "30")
 

@@ -6,9 +6,11 @@
                                   lookup key) and the customer-portal
                                   configuration. Safe to run again: what
                                   matches is left alone.
-    flask alpha-free-month        the alpha testers' free month: lists the
-                                  accounts; --apply gives it, --undo takes
-                                  it back.
+    flask alpha-free-month --start YYYY-MM-DD
+                                  the alpha testers' free month from that
+                                  day (00:00 UTC): shows the accounts and
+                                  dates; --apply gives it, --change-date
+                                  moves it, --undo takes it back.
 
 The amounts, currency, tax behaviour and tax code come from the settings
 (SUBSCRIPTION_PRICE_CENTS_*, SUBSCRIPTION_CURRENCY,
@@ -56,21 +58,33 @@ def stripe_sync_catalog_command():
 
 
 @click.command("alpha-free-month")
+@click.option("--start", "start_raw", metavar="YYYY-MM-DD",
+              help="The first day of the free month, 00:00 UTC: the Beta "
+                   "release date. Needed to give or move the month.")
 @click.option("--apply", "apply_", is_flag=True,
-              help="Make the change; without it, only list the accounts.")
+              help="Make the change; without it, only show what it would "
+                   "be.")
+@click.option("--change-date", is_flag=True,
+              help="Move the month of accounts that have it already to "
+                   "--start.")
 @click.option("--undo", is_flag=True,
               help="Put alpha testers back on the alpha plan.")
 @click.option("--user", "usernames", multiple=True,
               help="Only this username (repeatable).")
 @with_appcontext
-def alpha_free_month_command(apply_, undo, usernames):
-    """The alpha free month (#438): move every approved account on the
-    "alpha" plan to "free" with a free month (ALPHA_FREE_MONTH_DAYS) that
-    starts at its next visit, then the discounted price without a code.
-    Run once, right after PAYMENTS_ENABLED is turned on. Lists the
-    accounts unless --apply is given; --undo reverses it."""
+def alpha_free_month_command(start_raw, apply_, change_date, undo,
+                             usernames):
+    """The alpha free month (#438): every approved account on the "alpha"
+    plan moves to "free" with a free month from --start (00:00 UTC) for
+    ALPHA_FREE_MONTH_DAYS days, the same dates for everyone, then the
+    discounted price without a code. Until the start nothing changes for
+    them. Shows what it would do unless --apply is given. --change-date
+    moves the month of accounts that have it; --undo reverses it all."""
+    from datetime import datetime
+
     from backend.utils.subscriptions import (
-        alpha_free_month_candidates, grant_alpha_free_month,
+        alpha_free_month_candidates, alpha_testers, free_month_dates,
+        grant_alpha_free_month, move_alpha_free_month, parse_start_date,
         payments_enabled, undo_alpha_free_month)
     if undo:
         if not apply_:
@@ -82,15 +96,59 @@ def alpha_free_month_command(apply_, undo, usernames):
         raise click.ClickException(
             "Payments are off: set PAYMENTS_ENABLED=true and restart "
             "first. The free month only means something while they are on.")
+    if not start_raw:
+        raise click.ClickException(
+            "--start YYYY-MM-DD is needed: the first day of the free month "
+            "(the Beta release date), from 00:00 UTC.")
+    try:
+        start = parse_start_date(start_raw)
+    except ValueError:
+        raise click.ClickException(
+            f"--start {start_raw!r} is not a date like 2026-12-01.")
+    begin, end = free_month_dates(start)
+    now = datetime.utcnow()
+    fmt = "%Y-%m-%d %H:%M UTC"
+    click.echo(f"Free month: from {begin.strftime(fmt)} to "
+               f"{end.strftime(fmt)} "
+               f"({current_app.config.get('ALPHA_FREE_MONTH_DAYS')} days).")
+    if now < begin:
+        click.echo("It has not started: until then these accounts keep the "
+                   "alpha plan's access, as now.")
+    elif now < end:
+        left = (end - now).days
+        click.echo(f"It started already: about {left} day(s) of it are "
+                   "left.")
+    else:
+        click.echo("It has ended already: these accounts are lapsed at "
+                   "once (reading, writing and export; no AI).")
+
+    if change_date:
+        users = alpha_testers(usernames or None)
+        click.echo(f"{len(users)} alpha tester(s) get these dates instead "
+                   "of their present ones:")
+        for u in users:
+            old = (f"{u.alpha_free_start:%Y-%m-%d} to "
+                   f"{u.alpha_free_until:%Y-%m-%d}"
+                   if u.alpha_free_start and u.alpha_free_until else "none")
+            click.echo(f"  {u.username} (now {old})")
+        if not apply_:
+            click.echo("Nothing changed. Run again with --apply.")
+            return
+        n = move_alpha_free_month(users, start)
+        click.echo(f"Done: the free month of {n} account(s) moved.")
+        return
+
     users = alpha_free_month_candidates(usernames or None)
-    days = current_app.config.get("ALPHA_FREE_MONTH_DAYS")
-    click.echo(f"{len(users)} account(s) on the alpha plan get a free "
-               f"month ({days} days from their next visit):")
+    click.echo(f"{len(users)} account(s) on the alpha plan get it:")
     for u in users:
         click.echo(f"  {u.username}")
+    already = alpha_testers(usernames or None)
+    if already:
+        click.echo(f"{len(already)} account(s) have a free month already "
+                   "and are left as they are; --change-date moves it.")
     if not apply_:
         click.echo("Nothing changed. Run again with --apply.")
         return
-    n = grant_alpha_free_month(users)
-    click.echo(f"Done: {n} account(s) moved to the free plan with a free "
-               "month.")
+    n = grant_alpha_free_month(users, start)
+    click.echo(f"Done: {n} account(s) moved to the free plan with this "
+               "free month.")

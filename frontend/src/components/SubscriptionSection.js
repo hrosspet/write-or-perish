@@ -219,6 +219,10 @@ export default function SubscriptionSection({ user, setUser }) {
             Switch between Standard and Supporter, change your card, see invoices or cancel on Stripe's page. Moving up is charged for the rest of the month at once; moving down takes effect when the month you paid for ends. A cancelled subscription runs to the end of the period you paid for.
           </div>
         </>
+      ) : alpha && sub.free_month_upcoming ? (
+        // An alpha tester before the free month (#438): nothing changes
+        // until it starts, and nothing can be bought before then.
+        <div style={textStyle}>{freeLine}</div>
       ) : sub.plan_set_by_hand ? (
         <div style={textStyle}>
           Your account has the paid features already ({user.plan}). There is nothing to pay.
