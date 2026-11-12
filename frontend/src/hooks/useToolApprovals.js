@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import api from '../api';
 import { groupByTurn } from '../components/ToolApprovalDialog';
+import { useOptionalAudio } from '../contexts/AudioContext';
 
 const NOT_RUN = "Loore couldn't make this change. It still waits for your approval.";
 
@@ -23,6 +24,23 @@ export function useToolApprovals() {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState({});
   const [errors, setErrors] = useState({});
+  // The player, where there is one: a reply's spoken approval announcement
+  // in its queue goes once that reply's changes are all decided (Peter,
+  // 2026-11-12: "when it's not pending, it's not voiced out anymore").
+  const audio = useOptionalAudio();
+  const audioRef = useRef(audio);
+  audioRef.current = audio;
+  const recheckAnnouncement = useCallback(() => {
+    const player = audioRef.current;
+    const nodeId = player && player.announcementNodeId
+      ? player.announcementNodeId() : null;
+    if (nodeId == null) return;
+    api.get('/voice/approval-announcement', { params: { node: nodeId } })
+      .then((res) => {
+        if (!res?.data?.url && audioRef.current) audioRef.current.dropAnnouncement();
+      })
+      .catch(() => {});
+  }, []);
   // Every call decided: the dialog is closed, so calls found later open it
   // only when asked to.
   useEffect(() => {
@@ -59,12 +77,15 @@ export function useToolApprovals() {
       replaceTurn(res.data?.pending);
       if (res.data?.outcome === 'failed') {
         setErrors((e) => ({ ...e, [item.id]: res.data.error }));
-      } else if (onDecided) {
-        onDecided(res.data);
+      } else {
+        recheckAnnouncement();
+        if (onDecided) onDecided(res.data);
       }
     } catch (err) {
       if (err?.response?.status === 404) {
+        // Decided elsewhere (another device): the announcement may go too.
         setPending((all) => all.filter((p) => p.id !== item.id));
+        recheckAnnouncement();
       } else {
         setErrors((e) => ({
           ...e,
@@ -74,7 +95,7 @@ export function useToolApprovals() {
     } finally {
       setBusy((b) => ({ ...b, [item.id]: false }));
     }
-  }, []);
+  }, [recheckAnnouncement]);
 
   return {
     pending,

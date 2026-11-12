@@ -37,6 +37,16 @@ const TTS_TRIGGER_WATCHDOG_MS = 20000;
 // page returns to the foreground: that is when iOS has most likely killed
 // the stream, and a reconnect to a live one is harmless (it replays).
 const TTS_SSE_CATCH_UP_MS = 3000;
+// INTRODUCED CONSTANT: how long the end of a turn's audio waits for the
+// answer on the approval announcement (Peter, 2026-11-12) before the queue
+// ends without it. The answer is asked as soon as the reply is written, so
+// it is usually in before the reply has been heard; only a clip being made
+// for the first time, or a slow network, takes this long. Not measured.
+const ANNOUNCEMENT_WAIT_MS = 5000;
+
+const absoluteUrl = (url) => (url.startsWith('http')
+  ? url
+  : `${process.env.REACT_APP_BACKEND_URL || ''}${url}`);
 
 // Chapter title of a node whose audio starts before its text is complete
 // (#367: spoken while written); replaced with the real one when it's done.
@@ -275,6 +285,45 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   const errorSoundAfterQueueRef = useRef(null);
   const latestAudioRef = useRef(audio);
   latestAudioRef.current = audio;
+
+  // The approval announcement (Peter, 2026-11-12: "the announcement should
+  // be TTSed as a separate chunk and appended to the queue. So that when
+  // it's not pending, it's not voiced out anymore"). When the turn's final
+  // node is written, the server is asked whether that reply's changes wait
+  // (GET /voice/approval-announcement); its clip then joins the same queue
+  // after the reply's last chunk. The queue waits for the answer
+  // (generatingTTS stays on), at most ANNOUNCEMENT_WAIT_MS.
+  const announcementAskRef = useRef({ nodeId: null, promise: null });
+  const askAnnouncement = useCallback((nodeId) => {
+    if (announcementAskRef.current.nodeId === nodeId) {
+      return announcementAskRef.current.promise;
+    }
+    const promise = Promise.resolve()
+      .then(() => api.get('/voice/approval-announcement', { params: { node: nodeId } }))
+      .then((res) => (res && res.data && res.data.url ? res.data : null))
+      .catch(() => null);
+    announcementAskRef.current = { nodeId, promise };
+    return promise;
+  }, []);
+  // Nothing more of the reply is coming: add the announcement if it is
+  // due, then let the queue end. *alone*: nothing of this turn is in the
+  // queue (a reply that is all proposal card), so the clip starts a queue.
+  const endTurnAudio = useCallback(async (nodeId, { alone = false } = {}) => {
+    const turn = turnRef.current;
+    const announcement = await Promise.race([
+      askAnnouncement(nodeId),
+      new Promise((resolve) => { setTimeout(() => resolve(null), ANNOUNCEMENT_WAIT_MS); }),
+    ]);
+    // The user started, cancelled or left the turn meanwhile.
+    if (turn !== turnRef.current) return;
+    const queue = latestAudioRef.current;
+    if (announcement) {
+      const url = absoluteUrl(announcement.url);
+      await queue.appendAnnouncement(url, announcement.duration, nodeId,
+        alone ? { alone: { title: ttsTitle, url, chapters: [] } } : {});
+    }
+    queue.setGeneratingTTS(false);
+  }, [askAnnouncement, ttsTitle]);
   // nodeId: the reply node, or null when the reply never started.
   const soundReplyFailure = useCallback((nodeId, turn) => {
     if (turn !== turnRef.current) return;
@@ -588,7 +637,8 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       }
       continuingChainRef.current = false;
       setTtsGenerating(false);
-      audio.setGeneratingTTS(false);
+      // The queue ends once the announcement is in (or not due).
+      endTurnAudio(llmNodeId, { alone: firstChunkRef.current });
       // The turn ended with nothing (more) to play — e.g. a final answer
       // that is all proposal card: leave "Thinking...".
       if (firstChunkRef.current || awaitingNextNodeRef.current) {
@@ -676,9 +726,10 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       advanceChain(nextId);
     } else {
       continuingChainRef.current = false;
-      audio.setGeneratingTTS(false);
+      // The queue ends once the announcement is in (or not due).
+      endTurnAudio(llmNodeId);
     }
-  }, [llmNodeId, audio, ttsTitle, stopSilentAudio, advanceChain]);
+  }, [llmNodeId, audio, ttsTitle, stopSilentAudio, advanceChain, endTurnAudio]);
 
   // Interim playback finished but the continuation's audio isn't ready yet
   // (the answer is still generating) — drop back to "Thinking..." until
@@ -734,6 +785,8 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       // next turn parents off the answer (not an interim retrieval step), and
       // interim text carries no proposals to parse.
       if (firstCompletion && continuationId == null) {
+        // Asked now, so the answer is in when the reply's audio ends.
+        askAnnouncement(llmNodeId);
         const wasInitialResume = initialResumeRef.current;
         if (initialResumeRef.current) {
           initialResumeRef.current = false;
@@ -773,8 +826,11 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       // final answer — end any chain so the audio queue can finish.
       if (!llmData.content || !llmData.content.trim()) {
         stopSilentAudio();
+        const alone = !continuingChainRef.current;
         continuingChainRef.current = false;
-        audio.setGeneratingTTS(false);
+        // Ends the queue once the announcement is in (or not due).
+        audio.setGeneratingTTS(true);
+        endTurnAudio(llmNodeId, { alone });
         setPhase('playback');
         return;
       }
@@ -853,7 +909,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     // (llm-status polling already stopped on 'completed', so no other dep
     // changes).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [llmStatus, llmData, llmNodeId, audio, ttsTitle, stopSilentAudio, advanceChain, deliverFullTts, ttsRetriggerNonce, soundReplyFailure, finishGenerating]);
+  }, [llmStatus, llmData, llmNodeId, audio, ttsTitle, stopSilentAudio, advanceChain, deliverFullTts, ttsRetriggerNonce, soundReplyFailure, finishGenerating, askAnnouncement, endTurnAudio]);
 
   // Safety net: TTS is being generated (POST /tts returned 202) but no
   // chunk arrived within 60s — SSE is probably dead; transition to

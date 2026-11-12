@@ -1841,7 +1841,13 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
           >
             <FaThumbtack />
           </button>
-          <SpeakerIcon nodeId={node.id} content={node.content} isPublic={node.privacy_level === 'public'} aiUsage={node.ai_usage} onTtsGenerated={() => setNode(prev => prev ? { ...prev, has_tts: true } : prev)} />
+          {/* A reply in a thread where a change waits: its audio may be
+              followed by the spoken announcement (asked when it plays). */}
+          <SpeakerIcon
+            nodeId={node.id} content={node.content} isPublic={node.privacy_level === 'public'} aiUsage={node.ai_usage}
+            onTtsGenerated={() => setNode(prev => prev ? { ...prev, has_tts: true } : prev)}
+            announce={pendingApprovals.length > 0 && (node.node_type === 'llm' || !!node.llm_model)}
+          />
           <DownloadAudioIcon nodeId={node.id} isPublic={node.privacy_level === 'public'} aiUsage={node.ai_usage} />
         </NodeFooter>
         {(showCraftBar || showTryAgain || readActions) && (
