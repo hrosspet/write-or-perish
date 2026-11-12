@@ -159,7 +159,8 @@ def _world(app):
     r = _reply(app, "ben", e, "BEN-REPLY-WORDS")
     assert r.status_code == 201, r.get_json()
     ben_reply = r.get_json()["id"]
-    r = _client(app, "ben").post(f"/api/nodes/{e}/llm",
+    # His AI reply, under his own reply (the public rule).
+    r = _client(app, "ben").post(f"/api/nodes/{ben_reply}/llm",
                                  json={})
     assert r.status_code == 202, r.get_json()
     answer = r.get_json()["node_id"]
@@ -418,7 +419,8 @@ def test_pinned_answer_stays_in_readers_log_after_entry_deleted(app):
     close = _circle(app, "anna", "Close", ["ben"])
     e = _share(app, circle_ids=[close])
     ben = _client(app, "ben")
-    r = ben.post(f"/api/nodes/{e}/llm", json={})
+    mine = _reply(app, "ben", e, "BEN R").get_json()["id"]
+    r = ben.post(f"/api/nodes/{mine}/llm", json={})
     aid = r.get_json()["node_id"]
     a = _db.session.get(Node, aid)
     a.set_content("ANSWER-DERIVED-FROM-ANNA")
@@ -436,7 +438,14 @@ def test_pinned_answer_stays_in_readers_log_after_entry_deleted(app):
 def _answer(app, who, parent):
     """*who*'s AI reply under *parent*, written, then shared with the
     thread by *who* (every AI reply is created private and shared by its
-    requester once it is written, Peter 2026-11-12)."""
+    requester once it is written, Peter 2026-11-12). Under someone
+    else's node *who* first writes a reply of their own and asks under
+    it (the public rule, Peter 2026-11-12)."""
+    node = _db.session.get(Node, parent)
+    if (node.human_owner_id or node.user_id) != _user(who).id:
+        r = _reply(app, who, parent, f"{who.upper()}-OWN-REPLY")
+        assert r.status_code == 201, r.get_json()
+        parent = r.get_json()["id"]
     r = _client(app, who).post(f"/api/nodes/{parent}/llm",
                                json={})
     assert r.status_code == 202, r.get_json()
@@ -591,7 +600,8 @@ def test_a_members_model_through_the_route(app):
     ben.preferred_model = "gpt-5"
     _db.session.commit()
     e = _share(app, circle_ids=[close], parent_id=her_ai.id)
-    r = _client(app, "ben").post(f"/api/nodes/{e}/llm",
+    mine = _reply(app, "ben", e, "BEN R").get_json()["id"]
+    r = _client(app, "ben").post(f"/api/nodes/{mine}/llm",
                                  json={})
     a = _db.session.get(Node, r.get_json()["node_id"])
     seen = _client(app, "ben").get(f"/api/nodes/{a.id}").get_json()

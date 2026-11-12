@@ -1127,14 +1127,18 @@ privacy select is greyed out (`SelectField.unavailable`), as on the web.
   switch. Auto-generate is off in every circle thread, for the author too (Peter, 2026-11-12; main's
   `isSharedThread`, privacy-based); the circles audience test is `ThreadModel.isCircleThread`.
 - **AI replies in a shared thread** (2026-11-11; "Ask my AI" and `circle_ask` are gone): every member has
-  the normal LLM Response control on every node they can read (`ThreadModel.showCraftBar`; a reader
-  without Craft mode too, then without the model picker; the author as well, since auto-generate is
-  off there). The request is the normal `POST /nodes/<id>/llm {model, source_mode}`. Since 2026-11-12
+  the normal LLM Response control under their own nodes of the thread (`ThreadModel.showCraftBar`; a
+  reader without Craft mode too, then without the model picker; the author as well, since auto-generate
+  is off there). Since 2026-11-12 evening it follows the public rule (Peter: "public rule"): none under
+  someone else's node, where the note says to write a reply first (`CirclesWording.foreignSharedNoteOthers`).
+  The request is the normal `POST /nodes/<id>/llm {model, source_mode}`. Since 2026-11-12
   every AI reply is created private (Peter): "AI reply: Shared with this thread / Only me" is gone, the
   reply carries "Only you see this reply" (`SharedThread.showsPrivateReplyNote`, by
   `human_owner_username` in the tree too), and its requester shares it with the thread through Edit.
-  The `CircleReplyDialog` AI variant ("Only you will see it. Your AI reads your ...") comes only when a
-  prompt someone else wrote reads the requester's data (`confirmAIReply`; `DefaultsKey.circleAiReplyAck`).
+  The `CircleReplyDialog` AI variant ("Only you will see it. Your AI reads your ...") comes only when the
+  server sends a key: a prompt someone else wrote, edited or from scratch, reads the requester's data or
+  turns tools on; one of Loore's default prompts unedited sends none (Peter, 2026-11-12, decided on the
+  server) (`confirmAIReply`; `DefaultsKey.circleAiReplyAck`).
   Off states: `CirclesWording.aiReplyOffReason`. An AI reply shows
   `llm_label` in place of the model id (`NodeFooterText.author`) and belongs to
   `human_owner_username` (`ThreadModel.ownedByMe`); its edit form offers Only me and Circles

@@ -109,8 +109,12 @@ enum CirclesWording {
         return nil
     }
 
-    /// For a reader, over the reply form of someone else's shared thread.
+    /// For a reader, over the reply form of someone else's shared thread, under
+    /// a node of their own (where LLM Response is).
     static let foreignSharedNote = "Before your reply is sent, Loore names the people who will see it. An AI reply is generated here only when you press LLM Response, and only you see it until you share it."
+    /// The same under someone else's node: no LLM Response there (the public
+    /// rule, Peter 2026-11-12), so it says how to ask.
+    static let foreignSharedNoteOthers = "Before your reply is sent, Loore names the people who will see it. To ask your AI, write your reply first and press LLM Response under it. Only you see the AI reply until you share it."
 
     static let aiReplyDialogTitle = "Generate an AI reply?"
     static let aiReplyDialogConfirm = "Generate"

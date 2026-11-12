@@ -23,7 +23,14 @@ def _private(app, owner, content):  # noqa: F811
 
 
 def _ai_reply(app, who, parent, text=None):  # noqa: F811
-    """*who*'s AI reply under *parent*, written (its task is mocked)."""
+    """*who*'s AI reply under *parent*, written (its task is mocked).
+    Under someone else's node *who* first writes a reply of their own
+    and asks under it (the public rule, Peter 2026-11-12)."""
+    node = _db.session.get(Node, parent)
+    if (node.human_owner_id or node.user_id) != _user(who).id:
+        r = _reply(app, who, parent, f"{who}'s own reply")
+        assert r.status_code == 201, r.get_json()
+        parent = r.get_json()["id"]
     r = _client(app, who).post(f"/api/nodes/{parent}/llm", json={})
     assert r.status_code == 202, r.get_json()
     node = _db.session.get(Node, r.get_json()["node_id"])
@@ -66,13 +73,18 @@ def test_every_circle_shape_counts_as_shared_and_an_only_me_branch_does_not(
 def test_no_automatic_reply_in_a_circle_thread_for_anyone(app):  # noqa: F811
     entry = _share(app, names=["ben"])
     reply = _reply(app, "ben", entry, "ben replies").get_json()["id"]
+    hers = _reply(app, "anna", reply, "anna answers").get_json()["id"]
     before = _count()
-    for who, nid in (("anna", entry), ("anna", reply), ("ben", entry),
-                     ("ben", reply)):
+    for who, nid in (("anna", entry), ("anna", hers), ("ben", reply)):
         r = _client(app, who).post(f"/api/nodes/{nid}/llm",
                                    json={"auto_generate": True})
         assert r.status_code == 409, (who, nid)
         assert r.get_json()["code"] == "auto_generate_off"
+    # Under someone else's node nobody asks at all (the public rule).
+    for who, nid in (("anna", reply), ("ben", entry)):
+        r = _client(app, who).post(f"/api/nodes/{nid}/llm",
+                                   json={"auto_generate": True})
+        assert r.status_code == 403, (who, nid)
     assert _count() == before
     # LLM Response, the user's own request, works there.
     assert _client(app, "anna").post(
@@ -87,10 +99,14 @@ def test_no_automatic_reply_in_a_circle_thread_for_anyone(app):  # noqa: F811
 
 def test_an_ai_reply_in_a_circle_thread_is_private_on_every_request(app):  # noqa: F811
     entry = _share(app, names=["ben", "chidi"])
+    # Each under a node of their own (the public rule).
+    own = {"anna": entry,
+           "ben": _reply(app, "ben", entry, "ben replies").get_json()["id"]}
     for who in ("anna", "ben"):
         for body in ({}, {"privacy_level": "circles"},
                      {"privacy_level": "public"}):
-            r = _client(app, who).post(f"/api/nodes/{entry}/llm", json=body)
+            r = _client(app, who).post(f"/api/nodes/{own[who]}/llm",
+                                       json=body)
             assert r.status_code == 202, (who, body)
             node = _db.session.get(Node, r.get_json()["node_id"])
             assert node.privacy_level == "private", (who, body)
@@ -102,7 +118,8 @@ def test_an_ai_reply_in_a_circle_thread_is_private_on_every_request(app):  # noq
 
 def test_an_ai_reply_is_not_shared_while_it_is_written(app):  # noqa: F811
     entry = _share(app, names=["ben"])
-    r = _client(app, "ben").post(f"/api/nodes/{entry}/llm", json={})
+    mine = _reply(app, "ben", entry, "ben replies").get_json()["id"]
+    r = _client(app, "ben").post(f"/api/nodes/{mine}/llm", json={})
     aid = r.get_json()["node_id"]
     for call in (
             lambda: _put(app, "ben", aid, privacy_level="circles"),

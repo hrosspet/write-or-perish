@@ -51,15 +51,17 @@ def test_a_public_agentic_prompt_needs_the_agreement_on_the_route(app):  # noqa:
         "circle_usernames": ["ben"]})
     assert r.status_code == 200, r.get_json()
     ben = _client(app, "ben")
-    audience = ben.get(f"/api/nodes/{entry}").get_json()["audience"]
+    # ben asks under his own reply in the thread (the public rule).
+    mine = _reply(app, "ben", entry, "BENS REPLY").get_json()["id"]
+    audience = ben.get(f"/api/nodes/{mine}").get_json()["audience"]
     assert audience["ai_reads"] == [cz.TOOLS_ONLY_NAME]
     key = audience["ai_reads_key"]
     assert key
-    r = ben.post(f"/api/nodes/{entry}/llm", json={})
+    r = ben.post(f"/api/nodes/{mine}/llm", json={})
     assert r.status_code == 409
     assert r.get_json()["code"] == cz.AI_READS_CHANGED_CODE
     assert r.get_json()["ai_reads_key"] == key
-    r = ben.post(f"/api/nodes/{entry}/llm", json={"ai_reads_ack": key})
+    r = ben.post(f"/api/nodes/{mine}/llm", json={"ai_reads_ack": key})
     assert r.status_code == 202, r.get_json()
 
 
@@ -86,8 +88,9 @@ def test_deleting_the_shared_entry_gives_the_path_back_to_its_author(app):  # no
     assert r.status_code == 202, r.get_json()
     her_side = r.get_json()["node_id"]
     ben = _client(app, "ben")
-    key = ben.get(f"/api/nodes/{entry}").get_json()["audience"]["ai_reads_key"]
-    r = ben.post(f"/api/nodes/{entry}/llm", json={"ai_reads_ack": key})
+    mine = _reply(app, "ben", entry, "BENS REPLY").get_json()["id"]
+    key = ben.get(f"/api/nodes/{mine}").get_json()["audience"]["ai_reads_key"]
+    r = ben.post(f"/api/nodes/{mine}/llm", json={"ai_reads_ack": key})
     assert r.status_code == 202, r.get_json()
     his = r.get_json()["node_id"]
     assert _node(her_side).audience_root_id == entry
@@ -104,16 +107,20 @@ def test_deleting_the_shared_entry_gives_the_path_back_to_its_author(app):  # no
         assert not _can_read(app, "ben", nid), nid
     assert not _can_read(app, "ben", his)
 
-    # Past the grace period the cleanup purges the entry and ben's AI
-    # reply (his after the entry's content is gone); everything of
-    # anna's above the entry stays, open to her.
+    # Past the grace period the cleanup purges the entry's text and ben's
+    # AI reply (his after the entry's content is gone); ben's typed reply,
+    # under which he asked, stays his (so the entry's row may stay as a
+    # tombstone above it); everything of anna's above the entry stays,
+    # open to her.
     later = time.time() + 31 * 86400
     for _ in range(3):
         finalize_deleted_nodes(now=later)
     _db.session.expire_all()
     gone = _db.session.get(Node, his)
     assert gone is None or gone.content is None
-    assert _db.session.get(Node, entry) is None
+    gone_entry = _db.session.get(Node, entry)
+    assert gone_entry is None or gone_entry.content is None
+    assert _node(mine).get_content() == "BENS REPLY"
     for nid in path + (her_side,):
         node = _node(nid)
         assert node is not None and node.deleted_at is None, nid
@@ -185,11 +192,12 @@ def test_a_reader_sees_his_own_recent_writing_on_a_shared_prompt(app):  # noqa: 
 def test_a_reply_under_a_members_own_private_ai_reply_is_only_me(app):  # noqa: F811
     entry = _share(app, names=["ben"])
     ben = _client(app, "ben")
+    mine = _reply(app, "ben", entry, "BENS REPLY").get_json()["id"]
     # Every AI reply is created private (Peter, 2026-11-12).
-    r = ben.post(f"/api/nodes/{entry}/llm", json={})
+    r = ben.post(f"/api/nodes/{mine}/llm", json={})
     assert r.status_code == 202, r.get_json()
     private_ai = r.get_json()["node_id"]
-    r = ben.post(f"/api/nodes/{entry}/llm", json={})
+    r = ben.post(f"/api/nodes/{mine}/llm", json={})
     shared_ai = r.get_json()["node_id"]
     node = _node(shared_ai)
     node.llm_task_status = "completed"
@@ -215,26 +223,29 @@ def test_a_reply_under_a_members_own_private_ai_reply_is_only_me(app):  # noqa: 
 
 def _agentic_shared(app):  # noqa: F811
     """anna's Text-mode thread shared with ben with the discussion
-    leading up to her entry: its prompt asks for the member's data."""
+    leading up to her entry: its prompt (edited: not one of Loore's
+    defaults) asks for the member's data. ben's own reply in the thread,
+    where he asks for AI replies (the public rule), and the key."""
     prompt = _add(None, "THE-PROMPT {user_profile}", prompt_key="textmode")
     entry = _add(prompt, SECRET)
     r = _client(app, "anna").put(f"/api/nodes/{entry}", json={
         "content": SECRET, "privacy_level": "circles",
         "circle_usernames": ["ben"], "share_path": True})
     assert r.status_code == 200, r.get_json()
+    mine = _reply(app, "ben", entry, "BENS REPLY").get_json()["id"]
     key = _client(app, "ben").get(
-        f"/api/nodes/{entry}").get_json()["audience"]["ai_reads_key"]
+        f"/api/nodes/{mine}").get_json()["audience"]["ai_reads_key"]
     assert key
-    return entry, key
+    return entry, mine, key
 
 
 def test_a_members_only_me_ai_reply_tells_the_client_what_to_agree_to(app):  # noqa: F811,E501
     """2. Under his own Only-me AI reply ben's next AI reply needs the
     agreement too: the node says what it reads and the key, so the
     client can ask (in the private wording) instead of being refused."""
-    entry, key = _agentic_shared(app)
+    entry, reply, key = _agentic_shared(app)
     ben = _client(app, "ben")
-    r = ben.post(f"/api/nodes/{entry}/llm", json={
+    r = ben.post(f"/api/nodes/{reply}/llm", json={
         "privacy_level": "private", "ai_reads_ack": f"private:{key}"})
     assert r.status_code == 202, r.get_json()
     mine = r.get_json()["node_id"]
@@ -265,10 +276,10 @@ def test_a_members_only_me_branch_works_like_his_private_thread(app):  # noqa: F
     audience, and closes and goes with the entry like his other AI
     replies there. His typed replies stay his."""
     from backend.tasks.node_cleanup import finalize_deleted_nodes
-    entry, key = _agentic_shared(app)
+    entry, reply, key = _agentic_shared(app)
     ben = _client(app, "ben")
     ack = {"ai_reads_ack": f"private:{key}"}
-    r = ben.post(f"/api/nodes/{entry}/llm",
+    r = ben.post(f"/api/nodes/{reply}/llm",
                  json={"privacy_level": "private", **ack})
     mine = r.get_json()["node_id"]
     r = _reply(app, "ben", mine, content="BENS PRIVATE NOTE",

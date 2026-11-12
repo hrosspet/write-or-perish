@@ -760,20 +760,32 @@ def test_a_member_asks_for_an_ai_reply_in_the_thread(app):
     tip_node = _db.session.get(Node, tip)
     assert [n.id for n in _chain(
         tip_node, ben.id, in_shared_thread=True)] == [nid, tip]
-    # Under any node of the thread ben can read: the entry, and chidi's
-    # reply (another person's node).
+    # Only under his own nodes, as in a public thread (Peter, 2026-11-12:
+    # "public rule"): under the entry and under chidi's reply ben gets
+    # main's answer, and nothing is made.
     other = _reply(app, "chidi", nid, "chidi chat").get_json()["id"]
+    before = Node.query.count()
     for node_id in (nid, other):
         r = _client(app, "ben").post(f"/api/nodes/{node_id}/llm", json={})
-        assert r.status_code == 202, node_id
-        made = _db.session.get(Node, r.get_json()["node_id"])
-        assert made.human_owner_id == ben.id
-        assert made.audience_root_id == nid
-        # anna's entry does not set ben's model.
-        assert made.llm_model == "claude-x"
-    # The node replied to is None: refused, as in a private thread.
-    r = _client(app, "ben").post(f"/api/nodes/{hidden}/llm", json={})
+        assert r.status_code == 403, node_id
+        assert "only request an AI response on your own nodes" in (
+            r.get_json()["error"])
+    assert Node.query.count() == before
+    # Under his own reply to the entry: a reply in the thread, and anna's
+    # entry does not set ben's model.
+    again = _reply(app, "ben", nid, "ben again").get_json()["id"]
+    r = _client(app, "ben").post(f"/api/nodes/{again}/llm", json={})
+    assert r.status_code == 202, r.get_json()
+    made = _db.session.get(Node, r.get_json()["node_id"])
+    assert made.human_owner_id == ben.id
+    assert made.audience_root_id == nid
+    assert made.llm_model == "claude-x"
+    # His own node replied to is None: refused, as in a private thread.
+    his_none = _reply(app, "ben", nid, "ben none", ai_usage="none"
+                      ).get_json()["id"]
+    r = _client(app, "ben").post(f"/api/nodes/{his_none}/llm", json={})
     assert r.status_code == 403
+    assert "None" in r.get_json()["error"]
     # Not for someone who cannot read the thread: 403 and no text, the
     # answer for any node that is not theirs.
     before = Node.query.count()
@@ -804,8 +816,10 @@ def test_an_ai_reply_is_private_until_its_requester_shares_it(app):
     can take it back. Never public, never another audience; nothing can
     be asked for at creation."""
     nid = _share(app, names=["ben", "chidi"])
+    # ben asks under his own reply in the thread (the public rule).
+    rid = _reply(app, "ben", nid, "ben replies").get_json()["id"]
     for body in ({}, {"privacy_level": "circles"}, {"privacy_level": "public"}):
-        r = _client(app, "ben").post(f"/api/nodes/{nid}/llm", json=body)
+        r = _client(app, "ben").post(f"/api/nodes/{rid}/llm", json=body)
         assert r.status_code == 202, body
         node = _db.session.get(Node, r.get_json()["node_id"])
         assert node.privacy_level == "private", body
@@ -861,15 +875,20 @@ def test_no_ai_reply_when_the_entry_is_none(app):
 def test_an_ai_reply_respects_the_members_spend_cap_and_account_setting(
         app, monkeypatch):
     nid = _share(app, names=["ben", "chidi"])
+    # Each asks under their own reply (the public rule).
+    bens = _reply(app, "ben", nid, "ben replies").get_json()["id"]
+    chidis = _reply(app, "chidi", nid, "chidi replies").get_json()["id"]
     import backend.utils.spend as spend
     monkeypatch.setattr(spend, "user_is_capped", lambda u: True)
-    r = _client(app, "ben").post(f"/api/nodes/{nid}/llm", json={})
+    r = _client(app, "ben").post(f"/api/nodes/{bens}/llm", json={})
     assert r.status_code == 402
     monkeypatch.undo()
     _user("chidi").default_ai_usage = "none"
     _db.session.commit()
-    r = _client(app, "chidi").post(f"/api/nodes/{nid}/llm", json={})
+    r = _client(app, "chidi").post(f"/api/nodes/{chidis}/llm", json={})
     assert r.status_code == 403
+    assert "only request an AI response on your own" not in (
+        r.get_json()["error"])
     assert Node.query.filter_by(node_type="llm").count() == 0
 
 
@@ -912,9 +931,14 @@ def test_the_authors_model_reads_replies_by_their_own_ai_usage(app):
     assert reply_refusal(_db.session.get(Node, none), anna.id) is not None
     assert reply_refusal(_db.session.get(Node, ok), anna.id) is None
     # A reply on her own shared entry is a reply in the thread, also
-    # under a reader's reply. It is private, like every new AI reply,
-    # until she shares it with the thread (Peter, 2026-11-12).
-    for node_id in (nid, ok):
+    # under her own reply below a reader's. It is private, like every new
+    # AI reply, until she shares it with the thread (Peter, 2026-11-12).
+    # Under the reader's reply itself she gets main's answer (the public
+    # rule, Peter 2026-11-12).
+    r = _client(app, "anna").post(f"/api/nodes/{ok}/llm", json={})
+    assert r.status_code == 403
+    hers = _reply(app, "anna", ok, "anna answers ben").get_json()["id"]
+    for node_id in (nid, hers):
         r = _client(app, "anna").post(f"/api/nodes/{node_id}/llm", json={})
         assert r.status_code == 202
         answer = _db.session.get(Node, r.get_json()["node_id"])
@@ -936,17 +960,21 @@ def test_another_persons_model_never_sets_my_default(app):
     ben, anna = _user("ben"), _user("anna")
     ben.preferred_model = "claude-x"
     _db.session.commit()
-    r = _client(app, "ben").post(f"/api/nodes/{nid}/llm",
+    rid = _reply(app, "ben", nid, "ben replies").get_json()["id"]
+    r = _client(app, "ben").post(f"/api/nodes/{rid}/llm",
                                  json={})
     answer = _db.session.get(Node, r.get_json()["node_id"])
     answer.llm_task_status = "completed"
     _db.session.commit()
     assert answer.llm_model == "claude-x"
     # Once ben shares it with the thread, anna's next reply under ben's
-    # AI answer stays on her own default.
+    # AI answer (under her own reply to it) stays on her own default.
     assert _put(app, "ben", answer.id,
                 privacy_level="circles").status_code == 200
     assert resolve_chat_model(_db.session.get(Node, answer.id), anna) == (
+        "gpt-5", "default")
+    hers = _reply(app, "anna", answer.id, "anna answers").get_json()["id"]
+    assert resolve_chat_model(_db.session.get(Node, hers), anna) == (
         "gpt-5", "default")
 
 
@@ -990,13 +1018,14 @@ def test_a_members_ai_reply_is_theirs(app):
     from backend.utils.privacy import (
         can_ai_access_node, can_user_access_node, is_others_thread_answer)
     nid = _share(app, names=["ben", "chidi"])
-    _reply(app, "chidi", nid, "CHIDIS-REPLY")
+    chidis = _reply(app, "chidi", nid, "CHIDIS-REPLY").get_json()["id"]
     typed = _reply(app, "ben", nid, "BENS-TYPED-REPLY").get_json()["id"]
-    r = _client(app, "ben").post(f"/api/nodes/{nid}/llm", json={})
+    # Each asks under their own reply (the public rule).
+    r = _client(app, "ben").post(f"/api/nodes/{typed}/llm", json={})
     answer = _db.session.get(Node, r.get_json()["node_id"])
     answer.set_content("BENS-AI-REPLY")
     answer.llm_task_status = "completed"
-    theirs = _client(app, "chidi").post(f"/api/nodes/{nid}/llm", json={})
+    theirs = _client(app, "chidi").post(f"/api/nodes/{chidis}/llm", json={})
     other = _db.session.get(Node, theirs.get_json()["node_id"])
     other.set_content("CHIDIS-AI-REPLY")
     other.llm_task_status = "completed"
@@ -1234,7 +1263,11 @@ def test_the_discussion_leading_up_to_an_entry_is_shared_only_when_asked(app):
     data = _client(app, "ben").get(f"/api/nodes/{entry}").get_json()
     for words in ("THE-PROMPT", "ANNAS-FIRST-TURN", "ANNAS-AI-REPLY"):
         assert words not in json.dumps(data), words
-    assert data["audience"]["ai_reads"] == []
+    # ben asks for AI replies under his own reply in the thread (the
+    # public rule, Peter 2026-11-12).
+    mine = _reply(app, "ben", entry, "BENS-REPLY").get_json()["id"]
+    assert _client(app, "ben").get(
+        f"/api/nodes/{mine}").get_json()["audience"]["ai_reads"] == []
     assert chain() == [entry]
     # The author is asked; a node with nothing above it has no question.
     info = _client(app, "anna").get(f"/api/nodes/{entry}/audience").get_json()
@@ -1266,7 +1299,7 @@ def test_the_discussion_leading_up_to_an_entry_is_shared_only_when_asked(app):
     # The path is not a set of entries: one note, one listed entry.
     assert _shared_ids(app, "ben") == [alone, entry] or _shared_ids(
         app, "ben") == [entry, alone]
-    data = _client(app, "ben").get(f"/api/nodes/{entry}").get_json()
+    data = _client(app, "ben").get(f"/api/nodes/{mine}").get_json()
     assert data["audience"]["ai_reads"][:2] == ["profile", "memory"]
     # The request for a reply the thread will read carries the key of
     # what the dialog named; without it, or with another, nothing is made.
@@ -1274,31 +1307,31 @@ def test_the_discussion_leading_up_to_an_entry_is_shared_only_when_asked(app):
     assert key and data["audience"]["ai_reads"][-1].startswith("anything else")
     before = Node.query.count()
     for body in ({}, {"ai_reads_ack": "something-else"}):
-        r = _client(app, "ben").post(f"/api/nodes/{entry}/llm", json=body)
+        r = _client(app, "ben").post(f"/api/nodes/{mine}/llm", json=body)
         assert r.status_code == 409, body
         assert r.get_json()["code"] == "circle_ai_reads_changed"
         assert r.get_json()["ai_reads_key"] == key
         assert r.get_json()["ai_reads"] == data["audience"]["ai_reads"]
     assert Node.query.count() == before
-    r = _client(app, "ben").post(f"/api/nodes/{entry}/llm",
+    r = _client(app, "ben").post(f"/api/nodes/{mine}/llm",
                                  json={"ai_reads_ack": key})
     assert r.status_code == 202
     # Private, like every new AI reply (Peter, 2026-11-12): ben's alone.
     assert not _can_read(app, "anna", r.get_json()["node_id"])
     # The dialog's agreement is sent as "private:<key>" and is accepted
     # the same way; a privacy_level in the request changes nothing.
-    r = _client(app, "ben").post(f"/api/nodes/{entry}/llm", json={
+    r = _client(app, "ben").post(f"/api/nodes/{mine}/llm", json={
         "ai_reads_ack": "private:" + key, "privacy_level": "circles"})
     assert r.status_code == 202
     made = _db.session.get(Node, r.get_json()["node_id"])
     assert made.privacy_level == "private" and made.audience_root_id == entry
     assert not _can_read(app, "anna", made.id)
     before = Node.query.count()
-    r = _client(app, "ben").post(f"/api/nodes/{entry}/llm",
+    r = _client(app, "ben").post(f"/api/nodes/{mine}/llm",
                                  json={"privacy_level": "private"})
     assert r.status_code == 409
     assert r.get_json()["code"] == "circle_ai_reads_changed"
-    r = _client(app, "ben").post(f"/api/nodes/{entry}/llm", json={
+    r = _client(app, "ben").post(f"/api/nodes/{mine}/llm", json={
         "ai_reads_ack": "private:something-else"})
     assert r.status_code == 409
     assert Node.query.count() == before
@@ -1319,7 +1352,7 @@ def test_the_discussion_leading_up_to_an_entry_is_shared_only_when_asked(app):
     assert _can_read(app, "ben", root)
     assert chain() == [t["ai"], entry]
     assert _client(app, "ben").get(
-        f"/api/nodes/{entry}").get_json()["audience"]["ai_reads"] == []
+        f"/api/nodes/{mine}").get_json()["audience"]["ai_reads"] == []
     # Taken back: the whole path closes.
     r = _client(app, "anna").put(f"/api/nodes/{entry}/audience", json={
         "circle_usernames": ["ben"], "share_path": False})

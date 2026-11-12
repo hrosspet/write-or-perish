@@ -246,8 +246,9 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   const isPublicThread = node?.privacy_level === 'public';
   // A SHARED thread (Circles): an AI reply is generated the way it is in
   // a private thread. Any member, the author or a reader, can press LLM
-  // Response on any node of the thread they can read; the reply is
-  // written by that member's own AI and carries their name. Like every
+  // Response under their own nodes of the thread, as in a public thread
+  // (Peter, 2026-11-12: "public rule"); the reply is written by that
+  // member's own AI and carries their name. Like every
   // AI reply it is created private (Peter, 2026-11-12): only its
   // requester reads it until they share it with the thread through Edit.
   // Auto-generate is off in the thread, for the author too, as in a
@@ -1476,14 +1477,15 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     && !['pending', 'processing', 'failed'].includes(node.transcription_status)
     && !(entryEnd.children || []).some(c => !c.deleted
       && !['failed', 'cancelled'].includes(c.llm_task_status));
-  // In a shared thread (Circles) every member has LLM Response on every
-  // node they can read, other people's included. It shows without Craft
-  // mode, as in a public thread: auto-generate is off there (Peter,
-  // 2026-11-12), so it is the only way to get an AI reply, for the author
-  // too. Where no AI may read the entry the control stays, disabled, with
-  // the reason next to it (aiOffReason).
+  // In a shared thread (Circles) LLM Response follows the public rule
+  // (Peter, 2026-11-12): only under the member's own nodes; under someone
+  // else's a member writes their own reply first and asks under it. It
+  // shows without Craft mode, as in a public thread: auto-generate is off
+  // there, so it is the only way to get an AI reply, for the author too.
+  // Where no AI may read the entry the control stays, disabled, with the
+  // reason next to it (aiOffReason).
   const aiOffReason = aiReplyOffReason(audience, node, currentUser);
-  const showCraftBar = (isOwner || isSharedThread)
+  const showCraftBar = isOwner
     && (craftMode || autoGenerateLocked)
     && (!autoGenerateActive || awaitsReply)
     && (node.ai_usage !== 'none' || isSharedThread) && !isLlmPending;
@@ -2137,9 +2139,14 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
           fontFamily: 'var(--sans)', fontWeight: 300, fontSize: '0.8rem',
           lineHeight: 1.5, color: 'var(--text-secondary)',
         }}>
-          Before your reply is sent, Loore names the people who will see
-          it. An AI reply is generated here only when you press LLM
-          Response, and only you see it until you share it.
+          {isOwner
+            ? 'Before your reply is sent, Loore names the people who will '
+              + 'see it. An AI reply is generated here only when you press '
+              + 'LLM Response, and only you see it until you share it.'
+            : 'Before your reply is sent, Loore names the people who will '
+              + 'see it. To ask your AI, write your reply first and press '
+              + 'LLM Response under it. Only you see the AI reply until you '
+              + 'share it.'}
         </div>
       )}
       {showInlineInput && (

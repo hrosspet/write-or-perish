@@ -165,8 +165,9 @@ final class ThreadModel {
 
     // Circles: a shared thread. An AI reply here works like an AI reply in a
     // private thread: every member (the author and each reader) can generate
-    // one under any node of the thread, with their own model and profile, and
-    // it is marked with their name. Like every AI reply it is created private
+    // one under their own nodes of the thread (the public rule, Peter
+    // 2026-11-12), with their own model and profile, and it is marked with
+    // their name. Like every AI reply it is created private
     // (Peter, 2026-11-12): only the one who asked reads it until they share it
     // with the thread through Edit. No auto-generate in the thread, for the
     // author too; no Voice Mode in someone else's.
@@ -373,14 +374,15 @@ final class ThreadModel {
 
     /// LLM Response: in craft mode, and in every shared thread, where it is the
     /// only way to a reply (auto-generate is off there). In a circle-shared
-    /// thread every member has it on every node they can read, other people's
-    /// included; where AI usage closes it, it stays, disabled, with
-    /// `aiReplyOffReason`. Not where the thread is too long for another reply
-    /// (#648): the form offers a new thread instead.
+    /// thread it follows the public rule (Peter, 2026-11-12): a member has it
+    /// under their own nodes only, and writes a reply first to ask under it;
+    /// where AI usage closes it, it stays, disabled, with `aiReplyOffReason`.
+    /// Not where the thread is too long for another reply (#648): the form
+    /// offers a new thread instead.
     func showCraftBar(craftMode: Bool, autoGenerate: Bool) -> Bool {
         guard let node, !isLLMPending else { return false }
         if isCircleThread {
-            return (craftMode || isSharedThread) && !autoGenerateActive(autoGenerate)
+            return isOwner && (craftMode || isSharedThread) && !autoGenerateActive(autoGenerate)
                 && !atThreadLimit
         }
         return isOwner && (craftMode || isSharedThread) && !autoGenerateActive(autoGenerate)

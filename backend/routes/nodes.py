@@ -1640,9 +1640,15 @@ def _focal_own_fields(node, viewer_id):
                 # (the dialog before the reply names them).
                 # ai_reads_key: what the viewer agrees to in that
                 # dialog; sent back with the request for the reply.
-                (audience["ai_reads"],
-                 audience["ai_reads_key"]) = cz.ai_reply_reads(
-                    node, viewer_id)
+                # Only under the viewer's own node: nobody asks for an
+                # AI reply under someone else's (the public rule, Peter
+                # 2026-11-12), so nothing is read for one.
+                if is_node_owner(node, viewer_id):
+                    (audience["ai_reads"],
+                     audience["ai_reads_key"]) = cz.ai_reply_reads(
+                        node, viewer_id)
+                else:
+                    audience["ai_reads"], audience["ai_reads_key"] = [], ""
                 data["audience"] = audience
     # Circles: the viewer's own node that only they read, written in
     # someone else's shared thread (an AI reply kept to Only me, a reply
@@ -2303,22 +2309,21 @@ def request_llm_response(node_id):
     # thread you respond first (a public reply of yours), then generate on
     # your own branch — the completion is attributed and billed to you.
     # (Also closes a latent gap: this route never checked ownership.)
-    # Circles: a shared thread works like a private one for the people
-    # in it. Every current member (the author and the readers) may ask
-    # for a reply under any node of the thread they can read; it is
-    # theirs, written by their own model, and a reply in the thread
-    # (llm_nodes.create_llm_placeholder). Anyone else gets the answer
-    # below, whether or not the node is shared.
+    # Circles follow the same rule (Peter, 2026-11-12: "public rule"):
+    # a member of a shared thread, the author included, writes their own
+    # reply there first and asks under it. The reply under their own
+    # node is theirs, written by their own model, and a reply in the
+    # thread (llm_nodes.create_llm_placeholder).
     from backend.utils import circles as cz
     owner_id = parent_node.human_owner_id or parent_node.user_id
-    in_thread = (
-        cz.circles_enabled(current_user)
-        and cz.reply_thread_entry(parent_node, current_user.id) is not None)
-    if owner_id != current_user.id and not in_thread:
+    if owner_id != current_user.id:
         return jsonify({
             "error": "You can only request an AI response on your own "
                      "nodes. Reply first, then generate on your reply.",
         }), 403
+    in_thread = (
+        cz.circles_enabled(current_user)
+        and cz.reply_thread_entry(parent_node, current_user.id) is not None)
 
     # A long entry is saved as a chain of parts: asked on any part, the
     # reply goes under the last one, so it reads the whole entry. The

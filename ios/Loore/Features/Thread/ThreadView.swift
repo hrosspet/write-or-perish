@@ -290,14 +290,14 @@ private struct ThreadContent: View {
 
     /// AI replies in a shared thread (Circles): for a reader, what happens to
     /// a typed reply and to an AI reply; why no AI reply can be generated,
-    /// when AI usage closes it; and the AI-reply control, for every member on
-    /// every node. An AI reply is its requester's alone until they share it
+    /// when AI usage closes it; and the AI-reply control, for every member under
+    /// their own nodes (the public rule). An AI reply is its requester's alone until they share it
     /// (Peter, 2026-11-12), so there is no choice of who reads it here.
     private func sharedAIReplyArea(_ node: NodeDetail, showControl: Bool) -> some View {
         let offReason = model.aiReplyOffReason
         return VStack(alignment: .leading, spacing: 10) {
             if model.isForeignShared && !model.isLLMPending {
-                Text(CirclesWording.foreignSharedNote)
+                Text(model.isOwner ? CirclesWording.foreignSharedNote : CirclesWording.foreignSharedNoteOthers)
                     .font(LooreFont.sans(12.8, .light))
                     .foregroundStyle(LooreColor.textSecondary)
                     .lineSpacing(3)

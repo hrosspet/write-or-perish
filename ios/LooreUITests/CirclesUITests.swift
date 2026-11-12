@@ -216,52 +216,32 @@ final class CirclesUITests: XCTestCase {
 
     // MARK: 5. An AI reply in a shared thread
 
-    /// Every AI reply is created private (Peter, 2026-11-12). Where a prompt
-    /// someone else shared reads the reader's data, the dialog says so in the
-    /// private wording; the reply carries "Only you see this reply".
-    func test5AnAIReplyIsPrivateAndTheSharedPromptIsAgreedTo() throws {
+    /// LLM Response follows the public rule in a circle thread (Peter,
+    /// 2026-11-12): a reader has none under someone else's node, and the
+    /// note says to write a reply first. (The AI reply under the reader's own
+    /// node, with the dialog: tests 10 and 11.)
+    func test5NoLLMResponseUnderSomeoneElsesNode() throws {
         let turn = try id("agentic_turn")
         let app = try launch(as: "ben", route: "/node/\(turn)")
         waitForFocal(app)
-        let llm = app.buttons["thread.llmResponse"]
-        bringIntoView(app, llm)
-        XCTAssertTrue(llm.exists, "no LLM Response control for a reader on someone else's node")
+        let note = text(app, containing: "To ask your AI, write your reply first and press LLM Response under it.")
+        bringIntoView(app, note, swipes: 10)
+        XCTAssertTrue(note.exists, "the reader's note does not say how to ask")
+        XCTAssertFalse(app.buttons["thread.llmResponse"].exists, "LLM Response under someone else's node")
         XCTAssertFalse(element(app, "thread.aiReplyPrivacy").exists, "no \"AI reply:\" choice any more")
-        XCTAssertFalse(element(app, "thread.aiReplyPrivacy.shared").exists)
-        snapshot("19-ben-ai-reply-control")
-        llm.tap()
-        let confirm = app.buttons["circles.replyConfirm"]
-        XCTAssertTrue(confirm.waitForExistence(timeout: 10), "the AI dialog did not open")
-        XCTAssertTrue(app.staticTexts["Generate an AI reply?"].exists)
-        XCTAssertTrue(text(app, containing: "Only you will see it. Your AI reads your profile").exists)
-        XCTAssertTrue(text(app, containing: "for this reply, as the prompt shared in this thread asks.").exists)
-        XCTAssertFalse(text(app, containing: "will see it, marked with your name").exists, "nobody is named")
-        XCTAssertFalse(text(app, containing: "could share private information").exists)
-        XCTAssertEqual(confirm.label, "Generate")
-        XCTAssertTrue(confirm.isHittable, "Generate is off the screen")
-        snapshot("20-ben-ai-dialog-private")
-        confirm.tap()
-        // The reply opens on its own page; the stub answers at once.
-        XCTAssertTrue(text(app, containing: "Stub reply from").waitForExistence(timeout: 30), "no AI reply appeared")
-        let label = text(app, containing: "via @ben")
-        XCTAssertTrue(label.waitForExistence(timeout: 10), "no label on the AI reply")
-        XCTAssertTrue(label.label.contains("GPT-6 Luna via @ben"), "the label reads \(label.label)")
-        XCTAssertTrue(text(app, containing: "Only you see this reply").waitForExistence(timeout: 10),
-                      "the private reply does not say so")
-        XCTAssertFalse(element(app, "thread.readers").exists, "a private reply has no readers")
-        sleep(2)
-        snapshot("21-ben-ai-reply-private")
+        snapshot("19-ben-no-ai-reply-control")
     }
 
     // MARK: 6. No dialog where nothing of the requester's is read
 
+    /// Under ben's own Only-me AI reply below the entry: the thread has no
+    /// prompt, so nothing is asked and the reply is made, Only me.
     func test6NoDialogWhereNothingOfTheRequestersIsRead() throws {
-        let app = try launch(as: "ben", route: "/node/\(try id("entry"))")
+        let app = try launch(as: "ben", route: "/node/\(try id("bens_private_ai"))", autoGenerateOff: true)
         waitForFocal(app)
         let llm = app.buttons["thread.llmResponse"]
         bringIntoView(app, llm)
-        XCTAssertTrue(text(app, containing: "only you see it until you share it").exists,
-                      "the reader's note does not say an AI reply is private")
+        XCTAssertTrue(llm.exists, "no LLM Response under ben's own node")
         llm.tap()
         // The reply is ben's alone and the thread's prompt reads nothing of his:
         // nothing to ask, the reply is made.

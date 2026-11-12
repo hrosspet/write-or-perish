@@ -92,13 +92,15 @@ def test_ask_model_variants(app, ben_pref, author_model, expect):
     ben = _user("ben")
     ben.preferred_model = ben_pref
     _db.session.commit()
-    # ben names no model: his own, never the model of anna's reply.
-    r = _client(app, "ben").post(f"/api/nodes/{her_ai.id}/llm", json={})
+    # ben asks under his own reply to it (the public rule). He names no
+    # model: his own, never the model of anna's reply above.
+    mine = _reply(app, "ben", her_ai.id, "BEN R").get_json()["id"]
+    r = _client(app, "ben").post(f"/api/nodes/{mine}/llm", json={})
     a = _db.session.get(Node, r.get_json()["node_id"])
     assert a.llm_model == expect
     assert a.human_owner_id == ben.id and a.audience_root_id == e
     # A model ben names himself is his choice.
-    r = _client(app, "ben").post(f"/api/nodes/{her_ai.id}/llm",
+    r = _client(app, "ben").post(f"/api/nodes/{mine}/llm",
                                  json={"model": author_model})
     assert _db.session.get(
         Node, r.get_json()["node_id"]).llm_model == author_model
@@ -229,10 +231,15 @@ def test_every_path_that_creates_a_node_under_a_shared_entry(app, monkeypatch):
     _db.session.commit()
     assert ben.post(f"/api/drafts/streaming/{d.session_id}/save-as-node",
                     json={}).status_code in (200, 201)
-    #    ... and an AI reply, the reader's and the author's: in the
-    #    thread (its pointer), but private like every new AI reply
-    #    (Peter, 2026-11-12), read by its requester alone until shared.
-    assert ben.post(f"/api/nodes/{e}/llm", json={}).status_code == 202
+    #    ... and an AI reply, the reader's (under his typed reply: the
+    #    public rule) and the author's: in the thread (its pointer), but
+    #    private like every new AI reply (Peter, 2026-11-12), read by its
+    #    requester alone until shared.
+    typed = Node.query.filter(Node.id.notin_(before), Node.parent_id == e,
+                              Node.user_id == _user("ben").id,
+                              Node.node_type == "user").order_by(
+                                  Node.id).first().id
+    assert ben.post(f"/api/nodes/{typed}/llm", json={}).status_code == 202
     assert anna.post(f"/api/nodes/{e}/llm", json={}).status_code == 202
     joined = new_under(e, before)
     assert len(joined) == 6, [(n.id, n.node_type) for n in joined]

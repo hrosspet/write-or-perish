@@ -774,24 +774,51 @@ final class CirclesFormTests: StubbedAppTestCase {
     }
 
     private func clearAIReplyMemory() {
-        for key in [DefaultsKey.circleAiReplyAck(entryId: 31, userId: 5), DefaultsKey.circleReplyAck(entryId: 31, userId: 5),
-                    "loore_circle_ai_reply_privacy_5_31"] {
-            UserDefaults.standard.removeObject(forKey: key)
+        for entry in [30, 31] {
+            for key in [DefaultsKey.circleAiReplyAck(entryId: entry, userId: 5), DefaultsKey.circleReplyAck(entryId: entry, userId: 5),
+                        "loore_circle_ai_reply_privacy_5_\(entry)"] {
+                UserDefaults.standard.removeObject(forKey: key)
+            }
         }
+    }
+
+    /// seowriter's own reply (node 31) in anna's shared thread (entry 30): where a
+    /// member asks for an AI reply (the public rule, Peter 2026-11-12).
+    private var ownSharedReply: String {
+        sharedParent
+            .replacingOccurrences(of: #""user": {"id": 9, "username": "anna"}"#,
+                                  with: #""user": {"id": 5, "username": "seowriter"}"#)
+            .replacingOccurrences(of: #""entry_id": 31"#, with: #""entry_id": 30"#)
+            .replacingOccurrences(of: #""is_entry": true"#, with: #""is_entry": false"#)
+            .replacingOccurrences(of: #""ancestors": []"#,
+                                  with: #""ancestors": [{"id": 30, "content": "Leaving in March", "node_type": "user", "user_id": 9, "username": "anna", "ai_usage": "chat", "privacy_level": "circles"}]"#)
+    }
+
+    func testAReaderHasNoLLMResponseUnderSomeoneElsesNode() async {
+        // The public rule (Peter, 2026-11-12): under anna's entry the reader writes
+        // a reply first; the note says how to ask.
+        let model = await thread(sharedParent)
+        XCTAssertTrue(model.isCircleThread)
+        XCTAssertTrue(model.isForeignShared)
+        XCTAssertFalse(model.isOwner, "the entry is anna's")
+        XCTAssertFalse(model.showCraftBar(craftMode: true, autoGenerate: true))
+        XCTAssertFalse(model.showCraftBar(craftMode: false, autoGenerate: false))
+        XCTAssertEqual(CirclesWording.foreignSharedNoteOthers,
+                       "Before your reply is sent, Loore names the people who will see it. To ask your AI, write your reply first and press LLM Response under it. Only you see the AI reply until you share it.")
     }
 
     func testAReaderGeneratesAnAIReplyWithTheNormalRequest() async {
         clearAIReplyMemory()
         defer { clearAIReplyMemory() }
         // "Don't ask again" for typed replies does not matter for an AI reply.
-        UserDefaults.standard.set("true", forKey: DefaultsKey.circleReplyAck(entryId: 31, userId: 5))
-        let model = await thread(sharedParent)
+        UserDefaults.standard.set("true", forKey: DefaultsKey.circleReplyAck(entryId: 30, userId: 5))
+        let model = await thread(ownSharedReply)
         XCTAssertTrue(model.isCircleThread)
         XCTAssertTrue(model.isSharedThread)
         XCTAssertTrue(model.isForeignShared)
-        XCTAssertFalse(model.isOwner, "the entry is anna's")
+        XCTAssertTrue(model.isOwner, "his own reply in anna's thread")
         XCTAssertFalse(model.autoGenerateActive(true), "no AI reply is generated automatically in a shared thread")
-        // The control shows for a reader on someone else's node, with or without Craft mode.
+        // The control shows for a reader on his own node, with or without Craft mode.
         XCTAssertTrue(model.showCraftBar(craftMode: true, autoGenerate: true))
         XCTAssertTrue(model.showCraftBar(craftMode: false, autoGenerate: true))
         XCTAssertNil(model.aiReplyOffReason)
@@ -807,13 +834,14 @@ final class CirclesFormTests: StubbedAppTestCase {
         XCTAssertNil(sent?["privacy_level"], "the server makes every AI reply private")
         XCTAssertNil(sent?["ai_reads_ack"], "the thread has no ai_reads_key: nothing to acknowledge")
         XCTAssertNil(sent?["auto_generate"], "LLM Response is the user's own request")
-        XCTAssertNil(UserDefaults.standard.string(forKey: DefaultsKey.circleAiReplyAck(entryId: 31, userId: 5)))
+        XCTAssertNil(UserDefaults.standard.string(forKey: DefaultsKey.circleAiReplyAck(entryId: 30, userId: 5)))
     }
 
-    /// The shared entry with a prompt someone else shared that fills in the reader's data.
+    /// The reader's own reply in the shared thread, with a prompt someone else shared
+    /// (edited, or written from scratch) that fills in the reader's data.
     private func keyedParent(_ key: String, reads: String = #"["profile"]"#) -> String {
-        sharedParent.replacingOccurrences(of: #""entry_ai_usage": "chat""#,
-                                          with: #""entry_ai_usage": "chat", "ai_reads": \#(reads), "ai_reads_key": "\#(key)""#)
+        ownSharedReply.replacingOccurrences(of: #""entry_ai_usage": "chat""#,
+                                            with: #""entry_ai_usage": "chat", "ai_reads": \#(reads), "ai_reads_key": "\#(key)""#)
     }
 
     func testTheDialogNamesNobodyAndTheAgreementGoesWithTheRequest() async throws {
@@ -834,7 +862,7 @@ final class CirclesFormTests: StubbedAppTestCase {
         XCTAssertEqual(sent?["ai_reads_ack"] as? String, "private:k1")
         XCTAssertNil(sent?["privacy_level"])
         // "Don't ask again" stores the key that was shown, not a yes.
-        XCTAssertEqual(UserDefaults.standard.string(forKey: DefaultsKey.circleAiReplyAck(entryId: 31, userId: 5)),
+        XCTAssertEqual(UserDefaults.standard.string(forKey: DefaultsKey.circleAiReplyAck(entryId: 30, userId: 5)),
                        "private:k1")
         // The same key later: not asked, and the stored value is sent.
         let same = await thread(keyedParent("k1"))
@@ -847,7 +875,7 @@ final class CirclesFormTests: StubbedAppTestCase {
     func testAStoredKeyThatDiffersShowsTheDialogAgain() async {
         clearAIReplyMemory()
         defer { clearAIReplyMemory() }
-        let key = DefaultsKey.circleAiReplyAck(entryId: 31, userId: 5)
+        let key = DefaultsKey.circleAiReplyAck(entryId: 30, userId: 5)
         for stored in ["private:k1", "k1", "1", "true"] {
             UserDefaults.standard.set(stored, forKey: key)
             let model = await thread(keyedParent("k2", reads: #"["profile","memory"]"#))
@@ -954,7 +982,7 @@ final class CirclesFormTests: StubbedAppTestCase {
         clearAIReplyMemory()
         defer { clearAIReplyMemory() }
         // The user ticked "Don't ask again" for k1; the server's list has changed since.
-        UserDefaults.standard.set("private:k1", forKey: DefaultsKey.circleAiReplyAck(entryId: 31, userId: 5))
+        UserDefaults.standard.set("private:k1", forKey: DefaultsKey.circleAiReplyAck(entryId: 30, userId: 5))
         let parent = keyedParent("k1")
         StubURLProtocol.install { [self] request in
             if path(request) == "/api/nodes/31" { return .json(200, parent) }
@@ -989,14 +1017,14 @@ final class CirclesFormTests: StubbedAppTestCase {
         XCTAssertEqual(body(of: "POST /api/nodes/31/llm")?["ai_reads_ack"] as? String, "private:k2")
         XCTAssertFalse(model.llmRequesting)
         // Not ticked this time: the stored key stays the old one, so the next reply asks again.
-        XCTAssertEqual(UserDefaults.standard.string(forKey: DefaultsKey.circleAiReplyAck(entryId: 31, userId: 5)),
+        XCTAssertEqual(UserDefaults.standard.string(forKey: DefaultsKey.circleAiReplyAck(entryId: 30, userId: 5)),
                        "private:k1")
     }
 
     func testCancellingAfterAChangedListSendsNoSecondRequest() async {
         clearAIReplyMemory()
         defer { clearAIReplyMemory() }
-        UserDefaults.standard.set("private:k1", forKey: DefaultsKey.circleAiReplyAck(entryId: 31, userId: 5))
+        UserDefaults.standard.set("private:k1", forKey: DefaultsKey.circleAiReplyAck(entryId: 30, userId: 5))
         let parent = keyedParent("k1")
         StubURLProtocol.install { [self] request in
             if path(request) == "/api/nodes/31" { return .json(200, parent) }
@@ -1024,15 +1052,15 @@ final class CirclesFormTests: StubbedAppTestCase {
         model.showAIReplyDialog = false   // Cancel, or the dialog closed any other way
         try? await Task.sleep(nanoseconds: 200_000_000)
         XCTAssertFalse(calls.contains("POST /api/nodes/31/llm"))
-        XCTAssertNil(UserDefaults.standard.string(forKey: DefaultsKey.circleAiReplyAck(entryId: 31, userId: 5)))
+        XCTAssertNil(UserDefaults.standard.string(forKey: DefaultsKey.circleAiReplyAck(entryId: 30, userId: 5)))
     }
 
     func testAChoiceStoredByAnEarlierVersionChangesNothing() async {
         clearAIReplyMemory()
         defer { clearAIReplyMemory() }
         // "AI reply: Shared with this thread / Only me" is gone: every AI reply is private.
-        UserDefaults.standard.set("shared", forKey: "loore_circle_ai_reply_privacy_5_31")
-        let model = await thread(sharedParent)
+        UserDefaults.standard.set("shared", forKey: "loore_circle_ai_reply_privacy_5_30")
+        let model = await thread(ownSharedReply)
         XCTAssertNil(model.llmRequestBody()["privacy_level"])
         model.aiReplyPressed()
         await waitFor("POST /api/nodes/31/llm")
@@ -1041,7 +1069,7 @@ final class CirclesFormTests: StubbedAppTestCase {
 
     func testTheAIReplyControlIsOffWhenTheEntryIsNone() async {
         clearAIReplyMemory()
-        let model = await thread(sharedParent.replacingOccurrences(of: #""entry_ai_usage": "chat""#,
+        let model = await thread(ownSharedReply.replacingOccurrences(of: #""entry_ai_usage": "chat""#,
                                                                     with: #""entry_ai_usage": "none""#))
         XCTAssertEqual(model.aiReplyOffReason, "@anna set this entry's AI usage to None, so no AI can read it.")
         XCTAssertTrue(model.showCraftBar(craftMode: false, autoGenerate: true), "the control stays, disabled, with the reason")
@@ -1055,9 +1083,10 @@ final class CirclesFormTests: StubbedAppTestCase {
         clearAIReplyMemory()
         let json = String(data: try fixture("node_shared_ai_reply.json"), encoding: .utf8) ?? "{}"
         let model = await thread(json)
-        // ben's AI wrote the focal reply under anna's entry: not seowriter's, though any member can answer it.
+        // ben's AI wrote the focal reply under anna's entry: not seowriter's, so no
+        // LLM Response under it (the public rule, Peter 2026-11-12).
         XCTAssertFalse(model.isOwner)
-        XCTAssertTrue(model.showCraftBar(craftMode: false, autoGenerate: true))
+        XCTAssertFalse(model.showCraftBar(craftMode: false, autoGenerate: true))
         // The reply seowriter's AI wrote under it is seowriter's, whatever parent_user_id says.
         XCTAssertTrue(model.ownedByMe(userId: 9, parentUserId: 12, nodeType: .llm, humanOwnerUsername: "seowriter"))
         XCTAssertFalse(model.ownedByMe(userId: 9, parentUserId: 5, nodeType: .llm, humanOwnerUsername: "ben"))

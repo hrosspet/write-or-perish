@@ -120,7 +120,9 @@ def test_taken_back_before_removal_it_cannot_go_back_after(app):  # noqa: F811
 def test_an_ai_reply_closed_to_its_owner_is_not_his_to_change(app):  # noqa: F811
     close = _circle(app, "anna", "Close", ["ben", "chidi"])
     entry = _share(app, circle_ids=[close])
-    r = _client(app, "ben").post(f"/api/nodes/{entry}/llm", json={})
+    # Under his own reply in the thread (the public rule).
+    mine = _reply(app, "ben", entry, "ben replies").get_json()["id"]
+    r = _client(app, "ben").post(f"/api/nodes/{mine}/llm", json={})
     aid = r.get_json()["node_id"]
     node = _db.session.get(Node, aid)
     node.set_content("BENS AI REPLY")
