@@ -36,6 +36,11 @@ struct NodeFormView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .background { model?.drafts.flushInBackground() }
         }
+        // The parent was edited above the form (made public or private): the
+        // reply follows, keeping its text.
+        .onChange(of: config.parentPrivacy) { _, level in
+            if let level { model?.parentPrivacyChanged(level) }
+        }
     }
 }
 
@@ -62,10 +67,14 @@ private struct NodeFormBody: View {
                                   onText: "AI will include your profile, recent entries, todos and preferences as context.",
                                   offText: "No agentic context. AI replies only see this entry.",
                                   disabled: model.loading)
-                LabeledPillToggle(label: "Auto-generate", isOn: $model.useAutoGenerate,
+                // A public or circles entry: shown off and locked; the stored choice is kept.
+                LabeledPillToggle(label: "Auto-generate",
+                                  isOn: Binding(get: { model.autoGenerateOn }, set: { model.useAutoGenerate = $0 }),
                                   onText: "AI will reply automatically after you submit.",
-                                  offText: "No AI reply. You can click LLM Response on the created node later.",
-                                  disabled: model.loading)
+                                  offText: model.autoGenerateLocked ? SharedThread.autoGenerateLockedFormText
+                                      : "No AI reply. You can click LLM Response on the created node later.",
+                                  disabled: model.loading,
+                                  lockedHint: model.autoGenerateLocked ? SharedThread.autoGenerateOffHint : nil)
             }
             statusLines
             if let file = model.uploadedFile {
@@ -100,6 +109,8 @@ private struct NodeFormBody: View {
             case .split?:
                 SplitContentDialog(charCount: model.pendingPaste?.jsLength ?? model.content.jsLength,
                                    onConfirm: model.confirmSplit, onCancel: model.cancelSplit)
+            case .quotesNotPublic(let refusal)?:
+                QuotesNotPublicDialog(refusal: refusal, onOpen: model.openQuoted, onClose: model.cancelDialog)
             case nil:
                 EmptyView()
             }

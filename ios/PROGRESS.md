@@ -555,7 +555,7 @@ doc §6. **parity** = same behaviour (a web view where §6 says so); **deviation
 | NodeFormModal (Write New Entry, Edit, Reply, Edit Reference) | sheets | deviation | swipe down closes; the draft keeps the text |
 | Craft mode dialog | `CraftModeDialog` | deviation | copy says "in More" |
 | New token dialog | `NewTokenDialog` | deviation | "Tap" for "Click" |
-| Delete, Rename, Regenerate audio, Apply to replies, Public reply, Split content, Unsaved changes dialogs | `.looreDialog` cards | parity | one presenter per dialog chain |
+| Delete, Rename, Regenerate audio, Apply to replies, Public reply, Split content, Unsaved changes, Not public yet (2026-11-12) dialogs | `.looreDialog` cards | parity | one presenter per dialog chain |
 | Version history drawer | `VersionHistorySheet` | deviation | sheet with list → detail |
 | Admin refusal, X lookup dialogs | admin web view | parity | |
 | Toasts | `ToastStack` | parity | above the mini-player (M5); announced to VoiceOver (M5) |
@@ -659,6 +659,8 @@ Sign-out does not warn about unsent chunks (the review's optional logout warning
   are not shown; auto-generate sends `preferred_model` when no picker is visible; the auto-generate
   check ignores the new reply's own AI usage; a split entry's reply goes under the head; clearing
   the text does not clear the server draft; a pin error replaces the page.
+- **LLM Response in circles threads** (2026-11-12): shown to the owner without craft mode, as in public
+  threads; auto-generate is off there and this is the only way to a reply (the web: public threads only).
 - **Model picker**: a popover list (the web's custom listbox): featured models, "More models…"
   expanding in place to the grouped list.
 - **Writing**: selects are iOS menus; the text field grows with its content (3–12 lines inline,
@@ -1029,3 +1031,39 @@ Peter: "currently it's not possible to select text in the app and copy it. Could
   `SelectCopyUITests` (local backend): a selection across two paragraphs copied and pasted back, no
   keyboard, a tap outside clears it, a link still opens, in an expanded reply card a 0.7 s press
   selects and a 0.4 s press opens the reply, the profile.
+
+## AI replies in shared threads, quotes in public nodes (Peter, 2026-11-12)
+
+Peter: "all AI replies in a public thread are private by default, autogenerate is off in public threads and
+circles and can't be turned on, and only the user can change an AI reply to that circle/public". And: a
+public node never quotes a node that isn't public; publishing one shows a dialog instead.
+
+- One test of a shared thread: `PrivacyLevel.isSharedWithOthers` (anything but private;
+  `Core/Models/SharedThread.swift`, the server's `shared_with_others`). `ThreadModel.isSharedThread` and
+  `NodeFormModel.autoGenerateLocked` use it; neither writes `loore_auto_generate`.
+- Thread: auto-generate is off in public and circles threads. Public keeps its hidden header; in a circles
+  thread the craft-mode Auto-generate switch shows off, dimmed and inert, hint "Auto-generate is off in public
+  threads.". The automatic request after an entry (`tryAutoGenerate`) sends `auto_generate: true`, is skipped
+  when the new entry is public or circles (`NodeFormResult.privacy`, the created node's privacy), and a 409
+  `auto_generate_off` means no reply, no toast. LLM Response sends no flag.
+- Write New Entry: with public or circles selected (or under a public parent) the Auto-generate toggle shows
+  off, dimmed and inert, with the web's locked line; `/textmode/start`, `save-as-node` and the plain entry's
+  `/llm` request ask for no reply. Text mode and read replies send `auto_generate: false` for a shared entry.
+- An AI reply's privacy: its owner's kebab → Edit already offered the privacy select (parity with the web,
+  `PUT` with the unchanged text); nothing to fix. A 409 `reply_in_progress` shows the server's words in the
+  form.
+- 409 `quotes_not_public` (`QuotesNotPublic`): the form keeps its text and settings and shows "Not public
+  yet" (`QuotesNotPublicDialog`): the server's words, one row per quoted entry (its preview opens it; "An
+  entry you can't open (#N). Remove its quote to publish."), OK. A form in a sheet closes its sheet before
+  the entry opens (`NodeFormConfig.leaveForNode`). The Share page's Publish shows the same dialog.
+- Simulator-check fixes: a reply form follows its parent's current privacy (`NodeFormConfig.parentPrivacy`,
+  `NodeFormModel.parentPrivacyChanged`): made public above an open form, the reply is pinned to public and the
+  public-reply question comes back; made private, the form returns to private; the typed text stays. A private
+  AI reply under a public or circles node shows its owner a lock and "Only you see this reply" under its
+  footer (focal, ancestors, replies; `SharedThread.showsPrivateReplyNote`, `PrivateReplyNote`). The locked
+  switch's words are "Auto-generate is off in public and shared threads." and, in a circles thread, show as a
+  caption under the dimmed switch.
+- Deviation: the LLM Response bar shows to the owner in circles threads too, not only public ones
+  (`showCraftBar`), as it is the only way to a reply there without craft mode.
+- Tests: `SharedThreadTests.swift` (`SharedPrivacyTests`, `SharedEntryFormTests`, `SharedThreadModelTests`).
+  Unit tests only; not walked in the simulator.
