@@ -19,7 +19,8 @@ is what failed and where: the exception's type and its stack frames.
   the value-free codes of ``safe_exception_summary``.
 - ``scrub_sentry_event`` and ``scrub_sentry_breadcrumb`` do the same for
   what reaches Sentry: exception messages are replaced, log messages lose
-  the text of the exceptions they quote and any database values.
+  the text of the exceptions they quote and any database values, and
+  email addresses are masked (#666).
 """
 
 import logging
@@ -238,6 +239,45 @@ def strip_database_values(text):
     return text
 
 
+# --- Email addresses (#666) -----------------------------------------------
+# Log lines name a mail's recipient by user id or a keyed hash
+# (utils/email.recipient_ref), never by address. As a second line of
+# defence, anything shaped like an address that still reaches a Sentry
+# event or breadcrumb is masked. The repetitions are bounded and every
+# domain label ends at a literal dot, so a scan stays linear in the
+# text's length. An address without a dotted domain (user@localhost) is
+# not matched.
+EMAIL_REMOVED = "[email removed]"
+_EMAIL_SHAPED = re.compile(
+    r"[\w.%+-]{1,64}@(?:[\w-]{1,63}\.){1,8}[^\W\d_]{2,24}(?![\w-])")
+# How deep mask_emails_in walks nested extra data and breadcrumb data.
+_MASK_MAX_DEPTH = 8
+
+
+def mask_emails(text):
+    """*text* with every email-shaped string replaced by EMAIL_REMOVED.
+    Anything that is not a string is returned as it is."""
+    if not isinstance(text, str) or "@" not in text:
+        return text
+    return _EMAIL_SHAPED.sub(EMAIL_REMOVED, text)
+
+
+def mask_emails_in(value, depth=0):
+    """*value* (a string, or dicts, lists and tuples of them) with the
+    email-shaped strings masked, keys included. Past _MASK_MAX_DEPTH a
+    nested container is replaced by MESSAGE_REMOVED."""
+    if isinstance(value, str):
+        return mask_emails(value)
+    if isinstance(value, (dict, list, tuple)) and depth >= _MASK_MAX_DEPTH:
+        return MESSAGE_REMOVED
+    if isinstance(value, dict):
+        return {mask_emails(k): mask_emails_in(v, depth + 1)
+                for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [mask_emails_in(v, depth + 1) for v in value]
+    return value
+
+
 def _texts_of(exc):
     """The ways *exc*'s text can appear in a message, longest first."""
     texts = set()
@@ -258,7 +298,8 @@ def _texts_of(exc):
 
 def scrub_text(text, exceptions=()):
     """*text* with each of *exceptions*' text replaced by its type name,
-    then without database values (strip_database_values)."""
+    then without database values (strip_database_values) and without
+    email addresses (mask_emails)."""
     if not isinstance(text, str) or not text:
         return text
     for exc in exceptions:
@@ -266,7 +307,7 @@ def scrub_text(text, exceptions=()):
         for exc_text in _texts_of(exc):
             if exc_text in text:
                 text = text.replace(exc_text, name)
-    return strip_database_values(text)
+    return mask_emails(strip_database_values(text))
 
 
 def _exceptions_for(hint):
@@ -326,6 +367,9 @@ def _scrub_exception_values(event, exceptions):
         if value.get("value") or summary:
             value["value"] = (f"{MESSAGE_REMOVED} ({summary})" if summary
                               else MESSAGE_REMOVED)
+        # The summary holds codes and schema names only; masked anyway.
+        if isinstance(value.get("value"), str):
+            value["value"] = mask_emails(value["value"])
         for frame in (value.get("stacktrace") or {}).get("frames") or ():
             frame.pop("vars", None)
     for thread in (event.get("threads") or {}).get("values") or ():
@@ -355,16 +399,30 @@ def _scrub_breadcrumbs(event):
     if isinstance(crumbs, dict):
         crumbs = crumbs.get("values")
     for crumb in crumbs or ():
-        if isinstance(crumb, dict) and isinstance(crumb.get("message"), str):
-            crumb["message"] = strip_database_values(crumb["message"])
+        if not isinstance(crumb, dict):
+            continue
+        if isinstance(crumb.get("message"), str):
+            crumb["message"] = mask_emails(
+                strip_database_values(crumb["message"]))
+        if isinstance(crumb.get("data"), dict):
+            crumb["data"] = mask_emails_in(crumb["data"])
+
+
+def _scrub_extra(event):
+    """Email addresses out of the event's extra data and contexts."""
+    for key in ("extra", "contexts"):
+        if isinstance(event.get(key), dict):
+            event[key] = mask_emails_in(event[key])
 
 
 def scrub_sentry_event(event, hint):
     """Sentry before_send: the event keeps each exception's type and stack
     frames; messages are replaced (safe_exception_summary is kept), log
-    messages lose the text of the exceptions they quote, and database
-    values are stripped from every message and breadcrumb. A part that
-    cannot be scrubbed is dropped rather than sent as it is."""
+    messages lose the text of the exceptions they quote, database values
+    are stripped from every message and breadcrumb, and email addresses
+    are masked in messages, exception values, breadcrumbs, extra data and
+    contexts. A part that cannot be scrubbed is dropped rather than sent
+    as it is."""
     try:
         exceptions = _exceptions_for(hint)
     except Exception:
@@ -379,6 +437,11 @@ def scrub_sentry_event(event, hint):
         _scrub_breadcrumbs(event)
     except Exception:
         event.pop("breadcrumbs", None)
+    try:
+        _scrub_extra(event)
+    except Exception:
+        event.pop("extra", None)
+        event.pop("contexts", None)
     return event
 
 
@@ -396,13 +459,19 @@ def _drop_messages(event):
 
 def scrub_sentry_breadcrumb(crumb, hint):
     """Sentry before_breadcrumb: a log line's breadcrumb without the text
-    of the exceptions it quotes and without database values."""
+    of the exceptions it quotes, without database values and without
+    email addresses (in its data too)."""
     try:
         if isinstance(crumb.get("message"), str):
             crumb["message"] = scrub_text(crumb["message"],
                                           _exceptions_for(hint))
     except Exception:
         crumb["message"] = MESSAGE_REMOVED
+    try:
+        if isinstance(crumb.get("data"), dict):
+            crumb["data"] = mask_emails_in(crumb["data"])
+    except Exception:
+        crumb.pop("data", None)
     return crumb
 
 
