@@ -13,6 +13,16 @@ from backend.utils.timefmt import iso_utc
 
 search_bp = Blueprint("search_bp", __name__)
 
+# Search by meaning sends the search words to an embedding model, so an
+# account whose Default AI usage is None has no search (Peter, 2026-11-13:
+# "disable search for accounts with ai_usage None"; No AI means no AI).
+# Keyword search is the admins' own tool and stays as it is. The clients
+# show their own copy of this text (web SearchModal, iOS SearchView).
+SEARCH_REFUSED_MESSAGE = (
+    "Search needs AI to find things by meaning. Your Default AI usage is "
+    "set to None, so Loore keeps your entries away from AI. You can change "
+    "it in Account settings.")
+
 
 def _strip_diacritics(text):
     """Remove diacritics/accents: 'štědrá' -> 'stedra', 'café' -> 'cafe'."""
@@ -306,12 +316,21 @@ def semantic_search():
     similarity (rank_embeddings: in Postgres with pgvector on, otherwise a
     chunked scan in Python). Only AI-readable nodes are embedded, so
     ai_usage='none' content never appears here (keyword search still
-    covers it).
+    covers it). An account set to None is refused before anything else
+    (SEARCH_REFUSED_MESSAGE).
     """
     from flask import current_app
     from backend.models import NodeEmbedding
     from backend.utils.api_keys import get_openai_chat_key
     from backend.utils.embeddings import embed_texts, rank_embeddings
+    from backend.utils.llm_nodes import (
+        AIUsageRefused, ai_usage_refused_response,
+    )
+    from backend.utils.privacy import account_allows_ai
+
+    if not account_allows_ai(current_user):
+        return ai_usage_refused_response(
+            AIUsageRefused(SEARCH_REFUSED_MESSAGE, "account"))
 
     q = request.args.get("q", "").strip()
     limit = min(request.args.get("limit", 20, type=int), 50)
