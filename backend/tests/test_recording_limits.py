@@ -1616,6 +1616,81 @@ class TestDecodedLength:
         assert decoded_audio_seconds(junk) is None
 
 
+class TestAudioWorkDeadline:
+    """One deadline for a task's audio work: each ffmpeg call gets the time
+    left as its timeout, a re-encode at most 30 s a chunk; audio not reached
+    in time is kept without its text, not sent and not retried."""
+
+    def test_a_slow_decoder_cannot_hold_the_task_past_its_deadline(
+            self, st, monkeypatch):
+        from backend.models import APICostLog
+        clock = {"t": 0.0}
+        calls = []
+
+        def slow_decode(p, timeout_seconds=None, logger=None):
+            # Runs to its limit, then fails.
+            spent = 600.0 if timeout_seconds is None else timeout_seconds
+            calls.append(("decode", spent))
+            clock["t"] += spent
+            return None
+
+        def slow_split(path, piece_seconds, limit_seconds,
+                       timeout_seconds=1800, logger=None, deadline=None):
+            calls.append(("re-encode", timeout_seconds))
+            clock["t"] += timeout_seconds
+            return [], False
+
+        monkeypatch.setattr(st, "_now", lambda: clock["t"], raising=False)
+        monkeypatch.setattr(st, "decode_timeout_seconds", lambda p: 600.0,
+                            raising=False)
+        monkeypatch.setattr(st, "decoded_audio_seconds", slow_decode)
+        monkeypatch.setattr(st, "split_audio_for_transcription", slow_split)
+        merges = []
+        merge = st.concat_fragmented_media
+
+        def counted_merge(paths, **kwargs):
+            merges.append(len(paths))
+            return merge(paths, **kwargs)
+        monkeypatch.setattr(st, "concat_fragmented_media", counted_merge)
+        # Three resumed parts of five chunks: three sub-batches.
+        _, folder = _recording(st, "sess-slow", range(0, 15))
+        for start in (5, 10):
+            (folder / f"init.{start}.webm").write_bytes(
+                b"\x1aE\xdf\xa3-webm-head")
+
+        _batch(st, "sess-slow", range(0, 15))
+
+        deadline = getattr(st, "TASK_AUDIO_DEADLINE_SECONDS", 20 * 60)
+        assert clock["t"] <= deadline
+        per_chunk = getattr(st, "REENCODE_SECONDS_PER_CHUNK", 30)
+        assert all(spent <= 5 * per_chunk
+                   for step, spent in calls if step == "re-encode")
+        # The third part was not reached: no ffmpeg call for it, no merge.
+        assert len(calls) == 3
+        assert merges == [5, 5]
+        assert st._provider.call_count == 0
+        assert APICostLog.query.count() == 0
+        kept = NodeTranscriptChunk.query.filter_by(
+            session_id="sess-slow").all()
+        assert {limits.untranscribed_code(c.error) for c in kept} \
+            == {limits.UNREADABLE}
+        assert any(p.name.startswith("batch_") for p in folder.iterdir())
+
+    def test_a_merge_gets_only_the_time_left(self, tmp_path):
+        import subprocess
+        import time
+        from backend.utils import webm_utils
+        part = tmp_path / "chunk_0000.webm"
+        part.write_bytes(b"\x1aE\xdf\xa3-webm-head")
+        token = webm_utils.audio_work_deadline.set(time.monotonic() - 1)
+        try:
+            with pytest.raises(subprocess.TimeoutExpired):
+                webm_utils.concat_fragmented_media([str(part)],
+                                                   output_suffix=".webm")
+        finally:
+            webm_utils.audio_work_deadline.reset(token)
+
+
 @pytest.fixture
 def tr(st, monkeypatch):
     """backend.tasks.transcription (uploaded files) on the st app, with the

@@ -22,6 +22,7 @@ from openai import OpenAI
 import pathlib
 import os
 import shutil
+import subprocess
 import time
 from datetime import datetime, timezone
 
@@ -29,14 +30,16 @@ from backend.celery_app import celery, flask_app
 from backend.models import Node, NodeTranscriptChunk, Draft, APICostLog
 from backend.extensions import db
 from backend.utils.audio_processing import (
-    CHUNK_DURATION_SEC, compress_audio_if_needed, decoded_audio_seconds,
-    split_audio_for_transcription,
+    CHUNK_DURATION_SEC, compress_audio_if_needed, decode_timeout_seconds,
+    decoded_audio_seconds, split_audio_for_transcription,
 )
 from backend.utils import recording_limits
 from backend.utils.audio_storage import (
     move_session_audio_to_node, storage_path,
 )
-from backend.utils.webm_utils import concat_fragmented_media
+from backend.utils.webm_utils import (
+    audio_work_deadline, concat_fragmented_media,
+)
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.encryption import decrypt_file_to_temp
 from backend.utils.cost import calculate_audio_cost_microdollars
@@ -110,6 +113,27 @@ def _log_transcription_cost(user_id, seconds):
     ))
 
 
+# INTRODUCED HEURISTIC: one deadline for a transcription task's audio work
+# (measuring and, when that fails, re-encoding each batch, and the requests
+# between them): 20 minutes from the task's start. Each ffmpeg call gets the
+# time left as its timeout; audio not reached by then is kept without its
+# text (recording_limits.UNREADABLE), never retried. A batch of 20 chunks is
+# measured in well under a second.
+TASK_AUDIO_DEADLINE_SECONDS = 20 * 60
+# INTRODUCED HEURISTIC: re-encoding a recording's audio may take at most this
+# long per chunk (twice its 15 s); it runs at hundreds of times real time.
+REENCODE_SECONDS_PER_CHUNK = 2 * recording_limits.STREAMING_CHUNK_SECONDS
+
+
+def _now():
+    return time.monotonic()
+
+
+def _task_deadline():
+    """The deadline of a task's audio work (TASK_AUDIO_DEADLINE_SECONDS)."""
+    return _now() + TASK_AUDIO_DEADLINE_SECONDS
+
+
 class _Plan:
     """What of a recording's audio goes to the provider (_plan_audio)."""
 
@@ -125,7 +149,7 @@ class _Plan:
             self.folder = None
 
 
-def _plan_audio(path, name, chunk_count, room):
+def _plan_audio(path, name, chunk_count, room, deadline):
     """What of the audio at *path* (*chunk_count* chunks of a recording) is
     sent to the provider, and the seconds counted for it (the length bound
     and the cost record), never fewer than *chunk_count* ×
@@ -138,10 +162,18 @@ def _plan_audio(path, name, chunk_count, room):
     are sent, counted at their decoded length. Nothing is sent when the
     audio would take the recording past MAX_TRANSCRIBED_SECONDS (*room*:
     the seconds it may still have transcribed; reason TOO_LONG), or when
-    even the re-encode fails (UNREADABLE). The audio stays with the
-    recording either way."""
+    even the re-encode fails or *deadline* (_task_deadline) has come
+    (UNREADABLE). The audio stays with the recording either way. Each
+    ffmpeg call's timeout is the time left; the re-encode's at most
+    REENCODE_SECONDS_PER_CHUNK a chunk."""
     floor = chunk_count * recording_limits.STREAMING_CHUNK_SECONDS
-    seconds = decoded_audio_seconds(path, logger=logger)
+    unread = _Plan(seconds=floor, reason=recording_limits.UNREADABLE)
+    left = deadline - _now()
+    if left <= 0:
+        return unread
+    seconds = decoded_audio_seconds(
+        path, timeout_seconds=min(decode_timeout_seconds(path), left),
+        logger=logger)
     if seconds is not None:
         counted = max(seconds, floor)
         if counted > room:
@@ -149,8 +181,12 @@ def _plan_audio(path, name, chunk_count, room):
         return _Plan(files=[(path, name)], seconds=counted)
     if floor > room:
         return _Plan(seconds=floor, reason=recording_limits.TOO_LONG)
+    left = min(deadline - _now(), chunk_count * REENCODE_SECONDS_PER_CHUNK)
+    if left <= 0:
+        return unread
     pieces, cut = split_audio_for_transcription(
-        path, CHUNK_DURATION_SEC, room, logger=logger)
+        path, CHUNK_DURATION_SEC, room, timeout_seconds=left, logger=logger,
+        deadline=time.monotonic() + left)
     plan = _Plan(files=[(piece, "audio.mp3") for piece, _ in pieces],
                  seconds=max(sum(s for _, s in pieces), floor),
                  folder=os.path.dirname(pieces[0][0]) if pieces else None)
@@ -323,10 +359,12 @@ def transcribe_chunk(self, node_id: int, chunk_index: int, chunk_path: str):
 
             # What is sent and counted (the length bound, the cost):
             # utils/recording_limits, _plan_audio.
+            deadline = _task_deadline()
             plan = _plan_audio(
                 processed_path, processed_path.name, 1,
                 recording_limits.MAX_TRANSCRIBED_SECONDS
-                - recording_limits.transcribed_seconds(node_id=node_id))
+                - recording_limits.transcribed_seconds(node_id=node_id),
+                deadline)
             chunk_duration_sec = plan.seconds
 
             try:
@@ -640,10 +678,12 @@ def transcribe_draft_chunk(self, session_id: str, chunk_index: int, chunk_path: 
 
             # What is sent and counted (the length bound, the cost):
             # utils/recording_limits, _plan_audio.
+            deadline = _task_deadline()
             plan = _plan_audio(
                 processed_path, processed_path.name, 1,
                 recording_limits.MAX_TRANSCRIBED_SECONDS
-                - recording_limits.transcribed_seconds(session_id=session_id))
+                - recording_limits.transcribed_seconds(session_id=session_id),
+                deadline)
             draft_chunk_duration_sec = plan.seconds
 
             try:
@@ -826,6 +866,7 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
         batch_duration_sec = 0.0
         cost_recorded = False
         user_id = draft.user_id
+        deadline = _task_deadline()
 
         try:
             for idx in sorted(chunk_indices):
@@ -942,13 +983,28 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
             transcribed_before = recording_limits.transcribed_seconds(
                 session_id=session_id)
             for sub_indices in sub_batches:
+                # Past the task's deadline (TASK_AUDIO_DEADLINE_SECONDS):
+                # this part is kept as it is (its chunk files), not merged,
+                # not sent.
+                if _now() >= deadline:
+                    untranscribed.update({idx: recording_limits.UNREADABLE
+                                          for idx in sub_indices})
+                    continue
                 merge_report = {}
-                merged_path = concat_fragmented_media(
-                    [paths_by_idx[i] for i in sub_indices],
-                    init_segment_path=_resolve_init(sub_indices),
-                    output_suffix=ext,
-                    report=merge_report,
-                )
+                deadline_token = audio_work_deadline.set(deadline)
+                try:
+                    merged_path = concat_fragmented_media(
+                        [paths_by_idx[i] for i in sub_indices],
+                        init_segment_path=_resolve_init(sub_indices),
+                        output_suffix=ext,
+                        report=merge_report,
+                    )
+                except subprocess.TimeoutExpired:
+                    untranscribed.update({idx: recording_limits.UNREADABLE
+                                          for idx in sub_indices})
+                    continue
+                finally:
+                    audio_work_deadline.reset(deadline_token)
                 merged_by_subbatch.append((sub_indices, merged_path))
                 if merge_report.get('holds_all_audio') is False:
                     short_subbatches.add(sub_indices[0])
@@ -965,7 +1021,7 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
                 plan = _plan_audio(
                     processed_path, f"audio{ext}", len(sub_indices),
                     recording_limits.MAX_TRANSCRIBED_SECONDS
-                    - transcribed_before - batch_duration_sec)
+                    - transcribed_before - batch_duration_sec, deadline)
 
                 try:
                     if plan.reason:

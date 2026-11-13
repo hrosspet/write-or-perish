@@ -10,14 +10,18 @@ from celery.utils.log import get_task_logger
 from openai import OpenAI
 import pathlib
 import os
+import time
 from datetime import datetime
 
 from backend.celery_app import celery, flask_app
 from backend.models import Node, APICostLog
 from backend.extensions import db
 from backend.utils.audio_processing import (
+    SPLIT_TIMEOUT_SECONDS,
     compress_audio_if_needed,
+    decode_timeout_seconds,
     decoded_audio_seconds,
+    seconds_left,
     split_audio_for_transcription,
     CHUNK_DURATION_SEC,
     OPENAI_MAX_AUDIO_BYTES,
@@ -201,7 +205,14 @@ def transcribe_audio(self, node_id: int, audio_file_path: str, filename: str = N
             # otherwise it is cut at MAX_UPLOAD_TRANSCRIBED_SECONDS and split
             # into pieces re-timed from their samples, so the bound holds
             # whether or not the length could be measured.
-            decoded_sec = decoded_audio_seconds(processed_path, logger=logger)
+            # One deadline for the file's audio work (measuring, cutting,
+            # measuring the pieces): SPLIT_TIMEOUT_SECONDS.
+            deadline = time.monotonic() + SPLIT_TIMEOUT_SECONDS
+            decoded_sec = decoded_audio_seconds(
+                processed_path,
+                timeout_seconds=seconds_left(
+                    deadline, decode_timeout_seconds(processed_path)),
+                logger=logger)
             needs_chunking = (decoded_sec is None
                               or file_size > OPENAI_MAX_AUDIO_BYTES
                               or decoded_sec > OPENAI_MAX_DURATION_SEC)
@@ -250,7 +261,8 @@ def transcribe_audio(self, node_id: int, audio_file_path: str, filename: str = N
 
                 pieces, cut = split_audio_for_transcription(
                     processed_path, CHUNK_DURATION_SEC,
-                    MAX_UPLOAD_TRANSCRIBED_SECONDS, logger=logger)
+                    MAX_UPLOAD_TRANSCRIBED_SECONDS, logger=logger,
+                    deadline=deadline)
                 chunk_paths = [path for path, _ in pieces]
 
                 if not chunk_paths:

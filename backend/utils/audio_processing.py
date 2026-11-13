@@ -573,31 +573,49 @@ def decoded_audio_seconds(file_path, timeout_seconds=None, logger=None):
     return total / (2 * DECODE_COUNT_RATE)
 
 
-# Heuristic: how long cutting an uploaded file into pieces may take: half
-# the task's hard limit (celery_app.TASK_TIME_LIMIT). It re-encodes the audio
-# as the earlier chunking did; an hour of audio takes about 12 s on a laptop.
+# Heuristic: how long the audio work for one uploaded file may take in all
+# (measuring it, cutting it into pieces and measuring those): half the
+# task's hard limit (celery_app.TASK_TIME_LIMIT). The cutting re-encodes the
+# audio as the earlier chunking did; an hour of audio takes about 12 s on a
+# laptop.
 SPLIT_TIMEOUT_SECONDS = 1800
 # The pieces' bitrate, as the earlier chunking used.
 PIECE_BITRATE = 128_000
 
 
+def seconds_left(deadline, cap):
+    """*cap*, cut to the time left until *deadline* (a time.monotonic()
+    value; None: no deadline). Zero or less when it has passed."""
+    import time
+    if deadline is None:
+        return cap
+    return min(cap, deadline - time.monotonic())
+
+
 def split_audio_for_transcription(file_path, piece_seconds, limit_seconds,
                                   timeout_seconds=SPLIT_TIMEOUT_SECONDS,
-                                  logger=None):
+                                  logger=None, deadline=None):
     """(pieces, cut): the audio of *file_path* to send to the provider, as
     [(path, seconds)]: MP3 pieces of *piece_seconds* in a new temporary
     folder, up to *limit_seconds*. Its first audio stream is decoded and
     re-timed from its samples, so the cut and the pieces follow the audio
     itself, whatever the container's timestamps say; at most
     ceil(limit / piece) pieces. *seconds*: the piece's decoded length, or,
-    when it cannot be decoded, *piece_seconds* (the most a piece holds). A
-    last piece under a second's bytes that cannot be decoded (the frames
-    left at the end of the audio) is left out.
+    when it cannot be decoded (or no time is left to), *piece_seconds* (the
+    most a piece holds). A last piece under a second's bytes that cannot be
+    decoded (the frames left at the end of the audio) is left out.
     *cut*: the file holds audio past *limit_seconds* (in no piece).
-    ([], False) when ffmpeg fails or takes longer than *timeout_seconds*."""
+
+    All of its ffmpeg work (the re-encode, then measuring the pieces) ends
+    by *deadline* (a time.monotonic() value) when given, the re-encode also
+    within *timeout_seconds*. ([], False) when ffmpeg fails or runs out of
+    time."""
     import glob
     import shutil
     import subprocess
+    timeout = seconds_left(deadline, timeout_seconds)
+    if timeout <= 0:
+        return [], False
     # Piece boundaries, the last one at the limit; one second more is
     # decoded, so audio past the limit shows as one more piece.
     bounds = []
@@ -616,7 +634,7 @@ def split_audio_for_transcription(file_path, piece_seconds, limit_seconds,
            "-reset_timestamps", "1",
            os.path.join(out_dir, "piece_%03d.mp3")]
     try:
-        subprocess.run(cmd, check=True, timeout=timeout_seconds,
+        subprocess.run(cmd, check=True, timeout=timeout,
                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                        stderr=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError) as e:
@@ -625,15 +643,23 @@ def split_audio_for_transcription(file_path, piece_seconds, limit_seconds,
                          f"{type(e).__name__}")
         shutil.rmtree(out_dir, ignore_errors=True)
         return [], False
+
+    def measure(path):
+        left = seconds_left(deadline, decode_timeout_seconds(path))
+        if left <= 0:
+            return None
+        return decoded_audio_seconds(path, timeout_seconds=left,
+                                     logger=logger)
+
     paths = sorted(glob.glob(os.path.join(out_dir, "piece_*.mp3")))
     kept, extra = paths[:len(bounds)], paths[len(bounds):]
-    cut = any(decoded_audio_seconds(path) for path in extra)
+    cut = any(measure(path) for path in extra)
     for path in extra:
         os.unlink(path)
     pieces = []
     for n, path in enumerate(kept):
         size = pathlib.Path(path).stat().st_size
-        seconds = decoded_audio_seconds(path, logger=logger)
+        seconds = measure(path)
         if seconds is None:
             if n == len(kept) - 1 and size < PIECE_BITRATE // 8:
                 os.unlink(path)
