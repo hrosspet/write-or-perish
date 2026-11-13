@@ -23,13 +23,25 @@ Options:
                          appended. Without --merge a non-empty user aborts.
                          On an existing account whose current intentions
                          the user wrote (not an inferred version), the
-                         dump's intentions are skipped (#412).
+                         dump's intentions are skipped (#412). An existing
+                         account whose owner said no to starting from
+                         their tweets is refused (#662).
     --create-approved    when the user has to be created, set approved=True
                          (default: created unapproved — the same gate a
                          fresh signup gets; flip it in the admin page)
     --twitter-id ID      set the account's X/Twitter numeric id so "Sign in
                          with X" claims it by id, not only by username match
                          (the Community Archive's account_id; e.g. 316970336)
+
+A pre-fill bundle (#662): each entry keeps its provenance, so after a no
+to "Start from your tweets" the pre-filled tweets are told apart from the
+person's own entries, and the account keeps the dump's prefilled_handle
+when it is the account's username (case aside; a different one is left
+unset and reported, since Glean leaves out the tweets of the account's
+pre-filled handle). The account is marked as one whose writing is private
+for the choice of profile models (User.profile_private_read), as a loaded
+account was before provenance was carried, so no profile build of it
+crosses providers on its own (#589's public-only rule).
 
 Ids are remapped in two passes (nodes: parent + continuation links;
 profiles: parent_profile_id; recent contexts: profile_id). LLM author
@@ -128,6 +140,7 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
         Node, NodeEmbedding, User, UserProfile, UserRecentContext,
         UserTodo, UserArtifact,
     )
+    from backend.routes.import_data import PROVENANCES
 
     dump, node_iter, node_total = _open_dump(path)
 
@@ -149,6 +162,11 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
         print(f"created user '{username}' (id {user.id}, approved={user.approved})",
               file=sys.stderr)
     else:
+        if user.prefill_consent == "no":
+            # A dump loaded onto an account is a pre-fill (a lab bundle of
+            # tweets, profile and intentions): its owner said no (#662).
+            sys.exit(f"User '{username}' said no to starting from their "
+                     f"tweets (pre-fill consent: no); nothing loaded.")
         existing = Node.query.filter(
             or_(Node.user_id == user.id, Node.human_owner_id == user.id),
             Node.deleted_at.is_(None)).count()
@@ -157,6 +175,17 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
                      f"pass --merge to add to them (dedup on source_key).")
         print(f"loading onto existing user '{username}' (id {user.id}, "
               f"{existing} nodes, merge={merge})", file=sys.stderr)
+
+    handle = (dump["user"].get("prefilled_handle") or "").strip() or None
+    if handle and not user.prefilled_handle:
+        if handle.lower() == username.lower():
+            user.prefilled_handle = handle
+        else:
+            print(f"prefilled_handle @{handle} is not the username '{username}': "
+                  f"left unset", file=sys.stderr)
+    # The provider rule as before provenance was carried (see above).
+    user.profile_private_read = True
+    db.session.flush()
 
     if twitter_id:
         other = User.query.filter(User.twitter_id == str(twitter_id), User.id != user.id).first()
@@ -311,6 +340,8 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
                                   nd.get("provenance")),
             source_key=key,
             origin=nd.get("origin"),
+            provenance=(nd.get("provenance")
+                        if nd.get("provenance") in PROVENANCES else None),
             tool_calls_meta=nd.get("tool_calls_meta"),
             prompt_key=nd.get("prompt_key"),
         )

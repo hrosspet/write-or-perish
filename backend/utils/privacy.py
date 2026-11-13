@@ -469,6 +469,11 @@ def account_allows_ai(user) -> bool:
 
 PREFILL_REFUSAL_CODES = ("ai_opt_out", "prefill_declined")
 
+# Node.provenance of the tweets a pre-fill brought in: Loore fetched them
+# from the Community Archive or the X API (routes/import_data). A user's
+# own archive upload is not one of them.
+PREFILL_PROVENANCES = ("prefill_ca", "prefill_x")
+
 
 def prefill_refusal(user):
     """Why an admin pre-fill or intentions run must not run for this
@@ -480,6 +485,30 @@ def prefill_refusal(user):
         return ("prefill_declined",
                 "This user declined the tweet seed (pre-fill consent: no).")
     return None
+
+
+def withheld_prefill_clauses(user_id):
+    """SQL clauses for a query of the nodes an AI read takes from a user's
+    writing as a whole (profile builds and their gates, intentions, the
+    recent-context summary, the writing a reply or poll draft reads as
+    background, the AI's archive search in utils/embeddings): after the
+    user said no to the tweet seed, on the card or later in Settings
+    (#662), the tweets a pre-fill brought in are left out. They stay in
+    the user's Loore; only these reads skip them.
+
+    An empty list for every other account, so their queries do not
+    change. The answer is read from the database at each call, so a no
+    given while a job runs counts from the job's next query. A thread
+    the user opens and replies to still reads its own entries, a tweet
+    among them."""
+    from sqlalchemy import func
+    from backend.extensions import db
+    from backend.models import Node, User
+    consent = db.session.query(User.prefill_consent).filter(
+        User.id == user_id).scalar()
+    if consent != "no":
+        return []
+    return [func.coalesce(Node.provenance, "").notin_(PREFILL_PROVENANCES)]
 
 
 def get_default_privacy_settings() -> dict:

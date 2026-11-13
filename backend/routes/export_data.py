@@ -10,6 +10,7 @@ from backend.extensions import db
 from backend.utils.tokens import approximate_token_count
 from backend.utils.privacy import (
     AI_ALLOWED, AIUsage, accessible_nodes_filter, can_user_access_node,
+    withheld_prefill_clauses,
 )
 from backend.utils.quotes import (
     resolve_quotes, has_quotes, ExportQuoteResolver,
@@ -982,6 +983,9 @@ def _scope_filter(user_id, filter_ai_usage, created_before, created_after):
     clauses = [_export_visible_filter(Node, user_id)]
     if filter_ai_usage:
         clauses.append(Node.ai_usage.in_(AI_ALLOWED))
+        # After a no to the tweet seed, the tweets a pre-fill brought in
+        # are not read (#662). Empty for every other account.
+        clauses.extend(withheld_prefill_clauses(user_id))
     if created_before is not None:
         clauses.append(Node.created_at < created_before)
     if created_after is not None:
@@ -1025,9 +1029,13 @@ def _select_incremental_rows(user_id, filter_ai_usage=False,
     cols = (Node.id, Node.parent_id, Node.created_at, Node.token_count,
             Node.deleted_at, Node.origin)
 
+    # Built once, so every layer of the walk applies the same filter (the
+    # tweet-seed answer is read once per call, #662).
+    general_filter = _scope_filter(user_id, filter_ai_usage, created_before,
+                                   created_after)
+
     def _general_filter():
-        return _scope_filter(user_id, filter_ai_usage, created_before,
-                             created_after)
+        return general_filter
 
     # 1. Anchors: target-owned/addressed AND pass general filters.
     anchor_rows = db.session.query(*cols).filter(
@@ -1181,7 +1189,11 @@ class WindowScope:
         gone = tuple(db.session.query(
             func.count(User.id), func.max(User.deleted_at),
         ).filter(User.deleted_at.isnot(None)).one())
-        return own + gone
+        # A changed answer to the tweet seed changes which rows the
+        # filter passes (#662).
+        consent = (db.session.query(User.prefill_consent).filter(
+            User.id == uid).scalar(),)
+        return own + gone + consent
 
     @staticmethod
     def _fetch(column, ids, clauses):
@@ -1685,7 +1697,8 @@ def _preselect_node_ids(user_id, budget, filter_ai_usage=False,
         _export_visible_filter(Node, user_id),
     )
     if filter_ai_usage:
-        inner = inner.filter(Node.ai_usage.in_(AI_ALLOWED))
+        inner = inner.filter(Node.ai_usage.in_(AI_ALLOWED),
+                             *withheld_prefill_clauses(user_id))
     if created_before:
         inner = inner.filter(Node.created_at < created_before)
     if created_after:
@@ -2532,7 +2545,8 @@ def build_user_export_content(
 
     # Only filter by AI usage if requested (for AI profile generation)
     if filter_ai_usage:
-        query = query.filter(Node.ai_usage.in_(AI_ALLOWED))
+        query = query.filter(Node.ai_usage.in_(AI_ALLOWED),
+                             *withheld_prefill_clauses(user.id))
 
     # Filter by creation timestamp if specified (for {user_export} context
     # limiting). `created_after` is intercepted by the dispatcher above and

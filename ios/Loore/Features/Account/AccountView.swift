@@ -4,7 +4,7 @@ import SwiftUI
 /// pasted confirmation link), X, plan, the settings that save on change,
 /// Voice (M3), "Delete my account" (#269), the app version and, in Debug
 /// builds, the hidden environment switcher (long-press the version line).
-/// `anchor` is the web hash (`email`, `x`, `model`, `references`, `craft`,
+/// `anchor` is the web hash (`email`, `x`, `model`, `references`, `tweets`, `craft`,
 /// `delete-account`).
 struct AccountView: View {
     var anchor: String?
@@ -161,6 +161,9 @@ private struct AccountForm: View {
                       options: [("none", "None"), ("chat", "Chat"), ("train", "Train")],
                       value: user.defaultAIUsage.rawString) { .string($0) }
                 .id(VoiceAIBlock.accountAnchor)
+            if model.showsTweetSeed {
+                tweetSeedRow.id("tweets")
+            }
             AccountRow(labelView: AnyView(HStack(spacing: 6) { CraftIcon(size: 13); Text("Craft mode") }),
                        helper: "Shows extra controls for people who want to steer the details: privacy and AI usage on each entry, the auto-generate switch and model picker on threads, audio upload, prompt editing and data export. Off is the simpler Loore. Menu items and controls added by craft mode carry the sliders icon.") {
                 onOffSelect(field: "craft_mode", isOn: app.capabilities.craftMode, onTitle: "On")
@@ -270,6 +273,25 @@ private struct AccountForm: View {
                 }
             }
             .helperStyle()
+        }
+    }
+
+    /// "Start from your tweets" (#662, web `AccountPage` `#tweets`): the answer to the
+    /// waitlist card's question, changed both ways. Until the user answers no option is
+    /// selected (no answer is not a no), and "Not answered yet" cannot be chosen.
+    private var tweetSeedRow: some View {
+        let current = user.prefillConsent?.rawString ?? ""
+        return AccountRow(label: "Start from your tweets", helper: AccountModel.tweetSeedHelp(user),
+                          message: model.tweetSeedError.map { AccountModel.Message(kind: .error, text: $0) }) {
+            SelectField(options: [("yes", "Yes"), ("no", "No")],
+                        selection: Binding(get: { current }, set: { new in
+                            guard new != current else { return }
+                            Task { await model.saveTweetSeed(PrefillConsent(rawString: new)) }
+                        }),
+                        disabled: model.isSaving("prefill_consent"),
+                        placeholder: "Not answered yet")
+                .accessibilityLabel("Start from your tweets")
+                .accessibilityIdentifier("account.tweetSeed")
         }
     }
 

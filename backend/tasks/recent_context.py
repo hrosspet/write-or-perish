@@ -27,7 +27,9 @@ from backend.models import (
     User, UserProfile, UserRecentContext, Node, APICostLog,
     RecentContextBatchJob,
 )
-from backend.utils.privacy import AI_ALLOWED, account_allows_ai
+from backend.utils.privacy import (
+    AI_ALLOWED, account_allows_ai, withheld_prefill_clauses,
+)
 from backend.extensions import db
 from backend.llm_providers import (
     LLMProvider, PromptTooLongError, is_empty_truncated, is_refused,
@@ -95,6 +97,7 @@ def _count_new_tokens(user_id, since):
             Node.human_owner_id == user_id),
         Node.created_at > since,
         Node.ai_usage.in_(AI_ALLOWED),
+        *withheld_prefill_clauses(user_id),
     ).scalar()
 
 
@@ -107,6 +110,7 @@ def _count_total_eligible_tokens(user_id):
         or_(Node.user_id == user_id,
             Node.human_owner_id == user_id),
         Node.ai_usage.in_(AI_ALLOWED),
+        *withheld_prefill_clauses(user_id),
     ).scalar()
 
 
