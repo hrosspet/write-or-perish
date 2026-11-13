@@ -9,6 +9,8 @@ import { emailState } from "../utils/emailState";
 import DeleteWritingDialog from "../components/DeleteWritingDialog";
 import DeleteAccountDialog from "../components/DeleteAccountDialog";
 import DisconnectXDialog from "../components/DisconnectXDialog";
+import SubscriptionSection from "../components/SubscriptionSection";
+import InviteSection from "../components/InviteSection";
 import BothProvidersDialog, { ownProviderName } from "../components/BothProvidersDialog";
 import { noteBothProvidersLater } from "../hooks/useBothProvidersQuestion";
 import {
@@ -679,6 +681,11 @@ export default function AccountPage() {
         />
       </div>
 
+      {/* Payments (#438): the Subscription section takes the Plan row's
+          place only while the server has payments on. */}
+      {user.payments_enabled ? (
+        <SubscriptionSection user={user} setUser={setUser} />
+      ) : (
       <div style={rowStyle}>
         <div style={labelStyle}>Plan</div>
         <div
@@ -693,6 +700,11 @@ export default function AccountPage() {
           {user.plan || "free"}
         </div>
       </div>
+      )}
+
+      {/* Referrals (#439): the invite link, only while the server has
+          them on. No counts, no reminders. */}
+      {user.referrals_enabled && <InviteSection />}
 
       {/* ─── Settings ─── */}
 

@@ -17,6 +17,18 @@ def float_from_env(name, default):
         return default
 
 
+def stripe_key_from_env(name, sandbox_name, environ=None):
+    """A Stripe key (#438): *name*, or in development and testing only
+    (FLASK_ENV) the local sandbox key *sandbox_name*. Staging and
+    production never fall back to it."""
+    environ = os.environ if environ is None else environ
+    deploy_env = (environ.get("FLASK_ENV") or "production").lower()
+    value = environ.get(name)
+    if not value and deploy_env in ("development", "testing"):
+        value = environ.get(sandbox_name)
+    return value or None
+
+
 class Config:
     SECRET_KEY = os.environ.get("SECRET_KEY", "this-should-be-changed")
     # Make sure your DATABASE_URL looks something like
@@ -137,6 +149,103 @@ class Config:
     PER_USER_MONTHLY_LIMIT_USD = float(
         os.environ.get("PER_USER_MONTHLY_LIMIT_USD", "0") or "0"
     )
+
+    # --- Payments (#438): Stripe subscriptions, Managed Payments ---
+    # The one switch. Off (default): no billing route answers, no
+    # subscription text or control shows, and AI replies are not gated by
+    # plan, exactly as before. On: new accounts start on the "free" plan
+    # and get AI replies, Voice mode and profile updates from a trialing
+    # or active subscription (backend/utils/subscriptions.py). Accounts
+    # whose plan was set by hand (alpha, pro) are not affected by it.
+    PAYMENTS_ENABLED = os.environ.get(
+        "PAYMENTS_ENABLED", "false").lower() in ("1", "true", "yes")
+    # Where this runs: FLASK_ENV ("development", "testing", "staging"; any
+    # other value or none at all counts as production).
+    DEPLOY_ENV = (os.environ.get("FLASK_ENV") or "production").lower()
+    # Stripe keys. The sandbox names are a fallback in development and
+    # testing only; staging and production set the STRIPE_* names. In
+    # production a test-mode key keeps payments off (create_app). The
+    # publishable key is read for completeness: Stripe-hosted Checkout
+    # needs no Stripe.js.
+    STRIPE_SECRET_KEY = stripe_key_from_env(
+        "STRIPE_SECRET_KEY", "STRIPE_SANDBOX_PRIVKEY")
+    STRIPE_PUBLISHABLE_KEY = stripe_key_from_env(
+        "STRIPE_PUBLISHABLE_KEY", "STRIPE_SANDBOX_PUBKEY")
+    # Signing secret of the webhook endpoint (/api/webhooks/stripe). Unset:
+    # the endpoint answers 404 while the switch is off, 503 while it is on.
+    STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET") or None
+    # The monthly prices, in cents of SUBSCRIPTION_CURRENCY (Peter,
+    # 2026-11-12): Standard about 30 USD, "that most people will choose";
+    # Supporter 99 USD, "mostly as an anchor", the same product for now;
+    # a discounted 12 USD opened by a code, shown nowhere. `flask
+    # stripe-sync-catalog` writes them to Stripe; a changed amount makes a
+    # new price there, and subscriptions already running keep theirs.
+    SUBSCRIPTION_PRICE_CENTS_STANDARD = int(
+        os.environ.get("SUBSCRIPTION_PRICE_CENTS_STANDARD") or "3000")
+    SUBSCRIPTION_PRICE_CENTS_SUPPORTER = int(
+        os.environ.get("SUBSCRIPTION_PRICE_CENTS_SUPPORTER") or "9900")
+    SUBSCRIPTION_PRICE_CENTS_DISCOUNTED = int(
+        os.environ.get("SUBSCRIPTION_PRICE_CENTS_DISCOUNTED") or "1200")
+    SUBSCRIPTION_CURRENCY = (
+        os.environ.get("SUBSCRIPTION_CURRENCY") or "usd").lower()
+    # "exclusive" (Peter, 2026-11-12: "tax should be on top of our
+    # pricing"): the VAT or sales tax Stripe collects as merchant of record
+    # is added at checkout. "inclusive" would put it inside the amounts.
+    # Stripe cannot change a price's tax behaviour later; the sync makes a
+    # new price instead.
+    SUBSCRIPTION_TAX_BEHAVIOR = (
+        os.environ.get("SUBSCRIPTION_TAX_BEHAVIOR") or "exclusive").lower()
+    # Managed Payments sells only products with an eligible tax code:
+    # AI as a Service, cloud based, personal use.
+    STRIPE_PRODUCT_TAX_CODE = (
+        os.environ.get("STRIPE_PRODUCT_TAX_CODE") or "txcd_10105001")
+    # Free days before the first payment, with a card (Peter, 2026-11-12:
+    # two weeks). Once per account: a second subscription has none.
+    SUBSCRIPTION_TRIAL_DAYS = int(
+        os.environ.get("SUBSCRIPTION_TRIAL_DAYS") or "14")
+    # Monthly model-cost ceiling of a subscribed account, in USD (Peter,
+    # 2026-11-12): the per-user spend cap for an account whose access
+    # comes from its subscription. An admin's per-user limit still wins;
+    # accounts set by hand keep PER_USER_MONTHLY_LIMIT_USD.
+    SUBSCRIPTION_SPEND_LIMIT_USD_STANDARD = float_from_env(
+        "SUBSCRIPTION_SPEND_LIMIT_USD_STANDARD", 50.0)
+    SUBSCRIPTION_SPEND_LIMIT_USD_SUPPORTER = float_from_env(
+        "SUBSCRIPTION_SPEND_LIMIT_USD_SUPPORTER", 100.0)
+    SUBSCRIPTION_SPEND_LIMIT_USD_DISCOUNTED = float_from_env(
+        "SUBSCRIPTION_SPEND_LIMIT_USD_DISCOUNTED", 50.0)
+    # Model cost a trial may use in all, whatever the level: nothing has
+    # been paid yet. Counted from the trial's start, not per month. From
+    # the first successful payment the level's monthly ceiling applies, and
+    # it counts the whole calendar month, trial usage in that month
+    # included. 0: no separate trial ceiling. Peter, 2026-11-12: "let's go
+    # with $30 for the free trial period, and if the user pays, extend
+    # this to the subscription's cap" — a starting value, to be checked
+    # with the prices before the switch is turned on.
+    SUBSCRIPTION_TRIAL_SPEND_LIMIT_USD = float_from_env(
+        "SUBSCRIPTION_TRIAL_SPEND_LIMIT_USD", 30.0)
+    # Wrong discount codes one account may try per hour before the code
+    # field answers "try again later". 10: a typo or two is never
+    # refused, guessing an 8-character code is out of reach.
+    DISCOUNT_CODE_ATTEMPTS_PER_HOUR = int(
+        os.environ.get("DISCOUNT_CODE_ATTEMPTS_PER_HOUR") or "10")
+    # Where the Subscribe view tells a user to ask for the lower price.
+    SUBSCRIPTION_CONTACT_EMAIL = (
+        os.environ.get("SUBSCRIPTION_CONTACT_EMAIL") or "info@loore.org")
+    # The alpha free month (Peter, 2026-11-12: alpha testers are "free for
+    # one month after the opening, then the discounted price"; "The number
+    # of months may still change"). Days, counted from the start date given
+    # to `flask alpha-free-month --apply --start` (the Beta release date).
+    ALPHA_FREE_MONTH_DAYS = int(
+        os.environ.get("ALPHA_FREE_MONTH_DAYS") or "30")
+    # Referrals (#439): an invite link per account; on the friend's first
+    # payment both get a free week as Stripe customer credit. On only
+    # while PAYMENTS_ENABLED is on; this switch turns the link and new
+    # referrals off by itself (a free week already earned is still given).
+    REFERRALS_ENABLED = os.environ.get(
+        "REFERRALS_ENABLED", "true").lower() in ("1", "true", "yes")
+    # Days of the free week (Peter, 2026-10-09: "a free week for both"):
+    # credit worth this many thirtieths of the next invoice.
+    REFERRAL_REWARD_DAYS = int(os.environ.get("REFERRAL_REWARD_DAYS") or "7")
 
     # Long threads (#648; Peter, 2026-11-12): every AI reply sends the
     # whole thread above it. A reply whose prompt would be over

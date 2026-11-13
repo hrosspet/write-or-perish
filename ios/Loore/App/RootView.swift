@@ -9,6 +9,7 @@ import SwiftUI
 /// shown after the user's own deletion.
 struct RootView: View {
     @Environment(AppState.self) private var app
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         @Bindable var router = app.router
@@ -35,6 +36,11 @@ struct RootView: View {
         .animation(LooreMotion.quick, value: app.phase)
         .animation(LooreMotion.quick, value: app.needsTerms)
         .task { await app.start() }
+        // Payments (#438): a subscription started or ended on the web shows
+        // when the app comes back, not only at the next launch.
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { Task { await app.refreshPayments() } }
+        }
     }
 
     @ViewBuilder private var content: some View {
@@ -50,7 +56,10 @@ struct RootView: View {
         case .accountDeleted(let deleteOn):
             AccountDeletedView(deleteOn: deleteOn)
         case .signedIn:
-            if app.isApproved {
+            if app.isApproved, app.user?.notLetIn == true {
+                // Payments on, no subscription yet (#438).
+                NoSubscriptionView()
+            } else if app.isApproved {
                 MainTabView()
             } else {
                 WaitlistView()
@@ -83,9 +92,14 @@ private struct BottomNotices: View {
             if let message = app.spendCapBannerMessage {
                 SpendCapBanner(message: message) { app.spendCapBannerMessage = nil }
             }
+            // Payments on, no AI replies (#438): the server's message, no link.
+            if let message = app.subscriptionBannerMessage {
+                SpendCapBanner(message: message, eyebrow: "REPLIES PAUSED") { app.subscriptionBannerMessage = nil }
+            }
         }
         .padding(.bottom, bottomOffset)
         .animation(LooreMotion.quick, value: app.spendCapBannerMessage)
+        .animation(LooreMotion.quick, value: app.subscriptionBannerMessage)
     }
 }
 

@@ -92,6 +92,7 @@ struct TextModeView: View {
                                                                     json: .object(body))
             return NodeFormResult(id: answer.id, userNodeId: answer.userNodeId, llmNodeId: answer.llmNodeId,
                                   spendCapped: answer.spendCapped, llmError: answer.llmError,
+                                  subscriptionMessage: answer.subscriptionNotice,
                                   llmErrorCode: answer.llmErrorCode)
         }
         var body: [String: JSONValue] = [
@@ -103,6 +104,7 @@ struct TextModeView: View {
         app.signals.post(.nodeCreated(answer.userNodeId))
         return NodeFormResult(id: answer.userNodeId, userNodeId: answer.userNodeId, llmNodeId: answer.llmNodeId,
                               spendCapped: answer.spendCapped, llmError: answer.llmError,
+                              subscriptionMessage: answer.subscriptionNotice,
                               llmErrorCode: answer.llmErrorCode)
     }
 

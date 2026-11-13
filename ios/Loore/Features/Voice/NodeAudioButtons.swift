@@ -9,6 +9,9 @@ struct SpeakerButton: View {
     var content: String?
     var isPublic = false
     var aiUsage: AIUsage?
+    /// The user's own recording (#438): playable without voice mode, while
+    /// payments are on, so a lapsed account keeps listening to what it said.
+    var ownRecording = false
     /// Called once new TTS finished generating (the edit dialog then knows the node has audio).
     var onTtsGenerated: (() -> Void)?
 
@@ -31,7 +34,7 @@ struct SpeakerButton: View {
     }
 
     var body: some View {
-        if app.user?.voiceModeEnabled == true || isPublic {
+        if app.user?.voiceModeEnabled == true || isPublic || ownRecording {
             let loading = app.audio.isLoading(target)
             let playing = app.audio.isPlaying(target)
             Button {
@@ -65,6 +68,8 @@ struct DownloadAudioButton: View {
     let nodeId: Int
     var isPublic = false
     var aiUsage: AIUsage?
+    /// The user's own recording (#438), as for SpeakerButton.
+    var ownRecording = false
 
     @Environment(AppState.self) private var app
     @State private var loading = false
@@ -73,7 +78,7 @@ struct DownloadAudioButton: View {
     @State private var shown: URL?
 
     var body: some View {
-        if app.user?.voiceModeEnabled == true || isPublic {
+        if app.user?.voiceModeEnabled == true || isPublic || ownRecording {
             let noAIAccess = aiUsage == .off
             Button {
                 guard !noAIAccess, !loading else { return }

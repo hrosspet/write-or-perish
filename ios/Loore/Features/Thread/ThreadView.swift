@@ -231,7 +231,9 @@ private struct ThreadContent: View {
                     .accessibilityLabel(model.pinTitle)
                     NodeAudioControls(nodeId: node.id, content: node.content, isPublic: node.privacyLevel == .public,
                                       aiUsage: node.aiUsage, hasTTS: node.hasTTS,
-                                      onTtsGenerated: { model.ttsGenerated() })
+                                      onTtsGenerated: { model.ttsGenerated() },
+                                      ownRecording: app.user?.paymentsEnabled == true && node.hasOriginalAudio
+                                          && node.user?.id == app.user?.id)
                 }
                 if model.focalShowsPrivateReplyNote {
                     PrivateReplyNote()

@@ -374,6 +374,32 @@ def test_account_opted_out_of_ai_gets_no_digest(app, monkeypatch):
     assert calls == []
 
 
+def test_payments_on_an_account_without_the_paid_set_gets_no_digest(
+        app, monkeypatch):
+    """#438: while payments are on, an account with no subscription (or
+    one that ended) starts no background model call: no nightly digest,
+    no manual rebuild. An account on a paid plan still gets it."""
+    user = User.query.first()
+    user.timezone = _tz_at_hour(_digest.NIGHTLY_DIGEST_LOCAL_HOUR)
+    user.plan = "free"
+    _db.session.commit()
+    _mk_item(user.id, "clip")
+    submitted = _stub_batch_submit(monkeypatch)
+    calls = _stub_llm(monkeypatch)
+    monkeypatch.setitem(_digest.flask_app.config, "PAYMENTS_ENABLED", True)
+
+    assert _digest.sweep_external_digests() == {"status": "ok",
+                                                "submitted": 0}
+    assert submitted == []
+    assert _digest.rebuild_external_digest(
+        _FakeSelf(), user.id, force=True) == {"status": "no_subscription"}
+    assert calls == []
+
+    user.plan = "alpha"
+    _db.session.commit()
+    assert _digest.sweep_external_digests()["submitted"] == 1
+
+
 def _hold_writing(user, account=False, at=None):
     """A waiting "Delete all my content" of *user* (#590), requested at
     *at*, or with *account* an account deletion (#269)."""

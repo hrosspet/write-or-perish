@@ -43,6 +43,10 @@ struct CurrentUser: Decodable, Equatable, Sendable {
     /// The gate and the user's own switch: every Glean card, button and menu
     /// entry shows only when this is true (#475).
     var gleanEnabled: Bool
+    /// Payments (#438): true only while the server has them on; `subscription`
+    /// is sent with it. Settings shows the state; the app sells nothing.
+    var paymentsEnabled: Bool
+    var subscription: SubscriptionState?
 
     enum CodingKeys: String, CodingKey {
         case id, username, email, plan, timezone
@@ -73,6 +77,8 @@ struct CurrentUser: Decodable, Equatable, Sendable {
         case dataDeletion = "data_deletion"
         case gleanAvailable = "glean_available"
         case gleanEnabled = "glean_enabled"
+        case paymentsEnabled = "payments_enabled"
+        case subscription
     }
 
     init(from decoder: Decoder) throws {
@@ -109,6 +115,22 @@ struct CurrentUser: Decodable, Equatable, Sendable {
         dataDeletion = c.tolerant(.dataDeletion)
         gleanAvailable = c.tolerant(.gleanAvailable, default: false)
         gleanEnabled = c.tolerant(.gleanEnabled, default: false)
+        paymentsEnabled = c.tolerant(.paymentsEnabled, default: false)
+        subscription = c.tolerant(.subscription)
+    }
+
+    /// Payments on and no AI replies on this account (#438): Voice refuses a
+    /// recording before it starts, as it does for the spend cap.
+    var aiRepliesPaused: Bool { paymentsEnabled && subscription?.aiReplies == false }
+
+    /// Payments on and the account never had a subscription (or its first
+    /// payment failed): it is not let in, and gets `NoSubscriptionView` only.
+    var notLetIn: Bool { approved && paymentsEnabled && subscription?.state == "none" }
+
+    /// Payments on, a payment failed on an account that paid before: it keeps
+    /// its writing, and the app says so on load (no way to pay here).
+    var paymentFailed: Bool {
+        paymentsEnabled && subscription?.status == "past_due" && subscription?.state == "lapsed"
     }
 
     /// Applies an email-state answer from any `/api/dashboard/email*` call
