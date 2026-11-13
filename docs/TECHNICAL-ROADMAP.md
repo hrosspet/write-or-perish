@@ -115,7 +115,7 @@ Users have a `plan` column (string, max 16 chars) on the User model. The plan co
 - The frontend receives `voice_mode_enabled` (boolean) from the `/dashboard` endpoint — it does not check plans directly.
 
 ### Authentication & User Management
-- **Magic link email authentication** - Passwordless login via email magic links, replacing Twitter-only OAuth (#54)
+- **Magic link email authentication** - Passwordless login via email magic links, replacing Twitter-only OAuth (#54). Since 2026-11-13 (A.97, `backend/utils/sign_in_links.py`): every emailed link has its own `sign_in_link` row (sha256 of the token, HMAC of the address, sent / expires / first used), so a new request leaves earlier links and the welcome link working; a link works until 15 minutes after its first use, never past its expiry; tokens carry a nonce, and tokens made before (no nonce, no row) are checked against `User.magic_link_token_hash` or their signature and sign in once. `POST /auth/magic-link/send` sends at most 5 emails an hour and 10 a day per address (counted from the rows; over it the answer is unchanged) and takes 10 requests in 15 minutes and 30 a day per client (`request.remote_addr` after ProxyFix, IPv6 by /64; counted in Redis, per process without it; over it a 429 with a calm message). Account deletion withdraws the address's links
 - **Dedicated login page** - Standalone login page with redirect flow (#53)
 - **User plan tiers** - Standardized plan system (free/alpha/pro) with admin dashboard management, migration scripts, and feature gating via `User.has_voice_mode`
 - **Terms of service acceptance** - Terms acceptance tracking with admin ability to reset on account deactivation

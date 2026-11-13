@@ -213,12 +213,12 @@ final class MagicLinkTests: XCTestCase {
 /// 429 and a calm message (backend/utils/sign_in_links.py); the sign-in screen
 /// shows the AuthFailure's message under the address field. Control: any
 /// server error text already came through this way.
+@MainActor
 final class SendMagicLinkTests: XCTestCase {
     private let wait = "If you asked a moment ago, the email is on its way. Please check your inbox, or try again in a few minutes."
 
-    override func tearDown() {
+    override func tearDown() async throws {
         StubURLProtocol.reset()
-        super.tearDown()
     }
 
     private func auth() -> AuthService {
