@@ -41,9 +41,9 @@ from backend.utils.cost import llm_cost_log_fields
 from backend.utils.chunk_plan import UPDATE_THRESHOLD_UNITS
 from backend.utils.llm_batch import (
     BATCH_JOB_MAX_AGE, apply_batch_key_override, batch_check_and_collect,
-    batch_submit, blocked_items, delete_collected_batch_files,
-    drop_openai_batch,
+    batch_submit, blocked_items, drop_openai_batch,
 )
+from backend.utils import anthropic_batch_deletion
 from backend.utils import refusal_backoff
 
 from backend.utils.hidden_rows import (
@@ -504,6 +504,9 @@ def _submit_batch(built):
         ]
         db.session.add(RecentContextBatchJob(
             provider_key=provider_key, batch_id=batch_id, items=items))
+        # Deleted at Anthropic once the job is no longer pending (#693).
+        anthropic_batch_deletion.register(
+            provider_key, batch_id, RecentContextBatchJob.__tablename__)
         submitted += len(items)
     db.session.commit()
     # batch_submit logs (not raises) a provider's failure; those users have
@@ -752,9 +755,11 @@ def _collect_recent_context_batches():
             claimed = _claim_and_apply(job, results, now)
             collected += claimed
             if claimed:
-                # Saved: the batch's files at OpenAI can go (#667). A run
-                # that lost the claim leaves them to the one that won.
-                delete_collected_batch_files(results, keys)
+                # Saved: the batch's files at OpenAI (#667) and the batch
+                # at Anthropic (#693) can go. A run that lost the claim
+                # leaves them to the one that won.
+                anthropic_batch_deletion.delete_collected_batches(
+                    results, keys, RecentContextBatchJob.__tablename__)
     return {"collected": collected, "abandoned": abandoned}
 
 

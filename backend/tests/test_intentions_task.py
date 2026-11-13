@@ -89,6 +89,32 @@ def test_small_corpus_submits_batch_directly_and_persists_job(app, wired, monkey
                           "budget": 1000000, "resubmitted": False}]
 
 
+def test_the_anthropic_batch_is_registered_and_goes_once_cancelled(
+        app, wired, monkeypatch):  # noqa: F811
+    """#693: the batch is recorded with its job; after the admin's cancel
+    nothing needs it, and the hourly sweep deletes it once it has ended
+    (still running: cancel first, never a delete)."""
+    from backend.models import AnthropicBatchDeletion
+    from backend.tests import anthropic_batch_fake as fake
+    from backend.utils import anthropic_batch_deletion as abd
+    u = _make_user("ines")
+    _db.session.commit()
+    it.start_infer_intentions_impl(u.id)
+    row = AnthropicBatchDeletion.query.one()
+    assert (row.batch_id, row.source) == ("b-1", "profile_batch_job")
+    monkeypatch.setitem(app.config, "ANTHROPIC_API_KEY", "k")
+    batches = fake.install(monkeypatch)
+    batches.add("b-1", status="in_progress")
+    assert abd.sweep() == {"needed": 1}     # pending: Loore still reads it
+
+    it.cancel_pending_intentions(u.id)      # cancels at the provider
+    assert batches.batches["b-1"] == "canceling"
+    assert abd.sweep() == {"running": 1}
+    batches.batches["b-1"] = "ended"
+    assert abd.sweep() == {"deleted": 1}
+    assert batches.calls_of("delete") == ["b-1"]
+
+
 def test_oversized_count_shrinks_budget_then_submits(app, wired, monkeypatch):  # noqa: F811
     """Sizing via the free count endpoint: an over-limit count shrinks the
     export budget by the real ratio (against min(budget, corpus)) and the
@@ -272,6 +298,55 @@ def test_poller_marks_a_refused_item_gave_up(app, wired, monkeypatch):  # noqa: 
     assert row.status == "collected"
     assert row.items[0]["gave_up"] is True
     assert UserArtifact.query.filter_by(user_id=u.id, kind="intentions").count() == 0
+
+
+@pytest.mark.parametrize("save_raises", [True, False])
+def test_poller_keeps_the_batch_of_a_result_it_could_not_save(
+        app, wired, monkeypatch, save_raises):  # noqa: F811
+    """#693 review: a result that came back but whose save raised is
+    shown as failed, and its batch stays at Anthropic while Anthropic keeps
+    results, for `backfill_intentions.py --collect`; the sweep deletes it
+    after that. The saved case is the control: deleted at once."""
+    from datetime import datetime, timedelta
+    from unittest.mock import MagicMock
+    import backend.tasks.profile_batch as pb
+    from backend.models import AnthropicBatchDeletion
+    from backend.tests import anthropic_batch_fake as fake
+    from backend.utils import anthropic_batch_deletion as abd
+    monkeypatch.setitem(app.config, "ANTHROPIC_API_KEY", "k")
+    monkeypatch.setattr(pb, "get_api_keys_for_usage",
+                        lambda cfg, usage: {"anthropic": "k"})
+    monkeypatch.setattr(pb, "apply_batch_key_override", lambda keys, cfg: keys)
+    u = _make_user("unsaved_item")
+    _db.session.commit()
+    item = {"custom_id": f"int-u{u.id}", "user_id": u.id, "kind": "intentions",
+            "model_id": "claude-opus-5.5", "budget": 1_000_000,
+            "resubmitted": False}
+    job = _job_for(item)
+    abd.register("anthropic", "b-old", "profile_batch_job")
+    _db.session.commit()
+    batches = fake.install(monkeypatch)
+    batches.add("b-old", results=[fake.succeeded(
+        item["custom_id"], "# Intentions\nA")])
+    if save_raises:
+        monkeypatch.setattr(it, "apply_intentions_item", MagicMock(
+            side_effect=RuntimeError("db down")))
+
+    pb._poll_profile_batches()
+
+    _db.session.expire_all()
+    row = ProfileBatchJob.query.get(job.id)
+    assert row.status == "collected"
+    if not save_raises:
+        assert batches.calls_of("delete") == ["b-old"]
+        return
+    assert row.items[0]["gave_up"] is True
+    assert row.items[0][abd.UNSAVED_RESULT] is True
+    assert batches.calls_of("delete") == []
+    assert abd.sweep() == {"needed": 1}
+    assert abd.sweep(now=datetime.utcnow() + abd.RESULTS_AVAILABLE
+                     + timedelta(hours=1)) == {"deleted": 1}
+    assert AnthropicBatchDeletion.query.one().deleted_at is not None
 
 
 def _job_for(item):
@@ -642,6 +717,83 @@ def test_backfill_script_skips_and_keeps_a_user_version(app, wired, monkeypatch,
     assert _current(u).id == mine.id
     assert APICostLog.query.filter_by(
         user_id=u.id, request_type="intentions_backfill").one().request_ref == KEPT_USER_EDIT_REF
+
+
+@pytest.mark.parametrize("model_known", [False, True])
+def test_backfill_script_collect_keeps_a_batch_it_could_not_save(
+        app, wired, monkeypatch, capsys, model_known):  # noqa: F811
+    """#693 review: `--collect` for a user whose model cannot be resolved
+    (the saved model is no longer offered) saves nothing and keeps the
+    batch, so the re-run with --model that it asks for saves the result.
+    The control: with --model from the start, it is saved and deleted."""
+    import importlib
+    import sys
+    from unittest.mock import MagicMock
+    from backend.tests import anthropic_batch_fake as fake
+    monkeypatch.setitem(sys.modules, "backend.app", MagicMock())
+    monkeypatch.delitem(sys.modules, "backend.scripts.backfill_intentions",
+                        raising=False)
+    script = importlib.import_module("backend.scripts.backfill_intentions")
+    monkeypatch.delitem(sys.modules, "backend.scripts.backfill_intentions")
+    monkeypatch.setitem(app.config, "ANTHROPIC_API_KEY", "k")
+    monkeypatch.setattr(script, "model_for_user", MagicMock(
+        side_effect=RuntimeError("Model no longer offered.")))
+    u = _make_user("retired_model")
+    _db.session.commit()
+    batches = fake.install(monkeypatch)
+    batches.add("msgbatch_r", results=[fake.succeeded(
+        f"int-u{u.id}", "# Intentions\nA")])
+    versions = lambda: UserArtifact.query.filter_by(  # noqa: E731
+        user_id=u.id, kind="intentions").count()
+
+    if not model_known:
+        script.collect_batches(app, ["msgbatch_r"], None)
+        assert "Pass --model" in capsys.readouterr().out
+        assert versions() == 0
+        assert batches.calls_of("delete") == []
+        assert "msgbatch_r" in batches.batches
+
+    script.collect_batches(app, ["msgbatch_r"], "claude-opus-5.5")
+    assert versions() == 1
+    assert batches.calls_of("delete") == ["msgbatch_r"]
+
+
+@pytest.mark.parametrize("save_fails", [False, True])
+def test_backfill_script_collect_deletes_a_saved_anthropic_batch(
+        app, wired, monkeypatch, save_fails):  # noqa: F811
+    """#693: `--collect` deletes the batch at Anthropic once its result is
+    saved; a failed save keeps it for another --collect (that case is a
+    control: it passes on main too)."""
+    import importlib
+    import sys
+    from unittest.mock import MagicMock
+    from backend.models import AnthropicBatchDeletion
+    from backend.tests import anthropic_batch_fake as fake
+    monkeypatch.setitem(sys.modules, "backend.app", MagicMock())
+    monkeypatch.delitem(sys.modules, "backend.scripts.backfill_intentions",
+                        raising=False)
+    script = importlib.import_module("backend.scripts.backfill_intentions")
+    monkeypatch.delitem(sys.modules, "backend.scripts.backfill_intentions")
+    monkeypatch.setitem(app.config, "ANTHROPIC_API_KEY", "k")
+    u = _make_user("collected")
+    _db.session.commit()
+    batches = fake.install(monkeypatch)
+    batches.add("msgbatch_x", results=[fake.succeeded(
+        f"int-u{u.id}", "# Intentions\nA")])
+    if save_fails:
+        monkeypatch.setattr(script, "_save_intentions", MagicMock(
+            side_effect=RuntimeError("db down")))
+
+    script.collect_batches(app, ["msgbatch_x"], "claude-opus-5.5")
+
+    if save_fails:
+        assert batches.calls_of("delete") == []
+        assert AnthropicBatchDeletion.query.count() == 0
+    else:
+        assert batches.calls_of("delete") == ["msgbatch_x"]
+        row = AnthropicBatchDeletion.query.one()
+        assert (row.source, row.deleted_at is not None) == (
+            "backfill_intentions", True)
 
 
 def test_intentions_read_before_a_content_deletion_are_not_saved(

@@ -850,7 +850,11 @@ def _strip_batch_jobs(model, belongs, dry_run, now, counts, key):
     """Take the user's items out of a batch job table (``belongs(item,
     job)``). A pending job that carried only theirs is cancelled at the
     provider and marked cancelled; a finished job that carried only
-    theirs is deleted; any other job keeps the other items."""
+    theirs is deleted; any other job keeps the other items. The batch of
+    a job cancelled or deleted here is deleted at Anthropic by the hourly
+    sweep (#693): registered here too, for a batch from before its
+    registration existed."""
+    from backend.utils import anthropic_batch_deletion
     for job in model.query.order_by(model.id).all():
         items = list(job.items or [])
 
@@ -865,12 +869,16 @@ def _strip_batch_jobs(model, belongs, dry_run, now, counts, key):
             counts["provider_batches_cancelled"] += 1
             if not dry_run:
                 _cancel_provider_batch(job.provider_key, job.batch_id)
+                anthropic_batch_deletion.register(
+                    job.provider_key, job.batch_id, model.__tablename__)
                 job.status = "cancelled"
                 job.collected_at = now
                 job.items = []
         elif dry_run:
             continue
         elif job.status != "pending" and not others:
+            anthropic_batch_deletion.register(
+                job.provider_key, job.batch_id, model.__tablename__)
             db.session.delete(job)
         else:
             job.items = others
@@ -938,10 +946,17 @@ def _stop_in_flight(user_id, dry_run, plan, scope):
         logger.warning("user purge: revoke failed (%s); waiting to revoke "
                        "again", type(e).__name__)
         revoke_failed = True
+    from backend.utils import anthropic_batch_deletion
     for entry in node_batches:
         _cancel_provider_batch(entry.get("provider") or "anthropic",
                                entry["batch_id"],
                                entry.get("key_type") or "chat")
+        # Deleted at Anthropic once it has ended (#693); committed with
+        # the batch tables below.
+        anthropic_batch_deletion.register(
+            entry.get("provider") or "anthropic", entry["batch_id"],
+            anthropic_batch_deletion.PURGE_SOURCE,
+            key_type=entry.get("key_type") or "chat")
 
     lock_busy = False
     # The pipelines whose collectors save per-user results under a lock.

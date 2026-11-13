@@ -2499,6 +2499,46 @@ class RecentContextBatchJob(db.Model):
     collected_at = db.Column(db.DateTime, nullable=True, index=True)
 
 
+class AnthropicBatchDeletion(db.Model):
+    """An Anthropic Message Batch Loore created, kept until the batch is
+    deleted at Anthropic once Loore no longer needs it (#693; the OpenAI
+    twin, #667, deletes a batch's files).
+
+    The row is written in the same commit as the record that owns the
+    batch (the batch job row, or the Glean reply's "_batch" entry), so a
+    crash between saving the results and deleting the batch leaves a row
+    the hourly sweep finds (utils/anthropic_batch_deletion.py). Batch ids,
+    ids and times only: nothing of a request or a result."""
+    __tablename__ = "anthropic_batch_deletion"
+
+    id = db.Column(db.Integer, primary_key=True)
+    batch_id = db.Column(db.String(255), nullable=False, unique=True)
+    # What owns the batch: a batch job table's name
+    # ("profile_batch_job", ...), "read" (a Glean reply's one-item batch,
+    # on node_id), or the code that queued an unowned batch for deletion
+    # ("backfill_intentions", "purge").
+    source = db.Column(db.String(32), nullable=False)
+    # The reply node of a "read" batch. No foreign key: the node can be
+    # deleted before its batch is.
+    node_id = db.Column(db.Integer, nullable=True)
+    # The key the batch was created under ("chat" | "train"): a batch
+    # lives in its key's workspace.
+    key_type = db.Column(db.String(16), nullable=False, default="chat")
+    created_at = db.Column(
+        db.DateTime, nullable=False, default=datetime.utcnow)
+    # When the sweep last looked at the row: it takes the rows it looked
+    # at longest ago first.
+    checked_at = db.Column(db.DateTime, nullable=True)
+    # When Loore asked Anthropic to cancel the batch (it was still
+    # running when Loore no longer needed it).
+    cancel_requested_at = db.Column(db.DateTime, nullable=True)
+    # Failed delete calls, and the last one's error type.
+    attempts = db.Column(db.Integer, nullable=False, default=0)
+    last_error = db.Column(db.String(64), nullable=True)
+    # When Anthropic confirmed the deletion (or answered 404).
+    deleted_at = db.Column(db.DateTime, nullable=True, index=True)
+
+
 class UserDataPurge(db.Model):
     """One request to delete all of a user's data (#268), and the record
     of what the purge did.

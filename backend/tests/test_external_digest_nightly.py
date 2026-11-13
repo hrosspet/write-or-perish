@@ -721,6 +721,61 @@ def test_collector_deletes_the_batch_files_once_saved(
     assert ExternalDigestBatchJob.query.get(job.id).status == "collected"
 
 
+def test_an_anthropic_batch_is_registered_with_its_job(app, monkeypatch):
+    """#693: the batch is recorded in the job's own commit, so it is
+    deleted at Anthropic once the job is no longer pending, also after a
+    crash between the save and the delete."""
+    from backend.models import AnthropicBatchDeletion
+    user = User.query.first()
+    user.timezone = _tz_at_hour(_digest.NIGHTLY_DIGEST_LOCAL_HOUR)
+    _db.session.commit()
+    _mk_item(user.id, "a")
+    _stub_batch_submit(monkeypatch)
+
+    assert _digest.sweep_external_digests() == {"status": "ok",
+                                                "submitted": 1}
+    job = ExternalDigestBatchJob.query.one()
+    row = AnthropicBatchDeletion.query.one()
+    assert (row.batch_id, row.source, row.deleted_at) == (
+        job.batch_id, "external_digest_batch_job", None)
+
+
+@pytest.mark.parametrize("delete_fails", [False, True])
+def test_collector_deletes_the_anthropic_batch_once_saved(
+        app, monkeypatch, delete_fails):
+    """#693: the ended batch is deleted at Anthropic after the digest and
+    the job are saved, never before; a delete that fails leaves the job
+    collected and is counted for the hourly sweep."""
+    from backend.models import AnthropicBatchDeletion
+    from backend.tests import anthropic_batch_fake as fake
+    user = User.query.first()
+    _mk_item(user.id, "a")
+    job = _pending_job(user, datetime.utcnow(), batch_id="msgbatch_d")
+    batches = fake.install(monkeypatch)
+    batches.add("msgbatch_d", results=[fake.succeeded(
+        f"external-digest-{user.id}", "# Topics\n- x")])
+    seen = []
+
+    def on_delete(batch_id):
+        _db.session.expire_all()
+        seen.append((batch_id,
+                     ExternalDigestBatchJob.query.get(job.id).status,
+                     UserArtifact.latest_for(
+                         user.id, _digest.DIGEST_KIND) is not None))
+    batches.on_delete = on_delete
+    if delete_fails:
+        batches.delete_error = RuntimeError("503")
+
+    assert _digest._collect_digest_batches() == {"collected": 1,
+                                                 "abandoned": 0}
+    assert seen == [("msgbatch_d", "collected", True)]
+    _db.session.expire_all()
+    row = AnthropicBatchDeletion.query.filter_by(batch_id="msgbatch_d").one()
+    assert (row.deleted_at is None, row.attempts) == (
+        (True, 1) if delete_fails else (False, 0))
+    assert ExternalDigestBatchJob.query.get(job.id).status == "collected"
+
+
 def _raise_not_found(ids, keys):
     raise RuntimeError("404: no such batch")
 

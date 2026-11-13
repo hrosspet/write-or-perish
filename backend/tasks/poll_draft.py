@@ -30,8 +30,9 @@ from backend.utils.cost import llm_cost_log_fields
 from backend.llm_providers import is_empty_truncated, is_refused
 from backend.utils.llm_batch import (
     batch_submit, batch_check_and_collect, apply_batch_key_override,
-    blocked_items, delete_collected_batch_files,
+    blocked_items,
 )
+from backend.utils import anthropic_batch_deletion
 from backend.utils.tokens import approximate_token_count
 
 logger = logging.getLogger(__name__)
@@ -205,6 +206,10 @@ def _submit_poll_draft(response_id, task_id=None):
                     "model_id": request["model_id"],
                 }],
             ))
+            # Deleted at Anthropic once the job is no longer pending
+            # (#693).
+            anthropic_batch_deletion.register(
+                provider_key, batch_id, PollDraftBatchJob.__tablename__)
         resp.draft_task_id = task_id
         db.session.commit()
     except Exception:
@@ -324,8 +329,10 @@ def _collect_poll_draft_batches():
         job.status = "collected"
         job.collected_at = datetime.utcnow()
         db.session.commit()
-        # Saved: the batch's files at OpenAI can go (#667).
-        delete_collected_batch_files(results, keys)
+        # Saved: the batch's files at OpenAI (#667) and the batch at
+        # Anthropic (#693) can go.
+        anthropic_batch_deletion.delete_collected_batches(
+            results, keys, PollDraftBatchJob.__tablename__)
 
 
 @celery.task

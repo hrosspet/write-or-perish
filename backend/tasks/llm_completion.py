@@ -61,7 +61,8 @@ from backend.utils.thread_size import (
     prompt_limit,
 )
 from backend.utils.llm_batch import (
-    BatchItemFailed, BatchItemCancelled, BatchItemPolicyBlocked,
+    BatchItemFailed, BatchItemCancelled, BatchItemGone,
+    BatchItemPolicyBlocked,
 )
 from backend.utils.ca_feed import (
     CA_CHAT_TURN_NOTE, CA_READ_AGAIN_TURN, CA_READ_AGAIN_TURN_KEPT,
@@ -3341,13 +3342,22 @@ def _request_batch_cancel(entry, api_key, provider):
 
 
 def _delete_batch_files(entry):
-    """Delete the files of the ended one-item OpenAI batch in *entry* once
-    its outcome is saved on the node (#667): its input, output and error
-    files at OpenAI. Best effort, never raises. An Anthropic batch has no
-    uploaded files. The task's soft time limit is let through."""
-    if not entry or (entry.get("provider") or "anthropic") != "openai":
+    """Delete what the provider keeps of the ended one-item batch in
+    *entry* once its outcome is saved on the node: an OpenAI batch's
+    input, output and error files (#667), an Anthropic batch itself
+    (#693; a failed delete is tried again by the hourly sweep). Best
+    effort, never raises. The task's soft time limit is let through."""
+    if not entry:
         return
     from backend.utils import llm_batch, soft_limit
+    if (entry.get("provider") or "anthropic") == "anthropic":
+        from backend.utils import anthropic_batch_deletion
+        anthropic_batch_deletion.delete_now(
+            [entry.get("batch_id")], anthropic_batch_deletion.READ_SOURCE,
+            key_type=entry.get("key_type") or "chat")
+        return
+    if entry.get("provider") != "openai":
+        return
     try:
         keys = llm_batch.apply_batch_key_override(
             get_api_keys_for_usage(flask_app.config,
@@ -3399,7 +3409,9 @@ def _ca_batch_poll(task, llm_node, parent_node, meta, entry, user_id):
     _withdraw_batch_reply). The provider's terminal verdict on the item
     raises BatchItemFailed (a cancel nobody here asked for included);
     anything else that fails here is re-queued by the task's error
-    handler with the entry still live."""
+    handler with the entry still live. A batch already deleted because
+    another run saved its outcome returns ("settled", None), and the
+    node is left as that run left it."""
     from backend.utils import llm_batch
     from backend.utils.spend import user_is_capped
     provider = entry.get("provider") or "anthropic"
@@ -3426,6 +3438,17 @@ def _ca_batch_poll(task, llm_node, parent_node, meta, entry, user_id):
             raise
         _withdraw_batch_reply(llm_node, meta, entry)
         return "withdrawn", None
+    except BatchItemGone:
+        # The batch (Anthropic) or its files (OpenAI) are deleted once an
+        # outcome is saved (#667, #693). A run that overlapped the one
+        # that saved it leaves the node as that run left it; otherwise
+        # the batch was deleted from outside Loore, a verdict.
+        db.session.refresh(llm_node)
+        if llm_node.llm_task_status not in ("pending", "processing"):
+            logger.info("Node %s: batch %s already settled by another "
+                        "run", llm_node.id, entry.get("batch_id"))
+            return "settled", None
+        raise
     except BatchItemPolicyBlocked as e:
         # The provider's verdict like any BatchItemFailed: the node fails
         # and nothing submits the turn again on its own. Reported with
@@ -3518,6 +3541,11 @@ def _ca_batch_submit(task, llm_node, model_id, api_model, messages,
     })
     llm_node.tool_calls_meta = json.dumps(meta)
     llm_node.llm_task_progress = 50
+    # Deleted at Anthropic once the reply is no longer at work (#693).
+    from backend.utils import anthropic_batch_deletion
+    anthropic_batch_deletion.register(
+        provider, batch_id, anthropic_batch_deletion.READ_SOURCE,
+        key_type=key_type, node_id=llm_node.id)
     db.session.commit()
     logger.info("Node %s: batch %s submitted; polling every %ss",
                 llm_node.id, batch_id, CA_BATCH_POLL_SECONDS)
@@ -4123,6 +4151,12 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         'llm_node_id': llm_node_id,
                         'status': 'cancelled',
                         'reason': 'spend_cap',
+                    }
+                if outcome == "settled":
+                    return {
+                        'parent_node_id': parent_node_id,
+                        'llm_node_id': llm_node_id,
+                        'status': 'settled',
                     }
 
             # A batch that has ended is collected even for a user who hit
