@@ -4,8 +4,9 @@ The switch is PAYMENTS_ENABLED. Off, nothing here changes what an account
 can do. On:
 
 * an account gets AI replies when it is on a paid plan
-  (User.on_paid_plan: a plan set by hand, alpha or pro, or a trialing,
-  active or past-due subscription) or is an admin. Every other account
+  (User.on_paid_plan: a plan set by hand, alpha or pro, a trialing or
+  active subscription, or an alpha tester's free month) or is an admin.
+  Every other account
   ("free", or a subscription that ended) keeps writing, reading and
   export; create_llm_placeholder refuses its replies with
   SubscriptionRequired, which the routes answer as a 402 (or, where the
@@ -19,6 +20,8 @@ can do. On:
 A Stripe event never writes ``User.plan``: an account set by hand stays
 as it is (utils/stripe_billing.apply_subscription).
 """
+from datetime import datetime, timedelta
+
 from flask import current_app, has_app_context
 
 from backend.models import SUBSCRIPTION_LEVELS
@@ -214,6 +217,8 @@ def subscription_required_message(user=None, kind="reply"):
         return f"Your subscription has ended, so {so}. {works}"
     if status == "past_due":
         return f"Your last payment didn't go through, so {so}. {works}"
+    if user is not None and getattr(user, "is_alpha_tester", False):
+        return f"Your free month has ended, so {so}. {works}"
     return f"{alone} {works}"
 
 
@@ -260,15 +265,202 @@ def level_spend_limit_usd(level, config=None):
     return None if value is None else float(value)
 
 
+# Until an alpha tester's first paid invoice, the usage ceiling is this
+# level's, whatever level they chose (Peter, 2026-11-13: "the standard
+# limit"): during the free month, and between its end and the first charge.
+ALPHA_UNPAID_CEILING_LEVEL = "standard"
+
+
 def subscription_spend_limit_usd(user, config=None):
     """The monthly ceiling an account's subscription gives it, or None:
     for an account set by hand (its cap stays what it was) and for one
-    whose subscription gives nothing."""
+    whose subscription gives nothing. An alpha tester has the Standard
+    level's ceiling until a first invoice is paid: during the month
+    without a subscription, and with one started during the month (at any
+    level) whose first payment has not gone through. The chosen level's
+    ceiling applies from then."""
     if user is None or getattr(user, "plan_set_by_hand", True):
         return None
-    if not getattr(user, "subscription_grants_access", False):
+    alpha_unpaid = (getattr(user, "alpha_free_granted_at", None) is not None
+                    and not getattr(user, "subscription_ever_paid", False))
+    if getattr(user, "subscription_grants_access", False):
+        if alpha_unpaid:
+            return level_spend_limit_usd(ALPHA_UNPAID_CEILING_LEVEL, config)
+        return level_spend_limit_usd(user.subscription_level, config)
+    if getattr(user, "alpha_free_month_active", False):
+        return level_spend_limit_usd(ALPHA_UNPAID_CEILING_LEVEL, config)
+    return None
+
+
+# ── The alpha free month (#438) ─────────────────────────────────────────
+# Peter, 2026-11-12: alpha testers are "free for one month after the
+# opening, then the discounted price"; 2026-11-13, on when the month
+# starts: "at the beta release date I'll decide later". So it starts on
+# one date for every tester, which the owner gives to
+# `flask alpha-free-month --apply --start YYYY-MM-DD` (00:00 UTC that
+# day), and ends ALPHA_FREE_MONTH_DAYS later, whether or not they visit.
+# The command moves every approved account on the hand-set "alpha" plan
+# to "free" and stores the dates on it. Before the start nothing changes
+# for a tester: they keep the alpha plan's access (User.plan_set_by_hand).
+# During the month they have everything without a card and may subscribe
+# at any time, at the discounted price without a code; the first payment
+# is due when the month ends. After it, without a subscription, the
+# account is lapsed: reading, writing and export stay.
+
+# Stripe refuses a Checkout trial that ends less than 48 hours ahead (one
+# hour of margin on top). A tester who subscribes in the month's last 49
+# hours gets the rest of those hours free: the least Stripe allows for a
+# trial; none at all after the end.
+CHECKOUT_TRIAL_MIN = timedelta(hours=49)
+
+
+def parse_start_date(raw):
+    """The free month's start for "YYYY-MM-DD": 00:00 UTC that day, as a
+    naive UTC datetime. Raises ValueError for anything else."""
+    return datetime.strptime((raw or "").strip(), "%Y-%m-%d")
+
+
+def free_month_dates(start, config=None):
+    """(start, end) of the free month that starts at *start*."""
+    cfg = _config(config)
+    return start, start + timedelta(
+        days=int(cfg.get("ALPHA_FREE_MONTH_DAYS") or 30))
+
+
+def alpha_checkout_trial_end(user, config=None, now=None):
+    """The trial a Checkout gives an alpha tester who subscribes during
+    the free month: until the month ends (at least CHECKOUT_TRIAL_MIN
+    ahead), so the first payment is due then. None once the month is
+    over, or when the account used a trial already: a later subscription
+    is charged at checkout. (Before the month starts a tester keeps the
+    alpha plan's access, and Checkout refuses them as it refuses alpha.)"""
+    if getattr(user, "subscription_trial_used", False):
         return None
-    return level_spend_limit_usd(user.subscription_level, config)
+    if not getattr(user, "alpha_free_month_active", False):
+        return None
+    now = now or datetime.utcnow()
+    return max(user.alpha_free_until, now + CHECKOUT_TRIAL_MIN)
+
+
+def alpha_free_month_candidates(usernames=None):
+    """Accounts the free month goes to: approved, not admins, on the
+    hand-set "alpha" plan, not being deleted, not given it already.
+    *usernames* narrows the list."""
+    from backend.models import User
+    q = User.query.filter(User.approved.is_(True),
+                          User.is_admin.isnot(True),
+                          User.plan == "alpha",
+                          User.deleted_at.is_(None),
+                          User.alpha_free_granted_at.is_(None))
+    if usernames:
+        q = q.filter(User.username.in_(list(usernames)))
+    return q.order_by(User.id).all()
+
+
+def current_free_month():
+    """(start, end) of the free month the command gave, or None before it
+    ran (or after a full --undo). Every tester has the same dates: the
+    command refuses a second date (--change-date moves them all)."""
+    from backend.models import User
+    row = (User.query
+           .filter(User.alpha_free_granted_at.isnot(None),
+                   User.alpha_free_start.isnot(None),
+                   User.alpha_free_until.isnot(None))
+           .order_by(User.alpha_free_granted_at.desc(), User.id.desc())
+           .first())
+    return (row.alpha_free_start, row.alpha_free_until) if row else None
+
+
+def convert_if_alpha(user, config=None, now=None):
+    """Once the free month has been given, an account that comes in on
+    the "alpha" plan later (approved after a wait, or restored from a
+    deletion it was waiting on when the command ran) gets the same month,
+    with the same dates, as the command would have given it. Does not
+    commit: the caller's change and this go together. Returns True when
+    it converted the account."""
+    if user is None or not payments_enabled(config):
+        return False
+    if (user.plan != "alpha" or not user.approved or user.is_admin
+            or user.deleted_at is not None
+            or user.alpha_free_granted_at is not None):
+        return False
+    month = current_free_month()
+    if month is None:
+        return False
+    user.plan = "free"
+    user.alpha_free_granted_at = now or datetime.utcnow()
+    user.alpha_free_start, user.alpha_free_until = month
+    return True
+
+
+def alpha_testers(usernames=None):
+    """Accounts given the free month already (*usernames* narrows)."""
+    from backend.models import User
+    q = User.query.filter(User.alpha_free_granted_at.isnot(None))
+    if usernames:
+        q = q.filter(User.username.in_(list(usernames)))
+    return q.order_by(User.id).all()
+
+
+def grant_alpha_free_month(users, start, config=None, now=None):
+    """Move *users* from "alpha" to "free" with the free month from
+    *start* (naive UTC). Commits. Returns how many changed."""
+    from backend.extensions import db
+    now = now or datetime.utcnow()
+    begin, end = free_month_dates(start, config)
+    for user in users:
+        user.plan = "free"
+        user.alpha_free_granted_at = now
+        user.alpha_free_start = begin
+        user.alpha_free_until = end
+    db.session.commit()
+    return len(users)
+
+
+def move_alpha_free_month(users, start, config=None):
+    """Give *users* (every alpha tester) the free month from *start*
+    instead. Their plan and anything they subscribed stay as they are.
+    Commits. Returns how many changed."""
+    from backend.extensions import db
+    begin, end = free_month_dates(start, config)
+    for user in users:
+        user.alpha_free_start = begin
+        user.alpha_free_until = end
+    db.session.commit()
+    return len(users)
+
+
+def undo_alpha_free_month(usernames=None):
+    """Put alpha testers back on the hand-set "alpha" plan and forget
+    their free month. Left as they are: an account whose plan was changed
+    since (an admin's choice), and one with a live subscription (it would
+    keep being charged for what "alpha" gives free; cancel it first).
+    Commits. Returns (how many changed, [(username, why skipped)])."""
+    from backend.extensions import db
+    from backend.models import SUBSCRIPTION_GRANTING_STATUSES
+    done, skipped = 0, []
+    for user in alpha_testers(usernames):
+        if user.plan != "free":
+            skipped.append((user.username, f"its plan is {user.plan} now"))
+            continue
+        if user.subscription_status in SUBSCRIPTION_GRANTING_STATUSES:
+            skipped.append((user.username, "it has a live subscription"))
+            continue
+        user.plan = "alpha"
+        user.alpha_free_granted_at = None
+        user.alpha_free_start = None
+        user.alpha_free_until = None
+        done += 1
+    db.session.commit()
+    return done, skipped
+
+
+def checkout_levels(user):
+    """The levels the account may choose without a code: an alpha tester
+    has the discounted one too, first."""
+    if getattr(user, "is_alpha_tester", False):
+        return ("discounted",) + OFFERED_LEVELS
+    return OFFERED_LEVELS
 
 
 def level_price_cents(level, config=None):
@@ -281,6 +473,7 @@ def subscription_state(user, config=None):
     iPhone Settings). Ids and payment details stay on the server."""
     cfg = _config(config)
     state = access_state(user, cfg)
+    alpha = bool(user.is_alpha_tester)
     return {
         # "set_by_hand" (also admins), "active", "lapsed", "none".
         "state": "set_by_hand" if state == "full" else state,
@@ -289,8 +482,17 @@ def subscription_state(user, config=None):
         "current_period_end": iso_utc(user.subscription_period_end),
         "trial_end": iso_utc(user.subscription_trial_end),
         "cancel_at_period_end": bool(user.subscription_cancel_at_period_end),
-        "trial_available": not user.subscription_trial_used,
+        # An alpha tester's free month takes the trial's place.
+        "trial_available": not user.subscription_trial_used and not alpha,
         "trial_days": int(cfg.get("SUBSCRIPTION_TRIAL_DAYS") or 0),
+        # The alpha free month: whether this is an alpha tester, when the
+        # month starts and ends (one date for every tester), whether it is
+        # still to come (the alpha plan's access until then) or runs.
+        "alpha_tester": alpha,
+        "free_month_upcoming": bool(user.alpha_free_month_upcoming),
+        "free_month_active": bool(user.alpha_free_month_active),
+        "free_month_start": iso_utc(user.alpha_free_start) if alpha else None,
+        "free_month_until": iso_utc(user.alpha_free_until) if alpha else None,
         "plan_set_by_hand": bool(user.plan_set_by_hand),
         "ai_replies": ai_replies_allowed(user, cfg),
         # Live at Stripe (it renews) but giving nothing: a failed payment

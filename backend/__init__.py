@@ -601,8 +601,10 @@ def create_app():
     )
     app.cli.add_command(pgvector_enable_command)
     app.cli.add_command(pgvector_compare_command)
-    from backend.billing_cli import stripe_sync_catalog_command
+    from backend.billing_cli import (
+        alpha_free_month_command, stripe_sync_catalog_command)
     app.cli.add_command(stripe_sync_catalog_command)
+    app.cli.add_command(alpha_free_month_command)
 
     try:
         from experiments.prompt_rct.run_rct import rct_cli

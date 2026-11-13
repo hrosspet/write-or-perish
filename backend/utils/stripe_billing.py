@@ -430,7 +430,15 @@ def checkout_session_params(user, level, price_id, config=None,
         meta["loore_code_id"] = str(code_id)
     subscription_data = {"metadata": dict(meta)}
     trial_days = int(cfg.get("SUBSCRIPTION_TRIAL_DAYS") or 0)
-    if trial_days > 0 and not user.subscription_trial_used:
+    if user.is_alpha_tester:
+        # The free month is an alpha tester's trial: no 14 days on top.
+        # Subscribing during it, the first payment is due when it ends.
+        from backend.utils.subscriptions import alpha_checkout_trial_end
+        trial_end = alpha_checkout_trial_end(user, cfg)
+        if trial_end is not None:
+            subscription_data["trial_end"] = int(
+                trial_end.replace(tzinfo=timezone.utc).timestamp())
+    elif trial_days > 0 and not user.subscription_trial_used:
         subscription_data["trial_period_days"] = trial_days
     return {
         "mode": "subscription",
@@ -566,13 +574,20 @@ def _apply_payment_state(user, sub, status):
     makes a subscription active when its trial ends and charges the
     first invoice about an hour later, so active is not proof of a
     payment. Only a paid invoice above zero sets it (handle_event)."""
+    # An alpha tester before their first paid invoice (#438) has one
+    # ceiling from the free month's start; a subscription that arrives
+    # meanwhile does not start it again.
+    from backend.utils.spend import alpha_unpaid_since
+    alpha_unpaid = alpha_unpaid_since(user) is not None
     if user.stripe_subscription_id != sub.get("id"):
         user.subscription_revoked = None
-        user.subscription_trial_capped = False
+        if not alpha_unpaid:
+            user.subscription_trial_capped = False
     first_payment_pending = (status == "active"
                              and not user.subscription_ever_paid
                              and bool(sub.get("trial_start")))
-    if status != "trialing" and not first_payment_pending:
+    if (status != "trialing" and not first_payment_pending
+            and not alpha_unpaid):
         user.subscription_trial_capped = False
     details = sub.get("cancellation_details") or {}
     user.subscription_end_reason = (details.get("reason")
@@ -988,9 +1003,17 @@ def handle_event(gateway, event, config=None):
             and (obj.get("amount_paid") or 0) > 0
             and user.stripe_subscription_id == sub_id):
         # The only proof of a payment (see _apply_payment_state). The
-        # trial's ceiling ends with it.
+        # trial's ceiling ends with it, and the monthly ceiling may change
+        # with it (an alpha tester's is Standard's until the first payment,
+        # #438): a block that the new ceiling no longer warrants is lifted.
+        from backend.utils.spend import (
+            get_user_spend_limit_usd, reconcile_user_spend_block)
+        cfg = _config(config)
+        limit_before = get_user_spend_limit_usd(user, cfg)
         user.subscription_ever_paid = True
         user.subscription_trial_capped = False
+        if get_user_spend_limit_usd(user, cfg) != limit_before:
+            reconcile_user_spend_block(user, cfg)
     return "applied" if user is not None else "no_account"
 
 

@@ -414,6 +414,10 @@ def restore_account(user):
         db.session.rollback()
         return False
     user.deleted_at = None
+    # An "alpha" account that was waiting to be deleted when the alpha free
+    # month was given gets the same month now (#438).
+    from backend.utils.subscriptions import convert_if_alpha
+    convert_if_alpha(user)
     db.session.commit()
     user_purge.settle_restore(cancelled)
     _drop_public_pages(user)
@@ -469,6 +473,10 @@ def undo_admin_deletion(job_id, admin_id):
         db.session.rollback()
         return False
     user.deleted_at = None
+    # An "alpha" account that was waiting to be deleted when the alpha free
+    # month was given gets the same month now (#438).
+    from backend.utils.subscriptions import convert_if_alpha
+    convert_if_alpha(user)
     db.session.commit()
     if not replaced:
         user_purge.settle_restore(cancelled)

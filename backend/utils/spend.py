@@ -185,11 +185,33 @@ def user_spend_since_microdollars(user_id, since):
 # none follows. An admin's per-user limit replaces it, as it replaces the
 # level's ceiling.
 
+def alpha_unpaid_since(user):
+    """An alpha tester (#438) from the free month's start to their first
+    paid invoice, while the month or a subscription not paid yet gives
+    them the paid set: the month's start, else None. That whole stretch,
+    the time after the month's end before the first charge included,
+    counts against one ceiling (trial_limit_usd)."""
+    if getattr(user, "alpha_free_granted_at", None) is None:
+        return None
+    if getattr(user, "subscription_ever_paid", False):
+        return None
+    start = getattr(user, "alpha_free_start", None)
+    if start is None or datetime.utcnow() < start:
+        return None
+    if (getattr(user, "alpha_free_month_active", False)
+            or getattr(user, "subscription_grants_access", False)):
+        return start
+    return None
+
+
 def under_trial_ceiling(user):
     """Trialing, or active after the trial before its first payment went
     through: Stripe makes the subscription active at the trial's end and
     charges the first invoice about an hour later, and until then
-    nothing has been paid."""
+    nothing has been paid. Also an alpha tester before their first paid
+    invoice (alpha_unpaid_since)."""
+    if alpha_unpaid_since(user) is not None:
+        return True
     status = getattr(user, "subscription_status", None)
     if status == "trialing":
         return True
@@ -205,6 +227,16 @@ def trial_limit_usd(user, config):
         return 0
     if getattr(user, "monthly_spend_limit_usd", None) is not None:
         return 0
+    if alpha_unpaid_since(user) is not None:
+        # An alpha tester (#438): from the free month's start to the first
+        # paid invoice, Standard's ceiling once in all (Peter, 2026-11-13:
+        # "the standard limit"), however many calendar months it spans.
+        from backend.utils.subscriptions import (
+            ALPHA_UNPAID_CEILING_LEVEL, level_spend_limit_usd)
+        return float(level_spend_limit_usd(ALPHA_UNPAID_CEILING_LEVEL,
+                                           config) or 0)
+    if getattr(user, "alpha_free_granted_at", None) is not None:
+        return 0
     return float(config.get("SUBSCRIPTION_TRIAL_SPEND_LIMIT_USD") or 0)
 
 
@@ -218,7 +250,8 @@ def enforce_trial_cap(user, config, send_email=None):
     start. Commits when it changed. Returns True when the user is
     blocked by it."""
     limit = trial_limit_usd(user, config)
-    since = getattr(user, "subscription_trial_start", None)
+    since = (alpha_unpaid_since(user)
+             or getattr(user, "subscription_trial_start", None))
     blocked = False
     spend = 0
     if limit > 0 and since is not None:
@@ -601,6 +634,15 @@ def spend_cap_payload(user=None, now=None):
     if isinstance(user, User) and trial_capped(user) and \
             not (user.spend_blocked_month
                  and user.spend_blocked_month == current_month(now)):
+        if alpha_unpaid_since(user) is not None:
+            # An alpha tester's free month (#438): one ceiling until the
+            # first payment.
+            return {
+                "error": "monthly_spend_limit_reached",
+                "message": ("You've reached the usage limit of your free "
+                            "month. It lifts with your first payment."),
+                "lifts_on": None,
+            }
         # The trial's own ceiling (#438): it lifts when the trial ends.
         end = user.subscription_trial_end
         when = f" on {end.strftime('%B')} {end.day}" if end else ""
