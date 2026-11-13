@@ -5,7 +5,9 @@
 //
 // What a no does (backend utils/privacy): no pre-fill runs for the
 // account, and every AI read of the person's writing as a whole leaves
-// the tweets a pre-fill brought in out. What was already made stays.
+// the tweets a pre-fill brought in out. What was already made stays, and
+// the profile and intentions stay in use (replies, Glean) until edited;
+// neither can be deleted.
 
 // The handle the tweets come from: the one Loore pre-filled from, else
 // the X account the person signs in with, else the username (the card's
@@ -24,10 +26,10 @@ export function tweetSeedHelp(user) {
   const text =
     `With Yes, Loore brings in your public tweets as @${tweetSeedHandle(user)}, ` +
     "keeps them private in your Loore, and drafts your profile and intentions " +
-    "from them. With No, it brings in no more of them, and leaves the ones it " +
-    "brought in out whenever it reads through your writing, such as to update " +
-    "your profile. What it already made stays: those tweets, your profile and " +
-    "your intentions, each yours to edit or delete.";
+    "from them. With No, it brings in no more of them and leaves the ones it " +
+    "brought in out whenever it reads through your writing. What it already " +
+    "made stays: those tweets, which you can delete, and your profile and " +
+    "intentions, which Loore keeps using in replies and Glean until you edit them.";
   return user && user.prefill_consent ? text : `${text} Until you answer, Loore may still bring them in.`;
 }
 
@@ -38,7 +40,7 @@ export function tweetSeedNoted(user, answer) {
     return "Noted. We'll seed your Loore from your public tweets and have first drafts of your artifacts — like your profile and intentions — waiting when you come in.";
   }
   if (user && user.prefilled_handle) {
-    return "Noted. Loore brings in no more of your tweets, and leaves the ones it brought in out whenever it reads through your writing. What it already made stays, yours to edit or delete. You can change this in Settings.";
+    return "Noted. Loore brings in no more of your tweets and leaves the ones it brought in out whenever it reads through your writing. Your profile and intentions stay, and Loore keeps using them until you edit them. You can change this in Settings.";
   }
   return "Noted. You'll start from a blank page — you can always seed from your tweets later, from Settings.";
 }

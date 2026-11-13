@@ -77,7 +77,7 @@ test('the text says what each answer does and what stays', () => {
   const help = screen.getByText(/With Yes, Loore brings in your public tweets as @ana_tw/);
   expect(help).toHaveTextContent(/With No, it brings in no more of them/);
   expect(help).toHaveTextContent(
-    /What it already made stays: those tweets, your profile and your intentions, each yours to edit or delete\./);
+    /What it already made stays: those tweets, which you can delete, and your profile and intentions, which Loore keeps using in replies and Glean until you edit them\./);
 });
 
 test.each([['yes', 'no'], ['no', 'yes']])('changing %s to %s saves it', async (from, to) => {
@@ -111,7 +111,7 @@ describe('the card', () => {
   test('a no on an account Loore already pre-filled does not promise a blank page', async () => {
     await answerNo({ ...baseUser, prefilled_handle: 'ana_tw' });
     expect(screen.queryByText(/blank page/)).toBeNull();
-    expect(screen.getByText(/What it already made stays, yours to edit or delete\./)).toBeInTheDocument();
+    expect(screen.getByText(/Your profile and intentions stay, and Loore keeps using them until you edit them\./)).toBeInTheDocument();
   });
 
   test('a no before any pre-fill keeps its line', async () => {

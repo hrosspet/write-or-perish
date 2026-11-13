@@ -1405,7 +1405,7 @@ POST   /api/connections/:id/message     # Message in connection thread
 **Cold Start Strategy:**
 0. ✅ Per-account cold start (2026-08-27): admin pre-fills a whitelisted account from its Community Archive tweets → batch-built "public persona so far" profile, so a new signup never faces the blank page
    - ✅ Opt-in (2026-08-27): X-login signups answer yes / not now on `/alpha-thank-you` (and once more on `/welcome`); escapable, nothing preselected, unanswered ≠ declined
-   - ✅ Changeable in Settings (#662, A.91): "Start from your tweets" on the Account page (web and iPhone) shows the answer and changes it both ways. A no stops every pre-fill (also one already fetching) and leaves the tweets a pre-fill brought in out of every AI read of the user's writing as a whole (profile builds, intentions, recent context, a reply's background writing); the tweets, profile and intentions already made stay, and the text says so
+   - ✅ Changeable in Settings (#662, A.91): "Start from your tweets" on the Account page (web and iPhone) shows the answer and changes it both ways. A no stops every pre-fill (also one already fetching) and leaves the tweets a pre-fill brought in out of every AI read of the user's writing as a whole (profile builds, intentions, recent context, a reply's background writing); the tweets, profile and intentions already made stay (the profile and intentions in use until edited), and the text says so; a first build under way when the no comes merges nothing read from the tweets; an account loaded from a bundle behaves the same
 1. Launch Features 1-3 first (single-player value)
 2. Build user base (waitlist, invite-only)
 3. Launch Feature 4 when 500+ users (critical mass)

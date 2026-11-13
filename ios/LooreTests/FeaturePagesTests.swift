@@ -127,10 +127,11 @@ final class AccountModelTests: StubbedAppTestCase {
         try signIn(["twitter_login": true, "twitter_handle": "sw", "prefilled_handle": "sw_tw"])
         XCTAssertEqual(AccountModel.tweetSeedHelp(app.user!),
                        "With Yes, Loore brings in your public tweets as @sw_tw, keeps them private in your Loore, "
-                       + "and drafts your profile and intentions from them. With No, it brings in no more of them, "
-                       + "and leaves the ones it brought in out whenever it reads through your writing, such as to "
-                       + "update your profile. What it already made stays: those tweets, your profile and your "
-                       + "intentions, each yours to edit or delete. Until you answer, Loore may still bring them in.")
+                       + "and drafts your profile and intentions from them. With No, it brings in no more of them "
+                       + "and leaves the ones it brought in out whenever it reads through your writing. What it "
+                       + "already made stays: those tweets, which you can delete, and your profile and intentions, "
+                       + "which Loore keeps using in replies and Glean until you edit them. Until you answer, Loore "
+                       + "may still bring them in.")
         try signIn(["twitter_login": true, "twitter_handle": "sw", "prefill_consent": "yes"])
         let answered = AccountModel.tweetSeedHelp(app.user!)
         XCTAssertTrue(answered.hasPrefix("With Yes, Loore brings in your public tweets as @sw, "))
@@ -158,7 +159,7 @@ final class AccountModelTests: StubbedAppTestCase {
         try signIn(["twitter_login": true, "prefilled_handle": "sw_tw"])
         let noted = AccountModel.tweetSeedNoted(app.user!, answer: .no)
         XCTAssertFalse(noted.contains("blank page"))
-        XCTAssertTrue(noted.contains("What it already made stays, yours to edit or delete."))
+        XCTAssertTrue(noted.contains("Your profile and intentions stay, and Loore keeps using them until you edit them."))
         try signIn(["twitter_login": true])
         XCTAssertEqual(AccountModel.tweetSeedNoted(app.user!, answer: .no),
                        "Noted. You'll start from a blank page — you can always seed from your tweets later, from Settings.")

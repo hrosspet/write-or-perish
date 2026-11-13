@@ -245,10 +245,10 @@ final class AccountModel {
     static func tweetSeedHelp(_ user: CurrentUser) -> String {
         let text = "With Yes, Loore brings in your public tweets as @\(tweetSeedHandle(user)), "
             + "keeps them private in your Loore, and drafts your profile and intentions "
-            + "from them. With No, it brings in no more of them, and leaves the ones it "
-            + "brought in out whenever it reads through your writing, such as to update "
-            + "your profile. What it already made stays: those tweets, your profile and "
-            + "your intentions, each yours to edit or delete."
+            + "from them. With No, it brings in no more of them and leaves the ones it "
+            + "brought in out whenever it reads through your writing. What it already "
+            + "made stays: those tweets, which you can delete, and your profile and "
+            + "intentions, which Loore keeps using in replies and Glean until you edit them."
         return user.prefillConsent == nil ? text + " Until you answer, Loore may still bring them in." : text
     }
 
@@ -259,7 +259,7 @@ final class AccountModel {
             return "Noted. We'll seed your Loore from your public tweets and have first drafts of your artifacts — like your profile and intentions — waiting when you come in."
         }
         if user.prefilledHandle != nil {
-            return "Noted. Loore brings in no more of your tweets, and leaves the ones it brought in out whenever it reads through your writing. What it already made stays, yours to edit or delete. You can change this in Settings."
+            return "Noted. Loore brings in no more of your tweets and leaves the ones it brought in out whenever it reads through your writing. Your profile and intentions stay, and Loore keeps using them until you edit them. You can change this in Settings."
         }
         return "Noted. You'll start from a blank page — you can always seed from your tweets later, from Settings."
     }

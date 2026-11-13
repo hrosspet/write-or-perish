@@ -303,6 +303,128 @@ class TestWithheldFromAIReads:
         assert len(withheld_prefill_clauses(u.id)) == 1
 
 
+# ── The person's own archive upload after a no ────────────────────────────
+
+def test_own_upload_after_a_no_is_read_again(app, users, monkeypatch):  # noqa: F811
+    """The person says no, then uploads their own X archive, which holds a
+    tweet the pre-fill already brought in and a new one. Both are their
+    own now and are read again; the import counts the returning tweet as
+    added to what the profile reads."""
+    import backend.routes.import_data as imp
+    seen = {}
+    monkeypatch.setattr(imp, "_profile_after_import",
+                        lambda uid, changes: seen.update(changes=changes)
+                        or (None, False, None))
+    from backend.routes.export_data import count_remaining_units
+    u = users["tw"]
+    row = {"id_str": "111", "full_text": TWEET_TEXT + " one",
+           "created_at": "Thu Jan 01 09:00:00 +0000 2026", "is_reply": False,
+           "token_count": 100}
+    imp.create_twitter_nodes(u.id, iter([row]), 1, "separate_nodes", True,
+                             "private", "chat", None, provenance="prefill_ca")
+    _set_consent(u, "no")
+    assert count_remaining_units(u.id, None) == 0
+
+    new = dict(row, id_str="222", full_text="a tweet only in my own archive",
+               created_at="Thu Jan 01 10:00:00 +0000 2026")
+    imp.create_twitter_nodes(u.id, iter([row, new]), 2, "separate_nodes", True,
+                             "private", "chat", None,
+                             provenance="archive_upload")
+    assert {n.provenance for n in Node.query.filter_by(human_owner_id=u.id)} == {
+        "archive_upload"}
+    assert count_remaining_units(u.id, None) == 200
+    assert seen["changes"].added == 2
+
+
+def test_own_upload_without_a_no_changes_nothing_read(app, users, monkeypatch):  # noqa: F811
+    """Without a no the pre-filled tweet was read already: the upload
+    makes it the person's own and counts nothing as added."""
+    import backend.routes.import_data as imp
+    seen = {}
+    monkeypatch.setattr(imp, "_profile_after_import",
+                        lambda uid, changes: seen.update(changes=changes)
+                        or (None, False, None))
+    u = users["tw"]
+    row = {"id_str": "111", "full_text": TWEET_TEXT,
+           "created_at": "Thu Jan 01 09:00:00 +0000 2026", "is_reply": False,
+           "token_count": 100}
+    imp.create_twitter_nodes(u.id, iter([row]), 1, "separate_nodes", True,
+                             "private", "chat", None, provenance="prefill_ca")
+    imp.create_twitter_nodes(u.id, iter([row]), 1, "separate_nodes", True,
+                             "private", "chat", None,
+                             provenance="archive_upload")
+    assert Node.query.filter_by(human_owner_id=u.id).one().provenance == (
+        "archive_upload")
+    assert seen["changes"].added == 0
+
+
+# ── An account loaded from a bundle (dump_user + load_user) ───────────────
+
+def test_a_dumped_and_loaded_account(app, users, tmp_path):  # noqa: F811
+    """A pre-fill bundle made elsewhere and loaded here: its tweets keep
+    their provenance and the account its handle, so a no leaves the tweets
+    out as on an account pre-filled through the admin routes. Without a
+    no, the account is read as before provenance was carried: no clause,
+    and still not public-only for the choice of profile models."""
+    from backend.scripts import dump_user, load_user
+    from backend.utils.privacy import withheld_prefill_clauses
+    from backend.utils.profile_providers import writing_is_public_only
+    from backend.routes.export_data import build_user_export_content
+    src = users["tw"]
+    src.prefilled_handle = "BirdPerson"
+    _node(src, TWEET_TEXT, 0, "prefill_ca", origin="twitter")
+    _db.session.commit()
+    src_id = src.id
+    out = tmp_path / "bundle.jsonl"
+    dump_user._run("birdperson", str(out), include_private=True)
+    # The other environment's copy steps aside (the dump detached `src`).
+    User.query.filter_by(id=src_id).update({"username": "birdperson_elsewhere"})
+    _db.session.commit()
+
+    load_user._run(str(out), None, False, False, twitter_id="999")
+    loaded = User.query.filter_by(username="birdperson").one()
+    tweet = Node.query.filter_by(human_owner_id=loaded.id).one()
+    assert tweet.provenance == "prefill_ca"
+    assert loaded.prefilled_handle == "BirdPerson"
+    # As before: the load marks the writing private for #589's rule. The
+    # provenance alone would make this never-signed-in account public-only
+    # (both providers' models for its builds): that is Peter's call.
+    assert loaded.profile_private_read is True
+    assert not writing_is_public_only(loaded)
+    loaded.profile_private_read = False
+    assert writing_is_public_only(loaded)
+    loaded.profile_private_read = True
+    _db.session.commit()
+    assert withheld_prefill_clauses(loaded.id) == []
+
+    _node(loaded, OWN_TEXT, 5)               # written in Loore after
+    _db.session.commit()
+
+    def text():
+        return _texts(build_user_export_content(
+            loaded, max_tokens=10_000, filter_ai_usage=True,
+            include_strategy="engaged_threads"))
+
+    assert TWEET_TEXT in text()
+    _set_consent(loaded, "no")
+    assert TWEET_TEXT not in text() and OWN_TEXT in text()
+
+
+def test_a_bundle_handle_unlike_the_username_is_left_unset(app, users, tmp_path):  # noqa: F811
+    """Control (passes on main too, where no handle is carried): Glean
+    leaves out the tweets of the account's username and its pre-filled
+    handle, so a different handle would change what Glean reads: the
+    load leaves it unset."""
+    from backend.scripts import dump_user, load_user
+    src = users["tw"]
+    src.prefilled_handle = "someone_else"
+    _db.session.commit()
+    out = tmp_path / "bundle.jsonl"
+    dump_user._run("birdperson", str(out), include_private=True)
+    load_user._run(str(out), "fresh_name", False, False)
+    assert User.query.filter_by(username="fresh_name").one().prefilled_handle is None
+
+
 # ── The admin load script ─────────────────────────────────────────────────
 
 def test_load_script_refuses_an_account_that_said_no(app, users, tmp_path, capsys):  # noqa: F811

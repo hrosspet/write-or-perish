@@ -18,12 +18,13 @@ that environment's DB and KMS key:
     python backend/scripts/dump_user.py --username RichDecibels --out data/rich.jsonl
 
 What it carries (all of it, not "latest N"):
-  - user: username, timezone, preferred_model, plan (flags like
-    approved/is_admin are NOT carried — the target decides those)
+  - user: username, timezone, preferred_model, plan, prefilled_handle
+    (flags like approved/is_admin are NOT carried — the target decides
+    those)
   - nodes: every alive PUBLIC node the user authored or owns (imported
     archives, published writing, LLM replies in those threads) with parent /
     continuation links,
-    origin, source_key, privacy, ai_usage, timestamps, token counts,
+    origin, provenance, source_key, privacy, ai_usage, timestamps, token counts,
     tool_calls_meta; LLM authors are referenced by username
   - node embeddings (vectors, so no re-embedding on load)
   - user_profile: the FULL iterative chain with every column, incl.
@@ -109,6 +110,8 @@ def _run(username, out_path, include_private=False):
             "timezone": getattr(user, "timezone", None),
             "preferred_model": user.preferred_model,
             "plan": user.plan,
+            # The handle a pre-fill brought the tweets from (#662).
+            "prefilled_handle": user.prefilled_handle,
         },
         "profiles": _profiles(user, UserProfile),
         "recent_contexts": _recent(user, UserRecentContext),
@@ -151,6 +154,9 @@ def _run(username, out_path, include_private=False):
                 "ai_usage": n.ai_usage,
                 "source_key": n.source_key,
                 "origin": n.origin,
+                # How an imported entry reached Loore: a pre-fill's tweets
+                # are told apart by it after a no to the tweet seed (#662).
+                "provenance": n.provenance,
                 "tool_calls_meta": n.tool_calls_meta,
                 "created_at": _iso(n.created_at),
                 "updated_at": _iso(n.updated_at),

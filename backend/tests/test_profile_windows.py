@@ -4640,3 +4640,77 @@ def test_a_soft_limit_in_a_set_s_submit_resumes_outside_the_cohort(
     pw.advance_profile_windows.apply_async.reset_mock()
     pb._seed_profile_batches()
     pw.advance_profile_windows.apply_async.assert_called_once()
+
+
+# ── #662: a no to the tweet seed during a first build ─────────────────────
+
+def _prefilled_tweets_at(user, times):
+    """The pre-filled tweets as rows of the node table at the corpus's
+    dates (the corpus stands in for counting and rendering; the check of
+    what a window held reads the node table)."""
+    from backend.models import Node
+    for t in times:
+        n = Node(user_id=user.id, human_owner_id=user.id, node_type="user",
+                 privacy_level="private", ai_usage="chat", origin="twitter",
+                 provenance="prefill_ca")
+        n.set_content("a synthetic tweet")
+        n.created_at = t
+        db.session.add(n)
+    db.session.commit()
+
+
+def test_a_no_during_a_first_build_sends_no_merge_of_the_tweets(world):
+    """The windows of a first build were read from the pre-filled tweets
+    and collected; the person says no before the final merge goes out.
+    Nothing more is sent for them: the windows stay stored but are not
+    merged, no profile appears, nothing is left building, and after a
+    later yes the next build starts a new set and reaches its final."""
+    world.corpus = _windows_corpus(3)
+    world.corpus.origin = "twitter"
+    u = _user(profile_needs_full_regen=True, prefill_consent="yes")
+    _prefilled_tweets_at(u, [t for t, _u in world.corpus.rows])
+    _advance(u)
+    _poll()                      # the windows are in; the final is due
+    windows = _rows(u, "window")
+    assert len(windows) >= 2 and not _items("final")
+
+    u.prefill_consent = "no"     # as the Settings switch stores it
+    u.prefill_consent_at = datetime.utcnow()
+    db.session.commit()
+    world.corpus = Corpus(0)     # what the filtered scope reads now
+    sent = len(world.provider.submits)
+    _advance(u)
+    assert len(world.provider.submits) == sent
+    assert not _items("final")
+    assert {r.ai_usage for r in _rows(u, "window")} == {"none"}
+    db.session.refresh(u)
+    assert not u.profile_batch_pending
+    assert u.profile_generation_task_id is None
+    from backend.routes.dashboard import get_latest_profile
+    assert get_latest_profile(u) is None
+    # The seeder's gate finds nothing of the stopped set to do.
+    assert not pw.set_work_due(u, ex.profile_update_base(u.id))
+
+    u.prefill_consent = "yes"
+    db.session.commit()
+    world.corpus = _windows_corpus(3)
+    _build(world, u)
+    finals = _rows(u, "integration")
+    assert finals and finals[-1].window_set != windows[0].window_set
+    assert get_latest_profile(u)["id"] == finals[-1].id
+
+
+def test_windows_read_after_a_no_are_merged(world):
+    """The windows of a build that started after the no read without the
+    pre-filled tweets, also where their dates hold one (here the first
+    window's, which starts at the beginning) and where they read tweets
+    the person uploaded: they are merged, and nothing is read twice."""
+    world.corpus = _windows_corpus(3)
+    world.corpus.origin = "twitter"
+    u = _user(profile_needs_full_regen=True, prefill_consent="no",
+              prefill_consent_at=datetime.utcnow() - timedelta(minutes=1))
+    _prefilled_tweets_at(u, [T0 - timedelta(days=30)])
+    _build(world, u)
+    assert _rows(u, "integration")
+    assert {r.ai_usage for r in _rows(u, "window")} == {"chat"}
+    assert len(_items("window")) == len(_rows(u, "window"))
