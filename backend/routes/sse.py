@@ -466,10 +466,19 @@ def draft_transcription_stream(session_id):
     # (re)connect is a sign of life — also for a resumed session whose
     # previous tab released it (#320). Not from a device whose recording
     # another device continued (#388).
+    # A recording that stopped keeping going is made live again only past
+    # the checks of a start (utils/recording_limits.revival_refusal); when
+    # they refuse, the stream still reports the transcript, and stamps
+    # nothing.
+    from backend.utils.recording_limits import revival_refusal
+    may_stamp = True
     if (draft.streaming_status == 'recording'
             and not is_taken_over(draft, device_key)):
-        stamp_session_alive(session_id)
-        db.session.commit()
+        if revival_refusal(draft) is None:
+            stamp_session_alive(session_id)
+            db.session.commit()
+        else:
+            may_stamp = False
 
     # Capture app reference for use in generator (needed for app context)
     app = current_app._get_current_object()
@@ -611,7 +620,8 @@ def draft_transcription_stream(session_id):
                     # before it stamps; and only while the stamp is set,
                     # so a stream that has not yet noticed its tab left
                     # cannot revive a session the tab released.
-                    if current_draft.streaming_status == 'recording':
+                    if (current_draft.streaming_status == 'recording'
+                            and may_stamp):
                         stamp_session_alive(session_id, only_if_unreleased=True)
                         db.session.commit()
 

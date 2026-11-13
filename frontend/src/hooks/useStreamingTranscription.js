@@ -8,8 +8,8 @@ import { isAiUsageRefusedError, aiUsageRefusalScope } from '../utils/aiUsage';
 import { isThreadTooLong } from '../utils/threadLength';
 import { isApprovalPendingError } from '../utils/toolApprovals';
 import {
-  isRecordingLimitCode, RECORDING_LIMIT_MESSAGE, TOO_MANY_RECORDINGS_CODE,
-  TOO_MANY_RECORDINGS_MESSAGE, untranscribedMessage,
+  finalRefusalMessage, isStartRefusal, TOO_MANY_RECORDINGS_MESSAGE,
+  untranscribedMessage,
 } from '../utils/recordingLimits';
 import { onPageReturn } from '../utils/pageReturn';
 import { playErrorSound } from '../utils/errorSound';
@@ -107,7 +107,10 @@ async function claimSession(sessionId, listedChunkCount) {
   } catch (err) {
     const code = err.response?.data?.code;
     console.warn('[StreamingTranscription] Claim refused:', code || err.message);
-    const refused = new Error(CLAIM_REFUSED_MESSAGES[code] || CLAIM_FAILED_MESSAGE);
+    // Continuing a recording that had stopped is checked as a start is
+    // (utils/recordingLimits): the server's words say why.
+    const refused = new Error(CLAIM_REFUSED_MESSAGES[code]
+      || finalRefusalMessage(err) || CLAIM_FAILED_MESSAGE);
     refused.fatal = true;
     throw refused;
   }
@@ -346,16 +349,15 @@ export function useStreamingTranscription(options = {}) {
           console.warn(`[StreamingTranscription] Session continued elsewhere: chunk ${chunkIndex} refused, not retrying`);
           return { success: false, fatalError: TAKEN_OVER_MESSAGE, sessionEnded: true };
         }
-        // Past what one recording may hold (utils/recordingLimits):
-        // retrying cannot help. The server keeps every chunk before this
-        // one; the recording stops here and can be recovered.
-        if (isRecordingLimitCode(code)) {
-          console.warn(`[StreamingTranscription] Chunk ${chunkIndex} refused (${code}); not retrying`);
-          return {
-            success: false,
-            fatalError: err.response?.data?.error || RECORDING_LIMIT_MESSAGE,
-            sessionEnded: true,
-          };
+        // Past what one recording may hold, or a recording that had
+        // stopped and may not be continued (the account's bounds, the
+        // usage limit; utils/recordingLimits): retrying cannot help. The
+        // server keeps every chunk before this one; the recording stops
+        // here and can be recovered.
+        const refusal = finalRefusalMessage(err);
+        if (refusal) {
+          console.warn(`[StreamingTranscription] Chunk ${chunkIndex} refused (${code || err.response?.status}); not retrying`);
+          return { success: false, fatalError: refusal, sessionEnded: true };
         }
 
         // Server rejected chunk 0 because it couldn't parse the format's
@@ -844,11 +846,11 @@ export function useStreamingTranscription(options = {}) {
         if (onError) onError(err);
         throw err;
       }
-      if (err?.response?.data?.code === TOO_MANY_RECORDINGS_CODE) {
-        // Other recordings of this account are in progress (the server's
-        // limit, utils/recordingLimits): refused before any draft existed
-        // and before the mic opened. Shown in the server's words, by the
-        // parent as a start that failed.
+      if (isStartRefusal(err)) {
+        // Other recordings of this account are in progress, or it holds
+        // several unfinished ones (the server's limits, utils/recordingLimits):
+        // refused before any draft existed and before the mic opened. Shown
+        // in the server's words, by the parent as a start that failed.
         try {
           err.message = err.response.data.error || TOO_MANY_RECORDINGS_MESSAGE;
           err.fatal = true;

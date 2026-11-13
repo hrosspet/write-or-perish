@@ -1,4 +1,5 @@
-// The server's limits on one recording (backend/utils/recording_limits.py).
+// The server's limits on one recording and on an account's recordings
+// (backend/utils/recording_limits.py).
 //
 // Audio kept without its text: past the length one recording may have
 // transcribed, the server stores the rest of a recording as audio and does
@@ -16,10 +17,13 @@ export function untranscribedMessage(code) {
   return (code && UNTRANSCRIBED_MESSAGES[code]) || null;
 }
 
-// A chunk the server refuses because the recording is past what one
-// recording may hold: retrying cannot help. The chunks before it are kept.
-const LIMIT_CODES = new Set([
+// A chunk the server refuses for good: the recording is past what one
+// recording may hold, or it had stopped keeping going and continuing it is
+// refused as a start would be (the account's bounds, the usage limit).
+// Retrying cannot help; the chunks before it are kept.
+const FINAL_CHUNK_CODES = new Set([
   'chunk_too_large', 'chunk_index_out_of_range', 'recording_too_large',
+  'too_many_recordings', 'too_many_unfinished',
 ]);
 
 export const RECORDING_LIMIT_MESSAGE =
@@ -27,12 +31,32 @@ export const RECORDING_LIMIT_MESSAGE =
   + 'is saved.';
 
 export function isRecordingLimitCode(code) {
-  return LIMIT_CODES.has(code);
+  return FINAL_CHUNK_CODES.has(code);
+}
+
+const SPEND_CAP_ERROR = 'monthly_spend_limit_reached';
+
+// The server's words for a refused chunk, start or continue that no retry
+// can help, or null for any other failure.
+export function finalRefusalMessage(err) {
+  const data = err?.response?.data;
+  if (!data) return null;
+  if (data.error === SPEND_CAP_ERROR) return data.message || null;
+  if (FINAL_CHUNK_CODES.has(data.code)) {
+    return data.error || RECORDING_LIMIT_MESSAGE;
+  }
+  return null;
 }
 
 // A new recording refused while other recordings of the account are in
-// progress (MAX_RECORDINGS_IN_PROGRESS): shown in the server's words.
-export const TOO_MANY_RECORDINGS_CODE = 'too_many_recordings';
+// progress, or while it holds several unfinished ones: shown in the
+// server's words.
+const START_REFUSAL_CODES = new Set(['too_many_recordings', 'too_many_unfinished']);
+
 export const TOO_MANY_RECORDINGS_MESSAGE =
   'Other recordings of yours are still in progress. Finish one of them, '
   + 'then start this one.';
+
+export function isStartRefusal(err) {
+  return START_REFUSAL_CODES.has(err?.response?.data?.code);
+}

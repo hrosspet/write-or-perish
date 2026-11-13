@@ -604,14 +604,19 @@ def init_streaming():
     NO node is created until the user explicitly saves.
 
     A capped user gets 402 here, before the frontend opens the mic (#341).
-    Resuming an interrupted session never calls init, and its chunks
-    (audio-chunk, transcribe-remaining, finalize) are not cap-checked.
+    Resuming an interrupted session never calls init; its chunks and its
+    claim are checked as a start is only once it stopped keeping going
+    (utils/recording_limits.revival_refusal), and a recording that kept
+    going is not cap-checked.
 
-    429 ``too_many_recordings`` and no draft while MAX_RECORDINGS_IN_PROGRESS
-    recordings of the account are in progress (utils/recording_limits:
-    live ones and finalizing ones; a left-behind session stops counting
-    once it is no longer live). A recording accepted here is transcribed
-    to its end, within the limits on one recording.
+    429 and no draft while MAX_RECORDINGS_IN_PROGRESS recordings of the
+    account are in progress (``too_many_recordings``: live or finalizing;
+    a left-behind one stops counting once it is no longer live), or while
+    it holds MAX_UNFINISHED_RECORDINGS unfinished ones
+    (``too_many_unfinished``), counted under the account's lock right
+    before the draft is inserted (utils/recording_limits). A recording
+    accepted here is transcribed to its end, within the limits on one
+    recording.
 
     A Voice recording (label "Voice") where AI may not read gets 403
     ``{"error", "code": "ai_usage_none", "scope"}`` and no draft, so the
@@ -645,10 +650,6 @@ def init_streaming():
     Returns: { "session_id": "uuid", "draft_id": 456 }
     """
     _cleanup_stale_drafts(current_user.id)
-    from backend.utils.recording_limits import too_many_recordings_response
-    too_many = too_many_recordings_response(current_user.id)
-    if too_many is not None:
-        return too_many
 
     data = request.get_json() or {}
 
@@ -715,6 +716,12 @@ def init_streaming():
         streaming_device_key=device_key,
     )
     draft.set_content("")  # Will be populated as chunks are transcribed
+    # Counted under the account's lock right before the insert, so two
+    # starts at once cannot both pass (utils/recording_limits).
+    from backend.utils.recording_limits import recording_start_refusal
+    refused = recording_start_refusal(current_user.id)
+    if refused is not None:
+        return refused
     db.session.add(draft)
     db.session.commit()
 
@@ -748,6 +755,9 @@ def claim_streaming(session_id):
     409 session_live while another device or tab is recording the session,
     400 session_not_active once it is no longer recording, 404
     session_not_found. The same device may claim again (a retried claim).
+    A session that stopped keeping going is continued only past the checks
+    of a start: 402 at the usage limit, 429 ``too_many_recordings`` /
+    ``too_many_unfinished`` (utils/recording_limits.revival_refusal).
 
     Request body: { "device_key": "..." }
 
@@ -773,6 +783,15 @@ def claim_streaming(session_id):
             "code": "session_not_found",
         }), 404
     draft_id = draft.id
+
+    # Continuing a recording that stopped keeping going is checked as a
+    # start is: the usage limit and the account's bounds
+    # (utils/recording_limits.revival_refusal). Before the row lock below:
+    # the account's lock is always taken first, as a chunk upload does.
+    from backend.utils.recording_limits import revival_refusal
+    refused = revival_refusal(draft)
+    if refused is not None:
+        return refused
 
     # Locked: a keyed chunk upload being stored now finishes first, so the
     # count below includes it (recording_device.is_taken_over_locked). The
@@ -899,7 +918,10 @@ def upload_streaming_chunk(session_id):
     that would take the recording past MAX_STREAMING_SESSION_BYTES 413
     ``recording_too_large``. Nothing of it is stored; the chunks accepted
     before stay. A copy of a stored chunk is answered as before, and a
-    re-sent chunk is not counted twice.
+    re-sent chunk is not counted twice. A chunk for a recording that
+    stopped keeping going (quiet longer than CONTINUES_WITHIN, or released)
+    is accepted only past the checks of a start: 402 at the usage limit,
+    429 past the account's bounds (revival_refusal).
 
     Returns: { "chunk_index": 0, "task_id": "celery-task-id" }
     """
@@ -936,6 +958,15 @@ def upload_streaming_chunk(session_id):
             "error": "Streaming session is not active",
             "code": "session_not_active",
         }), 400
+
+    # Audio for a recording that stopped keeping going (quiet longer than
+    # CONTINUES_WITHIN, or released) is checked as a start is
+    # (utils/recording_limits.revival_refusal); a recording that kept
+    # going is not (#341).
+    from backend.utils.recording_limits import revival_refusal
+    refused = revival_refusal(draft)
+    if refused is not None:
+        return refused
 
     # A chunk is the recording tab's sign of life (#320) — unless the tab
     # already released the session: an upload still in flight when the

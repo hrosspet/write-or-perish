@@ -805,6 +805,12 @@ def create_node():
             token_count=_atc2(placeholder_text),
         )
         node.set_content(placeholder_text)
+        # Counted again under the account's lock right before the insert
+        # (utils/recording_limits).
+        from backend.utils.recording_limits import upload_start_refusal
+        refused = upload_start_refusal(current_user.id)
+        if refused is not None:
+            return refused
         db.session.add(node)
         db.session.commit()  # Need node.id for the file path.
 
@@ -2689,6 +2695,27 @@ def _upload_declaration_error(filesize, total_chunks):
     return None
 
 
+def _fail_unfinished_upload(chunk_dir):
+    """The app reports an upload failed (/upload/cleanup): its entry, still
+    waiting for its file, ends ``failed``, so it no longer counts among the
+    account's uploads in progress (utils/recording_limits)."""
+    import json
+    from backend.utils.recording_limits import UPLOAD_FAILED_TEXT
+    try:
+        with open(chunk_dir / "metadata.json") as f:
+            node_id = json.load(f).get("node_id")
+        node = db.session.get(Node, int(node_id))
+    except (OSError, ValueError, TypeError):
+        return
+    if (node is None or node.user_id != current_user.id
+            or node.transcription_status != "pending"
+            or node.audio_original_url is not None):
+        return
+    node.transcription_status = "failed"
+    node.transcription_error = UPLOAD_FAILED_TEXT
+    db.session.commit()
+
+
 def _upload_chunk_too_large():
     return jsonify({"error": "This piece of the file is larger than Loore "
                              "accepts.",
@@ -2824,6 +2851,7 @@ def init_chunked_upload():
 
     # Create placeholder node
     placeholder_text = "[Voice note – upload in progress]"
+    from backend.utils.recording_limits import upload_start_refusal
     from backend.utils.tokens import approximate_token_count as _atc3
     node = Node(
         user_id=current_user.id,
@@ -2836,6 +2864,10 @@ def init_chunked_upload():
         token_count=_atc3(placeholder_text),
     )
     node.set_content(placeholder_text)
+    # Counted again under the account's lock right before the insert.
+    refused = upload_start_refusal(current_user.id)
+    if refused is not None:
+        return refused
     db.session.add(node)
     db.session.commit()
 
@@ -2891,7 +2923,9 @@ def upload_chunk():
     node its entry (400 ``upload_mismatch``); a piece over
     MAX_UPLOAD_CHUNK_BYTES (413 ``chunk_too_large``), or one that would take
     the pieces past the announced file size (413 ``upload_too_large``), is
-    not stored. A re-sent piece replaces its earlier copy.
+    not stored. A re-sent piece replaces its earlier copy. An upload started
+    longer ago than UPLOAD_COUNTS_FOR takes no more pieces (410
+    ``upload_expired``).
     """
     from backend.utils.recording_limits import (
         MAX_UPLOAD_CHUNK_BYTES, body_too_large,
@@ -2927,6 +2961,14 @@ def upload_chunk():
     # Save chunk
     if not chunk_dir.exists():
         return jsonify({"error": "Upload session not found"}), 404
+    # An upload that no longer counts takes no more pieces
+    # (utils/recording_limits.UPLOAD_COUNTS_FOR).
+    from backend.utils.recording_limits import (
+        UPLOAD_EXPIRED_TEXT, upload_expired,
+    )
+    if upload_expired(node):
+        return jsonify({"error": UPLOAD_EXPIRED_TEXT,
+                        "code": "upload_expired"}), 410
 
     import json
     metadata_path = chunk_dir / "metadata.json"
@@ -3116,7 +3158,10 @@ def finalize_chunked_upload():
 @nodes_bp.route("/upload/cleanup", methods=["POST"])
 @login_required
 def cleanup_chunked_upload():
-    """Clean up a failed/cancelled chunked upload.
+    """Clean up a failed/cancelled chunked upload. Its entry, still waiting
+    for its file, ends ``failed`` (UPLOAD_FAILED_TEXT), so it no longer
+    counts among the account's uploads in progress
+    (utils/recording_limits).
 
     Request body:
     {
@@ -3134,6 +3179,7 @@ def cleanup_chunked_upload():
 
     if chunk_dir.exists():
         import shutil
+        _fail_unfinished_upload(chunk_dir)
         try:
             shutil.rmtree(chunk_dir)
             current_app.logger.info(f"Cleaned up failed upload {upload_id}")
@@ -3192,7 +3238,9 @@ def init_streaming_transcription():
         return err
     # This path's recordings wait for their transcript as entries, counted
     # with the uploads (utils/recording_limits).
-    from backend.utils.recording_limits import too_many_uploads_response
+    from backend.utils.recording_limits import (
+        too_many_uploads_response, upload_start_refusal,
+    )
     too_many = too_many_uploads_response(current_user.id)
     if too_many is not None:
         return too_many
@@ -3219,6 +3267,10 @@ def init_streaming_transcription():
         token_count=_atc4(placeholder_text),
     )
     node.set_content(placeholder_text)
+    # Counted again under the account's lock right before the insert.
+    refused = upload_start_refusal(current_user.id)
+    if refused is not None:
+        return refused
     db.session.add(node)
     db.session.commit()
 
@@ -3271,6 +3323,11 @@ def upload_audio_chunk(node_id):
         return jsonify({"error": "This part of the recording is larger than "
                                  "Loore accepts.",
                         "code": "chunk_too_large"}), 413
+    # A recording on this path that no longer counts (UPLOAD_COUNTS_FOR)
+    # takes no more audio.
+    if limits.upload_expired(node):
+        return jsonify({"error": "This recording has ended.",
+                        "code": "recording_expired"}), 410
 
     # Get form data
     if "chunk" not in request.files:

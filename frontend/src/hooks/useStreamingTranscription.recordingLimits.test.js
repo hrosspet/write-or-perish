@@ -198,3 +198,91 @@ describe('a chunk past what one recording may hold', () => {
     },
   );
 });
+
+describe('a recording that had stopped and may not be continued', () => {
+  const capped = {
+    status: 402,
+    data: {
+      error: 'monthly_spend_limit_reached',
+      message: "You've reached your monthly usage limit for the free alpha. It resets at the start of next month.",
+    },
+  };
+  const unfinished = {
+    status: 429,
+    data: {
+      error: 'You have several unfinished recordings. Save or discard one of them, then start a new one.',
+      code: 'too_many_unfinished',
+    },
+  };
+
+  test.each([['the usage limit', capped], ['the account bounds', unfinished]])(
+    'a chunk refused for %s is not retried, and the recording stops in plain words',
+    async (_, response) => {
+      const onError = jest.fn();
+      const { result } = await startRecording({ onError });
+      mockPost.mockImplementation((url) => {
+        if (url.endsWith('/audio-chunk')) {
+          const err = new Error('Request failed');
+          err.response = response;
+          return Promise.reject(err);
+        }
+        return Promise.resolve({ data: {} });
+      });
+
+      await act(async () => {
+        mockRecorderOpts.onChunkReady(new Blob(['a']), 7);
+        await flush();
+      });
+
+      expect(callsTo('/audio-chunk')).toHaveLength(1);
+      expect(mockStopRecording).toHaveBeenCalledTimes(1);
+      expect(onError).toHaveBeenCalledTimes(1);
+      const expected = response.data.message || response.data.error;
+      expect(result.current.errorMessage).toBe(expected);
+    },
+  );
+
+  test('a continue refused for the usage limit says so', async () => {
+    mockPost.mockImplementation((url) => {
+      if (url.endsWith('/claim')) {
+        const err = new Error('Request failed');
+        err.response = capped;
+        return Promise.reject(err);
+      }
+      return Promise.resolve({ data: {} });
+    });
+    const onError = jest.fn();
+    const { result } = renderHook(() => useStreamingTranscription({ onError }));
+
+    await act(async () => {
+      await result.current.resumeStreaming('s9', 9, 4, 'audio/webm');
+    });
+    await act(async () => {
+      mockRecorderOpts.onChunkReady(new Blob(['a']), 4);
+      await flush();
+    });
+
+    expect(callsTo('/audio-chunk')).toHaveLength(0);
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0][0].message).toBe(capped.data.message);
+  });
+
+  test("a start refused for several unfinished recordings shows the server's words", async () => {
+    mockPost.mockImplementation((url) => {
+      if (url === '/drafts/streaming/init') {
+        const err = new Error('Request failed with status code 429');
+        err.response = unfinished;
+        return Promise.reject(err);
+      }
+      return Promise.resolve({ data: {} });
+    });
+    const onError = jest.fn();
+    const { result } = renderHook(() => useStreamingTranscription({ onError }));
+
+    await act(async () => { await result.current.startStreaming(); });
+
+    expect(mockStartRecording).not.toHaveBeenCalled();
+    expect(onError.mock.calls[0][0].message).toBe(unfinished.data.error);
+    expect(result.current.errorMessage).toBe(unfinished.data.error);
+  });
+});

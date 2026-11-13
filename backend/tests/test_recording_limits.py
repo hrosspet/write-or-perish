@@ -15,14 +15,22 @@ the older ``/api/nodes/<id>/audio-chunk``):
   transcribed, the text ends with a note, and the transcription stream
   tells the apps why;
 - a new recording is refused while MAX_RECORDINGS_IN_PROGRESS of the
-  account's recordings are in progress; one left behind stops counting;
+  account's recordings are in progress (one left behind stops counting),
+  or while it holds MAX_UNFINISHED_RECORDINGS unfinished ones (one quiet
+  for a day, or without audio, does not count);
+- a recording that stopped keeping going and takes audio again (a chunk,
+  a claim, its transcription stream) is checked as a start is; the real
+  flows (an app killed mid-recording, relaunched, continued or discarded)
+  still work;
+- starts at the same moment are counted again under the account's lock;
 - a recording of realistic size and length passes untouched (controls).
 
 Chunked file uploads (``/api/nodes/upload/...``): the init's size and piece
 count, each piece's index and size, and the finalize's total are held to
 what the init announced; a refused finalize deletes the pieces. A new
 upload is refused while MAX_UPLOADS_IN_PROGRESS of the account's uploads
-wait for their transcript.
+wait for their transcript; an upload older than UPLOAD_COUNTS_FOR takes
+no more pieces, and one the app reports failed stops counting.
 
 The data download (``/api/export/threads``): one at a time per account and
 EXPORTS_PER_HOUR an hour.
@@ -36,7 +44,7 @@ import os
 import pathlib
 import sys
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import MagicMock
 
 os.environ["ENCRYPTION_DISABLED"] = "true"
@@ -472,7 +480,6 @@ class TestRecordingsInProgress:
         # Control (passes on main too): a crashed app's session (no sign of
         # life for 45 s), a released one, and a finalize that died long ago
         # never keep the user from recording.
-        from datetime import timedelta
         long_ago = datetime.utcnow() - timedelta(hours=2)
         for n in range(3):
             draft, _ = _session(app, alice, f"stale-{n}")
@@ -502,17 +509,19 @@ class TestRecordingsInProgress:
         assert self._init(client).status_code == 201
 
 
+def _waiting_uploads(user, n, status="pending", created_at=None):
+    for _ in range(n):
+        node = Node(user_id=user.id, human_owner_id=user.id,
+                    node_type="user", transcription_status=status,
+                    ai_usage="chat")
+        if created_at is not None:
+            node.created_at = created_at
+        node.set_content("[Voice note – transcription pending]")
+        _db.session.add(node)
+    _db.session.commit()
+
+
 class TestUploadsInProgress:
-    def _waiting(self, user, n, status="pending", created_at=None):
-        for _ in range(n):
-            node = Node(user_id=user.id, human_owner_id=user.id,
-                        node_type="user", transcription_status=status,
-                        ai_usage="chat")
-            if created_at is not None:
-                node.created_at = created_at
-            node.set_content("[Voice note – transcription pending]")
-            _db.session.add(node)
-        _db.session.commit()
 
     def test_a_new_upload_waits_while_three_wait_for_their_transcript(
             self, app, client, alice):
@@ -543,15 +552,268 @@ class TestUploadsInProgress:
 
     def test_control_old_failed_and_finished_ones_do_not_count(
             self, app, client, alice):
-        # Control (passes on main too): an upload never finished an hour
-        # ago, a failed one and a transcribed one.
-        from datetime import timedelta
-        self._waiting(alice, 3, created_at=datetime.utcnow()
-                      - timedelta(hours=2))
-        self._waiting(alice, 3, status="failed")
-        self._waiting(alice, 3, status="completed")
+        # Control (passes on main too): uploads never finished that started
+        # longer ago than the window, failed ones and transcribed ones.
+        _waiting_uploads(alice, 3, created_at=datetime.utcnow()
+                         - limits.UPLOAD_COUNTS_FOR - timedelta(hours=1))
+        _waiting_uploads(alice, 3, status="failed")
+        _waiting_uploads(alice, 3, status="completed")
 
         assert _init_upload(client, 8, 2).status_code == 201
+
+    def test_a_piece_for_an_upload_that_no_longer_counts_is_refused(
+            self, app, client, alice):
+        node_id = _init_upload(client, 8, 2).get_json()["node_id"]
+        node = Node.query.get(node_id)
+        node.created_at = datetime.utcnow() - limits.UPLOAD_COUNTS_FOR \
+            - timedelta(minutes=1)
+        _db.session.commit()
+
+        resp = _send_piece(client, node_id, 0, b"abcd")
+
+        assert resp.status_code == 410
+        assert resp.get_json()["code"] == "upload_expired"
+
+    def test_control_a_slow_upload_within_the_window_keeps_going(
+            self, app, client, alice):
+        node_id = _init_upload(client, 8, 2).get_json()["node_id"]
+        node = Node.query.get(node_id)
+        node.created_at = datetime.utcnow() - timedelta(hours=5)
+        _db.session.commit()
+
+        assert _send_piece(client, node_id, 0, b"abcd").status_code == 200
+
+    def test_an_older_path_recording_that_no_longer_counts_takes_no_audio(
+            self, app, client, alice, tasks):
+        node = TestOlderNodePath()._node(app, alice)
+        node.created_at = datetime.utcnow() - limits.UPLOAD_COUNTS_FOR \
+            - timedelta(minutes=1)
+        _db.session.commit()
+
+        resp = TestOlderNodePath()._post(client, node, 0,
+                                         _payload(WEB_CHUNK_BYTES))
+
+        assert resp.status_code == 410
+        tasks.transcribe_chunk.delay.assert_not_called()
+
+    def test_an_upload_the_app_reports_failed_stops_counting(
+            self, app, client, alice):
+        for n in range(limits.MAX_UPLOADS_IN_PROGRESS):
+            assert _init_upload(client, 8, 2,
+                                upload_id=f"up-{n}").status_code == 201
+        assert _init_upload(client, 8, 2,
+                            upload_id="up-x").status_code == 429
+
+        assert client.post("/api/nodes/upload/cleanup",
+                           json={"upload_id": "up-0"}).status_code == 200
+
+        failed = Node.query.filter_by(transcription_status="failed").one()
+        assert failed.transcription_error == limits.UPLOAD_FAILED_TEXT
+        assert _init_upload(client, 8, 2, upload_id="up-y").status_code == 201
+
+
+KEY = "device-b-9876543210"
+
+
+def _left_behind(app, user, session_id, quiet, chunks=2):
+    """A recording its app left (killed mid-recording): its last sign of
+    life *quiet* ago (None: released), with *chunks* chunks stored."""
+    draft, folder = _session(app, user, session_id)
+    draft.streaming_heartbeat_at = (
+        None if quiet is None else datetime.utcnow() - quiet)
+    draft.streaming_device_key = KEY    # the device that recorded it
+    for idx in range(chunks):
+        _db.session.add(NodeTranscriptChunk(
+            session_id=session_id, chunk_index=idx, status="stored"))
+        (folder / f"chunk_{idx:04d}.webm").write_bytes(FRAGMENT)
+    _db.session.commit()
+    return draft
+
+
+def _init_recording(client):
+    return client.post("/api/drafts/streaming/init", json={"ai_usage": "chat"})
+
+
+class TestUnfinishedRecordings:
+    def test_a_new_recording_waits_while_six_are_unfinished(
+            self, app, client, alice):
+        for n in range(limits.MAX_UNFINISHED_RECORDINGS):
+            _left_behind(app, alice, f"left-{n}", timedelta(hours=1))
+
+        resp = _init_recording(client)
+
+        assert resp.status_code == 429
+        assert resp.get_json() == {"error": limits.TOO_MANY_UNFINISHED_TEXT,
+                                   "code": "too_many_unfinished"}
+        # Discarding one (the recovery banner) lets the next one start.
+        assert client.delete(
+            "/api/drafts/streaming/left-0/discard").status_code == 200
+        assert _init_recording(client).status_code == 201
+
+    def test_control_quiet_for_a_day_or_without_audio_they_do_not_count(
+            self, app, client, alice):
+        # Control (passes on main too): a crashed app never locks a user
+        # out for longer than a day, and a recording left before its first
+        # chunk never counts.
+        for n in range(limits.MAX_UNFINISHED_RECORDINGS):
+            _left_behind(app, alice, f"old-{n}", timedelta(hours=25))
+        for n in range(limits.MAX_UNFINISHED_RECORDINGS):
+            _left_behind(app, alice, f"empty-{n}", timedelta(hours=1),
+                         chunks=0)
+
+        assert _init_recording(client).status_code == 201
+
+
+class TestTakingAudioAgain:
+    """A recording that stopped keeping going (quiet longer than
+    CONTINUES_WITHIN, or released) is checked as a start is when it takes
+    audio again; one that kept going is not (#341)."""
+
+    def _claim(self, client, session_id):
+        return client.post(f"/api/drafts/streaming/{session_id}/claim",
+                           json={"device_key": KEY})
+
+    def test_at_the_usage_limit_a_stopped_recording_is_not_continued(
+            self, app, client, alice):
+        _left_behind(app, alice, "stopped", timedelta(minutes=30))
+        _cap(alice)
+
+        resp = _chunk(client, "stopped", 2, _payload(WEB_CHUNK_BYTES))
+        assert resp.status_code == 402
+        assert resp.get_json()["error"] == "monthly_spend_limit_reached"
+        assert _rows("stopped") == 2
+        resp = self._claim(client, "stopped")
+        assert resp.status_code == 402
+
+    def test_at_the_usage_limit_a_released_recording_is_not_continued(
+            self, app, client, alice):
+        _left_behind(app, alice, "released", None)
+        _cap(alice)
+
+        assert _chunk(client, "released", 2,
+                      _payload(WEB_CHUNK_BYTES)).status_code == 402
+        assert _rows("released") == 2
+
+    def test_control_a_capped_recording_that_kept_going_takes_its_audio(
+            self, app, client, alice):
+        # Control (passes on main too): #341, also across a dropped
+        # connection of a few minutes.
+        _left_behind(app, alice, "going", timedelta(minutes=5))
+        _cap(alice)
+
+        assert _chunk(client, "going", 2,
+                      _payload(WEB_CHUNK_BYTES)).status_code == 202
+
+    def test_a_stopped_recording_counts_against_the_bounds_again(
+            self, app, client, alice):
+        _left_behind(app, alice, "stopped", timedelta(minutes=30))
+        for _ in range(limits.MAX_RECORDINGS_IN_PROGRESS):
+            assert _init_recording(client).status_code == 201
+
+        resp = _chunk(client, "stopped", 2, _payload(WEB_CHUNK_BYTES))
+        assert resp.status_code == 429
+        assert resp.get_json()["code"] == "too_many_recordings"
+        assert self._claim(client, "stopped").status_code == 429
+        assert _rows("stopped") == 2
+
+    def test_the_transcription_stream_does_not_make_it_live_when_refused(
+            self, app, client, alice):
+        draft = _left_behind(app, alice, "stopped", timedelta(minutes=30))
+        quiet_since = draft.streaming_heartbeat_at
+        _cap(alice)
+
+        resp = client.get("/api/sse/drafts/stopped/transcription-stream")
+        resp.close()
+
+        _db.session.expire_all()
+        assert Draft.query.filter_by(session_id="stopped").one() \
+            .streaming_heartbeat_at == quiet_since
+
+    def test_app_killed_mid_recording_relaunched_and_continued(
+            self, app, client, alice):
+        # Control (passes before this change too): the real flow. The app
+        # is killed mid-recording; half an hour later it is opened again,
+        # sends the chunk it still held, and the user continues the
+        # recording, then stops.
+        _left_behind(app, alice, "killed", timedelta(minutes=30), chunks=4)
+
+        assert _chunk(client, "killed", 4,
+                      _payload(WEB_CHUNK_BYTES)).status_code == 202
+        resp = self._claim(client, "killed")
+        assert resp.status_code == 200, resp.get_data(as_text=True)
+        assert resp.get_json()["next_chunk_index"] == 5
+        assert _chunk(client, "killed", 5,
+                      _payload(WEB_CHUNK_BYTES)).status_code == 202
+        resp = client.post("/api/drafts/streaming/killed/finalize",
+                           json={"total_chunks": 6, "device_key": KEY})
+        assert resp.status_code == 202, resp.get_data(as_text=True)
+
+    def test_app_killed_mid_recording_relaunched_and_discarded(
+            self, app, client, alice):
+        # Control (passes before this change too).
+        _left_behind(app, alice, "killed", timedelta(minutes=30))
+
+        assert client.delete(
+            "/api/drafts/streaming/killed/discard").status_code == 200
+        assert _init_recording(client).status_code == 201
+
+    def test_control_a_capped_user_s_left_recording_is_still_transcribed(
+            self, app, client, alice, tasks):
+        # Control (passes on main too): its audio was accepted, so the
+        # recovery banner's "transcribe the rest" still runs (#341).
+        _left_behind(app, alice, "killed", timedelta(minutes=30))
+        _cap(alice)
+
+        resp = client.post("/api/drafts/streaming/killed/transcribe-remaining")
+        assert resp.status_code == 202, resp.get_data(as_text=True)
+        tasks.transcribe_chunk_batch.delay.assert_called_once()
+
+
+class TestStartsAtOnce:
+    """Two starts at the same moment: the count is made again under the
+    account's lock, right before the insert (on SQLite the lock itself is a
+    no-op; here it stands in for another start that committed meanwhile)."""
+
+    def test_recordings_are_counted_again_under_the_lock(
+            self, app, client, alice, monkeypatch):
+        locked = []
+
+        def others_started_meanwhile(user_id):
+            locked.append(user_id)
+            for n in range(limits.MAX_RECORDINGS_IN_PROGRESS):
+                _session(app, alice, f"meanwhile-{n}")
+        monkeypatch.setattr(limits, "lock_account", others_started_meanwhile)
+        before = Draft.query.count()
+
+        resp = _init_recording(client)
+
+        assert locked == [alice.id]
+        assert resp.status_code == 429
+        assert Draft.query.count() == before + limits.MAX_RECORDINGS_IN_PROGRESS
+
+    def test_uploads_are_counted_again_under_the_lock(
+            self, app, client, alice, monkeypatch):
+        def others_started_meanwhile(user_id):
+            _waiting_uploads(alice, limits.MAX_UPLOADS_IN_PROGRESS)
+        monkeypatch.setattr(limits, "lock_account", others_started_meanwhile)
+
+        resp = _init_upload(client, 8, 2)
+
+        assert resp.status_code == 429
+        assert resp.get_json()["code"] == "too_many_uploads"
+        assert Node.query.count() == limits.MAX_UPLOADS_IN_PROGRESS
+
+    def test_a_busy_lock_answers_plainly(self, app, client, alice,
+                                         monkeypatch):
+        def busy(user_id):
+            raise limits.RecordingsBusy()
+        monkeypatch.setattr(limits, "lock_account", busy)
+
+        resp = _init_recording(client)
+
+        assert resp.status_code == 503
+        assert resp.get_json()["code"] == "recordings_busy"
+        assert Draft.query.count() == 0
 
 
 # ── Chunked file uploads ─────────────────────────────────────────────────

@@ -45,6 +45,29 @@ final class RecordingLimitsTests: StubbedAppTestCase {
         XCTAssertTrue(app.toasts.toasts.isEmpty)
     }
 
+    func testARefusedContinueIsNotRetried() async throws {
+        // A recording that had stopped and may not be continued (the usage
+        // limit 402, the account's bounds 429): one attempt, then given up.
+        for status in [402, 429] {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("uploads-\(UUID().uuidString)")
+            defer { try? FileManager.default.removeItem(at: root) }
+            let uploader = ChunkUploader(root: root, useBackgroundSession: false)
+            uploader.delay = { _ in 0.001 }
+            uploader.cookieHeader = { _ in [:] }
+            var attempts = 0
+            uploader.transport = { request, _ in
+                attempts += 1
+                return (Data(#"{"error":"refused","code":"too_many_unfinished"}"#.utf8),
+                        HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!)
+            }
+            uploader.open(sessionId: "s", uploadURL: URL(string: "http://x/c")!)
+            uploader.enqueue(sessionId: "s", chunk: RecordedChunk(index: 3, data: Data(repeating: 3, count: 32), duration: 15))
+            let outcome = await uploader.settle(sessionId: "s")
+            XCTAssertEqual(outcome.failed, [3], "status \(status)")
+            XCTAssertLessThanOrEqual(attempts, 2, "status \(status): one attempt, one more at Stop")
+        }
+    }
+
     func testARefusedStartShowsTheServersWords() {
         let text = "Other recordings of yours are still in progress. Finish one of them, then start this one."
         let error = APIError.from(status: 429, contentType: "application/json",

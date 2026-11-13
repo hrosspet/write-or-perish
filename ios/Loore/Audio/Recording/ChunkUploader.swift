@@ -483,6 +483,11 @@ final class ChunkUploader: NSObject {
             return .retry
         case 401, 403, 404, 413, 422:
             return .giveUp
+        case 402, 429:
+            // A recording that had stopped and may not be continued: the
+            // usage limit, or the account's bounds on recordings
+            // (backend/utils/recording_limits). Retrying cannot help.
+            return .giveUp
         default:
             return .retry
         }
