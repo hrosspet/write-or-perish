@@ -1599,11 +1599,18 @@ def update_discount_code(code_id):
 @login_required
 @admin_required
 def list_referrals():
-    from backend.models import Referral
+    """Every invite (#439) with its state, and what came of a used one;
+    then the referrals made through the reusable link invites replaced.
+    Who an invite was for is not listed: that is the inviter's, and it is
+    deleted when the invite ends."""
+    from backend.models import Invite, Referral
     if _payments_off():
         abort(404)
     referrals = Referral.query.order_by(Referral.id.desc()).all()
+    by_invite = {r.invite_id: r for r in referrals if r.invite_id}
+    invites = Invite.query.order_by(Invite.id.desc()).all()
     ids = {r.inviter_id for r in referrals} | {r.friend_id for r in referrals}
+    ids |= {i.inviter_id for i in invites}
     ids.discard(None)
     users = {u.id: u for u in User.query.filter(User.id.in_(ids)).all()} \
         if ids else {}
@@ -1612,24 +1619,30 @@ def list_referrals():
         user = users.get(user_id)
         return user.username if user else None
 
-    rows = []
-    for r in referrals:
-        friend = users.get(r.friend_id)
-        rows.append({
-            "id": r.id,
+    def row(invite, r):
+        friend = users.get(r.friend_id) if r else None
+        out = {
+            "id": f"i{invite.id}" if invite else f"r{r.id}",
             # None: the account was deleted since.
-            "inviter": name(r.inviter_id),
-            "friend": name(r.friend_id),
+            "inviter": name(invite.inviter_id if invite else r.inviter_id),
+            # "open", "used", "withdrawn", "expired"; None: a referral
+            # through the reusable link.
+            "invite_state": invite.state if invite else None,
+            "invite_kind": invite.kind if invite else None,
+            "created_at": iso_utc(invite.created_at if invite
+                                  else r.created_at),
+            "friend": name(r.friend_id) if r else None,
             "friend_approved": bool(friend.approved) if friend else None,
-            "created_at": iso_utc(r.created_at),
-            "rewarded_at": iso_utc(r.rewarded_at),
-            "inviter_reward": r.inviter_reward,
-            "inviter_credit_cents": r.inviter_credit_cents,
-            "inviter_credit_currency": r.inviter_credit_currency,
-            "friend_reward": r.friend_reward,
-            "friend_credit_cents": r.friend_credit_cents,
-            "friend_credit_currency": r.friend_credit_currency,
-        })
+            "rewarded_at": iso_utc(r.rewarded_at) if r else None,
+        }
+        for key in ("inviter_reward", "inviter_credit_cents",
+                    "inviter_credit_currency", "friend_reward",
+                    "friend_credit_cents", "friend_credit_currency"):
+            out[key] = getattr(r, key) if r else None
+        return out
+
+    rows = [row(i, by_invite.get(i.id)) for i in invites]
+    rows += [row(None, r) for r in referrals if not r.invite_id]
     # What each side gets now (utils/referrals.referral_credit): the table
     # says it, and it is the amount to give by hand for a "failed" one.
     from backend.utils.referrals import referral_credit

@@ -1,15 +1,16 @@
-"""Referrals (#439): the invite link, the referral kept through signup,
-and a free week for both on the friend's first payment, given once.
+"""Referrals (#439): a free week for both on the friend's first payment,
+given once, and the admin list. The invites themselves (one personal
+invite a month) are in test_invites.py, which shares these harnesses.
 
 Two harnesses: the payments test app (test_payments.py: billing, webhook,
 admin and dashboard blueprints, Stripe replaced by a stub gateway) for the
-link, the reward and the admin list; and an app with the sign-in routes and
-the real X blueprint (as test_x_login_linking.py) for the signup paths.
+reward and the admin list; and an app with the sign-in routes and the real
+X blueprint (as test_x_login_linking.py) for the signup paths.
 """
 import os
 import sys
 from datetime import datetime
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 os.environ.setdefault("SECRET_KEY", "test-secret")
 os.environ.setdefault("ENCRYPTION_DISABLED", "true")
@@ -144,40 +145,7 @@ def _referral():
     return Referral.query.one()
 
 
-# ── The link ─────────────────────────────────────────────────────────────
-
-class TestTheLink:
-    def test_the_account_page_link(self, app):
-        u = _user()
-        r = _client(app, u).get("/api/referrals/link")
-        assert r.status_code == 200
-        url = r.get_json()["url"]
-        code = _db.session.get(User, u.id).referral_code
-        assert url == f"https://loore.test/invite/{code}"
-        # The same link every time.
-        assert _client(app, u).get(
-            "/api/referrals/link").get_json()["url"] == url
-
-    def test_the_code_says_nothing_about_the_account(self, app):
-        u = _user("alice")
-        code = referrals.invite_code(u)
-        assert len(code) == 16
-        assert "alice" not in code.lower()
-        # Random, not a function of the account: made again for the same
-        # account, it differs.
-        u.referral_code = None
-        _db.session.commit()
-        assert referrals.invite_code(u) != code
-        assert referrals.invite_code(_user("bob")) != code
-
-    def test_off_with_payments(self, app_off):
-        r = _client(app_off, _user()).get("/api/referrals/link")
-        assert r.status_code == 404
-
-    def test_off_with_its_own_switch(self, app_referrals_off):
-        r = _client(app_referrals_off, _user()).get("/api/referrals/link")
-        assert r.status_code == 404
-
+# ── The payload flag ──────────────────────────────────────────────────
 
 def test_the_payload_flag_on(app):
     user = _client(app, _user()).get(
@@ -191,60 +159,6 @@ def test_the_payload_flag_off(app_off):
     user = _client(app_off, _user()).get(
         "/api/dashboard/?profile=0").get_json()["user"]
     assert "referrals_enabled" not in user
-
-
-# ── Recording who invited whom ───────────────────────────────────────────
-
-class TestRecording:
-    def test_a_new_account_through_the_link(self, app):
-        inviter = _user("ines")
-        friend = _user("fred")
-        assert referrals.record_invite(
-            friend, referrals.invite_code(inviter), new_account=True)
-        ref = Referral.query.one()
-        assert (ref.inviter_id, ref.friend_id) == (inviter.id, friend.id)
-
-    def test_no_self_referral(self, app):
-        u = _user("ines")
-        code = referrals.invite_code(u)
-        assert referrals.record_invite(u, code, new_account=True) is None
-        assert Referral.query.count() == 0
-
-    def test_the_first_inviter_is_kept(self, app):
-        a, b = _user("a"), _user("b")
-        friend = _user("fred")
-        assert referrals.record_invite(friend, referrals.invite_code(a), True)
-        assert referrals.record_invite(
-            friend, referrals.invite_code(b), True) is None
-        assert Referral.query.one().inviter_id == a.id
-
-    def test_an_existing_user_is_not_brought_by_a_link(self, app):
-        inviter = _user("ines")
-        member = _user("old", last_seen_at=datetime.utcnow())
-        assert referrals.record_invite(
-            member, referrals.invite_code(inviter), new_account=False) is None
-
-    def test_an_account_set_up_ahead_at_its_first_sign_in(self, app):
-        inviter = _user("ines")
-        placeholder = _user("pre")   # created now, nobody signed in
-        assert referrals.record_invite(
-            placeholder, referrals.invite_code(inviter), new_account=False)
-
-    def test_unknown_or_malformed_codes_record_nothing(self, app):
-        friend = _user("fred")
-        for code in ("x" * 16, "", None, 5, "../../etc", "a b c d e f g h"):
-            assert referrals.record_invite(friend, code, True) is None
-        assert Referral.query.count() == 0
-
-    def test_a_deleted_inviter_records_nothing(self, app):
-        inviter = _user("ines", deleted_at=datetime.utcnow())
-        code = referrals.invite_code(inviter)
-        assert referrals.record_invite(_user("fred"), code, True) is None
-
-    def test_nothing_while_off(self, app_referrals_off):
-        inviter = _user("ines")
-        code = referrals.invite_code(inviter)
-        assert referrals.record_invite(_user("fred"), code, True) is None
 
 
 # ── The reward ───────────────────────────────────────────────────────────
@@ -616,6 +530,8 @@ class TestAdmin:
         assert len(rows) == 1
         row = rows[0]
         assert (row["inviter"], row["friend"]) == ("ines", "fred")
+        # A referral through the reusable link invites replaced.
+        assert row["invite_state"] is None
         assert row["inviter_reward"] == "granted"
         assert row["inviter_credit_cents"] == 750
         assert row["rewarded_at"]
@@ -697,109 +613,3 @@ def _x(x_id, screen_name, authorized=True):
     x.get.return_value = MagicMock(
         ok=True, json=lambda: {"id": x_id, "screen_name": screen_name})
     return x
-
-
-def _inviter_code():
-    inviter = User(username="ines", approved=True,
-                   last_seen_at=datetime.utcnow())
-    _db.session.add(inviter)
-    _db.session.commit()
-    return inviter, referrals.invite_code(inviter)
-
-
-class TestSignup:
-    def test_the_x_round_trip_keeps_the_invite(self, signup_app):
-        inviter, code = _inviter_code()
-        client = signup_app.test_client()
-        # Off to X: the invite waits in the session.
-        with patch("backend.routes.auth.twitter",
-                   _x(1, "fred", authorized=False)):
-            r = client.get(f"/auth/login?invite={code}")
-        assert r.status_code == 302
-        # Back from X: a new account, invited by Ines, not approved.
-        with patch("backend.routes.auth.twitter", _x(4242, "fred")):
-            r = client.get("/auth/login")
-        assert r.status_code == 302
-        friend = User.query.filter_by(twitter_id="4242").one()
-        ref = Referral.query.one()
-        assert (ref.inviter_id, ref.friend_id) == (inviter.id, friend.id)
-        assert not friend.approved
-        with client.session_transaction() as sess:
-            assert referrals.SESSION_KEY not in sess
-
-    def test_an_existing_x_account_is_not_brought_by_a_link(
-            self, signup_app):
-        """Control: a code changes nothing for an existing account."""
-        _inviter, code = _inviter_code()
-        member = User(username="old", twitter_id="77", approved=True,
-                      last_seen_at=datetime.utcnow())
-        _db.session.add(member)
-        _db.session.commit()
-        client = signup_app.test_client()
-        with patch("backend.routes.auth.twitter", _x(77, "old")):
-            client.get(f"/auth/login?invite={code}")
-        assert Referral.query.count() == 0
-
-    def test_the_email_link_keeps_the_invite(self, signup_app):
-        inviter, code = _inviter_code()
-        client = signup_app.test_client()
-        sent = {}
-
-        def capture(email, url, **_kwargs):   # #671 passes user_id
-            sent["url"] = url
-        with patch("backend.routes.auth.send_magic_link_email", capture):
-            r = client.post("/auth/magic-link/send", json={
-                "email": "fred@example.com", "invite": code})
-        assert r.status_code == 200
-        # Opened later in the same browser: the link records the invite.
-        path = sent["url"].split("://", 1)[1].split("/", 1)[1]
-        r = client.get("/" + path)
-        assert r.status_code == 302
-        friend = User.query.filter_by(email="fred@example.com").one()
-        assert not friend.approved
-        assert Referral.query.one().inviter_id == inviter.id
-
-    def _mail(self, client, email, invite):
-        sent = {}
-        with patch("backend.routes.auth.send_magic_link_email",
-                   lambda e, url, **_kw: sent.update(url=url)):
-            client.post("/auth/magic-link/send",
-                        json={"email": email, "invite": invite})
-        return "/" + sent["url"].split("://", 1)[1].split("/", 1)[1]
-
-    def test_a_code_put_on_someone_elses_sign_in_records_nothing(
-            self, signup_app):
-        """Someone asks for a sign-in link for another person's address
-        with their own code: that person signs in through it, and no
-        referral is recorded (nor would its reward be sent)."""
-        _inviter, code = _inviter_code()
-        link = self._mail(signup_app.test_client(), "vic@example.com", code)
-        victim = signup_app.test_client()
-        r = victim.get(link)
-        assert r.status_code == 302
-        assert User.query.filter_by(email="vic@example.com").one()
-        assert Referral.query.count() == 0
-
-    def test_the_link_opened_in_another_browser_records_nothing(
-            self, signup_app):
-        """The price of the rule above: the invite is followed on one
-        device and the mail opened on another."""
-        _inviter, code = _inviter_code()
-        link = self._mail(signup_app.test_client(), "fred@example.com", code)
-        signup_app.test_client().get(link)
-        assert Referral.query.count() == 0
-
-    def test_a_code_changes_no_answer(self, signup_app):
-        """Control (privacy): the send answer is the same for a real, a
-        made-up and no code: nothing tells whether a code belongs to
-        anyone."""
-        _inviter, code = _inviter_code()
-        answers = []
-        with patch("backend.routes.auth.send_magic_link_email",
-                   lambda *a, **k: None):
-            for invite in (code, "Zz" * 8, None):
-                r = signup_app.test_client().post(
-                    "/auth/magic-link/send",
-                    json={"email": "x@example.com", "invite": invite})
-                answers.append((r.status_code, r.get_json()))
-        assert answers[0] == answers[1] == answers[2]

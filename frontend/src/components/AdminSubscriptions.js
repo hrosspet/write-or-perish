@@ -153,9 +153,10 @@ export default function AdminSubscriptions() {
             <thead>
               <tr>
                 <th style={th}>invited by</th>
+                <th style={th}>invite</th>
                 <th style={th}>friend</th>
                 <th style={th}>approved</th>
-                <th style={th}>signed up</th>
+                <th style={th}>made</th>
                 <th style={th}>first payment</th>
                 <th style={th}>inviter's week</th>
                 <th style={th}>friend's week</th>
@@ -165,7 +166,11 @@ export default function AdminSubscriptions() {
               {referrals.map((r) => (
                 <tr key={r.id}>
                   <td style={cell}>{r.inviter || "(deleted)"}</td>
-                  <td style={cell}>{r.friend || "(deleted)"}</td>
+                  {/* Invites (#439): open, used, withdrawn or expired, by X
+                      or email; who it was for is not shown. "link": a
+                      referral through the reusable link invites replaced. */}
+                  <td style={cell}>{r.invite_state ? `${r.invite_state} (${r.invite_kind === "x" ? "X" : "email"})` : "link"}</td>
+                  <td style={cell}>{r.friend || (r.invite_state && r.invite_state !== "used" ? "—" : "(deleted)")}</td>
                   <td style={cell}>{r.friend_approved === null ? "—" : (r.friend_approved ? "yes" : "waiting")}</td>
                   <td style={cell}>{day(r.created_at)}</td>
                   <td style={cell}>{day(r.rewarded_at)}</td>

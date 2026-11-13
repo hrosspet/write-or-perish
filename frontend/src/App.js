@@ -10,6 +10,7 @@ import DataDeletionBanner from "./components/DataDeletionBanner";
 import TermsModal from "./components/TermsModal";
 import SubscribePage from "./pages/SubscribePage";
 import InvitePage from "./pages/InvitePage";
+import InviteMismatchPage from "./pages/InviteMismatchPage";
 import { notLetIn } from "./utils/subscription";
 import AdminPanel from "./components/AdminPanel";
 import NodeDetailWrapper from "./components/NodeDetailWrapper";
@@ -270,6 +271,8 @@ function App() {
           <Route path="/login" element={<LoginPage />} />
           {/* An invite link (#439): keeps the code for the sign-in. */}
           <Route path="/invite/:code" element={<InvitePage />} />
+          {/* A sign-in as someone the invite was not made for (#439). */}
+          <Route path="/invite-mismatch" element={<InviteMismatchPage />} />
           {/* Public about pages */}
           <Route path="/vision" element={<VisionPage />} />
           <Route path="/why-loore" element={<WhyLoorePage />} />

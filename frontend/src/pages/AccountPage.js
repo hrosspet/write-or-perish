@@ -702,8 +702,8 @@ export default function AccountPage() {
       </div>
       )}
 
-      {/* Referrals (#439): the invite link, only while the server has
-          them on. No counts, no reminders. */}
+      {/* Referrals (#439): one personal invite a month, only while the
+          server has them on. No counts, no reminders. */}
       {user.referrals_enabled && <InviteSection />}
 
       {/* ─── Settings ─── */}
