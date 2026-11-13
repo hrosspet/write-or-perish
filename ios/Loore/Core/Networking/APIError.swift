@@ -37,7 +37,8 @@ struct ServerErrorBody: Equatable, Sendable {
 enum APIError: Error, Equatable, Sendable {
     /// 401: signed out. The app signs out when it sees this.
     case unauthorized
-    /// 403 with the approval message: a waitlisted user called a gated API.
+    /// 403 with the approval message: a waitlisted user called a gated API
+    /// (or, payments on, an account the admin blocked: `notActiveCode`).
     case notApproved(message: String)
     /// 402 `monthly_spend_limit_reached`.
     case spendCap(message: String)
@@ -53,6 +54,8 @@ enum APIError: Error, Equatable, Sendable {
     case decoding(String)
 
     static let notApprovedPrefix = "Your account is not approved"
+    /// 403 `code` for an account the admin blocked while payments are on (#697).
+    static let notActiveCode = "account_not_active"
     static let spendCapCode = "monthly_spend_limit_reached"
     static let defaultSpendCapMessage =
         "You've reached your monthly usage limit for the free alpha. It resets at the start of next month."
@@ -90,7 +93,8 @@ enum APIError: Error, Equatable, Sendable {
         case 402 where body?.error == subscriptionRequiredCode:
             return .subscriptionRequired(message: body?.message ?? defaultSubscriptionMessage)
         case 403:
-            if let text = body?.error, text.hasPrefix(notApprovedPrefix) {
+            if let text = body?.error,
+               text.hasPrefix(notApprovedPrefix) || body?.code == notActiveCode {
                 return .notApproved(message: text)
             }
             return .server(status: status, body: body)

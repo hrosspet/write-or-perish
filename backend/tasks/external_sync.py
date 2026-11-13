@@ -561,10 +561,11 @@ def sync_all_twitter_bookmarks():
             if account.user is None or account.user.deleted_at is not None:
                 continue   # a deleted account in its grace period (#269)
             # Payments on: no background job for an account without the
-            # paid set (#438), a catch-up after a pause (#647) included;
-            # always True while off. Its pause, if any, waits as it is.
-            from backend.utils.subscriptions import ai_replies_allowed
-            if not ai_replies_allowed(account.user):
+            # paid set (#438) or one the admin blocked (#697), a catch-up
+            # after a pause (#647) included; always True while off. Its
+            # pause, if any, waits as it is.
+            from backend.utils.approval import background_work_allowed
+            if not background_work_allowed(account.user):
                 continue
             due = _sync_due(account, in_use, now)
             if due == "pause":

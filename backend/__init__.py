@@ -321,6 +321,8 @@ def create_app():
     #     their address before approval).
     #   - For other API requests, return a 403 JSON error.
     #   - For other (HTML) requests, redirect to "/" with the query flag ?alpha=1.
+    # While payments are on, only an account the admin blocked is held here
+    # (utils/approval.py): every other one is approved on arrival.
     @app.before_request
     def touch_last_seen_hook():
         # Admin Activity tab: who came back, and where they last were.
@@ -334,8 +336,20 @@ def create_app():
         if not current_user.is_authenticated:
             return  # nothing to check
 
-        if current_user.approved:
+        # `approved`, except, payments off, an account the gate let in by
+        # itself while they were on (#697: approval.waiting_again).
+        from backend.utils import approval
+        if approval.counts_as_approved(current_user):
             return  # approved users proceed
+
+        # Payments on (#697; Peter, 2026-11-13): nobody waits for approval.
+        # An account never approved is approved on its first request and
+        # goes on to the trial step (block_accounts_without_subscription
+        # below); one the admin blocked is refused here, with its own text.
+        # No-op while payments are off.
+        if approval.let_in(current_user):
+            db.session.commit()
+            return
 
         # Allow access to specific URL prefixes regardless.
         allowed_prefixes = ["/auth", "/static", "/favicon.ico"]
@@ -347,6 +361,14 @@ def create_app():
         # or the redirect below would loop).
         if request.endpoint and request.endpoint.startswith("public_pages."):
             return
+
+        # Payments on (#697): an account the admin blocked reaches only who
+        # it is, its subscription and Stripe's page to cancel it, its data
+        # download, the terms and deleting itself (approval.BLOCKED_OPEN).
+        if approval.approval_waived() and approval.is_blocked(current_user):
+            if approval.open_while_blocked(request.method, request.path):
+                return
+            return _refuse_unapproved()
 
         # Exempt endpoints that the frontend needs:
         # Allow GET requests to /api/dashboard to fetch current user info.
@@ -377,10 +399,15 @@ def create_app():
            (request.method == "GET" and account_path == "/api/account/restore"):
             return
 
+        return _refuse_unapproved()
+
+    def _refuse_unapproved():
         # For API calls, check if the request expects JSON.
         accept_header = request.headers.get("Accept", "")
         if request.path.startswith("/api") or request.is_json or "application/json" in accept_header:
-            return jsonify({"error": "Your account is not approved. Please wait for approval."}), 403
+            # The waiting text, or, payments on, the blocked account's.
+            from backend.utils.approval import refusal_body
+            return jsonify(refusal_body(current_user)), 403
 
         # For HTML (or non-JSON) requests, redirect to the landing page with an alpha flag.
         return redirect("/landing?alpha=1")

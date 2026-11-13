@@ -162,7 +162,9 @@ final class AppState {
     }
 
     var isApproved: Bool { user?.approved == true }
-    var needsTerms: Bool { user.map { !$0.termsUpToDate } ?? false }
+    /// Not for an account the admin blocked (payments on, #697): it can use
+    /// nothing the terms are for.
+    var needsTerms: Bool { user.map { !$0.termsUpToDate && !$0.accountBlocked } ?? false }
 
     // MARK: Launch
 

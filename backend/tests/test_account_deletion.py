@@ -881,6 +881,11 @@ def test_after_the_grace_period_nothing_of_the_account_is_left(
                             stripe_subscription_id="sub_hers"))
     _add(DiscountCodeAttempt(user_id=a_id, ok=False))
     _add(CheckoutSession(id="cs_hers", user_id=a_id, level="standard"))
+    # One trial per card (#697): her trial card's mark.
+    from backend.models import BillingRequest, TrialCard
+    _add(TrialCard(card_hash="h" * 64, user_id=a_id))
+    # The counts behind the checkout limit (#697): deleted with her.
+    _add(BillingRequest(user_id=a_id, kind="checkout"))
     B3 = _db.session.get(Node, world.ids["B3"])
     B3.pinned_by, B3.pinned_at = a_id, T0
     _db.session.commit()
@@ -913,6 +918,9 @@ def test_after_the_grace_period_nothing_of_the_account_is_left(
         stripe_subscription_id="sub_hers").one()
     assert red.user_id is None and red.state == "redeemed"
     assert _db.session.get(CheckoutSession, "cs_hers") is None
+    # The card's mark stays, without her: the card has had its trial.
+    mark = TrialCard.query.filter_by(card_hash="h" * 64).one()
+    assert mark.user_id is None and mark.created_at is not None
     assert job.counts["user"] == 1 and job.counts["node"] == 6
     assert all(isinstance(v, int) for v in job.counts.values())
 

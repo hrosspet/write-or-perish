@@ -1,5 +1,6 @@
 import React, { useCallback, useState } from "react";
 import { useUser } from "../contexts/UserContext";
+import PrefillConsentCard from "../components/PrefillConsentCard";
 import api from "../api";
 import SubscriptionSection from "../components/SubscriptionSection";
 import DeleteAccountDialog from "../components/DeleteAccountDialog";
@@ -62,6 +63,12 @@ export default function SubscribePage() {
       }}>
         Your account has no active subscription yet. Loore opens as soon as one starts.
       </p>
+
+      {/* "Start from your tweets?" (#697): with payments on, a new account
+          comes here, not to the waitlist that asked it before. Renders null
+          unless X sign-in and unanswered. */}
+      <PrefillConsentCard delayHint="Already on X?"
+        style={{ maxWidth: "none", marginBottom: "2rem" }} />
 
       <SubscriptionSection user={user} setUser={setUser} />
 

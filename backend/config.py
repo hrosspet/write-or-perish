@@ -243,6 +243,20 @@ class Config:
     # refused, guessing an 8-character code is out of reach.
     DISCOUNT_CODE_ATTEMPTS_PER_HOUR = int(
         os.environ.get("DISCOUNT_CODE_ATTEMPTS_PER_HOUR") or "10")
+    # Limits on starting a checkout and on the return page's sync, per
+    # account per hour (#697; utils/billing_limits). Each reaches Stripe.
+    # INTRODUCED HEURISTIC: a person opens Checkout, goes back, picks the
+    # other level, a few times in an hour: 10 starts leave room for that
+    # (going back to the same level reuses the open session); the return
+    # page syncs once per completed checkout, so 20 is generous.
+    CHECKOUT_STARTS_PER_HOUR = int(
+        os.environ.get("CHECKOUT_STARTS_PER_HOUR") or "10")
+    BILLING_SYNCS_PER_HOUR = int(
+        os.environ.get("BILLING_SYNCS_PER_HOUR") or "20")
+    # One trial per card (#697, utils/trial_cards): the key of the card
+    # fingerprint's hash. Unset: SECRET_KEY. Changing it (or SECRET_KEY
+    # while it is unset) forgets every card that had a trial.
+    TRIAL_CARD_HASH_KEY = os.environ.get("TRIAL_CARD_HASH_KEY") or None
     # Where the Subscribe view tells a user to ask for the lower price.
     SUBSCRIPTION_CONTACT_EMAIL = (
         os.environ.get("SUBSCRIPTION_CONTACT_EMAIL") or "info@loore.org")

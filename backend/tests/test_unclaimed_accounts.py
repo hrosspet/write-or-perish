@@ -830,3 +830,28 @@ def test_the_stash_prefix_matches_only_the_accounts_own_id(tmp_path,
     assert sorted(p.name for p in user_purge._ca_prefill_stashes(1)) == [
         "1-123", "1-9"]
     assert [p.name for p in user_purge._ca_prefill_stashes(11)] == ["11-123"]
+
+
+@pytest.mark.parametrize("path", ["prefill", "whitelist"])
+def test_approved_ahead_with_payments_on_is_still_unclaimed(app, stubs,
+                                                            path):
+    """#697 (payments on): a whitelist or a pre-fill approves the account
+    ahead of its owner (approved, approved_at, plan free, no let_in_at).
+    That is the admin's doing, not a sign of a person: never signed in,
+    the account is still due on day 91."""
+    from backend.routes.admin import _approve_with_prefill
+    from backend.utils import approval
+    app.config["PAYMENTS_ENABLED"] = True
+    u = _prefilled("ahead", plan="alpha")
+    if path == "prefill":
+        _approve_with_prefill(u)
+    else:
+        assert approval.let_in(u, now=OPENED, automatic=False)
+        _db.session.commit()
+    _db.session.expire_all()
+    fresh = _db.session.get(User, u.id)
+    assert (fresh.approved, fresh.plan, fresh.let_in_at) == (
+        True, "free", None)
+    assert fresh.approved_at is not None
+    assert _status(u, config=app.config).status == "due"
+    assert _status(u, now=DAY_89, config=app.config).status != "due"

@@ -38,6 +38,8 @@ import backend.models as _real_backend_models  # noqa: E402
 # What an account in state "none" may still call (method, rule).
 EXPECTED_OPEN = {
     ("GET", "/api/dashboard/"),
+    # The subscribe page's "Start from your tweets?" (#697).
+    ("PUT", "/api/dashboard/user"),
     ("PATCH", "/api/dashboard/timezone"),
     ("POST", "/api/account/delete"),
     ("POST", "/api/account/delete/confirm"),

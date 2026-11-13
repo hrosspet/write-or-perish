@@ -400,6 +400,33 @@ def test_payments_on_an_account_without_the_paid_set_gets_no_digest(
     assert _digest.sweep_external_digests()["submitted"] == 1
 
 
+def test_payments_on_a_blocked_account_gets_no_digest(app, monkeypatch):
+    """#697: an account the admin blocked (deactivated) starts no
+    background model call while payments are on, whatever its paid set:
+    no nightly digest, no manual rebuild. Control: payments off, the
+    sweep is what it was."""
+    from datetime import datetime
+    user = User.query.first()
+    user.timezone = _tz_at_hour(_digest.NIGHTLY_DIGEST_LOCAL_HOUR)
+    user.plan = "alpha"   # the paid set, by hand
+    user.approved = False
+    user.deactivated_at = datetime.utcnow()
+    _db.session.commit()
+    _mk_item(user.id, "clip")
+    submitted = _stub_batch_submit(monkeypatch)
+    calls = _stub_llm(monkeypatch)
+    monkeypatch.setitem(_digest.flask_app.config, "PAYMENTS_ENABLED", True)
+
+    assert _digest.sweep_external_digests() == {"status": "ok",
+                                                "submitted": 0}
+    assert _digest.rebuild_external_digest(
+        _FakeSelf(), user.id, force=True) == {"status": "blocked"}
+    assert submitted == [] and calls == []
+
+    monkeypatch.setitem(_digest.flask_app.config, "PAYMENTS_ENABLED", False)
+    assert _digest.sweep_external_digests()["submitted"] == 1
+
+
 def _hold_writing(user, account=False, at=None):
     """A waiting "Delete all my content" of *user* (#590), requested at
     *at*, or with *account* an account deletion (#269)."""

@@ -613,3 +613,34 @@ class TestTheDraftsPart:
         content = build_user_export_content(u, filter_ai_usage=False)
         assert content and "private draft text" not in content
         assert "# Drafts" not in content
+
+
+# ── A blocked account (#697) with a recording under way ─────────────────
+
+class TestABlockedAccountRecordsNothing:
+    """The recording exception above lives in the subscription gate. An
+    account the admin blocked (#697, payments on) is refused before that,
+    by the approval gate, which opens only approval.BLOCKED_OPEN: so a
+    block also stops a recording the account had under way, and the
+    exception never lets a blocked account record."""
+
+    def test_its_chunks_finalize_and_status_are_refused(self, app):
+        from backend.utils import approval
+        ben = _not_let_in()
+        draft = _session(app, ben)
+        client = _client(app, ben)
+        _passed(_chunk(client, draft.session_id, index=4))  # control
+        approval.block(ben)
+        _db.session.commit()
+        for resp in (
+                _chunk(client, draft.session_id),
+                client.get(f"/api/drafts/streaming/{draft.session_id}/status"),
+                client.post(
+                    f"/api/drafts/streaming/{draft.session_id}/finalize",
+                    json={"total_chunks": 6, "label": "Voice"})):
+            assert resp.status_code == 403, resp.get_data(as_text=True)
+            assert resp.get_json()["code"] == approval.NOT_ACTIVE_CODE
+        assert NodeTranscriptChunk.query.filter_by(
+            session_id=draft.session_id, chunk_index=5).first() is None
+        # Its data download stays open (both lists have it).
+        assert client.head("/api/export/threads").status_code < 400
