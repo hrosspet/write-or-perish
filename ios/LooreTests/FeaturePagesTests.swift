@@ -110,6 +110,60 @@ final class AccountModelTests: StubbedAppTestCase {
         XCTAssertFalse(AccountModel(app: app).showsDisconnectX, "an X-only account cannot disconnect")
     }
 
+    // #662: "Start from your tweets" (AccountPage.tweetSeed.test.js).
+
+    func testTweetSeedRowShowsWhereTheQuestionApplies() throws {
+        try signIn(["email": "a@example.com"])
+        XCTAssertFalse(AccountModel(app: app).showsTweetSeed, "an email account Loore never pre-filled")
+        try signIn(["twitter_login": true, "twitter_handle": "sw"])
+        XCTAssertTrue(AccountModel(app: app).showsTweetSeed, "an X sign-in: the card asks it")
+        try signIn(["email": "a@example.com", "prefilled_handle": "sw_tw"])
+        XCTAssertTrue(AccountModel(app: app).showsTweetSeed, "an account Loore pre-filled")
+        try signIn(["email": "a@example.com", "prefill_consent": "no"])
+        XCTAssertTrue(AccountModel(app: app).showsTweetSeed, "an answer can always be changed")
+    }
+
+    func testTweetSeedTextIsTheWebsText() throws {
+        try signIn(["twitter_login": true, "twitter_handle": "sw", "prefilled_handle": "sw_tw"])
+        XCTAssertEqual(AccountModel.tweetSeedHelp(app.user!),
+                       "With Yes, Loore brings in your public tweets as @sw_tw, keeps them private in your Loore, "
+                       + "and drafts your profile and intentions from them. With No, it brings in no more of them, "
+                       + "and leaves the ones it brought in out whenever it reads through your writing, such as to "
+                       + "update your profile. What it already made stays: those tweets, your profile and your "
+                       + "intentions, each yours to edit or delete. Until you answer, Loore may still bring them in.")
+        try signIn(["twitter_login": true, "twitter_handle": "sw", "prefill_consent": "yes"])
+        let answered = AccountModel.tweetSeedHelp(app.user!)
+        XCTAssertTrue(answered.hasPrefix("With Yes, Loore brings in your public tweets as @sw, "))
+        XCTAssertFalse(answered.contains("Until you answer"))
+    }
+
+    func testTweetSeedSavesBothWaysAndSaysWhenItDidNotSave() async throws {
+        try signIn(["twitter_login": true, "prefill_consent": "yes"])
+        let model = AccountModel(app: app)
+        StubURLProtocol.install { _ in
+            .json(200, #"{"user":{"id":5,"username":"seowriter","approved":true,"terms_up_to_date":true,"twitter_login":true,"prefill_consent":"no"}}"#)
+        }
+        await model.saveTweetSeed(.no)
+        XCTAssertEqual(body(of: "PUT /api/dashboard/user")?["prefill_consent"] as? String, "no")
+        XCTAssertEqual(app.user?.prefillConsent, .no)
+        XCTAssertNil(model.tweetSeedError)
+        StubURLProtocol.install { _ in .json(500, #"{"error":"down"}"#) }
+        await model.saveTweetSeed(.yes)
+        XCTAssertEqual(model.tweetSeedError, "Couldn't save your answer. Please try again.")
+        XCTAssertEqual(app.user?.prefillConsent, .no, "the answer shown is the one saved")
+        XCTAssertFalse(model.isSaving("prefill_consent"))
+    }
+
+    func testTheCardsNoOnAPrefilledAccountPromisesNoBlankPage() throws {
+        try signIn(["twitter_login": true, "prefilled_handle": "sw_tw"])
+        let noted = AccountModel.tweetSeedNoted(app.user!, answer: .no)
+        XCTAssertFalse(noted.contains("blank page"))
+        XCTAssertTrue(noted.contains("What it already made stays, yours to edit or delete."))
+        try signIn(["twitter_login": true])
+        XCTAssertEqual(AccountModel.tweetSeedNoted(app.user!, answer: .no),
+                       "Noted. You'll start from a blank page — you can always seed from your tweets later, from Settings.")
+    }
+
     func testXLoginOutcomeMessages() async throws {
         try signIn(["email": "a@example.com"])
         let model = AccountModel(app: app)

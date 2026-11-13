@@ -306,9 +306,11 @@ def _latest_non_integration_profile(user_id):
 
 
 def _new_token_count(user, cutoff):
+    from backend.utils.privacy import withheld_prefill_clauses
     q = db.session.query(func.coalesce(func.sum(Node.token_count), 0)).filter(
         or_(Node.user_id == user.id, Node.human_owner_id == user.id),
         Node.ai_usage.in_(['chat', 'train']),
+        *withheld_prefill_clauses(user.id),
     )
     if cutoff is not None:
         # Writing created after the cutoff, as the window reads it: an

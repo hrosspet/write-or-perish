@@ -554,12 +554,14 @@ def _unread_before(user, cutoff, boundary):
     already existed at ``boundary``, when the window was rendered."""
     if cutoff is None or boundary is None:
         return False
+    from backend.utils.privacy import withheld_prefill_clauses
     return db.session.query(Node.id).filter(
         or_(Node.user_id == user.id, Node.human_owner_id == user.id),
         Node.ai_usage.in_(AI_ALLOWED),
         Node.deleted_at.is_(None),
         Node.created_at > cutoff,
         Node.created_at < boundary,
+        *withheld_prefill_clauses(user.id),
     ).first() is not None
 
 

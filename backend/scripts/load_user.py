@@ -23,7 +23,9 @@ Options:
                          appended. Without --merge a non-empty user aborts.
                          On an existing account whose current intentions
                          the user wrote (not an inferred version), the
-                         dump's intentions are skipped (#412).
+                         dump's intentions are skipped (#412). An existing
+                         account whose owner said no to starting from
+                         their tweets is refused (#662).
     --create-approved    when the user has to be created, set approved=True
                          (default: created unapproved — the same gate a
                          fresh signup gets; flip it in the admin page)
@@ -149,6 +151,11 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
         print(f"created user '{username}' (id {user.id}, approved={user.approved})",
               file=sys.stderr)
     else:
+        if user.prefill_consent == "no":
+            # A dump loaded onto an account is a pre-fill (a lab bundle of
+            # tweets, profile and intentions): its owner said no (#662).
+            sys.exit(f"User '{username}' said no to starting from their "
+                     f"tweets (pre-fill consent: no); nothing loaded.")
         existing = Node.query.filter(
             or_(Node.user_id == user.id, Node.human_owner_id == user.id),
             Node.deleted_at.is_(None)).count()

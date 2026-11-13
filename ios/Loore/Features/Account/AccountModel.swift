@@ -208,4 +208,59 @@ final class AccountModel {
     }
 
     func isSaving(_ field: String) -> Bool { savingFields.contains(field) }
+
+    // MARK: Start from your tweets (#662)
+
+    /// Set when a change of the answer did not save: a no that did not reach the
+    /// server must not look given (web `AccountPage` `tweetSeedError`).
+    var tweetSeedError: String?
+
+    /// Where the question applies (web `showsTweetSeed`): the card asks X sign-ins,
+    /// an account Loore pre-filled holds tweets, and an answer can always be changed.
+    var showsTweetSeed: Bool {
+        guard let user else { return false }
+        return user.twitterLogin || user.prefilledHandle != nil || user.prefillConsent != nil
+    }
+
+    /// `PUT /api/dashboard/user {prefill_consent}`, "yes" or "no".
+    func saveTweetSeed(_ answer: PrefillConsent) async {
+        savingFields.insert("prefill_consent")
+        tweetSeedError = nil
+        defer { savingFields.remove("prefill_consent") }
+        do {
+            _ = try await app.updateUser(["prefill_consent": .string(answer.rawString)])
+        } catch {
+            tweetSeedError = "Couldn't save your answer. Please try again."
+        }
+    }
+
+    /// The handle the tweets come from (web `tweetSeedHandle`).
+    static func tweetSeedHandle(_ user: CurrentUser) -> String {
+        user.prefilledHandle ?? user.twitterHandle ?? user.username
+    }
+
+    /// What each answer does and what stays (web `tweetSeedHelp`; change the words of
+    /// both together). A no: no pre-fill runs, and every AI read of the writing as a
+    /// whole leaves the pre-filled tweets out (backend `withheld_prefill_clauses`).
+    static func tweetSeedHelp(_ user: CurrentUser) -> String {
+        let text = "With Yes, Loore brings in your public tweets as @\(tweetSeedHandle(user)), "
+            + "keeps them private in your Loore, and drafts your profile and intentions "
+            + "from them. With No, it brings in no more of them, and leaves the ones it "
+            + "brought in out whenever it reads through your writing, such as to update "
+            + "your profile. What it already made stays: those tweets, your profile and "
+            + "your intentions, each yours to edit or delete."
+        return user.prefillConsent == nil ? text + " Until you answer, Loore may still bring them in." : text
+    }
+
+    /// The card's line after an answer (web `tweetSeedNoted`). A no on an account Loore
+    /// already pre-filled does not leave a blank page: what was made stays.
+    static func tweetSeedNoted(_ user: CurrentUser, answer: PrefillConsent) -> String {
+        if answer == .yes {
+            return "Noted. We'll seed your Loore from your public tweets and have first drafts of your artifacts — like your profile and intentions — waiting when you come in."
+        }
+        if user.prefilledHandle != nil {
+            return "Noted. Loore brings in no more of your tweets, and leaves the ones it brought in out whenever it reads through your writing. What it already made stays, yours to edit or delete. You can change this in Settings."
+        }
+        return "Noted. You'll start from a blank page — you can always seed from your tweets later, from Settings."
+    }
 }
