@@ -617,6 +617,7 @@ Phase A (A.1–A.19) and B.1 are complete — see tables above for details.
 8i. ✅ **DONE (in review):** Entry headers no longer grow with thread depth (A.75, #592)
 8j. ✅ **DONE (in review):** Spend cap carries a month's overflow into the next month (A.76, #594) — next: the iPhone app reads the server's lift date in its toasts (its banner already shows the server's text)
 8k. ✅ **DONE (in review):** Long threads: a notice near the limit, no AI reply at it (A.80, #648)
+8l. ✅ **DONE (in review):** Fonts are served from Loore itself; no request goes to Google Fonts any more (A.90, #663)
 9. **NEXT:** Alchemical Mode (spec'd 2026-07-01, authoritative spec in FOUR-FEATURE-ECOSYSTEM.md) — LLM readiness/safety checker over recent user data → opt-in with strong experimental disclaimers → gated Alchemy home card with hidden source prompt; sources pluggable (Meditationbook.page PoC first, Chapman corpus + Petr's book later). Note: Intention Market deferred until more users (maintainer decision 2026-07-01).
 10. **THEN:** Phase B remaining (B.2 backend tests + B.3 frontend tests) — can run parallel
 11. **THEN:** Phase C infrastructure, leading to Phase D parallelization
