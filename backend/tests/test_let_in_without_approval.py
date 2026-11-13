@@ -306,6 +306,24 @@ class TestBlocked:
                                                   "none")
         assert user.approved is False
 
+    def test_control_profile_updates_already_skip_it(self, real_app):
+        # The profile and recent-context jobs pick from
+        # profile_eligible_query, which needs `approved`; the other jobs
+        # use approval.background_work_allowed (their own tests).
+        from backend.utils.approval import (
+            background_work_allowed, background_work_clause)
+        u = _blocked(username="payer", subscription_status="active",
+                     subscription_level="standard", default_ai_usage="chat")
+        assert u not in User.profile_eligible_query().all()
+        assert not background_work_allowed(u)
+        assert User.query.filter(User.id == u.id,
+                                 *background_work_clause()).count() == 0
+        u.approved = True   # unblocked
+        _db.session.commit()
+        assert background_work_allowed(u)
+        assert User.query.filter(User.id == u.id,
+                                 *background_work_clause()).count() == 1
+
     def test_control_deleting_itself_stays_open(self, real_app):
         u = _blocked(username="leaving", email="l@example.com")
         r = _client(real_app, u).post("/api/account/delete", json={})

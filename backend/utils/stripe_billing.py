@@ -215,6 +215,11 @@ class StripeGateway:
         return plain(self.client.v1.subscription_schedules.release(
             schedule_id))
 
+    # One trial per card (#697): only the card's fingerprint is read.
+    def retrieve_payment_method(self, payment_method_id):
+        return plain(self.client.v1.payment_methods.retrieve(
+            payment_method_id))
+
 
 def get_gateway(config=None):
     """The gateway for the configured secret key. Raises
@@ -805,6 +810,8 @@ def settle_subscription(gateway, sub, config=None, lock=True):
       charged refunded, whichever arrives first;
     * a subscription still in a trial for an account whose trial another
       subscription used: cancelled (nothing was charged yet);
+    * one still in a trial whose card started a trial on another account
+      (#697, utils/trial_cards): cancelled the same way;
     * the code that opened a kept subscription takes its use now.
 
     The account row is locked first (*lock*), so two events of one
@@ -848,6 +855,16 @@ def settle_subscription(gateway, sub, config=None, lock=True):
             logger.warning("User %s: a second trial (%s) cancelled; %s had "
                            "the trial", user.id, sub_id,
                            user.subscription_trial_sub_id)
+            cancelled = cancel_duplicate(gateway, sub)
+            apply_subscription(cancelled, config)
+            return user
+        # One trial per card too (#697): a trial whose card already
+        # started one on another account goes the same way.
+        from backend.utils.trial_cards import trial_card_refused
+        if trial_card_refused(gateway, user, sub, config):
+            # The account's next checkout has no trial, whatever card.
+            user.subscription_trial_used = True
+            user.subscription_trial_card_refused_at = datetime.utcnow()
             cancelled = cancel_duplicate(gateway, sub)
             apply_subscription(cancelled, config)
             return user

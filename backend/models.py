@@ -204,6 +204,12 @@ class User(db.Model, UserMixin):
     # live: "dispute" (a payment was disputed) or "refund" (its latest
     # payment was refunded in full). NULL: nothing withdrawn.
     subscription_revoked = db.Column(db.String(16), nullable=True)
+    # When a trial of this account was cancelled because its card had
+    # already started a trial on another account (#697, TrialCard). The
+    # subscribe page then says so; a subscription without a trial is
+    # possible. NULL: never.
+    subscription_trial_card_refused_at = db.Column(db.DateTime,
+                                                   nullable=True)
 
     # --- The alpha free month (#438; Peter, 2026-11-12: alpha testers are
     # "free for one month after the opening, then the discounted price") ---
@@ -2712,6 +2718,22 @@ class DiscountCodeAttempt(db.Model):
     created_at = db.Column(db.DateTime, nullable=False,
                            default=datetime.utcnow, index=True)
     ok = db.Column(db.Boolean, nullable=False, default=False)
+
+
+class TrialCard(db.Model):
+    """A card that started a free trial (#697): one trial per card as
+    well as per account (utils/trial_cards). Only a keyed hash of the
+    card's Stripe fingerprint (never the fingerprint, never card data)
+    and when the trial started. An account deletion keeps the row without
+    the account, as the anonymous mark that this card had its trial."""
+    __tablename__ = "trial_card"
+
+    id = db.Column(db.Integer, primary_key=True)
+    card_hash = db.Column(db.String(64), nullable=False, unique=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=True, index=True)
+    created_at = db.Column(db.DateTime, nullable=False,
+                           default=datetime.utcnow)
 
 
 # The per-user tables whose rows a waiting "Delete all my content" hides

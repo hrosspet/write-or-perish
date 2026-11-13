@@ -38,7 +38,7 @@ from backend.utils.cost import llm_cost_log_fields
 from backend.utils import refusal_backoff
 from backend.utils.refusal_backoff import REFUSED_REF
 from backend.utils.privacy import account_allows_ai
-from backend.utils.subscriptions import ai_replies_allowed
+from backend.utils.approval import background_work_allowed, is_blocked
 from backend.utils.llm_batch import (
     BATCH_JOB_MAX_AGE, apply_batch_key_override, batch_check_and_collect,
     batch_submit, blocked_items, delete_collected_batch_files,
@@ -384,8 +384,9 @@ def sweep_external_digests():
             and user.id in in_use   # #647: paused while nobody uses it
             and account_allows_ai(user)   # #346
             # Payments on: no background model call for an account
-            # without the paid set (#438); always True while off.
-            and ai_replies_allowed(user)
+            # without the paid set (#438), or one the admin blocked
+            # (#697); always True while off.
+            and background_work_allowed(user)
             and user.deleted_at is None   # hidden: account deleted (#269)
             # Account being deleted (#269). A waiting "Delete all my
             # content" does not hold the digest of what is saved since
@@ -510,8 +511,10 @@ def rebuild_external_digest(self, user_id, force=False):
             return {"status": "no_user"}
         if not account_allows_ai(user):   # #346
             return {"status": "ai_opt_out"}
-        if not ai_replies_allowed(user):   # payments on, no paid set (#438)
-            return {"status": "no_subscription"}
+        # Payments on: no paid set (#438), or blocked by the admin (#697).
+        if not background_work_allowed(user):
+            return {"status": "blocked" if is_blocked(user)
+                    else "no_subscription"}
         if account_on_hold(user_id):   # account being deleted (#269)
             return {"status": "on_hold"}
         if not force and not digest_is_stale(user_id):

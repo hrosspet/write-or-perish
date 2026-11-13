@@ -77,6 +77,29 @@ def let_in(user, now=None, config=None):
     return True
 
 
+def background_work_allowed(user, config=None):
+    """Whether a background job nobody asked for just now (the nightly
+    digest of saved references, the bookmark sync, embeddings) may make a
+    model call for *user*. Payments on: the paid set (#438), and not an
+    account the admin blocked (#697), whatever its subscription. True
+    while payments are off: the job's own checks stay as they were."""
+    from backend.utils.subscriptions import ai_replies_allowed
+    if not ai_replies_allowed(user, config):
+        return False
+    return not (approval_waived(config) and is_blocked(user))
+
+
+def background_work_clause(config=None):
+    """background_work_allowed in SQL, for a query joined to User. Nothing
+    while payments are off, so the query is the one it was."""
+    if not approval_waived(config):
+        return []
+    from sqlalchemy import or_
+    from backend.models import User
+    return [User.paid_features_clause(),
+            or_(User.approved.is_(True), User.deactivated_at.is_(None))]
+
+
 def refusal_body(user, config=None):
     """The 403 body of the approval gate for an account that is not
     approved: the blocked account's own text while payments are on,

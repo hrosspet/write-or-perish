@@ -657,6 +657,10 @@ def delete_identity(user_id):
     counts["discount_redemption.user_id"] += DiscountRedemption.query.filter(
         DiscountRedemption.user_id == U).update(
         {DiscountRedemption.user_id: None}, synchronize_session=False)
+    # One trial per card (#697): the card's mark stays without the account
+    # (a keyed hash and a date), so the card gets no second trial.
+    from backend.utils.trial_cards import detach_for_purge
+    counts["trial_card.user_id"] += detach_for_purge(U)
     counts["discount_code.created_by_id"] += DiscountCode.query.filter(
         DiscountCode.created_by_id == U).update(
         {DiscountCode.created_by_id: None}, synchronize_session=False)

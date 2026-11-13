@@ -488,6 +488,10 @@ def subscription_state(user, config=None):
         # An alpha tester's free month takes the trial's place.
         "trial_available": not user.subscription_trial_used and not alpha,
         "trial_days": int(cfg.get("SUBSCRIPTION_TRIAL_DAYS") or 0),
+        # A trial was cancelled because its card had one on another
+        # account (#697): the page says so, and that a subscription
+        # without a trial is possible.
+        "trial_card_refused": bool(user.subscription_trial_card_refused_at),
         # The alpha free month: whether this is an alpha tester, when the
         # month starts and ends (one date for every tester), whether it is
         # still to come (the alpha plan's access until then) or runs.
