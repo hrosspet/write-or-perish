@@ -30,7 +30,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
 
     steps:
       - name: Checkout code
@@ -44,7 +44,7 @@ jobs:
           cache-dependency-path: backend/requirements.txt
 
       - name: Install system dependencies (ffmpeg for audio processing)
-        timeout-minutes: 5
+        timeout-minutes: 10
         run: |
           APT_OPTS="-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o DPkg::Lock::Timeout=60"
           sudo apt-get $APT_OPTS update
