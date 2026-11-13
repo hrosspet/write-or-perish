@@ -150,7 +150,8 @@ def _run_batch(tmp_path, monkeypatch, chunk_indices, boundary_indices,
         monkeypatch.setattr(st, "concat_fragmented_media", fake_concat)
         monkeypatch.setattr(st, "compress_audio_if_needed",
                             lambda p, log: p)
-        monkeypatch.setattr(st, "get_audio_duration", lambda p, log: 15.0)
+        monkeypatch.setattr(st, "decoded_audio_seconds",
+                            lambda p, **k: 15.0)
         monkeypatch.setattr(st, "get_openai_chat_key", lambda cfg: "key")
 
         class FakeTranscriptions:

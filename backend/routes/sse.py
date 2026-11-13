@@ -524,11 +524,22 @@ def draft_transcription_stream(session_id):
                             "status": "completed"
                         }, event="chunk_complete")
                     else:
-                        yield format_sse_message({
+                        failed = {
                             "chunk_index": chunk.chunk_index,
                             "error": chunk.error,
                             "status": "failed"
-                        }, event="chunk_error")
+                        }
+                        # Kept as audio without its text (past the length
+                        # one recording may have transcribed): the code,
+                        # so the apps say why instead of sounding an error
+                        # (utils/recording_limits).
+                        from backend.utils.recording_limits import (
+                            untranscribed_code,
+                        )
+                        code = untranscribed_code(chunk.error)
+                        if code:
+                            failed["code"] = code
+                        yield format_sse_message(failed, event="chunk_error")
 
                     last_sent_chunk = chunk.chunk_index
 

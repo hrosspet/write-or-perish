@@ -10,17 +10,25 @@ from celery.utils.log import get_task_logger
 from openai import OpenAI
 import pathlib
 import os
+import time
 from datetime import datetime
 
 from backend.celery_app import celery, flask_app
 from backend.models import Node, APICostLog
 from backend.extensions import db
 from backend.utils.audio_processing import (
+    SPLIT_TIMEOUT_SECONDS,
     compress_audio_if_needed,
-    get_audio_duration,
-    chunk_audio,
+    decode_timeout_seconds,
+    decoded_audio_seconds,
+    seconds_left,
+    split_audio_for_transcription,
+    CHUNK_DURATION_SEC,
     OPENAI_MAX_AUDIO_BYTES,
     OPENAI_MAX_DURATION_SEC
+)
+from backend.utils.recording_limits import (
+    MAX_UPLOAD_TRANSCRIBED_SECONDS, UPLOAD_NOTE_PART, with_note,
 )
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.encryption import decrypt_file_to_temp
@@ -112,6 +120,20 @@ def _start_upload_reply(node, tip, model_id):
         return None
 
 
+def _log_transcription_cost(user_id, seconds):
+    """A cost row for *seconds* of audio sent to the provider (none for 0)."""
+    if seconds <= 0:
+        return
+    db.session.add(APICostLog(
+        user_id=user_id,
+        model_id="gpt-4o-transcribe",
+        request_type="transcription",
+        audio_duration_seconds=seconds,
+        cost_microdollars=calculate_audio_cost_microdollars(
+            "gpt-4o-transcribe", seconds),
+    ))
+
+
 @celery.task(base=TranscriptionTask, bind=True)
 def transcribe_audio(self, node_id: int, audio_file_path: str, filename: str = None,
                      auto_reply_model: str = None):
@@ -138,6 +160,11 @@ def transcribe_audio(self, node_id: int, audio_file_path: str, filename: str = N
         node.transcription_started_at = datetime.utcnow()
         node.transcription_progress = 0
         db.session.commit()
+
+        # Seconds of audio sent to the provider: the cost record, also when
+        # a request fails.
+        sent_seconds = 0.0
+        cost_logged = False
 
         try:
             # Get OpenAI API key (always use CHAT key for audio operations)
@@ -172,16 +199,30 @@ def transcribe_audio(self, node_id: int, audio_file_path: str, filename: str = N
 
             file_size = processed_path.stat().st_size
 
-            # For large files, skip expensive duration check - we know they need chunking
-            # This avoids loading 190MB+ files into memory just to check duration
-            if file_size > OPENAI_MAX_AUDIO_BYTES:
-                needs_chunking = True
-                duration_sec = 0  # Unknown, but doesn't matter - file size already requires chunking
-                logger.info(f"Large audio file: {file_size / 1024 / 1024:.1f} MB - will use chunked transcription")
-            else:
-                duration_sec = get_audio_duration(processed_path, logger)
-                logger.info(f"Transcribing audio: {file_size / 1024 / 1024:.1f} MB, {duration_sec:.0f} seconds")
-                needs_chunking = duration_sec > OPENAI_MAX_DURATION_SEC
+            # The file's length, counted from its decoded audio (not its
+            # container's timestamps; utils/recording_limits). It is sent
+            # whole only when that length is known and fits one request;
+            # otherwise it is cut at MAX_UPLOAD_TRANSCRIBED_SECONDS and split
+            # into pieces re-timed from their samples, so the bound holds
+            # whether or not the length could be measured.
+            # One deadline for the file's audio work (measuring, cutting,
+            # measuring the pieces): SPLIT_TIMEOUT_SECONDS.
+            deadline = time.monotonic() + SPLIT_TIMEOUT_SECONDS
+            decoded_sec = decoded_audio_seconds(
+                processed_path,
+                timeout_seconds=seconds_left(
+                    deadline, decode_timeout_seconds(processed_path)),
+                logger=logger)
+            needs_chunking = (decoded_sec is None
+                              or file_size > OPENAI_MAX_AUDIO_BYTES
+                              or decoded_sec > OPENAI_MAX_DURATION_SEC)
+            logger.info(
+                f"Transcribing audio: {file_size / 1024 / 1024:.1f} MB, "
+                + (f"{decoded_sec:.0f} seconds" if decoded_sec is not None
+                   else "length unknown")
+                + (", in pieces" if needs_chunking else ""))
+            # The file holds audio past the bound (not transcribed).
+            cut = False
 
             transcript = None
 
@@ -191,6 +232,7 @@ def transcribe_audio(self, node_id: int, audio_file_path: str, filename: str = N
                 node.transcription_progress = 30
                 db.session.commit()
 
+                sent_seconds = decoded_sec
                 with open(processed_path, "rb") as audio_file:
                     resp = client.audio.transcriptions.create(
                         model="gpt-4o-transcribe",
@@ -217,7 +259,11 @@ def transcribe_audio(self, node_id: int, audio_file_path: str, filename: str = N
                 node.transcription_progress = 30
                 db.session.commit()
 
-                chunk_paths = chunk_audio(processed_path, logger=logger)
+                pieces, cut = split_audio_for_transcription(
+                    processed_path, CHUNK_DURATION_SEC,
+                    MAX_UPLOAD_TRANSCRIBED_SECONDS, logger=logger,
+                    deadline=deadline)
+                chunk_paths = [path for path, _ in pieces]
 
                 if not chunk_paths:
                     raise Exception("Failed to create audio chunks")
@@ -226,7 +272,7 @@ def transcribe_audio(self, node_id: int, audio_file_path: str, filename: str = N
                 chunk_progress_step = 60 / len(chunk_paths)  # 30% -> 90% split across chunks
 
                 try:
-                    for i, chunk_path in enumerate(chunk_paths):
+                    for i, (chunk_path, piece_seconds) in enumerate(pieces):
                         progress = 30 + int((i + 1) * chunk_progress_step)
                         self.update_state(
                             state='PROGRESS',
@@ -240,6 +286,10 @@ def transcribe_audio(self, node_id: int, audio_file_path: str, filename: str = N
 
                         logger.info(f"Transcribing chunk {i + 1}/{len(chunk_paths)}")
 
+                        # What is sent: decoded, or the most a piece of
+                        # this size can hold (never less); counted also if
+                        # the request fails.
+                        sent_seconds += piece_seconds
                         with open(chunk_path, "rb") as audio_file:
                             resp = client.audio.transcriptions.create(
                                 model="gpt-4o-transcribe",
@@ -266,6 +316,10 @@ def transcribe_audio(self, node_id: int, audio_file_path: str, filename: str = N
                             os.unlink(chunk_path)
                         except Exception as e:
                             logger.warning(f"Failed to delete chunk: {e}")
+                    try:
+                        os.rmdir(os.path.dirname(chunk_paths[0]))
+                    except OSError:
+                        pass
 
             # Clean up compressed file if different from original
             if processed_path != file_path:
@@ -281,23 +335,13 @@ def transcribe_audio(self, node_id: int, audio_file_path: str, filename: str = N
                 except Exception as e:
                     logger.warning(f"Failed to delete temp decrypted file: {e}")
 
-            # Log transcription cost
-            # For chunked files where duration_sec is 0, estimate from chunk count
-            cost_duration = duration_sec
-            if cost_duration == 0 and needs_chunking:
-                cost_duration = len(chunk_paths) * 20 * 60  # ~20 min per chunk
-            if cost_duration > 0:
-                transcription_cost = calculate_audio_cost_microdollars(
-                    "gpt-4o-transcribe", cost_duration
-                )
-                cost_log = APICostLog(
-                    user_id=node.user_id,
-                    model_id="gpt-4o-transcribe",
-                    request_type="transcription",
-                    audio_duration_seconds=cost_duration,
-                    cost_microdollars=transcription_cost,
-                )
-                db.session.add(cost_log)
+            # Cut at the bound: the entry says the rest is audio only.
+            if cut:
+                transcript = with_note(transcript, UPLOAD_NOTE_PART)
+
+            # Log transcription cost: the audio sent to the provider
+            _log_transcription_cost(node.user_id, sent_seconds)
+            cost_logged = True
 
             # Step 4: Update node with transcript (100% progress)
             self.update_state(state='PROGRESS', meta={'progress': 100, 'status': 'Complete'})
@@ -353,5 +397,8 @@ def transcribe_audio(self, node_id: int, audio_file_path: str, filename: str = N
             node.transcription_status = 'failed'
             node.transcription_error = TRANSCRIPTION_FAILED_TEXT
             node.transcription_completed_at = datetime.utcnow()
+            if not cost_logged:
+                # Pieces sent before the failure.
+                _log_transcription_cost(node.user_id, sent_seconds)
             db.session.commit()
             raise

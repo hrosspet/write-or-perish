@@ -304,7 +304,8 @@ def st(monkeypatch, tmp_path):
     monkeypatch.setenv("AUDIO_STORAGE_PATH", str(tmp_path))
 
     monkeypatch.setattr(module, "compress_audio_if_needed", lambda p, log: p)
-    monkeypatch.setattr(module, "get_audio_duration", lambda p, log: 15.0)
+    monkeypatch.setattr(module, "decoded_audio_seconds",
+                        lambda p, **k: 15.0)
     monkeypatch.setattr(module, "get_openai_chat_key", lambda cfg: "key")
     monkeypatch.setattr(
         module, "concat_fragmented_media",
@@ -489,7 +490,8 @@ class TestCappedRecordingIsTranscribed:
         import backend.tasks.transcription as tr
         tr.flask_app = st.flask_app
         monkeypatch.setattr(tr, "compress_audio_if_needed", lambda p, log: p)
-        monkeypatch.setattr(tr, "get_audio_duration", lambda p, log: 15.0)
+        monkeypatch.setattr(tr, "decoded_audio_seconds",
+                            lambda p, **k: 15.0)
         monkeypatch.setattr(tr, "get_openai_chat_key", lambda cfg: "key")
         fake_openai = MagicMock()
         fake_openai.return_value.audio.transcriptions.create.return_value = (

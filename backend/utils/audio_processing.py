@@ -494,3 +494,178 @@ def tts_chapters(chunks):
             })
         elapsed += chunk.duration or 0.0
     return chapters if len(chapters) > 1 else []
+
+
+# The rate decoded audio is counted at: 8 kHz mono 16-bit PCM, 16,000 bytes
+# a second. Low, so a 5-minute batch is under 5 MB through the pipe; the
+# count is the same at any rate.
+DECODE_COUNT_RATE = 8000
+# Heuristic: how long counting may take: 60 s plus 3 s a megabyte, at most
+# 10 minutes. Decoding runs at hundreds of times real time (an hour of Opus
+# or AAC, 25-30 MB, decodes in 2-3 s on a laptop), so audio the apps send is
+# counted well within it, also on a slower server.
+DECODE_TIMEOUT_MIN_SECONDS = 60
+DECODE_TIMEOUT_SECONDS_PER_MB = 3
+DECODE_TIMEOUT_MAX_SECONDS = 600
+
+
+def decode_timeout_seconds(file_path):
+    """How long counting *file_path*'s audio may take (see above)."""
+    try:
+        megabytes = pathlib.Path(file_path).stat().st_size / 1_000_000
+    except OSError:
+        megabytes = 0
+    return min(DECODE_TIMEOUT_MAX_SECONDS,
+               DECODE_TIMEOUT_MIN_SECONDS
+               + DECODE_TIMEOUT_SECONDS_PER_MB * megabytes)
+
+
+def decoded_audio_seconds(file_path, timeout_seconds=None, logger=None):
+    """Seconds of audio in *file_path*, counted from its decoded samples, not
+    from its container's timestamps (which the recording client writes): the
+    first audio stream is decoded to 8 kHz mono 16-bit PCM on a pipe and the
+    bytes are counted as they come, never held. Used for the length bounds
+    and for the transcription cost (utils/recording_limits).
+
+    None when ffmpeg is missing, the file cannot be decoded, or decoding
+    takes longer than *timeout_seconds* (default decode_timeout_seconds;
+    the process is killed). Callers then re-encode the audio on the server
+    (split_audio_for_transcription) rather than estimate its length."""
+    import subprocess
+    import threading
+    if timeout_seconds is None:
+        timeout_seconds = decode_timeout_seconds(file_path)
+    cmd = ["ffmpeg", "-nostdin", "-v", "error", "-i", str(file_path),
+           "-map", "0:a:0", "-ac", "1", "-ar", str(DECODE_COUNT_RATE),
+           "-f", "s16le", "-"]
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL,
+                                stdin=subprocess.DEVNULL)
+    except OSError as e:
+        if logger:
+            logger.warning(f"Could not start ffmpeg to measure audio: {e}")
+        return None
+    timer = threading.Timer(timeout_seconds, proc.kill)
+    timer.start()
+    total = 0
+    try:
+        while True:
+            data = proc.stdout.read(1 << 16)
+            if not data:
+                break
+            total += len(data)
+        returncode = proc.wait()
+    finally:
+        timed_out = not timer.is_alive()
+        timer.cancel()
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        proc.stdout.close()
+    if timed_out or returncode != 0 or total == 0:
+        if logger:
+            logger.warning(
+                "Could not count decoded audio of %s (exit %s, %s bytes%s)",
+                pathlib.Path(file_path).name, returncode, total,
+                ", timed out" if timed_out else "")
+        return None
+    return total / (2 * DECODE_COUNT_RATE)
+
+
+# Heuristic: how long the audio work for one uploaded file may take in all
+# (measuring it, cutting it into pieces and measuring those): half the
+# task's hard limit (celery_app.TASK_TIME_LIMIT). The cutting re-encodes the
+# audio as the earlier chunking did; an hour of audio takes about 12 s on a
+# laptop.
+SPLIT_TIMEOUT_SECONDS = 1800
+# The pieces' bitrate, as the earlier chunking used.
+PIECE_BITRATE = 128_000
+
+
+def seconds_left(deadline, cap):
+    """*cap*, cut to the time left until *deadline* (a time.monotonic()
+    value; None: no deadline). Zero or less when it has passed."""
+    import time
+    if deadline is None:
+        return cap
+    return min(cap, deadline - time.monotonic())
+
+
+def split_audio_for_transcription(file_path, piece_seconds, limit_seconds,
+                                  timeout_seconds=SPLIT_TIMEOUT_SECONDS,
+                                  logger=None, deadline=None):
+    """(pieces, cut): the audio of *file_path* to send to the provider, as
+    [(path, seconds)]: MP3 pieces of *piece_seconds* in a new temporary
+    folder, up to *limit_seconds*. Its first audio stream is decoded and
+    re-timed from its samples, so the cut and the pieces follow the audio
+    itself, whatever the container's timestamps say; at most
+    ceil(limit / piece) pieces. *seconds*: the piece's decoded length, or,
+    when it cannot be decoded (or no time is left to), *piece_seconds* (the
+    most a piece holds). A last piece under a second's bytes that cannot be
+    decoded (the frames left at the end of the audio) is left out.
+    *cut*: the file holds audio past *limit_seconds* (in no piece).
+
+    All of its ffmpeg work (the re-encode, then measuring the pieces) ends
+    by *deadline* (a time.monotonic() value) when given, the re-encode also
+    within *timeout_seconds*. ([], False) when ffmpeg fails or runs out of
+    time."""
+    import glob
+    import shutil
+    import subprocess
+    timeout = seconds_left(deadline, timeout_seconds)
+    if timeout <= 0:
+        return [], False
+    # Piece boundaries, the last one at the limit; one second more is
+    # decoded, so audio past the limit shows as one more piece.
+    bounds = []
+    edge = piece_seconds
+    while edge < limit_seconds:
+        bounds.append(edge)
+        edge += piece_seconds
+    bounds.append(limit_seconds)
+    out_dir = tempfile.mkdtemp(prefix="pieces_")
+    cmd = ["ffmpeg", "-nostdin", "-v", "error", "-i", str(file_path),
+           "-map", "0:a:0", "-vn", "-af", "asetpts=N/SR/TB",
+           "-t", str(limit_seconds + 1),
+           "-c:a", "libmp3lame", "-b:a", str(PIECE_BITRATE),
+           "-f", "segment",
+           "-segment_times", ",".join(str(b) for b in bounds),
+           "-reset_timestamps", "1",
+           os.path.join(out_dir, "piece_%03d.mp3")]
+    try:
+        subprocess.run(cmd, check=True, timeout=timeout,
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as e:
+        if logger:
+            logger.error(f"Cutting audio into pieces failed: "
+                         f"{type(e).__name__}")
+        shutil.rmtree(out_dir, ignore_errors=True)
+        return [], False
+
+    def measure(path):
+        left = seconds_left(deadline, decode_timeout_seconds(path))
+        if left <= 0:
+            return None
+        return decoded_audio_seconds(path, timeout_seconds=left,
+                                     logger=logger)
+
+    paths = sorted(glob.glob(os.path.join(out_dir, "piece_*.mp3")))
+    kept, extra = paths[:len(bounds)], paths[len(bounds):]
+    cut = any(measure(path) for path in extra)
+    for path in extra:
+        os.unlink(path)
+    pieces = []
+    for n, path in enumerate(kept):
+        size = pathlib.Path(path).stat().st_size
+        seconds = measure(path)
+        if seconds is None:
+            if n == len(kept) - 1 and size < PIECE_BITRATE // 8:
+                os.unlink(path)
+                continue
+            seconds = piece_seconds
+        pieces.append((path, seconds))
+    if not pieces:
+        shutil.rmtree(out_dir, ignore_errors=True)
+    return pieces, cut

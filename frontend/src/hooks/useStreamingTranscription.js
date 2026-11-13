@@ -7,6 +7,10 @@ import { isSpendCapError, spendCapToastMessage } from '../utils/spendCap';
 import { isAiUsageRefusedError, aiUsageRefusalScope } from '../utils/aiUsage';
 import { isThreadTooLong } from '../utils/threadLength';
 import { isApprovalPendingError } from '../utils/toolApprovals';
+import {
+  finalRefusalMessage, isStartRefusal, TOO_MANY_RECORDINGS_MESSAGE,
+  untranscribedMessage,
+} from '../utils/recordingLimits';
 import { onPageReturn } from '../utils/pageReturn';
 import { playErrorSound } from '../utils/errorSound';
 import { RECORDING_DEVICE_KEY, TAKEN_OVER_CODE } from '../utils/recordingDevice';
@@ -103,7 +107,10 @@ async function claimSession(sessionId, listedChunkCount) {
   } catch (err) {
     const code = err.response?.data?.code;
     console.warn('[StreamingTranscription] Claim refused:', code || err.message);
-    const refused = new Error(CLAIM_REFUSED_MESSAGES[code] || CLAIM_FAILED_MESSAGE);
+    // Continuing a recording that had stopped is checked as a start is
+    // (utils/recordingLimits): the server's words say why.
+    const refused = new Error(CLAIM_REFUSED_MESSAGES[code]
+      || finalRefusalMessage(err) || CLAIM_FAILED_MESSAGE);
     refused.fatal = true;
     throw refused;
   }
@@ -185,6 +192,9 @@ export function useStreamingTranscription(options = {}) {
   // names (`shift` from the listed chunk count); `settled` resolves false
   // when it was refused. Null for a session this tab started.
   const claimRef = useRef(null);
+  // "<session>:<code>" of the notices already shown that a recording's
+  // audio is kept without its text (utils/recordingLimits): once each.
+  const untranscribedNoticesRef = useRef(new Set());
 
   // #320: this tab stops recording a session it never finalized (reload,
   // close, navigating away, cancel): tell the server, so the session can
@@ -338,6 +348,16 @@ export function useStreamingTranscription(options = {}) {
         if (code === TAKEN_OVER_CODE) {
           console.warn(`[StreamingTranscription] Session continued elsewhere: chunk ${chunkIndex} refused, not retrying`);
           return { success: false, fatalError: TAKEN_OVER_MESSAGE, sessionEnded: true };
+        }
+        // Past what one recording may hold, or a recording that had
+        // stopped and may not be continued (the account's bounds, the
+        // usage limit; utils/recordingLimits): retrying cannot help. The
+        // server keeps every chunk before this one; the recording stops
+        // here and can be recovered.
+        const refusal = finalRefusalMessage(err);
+        if (refusal) {
+          console.warn(`[StreamingTranscription] Chunk ${chunkIndex} refused (${code || err.response?.status}); not retrying`);
+          return { success: false, fatalError: refusal, sessionEnded: true };
         }
 
         // Server rejected chunk 0 because it couldn't parse the format's
@@ -549,6 +569,19 @@ export function useStreamingTranscription(options = {}) {
       }
     },
     onError: (data) => {
+      // Audio kept without its text (a recording past the length one
+      // recording may have transcribed): the recording goes on and its
+      // text ends with a note. Said once per recording, with no error
+      // sound (utils/recordingLimits).
+      const keptMessage = untranscribedMessage(data?.code);
+      if (keptMessage) {
+        const key = `${sessionIdRef.current}:${data.code}`;
+        if (!untranscribedNoticesRef.current.has(key)) {
+          untranscribedNoticesRef.current.add(key);
+          addToast(keptMessage, 10000);
+        }
+        return;
+      }
       console.error('Transcription error:', data);
       playErrorSound();
       if (onError) {
@@ -812,6 +845,16 @@ export function useStreamingTranscription(options = {}) {
         } catch (_) { /* sealed error object */ }
         if (onError) onError(err);
         throw err;
+      }
+      if (isStartRefusal(err)) {
+        // The account holds several open recordings (the server's limit,
+        // utils/recordingLimits):
+        // refused before any draft existed and before the mic opened. Shown
+        // in the server's words, by the parent as a start that failed.
+        try {
+          err.message = err.response.data.error || TOO_MANY_RECORDINGS_MESSAGE;
+          err.fatal = true;
+        } catch (_) { /* sealed error object */ }
       }
       setSessionState('error');
       setErrorMessage(err.message);

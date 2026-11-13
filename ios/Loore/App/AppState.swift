@@ -129,6 +129,11 @@ final class AppState {
         ChunkUploader.shared.cookieHeader = { [weak self] url in
             HTTPCookie.requestHeaderFields(with: self?.api.cookieStorage.cookies(for: url) ?? [])
         }
+        // A recording the server refuses audio for (backend/utils/recording_limits):
+        // said once, in the server's words; the audio stays on the phone.
+        ChunkUploader.shared.onRefused = { [weak self] _, message in
+            self?.toasts.show(message, duration: 10)
+        }
         audio.attach(self)
         profileWatcher.showToast = { [weak self] text, duration in self?.toasts.show(text, duration: duration) }
         profileWatcher.clearUserFlags = { [weak self] in
