@@ -12,9 +12,8 @@ const PrivacySelector = ({
   // Replies in public threads inherit the thread's privacy (#228) —
   // render a quiet static note instead of the dropdown.
   lockPrivacy = false,
-  // Levels left out of the dropdown (imports never offer 'public', #677).
-  omitLevels = [],
-  // One calm line shown under the privacy choice, in place of its description.
+  // Imports are always private (#677): no choice, one line in its place.
+  hidePrivacy = false,
   privacyNote = null,
 }) => {
   const labelStyle = {
@@ -58,7 +57,11 @@ const PrivacySelector = ({
       marginTop: '12px',
       marginBottom: '12px',
     }}>
-      {lockPrivacy ? (
+      {hidePrivacy ? (
+        <div style={{ marginBottom: '12px' }}>
+          <div style={descStyle}>{privacyNote}</div>
+        </div>
+      ) : lockPrivacy ? (
         <div style={{ marginBottom: '12px' }}>
           <label style={labelStyle}>
             Privacy Level
@@ -78,21 +81,14 @@ const PrivacySelector = ({
           disabled={disabled}
           style={selectStyle}
         >
-          {!omitLevels.includes('private') && (
-            <option value="private">🔒 Private · Only I can see this</option>
-          )}
-          {!omitLevels.includes('circles') && (
-            <option value="circles">👥 Circles · Shared with specific groups (coming soon)</option>
-          )}
-          {!omitLevels.includes('public') && (
-            <option value="public">🌐 Public · Anyone can see this</option>
-          )}
+          <option value="private">🔒 Private · Only I can see this</option>
+          <option value="circles">👥 Circles · Shared with specific groups (coming soon)</option>
+          <option value="public">🌐 Public · Anyone can see this</option>
         </select>
         <div style={descStyle}>
-          {privacyNote}
-          {!privacyNote && privacyLevel === 'private' && 'This note is private and only visible to you.'}
-          {!privacyNote && privacyLevel === 'circles' && 'This note will be shared with your selected circles (feature coming soon).'}
-          {!privacyNote && privacyLevel === 'public' && 'This note will be visible to all users.'}
+          {privacyLevel === 'private' && 'This note is private and only visible to you.'}
+          {privacyLevel === 'circles' && 'This note will be shared with your selected circles (feature coming soon).'}
+          {privacyLevel === 'public' && 'This note will be visible to all users.'}
         </div>
       </div>
       )}

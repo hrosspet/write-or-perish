@@ -2,7 +2,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 /// The four archive importers with their dialogs (web `ImportData`): file
-/// picker, extract/analyze stages, the confirm dialogs with privacy and AI
+/// picker, extract/analyze stages, the confirm dialogs with the AI
 /// usage (import defaults: Private, None), the deleted-content question and
 /// "Import Finished".
 struct ImportDataSection: View {
@@ -156,8 +156,8 @@ private struct ConfirmImportDialog: View {
                     ])
                 }
             }
-            PrivacySelectorView(privacy: $model.privacy, aiUsage: $model.aiUsage, disabled: model.busy,
-                                omitLevels: [.public], privacyNote: ImportModel.privacyNote)
+            PrivacySelectorView(privacy: .constant(.private), aiUsage: $model.aiUsage, disabled: model.busy,
+                                privacyNote: ImportModel.privacyNote)
             if let error = model.error {
                 Text(error).font(LooreFont.sans(13.6, .light)).foregroundStyle(LooreColor.accent)
             }

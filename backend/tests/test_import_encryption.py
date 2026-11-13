@@ -144,16 +144,16 @@ def _raw(node):
         db.text("SELECT content FROM node WHERE id = :id"), {"id": node.id}).scalar()
 
 
-def test_public_import_is_refused_before_anything_is_written(app):
+@pytest.mark.parametrize("level", ["public", "circles"])
+def test_a_non_private_import_is_refused_before_anything_is_written(app, level):
     from backend.routes.import_data import create_twitter_nodes
     u = _user()
     rows = [{"id_str": "1", "full_text": "a tweet", "created_at": "Mon Aug 24 10:00:00 +0000 2026",
              "is_reply": False, "token_count": 3}]
-    # Twitter nodes of an existing entry are the path that applies settings.
     with pytest.raises(ValueError):
         create_twitter_nodes(
             user_id=u.id, rows=iter(rows), total=1, import_type="separate_nodes",
-            include_replies=False, privacy_level="public", ai_usage="chat",
+            include_replies=False, privacy_level=level, ai_usage="chat",
             on_deleted=None, provenance="archive_upload",
         )
     assert Node.query.filter_by(source_key="twitter:1").count() == 0
@@ -204,7 +204,9 @@ def test_persist_guard_heals_plaintext_on_private_node(app, caplog):
     assert _raw(p) == "open"
 
 
-def test_reimport_settings_change_reencrypts_skipped_nodes(app):
+def test_reimport_leaves_an_entry_made_public_by_hand_in_plaintext(app):
+    """A re-import changes the AI usage of a skipped entry and nothing
+    about its privacy or storage: a published entry stays plaintext."""
     from backend.routes.import_data import _apply_settings_to_skipped
     u = _user()
     n = Node(user_id=u.id, human_owner_id=u.id, node_type="user",
@@ -214,9 +216,10 @@ def test_reimport_settings_change_reencrypts_skipped_nodes(app):
     db.session.commit()
     assert _raw(n) == "was public"
 
-    assert _apply_settings_to_skipped([n.id, None], "private", "none") == 1
+    assert _apply_settings_to_skipped([n.id, None], "none") == 1
     db.session.commit()
     assert n.ai_usage == "none"
-    _assert_encrypted(n, "was public")
+    assert n.privacy_level == "public"
+    assert _raw(n) == "was public"
     # no-op when nothing differs
-    assert _apply_settings_to_skipped([n.id], "private", "none") == 0
+    assert _apply_settings_to_skipped([n.id], "none") == 0

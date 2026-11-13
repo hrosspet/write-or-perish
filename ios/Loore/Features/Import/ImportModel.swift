@@ -166,7 +166,7 @@ struct ImportResult: Equatable {
         }
         var out: [String] = summary
         if updated > 0 {
-            out.append("Updated items were already imported; their privacy and AI-usage settings now match this import.")
+            out.append("Updated items were already imported; their AI-usage setting now matches this import.")
         }
         if skipped > 0 { out.append("Skipped items were already imported and left untouched.") }
         if empty > 0 {
@@ -209,9 +209,8 @@ final class ImportModel {
     var importType = "separate_nodes"
     var dateOrdering = "modified"
     var includeReplies = false
-    var privacy: PrivacyLevel = .private
-    /// Shown under the privacy choice; imports never offer Public (#677). Same wording as the web.
-    static let privacyNote = "Imported entries start private. You can make any of them public afterwards."
+    /// Imports are always private (#677): no choice, this line in its place. Same wording as the web.
+    static let privacyNote = "Imported entries are private. You can share or publish the ones you choose afterwards."
     /// Starts at the account's AI usage setting (#593, as the web), again each
     /// time a confirm dialog opens; the value shown is the value sent.
     var aiUsage: AIUsage = .off
@@ -345,7 +344,7 @@ final class ImportModel {
 
     /// The confirm body the web sends for this importer.
     func confirmBody(_ analysis: ImportAnalysis, onDeleted: String?) -> [String: Any] {
-        var body: [String: Any] = ["privacy_level": privacy.rawString, "ai_usage": aiUsage.rawString]
+        var body: [String: Any] = ["privacy_level": "private", "ai_usage": aiUsage.rawString]
         switch analysis.kind {
         case .claude, .chatgpt:
             body["import_token"] = analysis.importToken ?? ""

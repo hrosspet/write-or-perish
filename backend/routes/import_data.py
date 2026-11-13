@@ -311,31 +311,28 @@ class _ProfileChanges:
         })
 
 
-IMPORT_PUBLIC_REFUSAL = ("Imported entries can't be public. Import them, "
-                         "then make public the ones you choose.")
-IMPORT_PRIVACY_LEVELS = ("private", "circles")
+IMPORT_PRIVATE_ONLY = ("Imported entries are private. You can share or "
+                       "publish the ones you choose afterwards.")
 
 
 def _import_privacy(data):
     """(privacy_level, error_response) for an import request. Imports are
-    never public (#677): a public entry goes through the normal publish
-    path, where every check runs, one entry at a time. Unknown values are
-    refused too. A request without a level gets 'private'."""
+    always private (#677, Peter 2026-11-13): an entry is shared or
+    published afterwards, one at a time, where every check runs. The field
+    may be absent or "private" (older app builds send it); any other value
+    (Public, Circles, unknown) is refused with a 400 before anything is
+    written."""
     level = data.get('privacy_level', 'private')
-    if level == 'public':
-        return None, (jsonify({"error": IMPORT_PUBLIC_REFUSAL}), 400)
-    if not isinstance(level, str) or level not in IMPORT_PRIVACY_LEVELS:
-        return None, (jsonify({
-            "error": "Invalid privacy_level. Must be 'private' or "
-                     "'circles'."}), 400)
+    if level != 'private':
+        return None, (jsonify({"error": IMPORT_PRIVATE_ONLY}), 400)
     return level, None
 
 
 def _require_importable_privacy(privacy_level):
-    """Backstop under the routes' 400: an import task given a level
-    imports may not use (Public) stops before it writes anything."""
-    if privacy_level not in IMPORT_PRIVACY_LEVELS:
-        raise ValueError(IMPORT_PUBLIC_REFUSAL)
+    """Backstop under the routes' 400: an import task given a level other
+    than private stops before it writes anything."""
+    if privacy_level != 'private':
+        raise ValueError(IMPORT_PRIVATE_ONLY)
 
 
 def _requested_ai_usage(data):
@@ -346,41 +343,32 @@ def _requested_ai_usage(data):
     return data.get('ai_usage') or current_user.default_ai_usage or 'none'
 
 
-def _apply_settings_to_skipped(node_ids, privacy_level, ai_usage, dek=None,
-                               changes=None):
-    """Apply this import's privacy/ai_usage to already-imported nodes.
+def _apply_settings_to_skipped(node_ids, ai_usage, changes=None):
+    """Apply this import's AI usage to already-imported nodes.
 
-    Re-importing an archive is also how users change their mind about
-    import settings, so dedup-skipped (alive) nodes adopt the values
-    chosen for this import instead of being a pure no-op. Returns the
-    number of nodes whose settings actually changed; callers report it
-    as ``updated`` and keep it disjoint from ``skipped``. Provenance is
-    NOT touched: how a node first arrived is a fact, not a setting.
+    Re-importing an archive is also how users change their mind about the
+    AI usage, so dedup-skipped (alive) nodes adopt the value chosen for
+    this import instead of being a pure no-op. Privacy is never touched
+    (#677): imports are always private, so an entry the user shared or
+    published by hand after importing is not changed by a re-import.
+    Returns the number of nodes whose AI usage actually changed; callers
+    report it as ``updated`` and keep it disjoint from ``skipped``.
+    Provenance is NOT touched: how a node first arrived is a fact, not a
+    setting.
 
     ``changes`` (a _ProfileChanges) records the nodes whose new AI usage
     moves them into or out of what the profile reads (#625).
     """
-    from sqlalchemy import or_
-    # Keeps a re-import from ever making an entry public.
-    _require_importable_privacy(privacy_level)
     ids = [i for i in node_ids if i is not None]
     updated = 0
     # Chunked so a huge archive doesn't produce an unbounded IN clause.
-    # Goes through the ORM (not a bulk UPDATE) because a privacy change
-    # moves content across the encryption boundary (#257) — only the
-    # rows whose settings actually differ are loaded.
     for start in range(0, len(ids), 1000):
         chunk = ids[start:start + 1000]
         for node in Node.query.filter(
-            Node.id.in_(chunk),
-            or_(
-                Node.privacy_level != privacy_level,
-                Node.ai_usage != ai_usage,
-            ),
+            Node.id.in_(chunk), Node.ai_usage != ai_usage,
         ).all():
             if changes is not None:
                 changes.setting_changed(node)
-            node.set_privacy_level(privacy_level, dek=dek)
             node.ai_usage = ai_usage
             updated += 1
         db.session.flush()
@@ -1061,7 +1049,7 @@ def confirm_import():
             thread_count = threads_created
 
         nodes_updated = _apply_settings_to_skipped(
-            skipped_alive_ids, privacy_level, ai_usage, changes=changes
+            skipped_alive_ids, ai_usage, changes=changes
         )
         nodes_skipped -= nodes_updated
 
@@ -1650,7 +1638,7 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
                 on_progress(done)
 
     nodes_updated = _apply_settings_to_skipped(
-        skipped_alive_ids, privacy_level, ai_usage, changes=changes
+        skipped_alive_ids, ai_usage, changes=changes
     )
     nodes_skipped -= nodes_updated
     db.session.commit()
@@ -2675,9 +2663,7 @@ def create_conversation_nodes(user_id, source, conversations, privacy_level,
     def commit():
         nonlocal skipped_alive_ids
         state["updated"] += _apply_settings_to_skipped(
-            skipped_alive_ids, privacy_level, ai_usage,
-            dek=data_key.get() if skipped_alive_ids else None,
-            changes=changes)
+            skipped_alive_ids, ai_usage, changes=changes)
         skipped_alive_ids = []
         changes.to_state(state)
         db.session.commit()

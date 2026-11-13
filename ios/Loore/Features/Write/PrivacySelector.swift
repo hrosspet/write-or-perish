@@ -7,15 +7,8 @@ struct PrivacySelectorView: View {
     var disabled = false
     /// Replying under a public node: privacy is fixed and shown as text.
     var lockPrivacy = false
-    /// Levels left out of the menu (imports never offer Public, #677).
-    var omitLevels: [PrivacyLevel] = []
-    /// One calm line shown under the privacy choice in place of its description.
+    /// Imports are always private (#677): no choice, this line in its place.
     var privacyNote: String?
-
-    /// The privacy menu's options without the levels left out.
-    static func privacyOptions(omitting omitted: [PrivacyLevel]) -> [(PrivacyLevel, String)] {
-        privacyOptions.filter { option in !omitted.contains(option.0) }
-    }
 
     static let privacyOptions: [(PrivacyLevel, String)] = [
         (.private, "🔒 Private · Only I can see this"),
@@ -49,12 +42,14 @@ struct PrivacySelectorView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 6) {
-                FieldLabel(text: "Privacy Level")
-                if lockPrivacy {
+                if privacyNote == nil { FieldLabel(text: "Privacy Level") }
+                if let privacyNote {
+                    FieldDescription(text: privacyNote)
+                } else if lockPrivacy {
                     FieldDescription(text: "Public — inherited from the thread.")
                 } else {
-                    SelectField(options: Self.privacyOptions(omitting: omitLevels), selection: $privacy, disabled: disabled)
-                    FieldDescription(text: privacyNote ?? Self.privacyDescription(privacy))
+                    SelectField(options: Self.privacyOptions, selection: $privacy, disabled: disabled)
+                    FieldDescription(text: Self.privacyDescription(privacy))
                 }
             }
             VStack(alignment: .leading, spacing: 6) {

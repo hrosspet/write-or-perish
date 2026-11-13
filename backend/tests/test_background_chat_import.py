@@ -352,10 +352,10 @@ def test_a_run_with_other_settings_starts_over_and_updates(app, monkeypatch):
         run_conversation_import(alice.id, token, "t1", OPTIONS, batch_size=2)
     restore()
     _db.session.rollback()
-    circles = dict(OPTIONS, privacy_level="circles")
-    result = run_conversation_import(alice.id, token, "t2", circles)
+    chat = dict(OPTIONS, ai_usage="chat")
+    result = run_conversation_import(alice.id, token, "t2", chat)
     assert result["created"] == 4 and result["updated"] == 4
-    assert all(n.privacy_level == "circles"
+    assert all(n.ai_usage == "chat" and n.privacy_level == "private"
                for n in Node.query.filter_by(human_owner_id=alice.id))
 
 
@@ -557,44 +557,39 @@ def test_set_content_with_a_shared_key_matches_the_normal_envelope(kms):
 
 def test_a_settings_only_reimport_is_chunked_too(app, kms, monkeypatch):
     """Skips count toward the commit boundary: a re-import that only
-    changes settings is checkpointed every ~500 messages and gets a
-    data key per chunk, like a first import."""
+    changes the AI usage is checkpointed every ~500 messages. It touches
+    no privacy, so it re-encrypts nothing and makes no data key."""
     from backend.routes.import_data import run_conversation_import
     alice = _make_user("alice")
     _db.session.commit()
     run_conversation_import(alice.id, _stash(alice.id, _analyzed(30, 40)),
                             "t1", OPTIONS)  # 1200 messages
-    # The user made every entry public by hand: stored as plaintext.
-    for n in Node.query.filter_by(human_owner_id=alice.id):
-        n.set_privacy_level("public")
-    _db.session.commit()
     token = _stash(alice.id, _analyzed(30, 40))
     saves = []
     real_write = cs.write_state
     monkeypatch.setattr(cs, "write_state", lambda uid, tok, st: (
         saves.append(dict(st)), real_write(uid, tok, st)))
     wraps = kms["encrypt"]
-    result = run_conversation_import(alice.id, token, "t2", OPTIONS)
+    result = run_conversation_import(alice.id, token, "t2",
+                                     dict(OPTIONS, ai_usage="chat"))
     assert result["created"] == 0 and result["updated"] == 1200
     checkpoints = [st for st in saves if not st.get("finished")]
     assert len(checkpoints) > 1
     assert checkpoints[0]["next_conv"] < 30 and checkpoints[0]["updated"] > 0
-    raws = [c for (c,) in _db.session.query(Node.content).filter(
-        Node.human_owner_id == alice.id)]
-    assert all(r.startswith(encryption.ENCRYPTED_PREFIX_V2) for r in raws)
-    keys = {encryption.wrapped_dek_of(r) for r in raws}
-    assert len(keys) > 1
-    assert kms["encrypt"] - wraps == len(keys) <= 3
+    assert kms["encrypt"] == wraps
+    assert {n.privacy_level for n in
+            Node.query.filter_by(human_owner_id=alice.id)} == {"private"}
 
 
-def test_a_public_run_is_refused_and_writes_nothing(app):
+@pytest.mark.parametrize("level", ["public", "circles"])
+def test_a_non_private_run_is_refused_and_writes_nothing(app, level):
     from backend.routes.import_data import run_conversation_import
     alice = _make_user("alice")
     _db.session.commit()
     token = _stash(alice.id, _analyzed(3, 3))
     with pytest.raises(ValueError):
         run_conversation_import(alice.id, token, "t1",
-                                dict(OPTIONS, privacy_level="public"))
+                                dict(OPTIONS, privacy_level=level))
     assert Node.query.filter_by(human_owner_id=alice.id).count() == 0
 
 
