@@ -24,7 +24,8 @@ struct ThreadSheets: ViewModifier {
                     NodeFormSheet(title: "Edit Text", config: NodeFormConfig(
                         edit: .init(nodeId: target.id, initialContent: target.content, initialPrivacy: target.privacy,
                                     initialAIUsage: target.aiUsage, detachPrompt: target.hasPromptArtifact,
-                                    hasGeneratedTTS: target.hasTTS, hasChildren: target.hasChildren))) { result in
+                                    hasGeneratedTTS: target.hasTTS, hasChildren: target.hasChildren,
+                                    trainRefused: target.trainRefused))) { result in
                         Task { await model.editSaved(result, autoGenerate: $autoGenerate) }
                     } onClose: {
                         model.showEditForm = false

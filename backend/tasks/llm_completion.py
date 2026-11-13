@@ -48,8 +48,8 @@ from backend.utils.timefmt import local_stamp, strip_edge_timestamps
 from backend.utils.llm_stream import ReplyStream
 from backend.utils import voice_timing
 from backend.utils.api_keys import (
-    determine_api_key_type, get_api_keys_for_usage, ContextUsage,
-    PayloadLicence,
+    chain_inputs, determine_api_key_type, get_api_keys_for_usage,
+    ContextUsage, PayloadLicence,
 )
 from backend.utils.cost import llm_cost_log_fields
 from backend.utils.error_privacy import UserMessageError
@@ -83,7 +83,7 @@ from backend.utils.text_edits import apply_text_edits
 from backend.utils.artifact_versions import (
     artifact_diff, parse_version, stored_version, version_number,
 )
-from backend.utils.privacy import AI_ALLOWED
+from backend.utils.privacy import AI_ALLOWED, X_API_INPUT, chat_at_most
 from backend.utils.proposals import is_own_live_proposal
 from backend.utils.placeholders import (
     CA_TWEETS_PATTERN,
@@ -170,14 +170,19 @@ def _render_variant(user_id):
     keys of everyone else stay as they were. Both render paths (the
     generation loop and the pre-warm's render_system_message) compute
     the variant before they read the artifacts, so a render that still
-    saw the artifact is never stored under a key from after the delete."""
+    saw the artifact is never stored under a key from after the delete.
+    The `x` part marks an account that has had an X API pre-fill (#689):
+    its documents and index read as Chat, so a pre-fill after a render
+    takes a fresh key. Absent for everyone else."""
     from backend.utils.artifact_deletion import deletion_stamp
+    from backend.utils.privacy import x_api_account
     deleted = deletion_stamp(user_id)
     return (f"a{int(archive_search_enabled(flask_app.config))}"
             f"u{_account_ai_usage(user_id)}"
             f"s{int(_share_enabled_for_user(user_id))}"
             f"e{int(_external_references_for_user(user_id))}"
-            + (f"d{deleted}" if deleted else ""))
+            + (f"d{deleted}" if deleted else "")
+            + ("x" if x_api_account(user_id) else ""))
 
 
 def _system_render_variant(system_node, user_id, tools=None):
@@ -1076,9 +1081,18 @@ def get_user_artifacts_context(user_id, pinned_node=None, usage=None,
         # account's threads off the training key. Opening one
         # (read_artifact) still counts by that row. The setting is in the
         # render variant, so a cached verdict cannot outlive a switch.
-        usage.licence(USER_ARTIFACTS_INDEX_PLACEHOLDER).note_usage(
-            _account_ai_usage(user_id), "the account's AI-usage setting "
-            "(artifacts index)")
+        # Of an account that has had an X API pre-fill, the index's model-
+        # written titles and descriptions read as Chat (#689).
+        from backend.utils.privacy import X_API_INPUT, x_api_account
+        index_licence = usage.licence(USER_ARTIFACTS_INDEX_PLACEHOLDER)
+        if x_api_account(user_id):
+            index_licence.to_chat(
+                "the artifacts index of an account with X API posts",
+                X_API_INPUT)
+        else:
+            index_licence.note_usage(
+                _account_ai_usage(user_id), "the account's AI-usage "
+                "setting (artifacts index)")
     return memory_content, scratchpad_content, intentions_content, index_text
 
 
@@ -1393,7 +1407,8 @@ def _note_artifact_content(licence, artifact):
     """Report an artifact whose content joins the payload (#326) by its
     own row's ai_usage. The saved-references digest counts the same way:
     by the ai_usage stamped on the version (Peter, 2026-10-01)."""
-    licence.note_usage(artifact.ai_usage, f"the {artifact.kind} artifact")
+    licence.note_usage(artifact.ai_usage, f"the {artifact.kind} artifact",
+                       row=artifact)
 
 
 def _reads_todo(tr):
@@ -1437,7 +1452,7 @@ def _retrieval_injection_text(tr, user_id, with_labels=False, licence=None):
                 or todo.ai_usage not in AI_ALLOWED):
             return None
         if licence is not None:
-            licence.note_usage(todo.ai_usage, "the todo list")
+            licence.note_usage(todo.ai_usage, "the todo list", row=todo)
         return f"[Your current todo list:\n{todo.get_content()}]"
     if name == "read_artifact":
         # Deleted since the call (#603): "no longer available"
@@ -1514,7 +1529,8 @@ def _retrieval_injection_text(tr, user_id, with_labels=False, licence=None):
             tag = (f"[{m['label']}] " if with_labels and m.get("label")
                    else "")
             if licence is not None:
-                licence.note_usage(node.ai_usage, f"entry {node.id} preview")
+                licence.note_usage(node.ai_usage, f"entry {node.id} preview",
+                                   row=node)
             lines.append(
                 f"- {tag}entry {node.id} · {stamp}{pct}: {snippet}")
         # Saved external references (imported tweets/bookmarks), with their
@@ -2441,8 +2457,27 @@ def _redact_tool_input(inp):
     }
 
 
+def _written_from(licence, llm_node, node_chain, previous=None):
+    """X_API_INPUT when a tool write of this turn is written from X API
+    posts (#689), else None: what the turn's payload took in (*licence*,
+    None when the call runs later, on approval), what the reply that made
+    the call was marked with when it was finalized, the chain's own, and
+    the version the write replaces (update_artifact rewrites the whole
+    text)."""
+    from backend.utils.privacy import unlicensed_input
+    kinds = set(chain_inputs(node_chain))
+    if licence is not None:
+        kinds |= licence.inputs
+    for row in (llm_node, previous):
+        kind = unlicensed_input(row) if row is not None else None
+        if kind:
+            kinds.add(kind)
+    return X_API_INPUT if X_API_INPUT in kinds else None
+
+
 def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
-                        quote_labels=None, client=None, hold=None):
+                        quote_labels=None, client=None, hold=None,
+                        licence=None):
     """Execute tool calls and return metadata list. *quote_labels* is the
     turn's label map ({label: ("node"|"external", id)}) so read_full can
     resolve a search-result label; None outside the retrieval loop.
@@ -2454,7 +2489,11 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
     the user's data directly (tool_approvals.DIRECT_WRITE_TOOLS) is
     checked as usual and then kept for the user's approval instead of
     run: its entry says "pending_approval" (Peter, 2026-11-12). A call
-    the checks refuse fails as before; nothing is kept for it."""
+    the checks refuse fails as before; nothing is kept for it.
+
+    *licence* (the turn's PayloadLicence): whether a write is marked as
+    written from X API posts (_written_from, #689). None on approval: the
+    reply's own mark is used."""
     tool_results = []
 
     for tc in tool_calls:
@@ -2619,11 +2658,17 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                         # gets memory the next turn can read. The chain's
                         # verdict, not the licence — once a 'chat' memory
                         # was in a payload the licence would keep every
-                        # later write 'chat' for good.
+                        # later write 'chat' for good. A write from a turn
+                        # that took in X API posts, or one that rewrites a
+                        # version marked so, carries that mark and is
+                        # never 'train' (#689).
+                        written_from = _written_from(
+                            licence, llm_node, node_chain, previous)
                         owner = User.query.get(user_id)
                         writes_train = (
                             owner is not None
                             and owner.default_ai_usage == "train"
+                            and written_from is None
                             and determine_api_key_type(node_chain)
                             == "train")
                         artifact = UserArtifact(
@@ -2635,6 +2680,7 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                                           or "agentic_session"),
                             tokens_used=0,
                             ai_usage="train" if writes_train else "chat",
+                            unlicensed_input=written_from,
                         )
                         artifact.set_content(new_text)
                         db.session.add(artifact)
@@ -3890,7 +3936,8 @@ def _prewarm_anthropic_cache(system_node_id, user_id, model_id,
                 store_render(flask_app.config, system_node, sys_text,
                              render_variant, unlicensed=unlicensed,
                              rows=usage.rows(sys_content),
-                             references=usage.named_references)
+                             references=usage.named_references,
+                             inputs=usage.inputs(sys_content))
 
             key_type = determine_api_key_type([system_node], logger=logger)
             # The render carries the user's own rows, each licensed by
@@ -4354,6 +4401,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # The saved references a cached render's window names
             # (prompt_cache.CachedRender.references).
             cached_system_references = ()
+            # Its rows' unlicensed input kinds (#689), replayed with it.
+            cached_system_inputs = ()
             if system_node is not None:
                 _sys_text = system_node.get_content() or ""
                 # Exclude prompts carrying per-call volatile placeholders.
@@ -4375,6 +4424,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         cached_system_render = _cached.text
                         cached_system_unlicensed = _cached.unlicensed
                         cached_system_references = _cached.references
+                        cached_system_inputs = _cached.inputs
 
             def _placeholder_node(placeholder):
                 """The first of the user's own nodes carrying
@@ -4634,6 +4684,10 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # keys are re-read from it before every provider call (#325).
             licence = PayloadLicence(
                 key_type, logger=logger, label=f"Node {llm_node_id}")
+            # X API posts, or replies written from them, in the chain
+            # itself: no reply written from it may pass them on for
+            # training (#689).
+            licence.mark(*chain_inputs(node_chain))
             # The user's own rows the placeholders resolved to, and those
             # a cached system render carries (#326). Each resolved
             # placeholder is in the payload: it was fetched because an
@@ -4642,6 +4696,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                 cached_system_unlicensed):
                 if _unlicensed:
                     licence.to_chat(_unlicensed)
+            licence.mark(*context_usage.inputs(), *cached_system_inputs)
             key_type = licence.key_type
             api_keys = get_api_keys_for_usage(flask_app.config, key_type)
 
@@ -5265,7 +5320,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                 references=(
                                     context_usage.named_references
                                     if USER_RECENT_RAW_PLACEHOLDER
-                                    in _verdict_text else ()))
+                                    in _verdict_text else ()),
+                                inputs=context_usage.inputs(_verdict_text))
                     if role == "assistant":
                         last_assistant_index = len(messages)
                     messages.append({
@@ -5566,6 +5622,20 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             logged_ext_ids = set()
             quotes_decided_at = llm_node.created_at
 
+            def _mark_written_from(target):
+                """#689: a reply written from a payload that held X API
+                posts (or text written from them) may repeat their words,
+                so it carries the mark (Node.unlicensed_input), is stored
+                at Chat at most, and every later licence decision reads
+                it as Chat; Train is never offered for it. Set on each
+                node as it is finalized, from the licence as it then is.
+                Other people's saved writing marks nothing (Peter,
+                2026-09-29)."""
+                kind = licence.unlicensed_input
+                target.unlicensed_input = kind
+                if kind == X_API_INPUT:
+                    target.ai_usage = chat_at_most(target.ai_usage)
+
             def _finalize(target_node, resp):
                 """Write *resp* as the final answer on *target_node* using the
                 EXACT existing single-shot finalize behavior (cost log, Race B
@@ -5677,7 +5747,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     tool_results = _execute_tool_calls(
                         f_tool_calls, target_node, node_chain, user_id,
                         quote_labels=quote_labels, client=client,
-                        hold=write_hold,
+                        hold=write_hold, licence=licence,
                     )
                     if f_truncated:
                         for tr in tool_results:
@@ -5728,6 +5798,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 if resp.get("batch"):
                     _close_batch_entry(target_node, resp.get("batch_id"))
 
+                _mark_written_from(target_node)
                 target_node.llm_task_status = 'completed'
                 target_node.llm_task_progress = 100
                 # Voice: mark TTS pending in the SAME commit as completion so
@@ -5859,7 +5930,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     tool_results = _execute_tool_calls(
                         response_tool_calls, current_node, node_chain,
                         user_id, quote_labels=quote_labels, client=client,
-                        hold=write_hold,
+                        hold=write_hold, licence=licence,
                     )
                     if interim_truncated:
                         for tr in tool_results:
@@ -5957,6 +6028,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     current_node.token_count = approximate_token_count(
                         interim_text or interim_fallback)
                     current_node.tool_calls_meta = json.dumps(tool_results)
+                    _mark_written_from(current_node)
                     current_node.llm_task_status = 'completed'
                     current_node.llm_task_progress = 100
 

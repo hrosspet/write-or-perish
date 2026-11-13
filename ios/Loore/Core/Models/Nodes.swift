@@ -193,6 +193,8 @@ struct NodeDetail: Decodable, Identifiable, Sendable {
     var parentUserId: Int?
     var privacyLevel: PrivacyLevel
     var aiUsage: AIUsage
+    /// Loore fetched this entry through the X API: the editor offers no Train (#689).
+    var trainRefused: Bool
     var pinnedAt: Date?
     var llmModel: String?
     /// nil = written in Loore; "twitter" | "chatgpt" | "claude" | "markdown" for imports.
@@ -246,6 +248,7 @@ struct NodeDetail: Decodable, Identifiable, Sendable {
         case parentUserId = "parent_user_id"
         case privacyLevel = "privacy_level"
         case aiUsage = "ai_usage"
+        case trainRefused = "train_refused"
         case pinnedAt = "pinned_at"
         case llmModel = "llm_model"
         case llmTaskStatus = "llm_task_status"
@@ -276,6 +279,7 @@ struct NodeDetail: Decodable, Identifiable, Sendable {
         parentUserId = c.tolerant(.parentUserId)
         privacyLevel = c.tolerant(.privacyLevel, default: .private)
         aiUsage = c.tolerant(.aiUsage, default: .off)
+        trainRefused = c.tolerant(.trainRefused, default: false)
         pinnedAt = c.tolerant(.pinnedAt)
         llmModel = c.tolerant(.llmModel)
         origin = c.tolerant(.origin)
@@ -322,6 +326,8 @@ struct AncestorNode: Decodable, Identifiable, Hashable, Sendable {
     var userId: Int?
     var parentUserId: Int?
     var aiUsage: AIUsage?
+    /// Fetched through the X API: no Train (#689).
+    var trainRefused: Bool
     var privacyLevel: PrivacyLevel?
     var systemPrompt: SystemPromptFields
 
@@ -335,6 +341,7 @@ struct AncestorNode: Decodable, Identifiable, Hashable, Sendable {
         case userId = "user_id"
         case parentUserId = "parent_user_id"
         case aiUsage = "ai_usage"
+        case trainRefused = "train_refused"
         case privacyLevel = "privacy_level"
     }
 
@@ -353,6 +360,7 @@ struct AncestorNode: Decodable, Identifiable, Hashable, Sendable {
         userId = c.tolerant(.userId)
         parentUserId = c.tolerant(.parentUserId)
         aiUsage = c.tolerant(.aiUsage)
+        trainRefused = c.tolerant(.trainRefused, default: false)
         privacyLevel = c.tolerant(.privacyLevel)
         systemPrompt = (try? SystemPromptFields(from: decoder)) ?? SystemPromptFields()
     }
@@ -382,6 +390,8 @@ struct TreeNode: Decodable, Identifiable, Hashable, Sendable {
     var hasTTS: Bool
     var privacyLevel: PrivacyLevel?
     var aiUsage: AIUsage?
+    /// Fetched through the X API: no Train (#689).
+    var trainRefused: Bool
     var systemPrompt: SystemPromptFields
 
     enum CodingKeys: String, CodingKey {
@@ -398,6 +408,7 @@ struct TreeNode: Decodable, Identifiable, Hashable, Sendable {
         case hasTTS = "has_tts"
         case privacyLevel = "privacy_level"
         case aiUsage = "ai_usage"
+        case trainRefused = "train_refused"
     }
 
     init(from decoder: Decoder) throws {
@@ -421,6 +432,7 @@ struct TreeNode: Decodable, Identifiable, Hashable, Sendable {
         hasTTS = c.tolerant(.hasTTS, default: false)
         privacyLevel = c.tolerant(.privacyLevel)
         aiUsage = c.tolerant(.aiUsage)
+        trainRefused = c.tolerant(.trainRefused, default: false)
         systemPrompt = (try? SystemPromptFields(from: decoder)) ?? SystemPromptFields()
     }
 }
@@ -430,10 +442,14 @@ struct NodeUpdateResponse: Decodable, Sendable {
     var message: String?
     var node: NodeDetail
     var descendantsUpdated: Int
+    /// Replies written from posts fetched from X that "apply to my replies"
+    /// left at Chat (#689).
+    var keptFromTrain: Int
 
     enum CodingKeys: String, CodingKey {
         case message, node
         case descendantsUpdated = "descendants_updated"
+        case keptFromTrain = "kept_from_train"
     }
 
     init(from decoder: Decoder) throws {
@@ -441,6 +457,7 @@ struct NodeUpdateResponse: Decodable, Sendable {
         message = c.tolerant(.message)
         node = try c.decode(NodeDetail.self, forKey: .node)
         descendantsUpdated = c.tolerant(.descendantsUpdated, default: 0)
+        keptFromTrain = c.tolerant(.keptFromTrain, default: 0)
     }
 }
 

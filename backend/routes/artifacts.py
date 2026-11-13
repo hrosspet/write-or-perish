@@ -15,6 +15,7 @@ from flask_login import login_required, current_user
 
 from backend.extensions import db
 from backend.models import NodeContextArtifact, UserArtifact
+from backend.utils.privacy import chat_at_most, shown_ai_usage, x_api_account
 from backend.utils.timefmt import iso_utc
 
 # The answer for a deleted kind: the client says "This artifact was
@@ -35,6 +36,13 @@ _RESERVED_KIND_ERRORS = {
     "recent_context": ("Recent context is built by Loore and can't be saved "
                        "as an artifact."),
 }
+
+
+def _new_artifact_usage():
+    """The AI usage a kind with no version yet shows: the account's
+    setting, Chat at most for an account with X API posts (#689)."""
+    usage = current_user.default_ai_usage
+    return chat_at_most(usage) if x_api_account(current_user.id) else usage
 
 
 def _reserved_kind_refusal(kind):
@@ -68,7 +76,8 @@ def _serialize(artifact, version_number=None, include_content=True):
         "generated_by": artifact.generated_by,
         "created_at": iso_utc(artifact.created_at),
         "privacy_level": artifact.privacy_level,
-        "ai_usage": artifact.ai_usage,
+        # Chat at most where Train is refused (#689).
+        "ai_usage": shown_ai_usage(artifact),
         # Whether the user may delete it (#603): the clients show Delete
         # from this, so the rule lives on the server only.
         "deletable": UserArtifact.is_deletable_kind(artifact.kind),
@@ -100,7 +109,7 @@ def list_artifacts():
                 UserArtifact.DEFAULT_DESCRIPTIONS.get(kind)),
             "generated_by": None, "created_at": None,
             "privacy_level": "private",
-            "ai_usage": current_user.default_ai_usage,
+            "ai_usage": _new_artifact_usage(),
             "deletable": False,
         })
     for kind in sorted(latest):
@@ -124,7 +133,7 @@ def get_artifact(kind):
                     UserArtifact.DEFAULT_DESCRIPTIONS.get(kind)),
                 "content": "", "generated_by": None, "created_at": None,
                 "privacy_level": "private",
-                "ai_usage": current_user.default_ai_usage,
+                "ai_usage": _new_artifact_usage(),
                 "deletable": False,
             }}), 200
         from backend.utils.artifact_deletion import deleted_kinds
@@ -200,6 +209,8 @@ def update_artifact(kind):
         # The user's global default, like the todo list and the profile
         # (#326): the row's ai_usage is what the training key reads.
         ai_usage=current_user.default_ai_usage,
+        # An edit keeps what the version it edits was written from (#689).
+        unlicensed_input=previous.unlicensed_input if previous else None,
     )
     artifact.set_content(content)
     db.session.add(artifact)
@@ -255,6 +266,7 @@ def patch_artifact(kind):
             generated_by="user",
             tokens_used=0,
             ai_usage=current_user.default_ai_usage,
+            unlicensed_input=latest.unlicensed_input,
         )
         db.session.add(artifact)
     artifact.set_content(content)
@@ -365,8 +377,10 @@ def revert_artifact(kind, version_id):
         generated_by="revert",
         tokens_used=0,
         privacy_level=old.privacy_level,
-        # A revert reproduces a prior version, so copy its ai_usage (#191).
+        # A revert reproduces a prior version, so copy its ai_usage (#191)
+        # and what it was written from (#689).
         ai_usage=old.ai_usage,
+        unlicensed_input=old.unlicensed_input,
     )
     # Copy the encrypted content directly (no decrypt/re-encrypt round).
     new.content = old.content

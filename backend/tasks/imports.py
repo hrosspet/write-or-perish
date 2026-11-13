@@ -361,6 +361,10 @@ def _import_prefill_rows(user_id, handle, rows, options, state, seed_now,
     # Pin BEFORE create_twitter_nodes: its profile handoff consults
     # use_batch_for_user and must route to the seeder, not the sync task.
     user = User.query.get(user_id)
+    # Asked again after the fetch, which can take minutes: a no given in
+    # Settings meanwhile (#662) brings nothing in.
+    db.session.refresh(user)
+    _raise_if_prefill_refused(user)
     user.profile_force_batch = True
     user.prefilled_handle = handle
     db.session.commit()

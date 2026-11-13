@@ -3,7 +3,7 @@ from flask_login import login_required, current_user
 from backend.utils.error_privacy import describe_exception
 from backend.models import Node, User, UserProfile
 from backend.extensions import db
-from backend.utils.privacy import AI_ALLOWED
+from backend.utils.privacy import AI_ALLOWED, cap_ai_usage
 from backend.utils import docx_import, pdf_import
 from backend.utils.pdf_extract_worker import MAX_CHAPTERS as MAX_PDF_CHAPTERS
 from datetime import datetime, timedelta
@@ -148,6 +148,8 @@ def _add_imported_message_nodes(user_id, human_owner_id, parent_id,
     """
     if provenance not in PROVENANCES:
         raise ValueError(f"Unknown provenance {provenance!r}")
+    # Content fetched through the X API is never at Train (#689).
+    ai_usage = cap_ai_usage(ai_usage, provenance)
     from backend.utils.node_split import PART_STEP, split_text_at_cap
     segments = split_text_at_cap(node_content)
     # Parts are PART_STEP apart, also for a message without a usable
@@ -211,7 +213,8 @@ def _restore_node(node_id, content, privacy_level, ai_usage,
     re-upload after a CA pre-fill drops the public vouch, which errs on
     the private side; the reverse regains it). Required, as on
     create_twitter_nodes, so no importer can bring back a row nobody
-    can classify.
+    can classify. A copy fetched through the X API comes back at Chat at
+    most (#689); the user's own upload restores an X API copy as theirs.
     """
     if provenance not in PROVENANCES:
         raise ValueError(f"Unknown provenance {provenance!r}")
@@ -223,7 +226,7 @@ def _restore_node(node_id, content, privacy_level, ai_usage,
         token_count if token_count is not None
         else approximate_token_count(content)
     )
-    node.ai_usage = ai_usage
+    node.ai_usage = cap_ai_usage(ai_usage, provenance)
     node.provenance = provenance
     node.deleted_at = None
     return node
@@ -319,6 +322,21 @@ def _requested_ai_usage(data):
     return data.get('ai_usage') or current_user.default_ai_usage or 'none'
 
 
+def _x_api_skipped(node_ids, ai_usage):
+    """How many of the already-imported entries *node_ids* an import at
+    *ai_usage* left off Train because Loore fetched them through the X API
+    (#689): 0 unless the import asked for Train. Counted after the import
+    applied its settings, as the entries then are."""
+    from backend.utils.privacy import X_API_PROVENANCES
+    if ai_usage != "train":
+        return 0
+    ids = [i for i in node_ids if i is not None]
+    return sum(
+        Node.query.filter(Node.id.in_(ids[start:start + 1000]),
+                          Node.provenance.in_(X_API_PROVENANCES)).count()
+        for start in range(0, len(ids), 1000))
+
+
 def _apply_settings_to_skipped(node_ids, privacy_level, ai_usage, dek=None,
                                changes=None):
     """Apply this import's privacy/ai_usage to already-imported nodes.
@@ -330,32 +348,90 @@ def _apply_settings_to_skipped(node_ids, privacy_level, ai_usage, dek=None,
     as ``updated`` and keep it disjoint from ``skipped``. Provenance is
     NOT touched: how a node first arrived is a fact, not a setting.
 
+    An import at Train leaves the entries fetched through the X API at
+    Chat at most (#689), also one stored at Train before that rule
+    (``_x_api_skipped`` counts them for the result).
+
     ``changes`` (a _ProfileChanges) records the nodes whose new AI usage
     moves them into or out of what the profile reads (#625).
     """
     from sqlalchemy import or_
+    from backend.utils.privacy import X_API_PROVENANCES
     ids = [i for i in node_ids if i is not None]
     updated = 0
+    differs = [Node.privacy_level != privacy_level, Node.ai_usage != ai_usage]
+    if ai_usage == "train":
+        differs.append(Node.provenance.in_(X_API_PROVENANCES))
     # Chunked so a huge archive doesn't produce an unbounded IN clause.
     # Goes through the ORM (not a bulk UPDATE) because a privacy change
     # moves content across the encryption boundary (#257) — only the
     # rows whose settings actually differ are loaded.
     for start in range(0, len(ids), 1000):
         chunk = ids[start:start + 1000]
-        for node in Node.query.filter(
-            Node.id.in_(chunk),
-            or_(
-                Node.privacy_level != privacy_level,
-                Node.ai_usage != ai_usage,
-            ),
-        ).all():
+        for node in Node.query.filter(Node.id.in_(chunk), or_(*differs)).all():
+            target = cap_ai_usage(ai_usage, node.provenance)
+            if (node.privacy_level == privacy_level
+                    and node.ai_usage == target):
+                continue
             if changes is not None:
                 changes.setting_changed(node)
             node.set_privacy_level(privacy_level, dek=dek)
-            node.ai_usage = ai_usage
+            node.ai_usage = target
             updated += 1
         db.session.flush()
     return updated
+
+
+def _claim_prefilled_tweets(user_id, uploaded, changes):
+    """The person's own archive upload holds tweets a pre-fill already
+    brought in (#662): skipped as duplicates, they become the upload's
+    (provenance archive_upload), since the person gave them to Loore
+    themselves; the user's own input wins over the pre-fill's. After a
+    no to the tweet seed this is what brings them back into what AI reads
+    (utils/privacy.withheld_prefill_clauses), so each such tweet counts
+    as an entry this import added when the import lets AI read it, and
+    takes the import's settings without being counted again. On any other
+    account nothing that is read changes: an upload needs a signed-in
+    account, which is never public-only (utils/profile_providers).
+
+    *uploaded*: ``{node_id: (text, token_count)}``, the upload's own copy
+    of each skipped tweet. A claimed tweet takes that text, so what Loore
+    keeps under the upload's provenance is the person's own words (#689:
+    a pre-fill's copy may be the X API's, which never trains, and a tweet
+    id alone proves nothing — ids are public). A tweet the person edited
+    in Loore (an edit writes a NodeVersion) is not claimed: their edit
+    wins, and it stays the pre-fill's.
+
+    Returns the ids that were left out before (empty without a no)."""
+    from backend.models import NodeVersion
+    from backend.utils.encryption import new_dek
+    from backend.utils.privacy import (
+        PREFILL_PROVENANCES, withheld_prefill_clauses)
+    withheld = bool(withheld_prefill_clauses(user_id))
+    ids = [i for i in uploaded if i is not None]
+    was_withheld = set()
+    for start in range(0, len(ids), 1000):
+        chunk = ids[start:start + 1000]
+        edited = {node_id for (node_id,) in db.session.query(
+            NodeVersion.node_id).filter(NodeVersion.node_id.in_(chunk))}
+        dek = None
+        for node in Node.query.filter(
+                Node.id.in_(chunk),
+                Node.provenance.in_(PREFILL_PROVENANCES)).all():
+            if node.id in edited:
+                continue
+            text, token_count = uploaded[node.id]
+            if node.privacy_level != "public" and dek is None:
+                dek = new_dek()  # one KMS call per chunk; None when off
+            node.set_content(text, dek=dek)
+            node.token_count = (token_count if token_count is not None
+                                else approximate_token_count(text))
+            node.provenance = PROVENANCE_ARCHIVE_UPLOAD
+            if withheld:
+                was_withheld.add(node.id)
+                changes.entry_added(node.created_at, node.token_count)
+        db.session.flush()
+    return was_withheld
 
 
 def _release_deleted_docx_key(file_data, source_key, key_index,
@@ -1541,6 +1617,14 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
     changes = _ProfileChanges(ai_usage)
     since_commit = 0
     done = 0
+    # Tweets fetched through the X API are created and restored at Chat at
+    # most (#689); kept_from_train counts the tweets this import created or
+    # restored that asked for Train and stay off it, for the result.
+    new_ai_usage = cap_ai_usage(ai_usage, provenance)
+    kept_from_train = 0
+    # {node_id: (text, token_count)} of the skipped tweets, from the
+    # person's own upload: a pre-fill's copy it claims takes this text.
+    uploaded_texts = {}
 
     for tweet_data in rows:
         done += 1
@@ -1574,10 +1658,16 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
                 changes.entry_added(restored.created_at, token_count)
                 deleted_keys.discard(source_key)
                 nodes_restored += 1
+                if new_ai_usage != ai_usage:
+                    kept_from_train += 1
             else:
                 nodes_skipped += 1
                 if source_key not in deleted_keys:
                     skipped_alive_ids.append(key_index[source_key])
+                    if provenance == PROVENANCE_ARCHIVE_UPLOAD:
+                        # The upload's own copy, for a claim (#689).
+                        uploaded_texts[key_index[source_key]] = (
+                            content, token_count)
             if import_type == 'single_thread':
                 # Chain the next new tweet onto the existing copy so
                 # partially-skipped imports don't orphan new nodes.
@@ -1591,7 +1681,7 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
             node_type="user",
             token_count=token_count,
             privacy_level=privacy_level,
-            ai_usage=ai_usage,
+            ai_usage=new_ai_usage,
             source_key=source_key,
             origin="twitter",
             provenance=provenance,
@@ -1601,6 +1691,8 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
             node.created_at = tweet_created_at
         db.session.add(node)
         changes.entry_added(tweet_created_at, token_count)
+        if new_ai_usage != ai_usage:
+            kept_from_train += 1
 
         if import_type == 'single_thread':
             db.session.flush()
@@ -1617,9 +1709,15 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
             if on_progress:
                 on_progress(done)
 
+    withheld_claimed = set()
+    if provenance == PROVENANCE_ARCHIVE_UPLOAD:
+        withheld_claimed = _claim_prefilled_tweets(
+            user_id, uploaded_texts, changes)
     nodes_updated = _apply_settings_to_skipped(
-        skipped_alive_ids, privacy_level, ai_usage, changes=changes
-    )
+        [i for i in skipped_alive_ids if i not in withheld_claimed],
+        privacy_level, ai_usage, changes=changes
+    ) + _apply_settings_to_skipped(
+        sorted(withheld_claimed), privacy_level, ai_usage)
     nodes_skipped -= nodes_updated
     db.session.commit()
     if on_progress:
@@ -1644,6 +1742,11 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
         "empty": nodes_empty,
         "restored": nodes_restored,
         "updated": nodes_updated,
+        # Tweets of this import fetched through the X API that stay at
+        # Chat although the import asked for Train (#689): the result
+        # screen says why.
+        "kept_from_train": kept_from_train + _x_api_skipped(
+            skipped_alive_ids, ai_usage),
     }
 
 

@@ -379,8 +379,131 @@ def can_ai_use_node_for_training(node) -> bool:
     Returns:
         True if AI can use for training, False otherwise
     """
-    ai_usage = getattr(node, 'ai_usage', AIUsage.NONE)
-    return ai_usage == AIUsage.TRAIN
+    return effective_ai_usage(node) == AIUsage.TRAIN.value
+
+
+# Node.provenance of the entries Loore fetched through the X API
+# (routes/import_data.PROVENANCE_PREFILL_X). X's Developer Agreement
+# forbids using the X API or X Content to train a foundation or frontier
+# model, so these entries are never at Train (#689): they are created at
+# Chat at most, no route raises them to Train, and the training licence
+# reads them as Chat whatever is stored. The Community Archive and the
+# user's own archive upload are not the X API: their entries may be Train.
+X_API_PROVENANCES = ("prefill_x",)
+TRAIN_REFUSED_MESSAGE = (
+    "Posts fetched from X can't be used for training, under X's rules "
+    "for developers.")
+TRAIN_REFUSED_CODE = "x_api_no_train"
+
+
+# The mark on text a model wrote from posts fetched through the X API
+# (Node / UserArtifact / UserTodo .unlicensed_input, #689): Chat at most,
+# and Train is never offered. Other people's saved writing (references,
+# Glean tweets) is not marked: a reply written from it may be Train
+# (Peter, 2026-09-29), and the training key leaves out only the call that
+# carries the reference itself (PayloadLicence.note_external), as before.
+X_API_INPUT = "x_api"
+# The documents Loore's models write from the person's writing: profile
+# versions and windows, recent context, the todo list, the artifacts
+# (intentions, memory, digest, ...). Of an account that has had an X API
+# pre-fill, all of them read as X API input (x_api_account).
+DERIVED_TABLES = ("user_profile", "user_recent_context", "user_todo",
+                  "user_artifact")
+# APICostLog.request_type of an X API pre-fill (tasks/imports): written
+# before the tweets are imported, kept when they are deleted. A partial
+# index (models.APICostLog, ix_api_cost_log_x_prefill_user) makes the
+# lookup by user one index probe.
+X_API_PREFILL_REQUEST = "x_prefill"
+
+
+def train_refused_for(provenance) -> bool:
+    """Whether an entry with this Node.provenance may never be at Train."""
+    return provenance in X_API_PROVENANCES
+
+
+def x_api_account(user_id) -> bool:
+    """Whether the account has ever had an X API pre-fill: its cost record
+    (``APICostLog`` request_type ``x_prefill``), which stays when the
+    tweets are deleted (a "Delete all my writing" purge detaches it, and
+    deletes the documents with it). Then every document a model wrote from
+    its writing may quote the posts (intentions quote "in their words"),
+    so all of them read as Chat at most, whatever the account's setting
+    (#689). One probe of a partial index, asked once per user per
+    database session (a task or a request: the session is removed when
+    its app context ends)."""
+    if user_id is None:
+        return False
+    from backend.extensions import db
+    from backend.models import APICostLog
+    memo = db.session.info.setdefault("x_api_accounts", {})
+    if user_id in memo:
+        return memo[user_id]
+    # The predicate as a literal, the index's own text: the planner then
+    # matches the partial index also for a prepared statement.
+    found = db.session.query(APICostLog.id).filter(
+        APICostLog.user_id == user_id,
+        db.text(f"request_type = '{X_API_PREFILL_REQUEST}'"),
+    ).first() is not None
+    memo[user_id] = found
+    return found
+
+
+def unlicensed_input(row):
+    """``X_API_INPUT`` when *row* holds X API input, else None: an entry
+    fetched through the X API (provenance), a model-written node, artifact
+    or todo version marked so, or any document derived from the writing of
+    an account that has had an X API pre-fill (``x_api_account``)."""
+    if getattr(row, "unlicensed_input", None) == X_API_INPUT:
+        return X_API_INPUT
+    if getattr(row, "provenance", None) in X_API_PROVENANCES:
+        return X_API_INPUT
+    if (getattr(row, "__tablename__", None) in DERIVED_TABLES
+            and x_api_account(getattr(row, "user_id", None))):
+        return X_API_INPUT
+    return None
+
+
+def train_refused(row) -> bool:
+    """Whether *row* may never be at Train: it holds X API input."""
+    return unlicensed_input(row) == X_API_INPUT
+
+
+def cap_ai_usage(ai_usage, provenance):
+    """*ai_usage* as an entry with *provenance* may hold it: Train becomes
+    Chat for content fetched through the X API; None and Chat stay."""
+    if ai_usage == AIUsage.TRAIN.value and train_refused_for(provenance):
+        return AIUsage.CHAT.value
+    return ai_usage
+
+
+def chat_at_most(ai_usage):
+    """Train becomes Chat; None and Chat stay."""
+    return (AIUsage.CHAT.value if ai_usage == AIUsage.TRAIN.value
+            else ai_usage)
+
+
+def effective_ai_usage(row):
+    """The AI usage the training licence reads, and the screens show, for
+    *row*: its stored ai_usage, Chat at most when the row holds X API input
+    (``unlicensed_input``, #689), so nothing stored at Train before the
+    rule reaches the training key. Other rows read as stored."""
+    stored = getattr(row, 'ai_usage', AIUsage.NONE.value)
+    return chat_at_most(stored) if train_refused(row) else stored
+
+
+# What the editors show is what the licence reads.
+shown_ai_usage = effective_ai_usage
+
+
+def node_train_licence_clause(node_model):
+    """SQL for "this node is licensed for training": at Train, not
+    fetched through the X API and not written from such posts. The query
+    form of effective_ai_usage for nodes."""
+    return and_(
+        node_model.ai_usage == AIUsage.TRAIN.value,
+        func.coalesce(node_model.provenance, "").notin_(X_API_PROVENANCES),
+        node_model.unlicensed_input.is_(None),
+    )
 
 
 def speech_allowed(entity) -> bool:
@@ -418,6 +541,11 @@ def account_allows_ai(user) -> bool:
 
 PREFILL_REFUSAL_CODES = ("ai_opt_out", "prefill_declined")
 
+# Node.provenance of the tweets a pre-fill brought in: Loore fetched them
+# from the Community Archive or the X API (routes/import_data). A user's
+# own archive upload is not one of them.
+PREFILL_PROVENANCES = ("prefill_ca", "prefill_x")
+
 
 def prefill_refusal(user):
     """Why an admin pre-fill or intentions run must not run for this
@@ -429,6 +557,30 @@ def prefill_refusal(user):
         return ("prefill_declined",
                 "This user declined the tweet seed (pre-fill consent: no).")
     return None
+
+
+def withheld_prefill_clauses(user_id):
+    """SQL clauses for a query of the nodes an AI read takes from a user's
+    writing as a whole (profile builds and their gates, intentions, the
+    recent-context summary, the writing a reply or poll draft reads as
+    background, the AI's archive search in utils/embeddings): after the
+    user said no to the tweet seed, on the card or later in Settings
+    (#662), the tweets a pre-fill brought in are left out. They stay in
+    the user's Loore; only these reads skip them.
+
+    An empty list for every other account, so their queries do not
+    change. The answer is read from the database at each call, so a no
+    given while a job runs counts from the job's next query. A thread
+    the user opens and replies to still reads its own entries, a tweet
+    among them."""
+    from sqlalchemy import func
+    from backend.extensions import db
+    from backend.models import Node, User
+    consent = db.session.query(User.prefill_consent).filter(
+        User.id == user_id).scalar()
+    if consent != "no":
+        return []
+    return [func.coalesce(Node.provenance, "").notin_(PREFILL_PROVENANCES)]
 
 
 def get_default_privacy_settings() -> dict:

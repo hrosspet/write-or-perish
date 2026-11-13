@@ -23,13 +23,25 @@ Options:
                          appended. Without --merge a non-empty user aborts.
                          On an existing account whose current intentions
                          the user wrote (not an inferred version), the
-                         dump's intentions are skipped (#412).
+                         dump's intentions are skipped (#412). An existing
+                         account whose owner said no to starting from
+                         their tweets is refused (#662).
     --create-approved    when the user has to be created, set approved=True
                          (default: created unapproved — the same gate a
                          fresh signup gets; flip it in the admin page)
     --twitter-id ID      set the account's X/Twitter numeric id so "Sign in
                          with X" claims it by id, not only by username match
                          (the Community Archive's account_id; e.g. 316970336)
+
+A pre-fill bundle (#662): each entry keeps its provenance, so after a no
+to "Start from your tweets" the pre-filled tweets are told apart from the
+person's own entries, and the account keeps the dump's prefilled_handle
+when it is the account's username (case aside; a different one is left
+unset and reported, since Glean leaves out the tweets of the account's
+pre-filled handle). The account is marked as one whose writing is private
+for the choice of profile models (User.profile_private_read), as a loaded
+account was before provenance was carried, so no profile build of it
+crosses providers on its own (#589's public-only rule).
 
 Ids are remapped in two passes (nodes: parent + continuation links;
 profiles: parent_profile_id; recent contexts: profile_id). LLM author
@@ -48,6 +60,13 @@ from datetime import datetime
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 NODE_BATCH = 500
+
+
+def _mark(row):
+    """A dumped row's unlicensed input mark (#689), if it is a known one."""
+    from backend.utils.privacy import X_API_INPUT
+    mark = row.get("unlicensed_input")
+    return mark if mark == X_API_INPUT else None
 
 
 def _dt(s):
@@ -128,6 +147,7 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
         Node, NodeEmbedding, User, UserProfile, UserRecentContext,
         UserTodo, UserArtifact,
     )
+    from backend.routes.import_data import PROVENANCES
 
     dump, node_iter, node_total = _open_dump(path)
 
@@ -149,6 +169,11 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
         print(f"created user '{username}' (id {user.id}, approved={user.approved})",
               file=sys.stderr)
     else:
+        if user.prefill_consent == "no":
+            # A dump loaded onto an account is a pre-fill (a lab bundle of
+            # tweets, profile and intentions): its owner said no (#662).
+            sys.exit(f"User '{username}' said no to starting from their "
+                     f"tweets (pre-fill consent: no); nothing loaded.")
         existing = Node.query.filter(
             or_(Node.user_id == user.id, Node.human_owner_id == user.id),
             Node.deleted_at.is_(None)).count()
@@ -157,6 +182,17 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
                      f"pass --merge to add to them (dedup on source_key).")
         print(f"loading onto existing user '{username}' (id {user.id}, "
               f"{existing} nodes, merge={merge})", file=sys.stderr)
+
+    handle = (dump["user"].get("prefilled_handle") or "").strip() or None
+    if handle and not user.prefilled_handle:
+        if handle.lower() == username.lower():
+            user.prefilled_handle = handle
+        else:
+            print(f"prefilled_handle @{handle} is not the username '{username}': "
+                  f"left unset", file=sys.stderr)
+    # The provider rule as before provenance was carried (see above).
+    user.profile_private_read = True
+    db.session.flush()
 
     if twitter_id:
         other = User.query.filter(User.twitter_id == str(twitter_id), User.id != user.id).first()
@@ -221,6 +257,7 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
             tokens_used=td.get("tokens_used") or 0,
             privacy_level=td.get("privacy_level") or "private",
             ai_usage=td.get("ai_usage") or "chat",
+            unlicensed_input=_mark(td),
         )
         row.set_content(td.get("content") or "")
         if _dt(td.get("created_at")):
@@ -244,6 +281,7 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
             tokens_used=a.get("tokens_used") or 0,
             privacy_level=a.get("privacy_level") or "private",
             ai_usage=a.get("ai_usage") or "chat",
+            unlicensed_input=_mark(a),
         )
         row.set_content(a.get("content") or "")
         if _dt(a.get("created_at")):
@@ -257,6 +295,12 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
     # Nodes last, so context pins on system nodes resolve to the rows above.
     from backend.models import NodeContextArtifact, UserPrompt
     from backend.utils.context_artifacts import sync_context_artifacts
+    from backend.utils.privacy import (
+        X_API_INPUT, X_API_PREFILL_REQUEST, cap_ai_usage,
+        chat_at_most, train_refused_for,
+    )
+    from backend.models import APICostLog
+    holds_x_api = False
     prompt_cache = {}
     pinned = 0
 
@@ -296,6 +340,12 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
             id_map[nd["id"]] = existing_keys[key]
             skipped += 1
             continue
+        # A tweet the dump says was fetched through the X API, or a reply
+        # written from such posts, comes in at Chat at most (#689), so no
+        # load lifts it to Train; a reply keeps what it was written from.
+        mark = _mark(nd)
+        if mark == X_API_INPUT or train_refused_for(nd.get("provenance")):
+            holds_x_api = True
         new = Node(
             user_id=_author_id(nd.get("author_username"), user_id, cache, db, User),
             human_owner_id=user_id if nd.get("owner_is_user", True) else None,
@@ -304,9 +354,15 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
             token_count=nd.get("token_count") or 0,
             distributed_tokens=nd.get("distributed_tokens") or 0,
             privacy_level=nd.get("privacy_level", "private"),
-            ai_usage=nd.get("ai_usage", "none"),
+            ai_usage=(chat_at_most(nd.get("ai_usage", "none"))
+                      if mark == X_API_INPUT
+                      else cap_ai_usage(nd.get("ai_usage", "none"),
+                                        nd.get("provenance"))),
+            unlicensed_input=mark,
             source_key=key,
             origin=nd.get("origin"),
+            provenance=(nd.get("provenance")
+                        if nd.get("provenance") in PROVENANCES else None),
             tool_calls_meta=nd.get("tool_calls_meta"),
             prompt_key=nd.get("prompt_key"),
         )
@@ -356,6 +412,20 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
             db.session.query(Node).filter(Node.id == new_id).update(
                 values, synchronize_session=False)
             relinked += 1
+    if holds_x_api and not db.session.query(APICostLog.id).filter(
+            APICostLog.user_id == user_id,
+            APICostLog.request_type == X_API_PREFILL_REQUEST).first():
+        # The account now holds X API posts: its derived documents (the
+        # bundle's profile and intentions too) read as Chat at most
+        # (privacy.x_api_account, #689). That reads the pre-fill's cost
+        # record, which stayed where the posts were fetched: this $0 row
+        # records it here.
+        db.session.add(APICostLog(
+            user_id=user_id, model_id="x-api/timeline",
+            request_type=X_API_PREFILL_REQUEST, request_ref="load_user",
+            input_tokens=0, output_tokens=0, cost_microdollars=0))
+        print("the bundle holds X API posts: recorded on the account "
+              "(#689)", file=sys.stderr)
     db.session.commit()
 
     print(f"loaded '{username}' (id {user_id}): {created} nodes created, "

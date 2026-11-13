@@ -10,6 +10,7 @@ from backend.extensions import db
 from backend.utils.tokens import approximate_token_count
 from backend.utils.privacy import (
     AI_ALLOWED, AIUsage, accessible_nodes_filter, can_user_access_node,
+    withheld_prefill_clauses,
 )
 from backend.utils.quotes import (
     resolve_quotes, has_quotes, ExportQuoteResolver,
@@ -18,6 +19,7 @@ from backend.utils.quotes import (
     quotes_inside, hold_quotes, release_quotes, reference_title_lines,
 )
 from backend.utils.timefmt import iso_utc
+from backend.utils.privacy import effective_ai_usage
 from backend.utils.encryption import dek_cached, prefetch_deks
 from backend.utils.task_owner import failure_text, task_owned_by
 from backend.utils.thread_tree import ancestor_chains
@@ -347,14 +349,17 @@ def _note_entry(licence, node):
     """Report an entry whose text the export renders to *licence* (a
     PayloadLicence, #326): an export going to a model carries every
     rendered entry, the user's own and other people's replies alike, and
-    each is licensed for training by its own ai_usage. None = no report
-    (the user's own data download). A licensed entry is only recorded, in
-    case the licence tracks rows for a cached render."""
+    each is licensed for training by its own ai_usage (as the licence
+    reads it: an entry fetched through the X API never is, #689). None =
+    no report (the user's own data download). A licensed entry is only
+    recorded, in case the licence tracks rows for a cached render."""
     if licence is None:
         return
-    if node.ai_usage == AIUsage.TRAIN.value:
+    if effective_ai_usage(node) == AIUsage.TRAIN.value:
         licence.track_row(node.__tablename__, (node.id,))
     else:
+        # By the row: its unlicensed input (#689) marks what is written
+        # from this payload.
         licence.note_usage(node.ai_usage, f"archive entry {node.id}",
                            row=node)
 
@@ -374,10 +379,11 @@ def _note_resolver_preamble(licence, resolver):
         ids = resolver.referenced_artifacts.get(kind)
         if not ids:
             continue
-        for row_id, ai_usage in model.query.with_entities(
-                model.id, model.ai_usage).filter(model.id.in_(ids)):
-            licence.track_row(model.__tablename__, (row_id,))
-            licence.note_usage(ai_usage, f"archive {kind} {row_id}")
+        # By the row (#689): a profile or todo list of an account with X
+        # API posts, or a list written from such input, reads as Chat.
+        for row in model.query.filter(model.id.in_(ids)):
+            licence.note_usage(row.ai_usage, f"archive {kind} {row.id}",
+                               row=row)
 
 
 class _CompactTweetRun:
@@ -980,6 +986,9 @@ def _scope_filter(user_id, filter_ai_usage, created_before, created_after):
     clauses = [_export_visible_filter(Node, user_id)]
     if filter_ai_usage:
         clauses.append(Node.ai_usage.in_(AI_ALLOWED))
+        # After a no to the tweet seed, the tweets a pre-fill brought in
+        # are not read (#662). Empty for every other account.
+        clauses.extend(withheld_prefill_clauses(user_id))
     if created_before is not None:
         clauses.append(Node.created_at < created_before)
     if created_after is not None:
@@ -1023,9 +1032,13 @@ def _select_incremental_rows(user_id, filter_ai_usage=False,
     cols = (Node.id, Node.parent_id, Node.created_at, Node.token_count,
             Node.deleted_at, Node.origin)
 
+    # Built once, so every layer of the walk applies the same filter (the
+    # tweet-seed answer is read once per call, #662).
+    general_filter = _scope_filter(user_id, filter_ai_usage, created_before,
+                                   created_after)
+
     def _general_filter():
-        return _scope_filter(user_id, filter_ai_usage, created_before,
-                             created_after)
+        return general_filter
 
     # 1. Anchors: target-owned/addressed AND pass general filters.
     anchor_rows = db.session.query(*cols).filter(
@@ -1179,7 +1192,11 @@ class WindowScope:
         gone = tuple(db.session.query(
             func.count(User.id), func.max(User.deleted_at),
         ).filter(User.deleted_at.isnot(None)).one())
-        return own + gone
+        # A changed answer to the tweet seed changes which rows the
+        # filter passes (#662).
+        consent = (db.session.query(User.prefill_consent).filter(
+            User.id == uid).scalar(),)
+        return own + gone + consent
 
     @staticmethod
     def _fetch(column, ids, clauses):
@@ -1683,7 +1700,8 @@ def _preselect_node_ids(user_id, budget, filter_ai_usage=False,
         _export_visible_filter(Node, user_id),
     )
     if filter_ai_usage:
-        inner = inner.filter(Node.ai_usage.in_(AI_ALLOWED))
+        inner = inner.filter(Node.ai_usage.in_(AI_ALLOWED),
+                             *withheld_prefill_clauses(user_id))
     if created_before:
         inner = inner.filter(Node.created_at < created_before)
     if created_after:
@@ -2530,7 +2548,8 @@ def build_user_export_content(
 
     # Only filter by AI usage if requested (for AI profile generation)
     if filter_ai_usage:
-        query = query.filter(Node.ai_usage.in_(AI_ALLOWED))
+        query = query.filter(Node.ai_usage.in_(AI_ALLOWED),
+                             *withheld_prefill_clauses(user.id))
 
     # Filter by creation timestamp if specified (for {user_export} context
     # limiting). `created_after` is intercepted by the dispatcher above and

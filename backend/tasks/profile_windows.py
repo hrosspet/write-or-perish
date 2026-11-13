@@ -75,7 +75,7 @@ import json
 import math
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from celery.utils.log import get_task_logger
@@ -104,7 +104,7 @@ from backend.utils.privacy import AI_ALLOWED, account_allows_ai
 from backend.utils.profile_versions import (
     WINDOW_TYPES, current_profile_query)
 from backend.utils.profile_providers import (  # noqa: F401 (re-exported)
-    PUBLIC_PROVENANCES, agreed_to_both, note_private_read,
+    PREFILL_ORIGIN, PUBLIC_PROVENANCES, agreed_to_both, note_private_read,
     writing_is_public_only)
 from backend.utils import refusal_backoff, run_locks, soft_limit
 from backend.utils.tokens import approximate_token_count, format_date_metadata
@@ -410,6 +410,58 @@ def set_windows(user_id, set_id):
                   key=lambda r: (r.source_data_cutoff or datetime.min))
 
 
+def retire_withheld_rows(user, set_id):
+    """After a no to the tweet seed (#662): the set's windows that were
+    rendered before the no, read tweets ("twitter" in their origin stats)
+    and cover dates where a pre-fill brought tweets in were read from
+    those tweets, so nothing more is built on them. They stay stored,
+    marked not AI-readable (as a step collected after an account was
+    switched to None), so no merge, base or update reads them, and their
+    ranges count as unread again: read without the tweets, or not at all
+    when nothing else is there. A first build whose windows all read the
+    tweets ends without a final, and its next build starts a new set.
+
+    A window rendered after the no read without the tweets and is kept,
+    so a range is never retired twice. A group needs nothing: it is used
+    only while it is newer than its windows (_group_matches), and every
+    window read again is newer. A merge already sent before the no is
+    collected and saved. Nothing happens without a no, or when the time
+    of the no is not on record. Returns how many windows were retired;
+    the caller commits."""
+    from backend.utils.privacy import (
+        AIUsage, PREFILL_PROVENANCES, withheld_prefill_clauses)
+    if not set_id or not withheld_prefill_clauses(user.id):
+        return 0
+    no_at = (db.session.query(User.prefill_consent_at)
+             .filter(User.id == user.id).scalar())
+    if no_at is None:
+        return 0
+    if no_at.tzinfo is not None:
+        no_at = no_at.astimezone(timezone.utc).replace(tzinfo=None)
+    retired = 0
+    for row in _set_rows(user.id, set_id, ("window", CHAINED_TYPE)):
+        if row.source_rendered_at is not None and row.source_rendered_at >= no_at:
+            continue
+        stats = row.source_origin_stats
+        if stats and PREFILL_ORIGIN not in stats:
+            continue
+        held = db.session.query(Node.id).filter(
+            or_(Node.user_id == user.id, Node.human_owner_id == user.id),
+            Node.provenance.in_(PREFILL_PROVENANCES))
+        if row.covers_start is not None:
+            held = held.filter(Node.created_at > row.covers_start)
+        if row.source_data_cutoff is not None:
+            held = held.filter(Node.created_at <= row.source_data_cutoff)
+        if held.first() is not None:
+            row.ai_usage = AIUsage.NONE.value
+            retired += 1
+    if retired:
+        logger.info("User %s: set %s: %d windows read from pre-filled "
+                    "tweets before a no are not merged",
+                    user.id, set_id, retired)
+    return retired
+
+
 def _visible_profile(user_id):
     return current_profile_query(user_id).filter(
         UserProfile.ai_usage.in_(AI_ALLOWED)).first()
@@ -554,12 +606,14 @@ def _unread_before(user, cutoff, boundary):
     already existed at ``boundary``, when the window was rendered."""
     if cutoff is None or boundary is None:
         return False
+    from backend.utils.privacy import withheld_prefill_clauses
     return db.session.query(Node.id).filter(
         or_(Node.user_id == user.id, Node.human_owner_id == user.id),
         Node.ai_usage.in_(AI_ALLOWED),
         Node.deleted_at.is_(None),
         Node.created_at > cutoff,
         Node.created_at < boundary,
+        *withheld_prefill_clauses(user.id),
     ).first() is not None
 
 
@@ -1703,6 +1757,11 @@ def next_work(user, keys, deadline, wait_for_imports=True):
         # The import's deferred seed or the hourly seeder resumes the set.
         return "waiting"
     set_id, base, fresh = resolve_set(user)
+    if not fresh and retire_withheld_rows(user, set_id):
+        # A no to the tweet seed (#662): what the set read from the
+        # tweets is not merged; the set is resolved again without it.
+        db.session.commit()
+        set_id, base, fresh = resolve_set(user)
     if fresh and not wants_window_build(user):
         # A set is started only for a build that plans into two or more
         # chunks; anything smaller is the chained path's (the seeder).

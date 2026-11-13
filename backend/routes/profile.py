@@ -13,6 +13,7 @@ from backend.utils.privacy import (
     validate_privacy_level,
     PrivacyLevel,
     AI_ALLOWED,
+    shown_ai_usage,
     account_allows_ai,
     speech_allowed,
     SPEECH_REFUSED_MESSAGE,
@@ -122,7 +123,7 @@ def revert_profile(version_id):
             "tokens_used": new_profile.tokens_used,
             "created_at": iso_utc(new_profile.created_at),
             "privacy_level": new_profile.privacy_level,
-            "ai_usage": new_profile.ai_usage,
+            "ai_usage": shown_ai_usage(new_profile),  # #689
         }
     }), 200
 
@@ -319,7 +320,7 @@ def create_profile():
                 "tokens_used": profile.tokens_used,
                 "created_at": iso_utc(profile.created_at),
                 "privacy_level": profile.privacy_level,
-                "ai_usage": profile.ai_usage
+                "ai_usage": shown_ai_usage(profile)  # #689
             }
         }), 201
     except Exception as e:
@@ -526,7 +527,7 @@ def update_profile(profile_id):
                 "tokens_used": profile.tokens_used,
                 "created_at": iso_utc(profile.created_at),
                 "privacy_level": profile.privacy_level,
-                "ai_usage": profile.ai_usage
+                "ai_usage": shown_ai_usage(profile)  # #689
             }
         }), 200
     except Exception as e:
