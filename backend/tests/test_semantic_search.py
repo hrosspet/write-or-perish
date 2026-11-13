@@ -621,3 +621,102 @@ def test_semantic_results_escape_stored_markup(app, client, monkeypatch):
     assert node_r["snippet"] is None and ref_r["snippet"] is None
     # The title is a plain-text field (rendered as text by both clients).
     assert ref_r["title"] == "<b>T</b>"
+
+
+# ── An account set to None has no search (Peter, 2026-11-13, #684) ──────
+
+# These tests change the user in the fixture's own app context, the one
+# the client's requests run in: a nested app_context() has a session of
+# its own, and the request would read the user it cached before.
+
+def _record_query_embedding(monkeypatch, vector=(1.0, 0.0)):
+    """embed_texts replaced by a recorder: the list of what was sent."""
+    import backend.utils.embeddings as emb_module
+    sent = []
+
+    def fake(texts, key, **kw):
+        sent.append(list(texts))
+        return [list(vector) for _ in texts]
+    monkeypatch.setattr(emb_module, "embed_texts", fake)
+    return sent
+
+
+@pytest.mark.parametrize("query", [
+    "q=gardens", "q=gardens&scope=external", "q=gardens&include_external=0",
+    "q=gardens&from=2026-01-01", ""])
+def test_semantic_search_refused_for_an_account_set_to_none(
+        app, client, monkeypatch, query):
+    """The search words never reach the embedding model: the request is
+    refused with the AI-usage answer before anything else, whatever it
+    asks for (fails on main: 200, one embedding call)."""
+    from backend.routes.search import SEARCH_REFUSED_MESSAGE
+    user = User.query.first()
+    node = _mk_node(user.id, "a note about gardens")
+    _mk_embedding(node, [1.0, 0.0])
+    _mk_reference(user.id, "a clipped garden guide", [1.0, 0.0])
+    user.default_ai_usage = "none"
+    _db.session.commit()
+    sent = _record_query_embedding(monkeypatch)
+
+    resp = client.get(f"/api/search/semantic?{query}")
+
+    assert resp.status_code == 403
+    assert resp.get_json() == {"error": SEARCH_REFUSED_MESSAGE,
+                               "code": "ai_usage_none", "scope": "account"}
+    assert sent == []
+
+
+def test_semantic_search_works_for_chat_and_train_accounts(
+        app, client, monkeypatch):
+    """Control: an account set to Chat or Train searches as before, with
+    one embedding call per search."""
+    user = User.query.first()
+    node = _mk_node(user.id, "a note about gardens")
+    _mk_embedding(node, [1.0, 0.0])
+    node_id = node.id
+    sent = _record_query_embedding(monkeypatch)
+
+    for setting in ("chat", "train"):
+        user.default_ai_usage = setting
+        _db.session.commit()
+        resp = client.get("/api/search/semantic?q=gardens")
+        assert resp.status_code == 200
+        assert [r["id"] for r in resp.get_json()["results"]] == [node_id]
+    assert sent == [["gardens"], ["gardens"]]
+
+
+def test_an_entry_set_to_none_does_not_turn_search_off(
+        app, client, monkeypatch):
+    """Control: per-entry None on an account that allows AI keeps search
+    on; that entry is never embedded, so it is never a result."""
+    user = User.query.first()
+    shown = _mk_node(user.id, "a note about gardens")
+    _mk_embedding(shown, [1.0, 0.0])
+    kept = _mk_node(user.id, "a private note about gardens",
+                    ai_usage="none")
+    assert kept.id not in {n.id for n, _, _, _ in _candidate_nodes(50)}
+    shown_id = shown.id
+    sent = _record_query_embedding(monkeypatch)
+
+    resp = client.get("/api/search/semantic?q=gardens")
+
+    assert resp.status_code == 200
+    assert [r["id"] for r in resp.get_json()["results"]] == [shown_id]
+    assert sent == [["gardens"]]
+
+
+def test_keyword_search_is_unchanged_for_an_account_set_to_none(
+        app, client, monkeypatch):
+    """Control: the admins' keyword search makes no provider call and
+    stays as it is."""
+    user = User.query.first()
+    user.default_ai_usage = "none"
+    user.is_admin = True
+    _mk_node(user.id, "a note about gardens")
+    sent = _record_query_embedding(monkeypatch)
+
+    resp = client.get("/api/search?q=gardens")
+
+    assert resp.status_code == 200
+    assert resp.get_json()["total"] == 1
+    assert sent == []
