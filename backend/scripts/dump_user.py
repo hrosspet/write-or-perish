@@ -157,6 +157,9 @@ def _run(username, out_path, include_private=False):
                 # How an imported entry reached Loore: a pre-fill's tweets
                 # are told apart by it after a no to the tweet seed (#662).
                 "provenance": n.provenance,
+                # A reply written from X API posts or other people's
+                # saved writing (#689).
+                "unlicensed_input": n.unlicensed_input,
                 "tool_calls_meta": n.tool_calls_meta,
                 "created_at": _iso(n.created_at),
                 "updated_at": _iso(n.updated_at),
@@ -218,6 +221,7 @@ def _todos(user, UserTodo):
         "content": t.get_content(), "generated_by": t.generated_by,
         "tokens_used": t.tokens_used, "created_at": _iso(t.created_at),
         "privacy_level": t.privacy_level, "ai_usage": t.ai_usage,
+        "unlicensed_input": t.unlicensed_input,
     } for t in UserTodo.query.filter_by(user_id=user.id).order_by(UserTodo.id).all()]
 
 
@@ -228,6 +232,7 @@ def _artifacts(user, UserArtifact):
         "content": a.get_content(), "generated_by": a.generated_by,
         "tokens_used": a.tokens_used, "created_at": _iso(a.created_at),
         "privacy_level": a.privacy_level, "ai_usage": a.ai_usage,
+        "unlicensed_input": a.unlicensed_input,
     } for a in UserArtifact.live().filter_by(user_id=user.id).order_by(UserArtifact.id).all()]
 
 

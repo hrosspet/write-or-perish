@@ -837,6 +837,14 @@ class Node(db.Model):
     # entry, for anything written in Loore, and for items imported
     # before this column existed. Says nothing about the content.
     split_item = db.Column(db.String(32), nullable=True, index=True)
+    # On a model-written node: "x_api" when the call that wrote it carried
+    # posts Loore fetched through the X API (or text a model wrote from
+    # them), so the text may repeat them (#689). The node is Chat at most,
+    # Train is never offered for it, and the training licence reads it as
+    # Chat. NULL = nothing of the kind (every node written before #689,
+    # and replies written from other people's saved writing, which may be
+    # Train: Peter, 2026-09-29). utils/privacy.unlicensed_input reads it.
+    unlicensed_input = db.Column(db.String(16), nullable=True)
 
     # DB-level backstop against concurrent imports racing past the
     # application dedup check. NULL source_key rows are exempt (both
@@ -1304,6 +1312,9 @@ class UserTodo(db.Model):
     privacy_level = db.Column(db.String(16), nullable=False, default="private")
     # Todo is used as AI context in Voice sessions — must be AI-readable
     ai_usage = db.Column(db.String(16), nullable=False, default="chat")
+    # As Node.unlicensed_input (#689): a merge written from a reply or a
+    # list that carried such content, and every later version.
+    unlicensed_input = db.Column(db.String(16), nullable=True)
 
     user = db.relationship("User", backref="todos")
 
@@ -1359,6 +1370,9 @@ class UserArtifact(db.Model):
     privacy_level = db.Column(db.String(16), nullable=False, default="private")
     # Artifacts are LLM working memory — must be AI-readable to function.
     ai_usage = db.Column(db.String(16), nullable=False, default="chat")
+    # As Node.unlicensed_input (#689): a version the model wrote in a turn
+    # that carried such content, and every later version of the kind.
+    unlicensed_input = db.Column(db.String(16), nullable=True)
     # Soft delete (#603), as for nodes: the user's delete stamps every
     # version of the kind at once, and from then on no reader sees them
     # (read through live() / get_live() / latest_for()). The daily
@@ -1612,6 +1626,16 @@ class NodeTranscriptChunk(db.Model):
 
 class APICostLog(db.Model):
     __tablename__ = "api_cost_log"
+    # Whether an account has ever had an X API pre-fill is asked on every
+    # reply and pre-warm (utils/privacy.x_api_account, #689). Almost no
+    # account has such a row, and without this partial index the lookup
+    # would read all of the user's cost rows to find none; with it, it is
+    # one probe of a tiny index (one entry per X API pre-fill).
+    __table_args__ = (
+        db.Index("ix_api_cost_log_x_prefill_user", "user_id",
+                 postgresql_where=db.text("request_type = 'x_prefill'"),
+                 sqlite_where=db.text("request_type = 'x_prefill'")),
+    )
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False, index=True)
     model_id = db.Column(db.String(64), nullable=False)

@@ -133,6 +133,9 @@ struct ImportResult: Equatable {
     var archiveSummary: String?
     /// `ask_profile_rebuild` (#625), or nil.
     var rebuildQuestion: ProfileRebuildQuestion?
+    /// Tweets Loore fetched through the X API that stay at Chat although the
+    /// import asked for Train (`kept_from_train`, #689).
+    var keptFromTrain = 0
 
     init(_ object: [String: Any]) {
         func int(_ key: String) -> Int { (object[key] as? NSNumber)?.intValue ?? 0 }
@@ -142,8 +145,17 @@ struct ImportResult: Equatable {
         updated = int("updated")
         empty = int("empty")
         partlyUpdated = int("partly_updated")
+        keptFromTrain = int("kept_from_train")
         profileUpdateTaskId = object["profile_update_task_id"] as? String
         rebuildQuestion = ProfileRebuildQuestion(object["ask_profile_rebuild"])
+    }
+
+    /// The line for the X posts kept at Chat (web `keptFromTrainNote`).
+    static func keptFromTrainNote(_ count: Int) -> String? {
+        guard count > 0 else { return nil }
+        let posts = count == 1 ? "1 post that Loore fetched from X stays"
+            : "\(count.formatted()) posts that Loore fetched from X stay"
+        return "\(posts) at Chat. \(PrivacySelectorView.trainRefusedMessage)"
     }
 
     init(created: Int = 0, skipped: Int = 0, restored: Int = 0, updated: Int = 0, empty: Int = 0) {
@@ -163,7 +175,8 @@ struct ImportResult: Equatable {
     }
 
     var notes: [String] {
-        let summary = archiveSummary.map { [$0] } ?? []
+        let summary = (archiveSummary.map { [$0] } ?? [])
+            + (Self.keptFromTrainNote(keptFromTrain).map { [$0] } ?? [])
         if created == 0 && restored == 0 && updated == 0 {
             return summary + ["Everything in this archive was already imported — nothing new was added."]
         }

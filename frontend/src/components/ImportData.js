@@ -15,6 +15,7 @@ import PrivacySelector from "./PrivacySelector";
 import { BothProvidersQuestion } from "./BothProvidersDialog";
 import ProfileRebuildQuestion from "./ProfileRebuildQuestion";
 import { noteBothProvidersLater } from "../hooks/useBothProvidersQuestion";
+import { keptFromTrainNote } from "../utils/aiUsage";
 import { useUser } from "../contexts/UserContext";
 
 // The import result's note when a re-import could set this import's
@@ -873,6 +874,12 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
               These numbers count messages. Your archive has{" "}
               {importResult.archive_conversations.toLocaleString()} conversation{importResult.archive_conversations !== 1 ? "s" : ""}
               {importResult.archive_messages > 0 && <> with {importResult.archive_messages.toLocaleString()} messages</>}.
+            </p>
+          )}
+          {/* Tweets Loore fetched through the X API stay off Train (#689). */}
+          {keptFromTrainNote(importResult.kept_from_train) && (
+            <p style={{ fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.88rem", color: "var(--text-secondary)", margin: "0 0 1.4rem" }}>
+              {keptFromTrainNote(importResult.kept_from_train)}
             </p>
           )}
           {importResult.created === 0 && !importResult.restored && !importResult.updated ? (

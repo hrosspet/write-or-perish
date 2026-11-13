@@ -27,7 +27,7 @@ import useSubmitShortcut from "../hooks/useSubmitShortcut";
 
 const NodeForm = forwardRef(
   (
-    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt, hidePowerFeatures = false, placeholder, onSubmitOverride, uploadReplyOptions, compact = false, hideAudioUpload = false, allowAgenticPrompt = false, hasGeneratedTts = false, aiUsageFromGlobalDefault = false, hasChildren = false, parentPrivacyLevel },
+    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt, hidePowerFeatures = false, placeholder, onSubmitOverride, uploadReplyOptions, compact = false, hideAudioUpload = false, allowAgenticPrompt = false, hasGeneratedTts = false, aiUsageFromGlobalDefault = false, hasChildren = false, parentPrivacyLevel, trainRefused = false },
     ref
   ) => {
     const { user } = useUser();
@@ -915,6 +915,7 @@ const NodeForm = forwardRef(
             onAIUsageChange={setAiUsage}
             disabled={loading}
             lockPrivacy={parentPrivacy === "public" && !editMode}
+            trainRefused={trainRefused}
           />
         )}
 

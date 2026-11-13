@@ -4,7 +4,9 @@ from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
 from backend.models import Node, Draft, UserTodo
 from backend.extensions import db
-from backend.utils.privacy import AI_ALLOWED, can_user_access_node
+from backend.utils.privacy import (
+    AI_ALLOWED, can_user_access_node, shown_ai_usage,
+)
 from backend.utils.proposals import find_own_pending_proposal
 from backend.utils.timefmt import iso_utc
 from backend.utils.todo_lock import (
@@ -39,7 +41,8 @@ def _todo_json(todo, version_number):
         "tokens_used": todo.tokens_used,
         "created_at": iso_utc(todo.created_at),
         "privacy_level": todo.privacy_level,
-        "ai_usage": todo.ai_usage,
+        # Chat at most where Train is refused (#689).
+        "ai_usage": shown_ai_usage(todo),
         "version_number": version_number,
         "revision": todo_revision(todo),
     }
@@ -176,6 +179,9 @@ def update_todo():
         if latest is None or base_revision != todo_revision(latest):
             return _todo_changed_response(latest, current_user.id)
 
+    # An edit keeps what the list it edits was written from (#689): the
+    # list's items stay in the text.
+    edited = newest_todo(current_user.id)
     todo = UserTodo(
         user_id=current_user.id,
         generated_by=generated_by,
@@ -183,6 +189,7 @@ def update_todo():
         # ai_usage follows the user's global default, not a hardcoded
         # 'chat' (#191); live-gated out of prompts if the user opts out.
         ai_usage=current_user.default_ai_usage,
+        unlicensed_input=edited.unlicensed_input if edited else None,
     )
     todo.set_content(content)
     db.session.add(todo)
@@ -257,8 +264,10 @@ def revert_todo(version_id):
         user_id=current_user.id,
         generated_by="revert",
         tokens_used=0,
-        # A revert reproduces a prior version, so copy its ai_usage (#191).
+        # A revert reproduces a prior version, so copy its ai_usage (#191)
+        # and what it was written from (#689).
         ai_usage=old_todo.ai_usage,
+        unlicensed_input=old_todo.unlicensed_input,
     )
     # Copy the encrypted content directly
     new_todo.content = old_todo.content

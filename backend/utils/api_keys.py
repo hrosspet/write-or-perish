@@ -4,7 +4,18 @@ API key utilities for Write or Perish.
 This module provides functions to select the appropriate API keys based on
 privacy/ai_usage settings. Separated from tasks to avoid circular imports.
 """
-from backend.utils.privacy import AIUsage
+from backend.utils.privacy import (
+    AIUsage, X_API_INPUT, X_API_PROVENANCES,
+    effective_ai_usage, node_train_licence_clause, unlicensed_input,
+)
+
+
+def chain_inputs(node_chain) -> set:
+    """{X_API_INPUT} when the chain's own nodes hold X API input (#689),
+    else empty. AI replies count here: one written from X API posts may
+    repeat their words."""
+    return {kind for kind in (unlicensed_input(n) for n in node_chain)
+            if kind}
 
 
 def determine_api_key_type(node_chain: list, logger=None) -> str:
@@ -15,6 +26,11 @@ def determine_api_key_type(node_chain: list, logger=None) -> str:
     - If ANY user node has ai_usage='chat', use 'chat' keys
     - If ALL user nodes have ai_usage='train', use 'train' keys
 
+    Each node is read by its effective ai_usage (privacy.effective_ai_usage):
+    an entry fetched through the X API counts as 'chat' whatever is stored
+    (#689). An AI reply counts only when it was written from X API posts
+    (``Node.unlicensed_input``): it may repeat their words.
+
     Args:
         node_chain: List of nodes in the conversation chain
         logger: Optional logger for warnings
@@ -22,6 +38,9 @@ def determine_api_key_type(node_chain: list, logger=None) -> str:
     Returns:
         'chat' or 'train' indicating which key type to use
     """
+    if chain_inputs(node_chain):
+        return 'chat'
+
     # Only consider user nodes (not LLM responses) for determining key type
     user_nodes = [n for n in node_chain if n.node_type != "llm"]
 
@@ -32,7 +51,7 @@ def determine_api_key_type(node_chain: list, logger=None) -> str:
     # Check if any node has ai_usage='chat' (but not 'train')
     # If so, we must use chat keys
     for node in user_nodes:
-        ai_usage = getattr(node, 'ai_usage', AIUsage.NONE)
+        ai_usage = effective_ai_usage(node)
         if ai_usage == AIUsage.CHAT:
             return 'chat'
 
@@ -158,6 +177,11 @@ class PayloadLicence:
         # ({table: {ids}}): what a cached render's verdict rests on, to be
         # re-checked when the render is served again (#326).
         self.rows = {} if track_rows else None
+        # {X_API_INPUT} once the payload took in X API posts or text
+        # written from them (#689). Recorded whether or not the key had
+        # already dropped, since the reply and any artifact written in the
+        # turn are marked from it.
+        self.inputs = set()
 
     def track_row(self, table: str, row_ids) -> None:
         """Record rows the payload carries (a no-op unless tracking)."""
@@ -168,8 +192,20 @@ class PayloadLicence:
     def key_type(self) -> str:
         return self._key_type
 
-    def to_chat(self, reason: str) -> None:
-        """Drop to the chat key for the rest of the turn."""
+    @property
+    def unlicensed_input(self):
+        """The mark for text written from this payload (#689): X_API_INPUT
+        or None."""
+        return X_API_INPUT if X_API_INPUT in self.inputs else None
+
+    def mark(self, *kinds) -> None:
+        """Record X API input (a cached render's, the chain's)."""
+        self.inputs.update(k for k in kinds if k == X_API_INPUT)
+
+    def to_chat(self, reason: str, kind=None) -> None:
+        """Drop to the chat key for the rest of the turn; *kind* is
+        X_API_INPUT when X API input is behind it (#689)."""
+        self.mark(kind)
         if self._key_type == AIUsage.CHAT.value:
             return
         self.reason = reason
@@ -182,26 +218,44 @@ class PayloadLicence:
     def note_usage(self, ai_usage, what: str, row=None) -> None:
         """One row resolved into the payload, judged by its own setting:
         an artifact, the todo list, a search preview's node. *row* (the
-        model instance) is recorded when tracking."""
+        model instance) is recorded when tracking, and a row holding X API
+        input (privacy.unlicensed_input: an entry fetched through the X
+        API, a document derived from an X-prefilled account's writing, a
+        reply written from such posts) counts as 'chat' whatever
+        *ai_usage* says (#689)."""
         if row is not None:
             self.track_row(row.__tablename__, (row.id,))
+            kind = unlicensed_input(row)
+            if kind:
+                self.to_chat(f"{what} holds {kind} input", kind)
+                return
         if ai_usage != AIUsage.TRAIN.value:
             self.to_chat(f"{what} is {ai_usage!r}")
 
     def note_nodes(self, node_ids, what: str = "quoted node") -> None:
         """Nodes resolved into the payload by id — a ``{quote:ID}``, a
-        read_full — whoever wrote them. Each node's own ai_usage decides,
-        the same rule the chain's nodes are held to."""
+        read_full — whoever wrote them. Each node's own effective
+        ai_usage decides, the same rule the chain's nodes are held to
+        (an entry fetched through the X API, or a reply written from such
+        posts, is never licensed, #689). Asked also once the key has
+        dropped, for what the turn's reply is marked with."""
         self.track_row("node", node_ids)
-        if self._key_type == AIUsage.CHAT.value or not node_ids:
+        if not node_ids:
             return
+        from sqlalchemy import not_
         from backend.models import Node
-        row = Node.query.with_entities(Node.id, Node.ai_usage).filter(
+        rows = Node.query.with_entities(
+            Node.id, Node.ai_usage, Node.provenance,
+            Node.unlicensed_input).filter(
             Node.id.in_(set(node_ids)),
-            Node.ai_usage != AIUsage.TRAIN.value,
-        ).first()
-        if row is not None:
-            self.to_chat(f"{what} {row[0]} is {row[1]!r}")
+            not_(node_train_licence_clause(Node)),
+        ).all()
+        for node_id, ai_usage, provenance, mark in rows:
+            if provenance in X_API_PROVENANCES or mark == X_API_INPUT:
+                self.to_chat(f"{what} {node_id} holds X API input",
+                             X_API_INPUT)
+            else:
+                self.to_chat(f"{what} {node_id} is {ai_usage!r}")
 
     def note_external(self, item_ids, what: str = "saved reference") -> None:
         """Saved references resolved into the payload — other people's
@@ -270,6 +324,16 @@ class ContextUsage:
                 return lic.reason
         return None
 
+    def inputs(self, text=None):
+        """{X_API_INPUT} when a placeholder that resolved (or one appearing
+        in *text*) rendered X API input (#689), else empty."""
+        kinds = set()
+        for placeholder, lic in self._licences.items():
+            if text is not None and placeholder not in text:
+                continue
+            kinds |= lic.inputs
+        return kinds
+
 
 def rows_lost_licence(rows):
     """Why rows a cached render was licensed on no longer are, or None.
@@ -285,16 +349,35 @@ def rows_lost_licence(rows):
     )
     models = {m.__tablename__: m for m in (
         Node, UserArtifact, UserProfile, UserRecentContext, UserTodo)}
+    from sqlalchemy import distinct, not_
+    from backend.utils.privacy import x_api_account
     for table, ids in (rows or {}).items():
         if not ids:
             continue
         model = models.get(table)
         if model is None:
             return f"unknown table {table!r} in the cached verdict"
+        # An entry fetched through the X API, or text written from such
+        # posts, is never licensed, whatever is stored (#689): a render
+        # cached before the rule is rebuilt.
+        if model is Node:
+            unlicensed = not_(node_train_licence_clause(Node))
+        elif hasattr(model, "unlicensed_input"):
+            unlicensed = ((model.ai_usage != AIUsage.TRAIN.value)
+                          | model.unlicensed_input.isnot(None))
+        else:
+            unlicensed = model.ai_usage != AIUsage.TRAIN.value
         hit = model.query.with_entities(model.id, model.ai_usage).filter(
-            model.id.in_(list(ids)),
-            model.ai_usage != AIUsage.TRAIN.value,
+            model.id.in_(list(ids)), unlicensed,
         ).first()
         if hit is not None:
+            if hit[1] == AIUsage.TRAIN.value:
+                return f"{table} {hit[0]} holds X API input"
             return f"{table} {hit[0]} is now {hit[1]!r}"
+        if model is not Node:
+            # A document derived from an X-prefilled account's writing.
+            for (owner,) in model.query.with_entities(
+                    distinct(model.user_id)).filter(model.id.in_(list(ids))):
+                if x_api_account(owner):
+                    return f"{table} rows of account {owner} hold X API input"
     return None

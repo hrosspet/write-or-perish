@@ -46,6 +46,13 @@ CACHE_TTL_SECONDS = 24 * 3600
 # v5: in a call with tools, the recent raw window names a quoted saved
 # reference in one line instead of giving its text (2026-11-12); a v4
 # render would keep the text for the rest of its TTL.
+# Since #689 an entry may also carry "inputs" (X API input in its rows).
+# The key stays v5: an account that has had an X API pre-fill renders
+# under its own variant (llm_completion._render_variant's `x`), so it
+# never reads an entry from before. Another account's render holds X API
+# input only when it quotes someone else's public pre-filled post; one
+# cached before #689 replays its verdict (the call still goes out on the
+# chat key) but not the mark, for the rest of its 24 h TTL.
 _KEY_PREFIX = "wop:sysprompt:v5:"
 
 # *unlicensed* is why the render's own rows keep a payload off the
@@ -53,8 +60,11 @@ _KEY_PREFIX = "wop:sysprompt:v5:"
 # licensed.
 # *references* are the saved references its recent raw window names by
 # the name read_full opens them by (ContextUsage.named_references).
-CachedRender = namedtuple("CachedRender", ["text", "unlicensed", "references"],
-                          defaults=((),))
+# *inputs* is {X_API_INPUT} when its rows held X API input
+# (ContextUsage.inputs, #689): what a reply written from it is marked with.
+CachedRender = namedtuple("CachedRender",
+                          ["text", "unlicensed", "references", "inputs"],
+                          defaults=((), ()))
 
 
 def _client(config):
@@ -91,7 +101,8 @@ def get_cached_render(config, node, variant=""):
                             node.id, lost)
                 return None
         return CachedRender(entry["text"], unlicensed,
-                            tuple(entry.get("references") or ()))
+                            tuple(entry.get("references") or ()),
+                            tuple(entry.get("inputs") or ()))
     except Exception:
         logger.warning("Prompt cache read failed; re-rendering",
                        exc_info=True)
@@ -99,15 +110,17 @@ def get_cached_render(config, node, variant=""):
 
 
 def store_render(config, node, rendered_text, variant="",
-                 unlicensed=None, rows=None, references=()):
+                 unlicensed=None, rows=None, references=(), inputs=()):
     """Store the rendered text (encrypted) with its training-key verdict
     (see ``CachedRender``), for a licensed one the rows it rests on
-    (``ContextUsage.rows``), and the saved references its window names
-    (*references*). Failures are non-fatal."""
+    (``ContextUsage.rows``), the saved references its window names
+    (*references*) and whether its rows held X API input (*inputs*).
+    Failures are non-fatal."""
     entry = json.dumps({
         "text": rendered_text, "unlicensed": unlicensed,
         "rows": None if unlicensed else rows,
         "references": sorted(references or ()),
+        "inputs": sorted(inputs or ()),
     })
     try:
         _client(config).setex(

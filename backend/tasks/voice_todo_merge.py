@@ -201,6 +201,16 @@ def _fail_confirm_node(llm_node_id, user_id, confirm_node_id):
     db.session.commit()
 
 
+def _merge_input_mark(proposal_node, todo):
+    """X_API_INPUT when a merged todo list is written from X API posts
+    (#689): the proposal (the reply that proposed the changes) or the list
+    it rewrites holds them. None otherwise."""
+    from backend.utils.privacy import X_API_INPUT, unlicensed_input
+    kinds = {unlicensed_input(row) for row in (proposal_node, todo)
+             if row is not None}
+    return X_API_INPUT if X_API_INPUT in kinds else None
+
+
 def build_merge_messages(merge_prompt, update_summary, current_todo):
     """The merge call's messages: system=merge_prompt followed by the
     reply format, assistant=the proposal, user=the current todo list.
@@ -352,7 +362,13 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
         tokens_used=run.responses[-1].get("output_tokens", 0) or 0,
         # ai_usage follows the user's global default (#191).
         ai_usage=merge_user.default_ai_usage if merge_user else "chat",
+        # Written from a proposal or a list that carried X API posts: the
+        # mark goes on (#689).
+        unlicensed_input=_merge_input_mark(llm_node, todo),
     )
+    if new_todo.unlicensed_input:
+        from backend.utils.privacy import chat_at_most
+        new_todo.ai_usage = chat_at_most(new_todo.ai_usage)
     new_todo.set_content(merged)
     db.session.add(new_todo)
     # Assigns new_todo.id, so the proposal's tool_calls_meta records which
