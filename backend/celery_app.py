@@ -190,6 +190,15 @@ celery.conf.update(
             'task': 'backend.tasks.chat_imports.resume_stalled_imports',
             'schedule': 60.0,  # every minute
         },
+        # Anthropic Message Batches Loore no longer needs (#693): most
+        # are deleted right after their results are saved; this deletes
+        # the rest (a crash or a failed delete, batches given up on).
+        # A fixed minute, so a deploy does not restart its countdown.
+        # One indexed query when nothing is left.
+        'sweep-anthropic-batches': {
+            'task': 'backend.tasks.anthropic_batch_deletion.sweep_anthropic_batches',
+            'schedule': schedules.crontab(minute=43),  # hourly, at :43 UTC
+        },
     },
 )
 
@@ -247,3 +256,4 @@ from backend.tasks import imports  # noqa: F401
 from backend.tasks import chat_imports  # noqa: F401
 from backend.tasks import intentions  # noqa: F401
 from backend.tasks import user_purge  # noqa: F401
+from backend.tasks import anthropic_batch_deletion  # noqa: F401

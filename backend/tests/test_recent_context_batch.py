@@ -674,6 +674,68 @@ def test_an_overlapping_collector_run_does_not_save_twice(
     assert APICostLog.query.count() == 0
 
 
+@pytest.mark.parametrize("delete_fails", [False, True])
+def test_the_anthropic_batch_is_registered_and_deleted_once_saved(
+        app, rc, world, monkeypatch, delete_fails):
+    """#693: the batch is recorded with its job, and deleted at Anthropic
+    after the summary and the job are saved, never before; a failed
+    delete leaves the job collected and is counted for the sweep."""
+    from backend.models import AnthropicBatchDeletion
+    from backend.tests import anthropic_batch_fake as fake
+    user = _user("deleted-batch")
+    _check(rc)
+    [job] = _job_for(user)
+    row = AnthropicBatchDeletion.query.one()
+    assert (row.batch_id, row.source) == (job.batch_id,
+                                          "recent_context_batch_job")
+    batches = fake.install(monkeypatch)
+    batches.add(job.batch_id, results=[fake.succeeded(
+        f"recent_context_{user.id}", "BATCHED SUMMARY", 1000, 100)])
+    seen = []
+
+    def on_delete(batch_id):
+        _db.session.expire_all()
+        seen.append((RecentContextBatchJob.query.get(job.id).status,
+                     UserRecentContext.query.count()))
+    batches.on_delete = on_delete
+    if delete_fails:
+        batches.delete_error = RuntimeError("503")
+
+    assert rc._collect_recent_context_batches() == {
+        "collected": 1, "abandoned": 0}
+    assert seen == [("collected", 1)]
+    _db.session.expire_all()
+    row = AnthropicBatchDeletion.query.one()
+    assert (row.deleted_at is None, row.attempts) == (
+        (True, 1) if delete_fails else (False, 0))
+
+
+def test_a_run_that_lost_the_claim_deletes_no_anthropic_batch(
+        app, rc, world, monkeypatch):
+    """#693: the run that won the claim saves and deletes; the other one
+    leaves the batch alone. A control: passes on main too."""
+    from backend.tests import anthropic_batch_fake as fake
+    from backend.utils.llm_batch import CollectedResults
+    user = _user("raced-delete")
+    _check(rc)
+    [job] = _job_for(user)
+    batches = fake.install(monkeypatch)
+    batches.add(job.batch_id)
+
+    def other_run_claims_first(batch_ids, api_keys):
+        RecentContextBatchJob.query.filter_by(id=job.id).update(
+            {"status": "collected", "collected_at": datetime.utcnow()})
+        _db.session.commit()
+        results = CollectedResults(_summary(user))
+        results.anthropic_batches.append(job.batch_id)
+        return results, {}, {}
+    monkeypatch.setattr(rc, "batch_check_and_collect",
+                        other_run_claims_first)
+
+    rc._collect_recent_context_batches()
+    assert batches.calls_of("delete") == []
+
+
 def test_a_result_for_an_account_opted_out_meanwhile_is_billed_not_saved(
         app, rc, world, monkeypatch):
     user = _user("opted-out-later")

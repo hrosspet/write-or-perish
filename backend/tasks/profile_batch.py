@@ -39,7 +39,8 @@ from backend.utils import refusal_backoff, soft_limit
 from backend.utils.llm_batch import (
     BATCH_JOB_MAX_AGE, batch_submit, batch_check_and_collect,
     apply_batch_key_override, batch_ended, blocked_items,
-    delete_collected_batch_files, drop_openai_batch, list_batches)
+    drop_openai_batch, list_batches)
+from backend.utils import anthropic_batch_deletion
 # Module reference, not `from ... import names`: exports imports
 # celery_app, which imports this module to register its tasks. When a
 # web request touches backend.tasks.exports FIRST (e.g. POST
@@ -948,6 +949,9 @@ def _submit_requests(built, keys):
         db.session.add(ProfileBatchJob(
             provider_key=provider_key, batch_id=batch_id, status="pending",
             items=items, submitted_at=now))
+        # Deleted at Anthropic once the job is no longer pending (#693).
+        anthropic_batch_deletion.register(
+            provider_key, batch_id, ProfileBatchJob.__tablename__)
         for item in items:
             u = User.query.get(item["user_id"])
             if u:
@@ -1415,7 +1419,8 @@ def _poll_profile_batches():
         # reads its ended batch again, so its files go (#667).
         db.session.refresh(job)
         if job.status != "pending":
-            delete_collected_batch_files(results, keys)
+            anthropic_batch_deletion.delete_collected_batches(
+                results, keys, ProfileBatchJob.__tablename__)
             continue
 
         set_items = []
@@ -1574,8 +1579,10 @@ def _poll_profile_batches():
         job.status = "failed" if queue_full else "collected"
         job.collected_at = datetime.utcnow()
         db.session.commit()
-        # Saved: the batch's files at OpenAI can go (#667).
-        delete_collected_batch_files(results, keys)
+        # Saved: the batch's files at OpenAI (#667) and the batch at
+        # Anthropic (#693) can go.
+        anthropic_batch_deletion.delete_collected_batches(
+            results, keys, ProfileBatchJob.__tablename__)
         if queue_full and set_items:
             # Nothing of these window sets is in flight any more (unless a
             # user has another job pending): clear the flag as the chained

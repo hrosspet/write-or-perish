@@ -278,6 +278,10 @@ def _submit(user, template, budget, chronological, keys, label, built=None,
     db.session.add(ProfileBatchJob(
         provider_key=provider_key, batch_id=batch_id, status="pending",
         items=[item], submitted_at=datetime.utcnow()))
+    # Deleted at Anthropic once the job is no longer pending (#693).
+    from backend.utils import anthropic_batch_deletion
+    anthropic_batch_deletion.register(
+        provider_key, batch_id, ProfileBatchJob.__tablename__)
     db.session.commit()
     logger.info("intentions user %s: submitted batch %s (%s export ~%s est tokens, budget=%s)",
                 user.id, batch_id, label, est, budget)

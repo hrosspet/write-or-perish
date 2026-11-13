@@ -89,6 +89,32 @@ def test_small_corpus_submits_batch_directly_and_persists_job(app, wired, monkey
                           "budget": 1000000, "resubmitted": False}]
 
 
+def test_the_anthropic_batch_is_registered_and_goes_once_cancelled(
+        app, wired, monkeypatch):  # noqa: F811
+    """#693: the batch is recorded with its job; after the admin's cancel
+    nothing needs it, and the hourly sweep deletes it once it has ended
+    (still running: cancel first, never a delete)."""
+    from backend.models import AnthropicBatchDeletion
+    from backend.tests import anthropic_batch_fake as fake
+    from backend.utils import anthropic_batch_deletion as abd
+    u = _make_user("ines")
+    _db.session.commit()
+    it.start_infer_intentions_impl(u.id)
+    row = AnthropicBatchDeletion.query.one()
+    assert (row.batch_id, row.source) == ("b-1", "profile_batch_job")
+    monkeypatch.setitem(app.config, "ANTHROPIC_API_KEY", "k")
+    batches = fake.install(monkeypatch)
+    batches.add("b-1", status="in_progress")
+    assert abd.sweep() == {"needed": 1}     # pending: Loore still reads it
+
+    it.cancel_pending_intentions(u.id)      # cancels at the provider
+    assert batches.batches["b-1"] == "canceling"
+    assert abd.sweep() == {"running": 1}
+    batches.batches["b-1"] = "ended"
+    assert abd.sweep() == {"deleted": 1}
+    assert batches.calls_of("delete") == ["b-1"]
+
+
 def test_oversized_count_shrinks_budget_then_submits(app, wired, monkeypatch):  # noqa: F811
     """Sizing via the free count endpoint: an over-limit count shrinks the
     export budget by the real ratio (against min(budget, corpus)) and the
@@ -642,6 +668,44 @@ def test_backfill_script_skips_and_keeps_a_user_version(app, wired, monkeypatch,
     assert _current(u).id == mine.id
     assert APICostLog.query.filter_by(
         user_id=u.id, request_type="intentions_backfill").one().request_ref == KEPT_USER_EDIT_REF
+
+
+@pytest.mark.parametrize("save_fails", [False, True])
+def test_backfill_script_collect_deletes_a_saved_anthropic_batch(
+        app, wired, monkeypatch, save_fails):  # noqa: F811
+    """#693: `--collect` deletes the batch at Anthropic once its result is
+    saved; a failed save keeps it for another --collect (that case is a
+    control: it passes on main too)."""
+    import importlib
+    import sys
+    from unittest.mock import MagicMock
+    from backend.models import AnthropicBatchDeletion
+    from backend.tests import anthropic_batch_fake as fake
+    monkeypatch.setitem(sys.modules, "backend.app", MagicMock())
+    monkeypatch.delitem(sys.modules, "backend.scripts.backfill_intentions",
+                        raising=False)
+    script = importlib.import_module("backend.scripts.backfill_intentions")
+    monkeypatch.delitem(sys.modules, "backend.scripts.backfill_intentions")
+    monkeypatch.setitem(app.config, "ANTHROPIC_API_KEY", "k")
+    u = _make_user("collected")
+    _db.session.commit()
+    batches = fake.install(monkeypatch)
+    batches.add("msgbatch_x", results=[fake.succeeded(
+        f"int-u{u.id}", "# Intentions\nA")])
+    if save_fails:
+        monkeypatch.setattr(script, "_save_intentions", MagicMock(
+            side_effect=RuntimeError("db down")))
+
+    script.collect_batches(app, ["msgbatch_x"], "claude-opus-5.5")
+
+    if save_fails:
+        assert batches.calls_of("delete") == []
+        assert AnthropicBatchDeletion.query.count() == 0
+    else:
+        assert batches.calls_of("delete") == ["msgbatch_x"]
+        row = AnthropicBatchDeletion.query.one()
+        assert (row.source, row.deleted_at is not None) == (
+            "backfill_intentions", True)
 
 
 def test_intentions_read_before_a_content_deletion_are_not_saved(

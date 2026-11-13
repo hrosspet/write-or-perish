@@ -41,7 +41,9 @@ Recovery: in --batch mode each retrieved result is saved immediately, so a
 crash/timeout only leaves the not-yet-retrieved batches unsaved. Their ids
 (with user ids) are printed up front and the provider keeps the results
 (Anthropic ~29 days), so `--collect <batch_id ...>` fetches and saves them
-later.
+later. Once a batch's result is saved (or it ended without one), the
+batch is deleted at the provider: its files at OpenAI (#667), the batch
+at Anthropic (#693); a failed save keeps it for `--collect`.
 
 Privacy: any selected user who has globally opted out of AI usage
 (default_ai_usage='none') is skipped entirely — their data is never sent to an
@@ -465,6 +467,9 @@ def run_batch(app, users, template, model_override, dry_run,
                         print(f"  ✓ user {uid}: saved intentions v{version} "
                               f"({len(r['content'])} chars, model={info['model_id']}, "
                               f"llm_tokens={total}, cost=${cost / 1e6:.4f}, batch 50%)")
+                    # Saved (or dropped for the user's own version): the
+                    # batch goes at the provider (#667, #693).
+                    _delete_batch(results, batch_keys)
                 except Exception as e:  # noqa: BLE001
                     db.session.rollback()
                     print(f"  ✗ user {uid}: save FAILED — {type(e).__name__}: {e}")
@@ -481,6 +486,8 @@ def run_batch(app, users, template, model_override, dry_run,
                 print(f"  ✗ user {uid}: batch {info['batch_id']} produced no "
                       f"result (db_est={info['db_tokens']}, {real}) — "
                       f"re-run sync for this user{tail}")
+                # Nothing left to read from it (#667, #693).
+                _delete_batch(results, batch_keys)
                 pending.pop(uid)
         if pending:
             print(f"  ... {len(pending)} still processing ({waited // 60}m elapsed)")
@@ -532,7 +539,10 @@ def collect_batches(app, batch_ids, model_override):
         if not results:
             print(f"  ✗ batch {batch_id}: ended with no usable results "
                   f"(every item errored?)")
+            # Nothing left to read from it (#667, #693).
+            _delete_batch(results, keys)
             continue
+        saved_all = True
         for cid, r in results.items():
             m = re.match(r"int-u(\d+)$", cid)
             if not m:
@@ -562,8 +572,25 @@ def collect_batches(app, batch_ids, model_override):
                           f"llm_tokens={total}, cost=${cost / 1e6:.4f}, batch 50%)")
             except Exception as e:  # noqa: BLE001
                 db.session.rollback()
+                saved_all = False
                 print(f"  ✗ batch {batch_id} user {uid}: save FAILED — "
                       f"{type(e).__name__}: {e}")
+        if saved_all:
+            # Every result saved: the batch goes at the provider (#667,
+            # #693). A failed save keeps it for another --collect.
+            _delete_batch(results, keys)
+
+
+def _delete_batch(results, keys):
+    """Delete an ended batch whose results are saved: its files at OpenAI
+    (#667), the batch at Anthropic (#693, retried by the hourly sweep if
+    the call fails). Never raises."""
+    from backend.utils import anthropic_batch_deletion
+    try:
+        anthropic_batch_deletion.delete_collected_batches(
+            results, keys, anthropic_batch_deletion.SCRIPT_SOURCE)
+    except Exception as e:  # noqa: BLE001 - the results are saved
+        print(f"  ! deleting the batch failed ({type(e).__name__})")
 
 
 def main():
