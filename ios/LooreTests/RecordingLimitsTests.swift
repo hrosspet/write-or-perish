@@ -45,31 +45,44 @@ final class RecordingLimitsTests: StubbedAppTestCase {
         XCTAssertTrue(app.toasts.toasts.isEmpty)
     }
 
-    func testARefusedContinueIsNotRetried() async throws {
-        // A recording that had stopped and may not be continued (the usage
-        // limit 402, the account's bounds 429): one attempt, then given up.
-        for status in [402, 429] {
+    func testARefusedRecordingIsSaidOnceAndKeptOnThePhone() async throws {
+        // A recording that held no audio for too long, refused as a new start
+        // would be (the usage limit 402, the account's open recordings 429):
+        // not retried now, said once in the server's words, kept on disk.
+        let cases: [(Int, String, String)] = [
+            (402, #"{"error":"monthly_spend_limit_reached","message":"You've reached your monthly usage limit."}"#,
+             "You've reached your monthly usage limit."),
+            (429, #"{"error":"You have several recordings that are not finished.","code":"too_many_recordings"}"#,
+             "You have several recordings that are not finished."),
+        ]
+        for (status, body, words) in cases {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent("uploads-\(UUID().uuidString)")
             defer { try? FileManager.default.removeItem(at: root) }
             let uploader = ChunkUploader(root: root, useBackgroundSession: false)
             uploader.delay = { _ in 0.001 }
             uploader.cookieHeader = { _ in [:] }
+            var said: [String] = []
+            uploader.onRefused = { _, message in said.append(message) }
             var attempts = 0
             uploader.transport = { request, _ in
                 attempts += 1
-                return (Data(#"{"error":"refused","code":"too_many_unfinished"}"#.utf8),
+                return (Data(body.utf8),
                         HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!)
             }
             uploader.open(sessionId: "s", uploadURL: URL(string: "http://x/c")!)
             uploader.enqueue(sessionId: "s", chunk: RecordedChunk(index: 3, data: Data(repeating: 3, count: 32), duration: 15))
+            uploader.enqueue(sessionId: "s", chunk: RecordedChunk(index: 4, data: Data(repeating: 4, count: 32), duration: 15))
             let outcome = await uploader.settle(sessionId: "s")
-            XCTAssertEqual(outcome.failed, [3], "status \(status)")
-            XCTAssertLessThanOrEqual(attempts, 2, "status \(status): one attempt, one more at Stop")
+            XCTAssertEqual(outcome.failed.sorted(), [3, 4], "status \(status)")
+            XCTAssertLessThanOrEqual(attempts, 4, "status \(status): one attempt each, one more at Stop")
+            XCTAssertEqual(said, [words], "status \(status)")
+            let kept = try FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent("s").path)
+            XCTAssertTrue(kept.count > 1, "the audio stays on the phone")
         }
     }
 
     func testARefusedStartShowsTheServersWords() {
-        let text = "Other recordings of yours are still in progress. Finish one of them, then start this one."
+        let text = "You have several recordings that are not finished. Save, finish or discard one of them, then start a new one."
         let error = APIError.from(status: 429, contentType: "application/json",
                                   data: Data(#"{"error":"\#(text)","code":"too_many_recordings"}"#.utf8))
         XCTAssertEqual(error.userMessage(fallback: "Could not start recording."), text)

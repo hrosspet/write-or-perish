@@ -112,6 +112,23 @@ def _start_upload_reply(node, tip, model_id):
         return None
 
 
+def _keep_untranscribed(node, message):
+    """An uploaded file kept with its entry without being turned into text:
+    its transcription ends ``failed`` with *message*, which the upload form
+    and the app show, and an entry that still holds its placeholder says
+    so. The caller has the node; this commits."""
+    from backend.utils.tokens import approximate_token_count
+    note = "[Voice note – saved, not turned into text]"
+    if (node.get_content() or "").startswith("[Voice note"):
+        node.set_content(note)
+        node.token_count = approximate_token_count(note)
+    node.transcription_status = 'failed'
+    node.transcription_error = message
+    node.transcription_progress = 0
+    node.transcription_completed_at = datetime.utcnow()
+    db.session.commit()
+
+
 @celery.task(base=TranscriptionTask, bind=True)
 def transcribe_audio(self, node_id: int, audio_file_path: str, filename: str = None,
                      auto_reply_model: str = None):
@@ -172,14 +189,41 @@ def transcribe_audio(self, node_id: int, audio_file_path: str, filename: str = N
 
             file_size = processed_path.stat().st_size
 
+            # The file's length, counted from its decoded audio (not its
+            # container's timestamps): the bound on what is transcribed and
+            # the cost record use it (utils/recording_limits).
+            from backend.utils.audio_processing import (
+                DECODE_TIMEOUT_FILE_SECONDS, decoded_audio_seconds,
+            )
+            from backend.utils.recording_limits import (
+                MAX_UPLOAD_TRANSCRIBED_SECONDS, UPLOAD_TOO_LONG_TEXT,
+            )
+            decoded_sec = decoded_audio_seconds(
+                processed_path, DECODE_TIMEOUT_FILE_SECONDS, logger=logger)
+            if decoded_sec is not None \
+                    and decoded_sec > MAX_UPLOAD_TRANSCRIBED_SECONDS:
+                # Kept with its entry, not transcribed; the entry says why.
+                _keep_untranscribed(node, UPLOAD_TOO_LONG_TEXT)
+                for leftover in (processed_path if processed_path != file_path
+                                 else None, temp_decrypted):
+                    if leftover:
+                        try:
+                            os.unlink(leftover)
+                        except OSError:
+                            pass
+                logger.info(f"Node {node_id}: {decoded_sec:.0f} s of audio, "
+                            f"past the length transcribed; kept untranscribed")
+                return {'node_id': node_id, 'status': 'not_transcribed'}
+
             # For large files, skip expensive duration check - we know they need chunking
             # This avoids loading 190MB+ files into memory just to check duration
             if file_size > OPENAI_MAX_AUDIO_BYTES:
                 needs_chunking = True
-                duration_sec = 0  # Unknown, but doesn't matter - file size already requires chunking
+                duration_sec = decoded_sec or 0  # Unknown when it could not be decoded
                 logger.info(f"Large audio file: {file_size / 1024 / 1024:.1f} MB - will use chunked transcription")
             else:
-                duration_sec = get_audio_duration(processed_path, logger)
+                duration_sec = (decoded_sec if decoded_sec is not None
+                                else get_audio_duration(processed_path, logger))
                 logger.info(f"Transcribing audio: {file_size / 1024 / 1024:.1f} MB, {duration_sec:.0f} seconds")
                 needs_chunking = duration_sec > OPENAI_MAX_DURATION_SEC
 

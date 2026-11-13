@@ -494,3 +494,65 @@ def tts_chapters(chunks):
             })
         elapsed += chunk.duration or 0.0
     return chapters if len(chapters) > 1 else []
+
+
+# The rate decoded audio is counted at: 8 kHz mono 16-bit PCM, 16,000 bytes
+# a second. Low, so a 5-minute batch is under 5 MB through the pipe; the
+# count is the same at any rate.
+DECODE_COUNT_RATE = 8000
+# Heuristic: how long counting may take. Decoding runs at hundreds of times
+# real time, so a 5-minute batch takes well under a second and a 7-hour file
+# under two minutes; past these the measure falls back to the container's.
+DECODE_TIMEOUT_BATCH_SECONDS = 60
+DECODE_TIMEOUT_FILE_SECONDS = 600
+
+
+def decoded_audio_seconds(file_path, timeout_seconds=DECODE_TIMEOUT_BATCH_SECONDS,
+                          logger=None):
+    """Seconds of audio in *file_path*, counted from its decoded samples, not
+    from its container's timestamps (which the recording client writes): the
+    first audio stream is decoded to 8 kHz mono 16-bit PCM on a pipe and the
+    bytes are counted as they come, never held. Used for the length bounds
+    and for the transcription cost (utils/recording_limits).
+
+    None when ffmpeg is missing, the file cannot be decoded, or decoding
+    takes longer than *timeout_seconds* (the process is killed); the
+    caller then measures as before (get_audio_duration)."""
+    import subprocess
+    import threading
+    cmd = ["ffmpeg", "-nostdin", "-v", "error", "-i", str(file_path),
+           "-map", "0:a:0", "-ac", "1", "-ar", str(DECODE_COUNT_RATE),
+           "-f", "s16le", "-"]
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL,
+                                stdin=subprocess.DEVNULL)
+    except OSError as e:
+        if logger:
+            logger.warning(f"Could not start ffmpeg to measure audio: {e}")
+        return None
+    timer = threading.Timer(timeout_seconds, proc.kill)
+    timer.start()
+    total = 0
+    try:
+        while True:
+            data = proc.stdout.read(1 << 16)
+            if not data:
+                break
+            total += len(data)
+        returncode = proc.wait()
+    finally:
+        timed_out = not timer.is_alive()
+        timer.cancel()
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        proc.stdout.close()
+    if timed_out or returncode != 0 or total == 0:
+        if logger:
+            logger.warning(
+                "Could not count decoded audio of %s (exit %s, %s bytes%s)",
+                pathlib.Path(file_path).name, returncode, total,
+                ", timed out" if timed_out else "")
+        return None
+    return total / (2 * DECODE_COUNT_RATE)

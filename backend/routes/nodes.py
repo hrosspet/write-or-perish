@@ -800,6 +800,7 @@ def create_node():
             parent_id=system_node.id if system_node else parent_id,
             node_type=node_type,
             transcription_status='pending',  # Set initial status
+            upload_activity_at=datetime.utcnow(),
             privacy_level=privacy_level,
             ai_usage=ai_usage,
             token_count=_atc2(placeholder_text),
@@ -2716,6 +2717,48 @@ def _fail_unfinished_upload(chunk_dir):
     db.session.commit()
 
 
+# The entry's transcription error when its upload was finalized at the
+# monthly usage limit: the file stays with the entry (utils/spend).
+UPLOAD_AT_SPEND_CAP_TEXT = "Your file is saved, but not turned into text."
+
+
+def _hand_upload_to_transcription(node):
+    """A finalized upload is handed to transcription: renewed (it counts
+    until its transcript is in, utils/recording_limits), and the monthly
+    usage limit is asked again. At the limit the file stays with its entry,
+    not turned into text; the entry's transcription ends ``failed`` with
+    the limit's message, and the answer (200, the upload itself succeeded)
+    carries ``spend_capped``. None when it may be transcribed."""
+    from backend.utils.spend import (
+        spend_cap_payload, spend_capped_fields, user_is_capped,
+    )
+    node.upload_activity_at = datetime.utcnow()
+    db.session.commit()
+    if not user_is_capped(current_user):
+        return None
+    from backend.utils.tokens import approximate_token_count
+    note = "[Voice note – saved, not turned into text]"
+    node.set_content(note)
+    node.token_count = approximate_token_count(note)
+    node.transcription_status = "failed"
+    node.transcription_error = (
+        f"{UPLOAD_AT_SPEND_CAP_TEXT} "
+        f"{spend_cap_payload(current_user)['message']}")
+    node.transcription_completed_at = datetime.utcnow()
+    db.session.commit()
+    body = {
+        "id": node.id,
+        "audio_original_url": node.audio_original_url,
+        "content": node.content,
+        "node_type": node.node_type,
+        "created_at": iso_utc(node.created_at),
+        "transcription_status": node.transcription_status,
+        "transcription_task_id": None,
+    }
+    body.update(spend_capped_fields(current_user))
+    return jsonify(body), 200
+
+
 def _upload_chunk_too_large():
     return jsonify({"error": "This piece of the file is larger than Loore "
                              "accepts.",
@@ -2859,6 +2902,7 @@ def init_chunked_upload():
         parent_id=system_node.id if system_node else parent_id,
         node_type=node_type,
         transcription_status='pending',
+        upload_activity_at=datetime.utcnow(),
         privacy_level=privacy_level,
         ai_usage=ai_usage,
         token_count=_atc3(placeholder_text),
@@ -2923,8 +2967,8 @@ def upload_chunk():
     node its entry (400 ``upload_mismatch``); a piece over
     MAX_UPLOAD_CHUNK_BYTES (413 ``chunk_too_large``), or one that would take
     the pieces past the announced file size (413 ``upload_too_large``), is
-    not stored. A re-sent piece replaces its earlier copy. An upload started
-    longer ago than UPLOAD_COUNTS_FOR takes no more pieces (410
+    not stored. A re-sent piece replaces its earlier copy. An upload
+    that received nothing for UPLOAD_IDLE_EXPIRES_AFTER takes no more pieces (410
     ``upload_expired``).
     """
     from backend.utils.recording_limits import (
@@ -2962,7 +3006,7 @@ def upload_chunk():
     if not chunk_dir.exists():
         return jsonify({"error": "Upload session not found"}), 404
     # An upload that no longer counts takes no more pieces
-    # (utils/recording_limits.UPLOAD_COUNTS_FOR).
+    # (utils/recording_limits.UPLOAD_IDLE_EXPIRES_AFTER).
     from backend.utils.recording_limits import (
         UPLOAD_EXPIRED_TEXT, upload_expired,
     )
@@ -3000,6 +3044,10 @@ def upload_chunk():
             "code": "upload_too_large",
         }), 413
     os.replace(staged, chunk_dir / chunk_name)
+    # A piece renews the upload (utils/recording_limits.touch_upload).
+    from backend.utils.recording_limits import touch_upload
+    touch_upload(node.id)
+    db.session.commit()
 
     # Update metadata
     if chunk_index not in metadata["uploaded_chunks"]:
@@ -3040,6 +3088,11 @@ def finalize_chunked_upload():
     assembled file are deleted, and its entry's transcription ends
     ``failed`` (UPLOAD_SIZE_MISMATCH_TEXT). 400 ``upload_mismatch`` for a
     node that is not the upload's entry.
+
+    The monthly usage limit is asked again here, as the file is handed to
+    transcription: at the limit the file is kept as the entry's audio, not
+    turned into text, and the entry says why (_hand_upload_to_transcription;
+    200 with ``spend_capped``).
     """
     data = request.get_json() or {}
     upload_id = data.get("upload_id")
@@ -3128,6 +3181,9 @@ def finalize_chunked_upload():
         current_app.logger.warning(
             "Failed to clean up chunks for upload %s: %s",
             upload_id, describe_exception(e))
+    capped = _hand_upload_to_transcription(node)
+    if capped is not None:
+        return capped
 
     # Enqueue transcription task
     api_key = get_openai_chat_key(current_app.config)
@@ -3258,6 +3314,7 @@ def init_streaming_transcription():
         parent_id=parent_id,
         node_type=node_type,
         transcription_status='processing',
+        upload_activity_at=datetime.utcnow(),
         streaming_transcription=True,
         streaming_session_id=session_id,
         streaming_total_chunks=None,  # Unknown until recording stops
@@ -3323,7 +3380,7 @@ def upload_audio_chunk(node_id):
         return jsonify({"error": "This part of the recording is larger than "
                                  "Loore accepts.",
                         "code": "chunk_too_large"}), 413
-    # A recording on this path that no longer counts (UPLOAD_COUNTS_FOR)
+    # A recording on this path idle for UPLOAD_IDLE_EXPIRES_AFTER
     # takes no more audio.
     if limits.upload_expired(node):
         return jsonify({"error": "This recording has ended.",
@@ -3380,6 +3437,7 @@ def upload_audio_chunk(node_id):
             "code": "chunk_too_large" if too_large else "recording_too_large",
         }), 413
     os.replace(staged, chunk_path)
+    limits.touch_upload(node.id)
 
     # Encrypt the audio chunk at rest
     encrypted_path = encrypt_file(str(chunk_path))

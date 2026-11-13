@@ -28,7 +28,9 @@ from datetime import datetime, timezone
 from backend.celery_app import celery, flask_app
 from backend.models import Node, NodeTranscriptChunk, Draft, APICostLog
 from backend.extensions import db
-from backend.utils.audio_processing import compress_audio_if_needed, get_audio_duration
+from backend.utils.audio_processing import (
+    compress_audio_if_needed, decoded_audio_seconds, get_audio_duration,
+)
 from backend.utils import recording_limits
 from backend.utils.audio_storage import (
     move_session_audio_to_node, storage_path,
@@ -91,6 +93,16 @@ VOICE_REPLY_SKIPPED_APPROVAL = (
     "Your recording is saved. Loore didn't reply because a change to your "
     "data waits for your approval. Approve or reject it, then continue."
 )
+
+
+def _measured_seconds(path):
+    """Seconds of audio in *path*, counted from its decoded samples
+    (utils/audio_processing.decoded_audio_seconds); the container's length
+    when it cannot be decoded, as before."""
+    seconds = decoded_audio_seconds(path, logger=logger)
+    if seconds is None:
+        return get_audio_duration(path, logger)
+    return seconds
 
 
 def _voice_approval_skip(user_id, parent_id):
@@ -229,8 +241,9 @@ def transcribe_chunk(self, node_id: int, chunk_index: int, chunk_path: str):
             # Compress if needed (webm -> mp3 for better compatibility)
             processed_path = compress_audio_if_needed(file_path, logger)
 
-            # Measure audio duration for cost tracking
-            chunk_duration_sec = get_audio_duration(processed_path, logger)
+            # Measure audio duration for cost tracking: decoded, as the
+            # length bound (utils/recording_limits)
+            chunk_duration_sec = _measured_seconds(processed_path)
 
             try:
                 # Past the length one recording may have transcribed
@@ -556,8 +569,9 @@ def transcribe_draft_chunk(self, session_id: str, chunk_index: int, chunk_path: 
             # Compress if needed (webm -> mp3 for better compatibility)
             processed_path = compress_audio_if_needed(file_path, logger)
 
-            # Measure audio duration for cost tracking
-            draft_chunk_duration_sec = get_audio_duration(processed_path, logger)
+            # Measure audio duration for cost tracking: decoded, as the
+            # length bound (utils/recording_limits)
+            draft_chunk_duration_sec = _measured_seconds(processed_path)
 
             try:
                 # Past the length one recording may have transcribed
@@ -884,7 +898,9 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
                 processed_path = compress_audio_if_needed(
                     merge_input_path, logger)
 
-                sub_duration = get_audio_duration(processed_path, logger)
+                # Decoded, not read from the container: the length bound and
+                # the cost record use what is sent to the provider.
+                sub_duration = _measured_seconds(processed_path)
                 # Counted against the length limit: 15 s a chunk when the
                 # length could not be read.
                 sub_counted = sub_duration or (

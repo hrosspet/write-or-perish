@@ -18,12 +18,12 @@ export function untranscribedMessage(code) {
 }
 
 // A chunk the server refuses for good: the recording is past what one
-// recording may hold, or it had stopped keeping going and continuing it is
-// refused as a start would be (the account's bounds, the usage limit).
-// Retrying cannot help; the chunks before it are kept.
+// recording may hold, or it held no audio for too long and its first chunk
+// is refused as a new start would be (the usage limit, the account's open
+// recordings). Retrying cannot help; the chunks before it are kept.
 const FINAL_CHUNK_CODES = new Set([
   'chunk_too_large', 'chunk_index_out_of_range', 'recording_too_large',
-  'too_many_recordings', 'too_many_unfinished',
+  'too_many_recordings',
 ]);
 
 export const RECORDING_LIMIT_MESSAGE =
@@ -48,14 +48,13 @@ export function finalRefusalMessage(err) {
   return null;
 }
 
-// A new recording refused while other recordings of the account are in
-// progress, or while it holds several unfinished ones: shown in the
-// server's words.
-const START_REFUSAL_CODES = new Set(['too_many_recordings', 'too_many_unfinished']);
+// A new recording refused while the account holds several open
+// recordings: shown in the server's words.
+const START_REFUSAL_CODES = new Set(['too_many_recordings']);
 
 export const TOO_MANY_RECORDINGS_MESSAGE =
-  'Other recordings of yours are still in progress. Finish one of them, '
-  + 'then start this one.';
+  'You have several recordings that are not finished. Save, finish or '
+  + 'discard one of them, then start a new one.';
 
 export function isStartRefusal(err) {
   return START_REFUSAL_CODES.has(err?.response?.data?.code);

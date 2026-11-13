@@ -142,9 +142,9 @@ describe('audio kept without its text', () => {
   });
 });
 
-describe('other recordings in progress', () => {
+describe('several open recordings', () => {
   test('a refused start says why in plain words and opens no mic', async () => {
-    const text = 'Other recordings of yours are still in progress. Finish one of them, then start this one.';
+    const text = 'You have several recordings that are not finished. Save, finish or discard one of them, then start a new one.';
     mockPost.mockImplementation((url) => {
       if (url === '/drafts/streaming/init') {
         const err = new Error('Request failed with status code 429');
@@ -199,7 +199,7 @@ describe('a chunk past what one recording may hold', () => {
   );
 });
 
-describe('a recording that had stopped and may not be continued', () => {
+describe('a recording refused more audio', () => {
   const capped = {
     status: 402,
     data: {
@@ -210,8 +210,8 @@ describe('a recording that had stopped and may not be continued', () => {
   const unfinished = {
     status: 429,
     data: {
-      error: 'You have several unfinished recordings. Save or discard one of them, then start a new one.',
-      code: 'too_many_unfinished',
+      error: 'You have several recordings that are not finished. Save, finish or discard one of them, then start a new one.',
+      code: 'too_many_recordings',
     },
   };
 
@@ -267,7 +267,7 @@ describe('a recording that had stopped and may not be continued', () => {
     expect(onError.mock.calls[0][0].message).toBe(capped.data.message);
   });
 
-  test("a start refused for several unfinished recordings shows the server's words", async () => {
+  test("a start refused for several open recordings shows the server's words", async () => {
     mockPost.mockImplementation((url) => {
       if (url === '/drafts/streaming/init') {
         const err = new Error('Request failed with status code 429');

@@ -847,8 +847,8 @@ export function useStreamingTranscription(options = {}) {
         throw err;
       }
       if (isStartRefusal(err)) {
-        // Other recordings of this account are in progress, or it holds
-        // several unfinished ones (the server's limits, utils/recordingLimits):
+        // The account holds several open recordings (the server's limit,
+        // utils/recordingLimits):
         // refused before any draft existed and before the mic opened. Shown
         // in the server's words, by the parent as a start that failed.
         try {

@@ -177,13 +177,11 @@ class TestStartIsRefusedWhenCapped:
 
 class TestResumeIsAllowedWhenCapped:
     def test_audio_chunk_accepted_for_existing_session(self, client, alice):
-        # A recording that started before the cap and kept going keeps
-        # uploading: no init, no cap check. (One that stopped and is taken
-        # up again is checked as a start is: test_recording_limits.py.)
+        # A recording that started before the cap (or is being resumed
+        # after an interruption) keeps uploading: no init, no cap check.
         session_id = "sess-resume"
         draft = Draft(user_id=alice.id, session_id=session_id,
                       streaming_status="recording",
-                      streaming_heartbeat_at=datetime.utcnow(),
                       streaming_mime_type="audio/webm")
         draft.set_content("")
         _db.session.add(draft)

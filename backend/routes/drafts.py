@@ -604,19 +604,15 @@ def init_streaming():
     NO node is created until the user explicitly saves.
 
     A capped user gets 402 here, before the frontend opens the mic (#341).
-    Resuming an interrupted session never calls init; its chunks and its
-    claim are checked as a start is only once it stopped keeping going
-    (utils/recording_limits.revival_refusal), and a recording that kept
-    going is not cap-checked.
+    Resuming an interrupted session never calls init, and a session that
+    holds audio is never refused more audio for quiet time or the cap
+    (utils/recording_limits.audio_refusal).
 
-    429 and no draft while MAX_RECORDINGS_IN_PROGRESS recordings of the
-    account are in progress (``too_many_recordings``: live or finalizing;
-    a left-behind one stops counting once it is no longer live), or while
-    it holds MAX_UNFINISHED_RECORDINGS unfinished ones
-    (``too_many_unfinished``), counted under the account's lock right
-    before the draft is inserted (utils/recording_limits). A recording
-    accepted here is transcribed to its end, within the limits on one
-    recording.
+    429 ``too_many_recordings`` and no draft while the account holds
+    MAX_OPEN_RECORDINGS open recordings, counted under the account's lock
+    right before the draft is inserted (utils/recording_limits). A
+    recording accepted here is transcribed to its end, within the limits
+    on one recording.
 
     A Voice recording (label "Voice") where AI may not read gets 403
     ``{"error", "code": "ai_usage_none", "scope"}`` and no draft, so the
@@ -755,9 +751,9 @@ def claim_streaming(session_id):
     409 session_live while another device or tab is recording the session,
     400 session_not_active once it is no longer recording, 404
     session_not_found. The same device may claim again (a retried claim).
-    A session that stopped keeping going is continued only past the checks
-    of a start: 402 at the usage limit, 429 ``too_many_recordings`` /
-    ``too_many_unfinished`` (utils/recording_limits.revival_refusal).
+    A session without audio past EMPTY_SESSION_EXPIRES_AFTER (or
+    released), and one with audio inactive for a day, are continued only
+    past the checks of a start (utils/recording_limits.audio_refusal).
 
     Request body: { "device_key": "..." }
 
@@ -784,12 +780,12 @@ def claim_streaming(session_id):
         }), 404
     draft_id = draft.id
 
-    # Continuing a recording that stopped keeping going is checked as a
-    # start is: the usage limit and the account's bounds
-    # (utils/recording_limits.revival_refusal). Before the row lock below:
+    # A recording without audio whose time ran out, or one inactive for a
+    # day, is continued only past the checks of a start
+    # (utils/recording_limits.audio_refusal). Before the row lock below:
     # the account's lock is always taken first, as a chunk upload does.
-    from backend.utils.recording_limits import revival_refusal
-    refused = revival_refusal(draft)
+    from backend.utils.recording_limits import audio_refusal
+    refused = audio_refusal(draft)
     if refused is not None:
         return refused
 
@@ -918,10 +914,13 @@ def upload_streaming_chunk(session_id):
     that would take the recording past MAX_STREAMING_SESSION_BYTES 413
     ``recording_too_large``. Nothing of it is stored; the chunks accepted
     before stay. A copy of a stored chunk is answered as before, and a
-    re-sent chunk is not counted twice. A chunk for a recording that
-    stopped keeping going (quiet longer than CONTINUES_WITHIN, or released)
-    is accepted only past the checks of a start: 402 at the usage limit,
-    429 past the account's bounds (revival_refusal).
+    re-sent chunk is not counted twice. A recording that holds audio is
+    never refused a chunk for quiet time or the usage limit. The first
+    chunk of a recording without audio past EMPTY_SESSION_EXPIRES_AFTER (or
+    released) is a new start: 402 at the usage limit, 429 past the count;
+    a recording with audio inactive for a day must fit under the count
+    again (utils/recording_limits.audio_refusal). Once finalizing, only
+    the chunks it announced are taken (400 ``chunk_index_out_of_range``).
 
     Returns: { "chunk_index": 0, "task_id": "celery-task-id" }
     """
@@ -959,12 +958,11 @@ def upload_streaming_chunk(session_id):
             "code": "session_not_active",
         }), 400
 
-    # Audio for a recording that stopped keeping going (quiet longer than
-    # CONTINUES_WITHIN, or released) is checked as a start is
-    # (utils/recording_limits.revival_refusal); a recording that kept
-    # going is not (#341).
-    from backend.utils.recording_limits import revival_refusal
-    refused = revival_refusal(draft)
+    # A recording that holds audio takes more whatever the gap (#341); the
+    # first audio of one without audio whose time ran out is a new start
+    # (utils/recording_limits.audio_refusal).
+    from backend.utils.recording_limits import audio_refusal
+    refused = audio_refusal(draft)
     if refused is not None:
         return refused
 
@@ -990,6 +988,11 @@ def upload_streaming_chunk(session_id):
     except ValueError:
         return jsonify({"error": "Invalid chunk_index"}), 400
     if not 0 <= chunk_index < recording_limits.MAX_STREAMING_CHUNKS:
+        return _limit_response(_CHUNK_INDEX_OUT_OF_RANGE)
+    # Once finalizing, a recording takes only the chunks it announced.
+    if (draft.streaming_status == "finalizing"
+            and draft.streaming_total_chunks is not None
+            and chunk_index >= draft.streaming_total_chunks):
         return _limit_response(_CHUNK_INDEX_OUT_OF_RANGE)
 
     # Normalize the chunk's mime to a family prefix; older frontends

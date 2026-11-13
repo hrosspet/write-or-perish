@@ -18,7 +18,7 @@ describe('recordingLimits', () => {
     expect(isRecordingLimitCode('recording_too_large')).toBe(true);
     expect(isRecordingLimitCode('chunk_index_out_of_range')).toBe(true);
     expect(isRecordingLimitCode('chunk_too_large')).toBe(true);
-    expect(isRecordingLimitCode('too_many_unfinished')).toBe(true);
+    expect(isRecordingLimitCode('too_many_recordings')).toBe(true);
     expect(isRecordingLimitCode('session_not_found')).toBe(false);
     expect(isRecordingLimitCode(undefined)).toBe(false);
   });
@@ -36,7 +36,6 @@ describe('recordingLimits', () => {
 
   test('the start refusals', () => {
     expect(isStartRefusal(refusal(429, { code: 'too_many_recordings' }))).toBe(true);
-    expect(isStartRefusal(refusal(429, { code: 'too_many_unfinished' }))).toBe(true);
     expect(isStartRefusal(refusal(402, { error: 'monthly_spend_limit_reached' }))).toBe(false);
   });
 });

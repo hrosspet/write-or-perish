@@ -22,32 +22,39 @@ tasks themselves, for every account. What the apps send (measured
   (AAC) it sometimes hands two slices over in one chunk, 486 KB. 16 KB a
   second.
 
-A recording accepted at its start (where the monthly usage limit is
-checked, #341) is stored and transcribed to its end (Peter, 2026-11-13:
-"User's recorded message should be stored on Loore's servers, possibly
-even transcribed (transcription is cheap). Just further AI use should be
-blocked"), within these limits:
+A recording accepted at its start (where the monthly usage limit and the
+count below are checked, #341) is stored and transcribed to its end
+(Peter, 2026-11-13: "User's recorded message should be stored on Loore's
+servers, possibly even transcribed (transcription is cheap). Just further
+AI use should be blocked"). Once it holds audio it is never refused more
+audio for quiet time or for the usage limit, whatever the gap; only these
+limits apply:
 
-- One recording is transcribed up to MAX_TRANSCRIBED_SECONDS of audio.
-  The audio past it is still stored and kept with the recording; its
-  chunks end ``failed`` with NOT_TRANSCRIBED_TEXT, so the finalize waits
-  for them no longer, and the recording's text ends with a note
+- One recording is transcribed up to MAX_TRANSCRIBED_SECONDS of audio, as
+  the server measures it by decoding (utils/audio_processing
+  .decoded_audio_seconds), the same measure the cost is recorded with. The
+  audio past it is still stored and kept with the recording; its chunks
+  end ``failed`` with NOT_TRANSCRIBED_TEXT, so the finalize waits for them
+  no longer, and the recording's text ends with a note
   (untranscribed_note).
 - Its audio is refused only past bounds no recording made in the apps
   reaches: a chunk over MAX_STREAMING_CHUNK_BYTES, a chunk index from
   MAX_STREAMING_CHUNKS on, or more than MAX_STREAMING_SESSION_BYTES in
   all. Audio accepted before stays.
-- An account starts no new recording while MAX_RECORDINGS_IN_PROGRESS of
-  its recordings are in progress, or while it holds
-  MAX_UNFINISHED_RECORDINGS unfinished ones; and no new audio upload while
-  MAX_UPLOADS_IN_PROGRESS of its uploads wait for their transcript. Each
-  start takes the account's lock and counts again inside it
-  (lock_account), so two starts at once cannot both pass.
-- A recording that has not shown a sign of life for CONTINUES_WITHIN (or
-  that its app released) and takes audio again (a claim, a chunk, its
-  transcription stream reconnecting) is checked as a start is: the usage
-  limit and the bounds above (revival_refusal). One that kept going is
-  not (#341).
+
+An account holds at most MAX_OPEN_RECORDINGS open recordings
+(open_recordings); a new start beyond them is refused. A recording that
+holds no audio yet is open only for EMPTY_SESSION_EXPIRES_AFTER from its
+start; its first audio after that is a new start: the usage limit, then
+the count (audio_refusal), as a new recording's init would be. Each start
+takes the account's lock and counts again inside it (lock_account), so two
+starts at once cannot both pass.
+
+An account has at most MAX_UPLOADS_IN_PROGRESS audio uploads waiting for
+their transcript (uploads_in_progress). An upload that receives no piece
+for UPLOAD_IDLE_EXPIRES_AFTER takes no more pieces; its app still holds
+the file and starts again. Its finalize asks for the usage limit again,
+and an uploaded file is transcribed up to MAX_UPLOAD_TRANSCRIBED_SECONDS.
 """
 import os
 from datetime import datetime, timedelta
@@ -102,59 +109,57 @@ MAX_UPLOAD_CHUNKS = 200
 # when a request's Content-Length is checked before the form is read.
 FORM_OVERHEAD_BYTES = 64 * 1024
 
-# INTRODUCED HEURISTIC: recordings (dictation and Voice) one account may
-# have in progress at once; a new one is refused while this many are. In
-# progress: being recorded (live, utils/streaming_session: a sign of life
-# within 45 s; a left-behind or crashed recording stops counting then, and
-# at once when its app released it), or finalizing, until its transcript
-# is in. Legitimate use is one device recording, plus a second device or an
-# earlier session not released yet.
-MAX_RECORDINGS_IN_PROGRESS = 3
-# A finalizing recording counts for at most this long after its last
-# change: its finalize waits up to 10 minutes for its chunks (the task's
-# own limit), so one whose task died stops counting after this.
-FINALIZING_COUNTS_FOR = timedelta(minutes=30)
+# INTRODUCED HEURISTIC: open recordings (dictation and Voice) one account
+# may hold. Open: recording, with audio and active (a chunk, a sign of life,
+# or its start) within OPEN_COUNTS_FOR, or without audio yet and started
+# within EMPTY_SESSION_EXPIRES_AFTER (also once its app released it); or
+# finalizing while its app still sends the chunks it announced. Saving,
+# discarding or finishing a recording frees its place at once; a recording
+# an app left behind (killed mid-recording) frees it after a day without
+# activity, and stays offered for recovery. A Voice turn frees its place as
+# soon as its last chunk is in. Six is room for one recording, a second
+# device and a few interrupted recordings not recovered yet.
+MAX_OPEN_RECORDINGS = 6
+OPEN_COUNTS_FOR = timedelta(hours=24)
 
-# INTRODUCED HEURISTIC: unfinished recordings one account may hold at all,
-# live or not: recording (with audio stored, or live) or finalizing, with a
-# sign of life within UNFINISHED_COUNTS_FOR. A recording an app left behind
-# (killed mid-recording) stays offered for recovery; it stops counting here
-# once it has been quiet that long, and when the user saves, discards or
-# continues and finishes it. A started recording with no audio stored (left
-# before its first chunk) never counts. Six is twice the recordings in
-# progress: room for a few interrupted recordings not recovered yet.
-MAX_UNFINISHED_RECORDINGS = 6
-UNFINISHED_COUNTS_FOR = timedelta(hours=24)
-
-# INTRODUCED HEURISTIC: a recording whose last sign of life is within this
-# keeps going without a check when its audio comes in again (a dropped
-# connection, a phone call, an app relaunched); after it, or once its app
-# released it, it is checked as a start is (revival_refusal).
-CONTINUES_WITHIN = timedelta(minutes=10)
+# INTRODUCED HEURISTIC: how long a recording with no audio stored yet stays
+# open. The apps send their first chunk within 15 s of recording (at once on
+# a pause or Stop); fifteen minutes covers a start followed by a long time
+# offline. After it, its first audio is checked as a new start.
+EMPTY_SESSION_EXPIRES_AFTER = timedelta(minutes=15)
 
 # INTRODUCED HEURISTIC: audio uploads (chunked or in one request) and older
 # node-path recordings of one account that may wait for their transcript at
 # once. The apps upload one file per press; three leaves room for presses in
 # quick succession.
 MAX_UPLOADS_IN_PROGRESS = 3
-# INTRODUCED HEURISTIC: an upload (or older node-path recording) counts for
-# this long after it started, and takes pieces only within it: a 200 MB file
-# in six hours is 74 kbit/s, slower than any connection the apps upload on.
-# One the apps report as failed (/upload/cleanup) stops counting at once.
-UPLOAD_COUNTS_FOR = timedelta(hours=6)
+# INTRODUCED HEURISTIC: an upload (or older node-path recording) that has
+# received no piece for this long takes no more pieces and stops counting
+# (410; the app still has the file and starts again). A continuous upload,
+# however slow, keeps going: each piece renews it. One the app reports as
+# failed (/upload/cleanup) stops counting at once.
+UPLOAD_IDLE_EXPIRES_AFTER = timedelta(minutes=30)
+# An upload handed to transcription counts until its transcript is in, at
+# most this long (a transcription that died then frees its place).
+HANDED_UPLOAD_COUNTS_FOR = timedelta(hours=24)
+
+# INTRODUCED HEURISTIC: the most audio of one uploaded file that is turned
+# into text, as decoded. A 200 MB file (the largest upload) at the iPhone's
+# 64 kbps is about 7 hours; eight leaves room. A longer file is kept with
+# its entry, not transcribed, and the entry says why.
+MAX_UPLOAD_TRANSCRIBED_SECONDS = 8 * 60 * 60
 
 TOO_MANY_RECORDINGS_TEXT = (
-    "Other recordings of yours are still in progress. Finish one of them, "
-    "then start this one.")
-TOO_MANY_UNFINISHED_TEXT = (
-    "You have several unfinished recordings. Save or discard one of them, "
-    "then start a new one.")
+    "You have several recordings that are not finished. Save, finish or "
+    "discard one of them, then start a new one.")
 TOO_MANY_UPLOADS_TEXT = (
     "Other audio files of yours are still being uploaded or turned into "
     "text. Wait for one of them to finish, then upload this one.")
-UPLOAD_EXPIRED_TEXT = ("This upload took too long to arrive. Please "
-                       "upload the file again.")
+UPLOAD_EXPIRED_TEXT = ("This upload stopped arriving. Please upload the "
+                       "file again.")
 UPLOAD_FAILED_TEXT = "The upload did not finish. Please upload the file again."
+UPLOAD_TOO_LONG_TEXT = ("Saved as audio, not turned into text: the file is "
+                        "longer than eight hours.")
 RECORDINGS_BUSY_TEXT = ("Loore is busy starting another recording of "
                         "yours. Try again in a moment.")
 
@@ -222,76 +227,101 @@ def int_in_range(value, low, high):
     return value if low <= value <= high else None
 
 
-def _live_since(now):
-    from backend.utils.streaming_session import LIVE_SESSION_WINDOW_SEC
-    return now - timedelta(seconds=LIVE_SESSION_WINDOW_SEC)
+def _since(now, delta):
+    return (now or datetime.utcnow()) - delta
 
 
-def _sessions(user_id, exclude_draft_id):
-    from backend.models import Draft
+def _has_audio():
+    from backend.extensions import db
+    from backend.models import Draft, NodeTranscriptChunk
+    return db.exists().where(
+        NodeTranscriptChunk.session_id == Draft.session_id)
+
+
+def _active_since(since):
+    """A recording started, stamped alive or sent a chunk since *since*."""
+    from backend.extensions import db
+    from backend.models import Draft, NodeTranscriptChunk
+    recent_chunk = db.exists().where(db.and_(
+        NodeTranscriptChunk.session_id == Draft.session_id,
+        NodeTranscriptChunk.created_at >= since))
+    return db.or_(Draft.created_at >= since,
+                  Draft.streaming_heartbeat_at >= since,
+                  recent_chunk)
+
+
+def open_recordings(user_id, now=None, exclude_draft_id=None):
+    """The account's open recordings (MAX_OPEN_RECORDINGS): recording with
+    audio and active within OPEN_COUNTS_FOR; recording without audio,
+    started within EMPTY_SESSION_EXPIRES_AFTER; finalizing
+    with fewer chunks stored than it announced."""
+    from backend.extensions import db
+    from backend.models import Draft, NodeTranscriptChunk
+    now = now or datetime.utcnow()
+    stored = (db.select(db.func.count(NodeTranscriptChunk.id))
+              .where(NodeTranscriptChunk.session_id == Draft.session_id)
+              .scalar_subquery())
+    has_audio = _has_audio()
     query = Draft.query.filter(Draft.user_id == user_id,
                                Draft.session_id.isnot(None))
     if exclude_draft_id is not None:
         query = query.filter(Draft.id != exclude_draft_id)
-    return query
+    return query.filter(db.or_(
+        db.and_(Draft.streaming_status == "recording", has_audio,
+                _active_since(_since(now, OPEN_COUNTS_FOR))),
+        db.and_(Draft.streaming_status == "recording", ~has_audio,
+                Draft.created_at >= _since(now, EMPTY_SESSION_EXPIRES_AFTER)),
+        db.and_(Draft.streaming_status == "finalizing",
+                Draft.streaming_total_chunks.isnot(None),
+                stored < Draft.streaming_total_chunks,
+                _active_since(_since(now, OPEN_COUNTS_FOR))),
+    )).count()
 
 
-def recordings_in_progress(user_id, now=None, exclude_draft_id=None):
-    """The account's recordings in progress (MAX_RECORDINGS_IN_PROGRESS):
-    live ones, and finalizing ones changed within FINALIZING_COUNTS_FOR."""
+def _activity():
     from backend.extensions import db
-    from backend.models import Draft
-    now = now or datetime.utcnow()
-    return _sessions(user_id, exclude_draft_id).filter(
-        db.or_(
-            db.and_(Draft.streaming_status == "recording",
-                    Draft.streaming_heartbeat_at >= _live_since(now)),
-            db.and_(Draft.streaming_status == "finalizing",
-                    Draft.updated_at >= now - FINALIZING_COUNTS_FOR),
-        ),
-    ).count()
-
-
-def unfinished_recordings(user_id, now=None, exclude_draft_id=None):
-    """The account's unfinished recordings (MAX_UNFINISHED_RECORDINGS):
-    recording or finalizing, live or not, with a sign of life within
-    UNFINISHED_COUNTS_FOR; a recording that is neither live nor finalizing
-    counts only with audio stored."""
-    from backend.extensions import db
-    from backend.models import Draft, NodeTranscriptChunk
-    now = now or datetime.utcnow()
-    has_audio = db.exists().where(
-        NodeTranscriptChunk.session_id == Draft.session_id)
-    last_sign = db.func.coalesce(Draft.streaming_heartbeat_at,
-                                 Draft.updated_at, Draft.created_at)
-    return _sessions(user_id, exclude_draft_id).filter(
-        Draft.streaming_status.in_(("recording", "finalizing")),
-        last_sign >= now - UNFINISHED_COUNTS_FOR,
-        db.or_(Draft.streaming_status == "finalizing",
-               Draft.streaming_heartbeat_at >= _live_since(now),
-               has_audio),
-    ).count()
+    from backend.models import Node
+    return db.func.coalesce(Node.upload_activity_at, Node.created_at)
 
 
 def uploads_in_progress(user_id, now=None):
     """The account's audio entries waiting for their transcript
-    (MAX_UPLOADS_IN_PROGRESS): transcription pending or processing, started
-    within UPLOAD_COUNTS_FOR."""
+    (MAX_UPLOADS_IN_PROGRESS), deleted ones left out: still receiving pieces
+    (a piece within UPLOAD_IDLE_EXPIRES_AFTER), or handed to transcription
+    within HANDED_UPLOAD_COUNTS_FOR."""
+    from backend.extensions import db
     from backend.models import Node
     now = now or datetime.utcnow()
     return Node.query.filter(
         Node.user_id == user_id,
+        Node.deleted_at.is_(None),
         Node.transcription_status.in_(("pending", "processing")),
-        Node.created_at >= now - UPLOAD_COUNTS_FOR,
+        db.or_(
+            db.and_(Node.audio_original_url.is_(None),
+                    _activity() >= _since(now, UPLOAD_IDLE_EXPIRES_AFTER)),
+            db.and_(Node.audio_original_url.isnot(None),
+                    _activity() >= _since(now, HANDED_UPLOAD_COUNTS_FOR)),
+        ),
     ).count()
 
 
 def upload_expired(node, now=None):
-    """True for an upload (or older node-path recording) started more than
-    UPLOAD_COUNTS_FOR ago: it no longer counts, and takes no more pieces."""
-    now = now or datetime.utcnow()
-    return node.created_at is not None and \
-        node.created_at < now - UPLOAD_COUNTS_FOR
+    """True for an upload (or older node-path recording) not yet handed to
+    transcription that has received nothing for UPLOAD_IDLE_EXPIRES_AFTER:
+    it no longer counts, and takes no more pieces."""
+    last = node.upload_activity_at or node.created_at
+    return (node.audio_original_url is None and last is not None
+            and last < _since(now, UPLOAD_IDLE_EXPIRES_AFTER))
+
+
+def touch_upload(node_id, now=None):
+    """An upload received a piece: renew it (UPLOAD_IDLE_EXPIRES_AFTER). A
+    Core UPDATE that keeps ``updated_at``: a piece is not an edit."""
+    from backend.models import Node
+    Node.query.filter(Node.id == node_id).update(
+        {Node.upload_activity_at: now or datetime.utcnow(),
+         Node.updated_at: Node.updated_at},
+        synchronize_session=False)
 
 
 class RecordingsBusy(Exception):
@@ -337,21 +367,17 @@ def _refused(text_, code, status):
 
 
 def recording_start_refusal(user_id, exclude_draft_id=None):
-    """Take the account's lock and count: the answer for a new recording
-    (or one coming back, *exclude_draft_id*) past MAX_RECORDINGS_IN_PROGRESS
-    (429 ``too_many_recordings``) or MAX_UNFINISHED_RECORDINGS (429
-    ``too_many_unfinished``), else None, the lock held until the caller
-    commits."""
+    """Take the account's lock and count: 429 ``too_many_recordings`` when
+    the account already holds MAX_OPEN_RECORDINGS open recordings (the
+    recording *exclude_draft_id* not counted), else None, the lock held
+    until the caller commits."""
     try:
         lock_account(user_id)
     except RecordingsBusy:
         return _refused(RECORDINGS_BUSY_TEXT, "recordings_busy", 503)
-    if recordings_in_progress(user_id, exclude_draft_id=exclude_draft_id) \
-            >= MAX_RECORDINGS_IN_PROGRESS:
+    if open_recordings(user_id, exclude_draft_id=exclude_draft_id) \
+            >= MAX_OPEN_RECORDINGS:
         return _refused(TOO_MANY_RECORDINGS_TEXT, "too_many_recordings", 429)
-    if unfinished_recordings(user_id, exclude_draft_id=exclude_draft_id) \
-            >= MAX_UNFINISHED_RECORDINGS:
-        return _refused(TOO_MANY_UNFINISHED_TEXT, "too_many_unfinished", 429)
     return None
 
 
@@ -380,24 +406,35 @@ def too_many_uploads_response(user_id):
                     "code": "too_many_uploads"}), 429
 
 
-def session_continues(draft, now=None):
-    """True while a recording keeps going: a sign of life within
-    CONTINUES_WITHIN, not released by its app."""
+def audio_refusal(draft, now=None):
+    """The answer for audio for *draft* (a chunk, a claim), or None when it
+    may take it.
+
+    - A recording that holds audio is never refused for quiet time or the
+      usage limit (#341). Only one inactive for OPEN_COUNTS_FOR (left
+      behind, then taken up again) must fit under the count again.
+    - A recording without audio is open for EMPTY_SESSION_EXPIRES_AFTER
+      from its start (also once its app released it). After that its first
+      audio is a new start: the usage limit (402), then the count.
+    Under the account's lock when a check runs (held until the caller
+    commits)."""
+    from backend.extensions import db
+    from backend.models import Draft, NodeTranscriptChunk
     now = now or datetime.utcnow()
-    return (draft.streaming_heartbeat_at is not None
-            and draft.streaming_heartbeat_at >= now - CONTINUES_WITHIN)
-
-
-def revival_refusal(draft, now=None):
-    """The answer for a recording that takes audio again after it stopped
-    keeping going (session_continues is False): the checks of a start, the
-    usage limit (402) and the bounds, with the recording itself not
-    counted; None when it may go on (the account's lock then held until
-    the caller commits), or when it kept going (#341)."""
-    if session_continues(draft, now):
+    has_audio = db.session.query(NodeTranscriptChunk.id).filter(
+        NodeTranscriptChunk.session_id == draft.session_id).first() is not None
+    if has_audio:
+        active = Draft.query.filter(
+            Draft.id == draft.id,
+            _active_since(_since(now, OPEN_COUNTS_FOR))).count()
+        if active:
+            return None
+        return recording_start_refusal(draft.user_id,
+                                       exclude_draft_id=draft.id)
+    if (draft.created_at
+            and draft.created_at >= _since(now, EMPTY_SESSION_EXPIRES_AFTER)):
         return None
     from backend.models import User
-    from backend.extensions import db
     from backend.utils.spend import spend_cap_response, user_is_capped
     user = db.session.get(User, draft.user_id)
     if user_is_capped(user):
