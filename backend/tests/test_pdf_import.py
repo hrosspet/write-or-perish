@@ -590,6 +590,9 @@ def test_reference_shows_title_and_author_from_its_text(client):
     assert page["title"] == "A Study of Things"
     assert page["content"] == f["content"]
 
+    # Keyword search is the admins' tool.
+    User.query.filter_by(username="alice").one().is_admin = True
+    _db.session.commit()
     found = client.get("/api/search?scope=external&q=method").get_json()
     assert found["results"][0]["title"] == "A Study of Things"
     assert found["results"][0]["author_handle"] == "Jane Doe"

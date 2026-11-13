@@ -22,6 +22,7 @@ SEARCH_REFUSED_MESSAGE = (
     "Search needs AI to find things by meaning. Your Default AI usage is "
     "set to None, so Loore keeps your entries away from AI. You can change "
     "it in Account settings.")
+KEYWORD_SEARCH_ADMIN_ONLY_MESSAGE = "Keyword search is only for admins."
 
 
 def _strip_diacritics(text):
@@ -190,6 +191,15 @@ def _external_keyword_search(q, dt_from, dt_to, page, per_page):
 @search_bp.route("/search", methods=["GET"])
 @login_required
 def search():
+    # Keyword search decrypts every entry (or reference) of the caller on
+    # each request, so it is the admins' tool only (Peter, 2026-11-13:
+    # "keyword search is costly because of KMS, and is allowed only for
+    # admins"); the clients offer everyone else search by meaning. Refused
+    # before anything is read. An admin set to AI usage None keeps it: no
+    # AI is involved.
+    if getattr(current_user, "is_admin", False) is not True:
+        return jsonify({"error": KEYWORD_SEARCH_ADMIN_ONLY_MESSAGE}), 403
+
     q = request.args.get("q", "").strip()
     date_from = request.args.get("from")
     date_to = request.args.get("to")

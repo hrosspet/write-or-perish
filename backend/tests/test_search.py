@@ -102,8 +102,11 @@ def data(app):
     - jan_node (alice, user)
     - bob_node (bob, user) → bob_llm (llm_bot, llm)
     """
-    alice = User(username="alice", approved=True)
-    bob = User(username="bob", approved=True)
+    # Keyword search is the admins' tool (Peter, 2026-11-13; refused for
+    # anyone else: TestAdminsOnly). The tests of what it finds search as
+    # admins, who also find only their own entries and references.
+    alice = User(username="alice", approved=True, is_admin=True)
+    bob = User(username="bob", approved=True, is_admin=True)
     llm_bot = User(username="claude-3-opus", approved=True)
     _db.session.add_all([alice, bob, llm_bot])
     _db.session.flush()
@@ -318,6 +321,67 @@ class TestSearch:
         ids = [r["id"] for r in resp.json["results"]]
         assert data["bob_llm_id"] not in ids
         assert data["bob_node_id"] not in ids
+
+
+class TestAdminsOnly:
+    """Keyword search decrypts every entry of the caller on each request,
+    so only admins have it (Peter, 2026-11-13: "keyword search is costly
+    because of KMS, and is allowed only for admins"). Anyone else is
+    refused before an entry or reference is read; the clients offer them
+    search by meaning only. Fails on main: 200 with their own results."""
+
+    @pytest.fixture
+    def carol(self, app, data):
+        carol = User(username="carol", approved=True)
+        _db.session.add(carol)
+        _db.session.flush()
+        node = Node(user_id=carol.id, human_owner_id=carol.id,
+                    content="Carol's winter notes", privacy_level="private",
+                    node_type="user", created_at=datetime(2025, 12, 10))
+        item = ExternalItem(user_id=carol.id, source="web_clip",
+                            external_id="c" * 64, title="Winter",
+                            fetched_at=datetime(2026, 1, 3))
+        item.set_content("a winter page")
+        _db.session.add_all([node, item])
+        _db.session.commit()
+        return carol.id
+
+    @pytest.fixture
+    def reads(self, monkeypatch):
+        """Every entry and reference whose text the request reads."""
+        seen = []
+        for model in (Node, ExternalItem):
+            real = model.get_content
+
+            def record(row, _real=real):
+                seen.append(row)
+                return _real(row)
+            monkeypatch.setattr(model, "get_content", record)
+        return seen
+
+    @pytest.mark.parametrize("query", [
+        "q=winter", "q=winter&scope=external", "from=2025-12-01",
+        "scope=external&to=2026-02-01", "q=winter&page=2", ""])
+    def test_refused_for_anyone_but_an_admin(self, app, carol, reads, query):
+        client = app.test_client()
+        _login(client, carol)
+        resp = client.get(f"/api/search?{query}")
+        assert resp.status_code == 403
+        assert resp.json == {"error": "Keyword search is only for admins."}
+        assert reads == []
+
+    def test_an_admin_set_to_none_keeps_it(self, app, data, reads):
+        """Control: admins are unchanged, also with AI usage None (no AI
+        is involved in keyword search)."""
+        alice = User.query.get(data["alice_id"])
+        alice.default_ai_usage = "none"
+        _db.session.commit()
+        client = app.test_client()
+        _login(client, data["alice_id"])
+        resp = client.get("/api/search?q=solstice")
+        assert resp.status_code == 200
+        assert [r["id"] for r in resp.json["results"]] == [data["dec_node_id"]]
+        assert reads
 
 
 class TestExternalScope:
