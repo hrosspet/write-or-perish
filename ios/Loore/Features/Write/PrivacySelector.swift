@@ -16,6 +16,13 @@ struct PrivacySelectorView: View {
     static let trainRefusedMessage =
         "Posts fetched from X can't be used for training, under X's rules for developers."
 
+    /// The toast after "apply to my replies" left replies off Train (web
+    /// `keptFromTrainRepliesNote`, #689).
+    static func keptFromTrainRepliesNote(_ count: Int) -> String? {
+        guard count > 0 else { return nil }
+        return "\(count) \(count == 1 ? "reply stays" : "replies stay") at Chat. \(trainRefusedMessage)"
+    }
+
     /// The AI usage options offered: all three, or None and Chat for an X API entry.
     static func offeredAIOptions(trainRefused: Bool) -> [(AIUsage, String)] {
         trainRefused ? aiOptions.filter { $0.0 != .train } : aiOptions

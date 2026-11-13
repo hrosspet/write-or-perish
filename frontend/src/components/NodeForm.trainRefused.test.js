@@ -30,7 +30,9 @@ import React, { createRef } from 'react';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import NodeForm from './NodeForm';
-import { TRAIN_REFUSED_MESSAGE, keptFromTrainNote } from '../utils/aiUsage';
+import {
+  TRAIN_REFUSED_MESSAGE, keptFromTrainNote, keptFromTrainRepliesNote,
+} from '../utils/aiUsage';
 
 const MESSAGE =
   "Posts fetched from X can't be used for training, under X's rules for developers.";
@@ -89,4 +91,10 @@ test('the import result names the X posts kept at Chat', () => {
   expect(keptFromTrainNote(undefined)).toBeNull();
   expect(keptFromTrainNote(1)).toBe(`1 post that Loore fetched from X stays at Chat. ${MESSAGE}`);
   expect(keptFromTrainNote(3)).toBe(`3 posts that Loore fetched from X stay at Chat. ${MESSAGE}`);
+});
+
+test('the cascade toast names the replies kept at Chat', () => {
+  expect(keptFromTrainRepliesNote(0)).toBeNull();
+  expect(keptFromTrainRepliesNote(1)).toBe(`1 reply stays at Chat. ${MESSAGE}`);
+  expect(keptFromTrainRepliesNote(3)).toBe(`3 replies stay at Chat. ${MESSAGE}`);
 });

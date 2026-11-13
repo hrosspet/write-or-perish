@@ -20,7 +20,9 @@ import {
   isSharedPrivacy, onlyYouSeeReply,
 } from "../utils/sharedThread";
 import { useCheckboxToggle, useTaskInsert } from "../utils/markdown";
-import { contextAllowsAi, isAiUsageRefusedError } from "../utils/aiUsage";
+import {
+  contextAllowsAi, isAiUsageRefusedError, keptFromTrainRepliesNote,
+} from "../utils/aiUsage";
 import { THREAD_TOO_LONG_CODE, isThreadTooLong } from "../utils/threadLength";
 import ThreadLengthNotice from "./ThreadLengthNotice";
 import NodeFormModal from "./NodeFormModal";
@@ -1039,6 +1041,9 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
         3000,
       );
     }
+    // Replies written from posts fetched from X stay off Train (#689).
+    const keptNote = keptFromTrainRepliesNote(data?.kept_from_train);
+    if (keptNote) addToast(keptNote, 8000);
 
     if (!wasFocal) {
       // Non-focal edit: refetch the focal node so the edited

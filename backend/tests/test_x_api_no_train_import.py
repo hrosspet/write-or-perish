@@ -259,3 +259,131 @@ def test_the_command_labels_only_the_accounts_named(app):  # noqa: F811
     assert Node.query.get(own.id).provenance == "archive_upload"
     assert Node.query.get(bobs.id).provenance is None
     assert dict(script.label_user(alice.id, apply=True)) == {}
+
+
+# ── review of #691: a claim replaces the text; dumps; --label-user ───────
+
+def _upload(user, rows, ai_usage="train"):
+    from backend.routes.import_data import create_twitter_nodes
+    return create_twitter_nodes(
+        user_id=user.id, rows=iter(rows), total=len(rows),
+        import_type="separate_nodes", include_replies=True,
+        privacy_level="private", ai_usage=ai_usage, on_deleted=None,
+        provenance="archive_upload")
+
+
+def _crafted(tweet_id, text):
+    """A row of a made-up archive: only a tweet id and any text."""
+    return {"id_str": str(tweet_id), "full_text": text,
+            "created_at": "Mon Aug 24 10:00:00 +0000 2026",
+            "is_reply": False}
+
+
+def test_an_upload_claims_an_x_api_post_only_with_its_own_text(app):  # noqa: F811
+    """The review's probe 4: a zip holding only data/tweets.js with the
+    post's id and other text turned the X API copy into archive_upload at
+    Train with the X API text still stored. The upload's text now replaces
+    it: what Loore keeps under the upload's provenance is the upload's."""
+    u = _make_user("alice")
+    _import(u, "prefill_x", "chat", include_replies=False)
+    x_text = Node.query.filter_by(source_key="twitter:1").one().get_content()
+
+    _upload(u, [_crafted(1, "anything at all")])
+
+    node = Node.query.filter_by(source_key="twitter:1").one()
+    assert node.get_content() == "anything at all" != x_text
+    assert (node.provenance, node.ai_usage) == ("archive_upload", "train")
+
+
+def test_an_upload_leaves_an_x_api_post_the_person_edited(app):  # noqa: F811
+    """The person's edit wins: the post stays the pre-fill's, at Chat,
+    with their text."""
+    from backend.models import NodeVersion
+    u = _make_user("alice")
+    _import(u, "prefill_x", "chat", include_replies=False)
+    node = Node.query.filter_by(source_key="twitter:1").one()
+    version = NodeVersion(node_id=node.id)
+    version.set_content(node.get_content())
+    _db.session.add(version)
+    node.set_content("my edit")
+    _db.session.commit()
+
+    result = _upload(u, [_crafted(1, "anything at all")])
+
+    node = Node.query.filter_by(source_key="twitter:1").one()
+    assert node.get_content() == "my edit"
+    assert (node.provenance, node.ai_usage) == ("prefill_x", "chat")
+    assert result["kept_from_train"] == 1
+
+
+def _dump(folder, user_id, tweet_ids):
+    import json
+    folder.mkdir(parents=True, exist_ok=True)
+    with open(folder / f"handle{user_id}-2026-09-01T00-00-00Z.jsonl", "w",
+              encoding="utf-8") as f:
+        f.write(json.dumps({"_meta": "loore x-api pre-fill",
+                            "for_user_id": user_id}) + "\n")
+        for i in tweet_ids:
+            f.write(json.dumps({"id": str(i), "text": "public post"}) + "\n")
+
+
+def test_a_dump_settles_which_old_tweets_came_through_the_x_api(app, tmp_path):  # noqa: F811
+    """carol signed in and had both kinds of pre-fill before provenance
+    existed. Her X API dump lists tweet 8: it is labelled; tweet 9 (not in
+    the dump: the Community Archive's, or her own) is left as it is."""
+    script = _script()
+    carol = _make_user("carol")
+    carol.last_seen_at = datetime(2026, 10, 1)
+    listed = _row(carol, "twitter:8", None, "train")
+    other = _row(carol, "twitter:9", None, "train")
+    _db.session.add(APICostLog(user_id=carol.id, model_id="x-api/timeline",
+                               request_type="x_prefill", cost_microdollars=1))
+    _db.session.commit()
+    _dump(tmp_path / "x-api", carol.id, [8, 7])
+    dumps = script.read_dumps(tmp_path / "x-api")
+    assert dumps == {carol.id: {"8", "7"}}
+    lines = []
+
+    script.run(apply=True, dumps=dumps, out=lines.append)
+
+    _db.session.expire_all()
+    assert (Node.query.get(listed.id).provenance,
+            Node.query.get(listed.id).ai_usage) == ("prefill_x", "chat")
+    assert (Node.query.get(other.id).provenance,
+            Node.query.get(other.id).ai_usage) == (None, "train")
+    assert any("listed in its X API dump" in line for line in lines)
+    assert any("accounts someone has signed into" in line for line in lines)
+
+
+def test_label_user_refuses_an_account_with_no_x_prefill(app):  # noqa: F811
+    """The review's probe 6: an account with no X API pre-fill had its own
+    old tweet stamped prefill_x."""
+    script = _script()
+    dave = _make_user("dave")
+    own = _row(dave, "twitter:77", None, "train")
+    _db.session.commit()
+    lines = []
+
+    ok = script.run(apply=True, label_users=[dave.id], out=lines.append)
+
+    _db.session.expire_all()
+    assert ok is False
+    assert (Node.query.get(own.id).provenance,
+            Node.query.get(own.id).ai_usage) == (None, "train")
+    assert any("--label-user refused" in line for line in lines)
+
+
+def test_a_todo_merge_keeps_the_mark_of_its_proposal_or_list(app):  # noqa: F811
+    from backend.models import UserTodo
+    from backend.tasks.voice_todo_merge import _merge_input_mark
+    u = _make_user("alice")
+    proposal = _row(u, None, None, "train", origin=None)
+    todo = UserTodo(user_id=u.id, generated_by="t", ai_usage="train")
+    todo.set_content("- a")
+    _db.session.add(todo)
+    _db.session.commit()
+    assert _merge_input_mark(proposal, todo) is None          # control
+    todo.unlicensed_input = "external"
+    assert _merge_input_mark(proposal, todo) == "external"
+    proposal.unlicensed_input = "x_api"
+    assert _merge_input_mark(proposal, None) == "x_api"

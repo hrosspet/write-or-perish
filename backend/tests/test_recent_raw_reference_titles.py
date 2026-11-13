@@ -603,5 +603,6 @@ def test_a_render_cached_under_the_old_prefix_is_not_read(
     fake_redis.store[key.replace(prompt_cache._KEY_PREFIX,
                                  "wop:sysprompt:v4:")] = blob
 
-    assert prompt_cache._KEY_PREFIX == "wop:sysprompt:v5:"
+    # v6 since #689 (entries carry their rows' unlicensed input kinds).
+    assert prompt_cache._KEY_PREFIX == "wop:sysprompt:v6:"
     assert prompt_cache.get_cached_render(app.config, system, "v") is None

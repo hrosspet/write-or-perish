@@ -328,3 +328,8 @@ def test_a_dumped_x_api_tweet_never_loads_at_train(app, tmp_path):
               Node.query.filter_by(human_owner_id=bob.id)}
     assert loaded["twitter:1"] == "chat"
     assert loaded["twitter:2"] == "train"
+    # The account now holds X API posts: recorded, so the bundle's profile
+    # and intentions read as Chat (privacy.x_api_account).
+    from backend.models import APICostLog
+    assert APICostLog.query.filter_by(
+        user_id=bob.id, request_type="x_prefill").count() == 1

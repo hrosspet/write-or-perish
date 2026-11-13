@@ -15,7 +15,9 @@ from backend.utils.magic_link import (
     verify_email_change_token, hash_token,
 )
 from backend.utils.timefmt import iso_utc, is_valid_timezone
-from backend.utils.privacy import VALID_PRIVACY_LEVELS, VALID_AI_USAGE
+from backend.utils.privacy import (
+    VALID_PRIVACY_LEVELS, VALID_AI_USAGE, shown_ai_usage,
+)
 from backend.routes.terms import CURRENT_TERMS_VERSION
 from backend.utils.reserved_usernames import validate_username
 from backend.utils.spend import spend_cap_payload, user_is_capped
@@ -65,7 +67,7 @@ def get_latest_profile(user):
             "has_tts": bool(profile.audio_tts_url),
             # The speaker icon is off where AI may not read the version
             # (POST /profile/<id>/tts refuses it: speech_allowed).
-            "ai_usage": profile.ai_usage,
+            "ai_usage": shown_ai_usage(profile),  # #689
         }
     return None
 

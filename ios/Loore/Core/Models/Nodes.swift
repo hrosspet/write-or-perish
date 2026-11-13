@@ -442,10 +442,14 @@ struct NodeUpdateResponse: Decodable, Sendable {
     var message: String?
     var node: NodeDetail
     var descendantsUpdated: Int
+    /// Replies written from posts fetched from X that "apply to my replies"
+    /// left at Chat (#689).
+    var keptFromTrain: Int
 
     enum CodingKeys: String, CodingKey {
         case message, node
         case descendantsUpdated = "descendants_updated"
+        case keptFromTrain = "kept_from_train"
     }
 
     init(from decoder: Decoder) throws {
@@ -453,6 +457,7 @@ struct NodeUpdateResponse: Decodable, Sendable {
         message = c.tolerant(.message)
         node = try c.decode(NodeDetail.self, forKey: .node)
         descendantsUpdated = c.tolerant(.descendantsUpdated, default: 0)
+        keptFromTrain = c.tolerant(.keptFromTrain, default: 0)
     }
 }
 

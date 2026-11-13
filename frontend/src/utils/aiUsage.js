@@ -51,3 +51,10 @@ export function keptFromTrainNote(count) {
   if (!count) return null;
   return `${count.toLocaleString()} ${count === 1 ? 'post' : 'posts'} that Loore fetched from X ${count === 1 ? 'stays' : 'stay'} at Chat. ${TRAIN_REFUSED_MESSAGE}`;
 }
+
+/** The toast after "apply to my replies" left replies off Train (#689):
+ * replies written from posts fetched from X stay at Chat. */
+export function keptFromTrainRepliesNote(count) {
+  if (!count) return null;
+  return `${count} ${count === 1 ? 'reply stays' : 'replies stay'} at Chat. ${TRAIN_REFUSED_MESSAGE}`;
+}

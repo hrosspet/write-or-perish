@@ -60,6 +60,8 @@ struct NodeFormResult {
     /// Edit: the node's own fields after the save.
     var editedNode: NodeDetail?
     var descendantsUpdated = 0
+    /// Replies "apply to my replies" left at Chat: written from X posts (#689).
+    var keptFromTrain = 0
     var spendCapped = false
     var llmError: String?
     /// Why the reply was skipped, as a code. `thread_too_long` (#648) is not
@@ -523,7 +525,8 @@ final class NodeFormModel {
             let answer: NodeUpdateResponse = try await api.put(APIPath.node(edit.nodeId), json: .object(body))
             await clearAfterSend()
             return NodeFormResult(id: answer.node.id, editedNode: answer.node,
-                                  descendantsUpdated: answer.descendantsUpdated, privacy: answer.node.privacyLevel)
+                                  descendantsUpdated: answer.descendantsUpdated,
+                                  keptFromTrain: answer.keptFromTrain, privacy: answer.node.privacyLevel)
         }
 
         if let file = uploadedFile {

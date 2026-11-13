@@ -382,7 +382,7 @@ def _apply_settings_to_skipped(node_ids, privacy_level, ai_usage, dek=None,
     return updated
 
 
-def _claim_prefilled_tweets(user_id, node_ids, changes):
+def _claim_prefilled_tweets(user_id, uploaded, changes):
     """The person's own archive upload holds tweets a pre-fill already
     brought in (#662): skipped as duplicates, they become the upload's
     (provenance archive_upload), since the person gave them to Loore
@@ -394,16 +394,38 @@ def _claim_prefilled_tweets(user_id, node_ids, changes):
     account nothing that is read changes: an upload needs a signed-in
     account, which is never public-only (utils/profile_providers).
 
+    *uploaded*: ``{node_id: (text, token_count)}``, the upload's own copy
+    of each skipped tweet. A claimed tweet takes that text, so what Loore
+    keeps under the upload's provenance is the person's own words (#689:
+    a pre-fill's copy may be the X API's, which never trains, and a tweet
+    id alone proves nothing — ids are public). A tweet the person edited
+    in Loore (an edit writes a NodeVersion) is not claimed: their edit
+    wins, and it stays the pre-fill's.
+
     Returns the ids that were left out before (empty without a no)."""
+    from backend.models import NodeVersion
+    from backend.utils.encryption import new_dek
     from backend.utils.privacy import (
         PREFILL_PROVENANCES, withheld_prefill_clauses)
     withheld = bool(withheld_prefill_clauses(user_id))
-    ids = [i for i in node_ids if i is not None]
+    ids = [i for i in uploaded if i is not None]
     was_withheld = set()
     for start in range(0, len(ids), 1000):
+        chunk = ids[start:start + 1000]
+        edited = {node_id for (node_id,) in db.session.query(
+            NodeVersion.node_id).filter(NodeVersion.node_id.in_(chunk))}
+        dek = None
         for node in Node.query.filter(
-                Node.id.in_(ids[start:start + 1000]),
+                Node.id.in_(chunk),
                 Node.provenance.in_(PREFILL_PROVENANCES)).all():
+            if node.id in edited:
+                continue
+            text, token_count = uploaded[node.id]
+            if node.privacy_level != "public" and dek is None:
+                dek = new_dek()  # one KMS call per chunk; None when off
+            node.set_content(text, dek=dek)
+            node.token_count = (token_count if token_count is not None
+                                else approximate_token_count(text))
             node.provenance = PROVENANCE_ARCHIVE_UPLOAD
             if withheld:
                 was_withheld.add(node.id)
@@ -1600,6 +1622,9 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
     # restored that asked for Train and stay off it, for the result.
     new_ai_usage = cap_ai_usage(ai_usage, provenance)
     kept_from_train = 0
+    # {node_id: (text, token_count)} of the skipped tweets, from the
+    # person's own upload: a pre-fill's copy it claims takes this text.
+    uploaded_texts = {}
 
     for tweet_data in rows:
         done += 1
@@ -1639,6 +1664,10 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
                 nodes_skipped += 1
                 if source_key not in deleted_keys:
                     skipped_alive_ids.append(key_index[source_key])
+                    if provenance == PROVENANCE_ARCHIVE_UPLOAD:
+                        # The upload's own copy, for a claim (#689).
+                        uploaded_texts[key_index[source_key]] = (
+                            content, token_count)
             if import_type == 'single_thread':
                 # Chain the next new tweet onto the existing copy so
                 # partially-skipped imports don't orphan new nodes.
@@ -1683,7 +1712,7 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
     withheld_claimed = set()
     if provenance == PROVENANCE_ARCHIVE_UPLOAD:
         withheld_claimed = _claim_prefilled_tweets(
-            user_id, skipped_alive_ids, changes)
+            user_id, uploaded_texts, changes)
     nodes_updated = _apply_settings_to_skipped(
         [i for i in skipped_alive_ids if i not in withheld_claimed],
         privacy_level, ai_usage, changes=changes

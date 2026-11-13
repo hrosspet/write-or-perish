@@ -46,15 +46,21 @@ CACHE_TTL_SECONDS = 24 * 3600
 # v5: in a call with tools, the recent raw window names a quoted saved
 # reference in one line instead of giving its text (2026-11-12); a v4
 # render would keep the text for the rest of its TTL.
-_KEY_PREFIX = "wop:sysprompt:v5:"
+# v6: entries carry the unlicensed input kinds of their rows (#689), so a
+# reply written from a cached render is marked like one from a fresh
+# render; a v5 entry has none to replay.
+_KEY_PREFIX = "wop:sysprompt:v6:"
 
 # *unlicensed* is why the render's own rows keep a payload off the
 # training key (``ContextUsage.reason``), or None when they are all
 # licensed.
 # *references* are the saved references its recent raw window names by
 # the name read_full opens them by (ContextUsage.named_references).
-CachedRender = namedtuple("CachedRender", ["text", "unlicensed", "references"],
-                          defaults=((),))
+# *inputs* are the unlicensed input kinds of its rows (ContextUsage.inputs,
+# #689): what a reply written from it is marked with.
+CachedRender = namedtuple("CachedRender",
+                          ["text", "unlicensed", "references", "inputs"],
+                          defaults=((), ()))
 
 
 def _client(config):
@@ -91,7 +97,8 @@ def get_cached_render(config, node, variant=""):
                             node.id, lost)
                 return None
         return CachedRender(entry["text"], unlicensed,
-                            tuple(entry.get("references") or ()))
+                            tuple(entry.get("references") or ()),
+                            tuple(entry.get("inputs") or ()))
     except Exception:
         logger.warning("Prompt cache read failed; re-rendering",
                        exc_info=True)
@@ -99,15 +106,17 @@ def get_cached_render(config, node, variant=""):
 
 
 def store_render(config, node, rendered_text, variant="",
-                 unlicensed=None, rows=None, references=()):
+                 unlicensed=None, rows=None, references=(), inputs=()):
     """Store the rendered text (encrypted) with its training-key verdict
     (see ``CachedRender``), for a licensed one the rows it rests on
-    (``ContextUsage.rows``), and the saved references its window names
-    (*references*). Failures are non-fatal."""
+    (``ContextUsage.rows``), the saved references its window names
+    (*references*) and the unlicensed input kinds of its rows (*inputs*).
+    Failures are non-fatal."""
     entry = json.dumps({
         "text": rendered_text, "unlicensed": unlicensed,
         "rows": None if unlicensed else rows,
         "references": sorted(references or ()),
+        "inputs": sorted(inputs or ()),
     })
     try:
         _client(config).setex(

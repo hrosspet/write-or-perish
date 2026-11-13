@@ -605,6 +605,17 @@ class Node(db.Model):
     # NULL = written in Loore, or imported before this column existed.
     # Never part of dedup: source_key alone decides a re-import match.
     provenance = db.Column(db.String(16), nullable=True)
+    # On a model-written node: the call that wrote it carried content not
+    # licensed for training, so the text may repeat it (#689):
+    #   "x_api"    — posts Loore fetched through the X API (or text a model
+    #                wrote from them); the node is Chat at most and Train
+    #                is never offered for it.
+    #   "external" — other people's saved writing (references, Glean
+    #                tweets); the stored ai_usage is the user's, but the
+    #                training licence reads the node as Chat.
+    # NULL = nothing of the kind (and every node written before #689).
+    # utils/privacy.unlicensed_input reads it.
+    unlicensed_input = db.Column(db.String(16), nullable=True)
 
     # DB-level backstop against concurrent imports racing past the
     # application dedup check. NULL source_key rows are exempt (both
@@ -1072,6 +1083,9 @@ class UserTodo(db.Model):
     privacy_level = db.Column(db.String(16), nullable=False, default="private")
     # Todo is used as AI context in Voice sessions — must be AI-readable
     ai_usage = db.Column(db.String(16), nullable=False, default="chat")
+    # As Node.unlicensed_input (#689): a merge written from a reply or a
+    # list that carried such content, and every later version.
+    unlicensed_input = db.Column(db.String(16), nullable=True)
 
     user = db.relationship("User", backref="todos")
 
@@ -1127,6 +1141,9 @@ class UserArtifact(db.Model):
     privacy_level = db.Column(db.String(16), nullable=False, default="private")
     # Artifacts are LLM working memory — must be AI-readable to function.
     ai_usage = db.Column(db.String(16), nullable=False, default="chat")
+    # As Node.unlicensed_input (#689): a version the model wrote in a turn
+    # that carried such content, and every later version of the kind.
+    unlicensed_input = db.Column(db.String(16), nullable=True)
     # Soft delete (#603), as for nodes: the user's delete stamps every
     # version of the kind at once, and from then on no reader sees them
     # (read through live() / get_live() / latest_for()). The daily

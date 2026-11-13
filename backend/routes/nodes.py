@@ -588,12 +588,12 @@ def _parent_user_id_of(node):
 
 
 def _ai_usage_fields(node):
-    """A node's AI usage as the editor shows it: the value the training
-    licence reads (an entry fetched through the X API reads as Chat even
-    if Train was stored before #689), plus ``train_refused`` on those
-    entries, so the web and the iPhone don't offer Train for them."""
-    from backend.utils.privacy import effective_ai_usage, train_refused
-    fields = {"ai_usage": effective_ai_usage(node)}
+    """A node's AI usage as the editor shows it: Chat at most for an
+    entry fetched through the X API or a reply written from such posts,
+    even if Train was stored before #689, plus ``train_refused`` on
+    those, so the web and the iPhone don't offer Train for them."""
+    from backend.utils.privacy import shown_ai_usage, train_refused
+    fields = {"ai_usage": shown_ai_usage(node)}
     if train_refused(node):
         fields["train_refused"] = True
     return fields
@@ -1644,7 +1644,12 @@ def get_node(node_id):
     # thread, where the walk looks through the read (reply_ai_usage; only
     # there, so other threads pay no chain queries).
     reply_usage = node.ai_usage or current_user.default_ai_usage
-    if in_read_thread and (node.human_owner_id or node.user_id) == current_user.id:
+    # An AI reply written from posts fetched from X is Chat by construction
+    # (#689): the walk looks through it too.
+    x_capped_reply = (node.node_type == "llm"
+                      and node.unlicensed_input == "x_api")
+    if ((in_read_thread or x_capped_reply)
+            and (node.human_owner_id or node.user_id) == current_user.id):
         from backend.utils.llm_nodes import reply_ai_usage
         reply_usage = reply_ai_usage(
             node, current_user, parent_content=focal.get("content"))

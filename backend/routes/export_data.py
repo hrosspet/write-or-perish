@@ -358,6 +358,8 @@ def _note_entry(licence, node):
     if effective_ai_usage(node) == AIUsage.TRAIN.value:
         licence.track_row(node.__tablename__, (node.id,))
     else:
+        # By the row: its unlicensed input (#689) marks what is written
+        # from this payload.
         licence.note_usage(node.ai_usage, f"archive entry {node.id}",
                            row=node)
 
@@ -377,10 +379,11 @@ def _note_resolver_preamble(licence, resolver):
         ids = resolver.referenced_artifacts.get(kind)
         if not ids:
             continue
-        for row_id, ai_usage in model.query.with_entities(
-                model.id, model.ai_usage).filter(model.id.in_(ids)):
-            licence.track_row(model.__tablename__, (row_id,))
-            licence.note_usage(ai_usage, f"archive {kind} {row_id}")
+        # By the row (#689): a profile or todo list of an account with X
+        # API posts, or a list written from such input, reads as Chat.
+        for row in model.query.filter(model.id.in_(ids)):
+            licence.note_usage(row.ai_usage, f"archive {kind} {row.id}",
+                               row=row)
 
 
 class _CompactTweetRun:

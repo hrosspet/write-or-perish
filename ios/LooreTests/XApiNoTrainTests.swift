@@ -31,6 +31,20 @@ final class XApiNoTrainTests: XCTestCase {
         XCTAssertEqual(PrivacySelectorView.trainRefusedMessage, message)
     }
 
+    func testTheCascadeAnswerNamesTheRepliesKeptAtChat() throws {
+        let answer = try decode(NodeUpdateResponse.self, #"""
+        {"node": {"id": 1, "content": "x", "ai_usage": "train"}, "descendants_updated": 2,
+         "kept_from_train": 1, "kept_from_train_message": "…"}
+        """#)
+        XCTAssertEqual(answer.keptFromTrain, 1)
+        XCTAssertEqual(PrivacySelectorView.keptFromTrainRepliesNote(1), "1 reply stays at Chat. \(message)")
+        XCTAssertEqual(PrivacySelectorView.keptFromTrainRepliesNote(2), "2 replies stay at Chat. \(message)")
+        XCTAssertNil(PrivacySelectorView.keptFromTrainRepliesNote(0))
+        // Control: an older answer has no count.
+        XCTAssertEqual(try decode(NodeUpdateResponse.self,
+                                  #"{"node": {"id": 1, "content": "x"}}"#).keptFromTrain, 0)
+    }
+
     func testTheImportResultNamesThePostsKeptAtChat() {
         XCTAssertNil(ImportResult.keptFromTrainNote(0))
         XCTAssertEqual(ImportResult.keptFromTrainNote(1), "1 post that Loore fetched from X stays at Chat. \(message)")

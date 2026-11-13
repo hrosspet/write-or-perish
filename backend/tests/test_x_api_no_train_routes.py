@@ -148,3 +148,71 @@ def test_the_put_response_carries_the_flag(app, users):  # noqa: F811
     resp = _put(app, alice, tweet, privacy_level="private", ai_usage="none")
 
     assert resp.json["node"]["train_refused"] is True
+
+
+def _x_reply(user, llm, parent, mark):
+    """An AI reply written from X API posts or other people's writing."""
+    n = _node(llm, parent, human_owner=user, node_type="llm",
+              ai_usage="chat" if mark == "x_api" else "train",
+              content="a reply")
+    n.unlicensed_input = mark
+    _db.session.commit()
+    return n
+
+
+def test_a_reply_written_from_x_api_posts_refuses_train(app, users):  # noqa: F811
+    alice, _, llm = users
+    root = _node(alice, content="root")
+    reply = _x_reply(alice, llm, root, "x_api")
+
+    resp = _put(app, alice, reply, ai_usage="train")
+
+    assert resp.status_code == 400
+    assert resp.json["code"] == "x_api_no_train"
+    client = app.test_client()
+    _login(client, alice)
+    focal = client.get(f"/nodes/{reply.id}").json
+    assert (focal["ai_usage"], focal["train_refused"]) == ("chat", True)
+
+
+def test_a_reply_written_from_saved_references_may_be_set_to_train(app, users):  # noqa: F811
+    """Control: Peter (2026-09-29) lets such replies be Train; the
+    licence reads them as Chat all the same."""
+    alice, _, llm = users
+    root = _node(alice, content="root")
+    reply = _x_reply(alice, llm, root, "external")
+    reply.ai_usage = "chat"
+    _db.session.commit()
+
+    resp = _put(app, alice, reply, ai_usage="train")
+
+    assert resp.status_code == 200
+    assert Node.query.get(reply.id).ai_usage == "train"
+
+
+def test_a_reply_under_a_capped_ai_reply_takes_the_threads_setting(app, users):  # noqa: F811
+    """The AI reply is Chat because it was written from X posts; what the
+    user writes under it starts at the thread's Train, not that Chat."""
+    alice, _, llm = users
+    root = _node(alice, ai_usage="train", content="root")
+    reply = _x_reply(alice, llm, root, "x_api")
+    client = app.test_client()
+    _login(client, alice)
+
+    assert client.get(f"/nodes/{reply.id}").json["reply_ai_usage"] == "train"
+
+
+def test_the_cascade_leaves_a_reply_written_from_x_api_posts_and_says_so(app, users):  # noqa: F811
+    alice, _, llm = users
+    root = _node(alice, content="root")
+    reply = _x_reply(alice, llm, root, "x_api")
+    mine = _node(alice, reply, content="mine")
+    _db.session.commit()
+
+    resp = _put(app, alice, root, ai_usage="train",
+                apply_to_descendants=True)
+
+    assert resp.json["kept_from_train"] == 1
+    assert resp.json["kept_from_train_message"] == MESSAGE
+    assert Node.query.get(reply.id).ai_usage == "chat"
+    assert Node.query.get(mine.id).ai_usage == "train"

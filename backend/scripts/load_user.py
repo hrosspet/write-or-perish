@@ -62,6 +62,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 NODE_BATCH = 500
 
 
+def _mark(row):
+    """A dumped row's unlicensed input mark (#689), if it is a known one."""
+    from backend.utils.privacy import UNLICENSED_INPUTS
+    mark = row.get("unlicensed_input")
+    return mark if mark in UNLICENSED_INPUTS else None
+
+
 def _dt(s):
     if not s:
         return None
@@ -250,6 +257,7 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
             tokens_used=td.get("tokens_used") or 0,
             privacy_level=td.get("privacy_level") or "private",
             ai_usage=td.get("ai_usage") or "chat",
+            unlicensed_input=_mark(td),
         )
         row.set_content(td.get("content") or "")
         if _dt(td.get("created_at")):
@@ -273,6 +281,7 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
             tokens_used=a.get("tokens_used") or 0,
             privacy_level=a.get("privacy_level") or "private",
             ai_usage=a.get("ai_usage") or "chat",
+            unlicensed_input=_mark(a),
         )
         row.set_content(a.get("content") or "")
         if _dt(a.get("created_at")):
@@ -286,7 +295,12 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
     # Nodes last, so context pins on system nodes resolve to the rows above.
     from backend.models import NodeContextArtifact, UserPrompt
     from backend.utils.context_artifacts import sync_context_artifacts
-    from backend.utils.privacy import cap_ai_usage
+    from backend.utils.privacy import (
+        UNLICENSED_INPUTS, X_API_INPUT, X_API_PREFILL_REQUEST, cap_ai_usage,
+        chat_at_most, train_refused_for,
+    )
+    from backend.models import APICostLog
+    holds_x_api = False
     prompt_cache = {}
     pinned = 0
 
@@ -326,8 +340,13 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
             id_map[nd["id"]] = existing_keys[key]
             skipped += 1
             continue
-        # A tweet the dump says was fetched through the X API comes in at
-        # Chat at most (#689), so no load lifts it to Train.
+        # A tweet the dump says was fetched through the X API, or a reply
+        # written from such posts, comes in at Chat at most (#689), so no
+        # load lifts it to Train; a reply keeps what it was written from.
+        mark = nd.get("unlicensed_input")
+        mark = mark if mark in UNLICENSED_INPUTS else None
+        if mark == X_API_INPUT or train_refused_for(nd.get("provenance")):
+            holds_x_api = True
         new = Node(
             user_id=_author_id(nd.get("author_username"), user_id, cache, db, User),
             human_owner_id=user_id if nd.get("owner_is_user", True) else None,
@@ -336,8 +355,11 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
             token_count=nd.get("token_count") or 0,
             distributed_tokens=nd.get("distributed_tokens") or 0,
             privacy_level=nd.get("privacy_level", "private"),
-            ai_usage=cap_ai_usage(nd.get("ai_usage", "none"),
-                                  nd.get("provenance")),
+            ai_usage=(chat_at_most(nd.get("ai_usage", "none"))
+                      if mark == X_API_INPUT
+                      else cap_ai_usage(nd.get("ai_usage", "none"),
+                                        nd.get("provenance"))),
+            unlicensed_input=mark,
             source_key=key,
             origin=nd.get("origin"),
             provenance=(nd.get("provenance")
@@ -391,6 +413,20 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
             db.session.query(Node).filter(Node.id == new_id).update(
                 values, synchronize_session=False)
             relinked += 1
+    if holds_x_api and not db.session.query(APICostLog.id).filter(
+            APICostLog.user_id == user_id,
+            APICostLog.request_type == X_API_PREFILL_REQUEST).first():
+        # The account now holds X API posts: its derived documents (the
+        # bundle's profile and intentions too) read as Chat at most
+        # (privacy.x_api_account, #689). That reads the pre-fill's cost
+        # record, which stayed where the posts were fetched: this $0 row
+        # records it here.
+        db.session.add(APICostLog(
+            user_id=user_id, model_id="x-api/timeline",
+            request_type=X_API_PREFILL_REQUEST, request_ref="load_user",
+            input_tokens=0, output_tokens=0, cost_microdollars=0))
+        print("the bundle holds X API posts: recorded on the account "
+              "(#689)", file=sys.stderr)
     db.session.commit()
 
     print(f"loaded '{username}' (id {user_id}): {created} nodes created, "

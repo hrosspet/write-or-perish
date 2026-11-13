@@ -985,6 +985,9 @@ final class ThreadModel {
             let n = result.descendantsUpdated
             app.toasts.show("Applied to \(n) repl\(n == 1 ? "y" : "ies") too")
         }
+        if let kept = PrivacySelectorView.keptFromTrainRepliesNote(result.keptFromTrain) {
+            app.toasts.show(kept)
+        }
         if !wasFocal {
             await reload()
             return
