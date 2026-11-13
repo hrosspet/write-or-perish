@@ -205,6 +205,21 @@ class User(db.Model, UserMixin):
     # payment was refunded in full). NULL: nothing withdrawn.
     subscription_revoked = db.Column(db.String(16), nullable=True)
 
+    # --- The alpha free month (#438; Peter, 2026-11-12: alpha testers are
+    # "free for one month after the opening, then the discounted price") ---
+    # When `flask alpha-free-month --apply` moved this account from the
+    # hand-set "alpha" plan to "free" and gave it a free month. It marks an
+    # alpha tester for good: the discounted price is theirs without a code,
+    # and an ended free month leaves the account lapsed, never shut out.
+    alpha_free_granted_at = db.Column(db.DateTime, nullable=True)
+    # The free month, UTC: one start for every tester, the Beta release
+    # date the owner gives the command (Peter, 2026-11-13: "at the beta
+    # release date"), and its end ALPHA_FREE_MONTH_DAYS later, whether or
+    # not the tester visits. Before the start the tester keeps the alpha
+    # plan's access.
+    alpha_free_start = db.Column(db.DateTime, nullable=True)
+    alpha_free_until = db.Column(db.DateTime, nullable=True)
+
     # Per-user monthly spend hard cap (issue: free-alpha guardrail). Stores the
     # "YYYY-MM" (UTC) in which the user crossed PER_USER_MONTHLY_LIMIT_USD. While
     # this equals the current month the user is blocked from cost-incurring
@@ -368,8 +383,11 @@ class User(db.Model, UserMixin):
     @property
     def plan_set_by_hand(self):
         """A plan that gives the paid feature set by itself (alpha, pro):
-        a subscription neither adds to it nor takes from it (#438)."""
-        return (self.plan or "free") in self.VOICE_MODE_PLANS
+        a subscription neither adds to it nor takes from it (#438). An alpha
+        tester whose free month is still to come keeps the alpha plan's
+        access until it starts."""
+        return ((self.plan or "free") in self.VOICE_MODE_PLANS
+                or self.alpha_free_month_upcoming)
 
     @property
     def subscription_grants_access(self):
@@ -381,9 +399,33 @@ class User(db.Model, UserMixin):
                 and self.subscription_status in ("trialing", "active"))
 
     @property
+    def is_alpha_tester(self):
+        """Given the alpha free month (alpha_free_granted_at)."""
+        return self.alpha_free_granted_at is not None
+
+    @property
+    def alpha_free_month_upcoming(self):
+        """An alpha tester before the free month's start: nothing has
+        changed for them yet (plan_set_by_hand)."""
+        if self.alpha_free_granted_at is None or self.alpha_free_start is None:
+            return False
+        return datetime.utcnow() < self.alpha_free_start
+
+    @property
+    def alpha_free_month_active(self):
+        """An alpha tester inside the free month (from its start to its
+        end): it gives the paid feature set like a subscription."""
+        if (self.alpha_free_granted_at is None
+                or self.alpha_free_start is None
+                or self.alpha_free_until is None):
+            return False
+        return self.alpha_free_start <= datetime.utcnow() < \
+            self.alpha_free_until
+
+    @property
     def subscription_access_state(self):
         """ACCESS_STATES for an account whose plan was not set by hand."""
-        if self.subscription_grants_access:
+        if self.subscription_grants_access or self.alpha_free_month_active:
             return "active"
         if self.subscription_ever_paid:
             return "lapsed"
@@ -392,14 +434,20 @@ class User(db.Model, UserMixin):
         # never let in.
         if self.subscription_cancelled_by_owner:
             return "lapsed"
+        # An alpha tester whose free month ended keeps reading, writing and
+        # export: they used Loore before payments existed.
+        if self.is_alpha_tester:
+            return "lapsed"
         return "none"
 
     @property
     def on_paid_plan(self):
         """The paid feature set (Voice mode, profile and recent-context
-        updates): a plan set by hand, or a subscription that grants it.
-        Without a subscription this is the plan check it replaces."""
-        return self.plan_set_by_hand or self.subscription_grants_access
+        updates): a plan set by hand, a subscription that grants it, or an
+        alpha tester's free month. Without either this is the plan check it
+        replaces."""
+        return (self.plan_set_by_hand or self.subscription_grants_access
+                or self.alpha_free_month_active)
 
     @property
     def has_voice_mode(self):
@@ -429,12 +477,22 @@ class User(db.Model, UserMixin):
             cls.subscription_status.in_(["trialing", "active"]))
 
     @classmethod
+    def alpha_free_month_clause(cls):
+        """In SQL: an alpha tester whose free month has not ended, the
+        month itself or the alpha access before it (both give the paid
+        feature set)."""
+        return and_(cls.alpha_free_granted_at.isnot(None),
+                    cls.alpha_free_until > datetime.utcnow())
+
+    @classmethod
     def paid_features_clause(cls):
         """In SQL: the account may start model calls (an admin, a plan set
-        by hand, or a subscription that gives access)."""
+        by hand, a subscription that gives access, or an alpha tester's
+        free month)."""
         return or_(cls.is_admin.is_(True),
                    cls.plan.in_(list(cls.VOICE_MODE_PLANS)),
-                   cls.subscription_grants_access_clause())
+                   cls.subscription_grants_access_clause(),
+                   cls.alpha_free_month_clause())
 
     def get_id(self):
         return str(self.id)
@@ -491,10 +549,12 @@ class User(db.Model, UserMixin):
         purging = account_on_hold_user_ids()
         return cls.query.filter(
             cls.approved.is_(True),
-            # on_paid_plan in SQL: a plan set by hand, or a subscription
-            # that grants the paid feature set (#438).
+            # on_paid_plan in SQL: a plan set by hand, a subscription that
+            # grants the paid feature set (#438), or an alpha tester's free
+            # month.
             or_(cls.plan.in_(list(cls.VOICE_MODE_PLANS)),
-                cls.subscription_grants_access_clause()),
+                cls.subscription_grants_access_clause(),
+                cls.alpha_free_month_clause()),
             cls.default_ai_usage.in_(list(AI_ALLOWED)),
             ~cls.id.in_(llm_authors),
             ~cls.id.in_(purging),

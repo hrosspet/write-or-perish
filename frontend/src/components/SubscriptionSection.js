@@ -3,7 +3,8 @@ import { useLocation, useNavigate } from "react-router-dom";
 import api from "../api";
 import useSubmitShortcut from "../hooks/useSubmitShortcut";
 import {
-  LEVEL_NAMES, formatPrice, rememberSubscription, subscriptionStatusLine,
+  LEVEL_NAMES, formatDay, formatPrice, freeMonthLine, rememberSubscription,
+  subscriptionStatusLine,
 } from "../utils/subscription";
 
 // The Subscription section of Settings (#438). Rendered only while the
@@ -17,6 +18,8 @@ const LIVE = ["trialing", "active", "past_due"];
 const LEVEL_NOTES = {
   standard: "Loore with AI replies, Voice mode and your profile kept up to date.",
   supporter: "The same Loore. What you pay above Standard keeps a lower price open for people who can't afford it.",
+  // Offered without a code only to alpha testers (#438).
+  discounted: "The same Loore, at the price for alpha testers.",
 };
 
 const RETURN_NOTICES = {
@@ -179,6 +182,14 @@ export default function SubscriptionSection({ user, setUser }) {
   const statusLine = subscriptionStatusLine(sub);
   const levels = (state && state.levels) || [];
   const contact = (state && state.contact_email) || "info@loore.org";
+  // The alpha free month (#438): the discounted level is offered without
+  // a code, and the free month takes the trial's place.
+  const alpha = !!sub.alpha_tester;
+  const reduced = levels.find((l) => l.level === "discounted");
+  const freeLine = alpha
+    ? freeMonthLine(sub, reduced && formatPrice(reduced.amount_cents, reduced.currency))
+    : null;
+  const freeUntil = formatDay(sub.free_month_until);
 
   return (
     <div id="subscription" style={{ marginBottom: "1.25rem", scrollMarginTop: "72px" }}>
@@ -208,20 +219,39 @@ export default function SubscriptionSection({ user, setUser }) {
             Switch between Standard and Supporter, change your card, see invoices or cancel on Stripe's page. Moving up is charged for the rest of the month at once; moving down takes effect when the month you paid for ends. A cancelled subscription runs to the end of the period you paid for.
           </div>
         </>
+      ) : alpha && sub.free_month_upcoming ? (
+        // An alpha tester before the free month (#438): nothing changes
+        // until it starts, and nothing can be bought before then.
+        <div style={textStyle}>{freeLine}</div>
       ) : sub.plan_set_by_hand ? (
         <div style={textStyle}>
           Your account has the paid features already ({user.plan}). There is nothing to pay.
         </div>
       ) : (
         <>
-          {statusLine && <div style={{ ...textStyle, marginBottom: "8px" }}>{statusLine}</div>}
-          <div style={{ ...textStyle, color: "var(--text-secondary)", marginBottom: "10px" }}>
-            {sub.trial_available && sub.trial_days
-              ? `The first ${sub.trial_days} days are free. Your card is charged when they end, unless you cancel before.`
-              : sub.state === "none"
-                ? "This account's free trial was used, so the first payment is due at checkout."
-                : "Subscribe to keep AI replies, Voice mode and profile updates."}
-          </div>
+          {alpha ? (
+            <>
+              {/* An alpha tester: the free month, then the price without
+                  a code. No card until they subscribe. */}
+              <div style={{ ...textStyle, marginBottom: "8px" }}>{freeLine}</div>
+              <div style={{ ...textStyle, color: "var(--text-secondary)", marginBottom: "10px" }}>
+                {sub.free_month_active
+                  ? `If you subscribe now, the first payment is on ${freeUntil}, when your free month ends. Until then nothing is charged.`
+                  : "The first payment is due at checkout."}
+              </div>
+            </>
+          ) : (
+            <>
+              {statusLine && <div style={{ ...textStyle, marginBottom: "8px" }}>{statusLine}</div>}
+              <div style={{ ...textStyle, color: "var(--text-secondary)", marginBottom: "10px" }}>
+                {sub.trial_available && sub.trial_days
+                  ? `The first ${sub.trial_days} days are free. Your card is charged when they end, unless you cancel before.`
+                  : sub.state === "none"
+                    ? "This account's free trial was used, so the first payment is due at checkout."
+                    : "Subscribe to keep AI replies, Voice mode and profile updates."}
+              </div>
+            </>
+          )}
           <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
             {levels.map((l) => (
               <button
@@ -243,6 +273,8 @@ export default function SubscriptionSection({ user, setUser }) {
               </button>
             ))}
           </div>
+          {!alpha && (
+          <>
           <div style={helperStyle}>
             Need a lower price? Write to {contact} for a code. No proof needed.
           </div>
@@ -264,6 +296,8 @@ export default function SubscriptionSection({ user, setUser }) {
               Use code
             </button>
           </form>
+          </>
+          )}
         </>
       )}
     </div>

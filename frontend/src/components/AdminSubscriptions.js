@@ -94,6 +94,7 @@ export default function AdminSubscriptions() {
                 <th style={th}>trial ends</th>
                 <th style={th}>period ends</th>
                 <th style={th}>cancelling</th>
+                <th style={th}>free month</th>
               </tr>
             </thead>
             <tbody>
@@ -106,6 +107,9 @@ export default function AdminSubscriptions() {
                   <td style={cell}>{day(s.trial_end)}</td>
                   <td style={cell}>{day(s.current_period_end)}</td>
                   <td style={cell}>{s.cancel_at_period_end ? "yes" : ""}</td>
+                  {/* Alpha testers (#438): the free month, the same dates
+                      for everyone. */}
+                  <td style={cell}>{s.alpha_tester ? `${day(s.free_month_start)} – ${day(s.free_month_until)}` : ""}</td>
                 </tr>
               ))}
             </tbody>

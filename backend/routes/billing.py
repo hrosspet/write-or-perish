@@ -14,7 +14,7 @@ from backend.extensions import db
 from backend.models import SUBSCRIPTION_GRANTING_STATUSES
 from backend.utils import discount_codes, stripe_billing
 from backend.utils.subscriptions import (
-    OFFERED_LEVELS, level_price_cents, payments_enabled, subscription_state)
+    checkout_levels, level_price_cents, payments_enabled, subscription_state)
 
 logger = logging.getLogger(__name__)
 
@@ -57,10 +57,11 @@ def _state():
     cfg = current_app.config
     return {
         "subscription": subscription_state(current_user, cfg),
+        # An alpha tester is offered the discounted level too, first.
         "levels": [{"level": level,
                     "amount_cents": level_price_cents(level, cfg),
                     "currency": cfg.get("SUBSCRIPTION_CURRENCY", "usd")}
-                   for level in OFFERED_LEVELS],
+                   for level in checkout_levels(current_user)],
         "contact_email": cfg.get("SUBSCRIPTION_CONTACT_EMAIL"),
     }
 
@@ -83,7 +84,8 @@ def _checkout_level(user, data):
                             400)
     if not raw:
         level = data.get("level")
-        if level not in OFFERED_LEVELS:
+        # The discounted level without a code: alpha testers only.
+        if level not in checkout_levels(user):
             return None, None, (jsonify({"error": "invalid_level",
                                          "message": "Choose a level."}), 400)
         return level, None, None
