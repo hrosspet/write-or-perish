@@ -30,6 +30,9 @@ final class ThreadModel {
     private(set) var pageError: String?
     private(set) var quotes = QuoteData()
 
+    /// An entry this account may not open, or none at all (#704).
+    static let notSharedMessage = "This entry isn't shared with you. It may be private, or it may have been deleted."
+
     // Reply generation
     private(set) var llmTaskNodeId: Int?
     private(set) var llmRequesting = false
@@ -274,7 +277,9 @@ final class ThreadModel {
         } catch let error as APIError {
             loading = false
             if error.status == 404 || error.status == 403 {
-                pageError = "This node doesn't exist, was deleted, or isn't shared with you."
+                // The same words for private, deleted and missing: the
+                // server never says which (web NotSharedNotice, #704).
+                pageError = Self.notSharedMessage
             } else if !error.isCancelled {
                 pageError = "Error fetching node details."
             }

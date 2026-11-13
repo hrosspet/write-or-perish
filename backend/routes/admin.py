@@ -951,6 +951,16 @@ def whitelist_user():
     }), 201
 
 
+def _welcome_destination():
+    """Where the welcome email's link lands: /welcome, or the page inside
+    Loore the admin named as `next_url` (#704; none by default). A value
+    that is not such a page is dropped, as in every sign-in."""
+    from backend.utils.destination import safe_destination
+    body = request.get_json(silent=True) or {}
+    named = body.get("next_url") if isinstance(body, dict) else None
+    return safe_destination(named) or "/welcome"
+
+
 @admin_bp.route("/users/<int:user_id>/activate_and_welcome", methods=["POST"])
 @login_required
 @admin_required
@@ -967,9 +977,10 @@ def activate_and_welcome(user_id):
 
     # Generate magic link pointing to /welcome (30-day expiry)
     welcome_max_age = 30 * 24 * 3600  # 30 days in seconds
+    landing = _welcome_destination()
     try:
         token = generate_magic_link_token(
-            user.email, next_url="/welcome", max_age=welcome_max_age
+            user.email, next_url=landing, max_age=welcome_max_age
         )
         token_h = hash_token(token)
 

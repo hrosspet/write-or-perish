@@ -35,7 +35,7 @@ Read these first; they change what the Swift port has to build.
 
 ### 1.2 Fetch: `GET /nodes/<id>` (backend `routes/nodes.py:get_node`)
 
-404 for missing, soft-deleted, or not visible (never 403, so ids can't be probed). UI copy for 404/403: **"This node doesn't exist, was deleted, or isn't shared with you."**; any other error: **"Error fetching node details."**; while loading: **"Loading node..."**; null node: **"No node found."**
+404 for missing, soft-deleted, or not visible (never 403, so ids can't be probed). UI copy for 404/403: **"This entry isn't shared with you. It may be private, or it may have been deleted."**; any other error: **"Error fetching node details."**; while loading: **"Loading node..."**; null node: **"No node found."**
 
 Response (focal node's own fields, from `_focal_own_fields` + `_system_prompt_fields`):
 
@@ -547,7 +547,7 @@ Buttons / labels: "Thread", "Voice Mode", "Starting…", "Relevant tweets", "Rea
 
 Placeholders: "What's present for you right now..." (default), "Type what's on your mind…" (thread inline, /textmode), "Ask about these picks, or say what you make of them…" (read reply).
 
-Inline text: "Loading node...", "No node found.", "This node doesn't exist, was deleted, or isn't shared with you.", "Error fetching node details.", "Error toggling pin.", "Error deleting node.", "Error starting voice session.", "[Node deleted]", "[Node inaccessible]", "[Quoted node inaccessible]", "[Quoted node deleted]", "[Quoted reference inaccessible]", "[<Label> not available]", "Quoted from @user", "Saved from @handle · Source", "You rated this good/bad on <date>", "Draft saved just now/Nm ago/Nh ago", "Saving...", "You're offline", "Transcribing recovered audio...", "Content is required.", "Public — inherited from the thread.", "Offline — recording continues, uploads will retry when connection returns", "Recording paused — another app took the microphone. Audio up to the interruption is saved.".
+Inline text: "Loading node...", "No node found.", "This entry isn't shared with you. It may be private, or it may have been deleted.", "Error fetching node details.", "Error toggling pin.", "Error deleting node.", "Error starting voice session.", "[Node deleted]", "[Node inaccessible]", "[Quoted node inaccessible]", "[Quoted node deleted]", "[Quoted reference inaccessible]", "[<Label> not available]", "Quoted from @user", "Saved from @handle · Source", "You rated this good/bad on <date>", "Draft saved just now/Nm ago/Nh ago", "Saving...", "You're offline", "Transcribing recovered audio...", "Content is required.", "Public — inherited from the thread.", "Offline — recording continues, uploads will retry when connection returns", "Recording paused — another app took the microphone. Audio up to the interruption is saved.".
 
 Toasts: "Turning off auto-generate. AI usage on some nodes is turned off." (8 s), "Applied to N reply/replies too", "Deleted N node(s)", "LLM response generation failed", "Error requesting LLM response.", "Read cancelled", "Couldn't save change — reverted (…)", "Couldn't add task — reverted (…)", "Could not start the read.", "Could not update the read mark.", "Could not save your feedback.", "Could not mark the list as read.", "You've been recording for 59 minutes — consider stopping soon and continuing in a new recording." (10 s, with chime), spend-cap messages, "Craft mode on. Its controls carry the sliders icon.", "Craft mode off.". Default toast duration 3 s.
 

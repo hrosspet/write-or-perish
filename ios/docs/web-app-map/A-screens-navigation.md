@@ -248,7 +248,7 @@ Common page chrome for app pages: centered column, `max-width` 720px (Log, Refer
 - Log card fields: `id, preview, node_type, child_count, created_at, pinned_at, username, human_owner_username, llm_model, origin, has_original_audio, prompt_key, thread_name, thread_root_id, newest_node_id, can_rename`.
 
 #### Thread `/node/:id` (member) — `components/NodeDetail.js` via `NodeDetailWrapper` (keyed by id → full remount per node)
-- Fetch: `GET /nodes/{id}`; 404/403 → "This node doesn't exist, was deleted, or isn't shared with you."; other → "Error fetching node details."; `GET /nodes/{id}/resolve-quotes` when content has `{quote:ID}`/`{quote_ext:ID}`. Scrolls to the focal node once.
+- Fetch: `GET /nodes/{id}`; 404/403 → "This entry isn't shared with you. It may be private, or it may have been deleted."; other → "Error fetching node details."; `GET /nodes/{id}/resolve-quotes` when content has `{quote:ID}`/`{quote_ext:ID}`. Scrolls to the focal node once.
 - Layout top→bottom:
   1. Row: H2 **"Thread"** + top-right controls column (owner, `ai_usage ≠ none`, not a public thread): **Voice Mode** (mic icon; `POST /voice/from-node/{id} {model}` → `/voice?resume=…&parent=…` or `/voice?parent=…`), **Relevant tweets / Read / Read further** (admin; `POST /read/from-node/{id}`), **Auto-generate** pill (craft only; `localStorage.loore_auto_generate`).
   2. `SemanticNeighbors` (admin-only, fixed right panel on ≥1200px).
@@ -354,7 +354,7 @@ Common page chrome for app pages: centered column, `max-width` 720px (Log, Refer
 - `GET /share/public/{username}` → `{username, shares[] {id, public_node_id, permalink, share_type, content, published_at, pinned}, canonical}`. Shell max 640px. H1 username; cards (type eyebrow, markdown, date, pin icon); tap → thread. Empty "{username}'s public entries will appear here as they share thoughts with Loore." Not found "Nothing here."
 
 #### Public thread `/node/:id` (visitor), `/@u/:slug` (visitor) — `pages/PublicThreadPage.js`
-- `GET /commons/node/{id}` → `{thread (recursive: id, username, node_type, llm_model, content, created_at, children), focus_id, truncated}`. Nested cards (focused one has an `accent` border); author line "{model} · via {user}" for LLM nodes; author links to `/@{user}`. "thread truncated". Funnel: "Respond, or ask the AI about this thread — from your own Loore." + **Sign in to respond** (`/login?returnUrl=/node/{id}`). Not found: visitor → login redirect; member → "Nothing here."
+- `GET /commons/node/{id}` → `{thread (recursive: id, username, node_type, llm_model, content, created_at, children), focus_id, truncated}`. Nested cards (focused one has an `accent` border); author line "{model} · via {user}" for LLM nodes; author links to `/@{user}`. "thread truncated". Funnel: "Respond, or ask the AI about this thread — from your own Loore." + **Sign in to respond** (`/login?returnUrl=` the page’s own address, `/node/{id}` or `/@{user}/{slug}`, query and fragment kept; #704). Not found: visitor → login redirect, on the way back to this page; member → the not-shared notice ("This entry isn't shared with you" / "It may be private, or it may have been deleted." / **Go to your Home page →**).
 
 ### 3.4 ADMIN
 
