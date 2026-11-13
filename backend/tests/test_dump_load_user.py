@@ -111,7 +111,11 @@ def test_round_trip_remaps_links_and_respects_privacy(app, tmp_path):
     dump_user._run("alice", str(out))
     d = _read(out)
     assert d["format"] == 2
-    assert set(d["user"]) == {"username", "timezone", "preferred_model", "plan"}
+    # prefilled_handle and each node's provenance since #662: a no to the
+    # tweet seed tells a bundle's pre-filled tweets apart by them.
+    assert set(d["user"]) == {"username", "timezone", "preferred_model", "plan",
+                              "prefilled_handle"}
+    assert all("provenance" in n for n in d["nodes"])
     assert [n["source_key"] for n in d["nodes"]] == ["twitter:1", None, "twitter:2"]  # private skipped
     assert d["nodes"][1]["author_username"] == "claude-opus-5"
     assert d["profiles"][1]["parent_profile_id"] == p1_id
