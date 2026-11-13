@@ -39,7 +39,8 @@ from backend.utils.cost import llm_cost_log_fields
 from backend.utils.chunk_plan import UPDATE_THRESHOLD_UNITS
 from backend.utils.llm_batch import (
     BATCH_JOB_MAX_AGE, apply_batch_key_override, batch_check_and_collect,
-    batch_submit, blocked_items,
+    batch_submit, blocked_items, delete_collected_batch_files,
+    drop_openai_batch,
 )
 from backend.utils import refusal_backoff
 
@@ -723,7 +724,12 @@ def _collect_recent_context_batches():
             results = {}
         if still_pending:
             if now - job.submitted_at > BATCH_JOB_MAX_AGE:
-                abandoned += _abandon(job, now)
+                gave_up = _abandon(job, now)
+                abandoned += gave_up
+                if gave_up and (job.provider_key or "").startswith("openai:"):
+                    # Nothing reads the batch again: cancelled if it still
+                    # runs, and its files go (#667).
+                    drop_openai_batch(keys.get("openai"), job.batch_id)
             continue
         ended.append((job, results))
 
@@ -739,7 +745,12 @@ def _collect_recent_context_batches():
                         "batch(es) are collected next run", len(ended))
             return {"collected": 0, "abandoned": abandoned}
         for job, results in ended:
-            collected += _claim_and_apply(job, results, now)
+            claimed = _claim_and_apply(job, results, now)
+            collected += claimed
+            if claimed:
+                # Saved: the batch's files at OpenAI can go (#667). A run
+                # that lost the claim leaves them to the one that won.
+                delete_collected_batch_files(results, keys)
     return {"collected": collected, "abandoned": abandoned}
 
 

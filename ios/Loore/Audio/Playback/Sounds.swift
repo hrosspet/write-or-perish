@@ -213,8 +213,8 @@ final class SoundPlayer {
 }
 
 /// A short sentence said on the device (`AVSpeechSynthesizer`, on the app's audio
-/// session): Voice mode's refusal when a thread is too long for another reply
-/// (#648). Nothing goes to a server or a provider.
+/// session): a refused Voice turn's sentence when its clip can't be had (#648,
+/// #651). Nothing goes to a server or a provider.
 @MainActor
 final class SentenceSpeaker: NSObject, AVSpeechSynthesizerDelegate {
     /// Longest wait for the synthesizer to say it is done (a sentence takes ~4 s).
@@ -275,6 +275,70 @@ final class SentenceSpeaker: NSObject, AVSpeechSynthesizerDelegate {
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
         let id = ObjectIdentifier(utterance)
         Task { @MainActor [weak self] in self?.finish(id) }
+    }
+}
+
+/// A refused Voice turn's clip (#651), played on its own on the app's audio
+/// session, never in the reply queue. As `SoundWorker`, the player lives on a
+/// private serial queue, so a slow audio device never blocks the turn.
+final class ClipSpeaker: NSObject, AVAudioPlayerDelegate, @unchecked Sendable {
+    private let queue = DispatchQueue(label: "org.loore.audio.refusal-clip", qos: .userInitiated)
+    /// Queue-confined: the clip playing and the caller waiting for it.
+    private var player: AVAudioPlayer?
+    private var waiting: CheckedContinuation<Bool, Never>?
+
+    /// Plays `data`; returns true once it has played, false when it could not
+    /// play or was stopped. A clip still playing stops first.
+    func play(_ data: Data) async -> Bool {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            queue.async { [self] in
+                finish(false)
+                guard let clip = try? AVAudioPlayer(data: data) else {
+                    continuation.resume(returning: false)
+                    return
+                }
+                clip.delegate = self
+                player = clip
+                waiting = continuation
+                guard clip.play() else {
+                    finish(false)
+                    return
+                }
+                // A delegate call that never comes does not hold the turn.
+                let id = ObjectIdentifier(clip)
+                queue.asyncAfter(deadline: .now() + clip.duration + 2) { [self] in
+                    if let current = player, ObjectIdentifier(current) == id { finish(true) }
+                }
+            }
+        }
+    }
+
+    /// Stops the clip at once; its caller goes on.
+    func stop() {
+        queue.async { [self] in finish(false) }
+    }
+
+    /// Queue only.
+    private func finish(_ played: Bool) {
+        player?.stop()
+        player = nil
+        let caller = waiting
+        waiting = nil
+        caller?.resume(returning: played)
+    }
+
+    func audioPlayerDidFinishPlaying(_ clip: AVAudioPlayer, successfully flag: Bool) {
+        let id = ObjectIdentifier(clip)
+        queue.async { [self] in
+            if let current = player, ObjectIdentifier(current) == id { finish(flag) }
+        }
+    }
+
+    func audioPlayerDecodeErrorDidOccur(_ clip: AVAudioPlayer, error: Error?) {
+        let id = ObjectIdentifier(clip)
+        queue.async { [self] in
+            if let current = player, ObjectIdentifier(current) == id { finish(false) }
+        }
     }
 }
 

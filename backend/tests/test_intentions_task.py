@@ -413,6 +413,20 @@ def test_cancel_marks_job_and_calls_provider(app, wired, monkeypatch):  # noqa: 
     assert it.pending_intentions_jobs(u.id) == []
 
 
+def test_an_openai_cancel_deletes_the_batch_files(app, wired, monkeypatch):  # noqa: F811
+    """#667: nothing reads a cancelled intentions batch again, so its
+    files at OpenAI go with the cancel."""
+    import backend.utils.llm_batch as lb
+    calls = []
+    monkeypatch.setattr(
+        lb, "openai_batch_cancel_one",
+        lambda key, batch_id, delete_files=False: calls.append(
+            (key, batch_id, delete_files)))
+    keys = {"openai": "k-oai", "anthropic": "k-ant"}
+    assert it._provider_cancel("openai:gpt-x", "b-1", keys) is None
+    assert calls == [("k-oai", "b-1", True)]
+
+
 def test_cancel_marks_job_even_when_provider_cancel_fails(app, wired, monkeypatch):  # noqa: F811
     u = _make_user("lea")
     _db.session.commit()

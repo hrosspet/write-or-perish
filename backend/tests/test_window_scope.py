@@ -170,8 +170,12 @@ def app(monkeypatch):
     monkeypatch.setattr(pb, "get_api_keys_for_usage", keys)
     monkeypatch.setattr(pw, "get_api_keys_for_usage", keys)
     import backend.llm_providers as lp
-    monkeypatch.setattr(lp.LLMProvider, "count_tokens",
-                        staticmethod(_count_tokens))
+    # Also the class profile_windows calls: when another test file has
+    # left a fresh copy of llm_providers behind, lp is not it, and the
+    # real count went to the provider (#633).
+    for provider in {lp.LLMProvider, pw.LLMProvider}:
+        monkeypatch.setattr(provider, "count_tokens",
+                            staticmethod(_count_tokens))
     monkeypatch.setattr(pw, "advance_profile_windows", MagicMock())
     monkeypatch.setattr(pw._exports, "_is_task_stale", lambda u: True)
     import backend.utils.notifications as notes

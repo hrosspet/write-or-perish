@@ -107,6 +107,13 @@ def main():
         print(f"  Progress: {node.transcription_progress}%")
         print(f"  Audio URL: {node.audio_original_url}")
 
+        # No AI means no AI (#665): an entry set to None is never sent to
+        # be transcribed (the task would refuse it too).
+        from backend.utils.recording_ai_usage import may_transcribe
+        if not may_transcribe(node.ai_usage):
+            print("\nError: AI usage for this entry is None; not transcribed")
+            sys.exit(1)
+
         # Find the audio file
         audio_file = find_audio_file(node.user_id, node_id)
 

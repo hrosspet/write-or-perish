@@ -66,8 +66,10 @@ struct TextModeView: View {
         if !s.aiUsage.allowsAI {
             app.toasts.show("Turning off auto-generate. AI usage on some nodes is turned off.", duration: 8)
             if let sid = s.streamingSessionId {
-                let answer: SaveAsNodeResponse = try await app.api.post(APIPath.streamingSaveAsNode(sid),
-                                                                        json: .object(["content": .string(s.content)]))
+                let answer: SaveAsNodeResponse = try await app.api.post(APIPath.streamingSaveAsNode(sid), json: .object([
+                    "content": .string(s.content), "privacy_level": .string(s.privacy.rawString),
+                    "ai_usage": .string(s.aiUsage.rawString),
+                ]))
                 return NodeFormResult(id: answer.id)
             }
             let created: NodeCreateResponse = try await app.api.post(APIPath.nodes, json: .object([
@@ -82,7 +84,8 @@ struct TextModeView: View {
             && !s.privacy.isSharedWithOthers
         if let sid = s.streamingSessionId {
             var body: [String: JSONValue] = [
-                "content": .string(s.content), "agentic": .bool(true), "auto_generate": .bool(autoGenerate),
+                "content": .string(s.content), "privacy_level": .string(s.privacy.rawString),
+                "ai_usage": .string(s.aiUsage.rawString), "agentic": .bool(true), "auto_generate": .bool(autoGenerate),
             ]
             if glean { body["entry"] = .string("glean") }
             let answer: SaveAsNodeResponse = try await app.api.post(APIPath.streamingSaveAsNode(sid),

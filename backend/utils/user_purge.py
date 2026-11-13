@@ -767,14 +767,17 @@ def _batch_keys(key_type="chat"):
 
 def _cancel_provider_batch(provider_key, batch_id, key_type="chat"):
     """Best-effort provider cancel of a batch that carries only this
-    user's requests. Returns None, or the error class name."""
+    user's requests. Returns None, or the error class name. Nothing
+    reads the batch again, so an OpenAI batch's files (the user's
+    requests and what came back) are deleted too (#667)."""
     from backend.utils import llm_batch
     try:
         keys = _batch_keys(key_type)
         if provider_key == "anthropic":
             llm_batch.anthropic_batch_cancel_one(keys.get("anthropic"), batch_id)
         elif provider_key.startswith("openai"):
-            llm_batch.openai_batch_cancel_one(keys.get("openai"), batch_id)
+            llm_batch.openai_batch_cancel_one(keys.get("openai"), batch_id,
+                                              delete_files=True)
         else:
             return "UnknownProvider"
         return None
@@ -859,6 +862,7 @@ def _strip_batch_jobs(model, belongs, dry_run, now, counts, key):
 PIPELINE_FLAG_RESETS = {
     "profile_batch_pending": False,
     "profile_needs_full_regen": False,
+    "profile_import_retip_from": None,
     "profile_batch_attempts": 0,
     "profile_force_batch": False,
     "profile_cap_held": False,

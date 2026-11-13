@@ -12,10 +12,15 @@ import api from '../api';
 import * as voiceTiming from '../utils/voiceTiming';
 import { isAiUsageRefusedError, aiUsageRefusalScope } from '../utils/aiUsage';
 import {
-  THREAD_LIMIT_SPOKEN, THREAD_TOO_LONG_CODE, isThreadTooLong, primeSpeech,
+  THREAD_TOO_LONG_CODE, isThreadTooLong, primeSpeech,
   soundThenSay, stopSpeaking,
 } from '../utils/threadLength';
 import { isApprovalPendingError } from '../utils/toolApprovals';
+import {
+  AI_USAGE_REFUSAL, APPROVAL_REFUSAL, LENGTH_REFUSAL, REFUSAL_SENTENCES,
+  SPEND_CAP_REFUSAL,
+} from '../utils/spokenRefusal';
+import { isSpendCapError } from '../utils/spendCap';
 import { onPageReturn } from '../utils/pageReturn';
 import { playErrorSound } from '../utils/errorSound';
 
@@ -47,6 +52,11 @@ const TTS_SSE_CATCH_UP_MS = 3000;
 // it is usually in before the reply has been heard; only a clip being made
 // for the first time, or a slow network, takes this long. Not measured.
 const ANNOUNCEMENT_WAIT_MS = 5000;
+
+// A refused turn's sentence, now (#651; see sayTurnRefusal in the hook):
+// the error sound first only for the thread's length, as #648 built it.
+const sayRefusalNow = (code) => soundThenSay(REFUSAL_SENTENCES[code],
+  code === LENGTH_REFUSAL ? playErrorSound : null);
 
 const absoluteUrl = (url) => (url.startsWith('http')
   ? url
@@ -252,19 +262,6 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   useEffect(() => {
     onAiUsageRefusedRef.current = onAiUsageRefused;
   }, [onAiUsageRefused]);
-  // The thread is too long for another reply (#648): a refused record
-  // press, a recording whose reply was skipped, or a reply refused before
-  // its first call. The error sound plays, then the sentence is said aloud
-  // (the user may not be looking) with the browser's own speech: no server
-  // call; a browser that refuses speech outside a gesture still plays the
-  // sound. The page then shows the limit ('too_long', with the server's
-  // *message* when it sent one) and the way to a new thread.
-  const refuseForThreadLength = useCallback((message) => {
-    soundThenSay(THREAD_LIMIT_SPOKEN, playErrorSound);
-    if (onAiUsageRefusedRef.current) {
-      onAiUsageRefusedRef.current('too_long', message || null);
-    }
-  }, []);
   // The server confirmed the recording is saved as an entry (#391): the
   // page learns that without waiting for a reply, which can fail or be
   // skipped after the entry exists.
@@ -364,6 +361,72 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     }
   }, [audio.waitingForChunks, audio.queueFinishedCount]);
 
+  // A refused turn says why aloud (#651; the thread's length first, #648):
+  // the user may not be looking. The refusal's sentence (utils/spokenRefusal:
+  // Loore's voice from its cached clip, the browser's own speech where that
+  // can't play). *code*: the server's code for the refusal; one without a
+  // sentence says nothing. A refusal is not a failure, so no error sound
+  // (as for AI usage before, 2026-10-13), except before the thread's length,
+  // as #648 built it, so a browser that says nothing outside a gesture
+  // still gives a sign. Never over this turn's reply: with part of it still
+  // to play, the sentence waits until that audio has played (as the error
+  // sound of a failed reply does); a new turn meanwhile drops it. A new
+  // recording stops it (stopSpeaking).
+  const refusalAfterQueueRef = useRef(null);
+  const sayTurnRefusal = useCallback((code) => {
+    if (!REFUSAL_SENTENCES[code]) return;
+    const queue = latestAudioRef.current;
+    const turn = turnRef.current;
+    if (audioTurnRef.current === turn && queue.generatingTTS && !queue.waitingForChunks) {
+      refusalAfterQueueRef.current = { turn, finishedCount: queue.queueFinishedCount, code };
+      return;
+    }
+    sayRefusalNow(code);
+  }, []);
+  useEffect(() => {
+    const waiting = refusalAfterQueueRef.current;
+    if (!waiting || waiting.turn !== turnRef.current) return;
+    if (audio.waitingForChunks || audio.queueFinishedCount !== waiting.finishedCount) {
+      refusalAfterQueueRef.current = null;
+      sayRefusalNow(waiting.code);
+    }
+  }, [audio.waitingForChunks, audio.queueFinishedCount]);
+  // The thread is too long for another reply (#648): a refused record
+  // press, a recording whose reply was skipped, or a reply refused before
+  // its first call. Said aloud as above; the page then shows the limit
+  // ('too_long', with the server's *message* when it sent one) and the way
+  // to a new thread.
+  const refuseForThreadLength = useCallback((message) => {
+    sayTurnRefusal(LENGTH_REFUSAL);
+    if (onAiUsageRefusedRef.current) {
+      onAiUsageRefusedRef.current('too_long', message || null);
+    }
+  }, [sayTurnRefusal]);
+  // A Record or Continue press the page refused for the monthly usage limit
+  // it already knew of (#341), said aloud as a refusal from the server is.
+  // Called inside the press, so the browser may speak later; a reply still
+  // playing is paused first, so the two never overlap.
+  const refuseForUsageLimit = useCallback(() => {
+    primeSpeech();
+    const queue = latestAudioRef.current;
+    if (queue.isPlaying) queue.pause();
+    sayRefusalNow(SPEND_CAP_REFUSAL);
+  }, []);
+  // The refusal a start's error stands for (useStreamingTranscription's
+  // flags); the thread's length is said with its screen (below).
+  const startRefusalCode = (err) => {
+    if (err?.spendCapped) return SPEND_CAP_REFUSAL;
+    if (err?.aiUsageRefused) return AI_USAGE_REFUSAL;
+    if (err?.approvalPending) return APPROVAL_REFUSAL;
+    return null;
+  };
+  // The refusal an answer of the server stands for: its `code`, or the
+  // 402's `error`.
+  const responseRefusalCode = (err) => {
+    const data = err?.response?.data;
+    return data ? (data.code || data.error || null) : null;
+  };
+
   // Streaming transcription
   // Derive label from apiEndpoint: '/voice' → 'Voice'
   const workflowLabel = apiEndpoint ? apiEndpoint.replace('/', '').charAt(0).toUpperCase() + apiEndpoint.replace('/', '').slice(1) : null;
@@ -381,6 +444,9 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       // Non-fatal upload failures (transient network) preserve prior silent
       // retry-queue behavior so they don't interrupt an in-progress recording.
       if (!err?.startup && !err?.fatal) return;
+      // A refused start says why aloud (#651): the usage limit, AI usage, a
+      // waiting change. The thread's length is said with its screen below.
+      sayTurnRefusal(startRefusalCode(err));
 
       // Refused by the monthly spend cap before the mic opened (#341). The
       // recorder already showed a toast; return to ready, not an error.
@@ -482,6 +548,9 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
         setPhase('ready');
         // The thread grew past the limit with this recording (#648).
         if (data.warningCode === THREAD_TOO_LONG_CODE) refuseForThreadLength();
+        // Any other refusal (the usage limit, AI usage, a waiting change)
+        // is said too (#651); a warning that is not one has no code.
+        else sayTurnRefusal(data.warningCode);
         return;
       }
 
@@ -523,6 +592,17 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
         if (onEntrySavedRef.current) onEntrySavedRef.current();
       } catch (err) {
         console.error(`${apiEndpoint} API error:`, err);
+        // A refusal says why aloud (#651); the thread's length is said with
+        // its screen below.
+        if (!isThreadTooLong(err)) sayTurnRefusal(responseRefusalCode(err));
+        // The monthly usage limit (#341): refused, not failed, so no failure
+        // sound and no red dot; the server's text says when it resets (it
+        // used to show the bare code).
+        if (isSpendCapError(err)) {
+          addToast(err.response.data.message || REFUSAL_SENTENCES[SPEND_CAP_REFUSAL], 8000);
+          setPhase('ready');
+          return;
+        }
         // AI usage keeps the thread away from AI: the page explains (a
         // blocked state with its own screen, not a failure: no sound).
         if (isAiUsageRefusedError(err) && onAiUsageRefusedRef.current) {
@@ -1287,6 +1367,9 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   useEffect(() => {
     return () => {
       turnRef.current += 1;
+      // A refusal's sentence goes with the screen (#651), its clip and its
+      // wait for the browser's speech too, as on the iPhone.
+      stopSpeaking();
       stopSilentAudio();
       audio.stop();
       ttsSSE.disconnect();
@@ -1313,5 +1396,6 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     handleCancelProcessing,
     setThreadParentId,
     getThreadParentId,
+    refuseForUsageLimit,
   };
 }

@@ -44,10 +44,35 @@ def _deliver(to_email, subject, text_body, html_body):
         smtp.sendmail(sender, to_email, msg.as_string())
 
 
+# INTRODUCED CONSTANT (#666): 8 hex characters (32 bits) tell one
+# recipient's lines from another's in a day's logs; the key keeps the
+# address from being confirmed by hashing a guess.
+RECIPIENT_HASH_CHARS = 8
+
+
+def recipient_ref(address, user_id=None):
+    """How a log line names a mail's recipient, never by the address
+    (#666): log lines become Sentry breadcrumbs and events. "user 42"
+    when the account is known; otherwise "address <8 hex characters>", a
+    hash of the lowercased address keyed with the app's SECRET_KEY, so a
+    "the mail never came" report can be matched in the logs (by computing
+    the same hash in a flask shell) without the address being written
+    anywhere or guessed from the log."""
+    if user_id is not None:
+        return f"user {user_id}"
+    import hashlib
+    import hmac
+    key = (current_app.config.get("SECRET_KEY") or "").encode()
+    digest = hmac.new(key, (address or "").strip().lower().encode(),
+                      hashlib.sha256).hexdigest()
+    return f"address {digest[:RECIPIENT_HASH_CHARS]}"
+
+
 def _send(to_email, subject, text_body, html_body, sent_log, failed_log,
           best_effort=False):
     """_deliver plus the sender's log lines. ``best_effort`` mails (admin
-    heads-ups, notices about something that already happened) never raise."""
+    heads-ups, notices about something that already happened) never raise.
+    The log lines never hold an address (recipient_ref, #666)."""
     try:
         _deliver(to_email, subject, text_body, html_body)
         logger.info(sent_log)
@@ -116,7 +141,10 @@ def _duration_words(seconds):
     return f"{seconds} seconds"
 
 
-def send_magic_link_email(to_email, magic_link_url):
+def send_magic_link_email(to_email, magic_link_url, user_id=None):
+    """*user_id*: the account the address belongs to, if there is one
+    (a sign-up has none yet); only for the log line."""
+    who = recipient_ref(to_email, user_id)
     lifetime = _duration_words(
         current_app.config.get("MAGIC_LINK_EXPIRY_SECONDS", 900))
     text_body = (
@@ -132,8 +160,8 @@ def send_magic_link_email(to_email, magic_link_url):
         (f"This link expires in {lifetime} and can only be used once.",
          "If you didn't request this, you can safely ignore this email."))
     _send(to_email, "Your Loore sign-in link", text_body, html_body,
-          f"Magic link email sent to {to_email}",
-          f"Failed to send magic link email to {to_email}")
+          f"Magic link email sent ({who})",
+          f"Failed to send magic link email ({who})")
 
 
 def send_email_change_email(to_email, confirm_url, expires_in_seconds):
@@ -311,7 +339,8 @@ def send_account_deleted_email(to_email):
           best_effort=True)
 
 
-def send_welcome_email(to_email, magic_link_url):
+def send_welcome_email(to_email, magic_link_url, user_id=None):
+    who = recipient_ref(to_email, user_id)
     text_body = (
         "Welcome to Loore\n\n"
         "Your account has been approved! You're one of the first people here.\n\n"
@@ -325,8 +354,8 @@ def send_welcome_email(to_email, magic_link_url):
         "Enter Loore", magic_link_url,
         ("This link can only be used once.",))
     _send(to_email, "Welcome to Loore", text_body, html_body,
-          f"Welcome email sent to {to_email}",
-          f"Failed to send welcome email to {to_email}")
+          f"Welcome email sent ({who})",
+          f"Failed to send welcome email ({who})")
 
 
 def send_spend_alert_email(to_email, provider, spend_usd, limit_usd, threshold):
@@ -350,8 +379,8 @@ def send_spend_alert_email(to_email, provider, spend_usd, limit_usd, threshold):
     _send(to_email,
           f"Loore spend alert: {provider} at {percent}% of monthly limit",
           text_body, html_body,
-          f"Spend alert email sent to {to_email} ({percent}%)",
-          f"Failed to send spend alert email to {to_email}")
+          f"Spend alert email sent ({percent}%)",
+          "Failed to send spend alert email")
 
 
 def send_disk_alert_email(to_email, percent, used_gb, total_gb, free_gb,
@@ -372,8 +401,8 @@ def send_disk_alert_email(to_email, percent, used_gb, total_gb, free_gb,
          f'{free_gb:,.1f} GB free.'])
     _send(to_email, f"Loore: server disk at {percent:.0f}%",
           text_body, html_body,
-          f"Disk alert email sent to {to_email} ({percent:.0f}%)",
-          f"Failed to send disk alert email to {to_email}")
+          f"Disk alert email sent ({percent:.0f}%)",
+          "Failed to send disk alert email")
 
 
 def send_provider_account_alert_email(to_email, provider, kind, model,
@@ -433,9 +462,8 @@ def send_provider_account_alert_email(to_email, provider, kind, model,
     _send(to_email,
           f"{prefix}Loore: {provider} calls are failing ({kind})",
           text_body, html_body,
-          f"Provider account alert sent to {to_email} ({provider} {kind} "
-          f"{key_role})",
-          f"Failed to send provider account alert to {to_email}")
+          f"Provider account alert sent ({provider} {kind} {key_role})",
+          "Failed to send provider account alert")
 
 
 def send_user_spend_block_email(to_email, username, spend_usd, limit_usd,
@@ -469,8 +497,8 @@ def send_user_spend_block_email(to_email, username, spend_usd, limit_usd,
     _send(to_email,
           f"Loore: user {username} hit the ${limit_usd:,.0f} monthly cap",
           text_body, html_body,
-          f"Spend block email sent to {to_email} (user {username})",
-          f"Failed to send spend block email to {to_email}")
+          f"Spend block email sent (user {username})",
+          "Failed to send spend block email")
 
 
 def send_admin_signup_notification(username, user_email):

@@ -322,7 +322,8 @@ def magic_link_send():
 
         backend_url = request.host_url.rstrip("/")
         magic_link_url = f"{backend_url}/auth/magic-link/verify?token={token}"
-        send_magic_link_email(email, magic_link_url)
+        send_magic_link_email(email, magic_link_url,
+                              user_id=user.id if user else None)
     except Exception:
         logger.exception("Error in magic link send")
         # Fall through — always return the same message to prevent enumeration

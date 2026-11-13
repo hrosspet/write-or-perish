@@ -19,9 +19,13 @@ export const THREAD_LIMIT_TEXT = 'This thread is too long for another AI '
   + 'this one has grown too large. You can still write here. To keep talking '
   + 'with AI, start a new thread.';
 
-// Said aloud in Voice mode when a turn is refused for the thread's length.
-export const THREAD_LIMIT_SPOKEN = 'This thread is too long for another '
-  + 'reply. Start a new thread to keep talking.';
+// The sentence said aloud in Voice mode when a turn is refused for the
+// thread's length, and the speech it goes through, now shared by every
+// refusal of a Voice turn (#651): see spokenRefusal.js.
+export {
+  THREAD_LIMIT_SPOKEN, SENTENCE_AFTER_SOUND_MS, speakSentence, soundThenSay,
+  stopSpeaking, primeSpeech, resetSpeechForTests,
+} from './spokenRefusal';
 
 // Where a new thread starts: Text mode for the thread page, a fresh Voice
 // session on the Voice screen.
@@ -36,73 +40,3 @@ export const isThreadTooLong = (err) =>
 // A 2xx that saved the entry but skipped its reply for the thread's length.
 export const replySkippedForLength = (data) =>
   data?.llm_error_code === THREAD_TOO_LONG_CODE;
-
-// Says *text* with the browser's own speech (no server, no provider): the
-// Voice screen's sentence for a refused turn. Returns whether it started.
-export function speakSentence(text) {
-  try {
-    if (typeof window === 'undefined') return false;
-    const synth = window.speechSynthesis;
-    const Utterance = window.SpeechSynthesisUtterance;
-    if (!synth || typeof Utterance !== 'function') return false;
-    synth.cancel();
-    synth.speak(new Utterance(text));
-    return true;
-  } catch (e) {
-    return false;
-  }
-}
-
-// The sentence waits for the error sound (three tones, ~0.6 s) to end.
-export const SENTENCE_AFTER_SOUND_MS = 700;
-let pendingSentence = null;
-
-// The refusal in Voice mode: the error sound every browser plays, then the
-// sentence. A browser that allows speech only inside a user gesture (iPhone
-// Safari before primeSpeech ran) stays silent for the sentence, never for
-// the sound.
-export function soundThenSay(text, playSound) {
-  stopSpeaking();
-  if (playSound) playSound();
-  pendingSentence = setTimeout(() => {
-    pendingSentence = null;
-    speakSentence(text);
-  }, SENTENCE_AFTER_SOUND_MS);
-}
-
-// A new recording starts: a sentence still waiting or being said stops, so
-// it is never recorded into the entry.
-export function stopSpeaking() {
-  if (pendingSentence) {
-    clearTimeout(pendingSentence);
-    pendingSentence = null;
-  }
-  try {
-    if (typeof window !== 'undefined' && window.speechSynthesis) {
-      window.speechSynthesis.cancel();
-    }
-  } catch (e) { /* speech unavailable */ }
-}
-
-// Called in the Record tap (a user gesture): WebKit lets a page speak
-// later, outside a gesture, only after it has spoken inside one. An empty
-// utterance, once per page: nothing is heard or recorded.
-let speechPrimed = false;
-export function primeSpeech() {
-  if (speechPrimed) return;
-  try {
-    if (typeof window === 'undefined') return;
-    const synth = window.speechSynthesis;
-    const Utterance = window.SpeechSynthesisUtterance;
-    if (!synth || typeof Utterance !== 'function') return;
-    synth.speak(new Utterance(''));
-    speechPrimed = true;
-  } catch (e) { /* speech unavailable */ }
-}
-
-// Tests only.
-export function resetSpeechForTests() {
-  speechPrimed = false;
-  if (pendingSentence) clearTimeout(pendingSentence);
-  pendingSentence = null;
-}

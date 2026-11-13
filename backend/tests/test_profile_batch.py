@@ -1028,6 +1028,30 @@ def test_poll_fails_stale_job(app, monkeypatch, check):
     assert u2.profile_batch_attempts == 1
 
 
+@pytest.mark.parametrize("provider_key", ["openai:gpt-x", "anthropic"])
+def test_a_stale_openai_batch_is_dropped_with_its_files(
+        app, monkeypatch, provider_key):
+    """#667: nothing reads a stale job's batch again, so an OpenAI one is
+    cancelled if it still runs and its files are deleted. An Anthropic
+    batch has no files."""
+    u = _user()
+    prev = _prev_profile(u, datetime(2026, 5, 1))
+    job, item = _chunk_job(u, prev)
+    job.provider_key = provider_key
+    job.submitted_at = datetime.utcnow() - timedelta(hours=30)
+    db.session.commit()
+    dropped = []
+    monkeypatch.setattr(pb, "drop_openai_batch",
+                        lambda key, batch_id: dropped.append(batch_id))
+    monkeypatch.setattr(pb, "batch_check_and_collect", _raise_unreadable)
+    monkeypatch.setattr(pb, "batch_submit", MagicMock(return_value={}))
+
+    pb._poll_profile_batches()
+
+    assert ProfileBatchJob.query.get(job.id).status == "failed"
+    assert dropped == ([job.batch_id] if provider_key != "anthropic" else [])
+
+
 # ── tokenizer-aware budgets (Community Archive pre-fill cost fixes) ───────
 
 def test_use_batch_for_user_force_flag(app):

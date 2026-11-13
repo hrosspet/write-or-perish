@@ -400,6 +400,19 @@ def voice_availability():
 # "the announcement should be TTSed as a separate chunk and appended to the
 # queue. So that when it's not pending, it's not voiced out anymore"
 
+def _announcement_access_refusal():
+    """The access check of the other routes that serve speech (POST
+    /nodes/<id>/tts): Voice mode on the account (403, the shape of
+    nodes.voice_mode_required), so no clip is made, or billed, for an
+    account that may not use Voice. None when the account may have the
+    clip. The players take a refusal quietly: the reply plays alone, and
+    a refusal's sentence is said with the device's speech (#651)."""
+    if not current_user.has_voice_mode:
+        return jsonify(
+            {"error": "Voice mode not enabled for this account"}), 403
+    return None
+
+
 @voice_bp.route("/approval-announcement", methods=["GET"])
 @login_required
 def approval_announcement_info():
@@ -412,6 +425,9 @@ def approval_announcement_info():
     be made. Asked when the reply is played, so a replay after the user
     decided has no announcement. A node that is not the user's reply
     answers 404, like one that does not exist."""
+    refused = _announcement_access_refusal()
+    if refused is not None:
+        return refused
     from backend.utils.announcement_audio import ensure_clip, variant_for
     from backend.utils.privacy import can_user_access_node
     from backend.utils.tool_approvals import announcement_count
@@ -434,6 +450,9 @@ def approval_announcement_info():
 def approval_announcement_audio(variant):
     """The announcement clip (one change / several), made on the first
     request and cached; 404 for another name, 503 when it can't be made."""
+    refused = _announcement_access_refusal()
+    if refused is not None:
+        return refused
     from flask import send_file
     from backend.utils.announcement_audio import (
         ANNOUNCEMENT_TEXTS, ensure_clip,
@@ -444,6 +463,34 @@ def approval_announcement_audio(variant):
     if clip is None:
         return jsonify({"error": "The announcement is not available."}), 503
     return send_file(str(clip.path), mimetype="audio/mpeg", max_age=86400)
+
+
+# ── A refused Voice turn, said aloud (#651) ──────────────────────────────
+
+@voice_bp.route("/refusal/<code>.mp3", methods=["GET"])
+@login_required
+def refusal_audio(code):
+    """The sentence for a refused Voice turn (utils/voice_refusals), by
+    the refusal's code: its cached clip in the replies' voice, made on the
+    first request for that voice. The clients ask for it when a turn is
+    refused and play it on its own, never in a reply's audio. Access as
+    for the announcement (Voice mode on the account); 404 for an unknown
+    code, 503 when the clip can't be made (the clients then say the
+    sentence with the device's speech). Not cached by the browser beyond
+    a revalidation: the address names no voice, and a new voice makes a
+    new clip."""
+    refused = _announcement_access_refusal()
+    if refused is not None:
+        return refused
+    from flask import send_file
+    from backend.utils.announcement_audio import ensure_refusal_clip
+    from backend.utils.voice_refusals import SPOKEN_REFUSALS
+    if code not in SPOKEN_REFUSALS:
+        return jsonify({"error": "Not found"}), 404
+    clip = ensure_refusal_clip(code, current_user.id)
+    if clip is None:
+        return jsonify({"error": "The sentence is not available."}), 503
+    return send_file(str(clip.path), mimetype="audio/mpeg", max_age=0)
 
 
 # ── Where a voice turn's wait goes (#371 step 0) ─────────────────────────
