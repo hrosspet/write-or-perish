@@ -554,9 +554,11 @@ def draft_transcription_stream(session_id):
                         # was dispatched (e.g. misconfigured placeholder,
                         # spend cap). The transcript was saved as a node.
                         complete_data["warning"] = current_draft.streaming_warning
-                        # A reply skipped for the thread's length (#648):
-                        # the Voice screen says it aloud.
-                        from backend.utils.thread_size import (
+                        # A reply skipped for a refusal (the thread's
+                        # length, #648; the usage limit, AI usage, a
+                        # waiting change, #651): the Voice screens say
+                        # it aloud.
+                        from backend.utils.voice_refusals import (
                             skipped_reply_code,
                         )
                         warning_code = skipped_reply_code(

@@ -562,6 +562,8 @@ struct VoiceView: View {
         if app.spendCapped {
             app.notifySpendBlocked()
             app.toasts.show(SpendCap.toastMessage(.record), duration: 8)
+            // ...and say it (#651): the user may not be looking.
+            Task { await voice.announceUsageLimit() }
             return
         }
         Task {
@@ -593,6 +595,8 @@ struct VoiceView: View {
         if app.spendCapped {
             app.notifySpendBlocked()
             app.toasts.show(SpendCap.toastMessage(.record), duration: 8)
+            // ...and say it (#651), the reply stopped first as Continue stops it.
+            Task { await voice.announceUsageLimit() }
             return
         }
         voice.continueConversation()
