@@ -108,9 +108,15 @@ def refresh_community_archive_snapshot(first_copy=False):
     download a gigabyte per deploy on its own. The first copy comes from
     the pre-fill import, the CLI, or *first_copy*: a read that found no
     export queues this with it (ca_feed.request_snapshot_refresh, #435
-    review), so the first glean on a fresh machine starts the fetch."""
+    review), so the first glean on a fresh machine starts the fetch.
+
+    With COMMUNITY_ARCHIVE_API_KEY set and the export stale (or absent),
+    it then caches the current day window from API v1 for Glean
+    (ca_feed.refresh_v1_day_for_read, #688): once per window, the runs
+    after that find it cached and send no request."""
     from backend.utils.ca_feed import (
         fetch_first_snapshot, refresh_snapshot_for_read,
+        refresh_v1_day_for_read,
     )
     with flask_app.app_context():
         snapshot_dir = snapshot_dir_for(flask_app.config)
@@ -118,7 +124,8 @@ def refresh_community_archive_snapshot(first_copy=False):
             export_id = fetch_first_snapshot(snapshot_dir, log=logger)
         else:
             export_id = refresh_snapshot_for_read(snapshot_dir, log=logger)
-    return {"export_id": export_id}
+        v1_day = refresh_v1_day_for_read(snapshot_dir, log=logger)
+    return {"export_id": export_id, "api_v1_day": v1_day}
 
 
 def _raise_if_prefill_refused(user):
@@ -133,7 +140,8 @@ def _raise_if_prefill_refused(user):
 def prefill_community_archive_impl(user_id, handle, options, update_state=None,
                                    seed_now=True):
     """Fetch @handle's tweets from the Community Archive (REST for small
-    accounts, the nightly parquet snapshot for large ones) into the user's
+    accounts, the nightly parquet snapshot for large ones; API v1 for every
+    account when COMMUNITY_ARCHIVE_API_KEY is set) into the user's
     account (origin="twitter", private, AI-readable) and pin the user to
     the BATCH profile pipeline before the import's profile handoff runs,
     so a bootstrapped corpus never triggers a synchronous (full-price)
@@ -184,6 +192,11 @@ def prefill_community_archive_impl(user_id, handle, options, update_state=None,
     # and parquet is not.
     min_parquet = current_app.config.get("COMMUNITY_ARCHIVE_PARQUET_MIN_TWEETS", 5000)
     use_parquet = bool(options.get("force_parquet")) or expected >= min_parquet
+    if ca.v1_enabled() and not options.get("force_parquet"):
+        # API v1 (#688) has no count, so whether the snapshot holds all of
+        # the account (the check below) cannot be known; its cursor paging
+        # reads a large account whole, live, at 200 tweets a request.
+        use_parquet = False
     if use_parquet:
         snapshot_dir = snapshot_dir_for(current_app.config)
         state("downloading", 0, None)
@@ -219,7 +232,8 @@ def prefill_community_archive_impl(user_id, handle, options, update_state=None,
                                   x_id=account.get("account_id"),
                                   provenance=PROVENANCE_PREFILL_CA)
     result.update({
-        "source": "parquet" if use_parquet else "rest",
+        "source": ("parquet" if use_parquet
+                   else "api-v1" if ca.v1_enabled() else "rest"),
         # What the archive actually holds vs. the account's self-reported
         # lifetime counter (uploads are often partial) — so a low node
         # count reads as "partial archive", not "import bug".

@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import api from '../api';
 import { useToast } from '../contexts/ToastContext';
-import { formatDateTime } from '../utils/date';
+import { formatDateTime, parseTimestamp } from '../utils/date';
 
 /**
  * A Community Archive read reply on the thread page.
@@ -26,14 +26,29 @@ import { formatDateTime } from '../utils/date';
 
 const count = (n) => Number(n || 0).toLocaleString('en-US');
 
+// "3 November", the reader's local date of the newest tweet.
+const dayMonth = (iso) => parseTimestamp(iso)
+  .toLocaleDateString('en-GB', { day: 'numeric', month: 'long' });
+
+/**
+ * The sentence a stale read adds (#688): the archive had nothing newer
+ * than the window's end when the read was made (read_window.export_stale,
+ * set by the server when the newest tweet was more than 36 hours old).
+ */
+export const staleExportNote = (w) => (w && w.export_stale && w.window_end
+  ? `The newest tweets available are from ${dayMonth(w.window_end)}; the archive's daily export has not updated since.`
+  : null);
+
 export const ReadWindowLine = ({ window: w }) => {
   if (!w || !w.window_end) return null;
   const from = formatDateTime(w.window_start);
   const to = formatDateTime(w.window_end);
+  const stale = staleExportNote(w);
   return (
     <p className="read-window">
       {`Tweets from ${from} to ${to} (your time): ${count(w.tweets)} by ${count(w.accounts)} accounts.`}
       {w.excluded > 0 && ` ${count(w.excluded)} you had already read were left out.`}
+      {stale && ` ${stale}`}
     </p>
   );
 };
