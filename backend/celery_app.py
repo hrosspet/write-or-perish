@@ -190,6 +190,13 @@ celery.conf.update(
             'task': 'backend.tasks.chat_imports.resume_stalled_imports',
             'schedule': 60.0,  # every minute
         },
+        # Invites (#439): an unused one expires after INVITE_EXPIRY_DAYS,
+        # and the handle or address in it is deleted. One indexed query
+        # when nothing is due.
+        'expire-invites': {
+            'task': 'backend.tasks.invites.expire_invites',
+            'schedule': 3600.0,  # hourly
+        },
     },
 )
 
@@ -247,3 +254,4 @@ from backend.tasks import imports  # noqa: F401
 from backend.tasks import chat_imports  # noqa: F401
 from backend.tasks import intentions  # noqa: F401
 from backend.tasks import user_purge  # noqa: F401
+from backend.tasks import invites  # noqa: F401

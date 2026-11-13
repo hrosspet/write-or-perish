@@ -225,6 +225,9 @@ final class AppState {
             defaults.set(craft, forKey: DefaultsKey.craftMode)
         }
         if newUser.spendBlocked { spendCapped = true }
+        // Which cap it is (#438): the trial's or the free month's lifts with
+        // the first payment, and the texts say so.
+        SpendCap.liftsWithPayment = newUser.spendBlocked && newUser.spendCapLiftsWithPayment
         applyPayments(newUser)
         syncTimezoneIfNeeded()
         fetchUpdatesIfNeeded()
@@ -447,6 +450,7 @@ final class AppState {
         subscriptionRequired = false
         subscriptionBannerMessage = nil
         APIError.paymentsEnabled = false
+        SpendCap.liftsWithPayment = false
         pendingUpdates = nil
         updatesFetched = false
         pendingLandingPath = nil
@@ -516,9 +520,12 @@ final class AppState {
     }
 
     /// Marks the session as capped and shows the banner (web `notifySpendBlocked`),
-    /// for cost actions refused before they start.
-    func notifySpendBlocked() {
+    /// for cost actions refused before they start. An answer that saved the
+    /// writing but skipped the reply passes which cap it is (#438); a press
+    /// refused here passes nothing and keeps what is known.
+    func notifySpendBlocked(liftsWithPayment: Bool? = nil) {
         spendCapped = true
+        if let liftsWithPayment { SpendCap.liftsWithPayment = liftsWithPayment }
         if spendCapBannerMessage == nil { spendCapBannerMessage = APIError.spendCapFallbackMessage }
     }
 

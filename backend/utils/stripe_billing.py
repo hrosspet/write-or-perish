@@ -183,11 +183,6 @@ class StripeGateway:
             params=params))
 
     # Customer credit (#439: a referral's free week)
-    def preview_invoice(self, customer_id, subscription_id):
-        """What the subscription's next invoice will charge."""
-        return plain(self.client.v1.invoices.create_preview(params={
-            "customer": customer_id, "subscription": subscription_id}))
-
     def list_balance_transactions(self, customer_id):
         page = self.client.v1.customers.balance_transactions.list(
             customer_id, params={"limit": 100})

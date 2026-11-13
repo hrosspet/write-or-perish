@@ -56,7 +56,7 @@ from backend.extensions import db
 from backend.models import (
     ApiToken, ChangelogReadState, CheckoutSession, DiscountCode,
     DiscountCodeAttempt,
-    DiscountRedemption, Node, Poll, Referral, ReleasedUsername, User,
+    DiscountRedemption, Invite, Node, Poll, Referral, ReleasedUsername, User,
     UserDataPurge, UsernameHistory,
 )
 from backend.utils import user_purge
@@ -672,6 +672,19 @@ def delete_identity(user_id):
     counts["referral.friend_id"] += Referral.query.filter(
         Referral.friend_id == U).update(
         {Referral.friend_id: None}, synchronize_session=False)
+    # Invites (#439): the account's own. An open one is withdrawn, and the
+    # handle or address of every one is deleted (the people it named may
+    # never have signed up); the row and its state stay, without the
+    # account, for a referral that points to it.
+    counts["invite.withdrawn"] += Invite.query.filter(
+        Invite.inviter_id == U, Invite.state == "open").update(
+        {Invite.state: "withdrawn", Invite.ended_at: datetime.utcnow()},
+        synchronize_session=False)
+    counts["invite.inviter_id"] += Invite.query.filter(
+        Invite.inviter_id == U).update(
+        {Invite.inviter_id: None, Invite.target: None,
+         Invite.target_x_id: None},
+        synchronize_session=False)
 
     handles = {(user.username or "").lower()}
     handles.update(h for (h,) in db.session.query(

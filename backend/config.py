@@ -237,15 +237,26 @@ class Config:
     # to `flask alpha-free-month --apply --start` (the Beta release date).
     ALPHA_FREE_MONTH_DAYS = int(
         os.environ.get("ALPHA_FREE_MONTH_DAYS") or "30")
-    # Referrals (#439): an invite link per account; on the friend's first
-    # payment both get a free week as Stripe customer credit. On only
-    # while PAYMENTS_ENABLED is on; this switch turns the link and new
-    # referrals off by itself (a free week already earned is still given).
+    # Referrals (#439): one personal invite a month per account; on the
+    # friend's first payment both get a free week as Stripe customer
+    # credit. On only while PAYMENTS_ENABLED is on; this switch turns
+    # invites and new referrals off by itself (a free week already earned
+    # is still given).
     REFERRALS_ENABLED = os.environ.get(
         "REFERRALS_ENABLED", "true").lower() in ("1", "true", "yes")
-    # Days of the free week (Peter, 2026-10-09: "a free week for both"):
-    # credit worth this many thirtieths of the next invoice.
-    REFERRAL_REWARD_DAYS = int(os.environ.get("REFERRAL_REWARD_DAYS") or "7")
+    # The free week's worth, as a share of the Standard level's monthly
+    # price before tax (SUBSCRIPTION_PRICE_CENTS_STANDARD), so a price
+    # change carries over. Peter, 2026-11-13: "the credit from referrals
+    # should be one week, or 1/4th of the standard subscription. If the
+    # inviter or the invitee have higher level of subscription, that
+    # shouldn't change the amount they are credited". 0.25 of 30.00 USD is
+    # 7.50 USD for each side; 7 days of 30 would be 7/30 (7.00 USD).
+    REFERRAL_CREDIT_FRACTION = float_from_env(
+        "REFERRAL_CREDIT_FRACTION", 0.25)
+    # Days an invite stays usable once made (Peter, 2026-11-13: one
+    # personal invite a month, "no keeping of invites"). An unused one then
+    # expires and the address or handle in it is deleted.
+    INVITE_EXPIRY_DAYS = int(os.environ.get("INVITE_EXPIRY_DAYS") or "30")
 
     # Long threads (#648; Peter, 2026-11-12): every AI reply sends the
     # whole thread above it. A reply whose prompt would be over

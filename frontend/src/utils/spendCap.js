@@ -13,11 +13,18 @@
 // the 402's lifts_on; "YYYY-MM-DD", UTC). It is the first of next month,
 // unless last month's overflow is larger than a whole month's limit and
 // holds the cap for longer (#594).
+//
+// Payments on (#438): the trial's ceiling and an alpha tester's free
+// month's lift with the first payment, not on a date and not with the
+// month. The server says so (user.spend_cap_lifts_with_payment, the 402's
+// lifts_with_payment, a 2xx's spend_cap_lifts_with_payment), and the texts
+// here then say that instead of a reset.
 
 import { paymentsEnabled } from './subscription';
 
 let _capped = false;
 let _liftsOn = null;
+let _liftsWithPayment = false;
 
 function rememberLiftDate(liftsOn) {
   if (typeof liftsOn === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(liftsOn)) {
@@ -29,12 +36,16 @@ if (typeof window !== 'undefined') {
   window.addEventListener('loore:spend-capped', (e) => {
     _capped = true;
     rememberLiftDate(e && e.detail && e.detail.liftsOn);
+    // A 402 (api.js) says which cap it is; the banner raised here without
+    // a detail keeps what is known.
+    if (e && e.detail) _liftsWithPayment = !!e.detail.liftsWithPayment;
   });
 }
 
-export function markSpendBlocked(liftsOn) {
+export function markSpendBlocked(liftsOn, liftsWithPayment) {
   _capped = true;
   rememberLiftDate(liftsOn);
+  _liftsWithPayment = !!liftsWithPayment;
 }
 
 export function isSpendBlocked() {
@@ -44,10 +55,15 @@ export function isSpendBlocked() {
 // Re-surface the banner (and mark blocked) — call this when a capped user
 // attempts a cost action that we're refusing client-side.
 // A response that saved the writing but skipped the reply for the cap
-// (`spend_capped`) passes its `spend_cap_lifts_on`.
-export function notifySpendBlocked(liftsOn) {
+// (`spend_capped`) passes its `spend_cap_lifts_on` and
+// `spend_cap_lifts_with_payment`; a press refused here passes nothing and
+// keeps what is known.
+export function notifySpendBlocked(liftsOn, liftsWithPayment) {
   _capped = true;
   rememberLiftDate(liftsOn);
+  if (liftsOn !== undefined || liftsWithPayment !== undefined) {
+    _liftsWithPayment = !!liftsWithPayment;
+  }
   try {
     window.dispatchEvent(new CustomEvent('loore:spend-capped', {}));
   } catch (e) {
@@ -97,7 +113,14 @@ function capSentence() {
     : "You've reached your monthly usage limit for the free alpha.";
 }
 
+// A cap only the first payment lifts (the trial's, the free month's): the
+// server's 402 names which; raised here, the words fit both. They name the
+// state, never where or how to pay.
+export const SPEND_CAP_UNTIL_PAYMENT_MESSAGE =
+  "You've reached your usage limit. It lifts with your first payment.";
+
 export function spendCapBannerMessage(now = new Date()) {
+  if (_liftsWithPayment) return SPEND_CAP_UNTIL_PAYMENT_MESSAGE;
   const lifts = spendCapLiftDate(now);
   if (lifts.getTime() === nextMonthStart(now).getTime()) {
     return paymentsEnabled()
@@ -111,11 +134,16 @@ export function spendCapBannerMessage(now = new Date()) {
 export function resetSpendCapForTests() {
   _capped = false;
   _liftsOn = null;
+  _liftsWithPayment = false;
 }
 
 export function spendCapToastMessage(action, now = new Date()) {
   const what = action === 'upload' ? 'upload audio'
     : action === 'glean' ? 'glean' : 'start a new recording';
+  if (_liftsWithPayment) {
+    return `You've reached your usage limit, so you can't ${what} `
+      + 'until your first payment.';
+  }
   return `You've reached your monthly usage limit, so you can't ${what} `
     + `until it resets on ${spendCapResetDate(now)}.`;
 }
