@@ -10,6 +10,7 @@ on:
 jobs:
   changes:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       backend: ${{ steps.filter.outputs.backend }}
       frontend: ${{ steps.filter.outputs.frontend }}
@@ -29,6 +30,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout code
@@ -42,9 +44,11 @@ jobs:
           cache-dependency-path: backend/requirements.txt
 
       - name: Install system dependencies (ffmpeg for audio processing)
+        timeout-minutes: 5
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          APT_OPTS="-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o DPkg::Lock::Timeout=60"
+          sudo apt-get $APT_OPTS update
+          sudo apt-get $APT_OPTS install -y ffmpeg
 
       - name: Install Python dependencies
         run: |
@@ -67,6 +71,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - name: Checkout code
@@ -108,6 +113,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - name: Checkout code
