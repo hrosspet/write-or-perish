@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from flask import Blueprint, redirect, url_for, flash, current_app, request, jsonify
 from flask_login import login_user, logout_user, login_required, current_user
@@ -11,6 +11,7 @@ from backend.utils.magic_link import (
     generate_magic_link_token, verify_magic_link_token,
     hash_token, generate_unique_username,
 )
+from backend.utils import sign_in_links
 from backend.utils.email import (
     send_magic_link_email, send_x_connected_notice, is_valid_email)
 from backend.utils.reserved_usernames import derive_available_username
@@ -306,19 +307,27 @@ def magic_link_send():
 
     if next_url and not is_safe_redirect_url(next_url):
         next_url = None
+    if not sign_in_links.client_may_ask(request.remote_addr):
+        # About this client only (utils/sign_in_links.py), never about
+        # the address.
+        logger.info("Sign-in email request over the client limit")
+        return jsonify({"error": sign_in_links.WAIT_MESSAGE}), 429
 
     try:
         token = generate_magic_link_token(email, next_url)
         token_h = hash_token(token)
-        expiry = datetime.utcnow() + timedelta(
-            seconds=current_app.config.get("MAGIC_LINK_EXPIRY_SECONDS", 900)
-        )
-
+        # A link of its own: the links already sent to the address keep
+        # working until they are used or expire (utils/sign_in_links.py).
         user = User.query.filter_by(email=email).first()
-        if user:
-            user.magic_link_token_hash = token_h
-            user.magic_link_expires_at = expiry
-            db.session.commit()
+        if not sign_in_links.record_link(
+                email, token_h,
+                current_app.config.get("MAGIC_LINK_EXPIRY_SECONDS", 900)):
+            # Over the address's limit: nothing is sent, and the answer is
+            # the one a sent link gets.
+            logger.info("Sign-in email not sent: the address's limit is "
+                        "reached (%s)",
+                        f"user {user.id}" if user else "no account")
+            return _link_sent_answer()
 
         backend_url = request.host_url.rstrip("/")
         magic_link_url = f"{backend_url}/auth/magic-link/verify?token={token}"
@@ -327,6 +336,13 @@ def magic_link_send():
         logger.exception("Error in magic link send")
         # Fall through — always return the same message to prevent enumeration
 
+    return _link_sent_answer()
+
+
+def _link_sent_answer():
+    """The answer to every sign-in email request that is not refused for
+    its client: an address with or without an account, a link sent or
+    not (the address's limit, a failed send)."""
     return jsonify({
         "message": "If that email is associated with an account, "
                    "you'll receive a sign-in link shortly. "
@@ -350,13 +366,13 @@ def magic_link_verify():
 
     token_h = hash_token(token)
 
+    # Valid until used or expired; a first use leaves it working for a
+    # while, for mail apps that open links first (utils/sign_in_links.py).
+    refused = sign_in_links.redeem(token_h, payload)
+    if refused is not None:
+        return redirect(f"{frontend_url}/login?error={refused}")
     user = User.query.filter_by(email=email).first()
     if user:
-        # Check token hash matches (but don't clear it — let the token
-        # remain valid until its natural expiry so that email-client
-        # prefetch doesn't consume it before the user clicks)
-        if user.magic_link_token_hash != token_h:
-            return redirect(f"{frontend_url}/login?error=link_already_used")
         if user.deleted_at is not None:
             # A deleted account in its grace period (#269): no sign-in;
             # the browser is asked whether to restore it.

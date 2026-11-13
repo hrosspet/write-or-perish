@@ -973,11 +973,10 @@ def activate_and_welcome(user_id):
         )
         token_h = hash_token(token)
 
-        user.magic_link_token_hash = token_h
-        user.magic_link_expires_at = (
-            datetime.utcnow() + timedelta(seconds=welcome_max_age)
-        )
-        db.session.commit()
+        # A link of its own, valid until used or expired: sign-in links
+        # asked for the address later leave it working.
+        from backend.utils.sign_in_links import record_link
+        record_link(user.email, token_h, welcome_max_age, limit=False)
 
         backend_url = request.host_url.rstrip("/")
         magic_link_url = f"{backend_url}/auth/magic-link/verify?token={token}"

@@ -391,6 +391,34 @@ class UsernameHistory(db.Model):
         "former_usernames", cascade="all, delete-orphan"))
 
 
+class SignInLink(db.Model):
+    """A sign-in link that was emailed: the sign-in email's link, or the
+    welcome email's (backend/utils/sign_in_links.py).
+
+    One row per link, so a new link for an address leaves the ones
+    already sent working: each stays valid until it is used or expires.
+    Only hashes are kept: the token's (sha256, like the other emailed
+    links) and the address's, keyed with the app's secret, so the rows
+    can be counted per address without holding the address. The address
+    the link signs in to travels in the signed token itself.
+    """
+    __tablename__ = "sign_in_link"
+    __table_args__ = (
+        # The per-address count of recent links (the sending limit).
+        db.Index("ix_sign_in_link_address_created", "address_hash",
+                 "created_at"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    token_hash = db.Column(db.String(64), nullable=False, unique=True)
+    address_hash = db.Column(db.String(64), nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False,
+                           default=datetime.utcnow)
+    expires_at = db.Column(db.DateTime, nullable=False, index=True)
+    # The first time the link signed someone in; null until then.
+    used_at = db.Column(db.DateTime, nullable=True)
+
+
 class ProfileBatchJob(db.Model):
     """A submitted provider batch covering one profile-generation step for one
     or more users (issue #173, Part A).

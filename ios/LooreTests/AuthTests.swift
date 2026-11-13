@@ -209,6 +209,46 @@ final class MagicLinkTests: XCTestCase {
     }
 }
 
+/// `POST /auth/magic-link/send` answers a client that asked too often with a
+/// 429 and a calm message (backend/utils/sign_in_links.py); the sign-in screen
+/// shows the AuthFailure's message under the address field. Control: any
+/// server error text already came through this way.
+final class SendMagicLinkTests: XCTestCase {
+    private let wait = "If you asked a moment ago, the email is on its way. Please check your inbox, or try again in a few minutes."
+
+    override func tearDown() {
+        StubURLProtocol.reset()
+        super.tearDown()
+    }
+
+    private func auth() -> AuthService {
+        AuthService(api: makeStubbedClient(environment: .production),
+                    vault: CookieVault(store: InMemorySecureStore(), environment: .production))
+    }
+
+    func testTheCalmMessageIsWhatTheScreenShows() async {
+        let body = #"{"error":"\#(wait)"}"#
+        StubURLProtocol.install { _ in .json(429, body) }
+        do {
+            _ = try await auth().sendMagicLink(email: "someone@example.com")
+            XCTFail("a 429 is not a sent link")
+        } catch let failure as AuthFailure {
+            XCTAssertEqual(failure.message, wait)
+        } catch {
+            XCTFail("unexpected \(error)")
+        }
+        XCTAssertEqual(StubURLProtocol.requests.map { $0.url?.path }, ["/auth/magic-link/send"])
+    }
+
+    func testTheSentAnswerIsTheSameForEveryAddress() async throws {
+        let sent = "If that email is associated with an account, you'll receive a sign-in link shortly. If you're new, a link has been sent to create your account."
+        let body = #"{"message":"\#(sent)"}"#
+        StubURLProtocol.install { _ in .json(200, body) }
+        let answer = try await auth().sendMagicLink(email: " someone@example.com ")
+        XCTAssertEqual(answer, sent)
+    }
+}
+
 final class LaunchOptionsTests: XCTestCase {
     func testParsesKnownArguments() {
         let options = LaunchOptions(arguments: ["/app", "-LooreEnvironment", "STAGING", "-LooreSessionCookie", "abc.def",
