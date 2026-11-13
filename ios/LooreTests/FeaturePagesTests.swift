@@ -342,6 +342,22 @@ final class ReadReplyTests: StubbedAppTestCase {
         XCTAssertNil(ReadWindowLine.text(try decode(ReadWindow.self, #"{"tweets":3}"#)), "no line without a window")
     }
 
+    func testWindowLineSaysWhenTheArchiveWasStale() throws {
+        // #688: the server sets export_stale when the newest tweet was over 36 hours old.
+        let utc = TimeZone(identifier: "UTC")!
+        let stale = try decode(ReadWindow.self, """
+        {"window_start":"2026-11-02T12:00:00Z","window_end":"2026-11-03T12:00:00Z","tweets":900,"accounts":120,"excluded":0,"export_stale":true}
+        """)
+        XCTAssertEqual(stale.exportStale, true)
+        XCTAssertTrue(ReadWindowLine.text(stale, timeZone: utc)!.hasSuffix(
+            " The newest tweets available are from 3 November; the archive's daily export has not updated since."))
+        let fresh = try decode(ReadWindow.self, """
+        {"window_start":"2026-11-02T12:00:00Z","window_end":"2026-11-03T12:00:00Z","tweets":900,"accounts":120,"excluded":0,"export_stale":false}
+        """)
+        XCTAssertFalse(ReadWindowLine.text(fresh, timeZone: utc)!.contains("newest tweets available"))
+        XCTAssertNil(ReadWindowLine.staleExportNote(try window(excluded: 0)), "older servers send no flag")
+    }
+
     func testCancelledLineSaysWhyToTheOwnerOnly() throws {
         // The server sends llm_task_error to the reply's owner only.
         let owners = try decode(NodeDetail.self, """

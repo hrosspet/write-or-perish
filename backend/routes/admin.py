@@ -1070,6 +1070,10 @@ def prefill_check():
     summary["import_source"] = "parquet" if (big and snapshot_complete) else (
         "parquet (if snapshot is current)" if big and summary.get("detail_source") != "parquet"
         else "rest")
+    if ca.v1_enabled():
+        # With an API key the pre-fill reads every account from API v1
+        # (prefill_community_archive_impl, #688).
+        summary["import_source"] = "api-v1"
     # The first step of the provisional ladder: what a fresh account must
     # hold for the seeder to build anything at all.
     from backend.utils.chunk_plan import next_build_threshold

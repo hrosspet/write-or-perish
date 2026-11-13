@@ -21,7 +21,8 @@ import urllib.request
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 from backend.utils.community_archive import (  # noqa: E402
-    ANON_KEY, SUPABASE_URL, TIMEOUT, _duckdb, fetch_account, fetch_account_parquet)
+    ANON_KEY, SUPABASE_URL, TIMEOUT, _duckdb, _warn_if_rest_retired,
+    fetch_account, fetch_account_parquet, v1_enabled)
 
 DEFAULT_SNAPSHOT = "~/data/twitter/community-archive-snapshot-2026-08-25"
 CHARS_PER_TOKEN = 2.0
@@ -45,7 +46,11 @@ def snapshot_size(handle, snapshot_dir):
 
 
 def _ca_exact_count(table, account_id):
-    """Server-side exact row count via PostgREST ``Prefer: count=exact`` (no rows fetched)."""
+    """Server-side exact row count via PostgREST ``Prefer: count=exact`` (no rows fetched).
+    None with COMMUNITY_ARCHIVE_API_KEY set: API v1 has no count (#688)."""
+    if v1_enabled():
+        return None
+    _warn_if_rest_retired()
     q = urllib.parse.urlencode({"account_id": f"eq.{account_id}", "select": "tweet_id", "limit": 0})
     req = urllib.request.Request(
         f"{SUPABASE_URL}/rest/v1/{table}?{q}",
@@ -148,7 +153,10 @@ def main():
             elif "error" in a:
                 api_str = f" | API: error ({a['error']})"
             else:
-                api_str = f" | API: {a['archived']:,} archived (account reports {a['num_tweets']:,})"
+                archived = ("?" if a.get("archived") is None
+                            else f"{a['archived']:,}")
+                api_str = (f" | API: {archived} archived "
+                           f"(account reports {a.get('num_tweets') or 0:,})")
         print(f"@{(s or {}).get('username', h)}: snapshot: {snap_str}{api_str}")
 
 

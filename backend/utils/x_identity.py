@@ -97,6 +97,10 @@ def resolve_x_id(handle, *, x_lookup=False, archive=True, cost_user_id=None,
         step_timeout = budget("archive-error")
         try:
             account = ca.fetch_account(handle, timeout=step_timeout)
+        except ca.CommunityArchiveRetired as e:
+            # No key past the REST API's retirement (#688): an archive
+            # error whose message tells the admin to set the key.
+            account, archive_error = None, e
         except ca.CommunityArchiveError as e:  # several exact matches
             raise XIdUnresolved("ambiguous", str(e)) from e
         except Exception as e:  # network / provider errors
@@ -109,6 +113,8 @@ def resolve_x_id(handle, *, x_lookup=False, archive=True, cost_user_id=None,
                              account.get("account_display_name"), account)
 
     if not x_lookup:
+        if isinstance(archive_error, ca.CommunityArchiveRetired):
+            raise XIdUnresolved("archive-error", str(archive_error))
         if archive_error is not None:
             raise XIdUnresolved(
                 "archive-error", "Community Archive lookup failed "

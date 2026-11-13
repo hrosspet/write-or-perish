@@ -71,7 +71,7 @@ from backend.utils.ca_feed import (
     ca_turn as _ca_turn,
     ArchiveNotReady, refs_from_render, render_read_reply_for_model,
     request_snapshot_refresh, seen_tweet_ids, list_to_keep, read_numbers,
-    read_since_note,
+    read_since_note, glean_source_dir,
 )
 from backend.utils.tool_meta import (
     get_tool_meta_entry, update_tool_meta,
@@ -4365,6 +4365,10 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         # background for the next read. Leave out what
                         # the reader has already seen.
                         request_snapshot_refresh(ca_snapshot_dir, log=logger)
+                        # A stale export is read from API v1's cached day
+                        # instead, when there is one (#688).
+                        ca_source_dir = glean_source_dir(
+                            ca_snapshot_dir, ca_days)
                         ca_seen = seen_tweet_ids(user_id)
                         if ca_live or not _read_batch_requested(llm_node):
                             # A live read again on the export of the read
@@ -4377,14 +4381,16 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             # gone, and its collect knows no note.
                             ca_keep = list_to_keep(
                                 node_chain, ca_node, ca_reply_ids, user_id,
-                                ca.snapshot_export_id(ca_snapshot_dir),
+                                ca.snapshot_export_id(ca_source_dir),
                                 ca_days, ca_scope)
-                    # else: a batch submitted before renders were pinned;
-                    # re-render the day as it was rendered then (no seen
-                    # filter) so its numbers still match.
+                    else:
+                        # A batch submitted before renders were pinned;
+                        # re-render the day as it was rendered then (no
+                        # seen filter) so its numbers still match.
+                        ca_source_dir = ca_snapshot_dir
                     try:
                         ca_tweets_content, ca_stats, ca_refs = ca.render_recent_tweets(
-                            ca_snapshot_dir, days=ca_days,
+                            ca_source_dir, days=ca_days,
                             exclude_usernames=[ca_owner.username,
                                                ca_owner.prefilled_handle]
                             if ca_owner else (),

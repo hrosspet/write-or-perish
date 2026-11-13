@@ -1121,6 +1121,97 @@ def test_import_revert_walks_the_current_chain_not_all_history(app, monkeypatch)
     assert _tip(w).parent_profile_id == v[0].id                 # re-tipped BEFORE the equal cutoff
 
 
+def test_prefill_reads_api_v1_with_a_key(app, monkeypatch, tmp_path):
+    """#688: with COMMUNITY_ARCHIVE_API_KEY set the pre-fill resolves the
+    handle and reads every tweet through API v1 (no count in v1, so not the
+    snapshot even for a large account); nothing reaches the network."""
+    import urllib.parse
+    import urllib.request
+    from backend.tasks import imports as imports_mod
+    from backend.tests.test_community_archive_v1 import (
+        FakeV1, page, v1_account, v1_tweet)
+    from backend.utils import community_archive as ca
+    import backend.tasks.exports as ex
+    monkeypatch.setattr(ex, "maybe_trigger_profile_update", MagicMock())
+    app.config["COMMUNITY_ARCHIVE_API_KEY"] = "cak_test_only"
+    app.config["COMMUNITY_ARCHIVE_PARQUET_MIN_TWEETS"] = 1
+    app.config["COMMUNITY_ARCHIVE_SNAPSHOT_DIR"] = str(tmp_path / "snap")
+    fake = FakeV1()
+    fake.routes["/accounts"] = [page([v1_account(77, "vee", num_tweets=50000)])]
+    fake.routes["/accounts/77/tweets"] = [
+        page([v1_tweet(1, "vee", "first thought", "2026-11-01T10:00:00.000Z", 77)], "c1"),
+        page([v1_tweet(2, "vee", "RT @x: theirs", "2026-11-02T10:00:00.000Z", 77,
+                       retweeted_tweet_id="5"),
+              v1_tweet(3, "vee", "second thought", "2026-11-03T10:00:00.000Z", 77)])]
+    monkeypatch.setattr(urllib.request, "urlopen", fake)
+    monkeypatch.setattr(ca, "_v1_not_before", 0.0)
+    for name in ("ensure_snapshot", "iter_tweets_parquet", "count_parquet"):
+        monkeypatch.setattr(ca, name, MagicMock(side_effect=AssertionError(name)))
+    u = _make_user("vee")
+    _db.session.commit()
+
+    result = imports_mod.prefill_community_archive_impl(u.id, "vee", {})
+
+    assert result["source"] == "api-v1" and result["created"] == 2
+    assert result["retweets_skipped"] == 1 and result["archived"] == 3
+    assert result["account_num_tweets"] == 50000
+    assert sorted(n.get_content() for n in Node.query.filter_by(
+        human_owner_id=u.id).all()) == ["first thought", "second thought"]
+    paths = [r["path"] for r in fake.requests]
+    assert paths == ["/accounts", "/accounts/77/tweets", "/accounts/77/tweets"]
+    assert all(r["headers"]["Authorization"] == "Bearer cak_test_only"
+               for r in fake.requests)
+    assert not (tmp_path / "ca-prefill" / f"{u.id}-77").exists()  # stash gone
+
+
+def test_prefill_v1_continues_in_a_next_run_from_its_cursor(app, monkeypatch, tmp_path):
+    """#690 review: a long API v1 read stops at its run's time with the
+    cursor stored and continues in the task's next run, never from page 1;
+    past the allowed runs it fails with what to do."""
+    import urllib.request
+    from backend.tasks import imports as imports_mod
+    from backend.tests.test_community_archive_v1 import (
+        FakeV1, page, v1_account, v1_tweet)
+    from backend.utils import community_archive as ca
+    import backend.tasks.exports as ex
+    monkeypatch.setattr(ex, "maybe_trigger_profile_update", MagicMock())
+    app.config["COMMUNITY_ARCHIVE_API_KEY"] = "cak_test_only"
+    fake = FakeV1()
+    fake.routes["/accounts"] = [page([v1_account(77, "vee")])]
+
+    def timeline(params):
+        i = int((params.get("cursor") or "c0")[1:])
+        return page([v1_tweet(i + 1, "vee", f"thought {i}", "2026-11-01T10:00:00.000Z", 77)],
+                    f"c{i + 1}" if i < 2 else None)
+    fake.routes["/accounts/77/tweets"] = [timeline]
+    monkeypatch.setattr(urllib.request, "urlopen", fake)
+    monkeypatch.setattr(ca, "_v1_not_before", 0.0)
+    monkeypatch.setattr(imports_mod, "PREFILL_V1_RUN_SECONDS", 0)  # one page a run
+    u = _make_user("vee")
+    _db.session.commit()
+
+    for _ in range(2):
+        with pytest.raises(imports_mod.PrefillContinues):
+            imports_mod.prefill_community_archive_impl(u.id, "vee", {})
+    assert Node.query.filter_by(human_owner_id=u.id).count() == 0
+    result = imports_mod.prefill_community_archive_impl(u.id, "vee", {})
+    assert result["created"] == 3 and result["source"] == "api-v1"
+    cursors = [r["params"].get("cursor") for r in fake.requests
+               if r["path"] == "/accounts/77/tweets"]
+    assert cursors == [None, "c1", "c2"]
+
+    # The task: a stop sends the next run; past the allowed runs it fails.
+    task = MagicMock()
+    task.retry.side_effect = RuntimeError("retry sent")
+    task.request.retries = 0
+    with pytest.raises(RuntimeError, match="retry sent"):
+        imports_mod._continue_prefill(task, u.id, "vee", imports_mod.PrefillContinues(400))
+    task.retry.assert_called_once_with(countdown=imports_mod.PREFILL_V1_CONTINUE_COUNTDOWN)
+    task.request.retries = imports_mod.PREFILL_V1_MAX_CONTINUATIONS
+    with pytest.raises(ca.CommunityArchiveError, match="run the pre-fill again"):
+        imports_mod._continue_prefill(task, u.id, "vee", imports_mod.PrefillContinues(400))
+
+
 def test_prefill_impl_stamps_x_id_only_on_login_less_accounts(app, monkeypatch):
     """Whitelist → pre-fill → owner's X login: X logins match on the X id
     only, so a pre-filled account that has no login yet gets the id of the

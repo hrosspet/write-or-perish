@@ -53,7 +53,7 @@ is dropped on collect.
 import json
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 log = logging.getLogger(__name__)
 
@@ -446,9 +446,20 @@ def mark_read_reply_opened(node, user_id):
     return bool(updated)
 
 
+def render_was_stale(row):
+    """Whether a pinned render read a stale archive: its window ends at the
+    newest tweet it had, and that tweet was more than EXPORT_STALE_AFTER
+    old when the render was made (#688)."""
+    if row is None or row.window_end is None or row.created_at is None:
+        return False
+    return row.created_at - row.window_end > EXPORT_STALE_AFTER
+
+
 def read_window_fields(row):
     """The reply page's record of what a read covered, from its pinned
-    render (None for replies from before renders were pinned)."""
+    render (None for replies from before renders were pinned).
+    ``export_stale`` tells the window line to say that the archive had
+    nothing newer (render_was_stale)."""
     from backend.utils.timefmt import iso_utc
     if row is None:
         return None
@@ -461,6 +472,7 @@ def read_window_fields(row):
         "tweets": row.tweet_count,
         "accounts": row.account_count,
         "excluded": row.excluded_count,
+        "export_stale": render_was_stale(row),
     }
 
 
@@ -505,15 +517,26 @@ def refs_from_render(row, reply_text, snapshot_dir):
     numbers). How many of the model's picks were dropped either way is
     recorded on the render (FeedRender.dropped_picks), each number once;
     a number cited only in the verdict is not a pick and not counted, and
-    not fetched: the verdict's words are stored as written, unlinked."""
-    from backend.utils.community_archive import fetch_tweets_by_id
+    not fetched: the verdict's words are stored as written, unlinked.
+    A render of a day read from API v1 (#688) resolves its tweets from that
+    day's cache, then from the export for any it no longer holds."""
+    from backend.utils.community_archive import (
+        fetch_tweets_by_id, snapshot_export_id, v1_day_dir_for_export)
     numbers = pick_numbers(reply_text)
     wanted = {}
     for n in numbers:
         tweet_id = row.tweet_id_for(n)
         if tweet_id:
             wanted[n] = tweet_id
-    found = fetch_tweets_by_id(snapshot_dir, wanted.values()) if wanted else {}
+    day = v1_day_dir_for_export(snapshot_dir, row.export_id) if wanted else None
+    if day is not None:
+        found = fetch_tweets_by_id(day, wanted.values())
+        missing = [i for i in wanted.values() if i not in found]
+        if missing and snapshot_export_id(snapshot_dir):
+            found.update(fetch_tweets_by_id(snapshot_dir, missing))
+    else:
+        found = (fetch_tweets_by_id(snapshot_dir, wanted.values())
+                 if wanted else {})
     refs = {}
     for n, tweet_id in wanted.items():
         ref = found.get(tweet_id)
@@ -553,7 +576,196 @@ def legacy_batches_live():
     return False
 
 
-def refresh_snapshot_for_read(snapshot_dir, log=log):
+# An export whose newest tweet is older than this at Glean time is stale
+# (#688): the read window line says so, the beat task reports it, and with
+# an API key Glean reads the last day from API v1 instead. Heuristic: the
+# archive exported once a day, around 07:00 UTC, so a healthy export's
+# newest tweet is at most ~24 h old plus the download; 36 h is one missed
+# export with half a day of margin.
+EXPORT_STALE_AFTER = timedelta(hours=36)
+
+# A broken archive is reported at ERROR (Sentry reports ERROR log lines)
+# once per problem per day; the rest of a streak logs at WARNING, and a
+# healthy run clears the claim, so a new streak reports at once. Claimed
+# in Redis like the provider and disk alerts (provider_alerts.claim).
+ARCHIVE_ALERT_REPEAT_SECONDS = 24 * 3600
+ARCHIVE_ALERT_PREFIX = "loore:community-archive-alert:"
+ALERT_EXPORT = "export"
+ALERT_API_V1_DAY = "api-v1-day"
+
+# export_newest_at's memo: {(snapshot dir, export id): newest tweet}. The
+# max over the whole export is a scan of its created_at column; an
+# export never changes once its id is written.
+_newest_memo = {}
+
+
+def _alert_config():
+    try:
+        from flask import current_app
+        return current_app.config
+    except RuntimeError:  # outside an app context (a script)
+        return {}
+
+
+def _report_archive_problem(kind, log, message, *args):
+    """Log *message* at ERROR for the first report of *kind* in
+    ARCHIVE_ALERT_REPEAT_SECONDS, at WARNING after that. Returns whether
+    it was the ERROR."""
+    from backend.utils.provider_alerts import claim
+    if claim((kind,), ARCHIVE_ALERT_REPEAT_SECONDS, _alert_config(),
+             prefix=ARCHIVE_ALERT_PREFIX):
+        log.error(message, *args)
+        return True
+    log.warning(message, *args)
+    return False
+
+
+def _archive_problem_cleared(kind):
+    from backend.utils.provider_alerts import release
+    release((kind,), _alert_config(), prefix=ARCHIVE_ALERT_PREFIX)
+
+
+def _describe_failure(e):
+    """The exception's type and HTTP status, never its text (#540)."""
+    code = getattr(e, "code", None)
+    return f"{type(e).__name__} {code}" if code else type(e).__name__
+
+
+def export_newest_at(snapshot_dir):
+    """The newest tweet's time (naive UTC) in the export cached in
+    *snapshot_dir*, or None when none is cached."""
+    from backend.utils import community_archive as ca
+    export_id = ca.snapshot_export_id(snapshot_dir)
+    if not export_id:
+        return None
+    key = (str(snapshot_dir), export_id)
+    if key not in _newest_memo:
+        newest = ca.snapshot_newest_tweet_at(snapshot_dir)
+        _newest_memo[key] = (datetime.strptime(newest, "%Y-%m-%d %H:%M:%S")
+                             if newest else None)
+    return _newest_memo[key]
+
+
+def export_is_stale(snapshot_dir, now=None):
+    """Whether the cached export's newest tweet is older than
+    EXPORT_STALE_AFTER (no export cached counts as stale)."""
+    newest = export_newest_at(snapshot_dir)
+    now = now or datetime.utcnow()
+    return newest is None or now - newest > EXPORT_STALE_AFTER
+
+
+def glean_source_dir(snapshot_dir, days=1, now=None):
+    """Where a Glean reads its day: the cached export, or — when an API key
+    is set, the export is stale (export_is_stale) and the read is of one
+    day — the newest day fetched from API v1 (ca.ensure_v1_day), as long
+    as its newest tweet is newer than the export's. Both hold the same
+    files, so the render and the selection are the same code either way.
+    A Glean never fetches: with no v1 day cached yet it reads the stale
+    export (its window line says so) and the background refresh it
+    queues fetches the day for the next one."""
+    from backend.utils import community_archive as ca
+    if int(days) != 1 or not ca.v1_enabled():
+        return snapshot_dir
+    try:
+        if not export_is_stale(snapshot_dir, now):
+            return snapshot_dir
+        day = ca.latest_v1_day(snapshot_dir)
+        if day is None:
+            return snapshot_dir
+        newest = export_newest_at(snapshot_dir)
+        day_newest = ca.snapshot_newest_tweet_at(day)
+    except Exception as e:  # noqa: BLE001 - the export path still reads
+        log.warning("Glean source: the API v1 day could not be checked "
+                    "(%s); reading the export", _describe_failure(e))
+        return snapshot_dir
+    if not day_newest:
+        return snapshot_dir
+    if newest is not None and (datetime.strptime(
+            day_newest, "%Y-%m-%d %H:%M:%S") <= newest):
+        return snapshot_dir
+    return day
+
+
+# API v1 requests the background fetch of Glean's day may send per UTC day
+# (#688), counted in Redis across processes (in this process alone without
+# it). A day window takes about 115-130 requests; 1,000 leaves room for
+# several failed runs, and is 5 % of a key's 20,000-a-day quota, so the
+# pre-fills that share the key always keep 19,000. Heuristic.
+V1_GLEAN_DAILY_REQUESTS = 1000
+GLEAN_BUDGET_PREFIX = "loore:community-archive-api:glean-requests:"
+_local_glean_requests = {}
+
+
+def _count_glean_request(key):
+    from backend.utils.provider_alerts import _redis
+    try:
+        client = _redis(_alert_config())
+        if client is not None:
+            n = client.incr(key)
+            client.expire(key, 2 * 24 * 3600)
+            return int(n)
+    except Exception:  # noqa: BLE001 - count in this process instead
+        log.warning("Glean request budget: Redis unavailable; counting in "
+                    "this process only", exc_info=True)
+    _local_glean_requests[key] = _local_glean_requests.get(key, 0) + 1
+    return _local_glean_requests[key]
+
+
+def glean_request_budget(now=None, limit=None):
+    """The ``on_request`` hook of the Glean day fetch: counts each request
+    against the UTC day's V1_GLEAN_DAILY_REQUESTS and raises
+    ca.V1BudgetSpent once they are used, before the request is sent."""
+    from backend.utils import community_archive as ca
+    key = GLEAN_BUDGET_PREFIX + (now or datetime.utcnow()).strftime("%Y-%m-%d")
+    limit = V1_GLEAN_DAILY_REQUESTS if limit is None else limit
+
+    def spend():
+        if _count_glean_request(key) > limit:
+            raise ca.V1BudgetSpent(
+                f"Glean's {limit} Community Archive API requests for the "
+                "day are used up")
+    return spend
+
+
+def refresh_v1_day_for_read(snapshot_dir, log=log, now=None):
+    """Background half of glean_source_dir: with an API key and a stale
+    (or absent) export, make sure the current day window is cached from
+    API v1. A failure is reported like a failed export refresh (one ERROR
+    a day) and the next run tries again; Glean goes on with what is
+    cached. Returns the window id in place, or None."""
+    from backend.utils import community_archive as ca
+    if not ca.v1_enabled():
+        return None
+    now = now or datetime.utcnow()
+    try:
+        stale = export_is_stale(snapshot_dir, now)
+    except Exception:  # noqa: BLE001 - an unreadable export serves no Glean
+        stale = True
+    if not stale:
+        return None
+    try:
+        window_id, fetched = ca.ensure_v1_day(
+            snapshot_dir, now=now.replace(tzinfo=timezone.utc),
+            on_request=glean_request_budget(now))
+    except ca.SnapshotBusy:
+        return None
+    except ca.V1DayWaiting as e:
+        log.info("Community Archive API: Glean's day waits after a failed "
+                 "fetch (%s)", e)
+        return None
+    except Exception as e:  # noqa: BLE001 - Glean goes on with the cache
+        _report_archive_problem(
+            ALERT_API_V1_DAY, log,
+            "Community Archive API: fetching the day for Glean failed (%s); "
+            "Glean reads the cached tweets", _describe_failure(e))
+        return None
+    _archive_problem_cleared(ALERT_API_V1_DAY)
+    if fetched:
+        log.info("Community Archive API: Glean's day %s cached", window_id)
+    return window_id
+
+
+def refresh_snapshot_for_read(snapshot_dir, log=log, now=None):
     """Bring the cached archive up to the latest nightly export (the
     Community Archive exports around 07:00 UTC) so "the last day" is the
     last day and not the day the snapshot was last fetched. Called by
@@ -563,7 +775,12 @@ def refresh_snapshot_for_read(snapshot_dir, log=log):
     refresh is logged and reads go on with the cached export (a reply
     shows the window it covered either way). While another refresh is
     downloading, this one returns at once (ca.refresh_snapshot). Returns
-    the export id in place, or None when nothing was checked."""
+    the export id in place, or None when nothing was checked.
+
+    A failed refresh, and an export left stale (EXPORT_STALE_AFTER) by an
+    archive that publishes no newer one, is reported at ERROR once a day
+    while it lasts (#688): until then a dead export only logged a
+    WARNING, and Glean read the same old day for ten days unnoticed."""
     from backend.utils import community_archive as ca
     if not ca.snapshot_export_id(snapshot_dir):
         return None
@@ -574,12 +791,37 @@ def refresh_snapshot_for_read(snapshot_dir, log=log):
     try:
         export_id, refreshed = ca.refresh_snapshot(snapshot_dir)
     except Exception as e:  # noqa: BLE001 - the read proceeds on the cache
-        log.warning("Community Archive snapshot refresh failed; reading "
-                    "the cached export: %s", e)
+        _report_archive_problem(
+            ALERT_EXPORT, log,
+            "Community Archive export refresh failed (%s); Glean reads the "
+            "cached export, whose newest tweet is from %s UTC",
+            _describe_failure(e), _newest_label(snapshot_dir))
         return None
     if refreshed:
         log.info("Community Archive snapshot refreshed to %s", export_id)
+    try:
+        stale = export_is_stale(snapshot_dir, now)
+    except Exception as e:  # noqa: BLE001 - an unreadable export: the render says so
+        log.warning("Community Archive export %s: newest tweet unreadable "
+                    "(%s)", export_id, _describe_failure(e))
+        return export_id
+    if stale:
+        _report_archive_problem(
+            ALERT_EXPORT, log,
+            "Community Archive export %s is stale: its newest tweet is from "
+            "%s UTC and the archive has published no newer export",
+            export_id, _newest_label(snapshot_dir))
+    else:
+        _archive_problem_cleared(ALERT_EXPORT)
     return export_id
+
+
+def _newest_label(snapshot_dir):
+    try:
+        newest = export_newest_at(snapshot_dir)
+    except Exception:  # noqa: BLE001 - only for the log line
+        newest = None
+    return newest.strftime("%Y-%m-%d %H:%M") if newest else "unknown"
 
 
 # The reason a read gives when no archive export is cached yet (#435
