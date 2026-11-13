@@ -1224,3 +1224,37 @@ def test_single_thread_chain_survives_an_empty_tweet(app):
     assert chain[0].parent_id is None
     assert chain[1].parent_id == chain[0].id
     assert [n.get_content() for n in chain] == ["first", "third"]
+
+
+# ── a job queued before imports were always private (#677) ───────────────
+
+@pytest.mark.parametrize("level", ["public", "circles"])
+def test_a_twitter_job_queued_with_a_non_private_level_imports_private(
+        app, monkeypatch, level):
+    from backend.routes.import_data import IMPORT_PRIVATE_ONLY
+    from backend.tasks import imports as imports_mod
+    monkeypatch.setattr(imports_mod, "flask_app", app)
+    u = _make_user("alice")
+    _db.session.commit()
+    token = ta.stash_write(u.id, _rows())
+    result = imports_mod.import_twitter_archive_impl(
+        lambda **kw: None, u.id, token,
+        {"import_type": "separate_nodes", "include_replies": False,
+         "privacy_level": level, "ai_usage": "none", "on_deleted": None})
+    assert result["created"] > 0
+    assert result["private_note"] == IMPORT_PRIVATE_ONLY
+    assert {n.privacy_level for n in
+            Node.query.filter_by(human_owner_id=u.id)} == {"private"}
+
+
+def test_control_a_private_twitter_job_has_no_note(app, monkeypatch):
+    from backend.tasks import imports as imports_mod
+    monkeypatch.setattr(imports_mod, "flask_app", app)
+    u = _make_user("alice")
+    _db.session.commit()
+    token = ta.stash_write(u.id, _rows())
+    result = imports_mod.import_twitter_archive_impl(
+        lambda **kw: None, u.id, token,
+        {"import_type": "separate_nodes", "include_replies": False,
+         "privacy_level": "private", "ai_usage": "none", "on_deleted": None})
+    assert "private_note" not in result

@@ -12,6 +12,9 @@ const PrivacySelector = ({
   // Replies in public threads inherit the thread's privacy (#228) —
   // render a quiet static note instead of the dropdown.
   lockPrivacy = false,
+  // Imports are always private (#677): no choice, one line in its place.
+  hidePrivacy = false,
+  privacyNote = null,
 }) => {
   const labelStyle = {
     display: 'block',
@@ -54,7 +57,11 @@ const PrivacySelector = ({
       marginTop: '12px',
       marginBottom: '12px',
     }}>
-      {lockPrivacy ? (
+      {hidePrivacy ? (
+        <div style={{ marginBottom: '12px' }}>
+          <div style={descStyle}>{privacyNote}</div>
+        </div>
+      ) : lockPrivacy ? (
         <div style={{ marginBottom: '12px' }}>
           <label style={labelStyle}>
             Privacy Level

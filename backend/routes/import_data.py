@@ -4,7 +4,7 @@ from backend.utils.error_privacy import describe_exception
 from backend.models import Node, User, UserProfile
 from backend.extensions import db
 from backend.utils.privacy import (
-    AI_ALLOWED, validate_ai_usage, validate_privacy_level,
+    AI_ALLOWED, validate_ai_usage,
 )
 from backend.utils import docx_import, pdf_import
 from backend.utils.pdf_extract_worker import MAX_CHAPTERS as MAX_PDF_CHAPTERS
@@ -324,6 +324,41 @@ class _ProfileChanges:
         })
 
 
+IMPORT_PRIVATE_ONLY = ("Imported entries are private. You can share or "
+                       "publish the ones you choose afterwards.")
+
+
+def _import_privacy(data):
+    """(privacy_level, error_response) for an import request. Imports are
+    always private (#677, Peter 2026-11-13): an entry is shared or
+    published afterwards, one at a time, where every check runs. The field
+    may be absent or "private" (older app builds send it); any other value
+    (Public, Circles, unknown) is refused with a 400 before anything is
+    written."""
+    level = data.get('privacy_level', 'private')
+    if level != 'private':
+        return None, (jsonify({"error": IMPORT_PRIVATE_ONLY}), 400)
+    return level, None
+
+
+def _require_importable_privacy(privacy_level):
+    """Backstop under the routes' 400: the functions that create the
+    entries stop before writing anything for a level other than private."""
+    if privacy_level != 'private':
+        raise ValueError(IMPORT_PRIVATE_ONLY)
+
+
+def _queued_privacy(options):
+    """(privacy_level, note) for an import task. A job queued by code from
+    before imports were always private may carry Public or Circles; it is
+    imported as private and its result says so, so a queued job (and the
+    upload behind it) is not lost. New requests never get this far: the
+    routes answer them with a 400."""
+    if options.get("privacy_level", "private") == "private":
+        return "private", None
+    return "private", IMPORT_PRIVATE_ONLY
+
+
 def _requested_ai_usage(data):
     """The AI usage an import applies: the value the request names, else
     the account's AI usage setting, the default every new entry gets
@@ -332,13 +367,10 @@ def _requested_ai_usage(data):
     return data.get('ai_usage') or current_user.default_ai_usage or 'none'
 
 
-def _invalid_settings(privacy_level, ai_usage):
-    """A 400 response when an import request names a privacy level or
-    AI usage Loore does not know; else None. A re-import applies both to
-    entries already in Loore, so neither is stored unchecked."""
-    if not (isinstance(privacy_level, str)
-            and validate_privacy_level(privacy_level)):
-        return jsonify({"error": "Invalid privacy_level"}), 400
+def _invalid_settings(ai_usage):
+    """A 400 response when an import request names an AI usage Loore does
+    not know; else None. A re-import applies it to entries already in
+    Loore, so it is not stored unchecked."""
     if not (isinstance(ai_usage, str) and validate_ai_usage(ai_usage)):
         return jsonify({"error": "Invalid ai_usage"}), 400
     return None
@@ -452,18 +484,19 @@ def _split_item_nodes(tip_ids, shapes=None):
     return item_of, partial
 
 
-def _apply_settings_to_skipped(node_ids, privacy_level, ai_usage, dek=None,
-                               changes=None, shapes=None, partial=None,
-                               privacy_changed=None):
-    """Apply this import's privacy/ai_usage to already-imported items.
+def _apply_settings_to_skipped(node_ids, ai_usage, changes=None,
+                               shapes=None, partial=None):
+    """Apply this import's AI usage to already-imported items.
 
-    Re-importing an archive is also how users change their mind about
-    import settings, so the entries a re-import matches adopt the values
-    chosen for this import instead of being a pure no-op. ``node_ids``
-    are the matched (keyed) nodes; every alive entry of their items
-    (_split_item_nodes, with ``shapes``) takes the settings, all
-    chapters of a document and all parts of a long message (#638), also
-    when the keyed node itself was deleted.
+    Re-importing an archive is also how users change their mind about the
+    AI usage, so the entries a re-import matches adopt the value chosen
+    for this import instead of being a pure no-op. ``node_ids`` are the
+    matched (keyed) nodes; every alive entry of their items
+    (_split_item_nodes, with ``shapes``) takes it, all chapters of a
+    document and all parts of a long message (#638), also when the keyed
+    node itself was deleted. Privacy is never touched (#677): imports are
+    always private, so an entry the user shared or published by hand
+    after importing is not changed by a re-import.
     Returns the number of items in which an entry actually changed;
     callers report it as ``updated`` and keep it disjoint from
     ``skipped``. Provenance is NOT touched: how a node first arrived is
@@ -471,35 +504,23 @@ def _apply_settings_to_skipped(node_ids, privacy_level, ai_usage, dek=None,
 
     ``changes`` (a _ProfileChanges) records the nodes whose new AI usage
     moves them into or out of what the profile reads (#625). ``partial``
-    (a set) gets the items only partly updated, and ``privacy_changed``
-    (a list) the ids of the nodes whose privacy level changed.
+    (a set) gets the items only partly updated.
     """
-    from sqlalchemy import or_
     item_of, unproven = _split_item_nodes(node_ids, shapes)
     if partial is not None:
         partial.update(unproven)
     ids = list(item_of)
     updated_items = set()
     # Chunked so a huge archive doesn't produce an unbounded IN clause.
-    # Goes through the ORM (not a bulk UPDATE) because a privacy change
-    # moves content across the encryption boundary (#257) — only the
-    # rows whose settings actually differ are loaded.
     for start in range(0, len(ids), 1000):
         chunk = ids[start:start + 1000]
         for node in Node.query.filter(
             Node.id.in_(chunk),
             Node.deleted_at.is_(None),
-            or_(
-                Node.privacy_level != privacy_level,
-                Node.ai_usage != ai_usage,
-            ),
+            Node.ai_usage != ai_usage,
         ).all():
             if changes is not None:
                 changes.setting_changed(node)
-            if (privacy_changed is not None
-                    and node.privacy_level != privacy_level):
-                privacy_changed.append(node.id)
-            node.set_privacy_level(privacy_level, dek=dek)
             node.ai_usage = ai_usage
             updated_items.add(item_of[node.id])
         db.session.flush()
@@ -512,16 +533,13 @@ class _Matched:
     and, for a file or message, the parts of the re-imported text, from
     which an item imported before split_item existed is checked
     (_item_shape). ``apply`` runs before the commit and returns
-    ``updated``; ``partial`` keeps the items only partly updated;
-    ``after_commit`` drops the cached public pages of the entries whose
-    privacy level changed, as an edit does (routes/nodes.py)."""
+    ``updated``; ``partial`` keeps the items only partly updated."""
 
     def __init__(self):
         self.skipped = []
         self.restored = []
         self.shapes = {}
         self.partial = set()
-        self.privacy_changed = []
 
     def _shape(self, node_id, parts):
         if node_id is not None and parts is not None:
@@ -537,27 +555,17 @@ class _Matched:
         self.restored.append(node_id)
         self._shape(node_id, parts)
 
-    def apply(self, privacy_level, ai_usage, dek=None, changes=None):
-        kw = dict(dek=dek, changes=changes, shapes=self.shapes,
-                  partial=self.partial,
-                  privacy_changed=self.privacy_changed)
-        updated = _apply_settings_to_skipped(
-            self.skipped, privacy_level, ai_usage, **kw)
-        # A restored item's other entries take the settings too; it is
+    def apply(self, ai_usage, changes=None):
+        kw = dict(changes=changes, shapes=self.shapes, partial=self.partial)
+        updated = _apply_settings_to_skipped(self.skipped, ai_usage, **kw)
+        # A restored item's other entries take the AI usage too; it is
         # counted as restored, not updated.
-        _apply_settings_to_skipped(
-            self.restored, privacy_level, ai_usage, **kw)
+        _apply_settings_to_skipped(self.restored, ai_usage, **kw)
         self.skipped, self.restored, self.shapes = [], [], {}
         return updated
 
     def any(self):
         return bool(self.skipped or self.restored)
-
-    def after_commit(self):
-        ids, self.privacy_changed = self.privacy_changed, []
-        if ids:
-            from backend.utils.public_cache import invalidate_for_nodes
-            invalidate_for_nodes(ids)
 
 
 def _release_deleted_docx_key(file_data, source_key, key_index,
@@ -1071,10 +1079,12 @@ def confirm_import():
     files = data.get('files', [])
     import_type = data.get('import_type', 'separate_nodes')
     date_ordering = data.get('date_ordering', 'modified')
-    privacy_level = data.get('privacy_level', 'private')
+    privacy_level, refusal = _import_privacy(data)
+    if refusal:
+        return refusal
     ai_usage = _requested_ai_usage(data)
     on_deleted = data.get('on_deleted')
-    invalid = _invalid_settings(privacy_level, ai_usage)
+    invalid = _invalid_settings(ai_usage)
     if invalid:
         return invalid
 
@@ -1245,13 +1255,11 @@ def confirm_import():
 
             thread_count = threads_created
 
-        nodes_updated = matched.apply(privacy_level, ai_usage,
-                                      changes=changes)
+        nodes_updated = matched.apply(ai_usage, changes=changes)
         nodes_skipped -= nodes_updated
 
         # Commit all nodes
         db.session.commit()
-        matched.after_commit()
 
         profile_update_task_id, profile_waits, rebuild_question = (
             _profile_after_import(current_user.id, changes))
@@ -1743,6 +1751,7 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
 
     Returns the dict the frontend renders as the import result.
     """
+    _require_importable_privacy(privacy_level)
     if import_type not in ('single_thread', 'separate_nodes'):
         raise ValueError("Invalid import_type")
     if provenance not in PROVENANCES:
@@ -1834,10 +1843,9 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
             if on_progress:
                 on_progress(done)
 
-    nodes_updated = matched.apply(privacy_level, ai_usage, changes=changes)
+    nodes_updated = matched.apply(ai_usage, changes=changes)
     nodes_skipped -= nodes_updated
     db.session.commit()
-    matched.after_commit()
     if on_progress:
         on_progress(total)
 
@@ -2229,10 +2237,12 @@ def confirm_twitter_import():
 
     import_type = data.get('import_type', 'separate_nodes')
     include_replies = bool(data.get('include_replies', False))
-    privacy_level = data.get('privacy_level', 'private')
+    privacy_level, refusal = _import_privacy(data)
+    if refusal:
+        return refusal
     ai_usage = _requested_ai_usage(data)
     on_deleted = data.get('on_deleted')
-    invalid = _invalid_settings(privacy_level, ai_usage)
+    invalid = _invalid_settings(ai_usage)
     if invalid:
         return invalid
 
@@ -2731,10 +2741,12 @@ def _confirm_conversation_import(source):
         # conversations themselves.
         return jsonify({"error": IMPORT_OUTDATED_CLIENT_MESSAGE}), 400
 
-    privacy_level = data.get('privacy_level', 'private')
+    privacy_level, refusal = _import_privacy(data)
+    if refusal:
+        return refusal
     ai_usage = _requested_ai_usage(data)
     on_deleted = data.get('on_deleted')
-    invalid = _invalid_settings(privacy_level, ai_usage)
+    invalid = _invalid_settings(ai_usage)
     if invalid:
         return invalid
 
@@ -2854,6 +2866,7 @@ def create_conversation_nodes(user_id, source, conversations, privacy_level,
     be continued from it. Calls ``on_progress(messages_done)`` at most
     every ``progress_interval`` seconds. Returns the final state.
     """
+    _require_importable_privacy(privacy_level)
     import time
     spec = _CONVERSATION_SOURCES[source]
     state = dict(state) if state else _new_conversation_state(None)
@@ -2876,15 +2889,12 @@ def create_conversation_nodes(user_id, source, conversations, privacy_level,
     last_progress = time.monotonic()
 
     def commit():
-        dek = data_key.get() if matched.any() else None
-        state["updated"] += matched.apply(privacy_level, ai_usage, dek=dek,
-                                          changes=changes)
+        state["updated"] += matched.apply(ai_usage, changes=changes)
         state["partly_updated"] = (state.get("partly_updated", 0)
                                    + len(matched.partial))
         matched.partial.clear()
         changes.to_state(state)
         db.session.commit()
-        matched.after_commit()
         data_key.rotate()
         if on_commit:
             on_commit(state)
@@ -3092,11 +3102,12 @@ def _run_conversation_import(user_id, token, task_id, options, *,
             on_progress(done, total)
 
     progress(state["done"])
+    privacy_level, private_note = _queued_privacy(options)
     try:
         state = create_conversation_nodes(
             user_id, source,
             cs.iter_conversations(path, start=state["next_conv"]),
-            options.get("privacy_level", "private"),
+            privacy_level,
             options.get("ai_usage", "none"),
             options.get("on_deleted"),
             state=state, batch_size=batch_size,
@@ -3130,6 +3141,8 @@ def _run_conversation_import(user_id, token, task_id, options, *,
         "partly_updated": state.get("partly_updated", 0),
         "total": total,
     }
+    if private_note:
+        result["private_note"] = private_note
     roles = header.get("roles") or {}
     current_app.logger.info(
         "%s import job done: user_msgs=%s assistant_msgs=%s user_tokens=%s "

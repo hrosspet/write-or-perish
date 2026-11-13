@@ -34,9 +34,16 @@ BATCH_SIZE = 500
 def import_twitter_archive(self, user_id, token, options):
     """options: import_type, include_replies, privacy_level, ai_usage,
     on_deleted (already resolved by the confirm request)."""
+    return import_twitter_archive_impl(
+        lambda **meta: self.update_state(**meta), user_id, token, options)
+
+
+def import_twitter_archive_impl(update_state, user_id, token, options):
+    """The task's work, with ``update_state`` passed in so it can run
+    without a worker."""
     from backend.extensions import db
     from backend.routes.import_data import (
-        PROVENANCE_ARCHIVE_UPLOAD, create_twitter_nodes)
+        PROVENANCE_ARCHIVE_UPLOAD, _queued_privacy, create_twitter_nodes)
     from backend.utils import twitter_archive as ta
     from backend.utils.task_owner import UserFacingTaskError
 
@@ -51,7 +58,7 @@ def import_twitter_archive(self, user_id, token, options):
         from backend.tasks.profile_batch import mark_import_activity
 
         def progress(done):
-            self.update_state(state="PROGRESS", meta={
+            update_state(state="PROGRESS", meta={
                 "user_id": user_id, "done": done, "total": total,
             })
             # A running import holds the profile build back (#598): at the
@@ -59,6 +66,7 @@ def import_twitter_archive(self, user_id, token, options):
             mark_import_activity(user_id)
 
         progress(0)
+        privacy_level, private_note = _queued_privacy(options)
         try:
             result = create_twitter_nodes(
                 user_id=user_id,
@@ -66,7 +74,7 @@ def import_twitter_archive(self, user_id, token, options):
                 total=total,
                 import_type=options.get("import_type", "separate_nodes"),
                 include_replies=bool(options.get("include_replies", False)),
-                privacy_level=options.get("privacy_level", "private"),
+                privacy_level=privacy_level,
                 ai_usage=options.get("ai_usage", "none"),
                 on_deleted=options.get("on_deleted"),
                 provenance=PROVENANCE_ARCHIVE_UPLOAD,
@@ -81,6 +89,8 @@ def import_twitter_archive(self, user_id, token, options):
             ta.stash_delete(path)
 
         result["user_id"] = user_id
+        if private_note:
+            result["private_note"] = private_note
         return result
 
 

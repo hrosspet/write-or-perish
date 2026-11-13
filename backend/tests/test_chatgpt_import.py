@@ -1323,7 +1323,7 @@ class TestConfirmImportSettingsUpdate:
         assert r1.get_json()["created"] == 2
 
         r2 = _confirm_conversations(
-            client, convs, privacy_level="public", ai_usage="chat"
+            client, convs, ai_usage="chat"
         )
         assert r2.status_code == 202
         b2 = r2.get_json()
@@ -1332,7 +1332,7 @@ class TestConfirmImportSettingsUpdate:
         assert b2["skipped"] == 0
         nodes = self._nodes(alice.id)
         assert len(nodes) == 2
-        assert all(n.privacy_level == "public" for n in nodes)
+        assert all(n.privacy_level == "private" for n in nodes)
         assert all(n.ai_usage == "chat" for n in nodes)
 
     def test_reimport_same_settings_is_pure_skip(self, app):
@@ -1366,7 +1366,7 @@ class TestConfirmImportSettingsUpdate:
 
         r = _confirm_conversations(
             client, convs, on_deleted="skip",
-            privacy_level="public", ai_usage="chat",
+            ai_usage="chat",
         )
         b = r.get_json()
         assert b["updated"] == 1
@@ -1382,7 +1382,7 @@ class TestConfirmImportSettingsUpdate:
         assert deleted_node.deleted_at is not None
         assert deleted_node.privacy_level == "private"
         assert deleted_node.ai_usage == "none"
-        assert alive_node.privacy_level == "public"
+        assert alive_node.privacy_level == "private"
         assert alive_node.ai_usage == "chat"
 
     def test_restore_applies_new_settings(self, app):
@@ -1400,12 +1400,12 @@ class TestConfirmImportSettingsUpdate:
 
         r = _confirm_conversations(
             client, convs, on_deleted="restore",
-            privacy_level="public", ai_usage="chat",
+            ai_usage="chat",
         )
         b = r.get_json()
         assert b["restored"] == 2
         assert b["updated"] == 0
         nodes = self._nodes(alice.id)
         assert all(n.deleted_at is None for n in nodes)
-        assert all(n.privacy_level == "public" for n in nodes)
+        assert all(n.privacy_level == "private" for n in nodes)
         assert all(n.ai_usage == "chat" for n in nodes)

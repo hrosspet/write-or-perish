@@ -126,6 +126,9 @@ struct ImportResult: Equatable {
     var empty = 0
     /// Items whose settings only their last entry took (#638), told in a note.
     var partlyUpdated = 0
+    /// Set when a job queued by an older app asked for Public or Circles and
+    /// was imported as private (#677).
+    var privateNote: String?
     var profileUpdateTaskId: String?
     /// ChatGPT/Claude: the numbers count messages, while the confirm dialog
     /// counted conversations; `archiveSummary` names both.
@@ -142,6 +145,7 @@ struct ImportResult: Equatable {
         updated = int("updated")
         empty = int("empty")
         partlyUpdated = int("partly_updated")
+        privateNote = object["private_note"] as? String
         profileUpdateTaskId = object["profile_update_task_id"] as? String
         rebuildQuestion = ProfileRebuildQuestion(object["ask_profile_rebuild"])
     }
@@ -163,13 +167,13 @@ struct ImportResult: Equatable {
     }
 
     var notes: [String] {
-        let summary = archiveSummary.map { [$0] } ?? []
+        let summary = (archiveSummary.map { [$0] } ?? []) + (privateNote.map { [$0] } ?? [])
         if created == 0 && restored == 0 && updated == 0 {
             return summary + ["Everything in this archive was already imported — nothing new was added."]
         }
         var out: [String] = summary
         if updated > 0 {
-            out.append("Updated items were already imported; their privacy and AI-usage settings now match this import.")
+            out.append("Updated items were already imported; their AI-usage setting now matches this import.")
         }
         if partlyUpdated > 0 {
             let one = partlyUpdated == 1
@@ -219,7 +223,8 @@ final class ImportModel {
     var importType = "separate_nodes"
     var dateOrdering = "modified"
     var includeReplies = false
-    var privacy: PrivacyLevel = .private
+    /// Imports are always private (#677): no choice, this line in its place. Same wording as the web.
+    static let privacyNote = "Imported entries are private. You can share or publish the ones you choose afterwards."
     /// Starts at the account's AI usage setting (#593, as the web), again each
     /// time a confirm dialog opens; the value shown is the value sent.
     var aiUsage: AIUsage = .off
@@ -353,7 +358,7 @@ final class ImportModel {
 
     /// The confirm body the web sends for this importer.
     func confirmBody(_ analysis: ImportAnalysis, onDeleted: String?) -> [String: Any] {
-        var body: [String: Any] = ["privacy_level": privacy.rawString, "ai_usage": aiUsage.rawString]
+        var body: [String: Any] = ["privacy_level": "private", "ai_usage": aiUsage.rawString]
         switch analysis.kind {
         case .claude, .chatgpt:
             body["import_token"] = analysis.importToken ?? ""

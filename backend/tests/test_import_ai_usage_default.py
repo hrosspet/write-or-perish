@@ -285,3 +285,124 @@ def test_twitter_task_gets_the_resolved_value(app, monkeypatch, extra,
                        json={"import_token": token, **extra})
     assert resp.status_code == 202, resp.get_json()
     assert task.delay.call_args[0][2]["ai_usage"] == expected
+
+
+# ── Imports are always private (#677) ───────────────────────────────────
+# Peter, 2026-11-13: "imports should never be public, nor circles". The
+# refusal tests fail on main, where both were accepted; controls are marked.
+
+REFUSAL = ("Imported entries are private. You can share or publish the ones "
+           "you choose afterwards.")
+
+
+def _privacies(user_id):
+    return sorted(n.privacy_level for n in
+                  Node.query.filter_by(human_owner_id=user_id).all())
+
+
+@pytest.mark.parametrize("level", ["public", "circles", "bogus", None,
+                                   ["public"]])
+def test_markdown_import_refuses_anything_but_private_and_writes_nothing(
+        app, hand_offs, level):
+    client, uid = _client_for(app, "chat")
+    resp = _confirm_markdown(client, privacy_level=level)
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == REFUSAL
+    assert _privacies(uid) == []
+    assert hand_offs == []
+
+
+@pytest.mark.parametrize("extra", [{"privacy_level": "private"}, {}])
+def test_markdown_import_control_private_or_absent_unchanged(
+        app, hand_offs, extra):
+    client, uid = _client_for(app, "chat")
+    body = {"files": FILES, "import_type": "separate_nodes", **extra}
+    assert client.post("/api/import/confirm", json=body).status_code == 201
+    assert _privacies(uid) == ["private", "private"]
+
+
+@pytest.mark.parametrize("source", ["chatgpt", "claude"])
+@pytest.mark.parametrize("level", ["public", "circles", "x"])
+def test_conversation_import_refuses_anything_but_private_and_starts_no_job(
+        app, hand_offs, run_jobs_inline, source, level):
+    client, uid = _client_for(app, "chat")
+    resp = _confirm_conversations(client, uid, source, privacy_level=level)
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == REFUSAL
+    assert run_jobs_inline == []
+    assert _privacies(uid) == []
+
+
+@pytest.mark.parametrize("source", ["chatgpt", "claude"])
+def test_conversation_import_control_private_unchanged(
+        app, hand_offs, run_jobs_inline, source):
+    client, uid = _client_for(app, "chat")
+    resp = _confirm_conversations(client, uid, source)
+    assert resp.status_code == 202
+    assert _privacies(uid) == ["private", "private"]
+
+
+@pytest.mark.parametrize("level", ["public", "circles"])
+def test_reimport_cannot_set_a_non_private_level(
+        app, hand_offs, run_jobs_inline, level):
+    client, uid = _client_for(app, "chat")
+    _confirm_conversations(client, uid, "chatgpt")
+    resp = _confirm_conversations(client, uid, "chatgpt", privacy_level=level)
+    assert resp.status_code == 400
+    assert _privacies(uid) == ["private", "private"]
+
+
+@pytest.mark.parametrize("by_hand", ["public", "circles"])
+def test_reimport_leaves_an_entry_shared_by_hand_alone(
+        app, hand_offs, by_hand):
+    """A re-import applies no privacy to the duplicates it skips: an entry
+    the user made public or shared after importing stays as they set it,
+    and the AI usage still follows the dialog."""
+    client, uid = _client_for(app, "chat")
+    _confirm_markdown(client, ai_usage="none")
+    node = Node.query.filter_by(human_owner_id=uid).first()
+    node.set_privacy_level(by_hand)
+    _db.session.commit()
+    body = _confirm_markdown(client, ai_usage="chat").get_json()
+    assert body["updated"] == 2
+    assert _privacies(uid) == sorted([by_hand, "private"])
+    assert _usages(uid) == ["chat", "chat"]
+
+
+def test_apply_settings_to_skipped_changes_ai_usage_never_privacy(
+        app, hand_offs):
+    from backend.routes.import_data import _apply_settings_to_skipped
+    client, uid = _client_for(app, "chat")
+    _confirm_markdown(client, ai_usage="none")
+    ids = [n.id for n in Node.query.filter_by(human_owner_id=uid)]
+    Node.query.get(ids[0]).set_privacy_level("public")
+    _db.session.commit()
+    assert _apply_settings_to_skipped(ids, "chat") == 2
+    assert _usages(uid) == ["chat", "chat"]
+    assert _privacies(uid) == ["private", "public"]
+
+
+@pytest.mark.parametrize("level", ["public", "circles", "x"])
+def test_twitter_confirm_refuses_anything_but_private_and_queues_nothing(
+        app, monkeypatch, level):
+    from backend.utils import twitter_archive as ta
+    client, uid = _client_for(app, "chat")
+    task = _fake_twitter_task(monkeypatch)
+    token = ta.stash_write(uid, [])
+    resp = client.post("/api/import/twitter/confirm",
+                       json={"import_token": token, "privacy_level": level})
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == REFUSAL
+    task.delay.assert_not_called()
+
+
+def test_twitter_confirm_control_private_is_queued(app, monkeypatch):
+    from backend.utils import twitter_archive as ta
+    client, uid = _client_for(app, "chat")
+    task = _fake_twitter_task(monkeypatch)
+    token = ta.stash_write(uid, [])
+    resp = client.post("/api/import/twitter/confirm",
+                       json={"import_token": token,
+                             "privacy_level": "private"})
+    assert resp.status_code == 202
+    assert task.delay.call_args[0][2]["privacy_level"] == "private"
