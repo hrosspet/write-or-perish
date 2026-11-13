@@ -92,7 +92,7 @@ def _subscription_required(resp):
 
 class TestNothingStartsWithoutAccess:
     @pytest.mark.parametrize("label", [None, "Voice"])
-    def test_a_dictation_or_voice_recording(self, on, client, alice, label):
+    def test_a_dictation_or_voice_recording(self, on, client, alice, label):  # noqa: F811
         _lapse(alice)
         body = {"ai_usage": "chat"}
         if label:
@@ -101,7 +101,7 @@ class TestNothingStartsWithoutAccess:
                                            json=body))
         assert Draft.query.count() == 0
 
-    def test_a_chunked_upload(self, on, client, alice):
+    def test_a_chunked_upload(self, on, client, alice):  # noqa: F811
         _lapse(alice)
         _subscription_required(client.post("/nodes/upload/init", json={
             "filename": "talk.m4a", "filesize": 10, "total_chunks": 1,
@@ -109,7 +109,7 @@ class TestNothingStartsWithoutAccess:
         assert Node.query.count() == 0
         assert not (_audio_root() / f"chunks/{alice.id}/up-1").exists()
 
-    def test_a_multipart_upload(self, on, client, alice, stub_tasks):
+    def test_a_multipart_upload(self, on, client, alice, stub_tasks):  # noqa: F811
         _lapse(alice)
         _subscription_required(client.post("/nodes/", data={
             "audio_file": (BytesIO(b"fake audio"), "talk.m4a"),
@@ -117,7 +117,7 @@ class TestNothingStartsWithoutAccess:
         assert Node.query.count() == 0
         stub_tasks[0].transcribe_audio.delay.assert_not_called()
 
-    def test_a_legacy_node_recording(self, on, client, alice):
+    def test_a_legacy_node_recording(self, on, client, alice):  # noqa: F811
         _lapse(alice)
         _subscription_required(client.post("/nodes/streaming/init",
                                            json={"ai_usage": "chat"}))
@@ -135,7 +135,7 @@ class TestNothingStartsWithoutAccess:
 # ── A recording that started with access goes on to the end ─────────────
 
 class TestARecordingInProgressGoesOn:
-    def _start(self, client, alice, label=None):
+    def _start(self, client, alice, label=None):  # noqa: F811
         _active(alice)
         body = {"ai_usage": "chat"}
         if label:
@@ -144,7 +144,7 @@ class TestARecordingInProgressGoesOn:
         assert resp.status_code == 201, resp.get_data(as_text=True)
         return resp.get_json()["session_id"]
 
-    def _chunk(self, client, session_id, index=5):
+    def _chunk(self, client, session_id, index=5):  # noqa: F811
         return client.post(
             f"/drafts/streaming/{session_id}/audio-chunk",
             data={"chunk": (BytesIO(FRAGMENT_BYTES), "chunk.webm"),
@@ -155,7 +155,7 @@ class TestARecordingInProgressGoesOn:
     @pytest.mark.parametrize("reason", ["ended", "past_due", "free_month",
                                         "none"])
     def test_its_chunks_are_stored_and_it_is_finalized(
-            self, on, client, alice, stub_tasks, label, reason):
+            self, on, client, alice, stub_tasks, label, reason):  # noqa: F811
         # Pins what held already: the chunk and finalize routes never ask
         # for the subscription.
         _transcription, streaming = stub_tasks
@@ -183,7 +183,7 @@ class TestARecordingInProgressGoesOn:
             session_id=session_id).one().streaming_status == "finalizing"
 
     def test_a_dictation_is_saved_as_an_entry_without_its_reply(
-            self, on, client, alice):
+            self, on, client, alice):  # noqa: F811
         # Pins what held already: save-as-node keeps the writing and says
         # why no reply follows (subscription_required fields).
         session_id = self._start(client, alice)
@@ -209,7 +209,7 @@ class TestARecordingInProgressGoesOn:
 
 
 class TestAnUploadInProgressGoesOn:
-    def _init(self, client, upload_id="up-1", **extra):
+    def _init(self, client, upload_id="up-1", **extra):  # noqa: F811
         resp = client.post("/nodes/upload/init", json={
             "filename": "talk.m4a", "filesize": 10, "total_chunks": 1,
             "upload_id": upload_id, "ai_usage": "chat", **extra})
@@ -218,7 +218,7 @@ class TestAnUploadInProgressGoesOn:
 
     @pytest.mark.parametrize("reply", [False, True])
     def test_chunk_and_finalize_store_and_queue_it(
-            self, on, client, alice, stub_tasks, reply):
+            self, on, client, alice, stub_tasks, reply):  # noqa: F811
         # Pins what held already: neither route asks for the
         # subscription; the reply it asked for is skipped by the
         # transcription task (TestTheUploadIsTranscribed below).
