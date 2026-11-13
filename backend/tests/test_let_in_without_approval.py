@@ -713,7 +713,7 @@ class TestSignupEmail:
             "/api/terms/accept").status_code == 200
         assert calls == []
 
-    def test_new_accounts_head_the_users_list(self, real_app):
+    def test_control_new_accounts_head_the_users_list(self, real_app):
         _admin_user, admin = _admin(real_app)
         _add(username="older",
              created_at=datetime.utcnow() - timedelta(days=3))
