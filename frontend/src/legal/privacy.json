@@ -119,11 +119,10 @@
       "items": [
         "Nobody can see the account. It holds only posts that were already public. Posts fetched from X's API are also kept as files on our server, unencrypted, until the account's content is deleted.",
         "We do this so that the person can start from their own words instead of a blank page. Our legal basis is our legitimate interest in that, weighed against theirs.",
-        "If nobody signs in to such an account within 90 days after we opened it, we delete the account, with everything in it.",
-        "Before we open such an account, we may prepare its material in separate storage, outside Loore accounts: the person's public posts and the profile drafted from them. The 90-day deletion does not apply to it. [PREFILL SOURCE MATERIAL: what is kept outside Loore accounts, for how long, and that we delete it when the person asks]",
+        "If nobody signs in to such an account within 90 days after we prepared it, we delete it, with everything in it. If we prepare it again, the 90 days start again.",
         "When you first sign in with X, Loore asks whether to seed your Loore from your public tweets. If you answer **Not now**, we import and build nothing more.",
         "To remove what was already built, use **Delete all my content** on the Account page, or delete your account.",
-        "If you haven't signed up and want us to delete such an account and the material we prepared for it, or not to build one, write to [info@loore.org](mailto:info@loore.org) with your X handle. We delete both.",
+        "If you haven't signed up and want us to delete such an account, or not to build one, write to [info@loore.org](mailto:info@loore.org) with your X handle. We delete it.",
         "We also keep our own copy of the Community Archive's public tweets, for this and for Glean."
       ]
     },
@@ -149,7 +148,7 @@
         "**Your account:** if you delete it, you can recover it within 30 days by signing in; after that it is deleted forever, with everything in it.",
         "**Backups:** daily copies are kept for 28 days and server snapshots for 14 days, so what is deleted forever leaves the backups within another 30 days. A weekly copy kept outside Google follows the same limit.",
         "**What stays after an account is deleted:** a record of what your AI use cost, without your name; an empty placeholder where other people replied under your entries; your username, reserved for a year so that nobody else can take it over; bug reports and ideas filed on GitHub through Loore, which stay public with the label loore:<your username>; if you used a reduced-price code, the record of that use with the subscription's Stripe reference number but without your account; and the reference numbers of the payment events Stripe sent us.",
-        "**A prefilled account nobody signed in to:** we delete it 90 days after we opened it, or sooner if you ask us to. The 90 days don't cover the material we prepared for it before we opened it (section 7); if you ask, we delete that too.",
+        "**A prefilled account nobody signed in to:** we delete it 90 days after we prepared it (section 7), or sooner if you ask us to.",
         "**Server logs:** [LOG RETENTION].",
         "**Error reports in Sentry:** 30 days.",
         "**Purchases:** Link keeps the records the law requires for sales and tax."
