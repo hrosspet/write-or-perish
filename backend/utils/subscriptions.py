@@ -227,7 +227,12 @@ _UPLOAD_STATUS = re.compile(r"^/api/nodes/(\d+)/transcription-status$")
 def finishes_recording_in_progress(user, req, now=None):
     """Whether *req* (a Flask request) only finishes a recording or upload
     of *user* that was under way when it stopped being let in (the
-    comment above). Asked by the gate for an account in state "none"."""
+    comment above). Asked by the gate for an account in state "none".
+    Every id the request names is checked against the others and against
+    the account: the session in the path is the account's; the thread a
+    finalize names is the one the session started in; an upload's folder
+    (upload_id) is the account's and was made by the init of the entry it
+    names (node_id), and a chunk is one of those its init announced."""
     from backend.extensions import db
     from backend.models import Draft, Node
     from backend.utils.streaming_session import session_is_live
@@ -251,37 +256,99 @@ def finishes_recording_in_progress(user, req, now=None):
         status = draft.streaming_status
         if action == "audio-chunk":
             return session_is_live(draft, now)
-        if action in ("finalize", "release"):
+        if action == "finalize":
+            # A Voice turn joins the thread its session started in; a
+            # dictation's finalize names none (its entry is saved later,
+            # under the session's own parent).
+            named = _body(req).get("parent_id")
+            return (status == "recording"
+                    and (named in (None, "")
+                         or _same_id(named, draft.parent_id)))
+        if action == "release":
             return status == "recording"
         if action == "stream" and status == "recording":
             # Connecting stamps the session live: only for a live one.
             return session_is_live(draft, now)
         return status in ("recording", "finalizing", "completed")
 
-    node_id = None
-    pending_upload = False
     if method == "POST" and path in _UPLOAD_CALLS:
-        source = (req.form if path.endswith("/chunk")
-                  else (req.get_json(silent=True) or {}))
-        node_id, pending_upload = source.get("node_id"), True
-    elif method == "GET" and _UPLOAD_STATUS.match(path):
-        node_id = _UPLOAD_STATUS.match(path).group(1)
-    if node_id is None:
-        return False
+        is_chunk = path.endswith("/chunk")
+        values = req.form if is_chunk else _body(req)
+        metadata = _upload_metadata(user, values.get("upload_id"))
+        if metadata is None or not _same_id(values.get("node_id"),
+                                            metadata.get("node_id")):
+            return False
+        node = _own_recent_upload_node(db, Node, user, metadata.get("node_id"),
+                                       since)
+        # Chunks and finalize: an upload whose init was accepted and whose
+        # file is not assembled yet.
+        if (node is None or node.audio_original_url is not None
+                or node.transcription_status != "pending"):
+            return False
+        if is_chunk:
+            try:
+                index = int(values.get("chunk_index"))
+                total = int(metadata.get("total_chunks"))
+            except (TypeError, ValueError):
+                return False
+            return 0 <= index < total
+        return True
+
+    status_call = _UPLOAD_STATUS.match(path)
+    if method == "GET" and status_call:
+        node = _own_recent_upload_node(db, Node, user, status_call.group(1),
+                                       since)
+        return node is not None
+    return False
+
+
+def _body(req):
+    body = req.get_json(silent=True)
+    return body if isinstance(body, dict) else {}
+
+
+def _same_id(raw, stored):
+    """*raw* (from a request: an int, a digit string, or nothing) names the
+    same id as *stored* (an int or None)."""
+    if raw in (None, ""):
+        return stored is None
     try:
-        node = db.session.get(Node, int(node_id))
+        return stored is not None and int(raw) == int(stored)
     except (TypeError, ValueError):
         return False
+
+
+def _upload_metadata(user, upload_id):
+    """The metadata its init wrote for *user*'s chunked upload *upload_id*
+    (routes/nodes.init_chunked_upload), or None: a malformed id, a folder
+    outside the account's, or no such upload."""
+    import json
+    from backend.routes import nodes as nodes_routes
+    if not isinstance(upload_id, str) \
+            or not nodes_routes._UPLOAD_ID_RE.fullmatch(upload_id):
+        return None
+    own = (nodes_routes.AUDIO_STORAGE_ROOT / "chunks" / str(user.id)).resolve()
+    folder = (own / upload_id).resolve()
+    if folder.parent != own:
+        return None
+    try:
+        metadata = json.loads((folder / "metadata.json").read_text())
+    except (OSError, ValueError):
+        return None
+    return metadata if isinstance(metadata, dict) else None
+
+
+def _own_recent_upload_node(db, node_model, user, node_id, since):
+    """*user*'s audio entry *node_id*, made since *since*, or None."""
+    try:
+        node = db.session.get(node_model, int(node_id))
+    except (TypeError, ValueError):
+        return None
     if (node is None or node.user_id != user.id
             or node.created_at is None or node.created_at < since
             or node.transcription_status is None):
-        return False
-    if pending_upload:
-        # Chunks and finalize: an upload whose init was accepted and whose
-        # file is not assembled yet.
-        return (node.audio_original_url is None
-                and node.transcription_status == "pending")
-    return True
+        return None
+    return node
 
 
 def ai_replies_allowed(user, config=None):

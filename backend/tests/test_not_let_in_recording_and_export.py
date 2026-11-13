@@ -198,6 +198,44 @@ class TestNothingElseOpens:
         _refused(client.get(
             f"/api/drafts/streaming/{draft.session_id}/status"))
 
+    def test_the_turn_goes_where_the_recording_started(self, app):
+        # Finalize names the thread the turn joins: under the exception it
+        # must be the one the session was started in.
+        ben = _not_let_in()
+        own = Node(user_id=ben.id, human_owner_id=ben.id, node_type="user",
+                   ai_usage="chat")
+        own.set_content("my thread")
+        other = Node(user_id=ben.id, human_owner_id=ben.id,
+                     node_type="user", ai_usage="chat")
+        other.set_content("elsewhere")
+        _db.session.add_all([own, other])
+        _db.session.commit()
+        draft = _session(app, ben)
+        draft.parent_id = own.id
+        _db.session.commit()
+        client = _client(app, ben)
+        url = f"/api/drafts/streaming/{draft.session_id}/finalize"
+        _refused(client.post(url, json={"total_chunks": 6, "label": "Voice",
+                                        "parent_id": other.id}))
+        _refused(client.post(url, json={"total_chunks": 6, "label": "Voice",
+                                        "parent_id": "not-an-id"}))
+        _passed(client.post(url, json={"total_chunks": 6, "label": "Voice",
+                                       "parent_id": own.id}))
+
+    def test_a_dictation_finalize_names_no_thread(self, app):
+        ben = _not_let_in()
+        own = Node(user_id=ben.id, human_owner_id=ben.id, node_type="user",
+                   ai_usage="chat")
+        own.set_content("replying to this")
+        _db.session.add(own)
+        _db.session.commit()
+        draft = _session(app, ben, label=None)
+        draft.parent_id = own.id
+        _db.session.commit()
+        _passed(_client(app, ben).post(
+            f"/api/drafts/streaming/{draft.session_id}/finalize",
+            json={"total_chunks": 6}))
+
     def test_another_accounts_session(self, app):
         ben = _not_let_in()
         anna = _user("anna", subscription_status="active",
@@ -310,6 +348,50 @@ class TestAnUploadInProgress:
             "upload_id": "up-1", "node_id": node.id}))
         # Its transcription is still reported.
         _passed(client.get(f"/api/nodes/{node.id}/transcription-status"))
+
+    def test_the_upload_and_its_entry_must_be_the_same_one(self, app):
+        # The upload folder named by upload_id must be the one whose init
+        # made the entry named by node_id; an upload folder of another
+        # (older) upload, or none at all, does not pass with it.
+        from backend.utils.subscriptions import RECORDING_IN_PROGRESS_MAX_AGE
+        ben = _not_let_in()
+        node = _upload(app, ben)
+        old = _upload(app, ben, upload_id="up-old",
+                      age=RECORDING_IN_PROGRESS_MAX_AGE + timedelta(hours=2))
+        client = _client(app, ben)
+        mixed = client.post("/api/nodes/upload/chunk", data={
+            "chunk": (BytesIO(b"0123456789"), "blob"), "chunk_index": "0",
+            "upload_id": "up-old", "node_id": str(node.id),
+        }, content_type="multipart/form-data")
+        _refused(mixed)
+        _refused(client.post("/api/nodes/upload/finalize", json={
+            "upload_id": "up-old", "node_id": node.id}))
+        _refused(client.post("/api/nodes/upload/chunk", data={
+            "chunk": (BytesIO(b"0123456789"), "blob"), "chunk_index": "0",
+            "upload_id": "up-new", "node_id": str(node.id),
+        }, content_type="multipart/form-data"))
+        _refused(client.post("/api/nodes/upload/chunk", data={
+            "chunk": (BytesIO(b"0123456789"), "blob"), "chunk_index": "0",
+            "upload_id": "../up-1", "node_id": str(node.id),
+        }, content_type="multipart/form-data"))
+        old_folder = app._tasks["root"] / "chunks" / str(ben.id) / "up-old"
+        assert not list(old_folder.glob("chunk_*"))
+        assert old.audio_original_url is None
+        app._tasks["transcription"].transcribe_audio.delay.assert_not_called()
+
+    def test_only_the_chunks_its_init_announced(self, app):
+        ben = _not_let_in()
+        node = _upload(app, ben)            # total_chunks 1
+        client = _client(app, ben)
+        for index in ("1", "99", "-1", "x"):
+            _refused(client.post("/api/nodes/upload/chunk", data={
+                "chunk": (BytesIO(b"0123456789"), "blob"),
+                "chunk_index": index, "upload_id": "up-1",
+                "node_id": str(node.id),
+            }, content_type="multipart/form-data"))
+        folder = app._tasks["root"] / "chunks" / str(ben.id) / "up-1"
+        assert not list(folder.glob("chunk_*"))
+        _passed(_upload_chunk(client, node))
 
     def test_another_accounts_or_an_old_upload(self, app):
         from backend.utils.subscriptions import RECORDING_IN_PROGRESS_MAX_AGE
