@@ -514,6 +514,11 @@ class Node(db.Model):
     # (utils/recording_limits.UPLOAD_COUNTS_FOR). NULL for entries
     # that are not uploads, and for uploads from before it was kept.
     upload_activity_at = db.Column(db.DateTime, nullable=True)
+    # An audio upload's seconds, while it waits for its transcript: from its
+    # size at its start, then as the transcription task measures it. It
+    # counts toward the account's usage at a start
+    # (utils/recording_limits.pending_audio_seconds). NULL for other entries.
+    audio_pending_seconds = db.Column(db.Float, nullable=True)
 
     # LLM completion task tracking
     llm_task_id = db.Column(db.String(255), nullable=True)
@@ -1371,6 +1376,12 @@ class NodeTranscriptChunk(db.Model):
     # transcribed (utils/recording_limits.MAX_TRANSCRIBED_SECONDS). NULL for
     # rows transcribed before it was kept, and for the other rows of a batch.
     audio_seconds = db.Column(db.Float, nullable=True)
+    # Seconds of audio this chunk is sent with, once the transcription task
+    # has measured it (the part's length on its first chunk, 0 on the
+    # others); NULL before. While the chunk waits for its transcript it
+    # counts toward the account's usage at a start
+    # (utils/recording_limits.pending_audio_seconds).
+    pending_seconds = db.Column(db.Float, nullable=True)
 
     # Relationship back to node
     node = db.relationship("Node", backref="transcript_chunks")

@@ -300,6 +300,18 @@ def queue_batches(session_id, stored_chunks):
     return task_ids
 
 
+def _note_measured(chunk_records, seconds):
+    """Chunks about to be sent: the part's measured seconds on the first,
+    0 on the others (NodeTranscriptChunk.pending_seconds), committed at
+    once, so a start meanwhile counts them as measured
+    (utils/recording_limits.pending_audio_seconds)."""
+    records = sorted((c for c in chunk_records if c is not None),
+                     key=lambda c: c.chunk_index)
+    for n, record in enumerate(records):
+        record.pending_seconds = seconds if n == 0 else 0.0
+    db.session.commit()
+
+
 def _transcribe_files(client, files):
     """The provider's text for *files* ([(path, name)]), joined."""
     texts = []
@@ -478,6 +490,7 @@ def transcribe_chunk(self, node_id: int, chunk_index: int, chunk_path: str):
                     return {'node_id': node_id, 'chunk_index': chunk_index,
                             'status': 'not_transcribed'}
 
+                _note_measured([chunk_record], plan.seconds)
                 # Transcribe the chunk
                 transcript = _transcribe_files(client, plan.files)
 
@@ -796,6 +809,7 @@ def transcribe_draft_chunk(self, session_id: str, chunk_index: int, chunk_path: 
                             'chunk_index': chunk_index,
                             'status': 'not_transcribed'}
 
+                _note_measured([chunk_record], plan.seconds)
                 # Transcribe the chunk
                 transcript = _transcribe_files(client, plan.files)
 
@@ -1155,6 +1169,11 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list,
                         untranscribed.update(
                             {idx: reason for idx in sub_indices})
                         continue
+                    _note_measured(
+                        NodeTranscriptChunk.query.filter(
+                            NodeTranscriptChunk.session_id == session_id,
+                            NodeTranscriptChunk.chunk_index.in_(sub_indices),
+                        ).all(), plan.seconds)
                     batch_duration_sec += plan.seconds
                     sub_text = _transcribe_files(client, plan.files)
                     if sub_text and sub_text.strip():

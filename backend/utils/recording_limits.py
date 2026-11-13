@@ -56,6 +56,15 @@ counts again inside it (lock_account), so two starts at once cannot both
 pass. Recordings without audio older than EMPTY_SESSION_REMOVED_AFTER are
 removed daily (tasks/recording_cleanup).
 
+Every start (a recording's or an upload's init, and audio of a recording
+that counts as a new start) asks for the usage limit with the audio the
+account has stored or queued but not yet recorded as cost counted in
+(pending_audio_seconds, usage_refusal), so new starts see the account's
+usage before the transcription catches up. A recording that holds audio is
+never refused for it. When the limit is reached, a recording's first audio
+is taken without the limit asked only for the account's most recently
+started recording, the one being spoken into.
+
 An account has at most MAX_UPLOADS_IN_PROGRESS audio uploads waiting for
 their transcript with activity within UPLOAD_COUNTS_FOR
 (uploads_in_progress). An upload takes pieces as long as it had one within
@@ -174,6 +183,17 @@ MAX_UPLOADS_IN_PROGRESS = 5
 # server's words. One the app reports as failed (/upload/cleanup) stops
 # counting at once.
 UPLOAD_COUNTS_FOR = timedelta(hours=24)
+
+# INTRODUCED HEURISTIC: an uploaded file's seconds are estimated, until the
+# transcription task measures them, from its size at the iPhone app's 64 kbps
+# (8 KB a second), at most MAX_UPLOAD_TRANSCRIBED_SECONDS.
+UPLOAD_ESTIMATE_BYTES_PER_SECOND = 64_000 // 8
+# Audio stored or queued counts toward the usage at a start
+# (pending_audio_seconds) for this long; a chunk or upload whose
+# transcription died then stops counting.
+PENDING_COUNTS_FOR = timedelta(hours=24)
+# The model the transcription is recorded at (utils/cost prices it).
+TRANSCRIPTION_MODEL = "gpt-4o-transcribe"
 
 # INTRODUCED HEURISTIC: the most audio of one uploaded file that is turned
 # into text, as decoded. A 200 MB file (the largest upload) at the iPhone's
@@ -484,18 +504,106 @@ def _refused(text_, code, status):
     return jsonify({"error": text_, "code": code}), status
 
 
-def recording_start_refusal(user_id, exclude_draft_id=None, new=False):
+def upload_estimate_seconds(size_bytes):
+    """An uploaded file's seconds before they are measured: its size at
+    UPLOAD_ESTIMATE_BYTES_PER_SECOND, at most MAX_UPLOAD_TRANSCRIBED_SECONDS."""
+    size = max(size_bytes or 0, 0)
+    return min(float(MAX_UPLOAD_TRANSCRIBED_SECONDS),
+               size / UPLOAD_ESTIMATE_BYTES_PER_SECOND)
+
+
+# Chunk statuses that wait for their transcript (and their cost row).
+_WAITING_CHUNK = ("stored", "pending", "processing")
+
+
+def pending_audio_seconds(user_id, now=None):
+    """Seconds of the account's audio stored or queued for transcription
+    and not yet recorded as cost:
+
+    - chunks of its recordings that wait for their transcript: as the
+      transcription task measured them (pending_seconds), or, before,
+      MAX_CHUNK_AUDIO_SECONDS each, the most a chunk is sent with;
+    - its uploads that wait for their transcript (audio_pending_seconds:
+      estimated from the file's size, then as measured).
+
+    A chunk or an upload leaves the sum in the commit that writes its cost
+    row or keeps it without its text (its status changes then), so nothing
+    is counted twice. Rows older than PENDING_COUNTS_FOR are left out."""
+    from backend.extensions import db
+    from backend.models import Draft, Node, NodeTranscriptChunk
+    since = _since(now, PENDING_COUNTS_FOR)
+    per_chunk = db.func.coalesce(NodeTranscriptChunk.pending_seconds,
+                                 float(MAX_CHUNK_AUDIO_SECONDS))
+    waiting = db.and_(NodeTranscriptChunk.status.in_(_WAITING_CHUNK),
+                      NodeTranscriptChunk.created_at >= since)
+    recordings = db.session.query(db.func.sum(per_chunk)).join(
+        Draft, Draft.session_id == NodeTranscriptChunk.session_id,
+    ).filter(Draft.user_id == user_id, waiting).scalar()
+    older_path = db.session.query(db.func.sum(per_chunk)).join(
+        Node, Node.id == NodeTranscriptChunk.node_id,
+    ).filter(Node.user_id == user_id,
+             NodeTranscriptChunk.session_id.is_(None), waiting).scalar()
+    uploads = db.session.query(
+        db.func.sum(db.func.coalesce(Node.audio_pending_seconds, 0.0)),
+    ).filter(
+        Node.user_id == user_id,
+        Node.deleted_at.is_(None),
+        Node.transcription_status.in_(("pending", "processing")),
+        _activity() >= since,
+    ).scalar()
+    return float(recordings or 0) + float(older_path or 0) \
+        + float(uploads or 0)
+
+
+def usage_refusal(user_id):
+    """The usage limit at a start: the 402 (utils/spend) when the account
+    is capped, or when its carry, what it spent this month and the audio it
+    has stored or queued but not yet recorded as cost
+    (pending_audio_seconds, at the transcription price) reach its limit.
+    None otherwise, and for an account without a limit. Asked at every
+    start; never for audio of a recording that holds audio."""
+    from flask import current_app
+    from backend.extensions import db
+    from backend.models import User
+    from backend.utils import spend
+    from backend.utils.cost import calculate_audio_cost_microdollars
+    user = db.session.get(User, user_id)
+    if user is None:
+        return None
+    if not spend.user_is_capped(user):
+        limit = spend._usd_to_microdollars(
+            spend.get_user_spend_limit_usd(user, current_app.config))
+        if limit <= 0:
+            return None
+        used = (spend.rolled_spend_carry(user, current_app.config)
+                + spend.get_user_month_spend_microdollars(user_id))
+        pending = calculate_audio_cost_microdollars(
+            TRANSCRIPTION_MODEL, pending_audio_seconds(user_id))
+        if used + pending < limit:
+            return None
+    response = spend.spend_cap_response(user)
+    db.session.rollback()
+    return response
+
+
+def recording_start_refusal(user_id, exclude_draft_id=None, new=False,
+                            usage=False):
     """Take the account's lock and count: 429 ``too_many_recordings`` when
     the account already holds MAX_OPEN_RECORDINGS open recordings (the
     recording *exclude_draft_id* not counted), worded by what recovery
     offers; for a *new* recording (an init, without audio yet) also 429
-    ``too_many_starts`` past MAX_EMPTY_STARTS. Else None, the lock held
-    until the caller commits."""
+    ``too_many_starts`` past MAX_EMPTY_STARTS. With *usage* (a start), the
+    usage limit first (usage_refusal, 402). Else None, the lock held until
+    the caller commits."""
     from backend.utils.streaming_session import not_live_clause
     try:
         lock_account(user_id)
     except RecordingsBusy:
         return _refused(RECORDINGS_BUSY_TEXT, "recordings_busy", 503)
+    if usage:
+        refused = usage_refusal(user_id)
+        if refused is not None:
+            return refused
     open_ = _open_query(user_id, exclude_draft_id=exclude_draft_id)
     if open_.count() >= MAX_OPEN_RECORDINGS:
         from backend.models import Draft
@@ -510,13 +618,16 @@ def recording_start_refusal(user_id, exclude_draft_id=None, new=False):
 
 
 def upload_start_refusal(user_id):
-    """Take the account's lock and count: 429 ``too_many_uploads`` past
-    MAX_UPLOADS_IN_PROGRESS, else None, the lock held until the caller
-    commits."""
+    """Take the account's lock and count: the usage limit (usage_refusal,
+    402), then 429 ``too_many_uploads`` past MAX_UPLOADS_IN_PROGRESS; else
+    None, the lock held until the caller commits."""
     try:
         lock_account(user_id)
     except RecordingsBusy:
         return _refused(RECORDINGS_BUSY_TEXT, "recordings_busy", 503)
+    refused = usage_refusal(user_id)
+    if refused is not None:
+        return refused
     if uploads_in_progress(user_id) >= MAX_UPLOADS_IN_PROGRESS:
         return _refused(TOO_MANY_UPLOADS_TEXT, "too_many_uploads", 429)
     return None
@@ -545,9 +656,11 @@ def audio_refusal(draft, now=None):
       saved either way.
     - A recording without audio is open for EMPTY_SESSION_EXPIRES_AFTER
       from its start (also once its app released it): its first audio must
-      fit under the count of open recordings (MAX_OPEN_RECORDINGS; the
-      usage limit was asked at its start). After that its first audio is a
-      new start: the usage limit (402), then the count.
+      fit under the count of open recordings (MAX_OPEN_RECORDINGS). The
+      usage limit was asked at its start; it is asked again unless this is
+      the account's most recently started recording, the one being spoken
+      into. After that time its first audio is a new start: the usage
+      limit (402), then the count.
     Under the account's lock when a check runs (held until the caller
     commits)."""
     from backend.extensions import db
@@ -563,15 +676,20 @@ def audio_refusal(draft, now=None):
             return None
     elif (draft.created_at
             and draft.created_at >= _since(now, EMPTY_SESSION_EXPIRES_AFTER)):
-        return recording_start_refusal(draft.user_id,
-                                       exclude_draft_id=draft.id)
-    from backend.models import User
-    from backend.utils.spend import spend_cap_response, user_is_capped
-    user = db.session.get(User, draft.user_id)
-    if user_is_capped(user):
-        db.session.rollback()
-        return spend_cap_response(user)
-    return recording_start_refusal(draft.user_id, exclude_draft_id=draft.id)
+        return recording_start_refusal(
+            draft.user_id, exclude_draft_id=draft.id,
+            usage=not _newest_recording(draft))
+    return recording_start_refusal(draft.user_id, exclude_draft_id=draft.id,
+                                   usage=True)
+
+
+def _newest_recording(draft):
+    """True when *draft* is the account's most recently started recording."""
+    from backend.models import Draft
+    newest = Draft.query.filter(
+        Draft.user_id == draft.user_id, Draft.session_id.isnot(None),
+    ).order_by(Draft.created_at.desc(), Draft.id.desc()).first()
+    return newest is not None and newest.id == draft.id
 
 
 def transcribed_seconds(session_id=None, node_id=None):

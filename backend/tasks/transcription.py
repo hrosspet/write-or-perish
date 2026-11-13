@@ -215,6 +215,12 @@ def transcribe_audio(self, node_id: int, audio_file_path: str, filename: str = N
                 timeout_seconds=seconds_left(
                     deadline, decode_timeout_seconds(processed_path)),
                 logger=logger, stop_after=MAX_UPLOAD_TRANSCRIBED_SECONDS + 1)
+            # Measured: the account's pending usage counts it so
+            # (utils/recording_limits.pending_audio_seconds; committed with
+            # the progress below).
+            if decoded_sec is not None:
+                node.audio_pending_seconds = min(
+                    decoded_sec, float(MAX_UPLOAD_TRANSCRIBED_SECONDS))
             needs_chunking = (decoded_sec is None
                               or file_size > OPENAI_MAX_AUDIO_BYTES
                               or decoded_sec > OPENAI_MAX_DURATION_SEC)

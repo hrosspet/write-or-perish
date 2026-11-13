@@ -794,6 +794,7 @@ def create_node():
         placeholder_text = "[Voice note – transcription pending]"
         from backend.utils.tokens import approximate_token_count as _atc2
 
+        from backend.utils.recording_limits import upload_estimate_seconds
         node = Node(
             user_id=current_user.id,
             human_owner_id=current_user.id,
@@ -801,6 +802,8 @@ def create_node():
             node_type=node_type,
             transcription_status='pending',  # Set initial status
             upload_activity_at=datetime.utcnow(),
+            # Its seconds until measured (utils/recording_limits).
+            audio_pending_seconds=upload_estimate_seconds(content_length),
             privacy_level=privacy_level,
             ai_usage=ai_usage,
             token_count=_atc2(placeholder_text),
@@ -2861,7 +2864,9 @@ def init_chunked_upload():
 
     # Create placeholder node
     placeholder_text = "[Voice note – upload in progress]"
-    from backend.utils.recording_limits import upload_start_refusal
+    from backend.utils.recording_limits import (
+        upload_estimate_seconds, upload_start_refusal,
+    )
     from backend.utils.tokens import approximate_token_count as _atc3
     node = Node(
         user_id=current_user.id,
@@ -2870,6 +2875,8 @@ def init_chunked_upload():
         node_type=node_type,
         transcription_status='pending',
         upload_activity_at=datetime.utcnow(),
+        # Its seconds until measured (utils/recording_limits).
+        audio_pending_seconds=upload_estimate_seconds(filesize),
         privacy_level=privacy_level,
         ai_usage=ai_usage,
         token_count=_atc3(placeholder_text),

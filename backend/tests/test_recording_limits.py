@@ -878,6 +878,174 @@ class TestEmptyRecordingCleanup:
         assert Draft.query.count() == 2
 
 
+# ── The usage limit at a start: audio not yet recorded as cost ─────────────
+
+PRICE = {"gpt-4o-transcribe": {"price_per_minute_usd": 0.006}}
+
+
+def _limit(app, user, usd, spent_usd=0.0):
+    """A monthly limit of *usd*, with *spent_usd* already recorded."""
+    from backend.models import APICostLog
+    app.config["AUDIO_PRICING"] = PRICE
+    user.monthly_spend_limit_usd = usd
+    if spent_usd:
+        _db.session.add(APICostLog(
+            user_id=user.id, model_id="gpt-4o-transcribe",
+            request_type="transcription",
+            cost_microdollars=int(round(spent_usd * 1_000_000))))
+    _db.session.commit()
+
+
+def _cost(seconds):
+    from backend.utils.cost import calculate_audio_cost_microdollars
+    return calculate_audio_cost_microdollars("gpt-4o-transcribe", seconds)
+
+
+def _voice_turn(client):
+    """A Voice turn: started, one chunk, finalized. (status, session id)."""
+    resp = _init_recording(client, label="Voice")
+    if resp.status_code != 201:
+        return resp.status_code, None
+    sid = resp.get_json()["session_id"]
+    resp = client.post(
+        f"/api/drafts/streaming/{sid}/audio-chunk",
+        data={"chunk": (io.BytesIO(IOS_CHUNK_0), "chunk_0.mp4"),
+              "chunk_index": "0", "mime_type": "audio/mp4"},
+        content_type="multipart/form-data")
+    assert resp.status_code == 202, resp.get_json()
+    resp = client.post(f"/api/drafts/streaming/{sid}/finalize",
+                       json={"total_chunks": 1, "label": "Voice",
+                             "model": "gpt-5"})
+    assert resp.status_code == 202, resp.get_json()
+    return 201, sid
+
+
+def _transcribed(user, session_id, seconds=15.0):
+    """What the transcription task commits at once for a turn: its chunk
+    completed and its cost row."""
+    from backend.models import APICostLog
+    chunk = NodeTranscriptChunk.query.filter_by(session_id=session_id).one()
+    chunk.status = "completed"
+    chunk.audio_seconds = seconds
+    _db.session.add(APICostLog(
+        user_id=user.id, model_id="gpt-4o-transcribe",
+        request_type="transcription", audio_duration_seconds=seconds,
+        cost_microdollars=_cost(seconds)))
+    _db.session.commit()
+
+
+class TestUsageAtAStart:
+    """A start counts the audio the account has stored or queued but not
+    yet recorded as cost; a recording that holds audio is never refused for
+    it."""
+
+    def test_forty_starts_in_a_row_stop_at_the_limit(
+            self, app, client, alice, tasks):
+        _limit(app, alice, 0.10)
+
+        codes = [_voice_turn(client)[0] for _ in range(40)]
+
+        accepted = codes.count(201)
+        assert codes == [201] * accepted + [402] * (40 - accepted)
+        # Each turn waits for its transcript, counted at the most a chunk
+        # is sent with until then: the starts stop at the limit, and what
+        # they may send passes it by less than one recording's bound.
+        per_turn = _cost(limits.MAX_CHUNK_AUDIO_SECONDS)
+        assert accepted == -(-100_000 // per_turn)
+        assert accepted * per_turn - 100_000 \
+            < _cost(limits.MAX_TRANSCRIBED_SECONDS)
+
+    def test_back_to_back_voice_turns_under_the_limit_are_counted_once(
+            self, app, client, alice, tasks):
+        # A person's turns, each transcribed before the next (the reply
+        # needs the transcript), are never refused under the limit, and a
+        # transcribed turn is not counted twice.
+        _limit(app, alice, 0.10, spent_usd=0.05)
+
+        for turn in range(20):
+            code, sid = _voice_turn(client)
+            assert code == 201, turn
+            assert limits.pending_audio_seconds(alice.id) \
+                == limits.MAX_CHUNK_AUDIO_SECONDS
+            _transcribed(alice, sid)
+            assert limits.pending_audio_seconds(alice.id) == 0
+
+    def test_a_turn_still_waiting_for_its_transcript_counts_once(
+            self, app, client, alice, tasks):
+        _limit(app, alice, 0.10, spent_usd=0.05)
+        assert _voice_turn(client)[0] == 201
+
+        # The next start, before the transcript: counted at its estimate.
+        assert _voice_turn(client)[0] == 201
+        assert limits.pending_audio_seconds(alice.id) \
+            == 2 * limits.MAX_CHUNK_AUDIO_SECONDS
+
+    def test_an_upload_counts_from_its_start(self, app, client, alice):
+        _limit(app, alice, 0.10)
+        # 8 MB: about 1,000 s until measured, the whole limit.
+        node_id = _init_upload(client, 8_000_000, 2).get_json()["node_id"]
+
+        assert _init_recording(client).status_code == 402
+        assert _init_upload(client, 8, 2, upload_id="up-2").status_code \
+            == 402
+        # Measured shorter by the transcription task.
+        Node.query.get(node_id).audio_pending_seconds = 60.0
+        _db.session.commit()
+        assert _init_recording(client).status_code == 201
+
+    def test_audio_with_its_cost_row_is_not_counted(self, app, client, alice):
+        _limit(app, alice, 0.10)
+        node_id = _init_upload(client, 8, 2).get_json()["node_id"]
+        Node.query.get(node_id).transcription_status = "completed"
+        _db.session.commit()
+
+        assert limits.pending_audio_seconds(alice.id) == 0
+
+    def test_control_a_recording_with_audio_takes_more_past_the_limit(
+            self, app, client, alice):
+        # Control (#341): the pending audio never refuses a recording's
+        # audio once it holds some.
+        _limit(app, alice, 0.01)
+        _left_behind(app, alice, "rec", timedelta(minutes=2), chunks=10)
+
+        assert _chunk(client, "rec", 10,
+                      _payload(WEB_CHUNK_BYTES)).status_code == 202
+
+
+class TestFirstAudioAtTheLimit:
+    def test_control_the_recording_being_spoken_into_takes_its_first_audio(
+            self, app, client, alice):
+        # Control: a start, then the limit reached seconds later by the
+        # previous turn's transcript, then its first chunk.
+        sid = _init_recording(client).get_json()["session_id"]
+        _cap(alice)
+
+        assert _chunk(client, sid, 1,
+                      _payload(WEB_CHUNK_BYTES)).status_code == 202
+
+    def test_only_the_newest_start_takes_its_first_audio_at_the_limit(
+            self, app, client, alice):
+        for n in range(5):
+            _left_behind(app, alice, f"open-{n}", timedelta(hours=1))
+        sids = [_init_recording(client).get_json()["session_id"]
+                for _ in range(30)]
+        _cap(alice)
+
+        codes = []
+        for sid in sids:
+            resp = client.post(
+                f"/api/drafts/streaming/{sid}/audio-chunk",
+                data={"chunk": (io.BytesIO(IOS_CHUNK_0), "chunk_0.mp4"),
+                      "chunk_index": "0", "mime_type": "audio/mp4"},
+                content_type="multipart/form-data")
+            codes.append(resp.status_code)
+            if resp.status_code == 202:
+                client.post(f"/api/drafts/streaming/{sid}/finalize",
+                            json={"total_chunks": 1})
+
+        assert codes == [402] * 29 + [202]
+
+
 def _waiting_uploads(user, n, status="pending", activity=None, deleted=False,
                      handed=False):
     for _ in range(n):
@@ -1786,6 +1954,24 @@ class TestDecodedLength:
         assert head.audio_seconds == pytest.approx(60, abs=0.2)
         assert APICostLog.query.one().audio_duration_seconds \
             == pytest.approx(60, abs=0.2)
+
+    def test_measured_audio_replaces_the_estimate_while_it_is_sent(self, st):
+        seen = []
+        words = type("R", (), {"text": "words"})()
+
+        def provider(**kwargs):
+            seen.append(limits.pending_audio_seconds(st._user.id))
+            return words
+        st._provider.side_effect = provider
+        st._decoded = 75.0
+        _recording(st, "sess-pm", range(0, 20))
+        assert limits.pending_audio_seconds(st._user.id) \
+            == 20 * limits.MAX_CHUNK_AUDIO_SECONDS
+
+        _batch(st, "sess-pm", range(0, 20))
+
+        assert seen == [75.0]
+        assert limits.pending_audio_seconds(st._user.id) == 0
 
     def test_audio_sent_before_a_failure_is_recorded(self, st):
         from backend.models import APICostLog
