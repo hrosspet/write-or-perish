@@ -111,7 +111,11 @@ def test_round_trip_remaps_links_and_respects_privacy(app, tmp_path):
     dump_user._run("alice", str(out))
     d = _read(out)
     assert d["format"] == 2
-    assert set(d["user"]) == {"username", "timezone", "preferred_model", "plan"}
+    # prefilled_handle and each node's provenance since #662: a no to the
+    # tweet seed tells a bundle's pre-filled tweets apart by them.
+    assert set(d["user"]) == {"username", "timezone", "preferred_model", "plan",
+                              "prefilled_handle"}
+    assert all("provenance" in n for n in d["nodes"])
     assert [n["source_key"] for n in d["nodes"]] == ["twitter:1", None, "twitter:2"]  # private skipped
     assert d["nodes"][1]["author_username"] == "claude-opus-5"
     assert d["profiles"][1]["parent_profile_id"] == p1_id
@@ -297,3 +301,35 @@ def test_a_bundles_intentions_never_replace_the_accounts_own(app, tmp_path):
     load_user._run(str(out), "edited", merge=True, create_approved=False)
     assert intentions("edited") == ["my own"]
     assert UserArtifact.latest_for(edited.id, "memory").get_content() == "facts"
+
+
+def test_a_dumped_x_api_tweet_never_loads_at_train(app, tmp_path):
+    """A dump row whose provenance says the tweet was fetched through the
+    X API loads at Chat even if it was stored at Train (#689); the user's
+    own upload keeps Train. (Dumps carry each entry's provenance with
+    #662; the rows are written here so this holds either way.)"""
+    alice, root, child, cont, _, _ = _seed_source()
+    root.ai_usage = cont.ai_usage = "train"
+    db.session.commit()
+    out = tmp_path / "alice.jsonl"
+    dump_user._run("alice", str(out))
+    lines = out.read_text(encoding="utf-8").splitlines()
+    rows = [json.loads(ln) for ln in lines[1:]]
+    for row in rows:
+        row["provenance"] = {"twitter:1": "prefill_x",
+                             "twitter:2": "archive_upload"}.get(row["source_key"])
+    out.write_text("\n".join([lines[0]] + [json.dumps(r) for r in rows]) + "\n",
+                   encoding="utf-8")
+
+    load_user._run(str(out), "bob", merge=False, create_approved=False)
+
+    bob = User.query.filter_by(username="bob").one()
+    loaded = {n.source_key: n.ai_usage for n in
+              Node.query.filter_by(human_owner_id=bob.id)}
+    assert loaded["twitter:1"] == "chat"
+    assert loaded["twitter:2"] == "train"
+    # The account now holds X API posts: recorded, so the bundle's profile
+    # and intentions read as Chat (privacy.x_api_account).
+    from backend.models import APICostLog
+    assert APICostLog.query.filter_by(
+        user_id=bob.id, request_type="x_prefill").count() == 1

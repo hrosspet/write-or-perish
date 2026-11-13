@@ -107,7 +107,14 @@ def _saved_by(user_id, external_ids, cutoff):
 def fetch_community_archive(self, user_id, username, max_items=2000):
     with flask_app.app_context():
         username = (username or "").strip().lstrip("@")
-        account_id = ca_lookup_account(username)
+        from backend.utils.community_archive import CommunityArchiveRetired
+        try:
+            account_id = ca_lookup_account(username)
+        except CommunityArchiveRetired as e:
+            # No key past the REST API's retirement (#688): not "not found".
+            logger.error("Community Archive fetch for user %s: %s", user_id, e)
+            return {"status": "unavailable", "username": username,
+                    "message": str(e)}
         if account_id is None:
             return {"status": "not_found", "username": username}
         created, skipped = _upsert_items(
@@ -554,10 +561,11 @@ def sync_all_twitter_bookmarks():
             if account.user is None or account.user.deleted_at is not None:
                 continue   # a deleted account in its grace period (#269)
             # Payments on: no background job for an account without the
-            # paid set (#438), a catch-up after a pause (#647) included;
-            # always True while off. Its pause, if any, waits as it is.
-            from backend.utils.subscriptions import ai_replies_allowed
-            if not ai_replies_allowed(account.user):
+            # paid set (#438) or one the admin blocked (#697), a catch-up
+            # after a pause (#647) included; always True while off. Its
+            # pause, if any, waits as it is.
+            from backend.utils.approval import background_work_allowed
+            if not background_work_allowed(account.user):
                 continue
             due = _sync_due(account, in_use, now)
             if due == "pause":

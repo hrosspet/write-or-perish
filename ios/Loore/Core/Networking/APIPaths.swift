@@ -13,6 +13,9 @@ enum APIPath {
     static let logout = "/auth/logout"
     static let xLogin = "/auth/login"
     static let xConnect = "/auth/x/connect"
+    /// A sign-in held because the invite it came with names someone else (#439).
+    static let inviteChoiceContinue = "/auth/invite-choice/continue"
+    static let inviteChoiceCancel = "/auth/invite-choice/cancel"
 
     // MARK: Account
     static let dashboard = "/api/dashboard/"

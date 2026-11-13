@@ -58,6 +58,12 @@ VOICE_REPLY_SKIPPED_SPEND_CAP = (
     "Your recording is saved. Loore didn't reply because you've reached "
     "your monthly usage limit, which resets at the start of next month."
 )
+# The same for a ceiling only the first payment lifts (#438: the trial's,
+# an alpha tester's free month's), which does not reset with the month.
+VOICE_REPLY_SKIPPED_SPEND_CAP_UNTIL_PAYMENT = (
+    "Your recording is saved. Loore didn't reply because you've reached "
+    "your usage limit, which lifts with your first payment."
+)
 # The same when AI usage keeps the recording, or the thread it continues,
 # away from AI (streaming init refuses such a recording; this covers a
 # setting changed while it was recorded).
@@ -65,6 +71,14 @@ VOICE_REPLY_SKIPPED_AI_USAGE = (
     "Your recording is saved. Loore didn't reply because AI usage is set "
     "to None."
 )
+
+
+def voice_reply_skipped_spend_cap(user_id):
+    """The capped recording's text for *user_id*'s kind of ceiling."""
+    from backend.utils.spend import cap_lifts_with_payment
+    if cap_lifts_with_payment(user_id):
+        return VOICE_REPLY_SKIPPED_SPEND_CAP_UNTIL_PAYMENT
+    return VOICE_REPLY_SKIPPED_SPEND_CAP
 
 
 def _ai_replies_allowed(user_id):
@@ -1708,7 +1722,10 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     # (an app whose picker does not filter on "chat"); the recording is
     # kept and the reply is not moved to another model.
     # SubscriptionRequired the same way (#438): payments are on and the
-    # account has no AI replies; the recording is kept. Raised before
+    # account's access ended while this recording was made (streaming
+    # init refuses an account without it); the recording is kept with its
+    # transcript, and its text names the reason, which the Voice screen
+    # says aloud (voice_refusals.SUBSCRIPTION_CODES). Raised before
     # ThreadTooLong (create_llm_placeholder checks the plan first).
     # ThreadTooLong the same way (#648): the thread grew past the limit
     # with this recording; it is kept, and the Voice screen says aloud why
@@ -1729,9 +1746,9 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
             SpendCapExceeded, AIUsageRefused, ReadOnlyModelRefused,
             SubscriptionRequired, ThreadTooLong) as e:
         if isinstance(e, SpendCapExceeded):
-            message = VOICE_REPLY_SKIPPED_SPEND_CAP
+            message = voice_reply_skipped_spend_cap(user_id)
         elif isinstance(e, SubscriptionRequired):
-            message = e.message
+            message = e.recording_message
         elif isinstance(e, AIUsageRefused):
             message = VOICE_REPLY_SKIPPED_AI_USAGE
         elif isinstance(e, ReadOnlyModelRefused):

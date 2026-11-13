@@ -85,6 +85,7 @@ SECRET_KEY=your-secret-key
 DATABASE_URL=postgresql://username:password@localhost/writeorperish
 TWITTER_API_KEY=your-twitter-api-key
 TWITTER_API_SECRET=your-twitter-api-secret
+COMMUNITY_ARCHIVE_API_KEY=your-community-archive-api-key  # optional, see docs/LOCAL-DEV.md
 FRONTEND_URL=https://loore.org
 OPENAI_API_KEY=your-openai-api-key
 ```

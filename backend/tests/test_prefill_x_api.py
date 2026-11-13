@@ -132,6 +132,10 @@ def test_prefill_x_impl_imports_and_pins_batch(app, monkeypatch):  # noqa: F811
     assert all(n.provenance == "prefill_x" for n in nodes)  # Loore fetched it
     fresh = User.query.get(u.id)
     assert fresh.profile_force_batch is True and fresh.prefilled_handle == "Alice"
+    # #685: the 90 days of an unclaimed account count from this pre-fill.
+    from datetime import datetime
+    assert fresh.prefilled_at is not None
+    assert abs((datetime.utcnow() - fresh.prefilled_at).total_seconds()) < 60
     assert sync.call_count == 0
     assert states[0]["stage"] == "fetching" and states[-1]["stage"] == "importing"
     assert result["profile_batch_queued"] is False  # three tiny tweets: under the ladder
@@ -226,6 +230,39 @@ def test_prefill_impls_refuse_when_the_task_runs(app, monkeypatch):  # noqa: F81
             impl(opted_out.id, "ivo", {})
     lookup.assert_not_called()
     assert Node.query.count() == 0
+
+
+def test_no_given_during_the_pull_imports_nothing(app, monkeypatch):  # noqa: F811
+    """#662: the person says no in Settings while the posts are being
+    fetched (the pull can take minutes). The tail asks again before it
+    writes anything: no entry, no pin to the batch pipeline, no handle."""
+    from sqlalchemy import update
+    from backend.tasks import imports as imports_mod
+    import backend.tasks.exports as ex
+    monkeypatch.setattr(ex, "maybe_trigger_profile_update", MagicMock())
+    u = _make_user("lena")
+    u.prefill_consent = "yes"
+    _db.session.commit()
+    monkeypatch.setattr(x_api, "lookup_user", lambda h, c, **k: {
+        "id": "U9", "username": "Lena", "name": "L", "tweet_count": 2,
+        "protected": False})
+
+    def iter_then_no(user_id, creds, max_tweets=3200, on_page=None, on_raw=None):
+        users = {}
+        for t in [_v2_tweet(2, "two"), _v2_tweet(1, "one")]:
+            if on_raw:
+                on_raw(t, users)
+            yield x_api.to_export_entry(t, users)
+        # The Settings switch, written by another request meanwhile.
+        _db.session.execute(update(User).where(User.id == u.id)
+                            .values(prefill_consent="no"))
+
+    monkeypatch.setattr(x_api, "iter_user_tweets", iter_then_no)
+    with pytest.raises(RuntimeError, match="declined"):
+        imports_mod.prefill_x_api_impl(u.id, "lena", {})
+    assert Node.query.filter_by(human_owner_id=u.id).count() == 0
+    fresh = User.query.get(u.id)
+    assert fresh.prefilled_handle is None and not fresh.profile_force_batch
 
 
 def _admin(admin_app):  # noqa: F811

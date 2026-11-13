@@ -229,8 +229,11 @@ def list_users():
         get_user_spend_limit_usd, month_start, rolled_spend_carry,
         user_is_capped,
     )
+    from backend.utils.approval import (
+        approval_waived, counts_as_approved, is_blocked)
 
     config = current_app.config
+    waived = approval_waived(config)
     now = datetime.utcnow()
     users = User.query.order_by(User.created_at.desc()).all()
     profile_status = _profile_status_map()
@@ -289,7 +292,12 @@ def list_users():
             "username": user.username,
             "created_at": iso_utc(user.created_at),
             "accepted_terms_at": iso_utc(user.accepted_terms_at),
-            "approved": user.approved,
+            # `approved`; payments off, an account the gate let in by
+            # itself while they were on reads as waiting (#697).
+            "approved": counts_as_approved(user, config),
+            # Payments on (#697): the admin blocked it (Inactive otherwise
+            # only means it has not come back since payments went on).
+            **({"blocked": is_blocked(user)} if waived else {}),
             "email": user.email,
             "plan": user.plan,
             "deactivated_at": iso_utc(user.deactivated_at),
@@ -358,19 +366,68 @@ def list_users():
 @login_required
 @admin_required
 def toggle_user_status(user_id):
+    """Activate / Deactivate. While payments are on (#697) the Users tab
+    offers Block / Unblock instead (block_user below), and this only for
+    an account never approved: Activate by hand, as before (an "alpha"
+    account then gets the alpha testers' free month, convert_if_alpha).
+    Payments off, an account the gate let in by itself while they were on
+    reads as waiting (approval.waiting_again); Activate approves it by
+    hand."""
+    from backend.utils.approval import (
+        approval_waived, approved_by_hand, is_blocked, waiting_again)
     user = User.query.get_or_404(user_id)
+    if waiting_again(user):
+        approved_by_hand(user)
+        user.approved_at = datetime.utcnow()
+        db.session.commit()
+        return jsonify({"message": "User status updated",
+                        "approved": True}), 200
     user.approved = not user.approved  # Toggle the approved flag
     if not user.approved:
         # Record deactivation time (terms acceptance fields are preserved for audit)
         user.deactivated_at = datetime.utcnow()
     else:
         user.approved_at = datetime.utcnow()
+        approved_by_hand(user)
         # An "alpha" account let in after the alpha free month was given
         # gets the same month (#438).
         from backend.utils.subscriptions import convert_if_alpha
         convert_if_alpha(user)
     db.session.commit()
-    return jsonify({"message": "User status updated", "approved": user.approved}), 200
+    body = {"message": "User status updated", "approved": user.approved}
+    if approval_waived():
+        body["blocked"] = is_blocked(user)
+    return jsonify(body), 200
+
+
+@admin_bp.route("/users/<int:user_id>/block", methods=["POST"])
+@login_required
+@admin_required
+def block_user(user_id):
+    """Payments on (#697): Block or Unblock any account. Body
+    {"block": true|false}. Block works on an account never approved too,
+    without Activate (which would give the alpha free month); Unblock puts
+    the account back exactly as it was (utils/approval.block, unblock).
+    Nothing of its subscription is cancelled. 404 while payments are
+    off: the Users tab has Deactivate / Activate then."""
+    from backend.utils.approval import (
+        approval_waived, block, is_blocked, unblock)
+    if not approval_waived():
+        return jsonify({"error": "Not found"}), 404
+    user = User.query.get_or_404(user_id)
+    data = request.get_json(silent=True)
+    want = data.get("block") if isinstance(data, dict) else None
+    if not isinstance(want, bool):
+        return jsonify({"error": "block must be true or false."}), 400
+    if user.id == current_user.id and want:
+        return jsonify({"error": "You can't block your own account."}), 400
+    if want:
+        block(user)
+    else:
+        unblock(user)
+    db.session.commit()
+    return jsonify({"blocked": is_blocked(user),
+                    "approved": bool(user.approved)}), 200
 
 @admin_bp.route("/activity", methods=["GET"])
 @login_required
@@ -382,6 +439,23 @@ def activity():
     from backend.utils.activity import activity_report
     days = min(max(request.args.get("days", 14, type=int), 7), 60)
     return jsonify(activity_report(days=days)), 200
+
+
+def _approve_with_prefill(user):
+    """Payments on (#697; Peter, 2026-11-13): starting a pre-fill counts
+    as the approval, so the account is ready at its owner's first sign-in
+    (at the trial step). Not an account the admin blocked. No welcome
+    email: the outreach is the admin's own."""
+    from backend.utils.approval import (
+        approval_waived, approved_by_hand, let_in)
+    if not approval_waived():
+        return
+    if let_in(user, automatic=False):
+        db.session.commit()
+    elif user.approved and user.let_in_at is not None:
+        # Let in by the gate earlier: the admin's pre-fill is an approval.
+        approved_by_hand(user)
+        db.session.commit()
 
 
 def _prefill_refusal_response(user):
@@ -753,6 +827,89 @@ def undo_deletion_route(user_id):
     return jsonify({"job": _purge_job_json(latest)}), 200
 
 
+@admin_bp.route("/unclaimed_accounts", methods=["GET"])
+@login_required
+@admin_required
+def unclaimed_accounts_report():
+    """The pre-filled accounts nobody claimed (#685): which the nightly
+    run deletes now (dry run: would delete), which wait for their date,
+    which are excluded, with the opened and deletion dates. Accounts
+    someone used, and those opened before the sign-in record, as counts.
+    Changes nothing; metadata only."""
+    from backend.utils import unclaimed_accounts as ua
+    from backend.utils.activity import LAST_SEEN_SINCE
+    assessments = ua.report()
+    days = ua.period_days()
+    listed = [ua.assessment_json(a, days) for a in assessments
+              if a.status in ("due", "waiting", "kept")]
+    before = [a.user_id for a in assessments if a.status == "before_record"]
+    return jsonify({
+        "deletion_enabled": ua.deletion_enabled(),
+        "period_days": ua.period_days(),
+        "max_per_run": ua.MAX_DELETIONS_PER_RUN,
+        "record_since": iso_utc(LAST_SEEN_SINCE),
+        "accounts": listed,
+        "used_count": sum(1 for a in assessments if a.status == "used"),
+        "before_record": {"count": len(before), "ids": before},
+    }), 200
+
+
+@admin_bp.route("/users/<int:user_id>/unclaimed_keep", methods=["PUT"])
+@login_required
+@admin_required
+def unclaimed_keep(user_id):
+    """The admin's Keep on a pre-filled account nobody claimed (#685), e.g.
+    when someone was promised more time. Body: {"until": "YYYY-MM-DD"
+    (kept to the end of that day, UTC) | "forever" | null (cleared: the
+    period applies again)}."""
+    from backend.utils import unclaimed_accounts as ua
+    user = User.query.get_or_404(user_id)
+    data = request.get_json(silent=True) or {}
+    try:
+        until = ua.parse_until(data.get("until"))
+    except (ValueError, AttributeError):
+        return jsonify({"error": 'Give a date (YYYY-MM-DD), "forever", or '
+                                 'nothing to clear.'}), 400
+    ua.set_keep(user, until)
+    logger.warning("Admin %s set the unclaimed-account Keep of user %s to %s",
+                   current_user.id, user.id,
+                   "forever" if until == ua.KEEP_FOREVER else until)
+    return jsonify({"account": ua.assessment_json(ua.assess(
+        user, datetime.utcnow(), config=current_app.config,
+        active_job_ids=ua.active_job_user_ids()))}), 200
+
+
+@admin_bp.route("/unclaimed_accounts/keep", methods=["POST"])
+@login_required
+@admin_required
+def unclaimed_keep_many():
+    """The admin's Keep on several pre-filled accounts at once (#685: the
+    owner prepares and invites people in waves). Body: {"until":
+    "YYYY-MM-DD" | "forever" | null, and either "user_ids": [ids] or
+    "scope": "due" | "upcoming" (every account due now, or due and
+    waiting, in the report at this moment)}. Returns the ids changed."""
+    from backend.utils import unclaimed_accounts as ua
+    data = request.get_json(silent=True) or {}
+    try:
+        until = ua.parse_until(data.get("until"))
+    except (ValueError, AttributeError):
+        return jsonify({"error": 'Give a date (YYYY-MM-DD), "forever", or '
+                                 'nothing to clear.'}), 400
+    scope = data.get("scope")
+    ids = data.get("user_ids")
+    if scope is not None and scope not in ua.BULK_SCOPES:
+        return jsonify({"error": "scope must be due or upcoming."}), 400
+    if scope is None and (not isinstance(ids, list) or not all(
+            isinstance(i, int) for i in ids)):
+        return jsonify({"error": "Give user_ids (a list of ids) or a "
+                                 "scope."}), 400
+    changed = ua.keep_many(until=until, user_ids=ids, scope=scope)
+    logger.warning("Admin %s set the unclaimed-account Keep of users %s to "
+                   "%s", current_user.id, changed,
+                   "forever" if until == ua.KEEP_FOREVER else until)
+    return jsonify({"user_ids": changed}), 200
+
+
 @admin_bp.route("/users/<int:user_id>/toggle_spam", methods=["POST"])
 @login_required
 @admin_required
@@ -881,10 +1038,13 @@ def whitelist_user():
     admin confirmed the spend in a dialog, per whitelist. That read is
     billed to the account it creates (the admin's ledger only when there
     is no account to bill).
-    Created unapproved: whitelisting starts the pre-fill workflow, not
-    ends it — the account is pre-filled (and may be claimed by its owner
-    meanwhile) before it is ready, and the admin approves it by hand once
-    it is. Body: {"handle", "x_lookup"?: bool}."""
+    Created unapproved while payments are off: whitelisting starts the
+    pre-fill workflow, not ends it — the account is pre-filled (and may be
+    claimed by its owner meanwhile) before it is ready, and the admin
+    approves it by hand once it is. While payments are on (#697),
+    whitelisting counts as the approval: the account is ready at its
+    owner's first sign-in, at the trial step. Body: {"handle",
+    "x_lookup"?: bool}."""
     from backend.utils.x_identity import resolve_x_id, XIdUnresolved, log_user_read
     data = request.get_json() or {}
     handle = (data.get("handle") or "").strip().lstrip("@")
@@ -924,6 +1084,9 @@ def whitelist_user():
         }), 409
 
     user = User(twitter_id=resolved.x_id, username=handle, approved=False)
+    from backend.utils.approval import let_in
+    # Payments on (#697): approved now, no welcome email.
+    let_in(user, automatic=False)
     db.session.add(user)
     try:
         db.session.commit()
@@ -964,28 +1127,36 @@ def activate_and_welcome(user_id):
     if not user.email:
         return jsonify({"error": "User has no email address. Add one first."}), 400
 
+    # Generate magic link pointing to /welcome (30-day expiry)
+    welcome_max_age = 30 * 24 * 3600  # 30 days in seconds
+
     # Approve the user
     user.approved = True
     user.approved_at = datetime.utcnow()
+    # By hand (#697): not let in by the gate, not waiting for Unblock.
+    from backend.utils.approval import approved_by_hand
+    approved_by_hand(user)
     # An "alpha" account let in after the alpha free month was given gets
     # the same month (#438).
     from backend.utils.subscriptions import convert_if_alpha
     convert_if_alpha(user)
+    # The invited person gets the link's 30 days to come, whatever else
+    # happens to sign-in links meanwhile: a pre-filled account nobody has
+    # claimed is not deleted before then (#685). Never moves a Keep the
+    # admin set earlier.
+    from backend.utils.unclaimed_accounts import keep_at_least
+    keep_at_least(user, user.approved_at + timedelta(seconds=welcome_max_age))
     db.session.commit()
-
-    # Generate magic link pointing to /welcome (30-day expiry)
-    welcome_max_age = 30 * 24 * 3600  # 30 days in seconds
     try:
         token = generate_magic_link_token(
             user.email, next_url="/welcome", max_age=welcome_max_age
         )
         token_h = hash_token(token)
 
-        user.magic_link_token_hash = token_h
-        user.magic_link_expires_at = (
-            datetime.utcnow() + timedelta(seconds=welcome_max_age)
-        )
-        db.session.commit()
+        # A link of its own, valid until used or expired: sign-in links
+        # asked for the address later leave it working.
+        from backend.utils.sign_in_links import record_link
+        record_link(user.email, token_h, welcome_max_age, user.id)
 
         backend_url = request.host_url.rstrip("/")
         magic_link_url = f"{backend_url}/auth/magic-link/verify?token={token}"
@@ -1023,6 +1194,7 @@ def prefill_from_community_archive(user_id):
     handle = (data.get("handle") or user.username or "").strip().lstrip("@")
     if not handle:
         return jsonify({"error": "Handle is required."}), 400
+    _approve_with_prefill(user)
     from backend.tasks.imports import prefill_community_archive
     task = prefill_community_archive.delay(user.id, handle, {
         "include_replies": bool(data.get("include_replies", True)),
@@ -1070,6 +1242,10 @@ def prefill_check():
     summary["import_source"] = "parquet" if (big and snapshot_complete) else (
         "parquet (if snapshot is current)" if big and summary.get("detail_source") != "parquet"
         else "rest")
+    if ca.v1_enabled():
+        # With an API key the pre-fill reads every account from API v1
+        # (prefill_community_archive_impl, #688).
+        summary["import_source"] = "api-v1"
     # The first step of the provisional ladder: what a fresh account must
     # hold for the seeder to build anything at all.
     from backend.utils.chunk_plan import next_build_threshold
@@ -1160,6 +1336,7 @@ def prefill_from_x_api(user_id):
     max_tweets = x_api.fetchable(x_api.TIMELINE_CAP, max_tweets)
     if max_tweets <= 0:
         return jsonify({"error": "max_tweets must be positive."}), 400
+    _approve_with_prefill(user)
     from backend.tasks.imports import prefill_x_api
     task = prefill_x_api.delay(user.id, handle, {
         "max_tweets": max_tweets,
@@ -1599,11 +1776,18 @@ def update_discount_code(code_id):
 @login_required
 @admin_required
 def list_referrals():
-    from backend.models import Referral
+    """Every invite (#439) with its state, and what came of a used one;
+    then the referrals made through the reusable link invites replaced.
+    Who an invite was for is not listed: that is the inviter's, and it is
+    deleted when the invite ends."""
+    from backend.models import Invite, Referral
     if _payments_off():
         abort(404)
     referrals = Referral.query.order_by(Referral.id.desc()).all()
+    by_invite = {r.invite_id: r for r in referrals if r.invite_id}
+    invites = Invite.query.order_by(Invite.id.desc()).all()
     ids = {r.inviter_id for r in referrals} | {r.friend_id for r in referrals}
+    ids |= {i.inviter_id for i in invites}
     ids.discard(None)
     users = {u.id: u for u in User.query.filter(User.id.in_(ids)).all()} \
         if ids else {}
@@ -1612,22 +1796,33 @@ def list_referrals():
         user = users.get(user_id)
         return user.username if user else None
 
-    rows = []
-    for r in referrals:
-        friend = users.get(r.friend_id)
-        rows.append({
-            "id": r.id,
+    def row(invite, r):
+        friend = users.get(r.friend_id) if r else None
+        out = {
+            "id": f"i{invite.id}" if invite else f"r{r.id}",
             # None: the account was deleted since.
-            "inviter": name(r.inviter_id),
-            "friend": name(r.friend_id),
+            "inviter": name(invite.inviter_id if invite else r.inviter_id),
+            # "open", "used", "withdrawn", "expired"; None: a referral
+            # through the reusable link.
+            "invite_state": invite.state if invite else None,
+            "invite_kind": invite.kind if invite else None,
+            "created_at": iso_utc(invite.created_at if invite
+                                  else r.created_at),
+            "friend": name(r.friend_id) if r else None,
             "friend_approved": bool(friend.approved) if friend else None,
-            "created_at": iso_utc(r.created_at),
-            "rewarded_at": iso_utc(r.rewarded_at),
-            "inviter_reward": r.inviter_reward,
-            "inviter_credit_cents": r.inviter_credit_cents,
-            "inviter_credit_currency": r.inviter_credit_currency,
-            "friend_reward": r.friend_reward,
-            "friend_credit_cents": r.friend_credit_cents,
-            "friend_credit_currency": r.friend_credit_currency,
-        })
-    return jsonify({"referrals": rows}), 200
+            "rewarded_at": iso_utc(r.rewarded_at) if r else None,
+        }
+        for key in ("inviter_reward", "inviter_credit_cents",
+                    "inviter_credit_currency", "friend_reward",
+                    "friend_credit_cents", "friend_credit_currency"):
+            out[key] = getattr(r, key) if r else None
+        return out
+
+    rows = [row(i, by_invite.get(i.id)) for i in invites]
+    rows += [row(None, r) for r in referrals if not r.invite_id]
+    # What each side gets now (utils/referrals.referral_credit): the table
+    # says it, and it is the amount to give by hand for a "failed" one.
+    from backend.utils.referrals import referral_credit
+    cents, currency = referral_credit()
+    return jsonify({"referrals": rows,
+                    "credit": {"cents": cents, "currency": currency}}), 200

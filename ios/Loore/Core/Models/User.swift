@@ -29,6 +29,10 @@ struct CurrentUser: Decodable, Equatable, Sendable {
     var prefilledHandle: String?
     var timezone: String
     var spendBlocked: Bool
+    /// Payments on (#438): the cap is the trial's or the free month's, which
+    /// only the first payment lifts, not the month (`spend_cap_lifts_with_payment`,
+    /// sent only then).
+    var spendCapLiftsWithPayment: Bool
     var shareV1Enabled: Bool
     var shareV1Available: Bool
     var publicSharingEnabled: Bool
@@ -47,6 +51,9 @@ struct CurrentUser: Decodable, Equatable, Sendable {
     /// is sent with it. Settings shows the state; the app sells nothing.
     var paymentsEnabled: Bool
     var subscription: SubscriptionState?
+    /// Payments on (#697): the admin blocked this account. Nobody else waits for
+    /// approval then, so it gets `AccountNotActiveView`, not the waitlist.
+    var accountBlocked: Bool
 
     enum CodingKeys: String, CodingKey {
         case id, username, email, plan, timezone
@@ -68,6 +75,7 @@ struct CurrentUser: Decodable, Equatable, Sendable {
         case prefillConsent = "prefill_consent"
         case prefilledHandle = "prefilled_handle"
         case spendBlocked = "spend_blocked"
+        case spendCapLiftsWithPayment = "spend_cap_lifts_with_payment"
         case shareV1Enabled = "share_v1_enabled"
         case shareV1Available = "share_v1_available"
         case publicSharingEnabled = "public_sharing_enabled"
@@ -79,6 +87,7 @@ struct CurrentUser: Decodable, Equatable, Sendable {
         case gleanEnabled = "glean_enabled"
         case paymentsEnabled = "payments_enabled"
         case subscription
+        case accountBlocked = "account_blocked"
     }
 
     init(from decoder: Decoder) throws {
@@ -106,6 +115,7 @@ struct CurrentUser: Decodable, Equatable, Sendable {
         prefilledHandle = c.tolerant(.prefilledHandle)
         timezone = c.tolerant(.timezone, default: "UTC")
         spendBlocked = c.tolerant(.spendBlocked, default: false)
+        spendCapLiftsWithPayment = c.tolerant(.spendCapLiftsWithPayment, default: false)
         shareV1Enabled = c.tolerant(.shareV1Enabled, default: false)
         shareV1Available = c.tolerant(.shareV1Available, default: false)
         publicSharingEnabled = c.tolerant(.publicSharingEnabled, default: false)
@@ -117,6 +127,7 @@ struct CurrentUser: Decodable, Equatable, Sendable {
         gleanEnabled = c.tolerant(.gleanEnabled, default: false)
         paymentsEnabled = c.tolerant(.paymentsEnabled, default: false)
         subscription = c.tolerant(.subscription)
+        accountBlocked = c.tolerant(.accountBlocked, default: false)
     }
 
     /// Payments on and no AI replies on this account (#438): Voice refuses a

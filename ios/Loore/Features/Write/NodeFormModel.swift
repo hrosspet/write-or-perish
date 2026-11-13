@@ -12,6 +12,8 @@ struct NodeFormConfig {
         var detachPrompt = false
         var hasGeneratedTTS = false
         var hasChildren = false
+        /// Fetched through the X API: the AI usage select offers no Train (#689).
+        var trainRefused = false
     }
 
     var parentId: Int?
@@ -58,7 +60,11 @@ struct NodeFormResult {
     /// Edit: the node's own fields after the save.
     var editedNode: NodeDetail?
     var descendantsUpdated = 0
+    /// Replies "apply to my replies" left at Chat: written from X posts (#689).
+    var keptFromTrain = 0
     var spendCapped = false
+    /// The cap only the first payment lifts (#438), from the answer.
+    var spendCapLiftsWithPayment = false
     var llmError: String?
     /// Payments on, no AI replies (#438): why the reply was skipped.
     var subscriptionMessage: String?
@@ -470,7 +476,7 @@ final class NodeFormModel {
                                                                streamingSessionId: streamingSessionId))
             await clearAfterSend()
             streamingSessionId = nil
-            if result.spendCapped { app.notifySpendBlocked() }
+            if result.spendCapped { app.notifySpendBlocked(liftsWithPayment: result.spendCapLiftsWithPayment) }
             if let notice = result.subscriptionMessage { app.notifySubscriptionRequired(notice) }
             if let llmError = result.llmError, !ThreadLength.isRefusal(result.llmErrorCode) {
                 app.toasts.show(llmError, duration: 10)
@@ -488,7 +494,7 @@ final class NodeFormModel {
             ])
             let answer: TextmodeStartResponse = try await api.post(APIPath.textmodeStart, json: body)
             await clearAfterSend()
-            if answer.spendCapped { app.notifySpendBlocked() }
+            if answer.spendCapped { app.notifySpendBlocked(liftsWithPayment: answer.spendCapLiftsWithPayment) }
             if let notice = answer.subscriptionNotice { app.notifySubscriptionRequired(notice) }
             // A first entry too large for a reply (#648): its page shows the limit.
             if let llmError = answer.llmError, !ThreadLength.isRefusal(answer.llmErrorCode) {
@@ -512,7 +518,7 @@ final class NodeFormModel {
             let answer: SaveAsNodeResponse = try await api.post(APIPath.streamingSaveAsNode(sid), json: .object(body))
             await clearAfterSend()
             streamingSessionId = nil
-            if answer.spendCapped { app.notifySpendBlocked() }
+            if answer.spendCapped { app.notifySpendBlocked(liftsWithPayment: answer.spendCapLiftsWithPayment) }
             if let notice = answer.subscriptionNotice { app.notifySubscriptionRequired(notice) }
             return NodeFormResult(id: answer.id, awaitLLM: answer.llmNodeId, userNodeId: answer.userNodeId,
                                   llmNodeId: answer.llmNodeId, tipId: answer.tipId, spendCapped: answer.spendCapped,
@@ -530,7 +536,8 @@ final class NodeFormModel {
             let answer: NodeUpdateResponse = try await api.put(APIPath.node(edit.nodeId), json: .object(body))
             await clearAfterSend()
             return NodeFormResult(id: answer.node.id, editedNode: answer.node,
-                                  descendantsUpdated: answer.descendantsUpdated, privacy: answer.node.privacyLevel)
+                                  descendantsUpdated: answer.descendantsUpdated,
+                                  keptFromTrain: answer.keptFromTrain, privacy: answer.node.privacyLevel)
         }
 
         if let file = uploadedFile {
@@ -606,6 +613,10 @@ final class NodeFormModel {
             initBody["parent_id"] = .optional(config.parentId)
             struct InitAnswer: Decodable { var node_id: Int }
             let started: InitAnswer = try await app.api.post(APIPath.uploadInit, json: .object(initBody))
+            // From the accepted init to the finalize, a recording in progress: the
+            // app does not switch to the not-let-in screen meanwhile (#438).
+            app.audio.beginUpload()
+            defer { app.audio.endUpload() }
             let handle = try FileHandle(forReadingFrom: file.url)
             defer { try? handle.close() }
             for index in 0..<total {

@@ -156,10 +156,12 @@ def _redis(config):
     return _client
 
 
-def claim(key, window, config):
+def claim(key, window, config, prefix=KEY_PREFIX):
     """True for the first claim of *key* in *window* seconds — across
-    processes when Redis answers, else within this process."""
-    name = KEY_PREFIX + ":".join(key)
+    processes when Redis answers, else within this process. *prefix*
+    names the alert family (the Community Archive alerts use their own,
+    ca_feed)."""
+    name = prefix + ":".join(key)
     try:
         client = _redis(config)
         if client is not None:
@@ -175,6 +177,21 @@ def claim(key, window, config):
             return False
         _local_claims[name] = now + window
         return True
+
+
+def release(key, config, prefix=KEY_PREFIX):
+    """Drop the claim of *key* (the problem is over), so the next failure
+    is reported at once rather than after the window."""
+    name = prefix + ":".join(key)
+    try:
+        client = _redis(config)
+        if client is not None:
+            client.delete(name)
+    except Exception:
+        logger.warning("Provider alert throttle: Redis unavailable",
+                       exc_info=True)
+    with _local_lock:
+        _local_claims.pop(name, None)
 
 
 def _capture(err, detail):

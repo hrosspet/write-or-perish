@@ -1,6 +1,11 @@
 import hashlib
+import secrets
 from flask import current_app
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
+
+# The payload key of a sign-in token's nonce. Tokens without it were made
+# before sign-in links had rows of their own.
+LINK_NONCE_KEY = "nonce"
 
 
 def _get_serializer():
@@ -12,7 +17,10 @@ def generate_magic_link_token(email, next_url=None, max_age=None,
     """*invite*: the invite code the sign-in came with (#439), carried in
     the signed token so it survives opening the link in another browser."""
     s = _get_serializer()
-    payload = {"email": email}
+    # The nonce makes every token unique (two for the same address in the
+    # same second would otherwise be equal) and marks a token whose link
+    # has a SignInLink row (backend/utils/sign_in_links.py).
+    payload = {"email": email, LINK_NONCE_KEY: secrets.token_urlsafe(12)}
     if next_url:
         payload["next_url"] = next_url
     if max_age:

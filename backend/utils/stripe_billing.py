@@ -18,7 +18,7 @@ what its state is, so events may arrive in any order. It never writes
 """
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from flask import current_app, has_app_context
 
@@ -183,11 +183,6 @@ class StripeGateway:
             params=params))
 
     # Customer credit (#439: a referral's free week)
-    def preview_invoice(self, customer_id, subscription_id):
-        """What the subscription's next invoice will charge."""
-        return plain(self.client.v1.invoices.create_preview(params={
-            "customer": customer_id, "subscription": subscription_id}))
-
     def list_balance_transactions(self, customer_id):
         page = self.client.v1.customers.balance_transactions.list(
             customer_id, params={"limit": 100})
@@ -214,6 +209,11 @@ class StripeGateway:
     def release_subscription_schedule(self, schedule_id):
         return plain(self.client.v1.subscription_schedules.release(
             schedule_id))
+
+    # One trial per card (#697): only the card's fingerprint is read.
+    def retrieve_payment_method(self, payment_method_id):
+        return plain(self.client.v1.payment_methods.retrieve(
+            payment_method_id))
 
 
 def get_gateway(config=None):
@@ -518,6 +518,14 @@ def create_checkout(gateway, user, level, config=None, code=None):
     db.session.query(User).filter(User.id == user.id).with_for_update().one()
     db.session.refresh(user)
     completed = user.subscription_status in SUBSCRIPTION_GRANTING_STATUSES
+    if not completed:
+        # Back at the same level (and code) while its session is still
+        # open: that session again, not a new one (#697).
+        reused = _reusable_session(gateway, user, level,
+                                   code.id if code is not None else None)
+        if reused is not None:
+            db.session.commit()
+            return reused
     for row in CheckoutSession.query.filter_by(user_id=user.id,
                                                state="open").all():
         expire_session(gateway, row)
@@ -538,6 +546,34 @@ def create_checkout(gateway, user, level, config=None, code=None):
         id=session["id"], user_id=user.id, level=level,
         code_id=code.id if code is not None else None, state="open"))
     db.session.commit()
+    return session
+
+
+# INTRODUCED HEURISTIC (#697): how old the account's open session may be
+# to be given again for the same level, instead of a new one. Its trial
+# and price were set when it was made; an hour keeps them current (Stripe
+# keeps a session open for 24 hours), and covers going back and forth.
+CHECKOUT_REUSE_MAX_AGE = timedelta(hours=1)
+
+
+def _reusable_session(gateway, user, level, code_id, now=None):
+    """The account's open session for *level* and *code_id*, made within
+    CHECKOUT_REUSE_MAX_AGE and still open at Stripe with its address, or
+    None. A session that is not open any more is left to create_checkout,
+    which records what it became."""
+    now = now or datetime.utcnow()
+    row = (CheckoutSession.query
+           .filter(CheckoutSession.user_id == user.id,
+                   CheckoutSession.state == "open",
+                   CheckoutSession.level == level,
+                   CheckoutSession.created_at >= now - CHECKOUT_REUSE_MAX_AGE)
+           .order_by(CheckoutSession.created_at.desc())
+           .first())
+    if row is None or row.code_id != code_id:
+        return None
+    session = gateway.retrieve_checkout_session(row.id) or {}
+    if session.get("status") != "open" or not session.get("url"):
+        return None
     return session
 
 
@@ -805,6 +841,8 @@ def settle_subscription(gateway, sub, config=None, lock=True):
       charged refunded, whichever arrives first;
     * a subscription still in a trial for an account whose trial another
       subscription used: cancelled (nothing was charged yet);
+    * one still in a trial whose card started a trial on another account
+      (#697, utils/trial_cards): cancelled the same way;
     * the code that opened a kept subscription takes its use now.
 
     The account row is locked first (*lock*), so two events of one
@@ -848,6 +886,16 @@ def settle_subscription(gateway, sub, config=None, lock=True):
             logger.warning("User %s: a second trial (%s) cancelled; %s had "
                            "the trial", user.id, sub_id,
                            user.subscription_trial_sub_id)
+            cancelled = cancel_duplicate(gateway, sub)
+            apply_subscription(cancelled, config)
+            return user
+        # One trial per card too (#697): a trial whose card already
+        # started one on another account goes the same way.
+        from backend.utils.trial_cards import trial_card_refused
+        if trial_card_refused(gateway, user, sub, config):
+            # The account's next checkout has no trial, whatever card.
+            user.subscription_trial_used = True
+            user.subscription_trial_card_refused_at = datetime.utcnow()
             cancelled = cancel_duplicate(gateway, sub)
             apply_subscription(cancelled, config)
             return user

@@ -115,7 +115,7 @@ sys.path.insert(0, "/app")
 from backend.app import create_app
 from backend.models import Node, NodeTranscriptChunk, User
 from backend.extensions import db
-from backend.utils.magic_link import generate_magic_link_token, hash_token
+from backend.utils.sign_in_links import make_link_token
 
 
 def deser(v):
@@ -241,10 +241,8 @@ with app.app_context():
         email = u.email or f"clone-{u.id}@local"
         if not u.email:
             u.email = email
-        token = generate_magic_link_token(email, "/")
-        u.magic_link_token_hash = hash_token(token)
-        u.magic_link_expires_at = datetime.utcnow() + timedelta(days=30)
         db.session.commit()
+        token = make_link_token(email, "/")
         login_urls.append((u.id, u.username, token))
 
     print("IMPORT_RESULT", json.dumps({

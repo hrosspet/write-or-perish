@@ -162,6 +162,74 @@ final class VoiceRefusalSpeechTurnTests: XCTestCase {
         }
     }
 
+    // MARK: The access ended while the turn was recorded (#438)
+
+    private static let accessEnded: [SpokenRefusal] = [.subscriptionEnded, .paymentFailed, .freeMonthEnded,
+                                                       .noSubscription]
+
+    func testARecordingKeptAfterTheAccessEndedIsSaid() async throws {
+        for refusal in Self.accessEnded {
+            audio.events = []
+            notices.toasts = []
+            backend.statuses = [try status(warning: refusal.text, warningCode: refusal.rawValue)]
+            await recordAndStop()
+            await wait("said \(refusal)") { !self.spoken.isEmpty }
+            XCTAssertEqual(spoken, [refusal.text])
+            XCTAssertEqual(notices.toasts, [refusal.text], "the toast stays")
+            XCTAssertEqual(turn.state, .idle)
+            XCTAssertNil(turn.aiBlock)
+            XCTAssertEqual(errorSounds, 0, "a refusal, not a failure")
+            XCTAssertFalse(turn.hasError)
+        }
+    }
+
+    func testTheLegacyReplyKeptAfterTheAccessEndedIsSaid() async throws {
+        let refusal = SpokenRefusal.paymentFailed
+        backend.statuses = [try decode(StreamingSessionStatus.self,
+            #"{"session_id":"sid-1","streaming_status":"completed","content":"hello there","chunks":[]}"#)]
+        backend.legacyError = apiError(402, #"""
+            {"error":"subscription_required","message":"\#(refusal.text)","code":"\#(refusal.rawValue)","user_node_id":8}
+            """#)
+        await recordAndStop()
+        await wait("said") { !self.spoken.isEmpty }
+        XCTAssertEqual(spoken, [refusal.text])
+        XCTAssertEqual(errorSounds, 0)
+        XCTAssertFalse(turn.hasError)
+        XCTAssertEqual(turn.state, .idle)
+    }
+
+    func testTheLegacyReplyRefusedForTheSubscriptionIsNotAFailure() async throws {
+        // A 402 that kept nothing (no recording of the turn): the banner says why;
+        // nothing is said, and no error sound.
+        backend.statuses = [try decode(StreamingSessionStatus.self,
+            #"{"session_id":"sid-1","streaming_status":"completed","content":"hello there","chunks":[]}"#)]
+        backend.legacyError = apiError(402, #"""
+            {"error":"subscription_required","message":"Your subscription has ended, so Loore doesn't reply. Your writing is saved."}
+            """#)
+        await recordAndStop()
+        await wait("idle") { self.turn.state == .idle }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertTrue(spoken.isEmpty)
+        XCTAssertEqual(errorSounds, 0)
+        XCTAssertFalse(turn.hasError)
+    }
+
+    func testAQueuedReplyRefusedAfterTheAccessEndedIsSaid() async throws {
+        let refusal = SpokenRefusal.subscriptionEnded
+        backend.statuses = [try decode(StreamingSessionStatus.self,
+            #"{"session_id":"sid-1","streaming_status":"completed","content":"hello there","chunks":[],"llm_node_id":101}"#)]
+        backend.llmStatuses[101] = [try decode(LLMStatus.self, #"""
+            {"node_id":101,"status":"failed","error":"\#(refusal.text)","error_code":"\#(refusal.rawValue)","warnings":[]}
+            """#)]
+        await recordAndStop()
+        await wait("said") { !self.spoken.isEmpty }
+        XCTAssertEqual(spoken, [refusal.text])
+        XCTAssertEqual(notices.toasts, [refusal.text])
+        XCTAssertEqual(errorSounds, 0, "said instead of the error sound")
+        XCTAssertFalse(turn.hasError)
+        XCTAssertEqual(turn.state, .idle)
+    }
+
     // MARK: A press refused on the phone
 
     func testAPressRefusedForTheKnownLimitIsSaid() async {
@@ -292,12 +360,31 @@ final class VoiceRefusalSpeechTurnTests: XCTestCase {
         XCTAssertEqual(SpokenRefusal.approvalWaiting.text,
                        "A change to your data is waiting for your approval. Approve or reject it on the screen to continue.")
         XCTAssertEqual(SpokenRefusal.threadTooLong.text, ThreadLength.spokenText)
+        // A recording kept after the access ended (#438): the server's on-screen
+        // text (subscriptions.paused_message(reason, "recording")), which names the
+        // state and never where or how to pay.
+        XCTAssertEqual(SpokenRefusal.subscriptionEnded.text,
+                       "Your subscription has ended, so Loore doesn't reply. Your recording is saved.")
+        XCTAssertEqual(SpokenRefusal.paymentFailed.text,
+                       "Your last payment didn't go through, so Loore doesn't reply. Your recording is saved.")
+        XCTAssertEqual(SpokenRefusal.freeMonthEnded.text,
+                       "Your free month has ended, so Loore doesn't reply. Your recording is saved.")
+        XCTAssertEqual(SpokenRefusal.noSubscription.text,
+                       "Loore doesn't reply on an account without a subscription. Your recording is saved.")
         for refusal in SpokenRefusal.allCases {
             XCTAssertNil(refusal.text.rangeOfCharacter(from: .decimalDigits), refusal.rawValue)
-            for word in ["$", "€", "buy", "pay", "price", "subscri", "upgrade", "plan"] {
+            let words = refusal.isAccessEnded
+                ? ["$", "€", "buy", "price", "subscribe", "upgrade", "plan"]
+                : ["$", "€", "buy", "pay", "price", "subscri", "upgrade", "plan"]
+            for word in words {
                 XCTAssertFalse(refusal.text.lowercased().contains(word), "\(refusal.rawValue): \(word)")
             }
         }
+        XCTAssertEqual(SpokenRefusal(code: "subscription_required_past_due"), .paymentFailed)
+        XCTAssertNil(SpokenRefusal(code: "subscription_required"), "the start's refusal has no sentence")
+        XCTAssertEqual(SpokenRefusal(keptRecordingMessage: SpokenRefusal.freeMonthEnded.text), .freeMonthEnded)
+        XCTAssertNil(SpokenRefusal(keptRecordingMessage: SpokenRefusal.usageLimit.text))
+        XCTAssertNil(SpokenRefusal(keptRecordingMessage: nil))
         XCTAssertEqual(SpokenRefusal(code: "approval_pending"), .approvalWaiting)
         XCTAssertNil(SpokenRefusal(code: "model_read_only"))
         XCTAssertNil(SpokenRefusal(code: nil))

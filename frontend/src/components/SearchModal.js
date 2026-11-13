@@ -5,6 +5,62 @@ import { formatDate } from '../utils/date';
 import { useUser } from '../contexts/UserContext';
 import { authorLabel, sourceLabel } from '../utils/references';
 import { highlightRuns } from '../utils/searchHighlight';
+import { isAiAllowed, isAiUsageRefusedError } from '../utils/aiUsage';
+
+// Search by meaning sends the search words to an embedding model, so an
+// account whose Default AI usage is None has no search (Peter, 2026-11-13;
+// the server refuses it: backend/routes/search.py SEARCH_REFUSED_MESSAGE).
+// The iPhone app says the same (SearchView).
+export const SEARCH_NEEDS_AI_TITLE = 'Search needs AI';
+export const SEARCH_NEEDS_AI_TEXT = 'Search needs AI to find things by '
+  + 'meaning. Your Default AI usage is set to None, so Loore keeps your '
+  + 'entries away from AI. You can change it in Account settings.';
+
+// In place of the search box and its results.
+function SearchNeedsAi({ onAccount }) {
+  return (
+    <div style={{ padding: '32px 28px', textAlign: 'center' }}>
+      <p style={{
+        fontFamily: 'var(--serif)',
+        fontStyle: 'italic',
+        fontSize: '1.3rem',
+        fontWeight: 300,
+        color: 'var(--text-muted)',
+        margin: '0 0 16px 0',
+      }}>
+        {SEARCH_NEEDS_AI_TITLE}
+      </p>
+      <p style={{
+        fontFamily: 'var(--sans)',
+        fontSize: '0.95rem',
+        fontWeight: 300,
+        color: 'var(--text-secondary)',
+        lineHeight: 1.7,
+        maxWidth: '420px',
+        margin: '0 auto 24px auto',
+      }}>
+        {SEARCH_NEEDS_AI_TEXT}
+      </p>
+      <button
+        type="button"
+        onClick={onAccount}
+        style={{
+          background: 'transparent',
+          border: 'none',
+          borderBottom: '1px solid var(--border)',
+          padding: '0 0 2px 0',
+          fontFamily: 'var(--sans)',
+          fontSize: '0.9rem',
+          fontWeight: 300,
+          color: 'var(--accent)',
+          cursor: 'pointer',
+        }}
+      >
+        Account settings
+      </button>
+    </div>
+  );
+}
 
 // Two surfaces share this modal: the Log (scope 'archive', the default —
 // the user's own entries, with saved references merged into semantic
@@ -16,9 +72,16 @@ function SearchModal({ onClose, onOpenNode, scope = 'archive' }) {
   const { user } = useUser();
   const externalOnly = scope === 'external';
   const isAdmin = !!(user && user.is_admin);
+  // An account set to None: no search by meaning. Admins keep their
+  // keyword search; everyone else sees why there is no search.
+  const accountAiOff = !!user && !isAiAllowed(user.default_ai_usage);
+  // The server said the same (the setting changed elsewhere).
+  const [refused, setRefused] = useState(false);
+  const searchOff = refused || (accountAiOff && !isAdmin);
   const [query, setQuery] = useState('');
   // Semantic is the default for everyone; the Keyword toggle is admin-only.
-  const [mode, setMode] = useState('semantic'); // 'keyword' | 'semantic'
+  const [chosenMode, setMode] = useState('semantic'); // 'keyword' | 'semantic'
+  const mode = accountAiOff ? 'keyword' : chosenMode;
   const [showDateFilter, setShowDateFilter] = useState(false);
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
@@ -39,6 +102,7 @@ function SearchModal({ onClose, onOpenNode, scope = 'archive' }) {
   }, []);
 
   const doSearch = useCallback(async (q, from, to) => {
+    if (searchOff) return;
     const trimmed = q.trim();
     if (!trimmed && !from && !to) {
       setResults([]);
@@ -65,7 +129,9 @@ function SearchModal({ onClose, onOpenNode, scope = 'archive' }) {
       setResults(res.data.results);
       setTotal(res.data.total);
     } catch (err) {
-      if (err.response?.status !== 400) {
+      if (isAiUsageRefusedError(err)) {
+        setRefused(true);
+      } else if (err.response?.status !== 400) {
         console.error('Search error:', err);
       }
       setResults([]);
@@ -73,7 +139,7 @@ function SearchModal({ onClose, onOpenNode, scope = 'archive' }) {
     } finally {
       setLoading(false);
     }
-  }, [mode, externalOnly]);
+  }, [mode, externalOnly, searchOff]);
 
   const loadMore = useCallback(async () => {
     if (mode === 'semantic') return; // semantic returns a single ranked set
@@ -184,6 +250,9 @@ function SearchModal({ onClose, onOpenNode, scope = 'archive' }) {
           overflow: 'hidden',
         }}
       >
+        {searchOff ? (
+          <SearchNeedsAi onAccount={() => { onClose(); navigate('/account#ai-usage'); }} />
+        ) : (<>
         {/* Search input row */}
         <div style={{
           display: 'flex',
@@ -215,7 +284,7 @@ function SearchModal({ onClose, onOpenNode, scope = 'archive' }) {
               fontFamily: 'var(--sans)',
             }}
           />
-          {isAdmin && (
+          {isAdmin && !accountAiOff && (
             <button
               onClick={() => setMode(mode === 'keyword' ? 'semantic' : 'keyword')}
               title={mode === 'semantic'
@@ -446,6 +515,7 @@ function SearchModal({ onClose, onOpenNode, scope = 'archive' }) {
             </div>
           )}
         </div>
+        </>)}
       </div>
     </div>
   );

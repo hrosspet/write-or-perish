@@ -5,15 +5,29 @@ import Observation
 struct ReadWindowLine: View {
     let window: ReadWindow
 
-    static func text(_ w: ReadWindow) -> String? {
+    static func text(_ w: ReadWindow, timeZone: TimeZone = .current) -> String? {
         guard w.windowEnd != nil else { return nil }
-        let from = LooreDateFormat.dateTime(w.windowStart)
-        let to = LooreDateFormat.dateTime(w.windowEnd)
+        let from = LooreDateFormat.dateTime(w.windowStart, timeZone: timeZone)
+        let to = LooreDateFormat.dateTime(w.windowEnd, timeZone: timeZone)
         var text = "Tweets from \(from) to \(to) (your time): \(enUS(w.tweets)) by \(enUS(w.accounts)) accounts."
         if let excluded = w.excluded, excluded > 0 {
             text += " \(enUS(excluded)) you had already read were left out."
         }
+        if let note = staleExportNote(w, timeZone: timeZone) {
+            text += " " + note
+        }
         return text
+    }
+
+    /// Web `staleExportNote` (#688): the archive had nothing newer than the window's end
+    /// when the read was made (`export_stale`, set by the server past 36 hours).
+    static func staleExportNote(_ w: ReadWindow, timeZone: TimeZone = .current) -> String? {
+        guard w.exportStale == true, let end = w.windowEnd else { return nil }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_GB")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "d MMMM"
+        return "The newest tweets available are from \(formatter.string(from: end)); the archive's daily export has not updated since."
     }
 
     /// `Number(n || 0).toLocaleString('en-US')`.

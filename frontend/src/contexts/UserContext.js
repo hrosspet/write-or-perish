@@ -3,6 +3,7 @@ import api from "../api";
 import { markSpendBlocked } from "../utils/spendCap";
 import { rememberSubscription } from "../utils/subscription";
 import { forgetInvite } from "../utils/invite";
+import { isRecordingActive, subscribeRecording } from "../utils/recordingActivity";
 
 // Create a new context
 const UserContext = createContext(null);
@@ -25,7 +26,8 @@ export const UserProvider = ({ children }) => {
         // Remember an already-capped user so cost actions (e.g. starting a
         // voice recording) can be blocked up front this session (issue #85).
         if (fetchedUser?.spend_blocked) {
-          markSpendBlocked(fetchedUser.spend_cap_lifts_on);
+          markSpendBlocked(fetchedUser.spend_cap_lifts_on,
+            fetchedUser.spend_cap_lifts_with_payment);
         }
         // Payments (#438): inert unless the server sends payments_enabled.
         rememberSubscription(fetchedUser);
@@ -73,8 +75,14 @@ export const UserProvider = ({ children }) => {
   // Payments on (#438): the server says the account is not let in (its
   // first payment failed, say): read the user again, so the app shows
   // the subscribe page. Nothing sends this event while payments are off.
+  // Not while a recording is in progress, nor while Voice says why its turn
+  // got no reply (utils/recordingActivity): the server still takes that
+  // recording's chunks and finalize, and leaving its screen now would stop
+  // it and lose what was not sent yet, or cut the sentence off. The user is
+  // read again once that has ended.
   useEffect(() => {
-    const onNoSubscription = () => {
+    let waiting = false;
+    const readAgain = () => {
       api.get("/dashboard", { params: { profile: 0 } })
         .then((res) => {
           if (res?.data?.user) {
@@ -84,8 +92,24 @@ export const UserProvider = ({ children }) => {
         })
         .catch(() => {});
     };
+    const onNoSubscription = () => {
+      if (isRecordingActive()) {
+        waiting = true;
+        return;
+      }
+      readAgain();
+    };
+    const unsubscribe = subscribeRecording((active) => {
+      if (!active && waiting) {
+        waiting = false;
+        readAgain();
+      }
+    });
     window.addEventListener("loore:no-subscription", onNoSubscription);
-    return () => window.removeEventListener("loore:no-subscription", onNoSubscription);
+    return () => {
+      unsubscribe();
+      window.removeEventListener("loore:no-subscription", onNoSubscription);
+    };
   }, []);
 
   return (

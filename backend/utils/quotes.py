@@ -420,7 +420,7 @@ def get_quote_data(node_ids: List[int], user_id: int) -> Dict[int, Optional[dict
     from backend.models import Node
     from backend.utils.privacy import (
         author_gone, can_user_access_node, can_user_view_tombstone,
-        owner_hidden,
+        owner_hidden, shown_ai_usage,
     )
 
     result = {}
@@ -445,7 +445,7 @@ def get_quote_data(node_ids: List[int], user_id: int) -> Dict[int, Optional[dict
                     "user_id": None if gone else node.user_id,
                     "created_at": iso_utc(node.created_at),
                     "node_type": node.node_type,
-                    "ai_usage": node.ai_usage,
+                    "ai_usage": shown_ai_usage(node),
                 }
             else:
                 result[node_id] = None
@@ -459,7 +459,8 @@ def get_quote_data(node_ids: List[int], user_id: int) -> Dict[int, Optional[dict
                 "user_id": node.user_id,
                 "created_at": iso_utc(node.created_at),
                 "node_type": node.node_type,
-                "ai_usage": node.ai_usage,
+                # Chat at most where Train is refused (#689).
+                "ai_usage": shown_ai_usage(node),
             }
         else:
             result[node_id] = None

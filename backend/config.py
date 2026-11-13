@@ -141,6 +141,21 @@ class Config:
         "DISK_ALERT_ENABLED", "false").lower() in ("1", "true", "yes")
     DISK_ALERT_PERCENT = float_from_env("DISK_ALERT_PERCENT", 90.0)
 
+    # Pre-filled accounts nobody claimed (#685, backend/utils/
+    # unclaimed_accounts.py). Decided by Peter (2026-11-13: "90 days makes
+    # sense to remove it from prod Loore"): an account Loore opened and
+    # pre-filled from a person's public posts, that nobody has signed in
+    # to, is deleted with everything in it this many days after it was
+    # opened. The privacy page states the same number.
+    UNCLAIMED_ACCOUNT_DAYS = int(float_from_env("UNCLAIMED_ACCOUNT_DAYS", 90))
+    # Off (the default), the nightly job is a dry run: it only reports what
+    # it would delete (the admin's Users tab, `flask unclaimed-accounts`,
+    # the worker log). The owner turns deletion on after reading the
+    # first dry run.
+    UNCLAIMED_ACCOUNT_DELETION_ENABLED = os.environ.get(
+        "UNCLAIMED_ACCOUNT_DELETION_ENABLED", "false").lower() in (
+        "1", "true", "yes")
+
     # Per-user monthly spend hard cap in USD, summed across ALL providers
     # (issue #85 follow-up; free-alpha guardrail). 0 (default) disables the
     # cap. When a user's month-to-date spend reaches this, they are
@@ -228,6 +243,20 @@ class Config:
     # refused, guessing an 8-character code is out of reach.
     DISCOUNT_CODE_ATTEMPTS_PER_HOUR = int(
         os.environ.get("DISCOUNT_CODE_ATTEMPTS_PER_HOUR") or "10")
+    # Limits on starting a checkout and on the return page's sync, per
+    # account per hour (#697; utils/billing_limits). Each reaches Stripe.
+    # INTRODUCED HEURISTIC: a person opens Checkout, goes back, picks the
+    # other level, a few times in an hour: 10 starts leave room for that
+    # (going back to the same level reuses the open session); the return
+    # page syncs once per completed checkout, so 20 is generous.
+    CHECKOUT_STARTS_PER_HOUR = int(
+        os.environ.get("CHECKOUT_STARTS_PER_HOUR") or "10")
+    BILLING_SYNCS_PER_HOUR = int(
+        os.environ.get("BILLING_SYNCS_PER_HOUR") or "20")
+    # One trial per card (#697, utils/trial_cards): the key of the card
+    # fingerprint's hash. Unset: SECRET_KEY. Changing it (or SECRET_KEY
+    # while it is unset) forgets every card that had a trial.
+    TRIAL_CARD_HASH_KEY = os.environ.get("TRIAL_CARD_HASH_KEY") or None
     # Where the Subscribe view tells a user to ask for the lower price.
     SUBSCRIPTION_CONTACT_EMAIL = (
         os.environ.get("SUBSCRIPTION_CONTACT_EMAIL") or "info@loore.org")
@@ -237,15 +266,26 @@ class Config:
     # to `flask alpha-free-month --apply --start` (the Beta release date).
     ALPHA_FREE_MONTH_DAYS = int(
         os.environ.get("ALPHA_FREE_MONTH_DAYS") or "30")
-    # Referrals (#439): an invite link per account; on the friend's first
-    # payment both get a free week as Stripe customer credit. On only
-    # while PAYMENTS_ENABLED is on; this switch turns the link and new
-    # referrals off by itself (a free week already earned is still given).
+    # Referrals (#439): one personal invite a month per account; on the
+    # friend's first payment both get a free week as Stripe customer
+    # credit. On only while PAYMENTS_ENABLED is on; this switch turns
+    # invites and new referrals off by itself (a free week already earned
+    # is still given).
     REFERRALS_ENABLED = os.environ.get(
         "REFERRALS_ENABLED", "true").lower() in ("1", "true", "yes")
-    # Days of the free week (Peter, 2026-10-09: "a free week for both"):
-    # credit worth this many thirtieths of the next invoice.
-    REFERRAL_REWARD_DAYS = int(os.environ.get("REFERRAL_REWARD_DAYS") or "7")
+    # The free week's worth, as a share of the Standard level's monthly
+    # price before tax (SUBSCRIPTION_PRICE_CENTS_STANDARD), so a price
+    # change carries over. Peter, 2026-11-13: "the credit from referrals
+    # should be one week, or 1/4th of the standard subscription. If the
+    # inviter or the invitee have higher level of subscription, that
+    # shouldn't change the amount they are credited". 0.25 of 30.00 USD is
+    # 7.50 USD for each side; 7 days of 30 would be 7/30 (7.00 USD).
+    REFERRAL_CREDIT_FRACTION = float_from_env(
+        "REFERRAL_CREDIT_FRACTION", 0.25)
+    # Days an invite stays usable once made (Peter, 2026-11-13: one
+    # personal invite a month, "no keeping of invites"). An unused one then
+    # expires and the address or handle in it is deleted.
+    INVITE_EXPIRY_DAYS = int(os.environ.get("INVITE_EXPIRY_DAYS") or "30")
 
     # Long threads (#648; Peter, 2026-11-12): every AI reply sends the
     # whole thread above it. A reply whose prompt would be over
@@ -430,6 +470,13 @@ class Config:
         os.environ.get("COMMUNITY_ARCHIVE_PARQUET_MIN_TWEETS") or "5000")
     COMMUNITY_ARCHIVE_SNAPSHOT_DIR = (
         os.environ.get("COMMUNITY_ARCHIVE_SNAPSHOT_DIR") or None)
+    # Personal key for the Community Archive API v1 (#688; created at
+    # community-archive.org, settings, API keys). Set: the pre-fill and
+    # archive lookups use API v1, and Glean reads the last day from it
+    # while the bulk export is stale. Unset: the Supabase REST API, which
+    # the archive retires on 2026-11-19. A secret: never logged.
+    COMMUNITY_ARCHIVE_API_KEY = (
+        os.environ.get("COMMUNITY_ARCHIVE_API_KEY") or "").strip() or None
 
     # Safety factor for prompt-too-long retries (0.99 = aim for 99% of the limit)
     RETRY_SAFETY_FACTOR = 0.99
@@ -907,6 +954,13 @@ class Config:
     # Per socket operation, for every mail the app sends. smtplib's default
     # is no timeout: a stalled relay held the request that sent the mail.
     MAIL_TIMEOUT_SECONDS = float(os.environ.get("MAIL_TIMEOUT_SECONDS") or "10")
+    # Requests one client (network address) may make to each route that
+    # emails a typed-in address (sign-in, email change): per 15 minutes and
+    # per day. Unset: the defaults in backend/utils/send_limits.py.
+    SEND_LIMIT_CLIENT_PER_15_MIN = int(
+        os.environ.get("SEND_LIMIT_CLIENT_PER_15_MIN") or "0") or None
+    SEND_LIMIT_CLIENT_PER_DAY = int(
+        os.environ.get("SEND_LIMIT_CLIENT_PER_DAY") or "0") or None
 
     FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
 

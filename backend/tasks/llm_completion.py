@@ -48,8 +48,8 @@ from backend.utils.timefmt import local_stamp, strip_edge_timestamps
 from backend.utils.llm_stream import ReplyStream
 from backend.utils import voice_timing
 from backend.utils.api_keys import (
-    determine_api_key_type, get_api_keys_for_usage, ContextUsage,
-    PayloadLicence,
+    chain_inputs, determine_api_key_type, get_api_keys_for_usage,
+    ContextUsage, PayloadLicence,
 )
 from backend.utils.cost import llm_cost_log_fields
 from backend.utils.error_privacy import UserMessageError
@@ -61,7 +61,8 @@ from backend.utils.thread_size import (
     prompt_limit,
 )
 from backend.utils.llm_batch import (
-    BatchItemFailed, BatchItemCancelled, BatchItemPolicyBlocked,
+    BatchItemFailed, BatchItemCancelled, BatchItemGone,
+    BatchItemPolicyBlocked,
 )
 from backend.utils.ca_feed import (
     CA_CHAT_TURN_NOTE, CA_READ_AGAIN_TURN, CA_READ_AGAIN_TURN_KEPT,
@@ -71,7 +72,7 @@ from backend.utils.ca_feed import (
     ca_turn as _ca_turn,
     ArchiveNotReady, refs_from_render, render_read_reply_for_model,
     request_snapshot_refresh, seen_tweet_ids, list_to_keep, read_numbers,
-    read_since_note,
+    read_since_note, glean_source_dir,
 )
 from backend.utils.tool_meta import (
     get_tool_meta_entry, update_tool_meta,
@@ -83,7 +84,9 @@ from backend.utils.text_edits import apply_text_edits
 from backend.utils.artifact_versions import (
     artifact_diff, parse_version, stored_version, version_number,
 )
-from backend.utils.privacy import AI_ALLOWED
+from backend.utils.privacy import (
+    AI_ALLOWED, X_API_INPUT, account_allows_ai, chat_at_most,
+)
 from backend.utils.proposals import is_own_live_proposal
 from backend.utils.placeholders import (
     CA_TWEETS_PATTERN,
@@ -170,14 +173,19 @@ def _render_variant(user_id):
     keys of everyone else stay as they were. Both render paths (the
     generation loop and the pre-warm's render_system_message) compute
     the variant before they read the artifacts, so a render that still
-    saw the artifact is never stored under a key from after the delete."""
+    saw the artifact is never stored under a key from after the delete.
+    The `x` part marks an account that has had an X API pre-fill (#689):
+    its documents and index read as Chat, so a pre-fill after a render
+    takes a fresh key. Absent for everyone else."""
     from backend.utils.artifact_deletion import deletion_stamp
+    from backend.utils.privacy import x_api_account
     deleted = deletion_stamp(user_id)
     return (f"a{int(archive_search_enabled(flask_app.config))}"
             f"u{_account_ai_usage(user_id)}"
             f"s{int(_share_enabled_for_user(user_id))}"
             f"e{int(_external_references_for_user(user_id))}"
-            + (f"d{deleted}" if deleted else ""))
+            + (f"d{deleted}" if deleted else "")
+            + ("x" if x_api_account(user_id) else ""))
 
 
 def _system_render_variant(system_node, user_id, tools=None):
@@ -949,6 +957,13 @@ ARTIFACT_KEPT_FROM_AI_ERROR = (
     "The user's latest version of '{kind}' is kept away from AI (AI usage "
     "None), so it can't be read or changed here. Nothing was saved.")
 
+# semantic_search for a user whose account's Default AI usage is None:
+# the search words would go to an embedding model, so nothing is searched
+# (Peter, 2026-11-13: no search for accounts set to None).
+SEARCH_TOOL_ACCOUNT_NONE_ERROR = (
+    "Search is off for this user: their Default AI usage is set to None, "
+    "so nothing is sent to the search model. Nothing was searched.")
+
 
 def _todo_index_line(user_id, pinned_node=None):
     """Index line for the user's todo list, or None if it's AI-blocked.
@@ -1076,9 +1091,18 @@ def get_user_artifacts_context(user_id, pinned_node=None, usage=None,
         # account's threads off the training key. Opening one
         # (read_artifact) still counts by that row. The setting is in the
         # render variant, so a cached verdict cannot outlive a switch.
-        usage.licence(USER_ARTIFACTS_INDEX_PLACEHOLDER).note_usage(
-            _account_ai_usage(user_id), "the account's AI-usage setting "
-            "(artifacts index)")
+        # Of an account that has had an X API pre-fill, the index's model-
+        # written titles and descriptions read as Chat (#689).
+        from backend.utils.privacy import X_API_INPUT, x_api_account
+        index_licence = usage.licence(USER_ARTIFACTS_INDEX_PLACEHOLDER)
+        if x_api_account(user_id):
+            index_licence.to_chat(
+                "the artifacts index of an account with X API posts",
+                X_API_INPUT)
+        else:
+            index_licence.note_usage(
+                _account_ai_usage(user_id), "the account's AI-usage "
+                "setting (artifacts index)")
     return memory_content, scratchpad_content, intentions_content, index_text
 
 
@@ -1393,7 +1417,8 @@ def _note_artifact_content(licence, artifact):
     """Report an artifact whose content joins the payload (#326) by its
     own row's ai_usage. The saved-references digest counts the same way:
     by the ai_usage stamped on the version (Peter, 2026-10-01)."""
-    licence.note_usage(artifact.ai_usage, f"the {artifact.kind} artifact")
+    licence.note_usage(artifact.ai_usage, f"the {artifact.kind} artifact",
+                       row=artifact)
 
 
 def _reads_todo(tr):
@@ -1437,7 +1462,7 @@ def _retrieval_injection_text(tr, user_id, with_labels=False, licence=None):
                 or todo.ai_usage not in AI_ALLOWED):
             return None
         if licence is not None:
-            licence.note_usage(todo.ai_usage, "the todo list")
+            licence.note_usage(todo.ai_usage, "the todo list", row=todo)
         return f"[Your current todo list:\n{todo.get_content()}]"
     if name == "read_artifact":
         # Deleted since the call (#603): "no longer available"
@@ -1514,7 +1539,8 @@ def _retrieval_injection_text(tr, user_id, with_labels=False, licence=None):
             tag = (f"[{m['label']}] " if with_labels and m.get("label")
                    else "")
             if licence is not None:
-                licence.note_usage(node.ai_usage, f"entry {node.id} preview")
+                licence.note_usage(node.ai_usage, f"entry {node.id} preview",
+                                   row=node)
             lines.append(
                 f"- {tag}entry {node.id} · {stamp}{pct}: {snippet}")
         # Saved external references (imported tweets/bookmarks), with their
@@ -2441,8 +2467,27 @@ def _redact_tool_input(inp):
     }
 
 
+def _written_from(licence, llm_node, node_chain, previous=None):
+    """X_API_INPUT when a tool write of this turn is written from X API
+    posts (#689), else None: what the turn's payload took in (*licence*,
+    None when the call runs later, on approval), what the reply that made
+    the call was marked with when it was finalized, the chain's own, and
+    the version the write replaces (update_artifact rewrites the whole
+    text)."""
+    from backend.utils.privacy import unlicensed_input
+    kinds = set(chain_inputs(node_chain))
+    if licence is not None:
+        kinds |= licence.inputs
+    for row in (llm_node, previous):
+        kind = unlicensed_input(row) if row is not None else None
+        if kind:
+            kinds.add(kind)
+    return X_API_INPUT if X_API_INPUT in kinds else None
+
+
 def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
-                        quote_labels=None, client=None, hold=None):
+                        quote_labels=None, client=None, hold=None,
+                        licence=None):
     """Execute tool calls and return metadata list. *quote_labels* is the
     turn's label map ({label: ("node"|"external", id)}) so read_full can
     resolve a search-result label; None outside the retrieval loop.
@@ -2454,7 +2499,11 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
     the user's data directly (tool_approvals.DIRECT_WRITE_TOOLS) is
     checked as usual and then kept for the user's approval instead of
     run: its entry says "pending_approval" (Peter, 2026-11-12). A call
-    the checks refuse fails as before; nothing is kept for it."""
+    the checks refuse fails as before; nothing is kept for it.
+
+    *licence* (the turn's PayloadLicence): whether a write is marked as
+    written from X API posts (_written_from, #689). None on approval: the
+    reply's own mark is used."""
     tool_results = []
 
     for tc in tool_calls:
@@ -2619,11 +2668,17 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                         # gets memory the next turn can read. The chain's
                         # verdict, not the licence — once a 'chat' memory
                         # was in a payload the licence would keep every
-                        # later write 'chat' for good.
+                        # later write 'chat' for good. A write from a turn
+                        # that took in X API posts, or one that rewrites a
+                        # version marked so, carries that mark and is
+                        # never 'train' (#689).
+                        written_from = _written_from(
+                            licence, llm_node, node_chain, previous)
                         owner = User.query.get(user_id)
                         writes_train = (
                             owner is not None
                             and owner.default_ai_usage == "train"
+                            and written_from is None
                             and determine_api_key_type(node_chain)
                             == "train")
                         artifact = UserArtifact(
@@ -2635,6 +2690,7 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                                           or "agentic_session"),
                             tokens_used=0,
                             ai_usage="train" if writes_train else "chat",
+                            unlicensed_input=written_from,
                         )
                         artifact.set_content(new_text)
                         db.session.add(artifact)
@@ -2710,6 +2766,13 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                 if not query:
                     result["status"] = "error"
                     result["error"] = "semantic_search needs a query."
+                elif not account_allows_ai(User.query.get(user_id)):
+                    # The query goes to an embedding model: none for an
+                    # account set to None (Peter, 2026-11-13). The tool
+                    # stays in the list, which depends on config only
+                    # (gated_voice_tools: the cache prefix).
+                    result["status"] = "error"
+                    result["error"] = SEARCH_TOOL_ACCOUNT_NONE_ERROR
                 else:
                     from backend.utils.api_keys import get_openai_chat_key
                     from backend.utils.embeddings import (
@@ -3279,13 +3342,22 @@ def _request_batch_cancel(entry, api_key, provider):
 
 
 def _delete_batch_files(entry):
-    """Delete the files of the ended one-item OpenAI batch in *entry* once
-    its outcome is saved on the node (#667): its input, output and error
-    files at OpenAI. Best effort, never raises. An Anthropic batch has no
-    uploaded files. The task's soft time limit is let through."""
-    if not entry or (entry.get("provider") or "anthropic") != "openai":
+    """Delete what the provider keeps of the ended one-item batch in
+    *entry* once its outcome is saved on the node: an OpenAI batch's
+    input, output and error files (#667), an Anthropic batch itself
+    (#693; a failed delete is tried again by the hourly sweep). Best
+    effort, never raises. The task's soft time limit is let through."""
+    if not entry:
         return
     from backend.utils import llm_batch, soft_limit
+    if (entry.get("provider") or "anthropic") == "anthropic":
+        from backend.utils import anthropic_batch_deletion
+        anthropic_batch_deletion.delete_now(
+            [entry.get("batch_id")], anthropic_batch_deletion.READ_SOURCE,
+            key_type=entry.get("key_type") or "chat")
+        return
+    if entry.get("provider") != "openai":
+        return
     try:
         keys = llm_batch.apply_batch_key_override(
             get_api_keys_for_usage(flask_app.config,
@@ -3337,7 +3409,9 @@ def _ca_batch_poll(task, llm_node, parent_node, meta, entry, user_id):
     _withdraw_batch_reply). The provider's terminal verdict on the item
     raises BatchItemFailed (a cancel nobody here asked for included);
     anything else that fails here is re-queued by the task's error
-    handler with the entry still live."""
+    handler with the entry still live. A batch already deleted because
+    another run saved its outcome returns ("settled", None), and the
+    node is left as that run left it."""
     from backend.utils import llm_batch
     from backend.utils.spend import user_is_capped
     provider = entry.get("provider") or "anthropic"
@@ -3364,6 +3438,17 @@ def _ca_batch_poll(task, llm_node, parent_node, meta, entry, user_id):
             raise
         _withdraw_batch_reply(llm_node, meta, entry)
         return "withdrawn", None
+    except BatchItemGone:
+        # The batch (Anthropic) or its files (OpenAI) are deleted once an
+        # outcome is saved (#667, #693). A run that overlapped the one
+        # that saved it leaves the node as that run left it; otherwise
+        # the batch was deleted from outside Loore, a verdict.
+        db.session.refresh(llm_node)
+        if llm_node.llm_task_status not in ("pending", "processing"):
+            logger.info("Node %s: batch %s already settled by another "
+                        "run", llm_node.id, entry.get("batch_id"))
+            return "settled", None
+        raise
     except BatchItemPolicyBlocked as e:
         # The provider's verdict like any BatchItemFailed: the node fails
         # and nothing submits the turn again on its own. Reported with
@@ -3456,6 +3541,11 @@ def _ca_batch_submit(task, llm_node, model_id, api_model, messages,
     })
     llm_node.tool_calls_meta = json.dumps(meta)
     llm_node.llm_task_progress = 50
+    # Deleted at Anthropic once the reply is no longer at work (#693).
+    from backend.utils import anthropic_batch_deletion
+    anthropic_batch_deletion.register(
+        provider, batch_id, anthropic_batch_deletion.READ_SOURCE,
+        key_type=key_type, node_id=llm_node.id)
     db.session.commit()
     logger.info("Node %s: batch %s submitted; polling every %ss",
                 llm_node.id, batch_id, CA_BATCH_POLL_SECONDS)
@@ -3911,7 +4001,8 @@ def _prewarm_anthropic_cache(system_node_id, user_id, model_id,
                 store_render(flask_app.config, system_node, sys_text,
                              render_variant, unlicensed=unlicensed,
                              rows=usage.rows(sys_content),
-                             references=usage.named_references)
+                             references=usage.named_references,
+                             inputs=usage.inputs(sys_content))
 
             key_type = determine_api_key_type([system_node], logger=logger)
             # The render carries the user's own rows, each licensed by
@@ -4061,6 +4152,12 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         'status': 'cancelled',
                         'reason': 'spend_cap',
                     }
+                if outcome == "settled":
+                    return {
+                        'parent_node_id': parent_node_id,
+                        'llm_node_id': llm_node_id,
+                        'status': 'settled',
+                    }
 
             # A batch that has ended is collected even for a user who hit
             # the spend cap meanwhile: by then the provider has processed
@@ -4093,8 +4190,26 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     logger.warning("Node %s: reply refused, no paid set "
                                    "(#438)", llm_node_id)
                     llm_node.llm_task_status = 'failed'
-                    llm_node.llm_task_error = subscription_required_message(
-                        owner)
+                    if source_mode == "voice":
+                        # A Voice turn whose access ended after its
+                        # recording was saved: the text says so, and its
+                        # code (llm-status ``error_code``) lets the Voice
+                        # screen say it aloud instead of the error sound.
+                        from backend.utils.subscriptions import (
+                            paused_reason)
+                        from backend.utils.voice_refusals import (
+                            recording_kept_code)
+                        reason = paused_reason(owner)
+                        llm_node.llm_task_error = (
+                            subscription_required_message(
+                                owner, "recording"))
+                        update_tool_meta(
+                            llm_node, REFUSED_MARKER,
+                            {"code": recording_kept_code(reason)},
+                            append_if_missing=True)
+                    else:
+                        llm_node.llm_task_error = (
+                            subscription_required_message(owner))
                     db.session.commit()
                     return {
                         'parent_node_id': parent_node_id,
@@ -4302,6 +4417,10 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         # background for the next read. Leave out what
                         # the reader has already seen.
                         request_snapshot_refresh(ca_snapshot_dir, log=logger)
+                        # A stale export is read from API v1's cached day
+                        # instead, when there is one (#688).
+                        ca_source_dir = glean_source_dir(
+                            ca_snapshot_dir, ca_days)
                         ca_seen = seen_tweet_ids(user_id)
                         if ca_live or not _read_batch_requested(llm_node):
                             # A live read again on the export of the read
@@ -4314,14 +4433,16 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             # gone, and its collect knows no note.
                             ca_keep = list_to_keep(
                                 node_chain, ca_node, ca_reply_ids, user_id,
-                                ca.snapshot_export_id(ca_snapshot_dir),
+                                ca.snapshot_export_id(ca_source_dir),
                                 ca_days, ca_scope)
-                    # else: a batch submitted before renders were pinned;
-                    # re-render the day as it was rendered then (no seen
-                    # filter) so its numbers still match.
+                    else:
+                        # A batch submitted before renders were pinned;
+                        # re-render the day as it was rendered then (no
+                        # seen filter) so its numbers still match.
+                        ca_source_dir = ca_snapshot_dir
                     try:
                         ca_tweets_content, ca_stats, ca_refs = ca.render_recent_tweets(
-                            ca_snapshot_dir, days=ca_days,
+                            ca_source_dir, days=ca_days,
                             exclude_usernames=[ca_owner.username,
                                                ca_owner.prefilled_handle]
                             if ca_owner else (),
@@ -4403,6 +4524,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # The saved references a cached render's window names
             # (prompt_cache.CachedRender.references).
             cached_system_references = ()
+            # Its rows' unlicensed input kinds (#689), replayed with it.
+            cached_system_inputs = ()
             if system_node is not None:
                 _sys_text = system_node.get_content() or ""
                 # Exclude prompts carrying per-call volatile placeholders.
@@ -4424,6 +4547,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         cached_system_render = _cached.text
                         cached_system_unlicensed = _cached.unlicensed
                         cached_system_references = _cached.references
+                        cached_system_inputs = _cached.inputs
 
             def _placeholder_node(placeholder):
                 """The first of the user's own nodes carrying
@@ -4683,6 +4807,10 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # keys are re-read from it before every provider call (#325).
             licence = PayloadLicence(
                 key_type, logger=logger, label=f"Node {llm_node_id}")
+            # X API posts, or replies written from them, in the chain
+            # itself: no reply written from it may pass them on for
+            # training (#689).
+            licence.mark(*chain_inputs(node_chain))
             # The user's own rows the placeholders resolved to, and those
             # a cached system render carries (#326). Each resolved
             # placeholder is in the payload: it was fetched because an
@@ -4691,6 +4819,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                 cached_system_unlicensed):
                 if _unlicensed:
                     licence.to_chat(_unlicensed)
+            licence.mark(*context_usage.inputs(), *cached_system_inputs)
             key_type = licence.key_type
             api_keys = get_api_keys_for_usage(flask_app.config, key_type)
 
@@ -5316,7 +5445,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                 references=(
                                     context_usage.named_references
                                     if USER_RECENT_RAW_PLACEHOLDER
-                                    in _verdict_text else ()))
+                                    in _verdict_text else ()),
+                                inputs=context_usage.inputs(_verdict_text))
                     if role == "assistant":
                         last_assistant_index = len(messages)
                     messages.append({
@@ -5617,6 +5747,20 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             logged_ext_ids = set()
             quotes_decided_at = llm_node.created_at
 
+            def _mark_written_from(target):
+                """#689: a reply written from a payload that held X API
+                posts (or text written from them) may repeat their words,
+                so it carries the mark (Node.unlicensed_input), is stored
+                at Chat at most, and every later licence decision reads
+                it as Chat; Train is never offered for it. Set on each
+                node as it is finalized, from the licence as it then is.
+                Other people's saved writing marks nothing (Peter,
+                2026-09-29)."""
+                kind = licence.unlicensed_input
+                target.unlicensed_input = kind
+                if kind == X_API_INPUT:
+                    target.ai_usage = chat_at_most(target.ai_usage)
+
             def _finalize(target_node, resp):
                 """Write *resp* as the final answer on *target_node* using the
                 EXACT existing single-shot finalize behavior (cost log, Race B
@@ -5728,7 +5872,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     tool_results = _execute_tool_calls(
                         f_tool_calls, target_node, node_chain, user_id,
                         quote_labels=quote_labels, client=client,
-                        hold=write_hold,
+                        hold=write_hold, licence=licence,
                     )
                     if f_truncated:
                         for tr in tool_results:
@@ -5779,6 +5923,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 if resp.get("batch"):
                     _close_batch_entry(target_node, resp.get("batch_id"))
 
+                _mark_written_from(target_node)
                 target_node.llm_task_status = 'completed'
                 target_node.llm_task_progress = 100
                 # Voice: mark TTS pending in the SAME commit as completion so
@@ -5913,7 +6058,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     tool_results = _execute_tool_calls(
                         response_tool_calls, current_node, node_chain,
                         user_id, quote_labels=quote_labels, client=client,
-                        hold=write_hold,
+                        hold=write_hold, licence=licence,
                     )
                     if interim_truncated:
                         for tr in tool_results:
@@ -6011,6 +6156,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     current_node.token_count = approximate_token_count(
                         interim_text or interim_fallback)
                     current_node.tool_calls_meta = json.dumps(tool_results)
+                    _mark_written_from(current_node)
                     current_node.llm_task_status = 'completed'
                     current_node.llm_task_progress = 100
 

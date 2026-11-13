@@ -802,6 +802,51 @@ class TestDraftBatchPipeline:
         assert system_user.approved is False
         assert system_user.plan == "free"
 
+    def test_submit_registers_the_anthropic_batch(self, pipeline,
+                                                  monkeypatch):
+        """#693: the batch is recorded in the job's commit, so it is
+        deleted at Anthropic once the job is collected."""
+        from backend.models import AnthropicBatchDeletion
+        monkeypatch.setattr(pipeline, "batch_submit",
+                            lambda reqs, keys, phase=None:
+                            {"anthropic": "batch-abc"})
+        poll, resp = _make_drafting_response()
+        pipeline._submit_poll_draft(resp.id, task_id="t-1")
+        row = AnthropicBatchDeletion.query.one()
+        assert (row.batch_id, row.source) == ("batch-abc",
+                                              "poll_draft_batch_job")
+
+    def test_collect_deletes_the_anthropic_batch_once_saved(
+            self, pipeline, monkeypatch, app):
+        """#693: deleted after the draft and the job are saved."""
+        from backend.models import AnthropicBatchDeletion
+        from backend.tests import anthropic_batch_fake as fake
+        monkeypatch.setitem(app.config, "ANTHROPIC_API_KEY", "k")
+        monkeypatch.setattr(
+            pipeline, "llm_cost_log_fields",
+            lambda model_id, response, batch=None: {
+                "input_tokens": 1, "output_tokens": 1,
+                "cache_read_tokens": 0, "cache_write_tokens": 0,
+                "cost_microdollars": 1})
+        poll, resp = _make_drafting_response()
+        job = self._pending_job(poll, resp)
+        batches = fake.install(monkeypatch)
+        batches.add("batch-abc", results=[fake.succeeded(
+            f"poll-draft-{resp.id}", "A drafted answer.")])
+        seen = []
+
+        def on_delete(batch_id):
+            _db.session.expire_all()
+            seen.append((PollDraftBatchJob.query.get(job.id).status,
+                         PollResponse.query.get(resp.id).status))
+        batches.on_delete = on_delete
+
+        pipeline._collect_poll_draft_batches()
+
+        assert seen == [("collected", "draft")]
+        _db.session.expire_all()
+        assert AnthropicBatchDeletion.query.one().deleted_at is not None
+
     def test_collect_still_pending_leaves_job(self, pipeline, monkeypatch):
         poll, resp = _make_drafting_response()
         job = self._pending_job(poll, resp)

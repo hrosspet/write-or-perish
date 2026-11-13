@@ -400,6 +400,33 @@ def test_payments_on_an_account_without_the_paid_set_gets_no_digest(
     assert _digest.sweep_external_digests()["submitted"] == 1
 
 
+def test_payments_on_a_blocked_account_gets_no_digest(app, monkeypatch):
+    """#697: an account the admin blocked (deactivated) starts no
+    background model call while payments are on, whatever its paid set:
+    no nightly digest, no manual rebuild. Control: payments off, the
+    sweep is what it was."""
+    from datetime import datetime
+    user = User.query.first()
+    user.timezone = _tz_at_hour(_digest.NIGHTLY_DIGEST_LOCAL_HOUR)
+    user.plan = "alpha"   # the paid set, by hand
+    user.approved = False
+    user.deactivated_at = datetime.utcnow()
+    _db.session.commit()
+    _mk_item(user.id, "clip")
+    submitted = _stub_batch_submit(monkeypatch)
+    calls = _stub_llm(monkeypatch)
+    monkeypatch.setitem(_digest.flask_app.config, "PAYMENTS_ENABLED", True)
+
+    assert _digest.sweep_external_digests() == {"status": "ok",
+                                                "submitted": 0}
+    assert _digest.rebuild_external_digest(
+        _FakeSelf(), user.id, force=True) == {"status": "blocked"}
+    assert submitted == [] and calls == []
+
+    monkeypatch.setitem(_digest.flask_app.config, "PAYMENTS_ENABLED", False)
+    assert _digest.sweep_external_digests()["submitted"] == 1
+
+
 def _hold_writing(user, account=False, at=None):
     """A waiting "Delete all my content" of *user* (#590), requested at
     *at*, or with *account* an account deletion (#269)."""
@@ -721,6 +748,61 @@ def test_collector_deletes_the_batch_files_once_saved(
     assert ExternalDigestBatchJob.query.get(job.id).status == "collected"
 
 
+def test_an_anthropic_batch_is_registered_with_its_job(app, monkeypatch):
+    """#693: the batch is recorded in the job's own commit, so it is
+    deleted at Anthropic once the job is no longer pending, also after a
+    crash between the save and the delete."""
+    from backend.models import AnthropicBatchDeletion
+    user = User.query.first()
+    user.timezone = _tz_at_hour(_digest.NIGHTLY_DIGEST_LOCAL_HOUR)
+    _db.session.commit()
+    _mk_item(user.id, "a")
+    _stub_batch_submit(monkeypatch)
+
+    assert _digest.sweep_external_digests() == {"status": "ok",
+                                                "submitted": 1}
+    job = ExternalDigestBatchJob.query.one()
+    row = AnthropicBatchDeletion.query.one()
+    assert (row.batch_id, row.source, row.deleted_at) == (
+        job.batch_id, "external_digest_batch_job", None)
+
+
+@pytest.mark.parametrize("delete_fails", [False, True])
+def test_collector_deletes_the_anthropic_batch_once_saved(
+        app, monkeypatch, delete_fails):
+    """#693: the ended batch is deleted at Anthropic after the digest and
+    the job are saved, never before; a delete that fails leaves the job
+    collected and is counted for the hourly sweep."""
+    from backend.models import AnthropicBatchDeletion
+    from backend.tests import anthropic_batch_fake as fake
+    user = User.query.first()
+    _mk_item(user.id, "a")
+    job = _pending_job(user, datetime.utcnow(), batch_id="msgbatch_d")
+    batches = fake.install(monkeypatch)
+    batches.add("msgbatch_d", results=[fake.succeeded(
+        f"external-digest-{user.id}", "# Topics\n- x")])
+    seen = []
+
+    def on_delete(batch_id):
+        _db.session.expire_all()
+        seen.append((batch_id,
+                     ExternalDigestBatchJob.query.get(job.id).status,
+                     UserArtifact.latest_for(
+                         user.id, _digest.DIGEST_KIND) is not None))
+    batches.on_delete = on_delete
+    if delete_fails:
+        batches.delete_error = RuntimeError("503")
+
+    assert _digest._collect_digest_batches() == {"collected": 1,
+                                                 "abandoned": 0}
+    assert seen == [("msgbatch_d", "collected", True)]
+    _db.session.expire_all()
+    row = AnthropicBatchDeletion.query.filter_by(batch_id="msgbatch_d").one()
+    assert (row.deleted_at is None, row.attempts) == (
+        (True, 1) if delete_fails else (False, 0))
+    assert ExternalDigestBatchJob.query.get(job.id).status == "collected"
+
+
 def _raise_not_found(ids, keys):
     raise RuntimeError("404: no such batch")
 
@@ -1027,3 +1109,40 @@ def test_no_digest_for_an_account_nobody_used_for_a_month(app, monkeypatch):
         f"external-digest-{away.id}"]
     assert ("The corpus holds 13 saved items"
             in requests_[0]["messages"][0]["content"])
+
+
+def test_payments_on_the_sweep_needs_both_use_and_the_paid_set(
+        app, monkeypatch):
+    """The payments train (PR #680) merged this sweep without a conflict;
+    both filters must hold together. Four accounts with new references in
+    their night: in use with a subscription, in use with one that ended,
+    away 40 days with a subscription, away with one that ended. Only the
+    first gets a digest. Guards ``and user.id in in_use`` (#659) and
+    ``and ai_replies_allowed(user)`` (#649): without either, a second
+    account is submitted."""
+    now = datetime.utcnow()
+    night_tz = _tz_at_hour(_digest.NIGHTLY_DIGEST_LOCAL_HOUR)
+    monkeypatch.setitem(_digest.flask_app.config, "PAYMENTS_ENABLED", True)
+    users = {}
+    for name, seen, paid in (
+            ("tester", now, True), ("lapsed", now, False),
+            ("away", now - timedelta(days=40), True),
+            ("away_lapsed", now - timedelta(days=40), False)):
+        user = User.query.filter_by(username=name).first() or User(
+            username=name)
+        user.timezone = night_tz
+        user.last_seen_at = seen
+        user.plan = "free"
+        user.subscription_level = "standard"
+        user.subscription_status = "active" if paid else "ended"
+        user.subscription_ever_paid = True
+        _db.session.add(user)
+        _db.session.commit()
+        _mk_item(user.id, f"clip_{name}")
+        users[name] = user
+    submitted = _stub_batch_submit(monkeypatch)
+
+    assert _digest.sweep_external_digests() == {"status": "ok",
+                                                "submitted": 1}
+    assert [r["custom_id"] for r in submitted[0]["anthropic"]] == [
+        f"external-digest-{users['tester'].id}"]

@@ -15,7 +15,12 @@ import PrivacySelector from "./PrivacySelector";
 import { BothProvidersQuestion } from "./BothProvidersDialog";
 import ProfileRebuildQuestion from "./ProfileRebuildQuestion";
 import { noteBothProvidersLater } from "../hooks/useBothProvidersQuestion";
+import { keptFromTrainNote } from "../utils/aiUsage";
 import { useUser } from "../contexts/UserContext";
+
+// Imports are always private (#677); same wording on the iPhone app.
+const IMPORT_PRIVACY_NOTE =
+  "Imported entries are private. You can share or publish the ones you choose afterwards.";
 
 // The import result's note when a re-import could set this import's
 // settings only on the last entry of some items (#638): imported before
@@ -298,7 +303,6 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
   const [uploadPercent, setUploadPercent] = useState(null);
   const uploadDetail =
     importStage === "uploading" && uploadPercent != null ? ` ${uploadPercent} %` : null;
-  const [importPrivacy, setImportPrivacy] = useState("private");
   // AI usage starts at the account's setting, the default every new entry
   // gets (#593, Peter 2026-11-10), each time a confirm dialog opens. The
   // value shown is the value sent: it also applies to entries this archive
@@ -446,7 +450,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
       files: importFiles.files,
       import_type: importType,
       date_ordering: dateOrdering,
-      privacy_level: importPrivacy,
+      privacy_level: "private",
       ai_usage: importAiUsage,
       ...(hasPdf ? { whose_writing: whoseWriting } : {}),
       ...(onDeleted ? { on_deleted: onDeleted } : {})
@@ -594,7 +598,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
         import_token: twitterImportData.import_token,
         import_type: importType,
         include_replies: includeReplies,
-        privacy_level: importPrivacy,
+        privacy_level: "private",
         ai_usage: importAiUsage,
         ...(onDeleted ? { on_deleted: onDeleted } : {})
       },
@@ -670,7 +674,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
       path: "/import/claude/confirm",
       body: {
         import_token: claudeImportData.import_token,
-        privacy_level: importPrivacy,
+        privacy_level: "private",
         ai_usage: importAiUsage,
         ...(onDeleted ? { on_deleted: onDeleted } : {})
       },
@@ -770,7 +774,7 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
       path: "/import/chatgpt/confirm",
       body: {
         import_token: chatGPTImportData.import_token,
-        privacy_level: importPrivacy,
+        privacy_level: "private",
         ai_usage: importAiUsage,
         ...(onDeleted ? { on_deleted: onDeleted } : {})
       },
@@ -875,6 +879,17 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
               {importResult.archive_messages > 0 && <> with {importResult.archive_messages.toLocaleString()} messages</>}.
             </p>
           )}
+          {/* Tweets Loore fetched through the X API stay off Train (#689). */}
+          {keptFromTrainNote(importResult.kept_from_train) && (
+            <p style={{ fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.88rem", color: "var(--text-secondary)", margin: "0 0 1.4rem" }}>
+              {keptFromTrainNote(importResult.kept_from_train)}
+            </p>
+          )}
+          {importResult.private_note && (
+            <p style={{ fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.88rem", color: "var(--text-secondary)", margin: "0 0 1.4rem" }}>
+              {importResult.private_note}
+            </p>
+          )}
           {importResult.created === 0 && !importResult.restored && !importResult.updated ? (
             <p style={{ fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.92rem", color: "var(--text-secondary)", margin: "0 0 1.4rem" }}>
               Everything in this archive was already imported — nothing new was added.
@@ -883,8 +898,8 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
             <>
               {importResult.updated > 0 && (
                 <p style={{ fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.88rem", color: "var(--text-secondary)", margin: "0 0 1.4rem" }}>
-                  Updated items were already imported; their privacy and
-                  AI-usage settings now match this import.
+                  Updated items were already imported; their AI-usage
+                  setting now matches this import.
                 </p>
               )}
               {importResult.partly_updated > 0 && (
@@ -1264,9 +1279,10 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
           </div>
 
           <PrivacySelector
-            privacyLevel={importPrivacy}
             aiUsage={importAiUsage}
-            onPrivacyChange={setImportPrivacy}
+            onPrivacyChange={() => {}}
+            hidePrivacy
+            privacyNote={IMPORT_PRIVACY_NOTE}
             onAIUsageChange={setImportAiUsage}
           />
           </>)}
@@ -1324,9 +1340,10 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
           </p>
 
           <PrivacySelector
-            privacyLevel={importPrivacy}
             aiUsage={importAiUsage}
-            onPrivacyChange={setImportPrivacy}
+            onPrivacyChange={() => {}}
+            hidePrivacy
+            privacyNote={IMPORT_PRIVACY_NOTE}
             onAIUsageChange={setImportAiUsage}
           />
 
@@ -1382,9 +1399,10 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
           ))}
 
           <PrivacySelector
-            privacyLevel={importPrivacy}
             aiUsage={importAiUsage}
-            onPrivacyChange={setImportPrivacy}
+            onPrivacyChange={() => {}}
+            hidePrivacy
+            privacyNote={IMPORT_PRIVACY_NOTE}
             onAIUsageChange={setImportAiUsage}
           />
 
@@ -1490,9 +1508,10 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
           </div>
 
           <PrivacySelector
-            privacyLevel={importPrivacy}
             aiUsage={importAiUsage}
-            onPrivacyChange={setImportPrivacy}
+            onPrivacyChange={() => {}}
+            hidePrivacy
+            privacyNote={IMPORT_PRIVACY_NOTE}
             onAIUsageChange={setImportAiUsage}
           />
 

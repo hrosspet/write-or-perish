@@ -16,6 +16,8 @@ struct SignInView: View {
     @State private var linkError: String?
     @State private var showXLogin = false
     @State private var xError: String?
+    /// A pasted link that came with an invite made for someone else (#439).
+    @State private var inviteMismatch: AuthService.InviteMismatch?
     @FocusState private var focused: Field?
 
     private enum Field { case email, link }
@@ -52,6 +54,38 @@ struct SignInView: View {
             WebLoginSheet(environment: app.environment) { result in
                 handleXLogin(result)
             }
+        }
+        // An invite made for someone else (#439; Peter, 2026-11-13): they are
+        // told, and choose. Nothing was made until they continue.
+        .alert("This invitation is for someone else",
+               isPresented: Binding(get: { inviteMismatch != nil },
+                                    set: { if !$0 { inviteMismatch = nil } }),
+               presenting: inviteMismatch) { _ in
+            Button("Sign in differently", role: .cancel) { signInDifferently() }
+            Button("Continue without the invitation") { continueWithoutInvite() }
+        } message: { mismatch in
+            Text(mismatch.text)
+        }
+    }
+
+    private func signInDifferently() {
+        inviteMismatch = nil
+        Task { await app.auth.cancelInviteChoice() }
+        pasted = ""
+        withAnimation(LooreMotion.quick) { step = .start }
+    }
+
+    private func continueWithoutInvite() {
+        inviteMismatch = nil
+        verifying = true
+        Task {
+            do {
+                let landing = try await app.auth.continueWithoutInvite()
+                await app.signInCompleted(landing: landing)
+            } catch {
+                linkError = (error as? AuthFailure)?.message ?? MagicLink.genericFailure
+            }
+            verifying = false
         }
     }
 
@@ -304,6 +338,8 @@ struct SignInView: View {
             do {
                 let landing = try await app.auth.verifyMagicLink(pasted: text)
                 await app.signInCompleted(landing: landing)
+            } catch let mismatch as AuthService.InviteMismatch {
+                inviteMismatch = mismatch
             } catch {
                 linkError = (error as? AuthFailure)?.message ?? MagicLink.genericFailure
             }

@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { useUser } from "../contexts/UserContext";
 import api from "../api";
+import { tweetSeedNoted } from "../utils/tweetSeed";
 
 /**
  * "Start from your tweets?" — the opt-in for seeding a fresh account from
@@ -19,7 +20,8 @@ import api from "../api";
  *    answer and is stored — it is NOT the same as dismissing.
  *  - Never a blocker: the card is one element on a page the user can
  *    simply leave. No answer = "we don't know", asked again once on
- *    /welcome, then it rests in Settings.
+ *    /welcome, then it rests in Settings ("Start from your tweets" on
+ *    the Account page, #662), where it can be changed both ways.
  */
 export default function PrefillConsentCard({ style, delayHint }) {
   const { user, setUser } = useUser();
@@ -81,9 +83,7 @@ export default function PrefillConsentCard({ style, delayHint }) {
           fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.92rem",
           lineHeight: 1.7, color: "var(--text-secondary)",
         }}>
-          {answered === "yes"
-            ? "Noted. We'll seed your Loore from your public tweets and have first drafts of your artifacts — like your profile and intentions — waiting when you come in."
-            : "Noted. You'll start from a blank page — you can always seed from your tweets later, from Settings."}
+          {tweetSeedNoted(user, answered)}
         </p>
       ) : (
         <>

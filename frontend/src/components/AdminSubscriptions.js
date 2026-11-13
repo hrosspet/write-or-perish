@@ -45,6 +45,8 @@ const week = (state, cents, currency) => {
 export default function AdminSubscriptions() {
   const [subs, setSubs] = useState(null);
   const [referrals, setReferrals] = useState(null);
+  // What each side gets now: a fixed share of Standard's price (#439).
+  const [credit, setCredit] = useState(null);
   const [codes, setCodes] = useState(null);
   const [err, setErr] = useState("");
   const [form, setForm] = useState({ code: "", max_uses: "", expires_at: "", note: "" });
@@ -59,7 +61,10 @@ export default function AdminSubscriptions() {
       .then((res) => setSubs(res.data.subscriptions))
       .catch(() => setErr("Failed to fetch subscriptions."));
     api.get("/admin/referrals")
-      .then((res) => setReferrals(res.data.referrals))
+      .then((res) => {
+        setReferrals(res.data.referrals);
+        setCredit(res.data.credit || null);
+      })
       .catch(() => setErr("Failed to fetch invitations."));
     loadCodes();
   }, []);
@@ -131,8 +136,15 @@ export default function AdminSubscriptions() {
       )}
 
       {/* Referrals (#439): who invited whom, and the free week each side
-          got on the friend's first payment. */}
+          got on the friend's first payment: the same credit for both,
+          whatever their level (Peter, 2026-11-13); the inviter's is at
+          most what the friend paid. */}
       <h2 style={h2}>Invitations</h2>
+      {credit && (
+        <div style={{ color: "var(--text-muted)", fontSize: "0.9em", marginBottom: "8px" }}>
+          {`Each side's free week is ${formatPrice(credit.cents, credit.currency || "usd")} of credit, whatever their level or tax; the inviter's is at most what the friend paid. A "failed" one is given by hand in the Stripe Dashboard.`}
+        </div>
+      )}
       {referrals === null ? <div>Loading…</div> : referrals.length === 0 ? (
         <div style={{ color: "var(--text-muted)" }}>No invitations yet.</div>
       ) : (
@@ -141,9 +153,10 @@ export default function AdminSubscriptions() {
             <thead>
               <tr>
                 <th style={th}>invited by</th>
+                <th style={th}>invite</th>
                 <th style={th}>friend</th>
                 <th style={th}>approved</th>
-                <th style={th}>signed up</th>
+                <th style={th}>made</th>
                 <th style={th}>first payment</th>
                 <th style={th}>inviter's week</th>
                 <th style={th}>friend's week</th>
@@ -153,7 +166,11 @@ export default function AdminSubscriptions() {
               {referrals.map((r) => (
                 <tr key={r.id}>
                   <td style={cell}>{r.inviter || "(deleted)"}</td>
-                  <td style={cell}>{r.friend || "(deleted)"}</td>
+                  {/* Invites (#439): open, used, withdrawn or expired, by X
+                      or email; who it was for is not shown. "link": a
+                      referral through the reusable link invites replaced. */}
+                  <td style={cell}>{r.invite_state ? `${r.invite_state} (${r.invite_kind === "x" ? "X" : "email"})` : "link"}</td>
+                  <td style={cell}>{r.friend || (r.invite_state && r.invite_state !== "used" ? "—" : "(deleted)")}</td>
                   <td style={cell}>{r.friend_approved === null ? "—" : (r.friend_approved ? "yes" : "waiting")}</td>
                   <td style={cell}>{day(r.created_at)}</td>
                   <td style={cell}>{day(r.rewarded_at)}</td>

@@ -1390,8 +1390,11 @@ class TestTrialCeiling:
         assert user_is_capped(user, now=datetime(2026, 12, 3))
         assert user_is_capped(user, now=datetime(2027, 1, 1))  # no reset
         payload = spend_cap_payload(user)
-        assert payload["lifts_on"] == "2026-12-09"
+        # The first payment lifts it, not the trial's end (2026-12-09).
+        assert payload["lifts_on"] is None
+        assert payload["lifts_with_payment"] is True
         assert "trial" in payload["message"]
+        assert "first payment" in payload["message"]
         assert "free alpha" not in payload["message"]
 
     def test_the_ceiling_ends_with_the_trial(self, app, gateway):
