@@ -47,6 +47,9 @@ struct CurrentUser: Decodable, Equatable, Sendable {
     /// is sent with it. Settings shows the state; the app sells nothing.
     var paymentsEnabled: Bool
     var subscription: SubscriptionState?
+    /// Payments on (#697): the admin blocked this account. Nobody else waits for
+    /// approval then, so it gets `AccountNotActiveView`, not the waitlist.
+    var accountBlocked: Bool
 
     enum CodingKeys: String, CodingKey {
         case id, username, email, plan, timezone
@@ -79,6 +82,7 @@ struct CurrentUser: Decodable, Equatable, Sendable {
         case gleanEnabled = "glean_enabled"
         case paymentsEnabled = "payments_enabled"
         case subscription
+        case accountBlocked = "account_blocked"
     }
 
     init(from decoder: Decoder) throws {
@@ -117,6 +121,7 @@ struct CurrentUser: Decodable, Equatable, Sendable {
         gleanEnabled = c.tolerant(.gleanEnabled, default: false)
         paymentsEnabled = c.tolerant(.paymentsEnabled, default: false)
         subscription = c.tolerant(.subscription)
+        accountBlocked = c.tolerant(.accountBlocked, default: false)
     }
 
     /// Payments on and no AI replies on this account (#438): Voice refuses a

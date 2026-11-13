@@ -204,6 +204,12 @@ class User(db.Model, UserMixin):
     # live: "dispute" (a payment was disputed) or "refund" (its latest
     # payment was refunded in full). NULL: nothing withdrawn.
     subscription_revoked = db.Column(db.String(16), nullable=True)
+    # When a trial of this account was cancelled because its card had
+    # already started a trial on another account (#697, TrialCard). The
+    # subscribe page then says so; a subscription without a trial is
+    # possible. NULL: never.
+    subscription_trial_card_refused_at = db.Column(db.DateTime,
+                                                   nullable=True)
 
     # --- The alpha free month (#438; Peter, 2026-11-12: alpha testers are
     # "free for one month after the opening, then the discounted price") ---
@@ -379,6 +385,16 @@ class User(db.Model, UserMixin):
     # for the admin Activity tab. Null for accounts approved before the
     # column existed: fall back to accepted_terms_at, then created_at.
     approved_at = db.Column(db.DateTime, nullable=True)
+    # When the approval gate let this account in by itself, while payments
+    # were on (#697, utils/approval.let_in). Not set by the admin's own
+    # approval or by a whitelist or pre-fill, and cleared when the admin
+    # approves the account by hand. With payments off again, such an
+    # account without the paid set waits for approval like a new one.
+    let_in_at = db.Column(db.DateTime, nullable=True)
+    # Whether the account was approved when the admin blocked it (#697,
+    # utils/approval.block), so Unblock restores exactly that. NULL: not
+    # blocked by Block (an account deactivated before payments, or none).
+    approved_before_block = db.Column(db.Boolean, nullable=True)
     # Last authenticated API request (throttled to one write per
     # ACTIVITY_TOUCH_INTERVAL) and its path, so "checked the profile and
     # left" is distinguishable from "never came". Not engagement — a view
@@ -2712,6 +2728,38 @@ class DiscountCodeAttempt(db.Model):
     created_at = db.Column(db.DateTime, nullable=False,
                            default=datetime.utcnow, index=True)
     ok = db.Column(db.Boolean, nullable=False, default=False)
+
+
+class BillingRequest(db.Model):
+    """A checkout started or a subscription synced by an account (#697),
+    for the hourly limits on both (CHECKOUT_STARTS_PER_HOUR,
+    BILLING_SYNCS_PER_HOUR; utils/billing_limits). Only who, which and
+    when."""
+    __tablename__ = "billing_request"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=False, index=True)
+    # "checkout" or "sync".
+    kind = db.Column(db.String(16), nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False,
+                           default=datetime.utcnow, index=True)
+
+
+class TrialCard(db.Model):
+    """A card that started a free trial (#697): one trial per card as
+    well as per account (utils/trial_cards). Only a keyed hash of the
+    card's Stripe fingerprint (never the fingerprint, never card data)
+    and when the trial started. An account deletion keeps the row without
+    the account, as the anonymous mark that this card had its trial."""
+    __tablename__ = "trial_card"
+
+    id = db.Column(db.Integer, primary_key=True)
+    card_hash = db.Column(db.String(64), nullable=False, unique=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=True, index=True)
+    created_at = db.Column(db.DateTime, nullable=False,
+                           default=datetime.utcnow)
 
 
 # The per-user tables whose rows a waiting "Delete all my content" hides

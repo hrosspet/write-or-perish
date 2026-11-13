@@ -20,6 +20,9 @@ from backend.routes.terms import CURRENT_TERMS_VERSION
 from backend.utils.reserved_usernames import validate_username
 from backend.utils.spend import spend_cap_payload, user_is_capped
 from backend.utils.subscriptions import user_payload_fields
+from backend.utils.approval import (
+    counts_as_approved as approval_counts_as_approved,
+    user_payload_fields as approval_payload_fields)
 from backend.utils.llm_nodes import effective_preferred_model, is_chat_model
 from backend.utils.own_entries import has_own_entries
 from backend.utils.user_purge import deletion_status
@@ -84,7 +87,9 @@ def _serialize_current_user():
         "username": current_user.username,
         "accepted_terms_at": iso_utc(current_user.accepted_terms_at),
         "terms_up_to_date": _terms_up_to_date(current_user),
-        "approved": current_user.approved,
+        # `approved`; payments off, an account the gate let in by itself
+        # while they were on reads as waiting (#697).
+        "approved": approval_counts_as_approved(current_user),
         "email": current_user.email,
         "is_admin": current_user.is_admin,
         "plan": current_user.plan,
@@ -157,6 +162,9 @@ def _serialize_current_user():
         # payments_enabled and the subscription's state (level, status,
         # dates, whether AI replies are on). Off: no key at all.
         **user_payload_fields(current_user),
+        # Payments on (#697): account_blocked, whether the admin blocked
+        # it. Off: no key.
+        **approval_payload_fields(current_user),
     }
 
 

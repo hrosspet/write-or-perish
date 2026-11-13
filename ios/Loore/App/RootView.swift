@@ -61,6 +61,9 @@ struct RootView: View {
                 NoSubscriptionView()
             } else if app.isApproved {
                 MainTabView()
+            } else if app.user?.accountBlocked == true {
+                // Payments on: the admin blocked it (#697); nobody else waits.
+                AccountNotActiveView()
             } else {
                 WaitlistView()
             }

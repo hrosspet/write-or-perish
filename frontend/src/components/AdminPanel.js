@@ -599,11 +599,34 @@ export function purgeLabel(job) {
   }
 }
 
+// The Users tab's Status cell. Payments on (#697): "Blocked" for an
+// account the admin blocked; "Inactive" is then one that has not come back
+// since payments went on (it is let in at its next visit).
+export function statusLabel(u, letInWithoutApproval) {
+  if (u.approved) return "Active";
+  if (letInWithoutApproval && u.blocked) return "Blocked";
+  return "Inactive";
+}
+
+// INTRODUCED HEURISTIC (#697): an account made in the last NEW_ACCOUNT_DAYS
+// is marked "new" in the Users tab while payments are on, where no email
+// announces a sign-up any more. A week covers a weekly look at the list.
+export const NEW_ACCOUNT_DAYS = 7;
+
+export function isNewAccount(u, now = Date.now()) {
+  if (!u.created_at) return false;
+  const made = Date.parse(u.created_at);
+  return !Number.isNaN(made) && now - made < NEW_ACCOUNT_DAYS * 86400 * 1000;
+}
+
 function AdminPanel() {
   const [activeTab, setActiveTab] = useState("users");
   const userCtx = useUser();
   const tabs = userCtx?.user?.payments_enabled
     ? [...ADMIN_TABS, SUBSCRIPTIONS_TAB] : ADMIN_TABS;
+  // Payments on (#697): nobody waits for approval, and the Users tab's
+  // switch blocks and unblocks.
+  const letInWithoutApproval = !!userCtx?.user?.payments_enabled;
   const [users, setUsers] = useState([]);
   const [allowedPlans, setAllowedPlans] = useState([]);
   // Start of the cache hit-rate window (ISO, from the backend) — the
@@ -702,6 +725,18 @@ function AdminPanel() {
     } catch (err) {
       console.error(err);
       setError("Error toggling user status.");
+    }
+  };
+
+  // Payments on (#697): Block / Unblock any account. Nothing of its
+  // subscription is cancelled.
+  const blockUser = async (userId, block) => {
+    try {
+      await api.post(`/admin/users/${userId}/block`, { block });
+      fetchUsers();
+    } catch (err) {
+      console.error(err);
+      setError(err.response?.data?.error || "Error blocking the account.");
     }
   };
 
@@ -1151,7 +1186,11 @@ function AdminPanel() {
       setNewHandle("");
       setNewHandleError("");
       setNewHandleNotice(
-        `Whitelisted @${u.username} as ${who}, X id ${u.twitter_id} (${source}); unapproved until you approve them.`
+        `Whitelisted @${u.username} as ${who}, X id ${u.twitter_id} (${source}); `
+        + (u.approved
+          // Payments on (#697): whitelisting is the approval.
+          ? "ready at their first sign-in, at the trial step."
+          : "unapproved until you approve them.")
       );
       fetchUsers();
     } catch (err) {
@@ -1353,12 +1392,16 @@ function AdminPanel() {
               <td style={{ border: "1px solid var(--border)", padding: "8px" }}>{u.id}</td>
               <td style={{ border: "1px solid var(--border)", padding: "8px" }}>
                 {u.username}
+                {letInWithoutApproval && isNewAccount(u) && (
+                  <span style={{ marginLeft: "6px", fontSize: "0.75em", color: "var(--accent)" }}
+                        title={`Made in the last ${NEW_ACCOUNT_DAYS} days`}>new</span>
+                )}
                 {u.spam && (
                   <span style={{ marginLeft: "6px", fontSize: "0.75em", color: "var(--error)" }} title="Flagged as spam">spam</span>
                 )}
               </td>
               <td style={{ border: "1px solid var(--border)", padding: "8px" }}>
-                {u.approved ? "Active" : "Inactive"}
+                {statusLabel(u, letInWithoutApproval)}
               </td>
               <td style={{ border: "1px solid var(--border)", padding: "8px" }}>
                 <select
@@ -1555,7 +1598,32 @@ function AdminPanel() {
                   : `${(u.cache_hit_rate * 100).toFixed(0)}%`}
               </td>
               <td style={{ border: "1px solid var(--border)", padding: "8px" }}>
-                {!u.approved && u.email ? (
+                {letInWithoutApproval ? (
+                  // Payments on (#697): nobody waits for approval. Block /
+                  // Unblock on any account; one never approved also keeps
+                  // Activate, which approves it by hand as before.
+                  <>
+                    <button onClick={() => blockUser(u.id, !u.blocked)}>
+                      {u.blocked ? "Unblock" : "Block"}
+                    </button>
+                    {!u.approved && !u.blocked && (
+                      <>
+                        {u.email && (
+                          <>
+                            {" "}
+                            <button onClick={() => activateAndWelcome(u.id)}>
+                              Activate &amp; Welcome
+                            </button>
+                          </>
+                        )}
+                        {" "}
+                        <button onClick={() => toggleApproved(u.id)}>
+                          Activate
+                        </button>
+                      </>
+                    )}
+                  </>
+                ) : !u.approved && u.email ? (
                   <>
                     <button onClick={() => activateAndWelcome(u.id)}>
                       Activate &amp; Welcome
