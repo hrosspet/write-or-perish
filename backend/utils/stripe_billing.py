@@ -182,6 +182,24 @@ class StripeGateway:
         return plain(self.client.v1.billing_portal.sessions.create(
             params=params))
 
+    # Customer credit (#439: a referral's free week)
+    def preview_invoice(self, customer_id, subscription_id):
+        """What the subscription's next invoice will charge."""
+        return plain(self.client.v1.invoices.create_preview(params={
+            "customer": customer_id, "subscription": subscription_id}))
+
+    def list_balance_transactions(self, customer_id):
+        page = self.client.v1.customers.balance_transactions.list(
+            customer_id, params={"limit": 100})
+        return [plain(t) for t in page.data]
+
+    def create_balance_transaction(self, customer_id, params,
+                                   idempotency_key=None):
+        options = {"idempotency_key": idempotency_key} if idempotency_key \
+            else None
+        return plain(self.client.v1.customers.balance_transactions.create(
+            customer_id, params=params, options=options))
+
     # Subscriptions
     def retrieve_subscription(self, subscription_id):
         return plain(self.client.v1.subscriptions.retrieve(subscription_id))
@@ -410,10 +428,23 @@ def ensure_customer(gateway, user):
         return user.stripe_customer_id
     customer = gateway.create_customer(
         {"metadata": {"loore_user_id": str(user.id)}},
-        idempotency_key=f"loore-customer-{user.id}")
+        idempotency_key=customer_idempotency_key(user))
     user.stripe_customer_id = customer["id"]
     db.session.commit()
     return user.stripe_customer_id
+
+
+def customer_idempotency_key(user):
+    """The key of the one "create customer" call for *user* (a checkout's,
+    or a referral's credit, #439). The account's creation time is in it:
+    databases that share one Stripe account (staging and local development
+    on the sandbox) have the same account ids, and within Stripe's 24-hour
+    window the id alone handed one database's customer to the other (seen
+    in the sandbox, 2026-11-12: a customer deleted since, so the credit
+    failed with "No such customer")."""
+    created = getattr(user, "created_at", None)
+    stamp = f"-{int(created.timestamp())}" if created else ""
+    return f"loore-customer-{user.id}{stamp}"
 
 
 class CheckoutAlreadyCompleted(Exception):
@@ -1000,20 +1031,28 @@ def handle_event(gateway, event, config=None):
         gateway, gateway.retrieve_subscription(sub_id), config)
     if (user is not None and etype in ("invoice.paid",
                                        "invoice.payment_succeeded")
-            and (obj.get("amount_paid") or 0) > 0
             and user.stripe_subscription_id == sub_id):
-        # The only proof of a payment (see _apply_payment_state). The
-        # trial's ceiling ends with it, and the monthly ceiling may change
-        # with it (an alpha tester's is Standard's until the first payment,
-        # #438): a block that the new ceiling no longer warrants is lifted.
-        from backend.utils.spend import (
-            get_user_spend_limit_usd, reconcile_user_spend_block)
-        cfg = _config(config)
-        limit_before = get_user_spend_limit_usd(user, cfg)
-        user.subscription_ever_paid = True
-        user.subscription_trial_capped = False
-        if get_user_spend_limit_usd(user, cfg) != limit_before:
-            reconcile_user_spend_block(user, cfg)
+        # The only proof of a payment (see _apply_payment_state): an
+        # invoice above zero, paid. Customer credit (a referral's free
+        # week, #439) can pay all of one, so its total counts, not only
+        # what the card paid. The trial's ceiling ends with it, and the
+        # monthly ceiling may change with it (an alpha tester's is
+        # Standard's until the first payment, #438): a block that the new
+        # ceiling no longer warrants is lifted.
+        if ((obj.get("amount_paid") or 0) > 0
+                or (obj.get("total") or 0) > 0):
+            from backend.utils.spend import (
+                get_user_spend_limit_usd, reconcile_user_spend_block)
+            cfg = _config(config)
+            limit_before = get_user_spend_limit_usd(user, cfg)
+            user.subscription_ever_paid = True
+            user.subscription_trial_capped = False
+            if get_user_spend_limit_usd(user, cfg) != limit_before:
+                reconcile_user_spend_block(user, cfg)
+        # The friend's first payment by card gives the referral's free
+        # weeks, once (#439).
+        from backend.utils.referrals import grant_on_first_payment
+        grant_on_first_payment(gateway, user, obj, config)
     return "applied" if user is not None else "no_account"
 
 

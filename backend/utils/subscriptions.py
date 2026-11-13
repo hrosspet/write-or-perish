@@ -507,7 +507,10 @@ def user_payload_fields(user, config=None):
     while they are off, so the payload is exactly what it was."""
     if not payments_enabled(config):
         return {}
+    from backend.utils.referrals import referrals_enabled
     return {
         "payments_enabled": True,
         "subscription": subscription_state(user, config),
+        # The invite link on the Account page (#439).
+        "referrals_enabled": referrals_enabled(config),
     }

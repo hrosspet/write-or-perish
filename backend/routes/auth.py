@@ -14,6 +14,7 @@ from backend.utils.magic_link import (
 from backend.utils.email import (
     send_magic_link_email, send_x_connected_notice, is_valid_email)
 from backend.utils.reserved_usernames import derive_available_username
+from backend.utils import referrals
 import logging
 from urllib.parse import urlparse, quote
 
@@ -227,6 +228,11 @@ def login():
         session['next_url'] = next_url
 
     connecting = _pop_connect_intent()
+    # An invite code (#439) waits in the session through the round trip
+    # to X; it is read when the X account comes back.
+    invite = referrals.clean_code(request.args.get('invite'))
+    if invite and not connecting:
+        session[referrals.SESSION_KEY] = invite
 
     if not twitter.authorized:
         if connecting:
@@ -256,6 +262,8 @@ def login():
     if connecting:
         return _connect_x(current_user._get_current_object(), twitter_id, username)
     user = User.query.filter_by(twitter_id=twitter_id).first()
+    new_account = user is None
+    invite = session.pop(referrals.SESSION_KEY, None)
     if not user:
         refused = _confirm_email_flow_redirect(session.get('next_url'))
         if refused is not None:
@@ -275,6 +283,9 @@ def login():
     user.twitter_handle = username
     db.session.commit()
 
+    # Who invited this account (#439), before the sign-in is recorded: an
+    # account set up ahead of its owner counts as new until then.
+    referrals.record_invite(user, invite, new_account)
     login_user(user, remember=True)
     # Record the sign-in itself, not only the app requests that follow:
     # "has anyone ever signed into this account" (a placeholder has not)
@@ -300,6 +311,12 @@ def magic_link_send():
     data = request.get_json() or {}
     email = (data.get("email") or "").strip().lower()
     next_url = data.get("next_url")
+    # An invite code (#439) rides in the signed link, and waits in this
+    # browser's session: the link records it only when opened in the
+    # browser that asked for it. Nothing in the answer depends on it.
+    invite = referrals.clean_code(data.get("invite"))
+    if invite:
+        session[referrals.SESSION_KEY] = invite
 
     if not is_valid_email(email):
         return jsonify({"error": "Please enter a valid email address."}), 400
@@ -308,7 +325,7 @@ def magic_link_send():
         next_url = None
 
     try:
-        token = generate_magic_link_token(email, next_url)
+        token = generate_magic_link_token(email, next_url, invite=invite)
         token_h = hash_token(token)
         expiry = datetime.utcnow() + timedelta(
             seconds=current_app.config.get("MAGIC_LINK_EXPIRY_SECONDS", 900)
@@ -350,8 +367,16 @@ def magic_link_verify():
         return redirect(f"{frontend_url}/login?error=invalid_or_expired")
 
     token_h = hash_token(token)
+    # The invite in the link counts only when this browser holds the same
+    # code (it asked for the link, or followed the invite link): a link
+    # someone else asked for with their code records nothing.
+    held = session.pop(referrals.SESSION_KEY, None)
+    invite = payload.get("invite")
+    if not invite or invite != held:
+        invite = None
 
     user = User.query.filter_by(email=email).first()
+    new_account = user is None
     if user:
         # Check token hash matches (but don't clear it — let the token
         # remain valid until its natural expiry so that email-client
@@ -380,6 +405,8 @@ def magic_link_verify():
         db.session.add(user)
         db.session.commit()
 
+    # Who invited this account (#439); approval is untouched.
+    referrals.record_invite(user, invite, new_account)
     login_user(user, remember=True)
 
     if next_url and is_safe_redirect_url(next_url):

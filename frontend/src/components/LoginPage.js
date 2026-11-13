@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import { useUser } from "../contexts/UserContext";
 import useSubmitShortcut from "../hooks/useSubmitShortcut";
+import { pendingInvite } from "../utils/invite";
 
 const backendUrl = process.env.REACT_APP_BACKEND_URL;
 
@@ -240,7 +241,11 @@ function LoginPage() {
 
   const handleTwitterLogin = () => {
     const nextParam = encodeURIComponent(returnUrl);
-    window.location.href = `${backendUrl}/auth/login?next=${nextParam}`;
+    // An invite code kept from /invite/<code> (#439) waits in the server
+    // session through the round trip to X.
+    const invite = pendingInvite();
+    const inviteParam = invite ? `&invite=${encodeURIComponent(invite)}` : "";
+    window.location.href = `${backendUrl}/auth/login?next=${nextParam}${inviteParam}`;
   };
 
   const handleEmailSubmit = async (e) => {
@@ -252,7 +257,15 @@ function LoginPage() {
       const res = await fetch(`${backendUrl}/auth/magic-link/send`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: emailInput, next_url: returnUrl }),
+        // The session cookie goes along: an invite code (#439) counts only
+        // when the link is opened in the browser that asked for it.
+        credentials: "include",
+        // The invite code (#439) rides in the signed link the email carries.
+        body: JSON.stringify({
+          email: emailInput,
+          next_url: returnUrl,
+          ...(pendingInvite() ? { invite: pendingInvite() } : {}),
+        }),
       });
       const data = await res.json();
       if (!res.ok) {

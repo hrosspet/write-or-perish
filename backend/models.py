@@ -220,6 +220,10 @@ class User(db.Model, UserMixin):
     alpha_free_start = db.Column(db.DateTime, nullable=True)
     alpha_free_until = db.Column(db.DateTime, nullable=True)
 
+    # The account's invite code (#439): random, never derived from the
+    # account, made the first time its link is asked for. NULL: none yet.
+    referral_code = db.Column(db.String(32), nullable=True, unique=True)
+
     # Per-user monthly spend hard cap (issue: free-alpha guardrail). Stores the
     # "YYYY-MM" (UTC) in which the user crossed PER_USER_MONTHLY_LIMIT_USD. While
     # this equals the current month the user is blocked from cost-incurring
@@ -2664,6 +2668,36 @@ class CheckoutSession(db.Model):
     state = db.Column(db.String(16), nullable=False, default="open")
     created_at = db.Column(db.DateTime, nullable=False,
                            default=datetime.utcnow)
+
+
+class Referral(db.Model):
+    """Who invited whom (#439), recorded at the friend's signup through
+    the inviter's link, and the free week each got on the friend's first
+    payment (utils/referrals). One per friend: the first inviter is kept.
+    An account deletion keeps the row without the deleted account."""
+    __tablename__ = "referral"
+
+    id = db.Column(db.Integer, primary_key=True)
+    inviter_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                           nullable=True, index=True)
+    friend_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                          nullable=True, unique=True)
+    created_at = db.Column(db.DateTime, nullable=False,
+                           default=datetime.utcnow)
+    # Set once, on the friend's first payment above zero.
+    rewarded_at = db.Column(db.DateTime, nullable=True)
+    reward_invoice_id = db.Column(db.String(255), nullable=True)
+    # Per side: "granted", "failed" (Stripe refused; give it by hand),
+    # "skipped_deleted", "skipped_no_account" or "skipped_self"; NULL
+    # before the reward. The credit as Stripe made it.
+    inviter_reward = db.Column(db.String(32), nullable=True)
+    inviter_credit_cents = db.Column(db.Integer, nullable=True)
+    inviter_credit_currency = db.Column(db.String(8), nullable=True)
+    inviter_credit_txn = db.Column(db.String(255), nullable=True)
+    friend_reward = db.Column(db.String(32), nullable=True)
+    friend_credit_cents = db.Column(db.Integer, nullable=True)
+    friend_credit_currency = db.Column(db.String(8), nullable=True)
+    friend_credit_txn = db.Column(db.String(255), nullable=True)
 
 
 class DiscountCodeAttempt(db.Model):
