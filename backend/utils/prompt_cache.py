@@ -46,18 +46,22 @@ CACHE_TTL_SECONDS = 24 * 3600
 # v5: in a call with tools, the recent raw window names a quoted saved
 # reference in one line instead of giving its text (2026-11-12); a v4
 # render would keep the text for the rest of its TTL.
-# v6: entries carry the unlicensed input kinds of their rows (#689), so a
-# reply written from a cached render is marked like one from a fresh
-# render; a v5 entry has none to replay.
-_KEY_PREFIX = "wop:sysprompt:v6:"
+# Since #689 an entry may also carry "inputs" (X API input in its rows).
+# The key stays v5: an account that has had an X API pre-fill renders
+# under its own variant (llm_completion._render_variant's `x`), so it
+# never reads an entry from before. Another account's render holds X API
+# input only when it quotes someone else's public pre-filled post; one
+# cached before #689 replays its verdict (the call still goes out on the
+# chat key) but not the mark, for the rest of its 24 h TTL.
+_KEY_PREFIX = "wop:sysprompt:v5:"
 
 # *unlicensed* is why the render's own rows keep a payload off the
 # training key (``ContextUsage.reason``), or None when they are all
 # licensed.
 # *references* are the saved references its recent raw window names by
 # the name read_full opens them by (ContextUsage.named_references).
-# *inputs* are the unlicensed input kinds of its rows (ContextUsage.inputs,
-# #689): what a reply written from it is marked with.
+# *inputs* is {X_API_INPUT} when its rows held X API input
+# (ContextUsage.inputs, #689): what a reply written from it is marked with.
 CachedRender = namedtuple("CachedRender",
                           ["text", "unlicensed", "references", "inputs"],
                           defaults=((), ()))
@@ -110,7 +114,7 @@ def store_render(config, node, rendered_text, variant="",
     """Store the rendered text (encrypted) with its training-key verdict
     (see ``CachedRender``), for a licensed one the rows it rests on
     (``ContextUsage.rows``), the saved references its window names
-    (*references*) and the unlicensed input kinds of its rows (*inputs*).
+    (*references*) and whether its rows held X API input (*inputs*).
     Failures are non-fatal."""
     entry = json.dumps({
         "text": rendered_text, "unlicensed": unlicensed,

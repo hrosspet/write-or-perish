@@ -605,16 +605,13 @@ class Node(db.Model):
     # NULL = written in Loore, or imported before this column existed.
     # Never part of dedup: source_key alone decides a re-import match.
     provenance = db.Column(db.String(16), nullable=True)
-    # On a model-written node: the call that wrote it carried content not
-    # licensed for training, so the text may repeat it (#689):
-    #   "x_api"    — posts Loore fetched through the X API (or text a model
-    #                wrote from them); the node is Chat at most and Train
-    #                is never offered for it.
-    #   "external" — other people's saved writing (references, Glean
-    #                tweets); the stored ai_usage is the user's, but the
-    #                training licence reads the node as Chat.
-    # NULL = nothing of the kind (and every node written before #689).
-    # utils/privacy.unlicensed_input reads it.
+    # On a model-written node: "x_api" when the call that wrote it carried
+    # posts Loore fetched through the X API (or text a model wrote from
+    # them), so the text may repeat them (#689). The node is Chat at most,
+    # Train is never offered for it, and the training licence reads it as
+    # Chat. NULL = nothing of the kind (every node written before #689,
+    # and replies written from other people's saved writing, which may be
+    # Train: Peter, 2026-09-29). utils/privacy.unlicensed_input reads it.
     unlicensed_input = db.Column(db.String(16), nullable=True)
 
     # DB-level backstop against concurrent imports racing past the
@@ -1397,6 +1394,16 @@ class NodeTranscriptChunk(db.Model):
 
 class APICostLog(db.Model):
     __tablename__ = "api_cost_log"
+    # Whether an account has ever had an X API pre-fill is asked on every
+    # reply and pre-warm (utils/privacy.x_api_account, #689). Almost no
+    # account has such a row, and without this partial index the lookup
+    # would read all of the user's cost rows to find none; with it, it is
+    # one probe of a tiny index (one entry per X API pre-fill).
+    __table_args__ = (
+        db.Index("ix_api_cost_log_x_prefill_user", "user_id",
+                 postgresql_where=db.text("request_type = 'x_prefill'"),
+                 sqlite_where=db.text("request_type = 'x_prefill'")),
+    )
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False, index=True)
     model_id = db.Column(db.String(64), nullable=False)

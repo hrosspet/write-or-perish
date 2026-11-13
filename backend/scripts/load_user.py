@@ -64,9 +64,9 @@ NODE_BATCH = 500
 
 def _mark(row):
     """A dumped row's unlicensed input mark (#689), if it is a known one."""
-    from backend.utils.privacy import UNLICENSED_INPUTS
+    from backend.utils.privacy import X_API_INPUT
     mark = row.get("unlicensed_input")
-    return mark if mark in UNLICENSED_INPUTS else None
+    return mark if mark == X_API_INPUT else None
 
 
 def _dt(s):
@@ -296,7 +296,7 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
     from backend.models import NodeContextArtifact, UserPrompt
     from backend.utils.context_artifacts import sync_context_artifacts
     from backend.utils.privacy import (
-        UNLICENSED_INPUTS, X_API_INPUT, X_API_PREFILL_REQUEST, cap_ai_usage,
+        X_API_INPUT, X_API_PREFILL_REQUEST, cap_ai_usage,
         chat_at_most, train_refused_for,
     )
     from backend.models import APICostLog
@@ -343,8 +343,7 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
         # A tweet the dump says was fetched through the X API, or a reply
         # written from such posts, comes in at Chat at most (#689), so no
         # load lifts it to Train; a reply keeps what it was written from.
-        mark = nd.get("unlicensed_input")
-        mark = mark if mark in UNLICENSED_INPUTS else None
+        mark = _mark(nd)
         if mark == X_API_INPUT or train_refused_for(nd.get("provenance")):
             holds_x_api = True
         new = Node(

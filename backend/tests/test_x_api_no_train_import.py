@@ -383,7 +383,39 @@ def test_a_todo_merge_keeps_the_mark_of_its_proposal_or_list(app):  # noqa: F811
     _db.session.add(todo)
     _db.session.commit()
     assert _merge_input_mark(proposal, todo) is None          # control
-    todo.unlicensed_input = "external"
-    assert _merge_input_mark(proposal, todo) == "external"
+    todo.unlicensed_input = "x_api"
+    assert _merge_input_mark(proposal, todo) == "x_api"
+    todo.unlicensed_input = None
     proposal.unlicensed_input = "x_api"
     assert _merge_input_mark(proposal, None) == "x_api"
+
+
+def test_the_x_prefill_lookup_is_one_probe_of_its_partial_index(app):  # noqa: F811
+    """privacy.x_api_account runs on every reply: it must not read all of
+    an account's cost rows to find none (re-check of #691, 4). The query
+    plan names the partial index, and the answer is asked once per
+    session."""
+    from sqlalchemy import event
+    from backend.utils.privacy import x_api_account
+    u = _make_user("alice")
+    for _ in range(3):
+        _db.session.add(APICostLog(user_id=u.id, model_id="m",
+                                   request_type="conversation",
+                                   cost_microdollars=1))
+    _db.session.commit()
+    plan = " ".join(str(row) for row in _db.session.execute(_db.text(
+        "EXPLAIN QUERY PLAN SELECT id FROM api_cost_log "
+        "WHERE user_id = :u AND request_type = 'x_prefill' LIMIT 1"),
+        {"u": u.id}))
+    assert "ix_api_cost_log_x_prefill_user" in plan
+
+    statements = []
+    engine = _db.session.get_bind()
+    listener = lambda *a: statements.append(a[2])  # noqa: E731
+    event.listen(engine, "before_cursor_execute", listener)
+    try:
+        assert x_api_account(u.id) is False
+        assert x_api_account(u.id) is False
+    finally:
+        event.remove(engine, "before_cursor_execute", listener)
+    assert len([s for s in statements if "api_cost_log" in s]) == 1

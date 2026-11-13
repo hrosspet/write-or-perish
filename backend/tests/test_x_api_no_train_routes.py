@@ -151,7 +151,7 @@ def test_the_put_response_carries_the_flag(app, users):  # noqa: F811
 
 
 def _x_reply(user, llm, parent, mark):
-    """An AI reply written from X API posts or other people's writing."""
+    """An AI reply written from X API posts (*mark* "x_api")."""
     n = _node(llm, parent, human_owner=user, node_type="llm",
               ai_usage="chat" if mark == "x_api" else "train",
               content="a reply")
@@ -173,21 +173,6 @@ def test_a_reply_written_from_x_api_posts_refuses_train(app, users):  # noqa: F8
     _login(client, alice)
     focal = client.get(f"/nodes/{reply.id}").json
     assert (focal["ai_usage"], focal["train_refused"]) == ("chat", True)
-
-
-def test_a_reply_written_from_saved_references_may_be_set_to_train(app, users):  # noqa: F811
-    """Control: Peter (2026-09-29) lets such replies be Train; the
-    licence reads them as Chat all the same."""
-    alice, _, llm = users
-    root = _node(alice, content="root")
-    reply = _x_reply(alice, llm, root, "external")
-    reply.ai_usage = "chat"
-    _db.session.commit()
-
-    resp = _put(app, alice, reply, ai_usage="train")
-
-    assert resp.status_code == 200
-    assert Node.query.get(reply.id).ai_usage == "train"
 
 
 def test_a_reply_under_a_capped_ai_reply_takes_the_threads_setting(app, users):  # noqa: F811

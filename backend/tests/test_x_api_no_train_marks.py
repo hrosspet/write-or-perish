@@ -2,11 +2,12 @@
 model writes from them (#689, review of PR #691).
 
 - AI replies: a reply written from a payload that held X API posts (or
-  text written from them) is marked ``x_api`` and stored at Chat; one
-  written from other people's saved writing is marked ``external`` and
-  keeps the user's setting. Either way the next turn that carries it goes
-  out on the chat key ("External content quoted word for word never
-  reaches training").
+  text written from them) is marked ``x_api`` and stored at Chat, and the
+  next turn that carries it goes out on the chat key.
+- Other people's saved writing marks nothing: a Train account with saved
+  references and no X API content chooses the same key as on main, turn
+  after turn (Peter, 2026-09-29: replies written from references may be
+  Train; the call that carries the reference itself is on the chat key).
 - Tool writes in such a turn (update_artifact) carry the mark, are never
   Train, and a later version of the kind inherits it.
 - Derived documents: every document a model wrote from the writing of an
@@ -94,10 +95,12 @@ def test_the_turn_after_a_pulled_x_api_tweet_stays_off_the_training_key(app, key
     assert _keys_used() == ["sk-chat"]
 
 
-def test_the_turn_after_a_pulled_saved_reference_stays_off_the_training_key(app, keys):  # noqa: F811
-    """The same gap for other people's saved writing: the reply is marked
-    and keeps the user's Train (Peter, 2026-09-29), but its words go out
-    on the chat key."""
+def test_a_reference_reading_turn_changes_no_later_key(app, keys):  # noqa: F811
+    """Control (the re-check's measurement): a Train account with a saved
+    reference and no X API content. Turn 1 reads the reference: its first
+    call on sk-train, the call carrying the reference on sk-chat, as on
+    main. The five turns after it go out on sk-train, as on main, and a
+    memory written there stays Train."""
     alice, system, user_node, llm_node = _train_chain("textmode")
     _train_user(alice)
     ref = _reference(alice.id, SAVED)
@@ -105,11 +108,32 @@ def test_the_turn_after_a_pulled_saved_reference_stays_off_the_training_key(app,
 
     cont = _turn_one_reads(alice, user_node, llm_node,
                            f"reference {ref.id}", SAVED)
-    assert (cont.unlicensed_input, cont.ai_usage) == ("external", "train")
+    assert _keys_used() == ["sk-train", "sk-chat"]
+    assert (getattr(cont, "unlicensed_input", None), cont.ai_usage) == (
+        None, "train")
 
-    _turn_two(alice, cont)
-    assert SAVED in _payload(0)
-    assert _keys_used() == ["sk-chat"]
+    previous = cont
+    for turn in range(5):
+        follow, nxt = _next_turn(alice, previous.id, f"turn {turn + 2}")
+        calls = [_resp("ok")]
+        if turn == 4:
+            calls = [_resp("Noting.", tool_calls=[{
+                "id": "t1", "name": "update_artifact",
+                "input": {"kind": "memory",
+                          "updated_content": "A NOTE FROM THIS THREAD"}}]),
+                _resp("Noted.")]
+        _ScriptedProvider.reset(calls)
+        generate_llm_response(_FakeSelf(), follow.id, nxt.id, "gpt-5",
+                              alice.id, source_mode="textmode")
+        assert set(_keys_used()) == {"sk-train"}, turn
+        reply = _fresh(nxt.id)
+        previous = (_fresh(reply.continuation_node_id)
+                    if reply.continuation_node_id else reply)
+        assert getattr(previous, "unlicensed_input", None) is None
+
+    memory = UserArtifact.latest_for(alice.id, "memory")
+    assert (getattr(memory, "unlicensed_input", None), memory.ai_usage) == (
+        None, "train")
 
 
 def test_the_turn_after_a_pulled_own_train_entry_keeps_the_training_key(app, keys):  # noqa: F811
@@ -161,7 +185,7 @@ def test_memory_written_from_a_quoted_x_api_tweet_never_trains(app, keys):  # no
 
 
 @pytest.mark.parametrize("previous_mark, expected", [
-    ("external", ("external", "chat")),
+    ("x_api", ("x_api", "chat")),
     (None, (None, "train")),                    # control
 ])
 def test_a_later_version_inherits_the_mark(app, keys, previous_mark, expected):  # noqa: F811

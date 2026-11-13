@@ -83,9 +83,7 @@ from backend.utils.text_edits import apply_text_edits
 from backend.utils.artifact_versions import (
     artifact_diff, parse_version, stored_version, version_number,
 )
-from backend.utils.privacy import (
-    AI_ALLOWED, EXTERNAL_INPUT, X_API_INPUT, chat_at_most,
-)
+from backend.utils.privacy import AI_ALLOWED, X_API_INPUT, chat_at_most
 from backend.utils.proposals import is_own_live_proposal
 from backend.utils.placeholders import (
     CA_TWEETS_PATTERN,
@@ -2460,12 +2458,12 @@ def _redact_tool_input(inp):
 
 
 def _written_from(licence, llm_node, node_chain, previous=None):
-    """The unlicensed input (#689) a tool write of this turn is marked
-    with: what the turn's payload took in (*licence*, None when the call
-    runs later, on approval), what the reply that made the call was marked
-    with when it was finalized, the chain's own, and the version the write
-    replaces (update_artifact rewrites the whole text). X API input wins;
-    None when there is none."""
+    """X_API_INPUT when a tool write of this turn is written from X API
+    posts (#689), else None: what the turn's payload took in (*licence*,
+    None when the call runs later, on approval), what the reply that made
+    the call was marked with when it was finalized, the chain's own, and
+    the version the write replaces (update_artifact rewrites the whole
+    text)."""
     from backend.utils.privacy import unlicensed_input
     kinds = set(chain_inputs(node_chain))
     if licence is not None:
@@ -2474,9 +2472,7 @@ def _written_from(licence, llm_node, node_chain, previous=None):
         kind = unlicensed_input(row) if row is not None else None
         if kind:
             kinds.add(kind)
-    if X_API_INPUT in kinds:
-        return X_API_INPUT
-    return EXTERNAL_INPUT if EXTERNAL_INPUT in kinds else None
+    return X_API_INPUT if X_API_INPUT in kinds else None
 
 
 def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
@@ -2495,8 +2491,9 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
     run: its entry says "pending_approval" (Peter, 2026-11-12). A call
     the checks refuse fails as before; nothing is kept for it.
 
-    *licence* (the turn's PayloadLicence): what a write is marked with
-    (_written_from, #689). None on approval: the reply's own mark is used."""
+    *licence* (the turn's PayloadLicence): whether a write is marked as
+    written from X API posts (_written_from, #689). None on approval: the
+    reply's own mark is used."""
     tool_results = []
 
     for tc in tool_calls:
@@ -2662,10 +2659,9 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                         # verdict, not the licence — once a 'chat' memory
                         # was in a payload the licence would keep every
                         # later write 'chat' for good. A write from a turn
-                        # that took in X API posts or other people's saved
-                        # writing, or one that rewrites a version marked
-                        # so, carries that mark and is never 'train'
-                        # (#689).
+                        # that took in X API posts, or one that rewrites a
+                        # version marked so, carries that mark and is
+                        # never 'train' (#689).
                         written_from = _written_from(
                             licence, llm_node, node_chain, previous)
                         owner = User.query.get(user_id)
@@ -4688,13 +4684,10 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # keys are re-read from it before every provider call (#325).
             licence = PayloadLicence(
                 key_type, logger=logger, label=f"Node {llm_node_id}")
-            # What the chain itself holds that no reply written from it
-            # may pass on for training (#689): X API posts, replies
-            # written from them or from other people's saved writing; a
-            # read thread carries other people's tweets.
+            # X API posts, or replies written from them, in the chain
+            # itself: no reply written from it may pass them on for
+            # training (#689).
             licence.mark(*chain_inputs(node_chain))
-            if ca_turn is not None:
-                licence.mark(EXTERNAL_INPUT)
             # The user's own rows the placeholders resolved to, and those
             # a cached system render carries (#326). Each resolved
             # placeholder is in the payload: it was fetched because an
@@ -5631,12 +5624,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
 
             def _mark_written_from(target):
                 """#689: a reply written from a payload that held X API
-                posts or other people's saved writing may repeat their
-                words, so it carries the mark (Node.unlicensed_input) and
-                every later licence decision reads it as Chat. Written
-                from X API input it is also stored at Chat at most, and
-                Train is never offered for it. Set on each node as it is
-                finalized, from the licence as it then is."""
+                posts (or text written from them) may repeat their words,
+                so it carries the mark (Node.unlicensed_input), is stored
+                at Chat at most, and every later licence decision reads
+                it as Chat; Train is never offered for it. Set on each
+                node as it is finalized, from the licence as it then is.
+                Other people's saved writing marks nothing (Peter,
+                2026-09-29)."""
                 kind = licence.unlicensed_input
                 target.unlicensed_input = kind
                 if kind == X_API_INPUT:

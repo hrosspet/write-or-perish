@@ -202,16 +202,13 @@ def _fail_confirm_node(llm_node_id, user_id, confirm_node_id):
 
 
 def _merge_input_mark(proposal_node, todo):
-    """The unlicensed input (#689) a merged todo list carries: the
-    proposal's (the reply that proposed the changes) or the list's it
-    rewrites; X API input wins. None when neither has any."""
-    from backend.utils.privacy import (
-        EXTERNAL_INPUT, X_API_INPUT, unlicensed_input)
+    """X_API_INPUT when a merged todo list is written from X API posts
+    (#689): the proposal (the reply that proposed the changes) or the list
+    it rewrites holds them. None otherwise."""
+    from backend.utils.privacy import X_API_INPUT, unlicensed_input
     kinds = {unlicensed_input(row) for row in (proposal_node, todo)
              if row is not None}
-    if X_API_INPUT in kinds:
-        return X_API_INPUT
-    return EXTERNAL_INPUT if EXTERNAL_INPUT in kinds else None
+    return X_API_INPUT if X_API_INPUT in kinds else None
 
 
 def build_merge_messages(merge_prompt, update_summary, current_todo):
@@ -365,8 +362,8 @@ def _run_merge(llm_node, update_summary, user_id, model_id,
         tokens_used=run.responses[-1].get("output_tokens", 0) or 0,
         # ai_usage follows the user's global default (#191).
         ai_usage=merge_user.default_ai_usage if merge_user else "chat",
-        # Written from a proposal or a list that carried X API posts or
-        # other people's saved writing: the mark goes on (#689).
+        # Written from a proposal or a list that carried X API posts: the
+        # mark goes on (#689).
         unlicensed_input=_merge_input_mark(llm_node, todo),
     )
     if new_todo.unlicensed_input:

@@ -396,14 +396,13 @@ TRAIN_REFUSED_MESSAGE = (
 TRAIN_REFUSED_CODE = "x_api_no_train"
 
 
-# What a payload took in that keeps text written from it off training
-# (Node / UserArtifact / UserTodo .unlicensed_input, #689):
-X_API_INPUT = "x_api"         # posts fetched through the X API, or text a
-#                               model wrote from them: Chat at most, and
-#                               Train is never offered
-EXTERNAL_INPUT = "external"   # other people's saved writing (references,
-#                               Glean tweets): the licence reads it as Chat
-UNLICENSED_INPUTS = (X_API_INPUT, EXTERNAL_INPUT)
+# The mark on text a model wrote from posts fetched through the X API
+# (Node / UserArtifact / UserTodo .unlicensed_input, #689): Chat at most,
+# and Train is never offered. Other people's saved writing (references,
+# Glean tweets) is not marked: a reply written from it may be Train
+# (Peter, 2026-09-29), and the training key leaves out only the call that
+# carries the reference itself (PayloadLicence.note_external), as before.
+X_API_INPUT = "x_api"
 # The documents Loore's models write from the person's writing: profile
 # versions and windows, recent context, the todo list, the artifacts
 # (intentions, memory, digest, ...). Of an account that has had an X API
@@ -411,7 +410,9 @@ UNLICENSED_INPUTS = (X_API_INPUT, EXTERNAL_INPUT)
 DERIVED_TABLES = ("user_profile", "user_recent_context", "user_todo",
                   "user_artifact")
 # APICostLog.request_type of an X API pre-fill (tasks/imports): written
-# before the tweets are imported, kept when they are deleted.
+# before the tweets are imported, kept when they are deleted. A partial
+# index (models.APICostLog, ix_api_cost_log_x_prefill_user) makes the
+# lookup by user one index probe.
 X_API_PREFILL_REQUEST = "x_prefill"
 
 
@@ -423,12 +424,13 @@ def train_refused_for(provenance) -> bool:
 def x_api_account(user_id) -> bool:
     """Whether the account has ever had an X API pre-fill: its cost record
     (``APICostLog`` request_type ``x_prefill``), which stays when the
-    tweets are deleted. Then every document a model wrote from its writing
-    may quote the posts (intentions quote "in their words"), so all of
-    them read as Chat at most, whatever the account's setting (#689).
-    Asked once per user per database session (a task or a request; the
-    session is removed when its app context ends). A yes is never
-    revoked; a no is asked again in the next session."""
+    tweets are deleted (a "Delete all my writing" purge detaches it, and
+    deletes the documents with it). Then every document a model wrote from
+    its writing may quote the posts (intentions quote "in their words"),
+    so all of them read as Chat at most, whatever the account's setting
+    (#689). One probe of a partial index, asked once per user per
+    database session (a task or a request: the session is removed when
+    its app context ends)."""
     if user_id is None:
         return False
     from backend.extensions import db
@@ -436,33 +438,29 @@ def x_api_account(user_id) -> bool:
     memo = db.session.info.setdefault("x_api_accounts", {})
     if user_id in memo:
         return memo[user_id]
+    # The predicate as a literal, the index's own text: the planner then
+    # matches the partial index also for a prepared statement.
     found = db.session.query(APICostLog.id).filter(
         APICostLog.user_id == user_id,
-        APICostLog.request_type == X_API_PREFILL_REQUEST,
+        db.text(f"request_type = '{X_API_PREFILL_REQUEST}'"),
     ).first() is not None
     memo[user_id] = found
     return found
 
 
 def unlicensed_input(row):
-    """What *row* holds that no training may take, or None:
-
-    - ``X_API_INPUT`` — an entry fetched through the X API (provenance),
-      a model-written node, artifact or todo version marked so, or any
-      document derived from the writing of an account that has had an X
-      API pre-fill (``x_api_account``);
-    - ``EXTERNAL_INPUT`` — a model-written row marked as written from
-      other people's saved writing.
-    """
-    mark = getattr(row, "unlicensed_input", None)
-    if mark == X_API_INPUT:
+    """``X_API_INPUT`` when *row* holds X API input, else None: an entry
+    fetched through the X API (provenance), a model-written node, artifact
+    or todo version marked so, or any document derived from the writing of
+    an account that has had an X API pre-fill (``x_api_account``)."""
+    if getattr(row, "unlicensed_input", None) == X_API_INPUT:
         return X_API_INPUT
     if getattr(row, "provenance", None) in X_API_PROVENANCES:
         return X_API_INPUT
     if (getattr(row, "__tablename__", None) in DERIVED_TABLES
             and x_api_account(getattr(row, "user_id", None))):
         return X_API_INPUT
-    return mark if mark in UNLICENSED_INPUTS else None
+    return None
 
 
 def train_refused(row) -> bool:
@@ -485,28 +483,22 @@ def chat_at_most(ai_usage):
 
 
 def effective_ai_usage(row):
-    """The AI usage the training licence reads for *row*: its stored
-    ai_usage, Chat at most when the row holds X API or other people's
-    input (``unlicensed_input``, #689), so nothing stored at Train before
-    the rule reaches the training key. Other rows read as stored."""
-    stored = getattr(row, 'ai_usage', AIUsage.NONE.value)
-    return chat_at_most(stored) if unlicensed_input(row) else stored
-
-
-def shown_ai_usage(row):
-    """The AI usage the screens show for *row*: Chat at most when Train is
-    refused for it (X API input), else as stored. A row marked only for
-    other people's writing shows the user's own setting (Peter,
-    2026-09-29: such replies may be set to Train); the licence still
-    reads it as Chat."""
+    """The AI usage the training licence reads, and the screens show, for
+    *row*: its stored ai_usage, Chat at most when the row holds X API input
+    (``unlicensed_input``, #689), so nothing stored at Train before the
+    rule reaches the training key. Other rows read as stored."""
     stored = getattr(row, 'ai_usage', AIUsage.NONE.value)
     return chat_at_most(stored) if train_refused(row) else stored
 
 
+# What the editors show is what the licence reads.
+shown_ai_usage = effective_ai_usage
+
+
 def node_train_licence_clause(node_model):
     """SQL for "this node is licensed for training": at Train, not
-    fetched through the X API and not written from unlicensed input. The
-    query form of effective_ai_usage for nodes."""
+    fetched through the X API and not written from such posts. The query
+    form of effective_ai_usage for nodes."""
     return and_(
         node_model.ai_usage == AIUsage.TRAIN.value,
         func.coalesce(node_model.provenance, "").notin_(X_API_PROVENANCES),
