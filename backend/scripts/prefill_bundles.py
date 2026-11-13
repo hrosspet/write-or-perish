@@ -22,7 +22,9 @@ export: skips an account that must not leave the lab (the reason is
 counted): an admin, one without a pre-filled handle, one someone signed
 in to or that has an email login, a deleted one, AI usage None, a "no" to
 the tweet seed, a spam flag, no numeric X id, an X id on the exclusion
-list, or no profile. It is idempotent and resumable: an account whose
+list, no profile, or material no pre-fill makes (an entry that is not a
+fetched tweet, a version a person saved: production refuses those). It
+is idempotent and resumable: an account whose
 metadata fingerprint matches its manifest is skipped as unchanged, so a
 stopped run is simply run again. Memory stays flat: dump_user streams
 the entries to a local file, which is gzipped line by line and uploaded
@@ -91,7 +93,37 @@ def skip_reason(user, excluded):
     if db.session.query(UserProfile.id).filter(
             UserProfile.user_id == user.id).first() is None:
         return "no_profile"
+    if holds_other_material(user.id):
+        return "other_material"
     return None
+
+
+def holds_other_material(user_id):
+    """Whether the account holds anything a pre-fill does not make: an
+    entry that is not a fetched tweet (a model's reply, something
+    written), or a version a person saved. A bundle carries a pre-fill's
+    material only; production refuses anything else, since it would make
+    an account nobody claimed look used. Metadata only."""
+    from sqlalchemy import func, or_
+    from backend.extensions import db
+    from backend.models import Node, UserArtifact, UserProfile, UserTodo
+    from backend.utils.prefill_bundle_load import PERSON_MADE
+    from backend.utils.privacy import PREFILL_PROVENANCES
+    other = db.session.query(Node.id).filter(
+        or_(Node.user_id == user_id, Node.human_owner_id == user_id),
+        Node.deleted_at.is_(None),
+        or_(func.coalesce(Node.origin, "") != "twitter",
+            func.coalesce(Node.provenance, "").notin_(PREFILL_PROVENANCES),
+            Node.source_key.is_(None), Node.node_type != "user"),
+    ).first()
+    if other is not None:
+        return True
+    for model in (UserProfile, UserTodo, UserArtifact):
+        if db.session.query(model.id).filter(
+                model.user_id == user_id,
+                model.generated_by.in_(PERSON_MADE)).first() is not None:
+            return True
+    return False
 
 
 def fingerprint(user):

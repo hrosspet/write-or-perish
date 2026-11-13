@@ -28,10 +28,18 @@ entries in chunks (each chunk with the map of dumped id -> new id, so a
 resumed run needs nothing in memory), then the links between entries in
 chunks. A run stops after RUN_SECONDS and sends the next; a run that
 dies is resumed by the beat (``stalled_load_ids``) once its heartbeat is
-STALE_AFTER old. Entries already in the account (same source key, or
-for an entry without one the same author, type and time) are not
-written again, so loading a bundle twice adds nothing twice; two loads
-into one account run one after the other.
+STALE_AFTER old. Entries already in the account (same tweet key) are
+not written again, so loading a bundle twice adds nothing twice; two
+loads into one account run one after the other.
+
+A bundle holds a pre-fill's material only (fetched tweets; model-drafted
+profile, intentions and the like; ``check_prefill_entry``), and the load
+changes nothing of the account that only a person's own action sets
+(sign-in, terms, X handle, consent, settings, time zone). So an account
+the admin made ready that nobody signs in to stays recognisable as
+unclaimed, and is deleted after 90 days like any pre-filled one (#685):
+``prefilled_handle`` is set, and the entries' ``updated_at`` is when this
+server stored them.
 
 Content is encrypted on write with this server's key, one data key per
 chunk, as imports do (backend/utils/dump_rows.py). Nothing here
@@ -553,24 +561,36 @@ def _local_copy(load, storage):
     return path
 
 
-def _author_id(nd, dump_username, user_id, cache):
-    """Who wrote a dumped entry here: the account itself, or for a model's
-    reply the model's placeholder account. An entry by another person
-    is refused (a bundle holds one person's material)."""
-    name = nd.get("author_username")
-    if not name or name == dump_username:
-        return user_id
-    if nd.get("node_type") != "llm":
+# What a person's own action makes (an edit, a revert): a bundle holds
+# none of it (PERSON_VERSIONS of the unclaimed-account deletion, #685).
+PERSON_MADE = ("user", "revert")
+
+
+def check_prefill_entry(nd, dump_username):
+    """A bundle holds what a pre-fill makes and nothing else: the person's
+    public posts Loore fetched (origin "twitter", a pre-fill provenance, a
+    source key), by the bundle's account. Anything else (a model's reply,
+    an entry someone wrote) would make an account nobody claimed look
+    used, and is refused."""
+    from backend.utils.privacy import PREFILL_PROVENANCES
+    if (nd.get("origin") != "twitter" or not nd.get("source_key")
+            or nd.get("provenance") not in PREFILL_PROVENANCES
+            or nd.get("node_type", "user") != "user" or nd.get("prompt")):
+        raise pb.BundleError("not_prefill",
+                             "The bundle holds an entry no pre-fill makes.")
+    if (nd.get("author_username") or dump_username) != dump_username:
         raise pb.BundleError("foreign_author",
                              "An entry in the bundle is by another account.")
-    if name not in cache:
-        u = User.query.filter_by(username=name).first()
-        if u is None:
-            u = User(twitter_id=f"llm-{name}", username=name)
-            db.session.add(u)
-            db.session.flush()
-        cache[name] = u.id
-    return cache[name]
+
+
+def check_prefill_header(header):
+    """Refuse versions a person saved (an edit, a revert): a pre-fill's
+    profile, todos and artifacts are all drafted by a model."""
+    for key in ("profiles", "todos", "artifacts"):
+        for row in header.get(key) or []:
+            if row.get("generated_by") in PERSON_MADE:
+                raise pb.BundleError(
+                    "not_prefill", "The bundle holds a version a person saved.")
 
 
 def _load_header(load, user, header, token):
@@ -590,9 +610,12 @@ def _load_header(load, user, header, token):
     user.profile_private_read = True
     # As every pre-fill: a bootstrapped corpus is built on the Batch path.
     user.profile_force_batch = True
-    tz = (header.get("user") or {}).get("timezone")
-    if tz and (user.timezone in (None, "", "UTC")) and not account_signed_in(user):
-        user.timezone = tz
+    # Nothing else of the account changes: not its time zone, consent,
+    # sign-in, X handle, settings or defaults. Each of those is a sign
+    # that a person used the account, and an account nobody claimed must
+    # stay recognisable as unclaimed for its deletion after 90 days
+    # (#685). The bundle's own time zone is the lab's, not the person's.
+    check_prefill_header(header)
 
     profiles = header.get("profiles") or []
     have = {(p.created_at, p.generated_by, p.generation_type): p.id
@@ -649,28 +672,10 @@ def _load_header(load, user, header, token):
     db.session.commit()
 
 
-def _existing_in_account(uid, batch):
-    """The account's entries a chunk may already hold (a load run again,
-    or a pre-fill made here before): {source key: id} for keyed entries,
-    {(author id, type, time): id} for the others. Metadata only, bounded
-    by the chunk."""
-    keys = [nd["source_key"] for nd in batch if nd.get("source_key")]
-    existing = dict(db.session.query(Node.source_key, Node.id).filter(
-        Node.human_owner_id == uid, Node.source_key.in_(keys))) if keys else {}
-    times = {dump_rows.dt(nd.get("created_at")) for nd in batch
-             if not nd.get("source_key")} - {None}
-    unkeyed = {}
-    if times:
-        for nid, author, ntype, at in db.session.query(
-                Node.id, Node.user_id, Node.node_type, Node.created_at).filter(
-                Node.human_owner_id == uid, Node.source_key.is_(None),
-                Node.created_at.in_(times)):
-            unkeyed.setdefault((author, ntype, at), nid)
-    return existing, unkeyed
-
-
-def _node_chunk(load, uid, path, token, chunk, author_cache, prompt_cache):
-    """Pass 1: write the next chunk of entries. False when none are left."""
+def _node_chunk(load, uid, path, token, chunk):
+    """Pass 1: write the next chunk of entries. False when none are left.
+    Every entry is checked to be a pre-fill's (check_prefill_entry) before
+    the chunk writes anything."""
     from backend.utils.encryption import new_dek
     header, entries = pb.open_bundle(path, skip=load.nodes_done)
     try:
@@ -682,38 +687,41 @@ def _node_chunk(load, uid, path, token, chunk, author_cache, prompt_cache):
         db.session.commit()
         return False
     dump_username = (header.get("user") or {}).get("username")
-    existing, unkeyed = _existing_in_account(uid, batch)
+    for nd in batch:
+        check_prefill_entry(nd, dump_username)
+    # Already in the account (a load run again, or a pre-fill made here
+    # before): matched on the tweet's key. Metadata only.
+    keys = [nd["source_key"] for nd in batch]
+    existing = dict(db.session.query(Node.source_key, Node.id).filter(
+        Node.human_owner_id == uid, Node.source_key.in_(keys)))
+    # Stored now: an entry's updated_at is when it was stored here (the
+    # deletion of unclaimed accounts, #685, counts from the first one),
+    # not when the lab stored it.
+    stored_at = _now()
     dek = None
     created = skipped = 0
     for nd in batch:
-        key = nd.get("source_key")
-        author = _author_id(nd, dump_username, uid, author_cache)
-        # An entry without a key (a model's reply) is the same entry when
-        # its author, type and time are: metadata, no content.
-        same = (author, nd.get("node_type", "user"), dump_rows.dt(nd.get("created_at")))
-        found = existing.get(key) if key else unkeyed.get(same)
-        if found is not None:
+        key = nd["source_key"]
+        if key in existing:
             db.session.add(PrefillBundleNodeMap(
-                load_id=load.id, old_id=nd["id"], new_id=found,
+                load_id=load.id, old_id=nd["id"], new_id=existing[key],
                 created=False, user_id=uid))
             skipped += 1
             continue
         if dek is None and nd.get("privacy_level", "private") != "public":
             dek = new_dek() or False   # False: encryption is off here
-        node = dump_rows.new_node(nd, uid, author, dek=dek or None)
+        node = dump_rows.new_node(nd, uid, uid, dek=dek or None)
+        node.updated_at = stored_at
         db.session.add(node)
         db.session.flush()
-        if key:
-            existing[key] = node.id
-        elif same[2] is not None:
-            unkeyed[same] = node.id
+        existing[key] = node.id
         db.session.add(PrefillBundleNodeMap(
             load_id=load.id, old_id=nd["id"], new_id=node.id, created=True,
             user_id=uid))
-        if nd.get("prompt"):
-            dump_rows.pin_prompt(node, nd["prompt"], uid, prompt_cache)
         if nd.get("embedding"):
-            db.session.add(dump_rows.new_embedding(nd["embedding"], node.id, uid))
+            emb = dump_rows.new_embedding(nd["embedding"], node.id, uid)
+            emb.node_updated_at = stored_at   # still matches the entry
+            db.session.add(emb)
         created += 1
     _progress(load.id, token, nodes_done=load.nodes_done + len(batch),
               created_count=load.created_count + created,
@@ -753,6 +761,9 @@ def _link_chunk(load, path, token, chunk):
             values = {c: mapped[nd[c]][0] for c in dump_rows.LINK_COLUMNS
                       if nd.get(c) in mapped}
             if values:
+                # updated_at kept: the entry was stored, not edited (its
+                # embedding stays current; #685 reads it as the store time).
+                values["updated_at"] = Node.updated_at
                 db.session.query(Node).filter(Node.id == own[0]).update(
                     values, synchronize_session=False)
                 relinked += 1
@@ -811,7 +822,6 @@ def _work(load_id, token, path, user, deadline, chunk, max_chunks):
         load = db.session.get(PrefillBundleLoad, load_id)
     if load.stage == "header":
         _load_header(load, user, header, token)
-    author_cache, prompt_cache = {}, {}
     steps = 0
     while time.monotonic() < deadline and (max_chunks is None or steps < max_chunks):
         load = db.session.get(PrefillBundleLoad, load_id)
@@ -820,8 +830,7 @@ def _work(load_id, token, path, user, deadline, chunk, max_chunks):
                 User.id == load.user_id).scalar()
             if consent == "no":
                 raise pb.BundleError("prefill_declined", "The person said no.")
-            _node_chunk(load, load.user_id, path, token, chunk,
-                        author_cache, prompt_cache)
+            _node_chunk(load, load.user_id, path, token, chunk)
         elif load.stage == "links":
             _link_chunk(load, path, token, chunk)
         else:

@@ -134,14 +134,10 @@ T0 = datetime(2024, 1, 1, 12, 0, 0)
 def _seed_lab_member(username="ca_alice", handle="alice", x_id="1001", n=7,
                      **user_kw):
     """A pre-filled lab account: n tweets (a reply chain, a continuation),
-    a model's reply, a one-window profile set with its final merge, an
+    a one-window profile set with its final merge, an
     intentions artifact and a recent context."""
     user = User(username=username, prefilled_handle=handle, twitter_id=x_id,
                 approved=False, **user_kw)
-    llm = User.query.filter_by(username="claude-opus-5").first()
-    if llm is None:
-        llm = User(username="claude-opus-5", twitter_id="llm-claude-opus-5")
-        db.session.add(llm)
     db.session.add(user)
     db.session.flush()
     nodes = []
@@ -158,12 +154,6 @@ def _seed_lab_member(username="ca_alice", handle="alice", x_id="1001", n=7,
         nodes.append(node)
     if n > 4:
         nodes[1].continuation_node_id = nodes[4].id
-    reply = Node(user_id=llm.id, human_owner_id=user.id, node_type="llm",
-                 llm_model="claude-opus-5", privacy_level="private",
-                 ai_usage="chat", parent_id=nodes[0].id, token_count=3)
-    reply.set_content(f"a reply to {handle}")
-    reply.created_at = T0 + timedelta(days=n)
-    db.session.add(reply)
     newest = T0 + timedelta(days=n - 1)
     window = UserProfile(
         user_id=user.id, generated_by="gpt-6-luna", generation_type="window",
@@ -411,7 +401,7 @@ def test_export_dry_run_writes_nothing_and_counts_every_skip(world, monkeypatch)
     pb.write_exclusion(world.storage, "1009", "protected")
     counts = _export(world, monkeypatch, dry_run=True)
     assert counts["would_export"] == 2
-    assert counts["would_export_nodes"] == 8 + 4   # alice 7+1, bob 3+1
+    assert counts["would_export_nodes"] == 7 + 3
     for reason in ("admin", "signed_in", "ai_none", "declined", "no_x_id",
                    "excluded", "no_profile"):
         assert counts.get(f"skipped_{reason}") >= 1, reason
@@ -431,12 +421,12 @@ def test_export_writes_the_layout_with_a_contentless_manifest(world, monkeypatch
     m = json.loads(raw_manifest)
     assert m["x_id"] == "1001" and m["handle"] == "alice"
     assert m["bundle_format"] == pb.BUNDLE_FORMAT and m["dump_format"] == 2
-    assert m["counts"]["nodes"] == 8 and m["counts"]["profiles"] == 2
+    assert m["counts"]["nodes"] == 7 and m["counts"]["profiles"] == 2
     assert m["counts"]["intentions"] == 1 and m["counts"]["recent_contexts"] == 1
-    assert m["newest_entry_at"] == "2024-01-08T12:00:00Z"
+    assert m["newest_entry_at"] == "2024-01-07T12:00:00Z"
     assert m["profile_generated_by"] == "gpt-6.1-sol"
     # No content in the manifest or the index.
-    for text in (b"tweet", b"profile of", b"intentions of", b"reply to"):
+    for text in (b"tweet", b"profile of", b"intentions of"):
         assert text not in raw_manifest
         assert text not in world.storage.read_bytes("handles/alice.json")
     local = world.tmp / "b.gz"
@@ -444,7 +434,7 @@ def test_export_writes_the_layout_with_a_contentless_manifest(world, monkeypatch
     assert pb.sha256_file(str(local)) == m["object"]["sha256"]
     with gzip.open(local, "rt") as f:
         lines = [json.loads(x) for x in f]
-    assert len(lines) == m["object"]["lines"] == 9
+    assert len(lines) == m["object"]["lines"] == 8
     assert all(n["provenance"] == "prefill_ca" for n in lines[1:] if n["node_type"] == "user")
     assert lines[0]["profiles"][1]["window_set"] == "set-1"
 
@@ -526,9 +516,9 @@ def test_admin_load_makes_an_account_its_owner_x_sign_in_finds(world, monkeypatc
         assert world.dispatched == [load.id]
         assert _run_until_done(load.id) == "done"
         load = db.session.get(PrefillBundleLoad, load.id)
-        assert (load.created_count, load.skipped_count) == (8, 0)
+        assert (load.created_count, load.skipped_count) == (7, 0)
         assert load.profiles_count == 2 and load.artifacts_count == 1
-        assert load.relinked_count == 4      # 2 replies, 1 continuation, the AI reply
+        assert load.relinked_count == 3      # 2 replies, 1 continuation
         assert PrefillBundleNodeMap.query.count() == 0
         user = db.session.get(User, load.user_id)
         assert user.twitter_id == "1001" and user.approved is True
@@ -540,7 +530,7 @@ def test_admin_load_makes_an_account_its_owner_x_sign_in_finds(world, monkeypatc
         # Safe to repeat: the same bundle is not loaded twice.
         again, refusal = pbl.start_admin_load("alice", admin_id=7)
         assert again is None and refusal[0] == "already_loaded"
-        assert Node.query.filter_by(human_owner_id=user.id).count() == 8
+        assert Node.query.filter_by(human_owner_id=user.id).count() == 7
 
 
 def test_a_chunked_load_resumes_after_a_killed_run(world, monkeypatch):
@@ -588,6 +578,115 @@ def test_a_chunked_load_resumes_after_a_killed_run(world, monkeypatch):
         assert _snapshot(User.query.filter_by(twitter_id="1001").one().id) == got
 
 
+def _person_signs(user):
+    """What would tell the deletion of unclaimed pre-filled accounts
+    (#685, PR #701) that a person used the account: the eleven user-row
+    signals of PR #701 (utils/unclaimed_accounts._COLUMN_SIGNALS), and the
+    row checks a load could trip. That module is not on this branch, so
+    the fields are asserted here directly."""
+    from backend.models import (
+        ApiToken, ChangelogReadState, Draft, ExternalAccount, NodeVersion,
+        UsernameHistory, UserPrompt, UserTodo, APICostLog)
+    out = []
+    checks = {
+        "signed in": user.last_seen_at is not None,
+        "terms": user.accepted_terms_at is not None or bool(user.accepted_terms_version),
+        "signed in with X": bool(user.twitter_handle) or user.x_connected_at is not None,
+        "consent": user.prefill_consent is not None or user.prefill_consent_at is not None,
+        "email change": bool(user.pending_email) or bool(user.email_change_token_hash),
+        "deletion asked": bool(user.account_deletion_token_hash),
+        "profile models": bool(user.profile_both_providers)
+        or user.profile_both_providers_answered_at is not None,
+        "glean": user.glean_enabled is not None,
+        "settings": bool(user.craft_mode or user.public_sharing_enabled
+                         or user.external_content_enabled),
+        "defaults": (user.default_ai_usage or "chat") != "chat"
+        or (user.default_privacy_level or "private") != "private",
+        "time zone": (user.timezone or "UTC") != "UTC",
+    }
+    out += [k for k, v in checks.items() if v]
+    uid = user.id
+    own = Node.query.filter((Node.user_id == uid) | (Node.human_owner_id == uid))
+    if own.filter((Node.origin.is_(None)) | (Node.origin != "twitter")
+                  | (Node.provenance.notin_(("prefill_ca", "prefill_x")))).first():
+        out.append("an entry of their own")
+    if NodeVersion.query.join(Node, NodeVersion.node_id == Node.id).filter(
+            (Node.user_id == uid) | (Node.human_owner_id == uid)).first():
+        out.append("edited an entry")
+    for model in (UserProfile, UserTodo, UserArtifact, UserPrompt):
+        if model.query.filter(model.user_id == uid,
+                              model.generated_by.in_(("user", "revert"))).first():
+            out.append(f"saved {model.__name__}")
+    if UserArtifact.query.filter(UserArtifact.user_id == uid,
+                                 UserArtifact.updated_at.isnot(None)).first():
+        out.append("saved a document")
+    for model in (APICostLog, Draft, ApiToken, ChangelogReadState,
+                  UsernameHistory, ExternalAccount):
+        if model.query.filter(model.user_id == uid).first():
+            out.append(model.__name__)
+    return out
+
+
+def test_an_account_made_ready_stays_recognisably_unclaimed(world, monkeypatch):
+    """An account the admin made ready that nobody signed in to must still
+    look unclaimed to the deletion after 90 days (#685): the load sets
+    prefilled_handle and nothing a person's own action sets, not even the
+    lab account's time zone, and its entries' updated_at is when this
+    server stored them (the deletion counts from the first)."""
+    _bundle(world, monkeypatch, timezone="Europe/Prague")
+    prod = world.prod()
+    with prod.app_context():
+        before = datetime.utcnow()
+        load, _ = _start("alice", admin_id=None, approve=True)
+        assert _run_until_done(load.id) == "done"
+        user = db.session.get(User, load.user_id)
+        from backend.utils.activity import sign_in_status
+        assert user.prefilled_handle == "alice" and sign_in_status(user) == "never"
+        assert _person_signs(user) == []
+        assert user.timezone == "UTC"
+        first_stored = db.session.query(db.func.min(Node.updated_at)).filter(
+            Node.human_owner_id == user.id).scalar()
+        assert first_stored >= before
+
+
+def test_a_bundle_holds_only_what_a_prefill_makes(world, monkeypatch):
+    """A model's reply (or anything a person wrote) is no pre-fill
+    material: the lab does not export an account holding one, and a
+    bundle with one is refused before its chunk writes anything."""
+    with world.lab.app_context():
+        alice = _seed_lab_member()
+        llm = User(username="claude-opus-5", twitter_id="llm-claude-opus-5")
+        db.session.add(llm)
+        db.session.flush()
+        reply = Node(user_id=llm.id, human_owner_id=alice.id, node_type="llm",
+                     privacy_level="private", ai_usage="chat", token_count=1)
+        reply.set_content("a model's reply")
+        db.session.add(reply)
+        db.session.commit()
+    counts = _export(world, monkeypatch)
+    assert counts.get("exported", 0) == 0 and counts["skipped_other_material"] == 1
+    # The same account written into a bundle by hand is refused on load.
+    with world.lab.app_context():
+        raw = world.tmp / "by-hand.jsonl"
+        from backend.scripts import dump_user
+        dump_user._run("ca_alice", str(raw), include_private=True)
+        gz = world.tmp / "by-hand.jsonl.gz"
+        header, stats = cli.compress(str(raw), str(gz))
+        world.storage.upload("bundles/1001/bundle.jsonl.gz", str(gz))
+        pb.write_manifest(world.storage, {
+            "bundle_format": pb.BUNDLE_FORMAT, "dump_format": 2, "x_id": "1001",
+            "handle": "alice", "counts": {"nodes": stats["nodes"]},
+            "object": {"sha256": pb.sha256_file(str(gz)), "lines": stats["lines"]}})
+        pb.write_handle_index(world.storage, "alice", "1001")
+    _prod_mode(monkeypatch)
+    prod = world.prod()
+    with prod.app_context():
+        load, _ = _start("alice", admin_id=None)
+        assert _run_until_done(load.id) == "failed"
+        assert db.session.get(PrefillBundleLoad, load.id).error == "not_prefill"
+        assert Node.query.filter_by(human_owner_id=load.user_id).count() == 0
+
+
 def test_two_loads_into_one_account_run_one_after_the_other(world, monkeypatch):
     """Two loads started at once (a double click, or the admin and the
     person's Yes): the later one waits for the earlier, then finds every
@@ -608,8 +707,8 @@ def test_two_loads_into_one_account_run_one_after_the_other(world, monkeypatch):
         assert _run_until_done(first.id) == "done"
         assert _run_until_done(second_id) == "done"
         later = db.session.get(PrefillBundleLoad, second_id)
-        assert (later.created_count, later.skipped_count, later.profiles_count) == (0, 8, 0)
-        assert Node.query.filter_by(human_owner_id=first.user_id).count() == 8
+        assert (later.created_count, later.skipped_count, later.profiles_count) == (0, 7, 0)
+        assert Node.query.filter_by(human_owner_id=first.user_id).count() == 7
         assert UserProfile.query.filter_by(user_id=first.user_id).count() == 2
 
 
@@ -735,7 +834,7 @@ def test_an_owner_who_signed_in_or_wrote_is_protected_unless_forced(world, monke
         load, refusal = _start("alice", admin_id=None, force=True)
         assert refusal is None and load.forced is True
         assert _run_until_done(load.id) == "done"
-        assert Node.query.filter_by(human_owner_id=user_id).count() == 9
+        assert Node.query.filter_by(human_owner_id=user_id).count() == 8
 
 
 def test_no_model_and_no_network_during_a_load(world, monkeypatch):
@@ -788,7 +887,7 @@ def test_the_load_reads_the_bundle_as_a_stream(world, monkeypatch):
                     for _ in range(pbl.MAX_STALLED_RUNS + 2)]
         assert outcomes[0] == "retrying"
         assert outcomes[-1] == "failed"
-        assert Node.query.filter_by(human_owner_id=load.user_id).count() == 8
+        assert Node.query.filter_by(human_owner_id=load.user_id).count() == 6
     assert not any(n.endswith(".gz") for n in reads)
     header, entries = pb.open_bundle(str(obj))
     assert inspect.isgenerator(entries)
@@ -958,7 +1057,7 @@ def test_admin_routes_check_start_and_follow_a_load(world, monkeypatch):
         assert client.get("/api/admin/prefill-bundles/config").get_json() == {"enabled": True}
         check = client.get("/api/admin/prefill-bundles/check?q=@alice").get_json()
         assert check["x_id"] == "1001" and check["account"]["exists"] is False
-        assert check["bundle"]["counts"]["nodes"] == 8
+        assert check["bundle"]["counts"]["nodes"] == 7
         assert "tweet" not in json.dumps(check)
         assert client.get("/api/admin/prefill-bundles/check?q=nobody").status_code == 404
         resp = client.post("/api/admin/prefill-bundles/loads",
@@ -967,7 +1066,7 @@ def test_admin_routes_check_start_and_follow_a_load(world, monkeypatch):
         load_id = resp.get_json()["load"]["id"]
         _run_until_done(load_id)
         got = client.get(f"/api/admin/prefill-bundles/loads/{load_id}").get_json()["load"]
-        assert got["status"] == "done" and got["created"] == 8 and got["approved"] is False
+        assert got["status"] == "done" and got["created"] == 7 and got["approved"] is False
         listed = client.get("/api/admin/prefill-bundles/loads").get_json()["loads"]
         assert [ld["id"] for ld in listed] == [load_id]
         assert "tweet" not in json.dumps(listed)

@@ -62,7 +62,7 @@ gcloud storage buckets get-iam-policy gs://<BUCKET>
 
 Both unset or off: nothing reads the storage and nothing loads. Switching `PREFILL_BUNDLES_ENABLED` off pauses loads under way; they continue when it is on again.
 
-**Code on the lab:** check out the branch with this code and install the requirements (`google-cloud-storage` is new). Do not run `deploy.sh` there (it generates and pushes migrations). The export reads no new tables.
+**Code on the lab:** check out the branch with this code and install the requirements (`google-cloud-storage` is new). Do not run `deploy.sh` there (it generates and pushes migrations). The export reads no new tables, but the models of the newer code read every column they map: when the lab's schema is older than the code, add the missing columns first (additively, as the lab's schema sync does; never `flask db migrate`). An `export --dry-run` stops at once with "column … does not exist" when one is missing.
 
 **Production:** the deploy creates the two new tables (`prefill_bundle_load`, `prefill_bundle_node_map`) and installs the requirements. Then set the two variables in the env file and restart the web service and both Celery workers.
 
@@ -78,7 +78,7 @@ python backend/scripts/prefill_bundles.py status                 # bundles and e
 python backend/scripts/prefill_bundles.py status --x-id <X_ID>   # one manifest
 ```
 
-**Expected counts:** about one bundle per account with a profile (roughly 2,000). The summary line counts the skips by reason: `skipped_ai_none` (accounts set to no AI), `skipped_no_profile`, `skipped_no_x_id`, `skipped_signed_in` (any account someone signed in to on the lab, or with an email login), `skipped_admin`, `skipped_excluded`, `skipped_declined`. Look at any reason you did not expect before the real run.
+**Expected counts:** about one bundle per account with a profile (roughly 2,000). The summary line counts the skips by reason: `skipped_ai_none` (accounts set to no AI), `skipped_no_profile`, `skipped_no_x_id`, `skipped_signed_in` (any account someone signed in to on the lab, or with an email login), `skipped_admin`, `skipped_excluded`, `skipped_declined`, `skipped_other_material` (an entry that is not a fetched tweet, or a version a person saved: a bundle holds a pre-fill's material only, and production refuses anything else). Look at any reason you did not expect before the real run.
 
 **How long:** about one to two hours for ~2,000 accounts and ~14 million entries (dump, gzip at about 4×, upload). The `--limit 20` run gives the rate. Memory stays flat: one account at a time, written to a temporary file and uploaded in chunks.
 
@@ -119,7 +119,7 @@ gcloud storage rm gs://<BUCKET>/handles/<handle in lower case>.json
 
 A deletion request also covers the lab's own copy (the lab account); remove it there as well.
 
-**An unclaimed loaded account** falls under the deletion of pre-filled accounts nobody signed in to (#685): every load sets `User.prefilled_handle`, the account's `created_at` is when it was opened, and `sign_in_status` stays "never" until someone signs in. That job removes the account, not the bundle.
+**An unclaimed loaded account** falls under the deletion of pre-filled accounts nobody signed in to (#685): every load sets `User.prefilled_handle`, and nothing a person's own action sets (sign-in, terms, X handle, the tweet-seed answer, settings, defaults, time zone). The entries' `updated_at` is when production stored them, so the 90 days count from the load, not from the lab's import. That job removes the account, not the bundle.
 
 ## After a load: how current the account is
 
