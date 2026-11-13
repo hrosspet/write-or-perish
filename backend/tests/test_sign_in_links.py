@@ -233,11 +233,13 @@ def test_a_new_request_leaves_the_links_already_sent_working(app, mails):
     assert _open(app, first) == (f"{FRONTEND_URL}/dashboard", str(_user("alice").id))
     assert _open(app, second) == (f"{FRONTEND_URL}/dashboard", str(_user("alice").id))
     # Only hashes are kept: neither the token nor the address.
+    from backend.utils.magic_link import hash_token
     rows = SignInLink.query.all()
-    assert len(rows) == 2
-    for row in rows:
-        assert first not in (row.token_hash, row.address_hash)
-        assert "alice" not in row.address_hash
+    assert {r.token_hash for r in rows} == {hash_token(first), hash_token(second)}
+    assert {r.address_hash for r in rows} == {
+        sign_in_links.address_key("alice@example.com")}
+    assert sign_in_links.address_key("alice@example.com") != hash_token(
+        "alice@example.com")                    # keyed, not a plain sha256
 
 
 def test_two_tokens_for_the_same_address_in_the_same_second_differ(app):
