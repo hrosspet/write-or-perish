@@ -3141,6 +3141,61 @@ def _send_user_export(user):
         raise
 
 
+# INTRODUCED HEURISTIC: data downloads one account may start: one at a time,
+# and EXPORTS_PER_HOUR within an hour of the first. Each one builds the whole
+# file; someone downloading again (a failed download, another device) stays
+# far below this.
+EXPORTS_PER_HOUR = 10
+# How long a download in progress holds its account's slot after its last
+# sign of life: it is renewed while pieces are sent (at most every
+# EXPORT_BEAT_SECONDS) and freed when the response closes, so this only
+# matters for a worker that died mid-download.
+EXPORT_RUN_TTL = 300
+EXPORT_BEAT_SECONDS = 30
+
+EXPORT_RUNNING_TEXT = ("A download of your data is already running. Wait "
+                       "for it to finish, then try again.")
+EXPORT_TOO_OFTEN_TEXT = ("You've downloaded your data several times in the "
+                         "last hour. Please try again later.")
+
+
+def _export_run_key(user_id):
+    return f"loore:export:run:{user_id}"
+
+
+def _export_count_key(user_id):
+    return f"loore:export:count:{user_id}"
+
+
+def _export_refused(text, code):
+    return jsonify({"error": text, "code": code}), 429
+
+
+def _export_refusal_peek(user_id):
+    """For a HEAD (the web's check before the download): the answer the
+    download would get now, taking nothing."""
+    from backend.utils.run_locks import counted, holder
+    if holder(_export_run_key(user_id)) is not None:
+        return _export_refused(EXPORT_RUNNING_TEXT, "export_running")
+    if (counted(_export_count_key(user_id)) or 0) >= EXPORTS_PER_HOUR:
+        return _export_refused(EXPORT_TOO_OFTEN_TEXT, "export_limit_reached")
+    return None
+
+
+def _beating(pieces, lock):
+    """*pieces*, renewing *lock* while they are sent."""
+    from backend.utils.run_locks import RunLockLost
+    last = time.monotonic()
+    for piece in pieces:
+        if time.monotonic() - last >= EXPORT_BEAT_SECONDS:
+            last = time.monotonic()
+            try:
+                lock.beat()
+            except RunLockLost:
+                pass
+        yield piece
+
+
 @export_bp.route("/export/threads", methods=["GET"])
 @login_required
 def export_threads():
@@ -3156,12 +3211,34 @@ def export_threads():
     once whatever the account's size, and no copy is stored on the
     server. A HEAD request (the web app's check before it starts the
     download) builds nothing.
+
+    One download per account at a time and EXPORTS_PER_HOUR in an hour:
+    429 ``export_running`` / ``export_limit_reached`` otherwise (a HEAD
+    gets the answer the download would get, and counts as none). Without
+    Redis the download goes ahead, as before.
     """
     # The user's own download: rows marked 'none' are included.
     user = current_user._get_current_object()
+    if request.method == "HEAD":
+        refused = _export_refusal_peek(user.id)
+        if refused is not None:
+            return refused
+        lock = None
+    else:
+        from backend.utils.run_locks import RunLock, count
+        lock = RunLock(_export_run_key(user.id), secrets.token_hex(8),
+                       EXPORT_RUN_TTL)
+        if not lock.acquire():
+            return _export_refused(EXPORT_RUNNING_TEXT, "export_running")
+        started = count(_export_count_key(user.id), 3600)
+        if started is not None and started > EXPORTS_PER_HOUR:
+            lock.release()
+            return _export_refused(EXPORT_TOO_OFTEN_TEXT,
+                                   "export_limit_reached")
     filename = f"loore-export-{datetime.utcnow().strftime('%Y-%m-%d')}.txt"
-    return Response(
-        stream_with_context(_send_user_export(user)),
+    pieces = _send_user_export(user)
+    response = Response(
+        stream_with_context(_beating(pieces, lock) if lock else pieces),
         mimetype="text/plain",
         headers={
             "Content-Disposition": f'attachment; filename="{filename}"',
@@ -3174,6 +3251,11 @@ def export_threads():
             "X-Content-Type-Options": "nosniff",
         },
     )
+    if lock is not None:
+        # Freed when the response closes: sent in full, cut off, or never
+        # started.
+        response.call_on_close(lock.release)
+    return response
 
 
 def _latest_profile_snapshot(user):

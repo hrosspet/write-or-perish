@@ -827,6 +827,43 @@ def _chunk_already_uploaded(chunk_index, chunk):
     }), 200
 
 
+# Answers for a chunk past the limits on one recording
+# (utils/recording_limits); audio accepted before stays.
+_CHUNK_TOO_LARGE = (
+    {"error": "This part of the recording is larger than Loore accepts.",
+     "code": "chunk_too_large"}, 413)
+_CHUNK_INDEX_OUT_OF_RANGE = (
+    {"error": ("This recording has more parts than Loore accepts. "
+               "Everything before this part is saved."),
+     "code": "chunk_index_out_of_range"}, 400)
+_RECORDING_TOO_LARGE = (
+    {"error": ("This recording is larger than Loore accepts. Everything "
+               "before this part is saved."),
+     "code": "recording_too_large"}, 413)
+
+
+def _limit_response(answer):
+    body, status = answer
+    return jsonify(body), status
+
+
+def _stored_chunk_size_error(upload_path, chunk_dir, chunk_index):
+    """The answer for a stored upload that is larger than a chunk may be,
+    or that would take its recording past the bytes one recording may
+    store; None when it fits. A re-sent chunk replaces its earlier copy,
+    which is not counted (utils/recording_limits)."""
+    from backend.utils import recording_limits as limits
+    size = upload_path.stat().st_size
+    if size > limits.MAX_STREAMING_CHUNK_BYTES:
+        return _limit_response(_CHUNK_TOO_LARGE)
+    replaced = {f"chunk_{chunk_index:04d}{ext}{enc}"
+                for ext in (".webm", ".mp4") for enc in ("", ".enc")}
+    if (limits.stored_bytes(chunk_dir, replaced) + size
+            > limits.MAX_STREAMING_SESSION_BYTES):
+        return _limit_response(_RECORDING_TOO_LARGE)
+    return None
+
+
 @drafts_bp.route("/streaming/<session_id>/audio-chunk", methods=["POST"])
 @login_required
 def upload_streaming_chunk(session_id):
@@ -845,8 +882,23 @@ def upload_streaming_chunk(session_id):
     - device_key: optional, the recording device's key (#388); 409
       session_taken_over when another device continued the session.
 
+    Limits on one recording (utils/recording_limits), which the apps
+    never reach: a chunk over MAX_STREAMING_CHUNK_BYTES gets 413
+    ``chunk_too_large``, a chunk_index below 0 or from
+    MAX_STREAMING_CHUNKS on 400 ``chunk_index_out_of_range``, and a chunk
+    that would take the recording past MAX_STREAMING_SESSION_BYTES 413
+    ``recording_too_large``. Nothing of it is stored; the chunks accepted
+    before stay. A copy of a stored chunk is answered as before, and a
+    re-sent chunk is not counted twice.
+
     Returns: { "chunk_index": 0, "task_id": "celery-task-id" }
     """
+    from backend.utils import recording_limits
+    # Larger than a chunk can be: refused before the body is read.
+    if recording_limits.body_too_large(
+            recording_limits.MAX_STREAMING_CHUNK_BYTES):
+        return _limit_response(_CHUNK_TOO_LARGE)
+
     # Find the draft by session_id
     draft = Draft.query.filter_by(
         session_id=session_id,
@@ -896,6 +948,8 @@ def upload_streaming_chunk(session_id):
         chunk_index = int(chunk_index)
     except ValueError:
         return jsonify({"error": "Invalid chunk_index"}), 400
+    if not 0 <= chunk_index < recording_limits.MAX_STREAMING_CHUNKS:
+        return _limit_response(_CHUNK_INDEX_OUT_OF_RANGE)
 
     # Normalize the chunk's mime to a family prefix; older frontends
     # without the field send WebM by definition.
@@ -945,6 +999,11 @@ def upload_streaming_chunk(session_id):
     # lists those.)
     upload_path = chunk_dir / f"upload-{uuid.uuid4().hex}{ext}"
     chunk_file.save(upload_path)
+    # Measured once stored: a request may carry no Content-Length.
+    too_large = _stored_chunk_size_error(upload_path, chunk_dir, chunk_index)
+    if too_large is not None:
+        upload_path.unlink(missing_ok=True)
+        return too_large
 
     # The files this upload puts in place, as (encrypted file under a name
     # of its own, final path): the init segment when the chunk carries one,
@@ -1221,6 +1280,11 @@ def finalize_streaming(session_id):
 
     if total_chunks is None:
         return jsonify({"error": "Missing total_chunks"}), 400
+    # A count no recording can have would keep the finalize task waiting
+    # for chunks that never come (utils/recording_limits).
+    from backend.utils.recording_limits import MAX_STREAMING_CHUNKS, int_in_range
+    if int_in_range(total_chunks, 0, MAX_STREAMING_CHUNKS) is None:
+        return jsonify({"error": "Invalid total_chunks"}), 400
 
     draft_id = draft.id
     # Locked from here to the commit, so a claim cannot slip in between the

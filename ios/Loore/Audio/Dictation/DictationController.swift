@@ -43,6 +43,9 @@ final class DictationController {
     @ObservationIgnored private var tickTask: Task<Void, Never>?
     @ObservationIgnored private var recordedData = Data()
     @ObservationIgnored private var warned = false
+    /// Codes already said for this recording's audio kept without its text
+    /// (`RecordingLimits`): once each.
+    @ObservationIgnored private var untranscribedNoticed: Set<String> = []
     @ObservationIgnored private var interruptionToast: Int?
     /// The current hold left the microphone running (a lost headset mic, #423).
     @ObservationIgnored private var holdKeepsCapture = false
@@ -77,6 +80,7 @@ final class DictationController {
         hasRecording = false
         recordedData = Data()
         warned = false
+        untranscribedNoticed = []
         elapsed = 0
         flowTask = Task { [weak self] in
             guard let self else { return }
@@ -188,6 +192,10 @@ final class DictationController {
                     switch TranscriptionStreamEvent(event) {
                     case .contentUpdate(let content, _):
                         self.callbacks.transcript(content)
+                    case .chunkError(_, _, let code):
+                        // Audio kept without its text (the usage limit, or past the
+                        // length limit): the recording goes on; said once, no error sound.
+                        self.noticeUntranscribed(code)
                     case .allComplete(let done):
                         if self.state == .finalizing, let content = done.content {
                             self.complete(sid, content: content)
@@ -206,6 +214,16 @@ final class DictationController {
                 // The stream gave up; the /status poll after finalize still finishes the job.
             }
         }
+    }
+
+    /// A `chunk_error` that keeps the chunk's audio without its text: a toast
+    /// once per code (at the usage limit also the banner); nothing for a failure.
+    func noticeUntranscribed(_ code: String?) {
+        guard let code, let message = RecordingLimits.untranscribedMessage(code),
+              !untranscribedNoticed.contains(code), let app else { return }
+        untranscribedNoticed.insert(code)
+        if code == RecordingLimits.spendCapCode { app.notifySpendBlocked() }
+        app.toasts.show(message, duration: 10)
     }
 
     private func startTicker(_ gen: Int) {

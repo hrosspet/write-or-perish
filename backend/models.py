@@ -1359,6 +1359,12 @@ class NodeTranscriptChunk(db.Model):
     task_id = db.Column(db.String(255), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     completed_at = db.Column(db.DateTime, nullable=True)
+    # Seconds of audio its transcription covered (as measured; 15 s a chunk
+    # when the length could not be read): on the row that carries a batch's
+    # text, the batch's. Their sum is how much of the recording was
+    # transcribed (utils/recording_limits.MAX_TRANSCRIBED_SECONDS). NULL for
+    # rows transcribed before it was kept, and for the other rows of a batch.
+    audio_seconds = db.Column(db.Float, nullable=True)
 
     # Relationship back to node
     node = db.relationship("Node", backref="transcript_chunks")

@@ -7,8 +7,10 @@ recording. What the cap may block, and what it may not:
 - Starting a recording or an upload: refused with 402 before anything is
   stored (streaming init, legacy streaming init, chunked-upload init,
   multipart POST /nodes/). Typed entries are not affected.
-- A recording that has started: always transcribed to the end. Resuming
-  one (audio-chunk on an existing session) is allowed.
+- A recording that has started: its audio is always stored to the end.
+  Resuming one (audio-chunk on an existing session) is allowed. Its
+  transcription stops at the cap (2026-11-13): the rest is kept as audio
+  (test_recording_limits.py).
 - The LLM reply after a Voice recording: skipped, with a warning the voice
   frontend shows as a toast, and the entry kept.
 
@@ -357,7 +359,12 @@ def _recording(user, session_id, chunk_indices, root):
 
 
 class TestCappedRecordingIsTranscribed:
-    def test_single_chunk_task_transcribes(self, st):
+    # Since 2026-11-13 (Peter: "User's recorded message should be stored on
+    # Loore's servers … Just further AI use should be blocked") a capped
+    # recording's audio is kept without being transcribed; the full story is
+    # in test_recording_limits.py.
+    def test_single_chunk_task_keeps_audio_untranscribed(self, st):
+        from backend.utils import recording_limits
         user = st._test_user
         _recording(user, "sess-1", [3], st._test_root)
         path = st._test_root / f"drafts/{user.id}/sess-1/chunk_0003.webm"
@@ -366,10 +373,14 @@ class TestCappedRecordingIsTranscribed:
 
         chunk = NodeTranscriptChunk.query.filter_by(
             session_id="sess-1", chunk_index=3).one()
-        assert chunk.status == "completed"
-        assert chunk.get_text() == "spoken words"
+        assert chunk.status == "failed"
+        assert chunk.error == recording_limits.NOT_TRANSCRIBED_TEXTS[
+            recording_limits.SPEND_CAP]
+        assert path.exists()
+        st.OpenAI.return_value.audio.transcriptions.create.assert_not_called()
 
-    def test_batch_task_transcribes(self, st):
+    def test_batch_task_keeps_audio_untranscribed(self, st):
+        from backend.utils import recording_limits
         user = st._test_user
         _recording(user, "sess-2", [0, 1, 2], st._test_root)
 
@@ -378,9 +389,13 @@ class TestCappedRecordingIsTranscribed:
         chunks = NodeTranscriptChunk.query.filter_by(
             session_id="sess-2").all()
         assert chunks, "chunk rows missing"
-        assert all(c.status == "completed" for c in chunks)
-        head = next(c for c in chunks if c.chunk_index == 0)
-        assert head.get_text() == "spoken words"
+        assert all(c.status == "failed" for c in chunks)
+        assert {recording_limits.untranscribed_code(c.error)
+                for c in chunks} == {recording_limits.SPEND_CAP}
+        # The merged audio is stored, as for a transcribed batch.
+        assert (st._test_root / f"drafts/{user.id}/sess-2/"
+                "batch_0000-0002.webm").exists()
+        st.OpenAI.return_value.audio.transcriptions.create.assert_not_called()
 
     def test_voice_finalize_keeps_entry_and_skips_reply(self, st):
         # The whole transcript is in; the cap only skips the LLM reply,

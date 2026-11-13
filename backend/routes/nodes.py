@@ -2662,6 +2662,69 @@ def _invalid_upload_id():
     return jsonify({"error": "Invalid upload_id"}), 400
 
 
+def _upload_declaration_error(filesize, total_chunks):
+    """The answer for an init whose file size or piece count no upload can
+    have (utils/recording_limits), or None."""
+    from backend.utils.recording_limits import (
+        MAX_UPLOAD_CHUNK_BYTES, MAX_UPLOAD_CHUNKS, int_in_range,
+    )
+    if isinstance(filesize, bool) or not isinstance(filesize, int) \
+            or filesize < 1:
+        return jsonify({"error": "Invalid filesize",
+                        "code": "invalid_upload_size"}), 400
+    if filesize > MAX_AUDIO_BYTES:
+        return jsonify({"error": "File too large",
+                        "code": "file_too_large"}), 413
+    fewest = -(-filesize // MAX_UPLOAD_CHUNK_BYTES)
+    if int_in_range(total_chunks, fewest,
+                    min(filesize, MAX_UPLOAD_CHUNKS)) is None:
+        return jsonify({"error": "Invalid total_chunks",
+                        "code": "invalid_upload_size"}), 400
+    return None
+
+
+def _upload_chunk_too_large():
+    return jsonify({"error": "This piece of the file is larger than Loore "
+                             "accepts.",
+                    "code": "chunk_too_large"}), 413
+
+
+def _uploaded_bytes(chunk_dir, leave_out=None):
+    """Bytes of the pieces an upload has stored (chunk_NNNN), without the
+    piece *leave_out* (the copy a re-sent piece replaces)."""
+    total = 0
+    for path in chunk_dir.glob("chunk_*"):
+        if path.name == leave_out:
+            continue
+        try:
+            total += path.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+# The entry's transcription error when its upload did not arrive as its
+# init announced.
+UPLOAD_SIZE_MISMATCH_TEXT = (
+    "The file did not arrive complete. Please upload it again.")
+
+
+def _upload_size_mismatch(chunk_dir, node, upload_id):
+    """Refuse a finalize whose pieces do not add up to the announced file:
+    the pieces and their folder go, and the entry's transcription ends
+    failed with UPLOAD_SIZE_MISMATCH_TEXT."""
+    import shutil
+    current_app.logger.warning(
+        "Upload %s refused at finalize: its pieces do not match the size "
+        "its init announced", upload_id)
+    shutil.rmtree(chunk_dir, ignore_errors=True)
+    node.transcription_status = "failed"
+    node.transcription_error = UPLOAD_SIZE_MISMATCH_TEXT
+    db.session.commit()
+    return jsonify({"error": UPLOAD_SIZE_MISMATCH_TEXT,
+                    "code": "upload_size_mismatch"}), 400
+
+
 @nodes_bp.route("/upload/init", methods=["POST"])
 @login_required
 @require_spend_headroom
@@ -2671,6 +2734,13 @@ def init_chunked_upload():
     Creates a placeholder node and prepares for chunk reception. A capped
     user gets 402 before the node exists (#341); the chunks and finalize of
     an upload accepted here are not cap-checked.
+
+    ``filesize`` must be a whole number of bytes up to MAX_AUDIO_BYTES (413
+    ``file_too_large`` above it), and ``total_chunks`` a count its pieces
+    can come in: at least the pieces of MAX_UPLOAD_CHUNK_BYTES the file
+    needs, at most MAX_UPLOAD_CHUNKS and never more than the file has
+    bytes (400 ``invalid_upload_size`` otherwise; utils/recording_limits).
+    The chunks and finalize hold the upload to both.
 
     Request body:
     {
@@ -2708,9 +2778,10 @@ def init_chunked_upload():
     if not _allowed_file(filename):
         return jsonify({"error": "Unsupported file type"}), 415
 
-    # Validate file size
-    if filesize > MAX_AUDIO_BYTES:
-        return jsonify({"error": "File too large"}), 413
+    # Validate file size and the pieces it is sent in
+    err = _upload_declaration_error(filesize, total_chunks)
+    if err is not None:
+        return err
 
     # Validate privacy settings
     if not validate_privacy_level(privacy_level):
@@ -2800,7 +2871,20 @@ def upload_chunk():
     - chunk_index: integer
     - upload_id: string
     - node_id: integer
+
+    Held to what the init announced (utils/recording_limits): the index
+    must be one of its pieces (400 ``chunk_index_out_of_range``) and the
+    node its entry (400 ``upload_mismatch``); a piece over
+    MAX_UPLOAD_CHUNK_BYTES (413 ``chunk_too_large``), or one that would take
+    the pieces past the announced file size (413 ``upload_too_large``), is
+    not stored. A re-sent piece replaces its earlier copy.
     """
+    from backend.utils.recording_limits import (
+        MAX_UPLOAD_CHUNK_BYTES, body_too_large,
+    )
+    # Larger than a piece can be: refused before the body is read.
+    if body_too_large(MAX_UPLOAD_CHUNK_BYTES):
+        return _upload_chunk_too_large()
     if "chunk" not in request.files:
         return jsonify({"error": "Missing chunk file"}), 400
 
@@ -2830,15 +2914,38 @@ def upload_chunk():
     if not chunk_dir.exists():
         return jsonify({"error": "Upload session not found"}), 404
 
-    chunk_path = chunk_dir / f"chunk_{chunk_index:04d}"
-    chunk_file.save(chunk_path)
-
-    # Update metadata
     import json
     metadata_path = chunk_dir / "metadata.json"
     with open(metadata_path, "r") as f:
         metadata = json.load(f)
+    if metadata.get("node_id") != node_id:
+        return jsonify({"error": "This piece belongs to another upload",
+                        "code": "upload_mismatch"}), 400
+    if not 0 <= chunk_index < metadata["total_chunks"]:
+        return jsonify({"error": "This upload has no such piece",
+                        "code": "chunk_index_out_of_range"}), 400
 
+    # Stored under a name of its own, measured, then moved into place: a
+    # piece too large never replaces a good copy, and a re-sent piece's
+    # earlier copy is not counted twice.
+    import uuid
+    chunk_name = f"chunk_{chunk_index:04d}"
+    staged = chunk_dir / f"upload-{uuid.uuid4().hex}"
+    chunk_file.save(staged)
+    size = staged.stat().st_size
+    if size > MAX_UPLOAD_CHUNK_BYTES:
+        staged.unlink(missing_ok=True)
+        return _upload_chunk_too_large()
+    if _uploaded_bytes(chunk_dir, leave_out=chunk_name) + size \
+            > metadata["filesize"]:
+        staged.unlink(missing_ok=True)
+        return jsonify({
+            "error": "The pieces are larger than the file announced",
+            "code": "upload_too_large",
+        }), 413
+    os.replace(staged, chunk_dir / chunk_name)
+
+    # Update metadata
     if chunk_index not in metadata["uploaded_chunks"]:
         metadata["uploaded_chunks"].append(chunk_index)
         metadata["uploaded_chunks"].sort()
@@ -2871,6 +2978,12 @@ def finalize_chunked_upload():
     }
 
     Returns: node info (same as create_node endpoint)
+
+    An upload whose pieces do not add up to the size its init announced
+    is refused (400 ``upload_size_mismatch``): its pieces and the
+    assembled file are deleted, and its entry's transcription ends
+    ``failed`` (UPLOAD_SIZE_MISMATCH_TEXT). 400 ``upload_mismatch`` for a
+    node that is not the upload's entry.
     """
     data = request.get_json() or {}
     upload_id = data.get("upload_id")
@@ -2900,6 +3013,9 @@ def finalize_chunked_upload():
     metadata_path = chunk_dir / "metadata.json"
     with open(metadata_path, "r") as f:
         metadata = json.load(f)
+    if metadata.get("node_id") != node_id:
+        return jsonify({"error": "This entry belongs to another upload",
+                        "code": "upload_mismatch"}), 400
 
     # Verify all chunks received
     expected_chunks = list(range(metadata["total_chunks"]))
@@ -2909,6 +3025,10 @@ def finalize_chunked_upload():
             "error": "Incomplete upload",
             "missing_chunks": list(missing)
         }), 400
+    # The pieces must hold the file the init announced, no more, no less;
+    # checked before anything is assembled.
+    if _uploaded_bytes(chunk_dir) != metadata["filesize"]:
+        return _upload_size_mismatch(chunk_dir, node, upload_id)
 
     # Reassemble chunks
     filename = metadata["filename"]
@@ -2927,14 +3047,11 @@ def finalize_chunked_upload():
             with open(chunk_path, "rb") as infile:
                 outfile.write(infile.read())
 
-    # Verify file size
+    # Verify file size (a piece re-sent while it was assembled)
     final_size = target_path.stat().st_size
     if final_size != metadata["filesize"]:
-        current_app.logger.error(
-            f"File size mismatch for upload {upload_id}: "
-            f"expected {metadata['filesize']}, got {final_size}"
-        )
-        # Don't fail - continue with transcription
+        target_path.unlink(missing_ok=True)
+        return _upload_size_mismatch(chunk_dir, node, upload_id)
 
     # Encrypt the assembled audio file at rest (URL stored without .enc)
     encrypt_file(str(target_path))
@@ -3127,6 +3244,18 @@ def upload_audio_chunk(node_id):
     if not node.streaming_transcription:
         return jsonify({"error": "Node is not in streaming transcription mode"}), 400
 
+    # The limits on one recording (utils/recording_limits), as on the
+    # draft path. This older path transcribes each chunk as it arrives, so
+    # a capped user's chunk is refused (402) rather than stored untranscribed.
+    from backend.utils import recording_limits as limits
+    if limits.body_too_large(limits.MAX_STREAMING_CHUNK_BYTES):
+        return jsonify({"error": "This part of the recording is larger than "
+                                 "Loore accepts.",
+                        "code": "chunk_too_large"}), 413
+    from backend.utils.spend import spend_cap_response, user_is_capped
+    if user_is_capped(current_user):
+        return spend_cap_response(current_user)
+
     # Get form data
     if "chunk" not in request.files:
         return jsonify({"error": "Missing chunk file"}), 400
@@ -3144,6 +3273,10 @@ def upload_audio_chunk(node_id):
         chunk_index = int(chunk_index)
     except ValueError:
         return jsonify({"error": "Invalid chunk_index"}), 400
+    if not 0 <= chunk_index < limits.MAX_STREAMING_CHUNKS:
+        return jsonify({"error": "This recording has more parts than Loore "
+                                 "accepts.",
+                        "code": "chunk_index_out_of_range"}), 400
 
     # Verify session ID matches
     if node.streaming_session_id != session_id:
@@ -3157,7 +3290,23 @@ def upload_audio_chunk(node_id):
 
     chunk_filename = f"chunk_{chunk_index:04d}.webm"
     chunk_path = chunk_dir / chunk_filename
-    chunk_file.save(chunk_path)
+    import uuid
+    staged = chunk_dir / f"upload-{uuid.uuid4().hex}.webm"
+    chunk_file.save(staged)
+    size = staged.stat().st_size
+    if size > limits.MAX_STREAMING_CHUNK_BYTES or (
+            limits.stored_bytes(chunk_dir, {chunk_filename,
+                                            f"{chunk_filename}.enc"}) + size
+            > limits.MAX_STREAMING_SESSION_BYTES):
+        staged.unlink(missing_ok=True)
+        too_large = size > limits.MAX_STREAMING_CHUNK_BYTES
+        return jsonify({
+            "error": ("This part of the recording is larger than Loore "
+                      "accepts." if too_large else
+                      "This recording is larger than Loore accepts."),
+            "code": "chunk_too_large" if too_large else "recording_too_large",
+        }), 413
+    os.replace(staged, chunk_path)
 
     # Encrypt the audio chunk at rest
     encrypted_path = encrypt_file(str(chunk_path))

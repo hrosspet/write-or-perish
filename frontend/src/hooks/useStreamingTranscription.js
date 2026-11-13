@@ -7,6 +7,10 @@ import { isSpendCapError, spendCapToastMessage } from '../utils/spendCap';
 import { isAiUsageRefusedError, aiUsageRefusalScope } from '../utils/aiUsage';
 import { isThreadTooLong } from '../utils/threadLength';
 import { isApprovalPendingError } from '../utils/toolApprovals';
+import {
+  isRecordingLimitCode, RECORDING_LIMIT_MESSAGE, noticeUntranscribed,
+  untranscribedMessage,
+} from '../utils/recordingLimits';
 import { onPageReturn } from '../utils/pageReturn';
 import { playErrorSound } from '../utils/errorSound';
 import { RECORDING_DEVICE_KEY, TAKEN_OVER_CODE } from '../utils/recordingDevice';
@@ -185,6 +189,9 @@ export function useStreamingTranscription(options = {}) {
   // names (`shift` from the listed chunk count); `settled` resolves false
   // when it was refused. Null for a session this tab started.
   const claimRef = useRef(null);
+  // "<session>:<code>" of the notices already shown that a recording's
+  // audio is kept without its text (utils/recordingLimits): once each.
+  const untranscribedNoticesRef = useRef(new Set());
 
   // #320: this tab stops recording a session it never finalized (reload,
   // close, navigating away, cancel): tell the server, so the session can
@@ -338,6 +345,17 @@ export function useStreamingTranscription(options = {}) {
         if (code === TAKEN_OVER_CODE) {
           console.warn(`[StreamingTranscription] Session continued elsewhere: chunk ${chunkIndex} refused, not retrying`);
           return { success: false, fatalError: TAKEN_OVER_MESSAGE, sessionEnded: true };
+        }
+        // Past what one recording may hold (utils/recordingLimits):
+        // retrying cannot help. The server keeps every chunk before this
+        // one; the recording stops here and can be recovered.
+        if (isRecordingLimitCode(code)) {
+          console.warn(`[StreamingTranscription] Chunk ${chunkIndex} refused (${code}); not retrying`);
+          return {
+            success: false,
+            fatalError: err.response?.data?.error || RECORDING_LIMIT_MESSAGE,
+            sessionEnded: true,
+          };
         }
 
         // Server rejected chunk 0 because it couldn't parse the format's
@@ -549,6 +567,18 @@ export function useStreamingTranscription(options = {}) {
       }
     },
     onError: (data) => {
+      // Audio kept without its text (the monthly usage limit, or a
+      // recording past the length limit): the recording goes on and its
+      // text ends with a note. Said once per recording and reason, with
+      // no error sound (utils/recordingLimits).
+      if (untranscribedMessage(data?.code)) {
+        const key = `${sessionIdRef.current}:${data.code}`;
+        if (!untranscribedNoticesRef.current.has(key)) {
+          untranscribedNoticesRef.current.add(key);
+          addToast(noticeUntranscribed(data.code), 10000);
+        }
+        return;
+      }
       console.error('Transcription error:', data);
       playErrorSound();
       if (onError) {

@@ -115,7 +115,9 @@ enum TranscriptionStreamEvent: Sendable, Equatable {
     }
 
     case chunkComplete(chunkIndex: Int)
-    case chunkError(chunkIndex: Int, error: String?)
+    /// `code`: set when the chunk's audio is kept without its text
+    /// (`RecordingLimits.untranscribedCodes`), not for a failure.
+    case chunkError(chunkIndex: Int, error: String?, code: String? = nil)
     /// The whole assembled transcript: replace the text with it.
     case contentUpdate(content: String, completedChunks: Int)
     case allComplete(AllComplete)
@@ -125,7 +127,7 @@ enum TranscriptionStreamEvent: Sendable, Equatable {
     case other(String)
 
     init(_ event: SSEEvent) {
-        struct ChunkPayload: Decodable { var chunk_index: Int?; var error: String? }
+        struct ChunkPayload: Decodable { var chunk_index: Int?; var error: String?; var code: String? }
         struct ContentPayload: Decodable { var content: String?; var completed_chunks: Int? }
         struct Err: Decodable { var error: String?; var message: String? }
         switch event.event {
@@ -133,7 +135,7 @@ enum TranscriptionStreamEvent: Sendable, Equatable {
             self = .chunkComplete(chunkIndex: (try? event.decode(ChunkPayload.self))?.chunk_index ?? -1)
         case "chunk_error":
             let p = try? event.decode(ChunkPayload.self)
-            self = .chunkError(chunkIndex: p?.chunk_index ?? -1, error: p?.error)
+            self = .chunkError(chunkIndex: p?.chunk_index ?? -1, error: p?.error, code: p?.code)
         case "content_update":
             let p = try? event.decode(ContentPayload.self)
             self = .contentUpdate(content: p?.content ?? "", completedChunks: p?.completed_chunks ?? 0)
