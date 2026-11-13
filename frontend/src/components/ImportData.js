@@ -17,6 +17,19 @@ import ProfileRebuildQuestion from "./ProfileRebuildQuestion";
 import { noteBothProvidersLater } from "../hooks/useBothProvidersQuestion";
 import { useUser } from "../contexts/UserContext";
 
+// The import result's note when a re-import could set this import's
+// settings only on the last entry of some items (#638): imported before
+// Loore marked an item's entries, and not every entry before the last
+// could be confirmed as part of it.
+export function partlyUpdatedNote(count) {
+  const one = count === 1;
+  return `${count} ${one ? "item" : "items"} could be updated only in part: `
+    + `${one ? "its last entry" : "the last entry of each"} now has these `
+    + "settings, but Loore could not confirm which entries before it belong "
+    + "to the same document or message, so those kept their own. You can "
+    + "change them on each entry.";
+}
+
 const ghostBtnStyle = {
   backgroundColor: "transparent",
   color: "var(--text-secondary)",
@@ -872,6 +885,11 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
                 <p style={{ fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.88rem", color: "var(--text-secondary)", margin: "0 0 1.4rem" }}>
                   Updated items were already imported; their privacy and
                   AI-usage settings now match this import.
+                </p>
+              )}
+              {importResult.partly_updated > 0 && (
+                <p style={{ fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.88rem", color: "var(--text-secondary)", margin: "0 0 1.4rem" }}>
+                  {partlyUpdatedNote(importResult.partly_updated)}
                 </p>
               )}
               {importResult.skipped > 0 && (

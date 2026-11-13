@@ -911,6 +911,20 @@ final class ImportTests: StubbedAppTestCase {
         XCTAssertEqual(conversations.stats.map(\.label), ["Messages imported", "Messages skipped"])
         XCTAssertEqual(conversations.notes.first, conversations.archiveSummary)
     }
+
+    /// #638: a re-import that could set its settings only on the last entry
+    /// of some older items says so, in the web app's words.
+    func testPartlyUpdatedNote() {
+        let one = ImportResult(["created": 0, "updated": 1, "partly_updated": 1])
+        XCTAssertEqual(one.partlyUpdated, 1)
+        XCTAssertEqual(one.notes.last,
+                       "1 item could be updated only in part: its last entry now has these settings, but Loore could "
+                       + "not confirm which entries before it belong to the same document or message, so those kept "
+                       + "their own. You can change them on each entry.")
+        let many = ImportResult(["created": 0, "updated": 3, "partly_updated": 2])
+        XCTAssertTrue(many.notes.last?.hasPrefix("2 items could be updated only in part: the last entry of each") ?? false)
+        XCTAssertFalse(ImportResult(["created": 0, "updated": 1]).notes.contains { $0.contains("only in part") })
+    }
 }
 
 /// Feature-page payloads and routes.

@@ -144,6 +144,43 @@ def invalidate_for_node(node):
     invalidate_in_thread(node.id, [node.id])
 
 
+def invalidate_for_nodes(node_ids):
+    """invalidate_for_node for many nodes, which may sit in different
+    threads (an import changes the settings of entries across many):
+    each id URL and the pages of each thread root, with one root query
+    per 1,000 ids. Reads only the columns the paths need.
+
+    Never raises: the change is already committed when this runs, so a
+    failure is logged, the session is rolled back so later statements on
+    it still work, and the TTL bounds how long a stale page outlives the
+    change."""
+    from backend.extensions import db
+    from backend.models import Node
+
+    ids = list(dict.fromkeys(node_ids))
+    if not ids:
+        return
+    try:
+        paths = {"/sitemap.xml"}
+        for start in range(0, len(ids), 1000):
+            rows = db.session.query(
+                Node.id, Node.parent_id, Node.human_owner_id, Node.user_id,
+                Node.public_slug,
+            ).filter(Node.id.in_(ids[start:start + 1000])).all()
+            roots = {}
+            for node, root in zip(rows, _roots_of(rows)):
+                paths.add(f"/node/{node.id}")
+                roots[root.id] = root
+            for root in roots.values():
+                paths.update(_paths_for_root(root))
+        invalidate(*paths)
+    except Exception:
+        db.session.rollback()
+        current_app.logger.exception(
+            "Settings of %d nodes were changed, but their public pages "
+            "could not be dropped from the cache", len(ids))
+
+
 def invalidate_deleted(target_id, deleted_ids):
     """The cache step of a committed soft-delete of `target_id`.
     `deleted_ids` are the nodes it tombstoned (the target, the

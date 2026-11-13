@@ -124,6 +124,8 @@ struct ImportResult: Equatable {
     var restored = 0
     var updated = 0
     var empty = 0
+    /// Items whose settings only their last entry took (#638), told in a note.
+    var partlyUpdated = 0
     var profileUpdateTaskId: String?
     /// ChatGPT/Claude: the numbers count messages, while the confirm dialog
     /// counted conversations; `archiveSummary` names both.
@@ -139,6 +141,7 @@ struct ImportResult: Equatable {
         restored = int("restored")
         updated = int("updated")
         empty = int("empty")
+        partlyUpdated = int("partly_updated")
         profileUpdateTaskId = object["profile_update_task_id"] as? String
         rebuildQuestion = ProfileRebuildQuestion(object["ask_profile_rebuild"])
     }
@@ -167,6 +170,13 @@ struct ImportResult: Equatable {
         var out: [String] = summary
         if updated > 0 {
             out.append("Updated items were already imported; their privacy and AI-usage settings now match this import.")
+        }
+        if partlyUpdated > 0 {
+            let one = partlyUpdated == 1
+            out.append("\(partlyUpdated) \(one ? "item" : "items") could be updated only in part: "
+                + "\(one ? "its last entry" : "the last entry of each") now has these settings, but Loore could not "
+                + "confirm which entries before it belong to the same document or message, so those kept their own. "
+                + "You can change them on each entry.")
         }
         if skipped > 0 { out.append("Skipped items were already imported and left untouched.") }
         if empty > 0 {
