@@ -83,7 +83,7 @@ from backend.utils.text_edits import apply_text_edits
 from backend.utils.artifact_versions import (
     artifact_diff, parse_version, stored_version, version_number,
 )
-from backend.utils.privacy import AI_ALLOWED
+from backend.utils.privacy import AI_ALLOWED, account_allows_ai
 from backend.utils.proposals import is_own_live_proposal
 from backend.utils.placeholders import (
     CA_TWEETS_PATTERN,
@@ -948,6 +948,13 @@ RESERVED_ARTIFACT_KINDS = {
 ARTIFACT_KEPT_FROM_AI_ERROR = (
     "The user's latest version of '{kind}' is kept away from AI (AI usage "
     "None), so it can't be read or changed here. Nothing was saved.")
+
+# semantic_search for a user whose account's Default AI usage is None:
+# the search words would go to an embedding model, so nothing is searched
+# (Peter, 2026-11-13: no search for accounts set to None).
+SEARCH_TOOL_ACCOUNT_NONE_ERROR = (
+    "Search is off for this user: their Default AI usage is set to None, "
+    "so nothing is sent to the search model. Nothing was searched.")
 
 
 def _todo_index_line(user_id, pinned_node=None):
@@ -2710,6 +2717,13 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                 if not query:
                     result["status"] = "error"
                     result["error"] = "semantic_search needs a query."
+                elif not account_allows_ai(User.query.get(user_id)):
+                    # The query goes to an embedding model: none for an
+                    # account set to None (Peter, 2026-11-13). The tool
+                    # stays in the list, which depends on config only
+                    # (gated_voice_tools: the cache prefix).
+                    result["status"] = "error"
+                    result["error"] = SEARCH_TOOL_ACCOUNT_NONE_ERROR
                 else:
                     from backend.utils.api_keys import get_openai_chat_key
                     from backend.utils.embeddings import (
