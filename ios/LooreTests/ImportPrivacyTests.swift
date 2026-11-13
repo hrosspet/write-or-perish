@@ -14,4 +14,10 @@ final class ImportPrivacyTests: XCTestCase {
         let levels = PrivacySelectorView.privacyOptions.map { $0.0 }
         XCTAssertEqual(levels, [.private, .circles, .public])
     }
+
+    func testAResultImportedPrivateAfterAnOlderRequestSaysSo() {
+        let result = ImportResult(["created": 2, "private_note": ImportModel.privacyNote])
+        XCTAssertEqual(result.notes.first, ImportModel.privacyNote)
+        XCTAssertNil(ImportResult(["created": 2]).privateNote)
+    }
 }

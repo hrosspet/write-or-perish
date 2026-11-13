@@ -582,15 +582,31 @@ def test_a_settings_only_reimport_is_chunked_too(app, kms, monkeypatch):
 
 
 @pytest.mark.parametrize("level", ["public", "circles"])
-def test_a_non_private_run_is_refused_and_writes_nothing(app, level):
-    from backend.routes.import_data import run_conversation_import
+def test_a_job_queued_with_a_non_private_level_imports_private_and_says_so(
+        app, level):
+    """A job stored by code from before imports were always private and
+    run after the deploy: nothing is lost, the entries are private, and
+    the result carries the note (#677)."""
+    from backend.routes.import_data import (
+        IMPORT_PRIVATE_ONLY, run_conversation_import)
     alice = _make_user("alice")
     _db.session.commit()
     token = _stash(alice.id, _analyzed(3, 3))
-    with pytest.raises(ValueError):
-        run_conversation_import(alice.id, token, "t1",
-                                dict(OPTIONS, privacy_level=level))
-    assert Node.query.filter_by(human_owner_id=alice.id).count() == 0
+    result = run_conversation_import(alice.id, token, "t1",
+                                     dict(OPTIONS, privacy_level=level))
+    assert result["created"] > 0
+    assert result["private_note"] == IMPORT_PRIVATE_ONLY
+    assert {n.privacy_level for n in
+            Node.query.filter_by(human_owner_id=alice.id)} == {"private"}
+
+
+def test_control_a_private_job_has_no_note(app):
+    from backend.routes.import_data import run_conversation_import
+    alice = _make_user("alice")
+    _db.session.commit()
+    result = run_conversation_import(alice.id, _stash(alice.id, _analyzed(2, 2)),
+                                     "t1", OPTIONS)
+    assert "private_note" not in result
 
 
 # ── the stash ────────────────────────────────────────────────────────────

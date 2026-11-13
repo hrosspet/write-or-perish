@@ -126,6 +126,9 @@ struct ImportResult: Equatable {
     var empty = 0
     /// Items whose settings only their last entry took (#638), told in a note.
     var partlyUpdated = 0
+    /// Set when a job queued by an older app asked for Public or Circles and
+    /// was imported as private (#677).
+    var privateNote: String?
     var profileUpdateTaskId: String?
     /// ChatGPT/Claude: the numbers count messages, while the confirm dialog
     /// counted conversations; `archiveSummary` names both.
@@ -142,6 +145,7 @@ struct ImportResult: Equatable {
         updated = int("updated")
         empty = int("empty")
         partlyUpdated = int("partly_updated")
+        privateNote = object["private_note"] as? String
         profileUpdateTaskId = object["profile_update_task_id"] as? String
         rebuildQuestion = ProfileRebuildQuestion(object["ask_profile_rebuild"])
     }
@@ -163,7 +167,7 @@ struct ImportResult: Equatable {
     }
 
     var notes: [String] {
-        let summary = archiveSummary.map { [$0] } ?? []
+        let summary = (archiveSummary.map { [$0] } ?? []) + (privateNote.map { [$0] } ?? [])
         if created == 0 && restored == 0 && updated == 0 {
             return summary + ["Everything in this archive was already imported — nothing new was added."]
         }

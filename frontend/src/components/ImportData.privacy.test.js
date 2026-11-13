@@ -65,6 +65,21 @@ test('the ChatGPT import dialog has no privacy choice and shows the note', async
   expect(mockPost.mock.calls[1][1].privacy_level).toBe('private');
 });
 
+test('a result that was imported private after an older request says so', async () => {
+  mockPost.mockImplementation((url) => (url === '/import/analyze'
+    ? Promise.resolve({ data: mdAnalyzed })
+    : Promise.resolve({ data: { created: 1, skipped: 0, restored: 0, updated: 0,
+      private_note: 'Imported entries are private. You can share or publish the ones you choose afterwards.' } })));
+  render(<MemoryRouter><ImportData inline /></MemoryRouter>);
+  fireEvent.change(screen.getByLabelText(/Import Markdown, Word \(\.docx\) or PDF/), {
+    target: { files: [new File(['# a'], 'a.md', { type: 'text/markdown' })] },
+  });
+  await screen.findByText('Confirm Import', { selector: 'h3' });
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm Import' }));
+  expect(await screen.findByText('Import Finished')).toBeTruthy();
+  expect(screen.getByText(NOTE)).toBeTruthy();
+});
+
 test('control: the shared selector still offers Public where nothing is left out', () => {
   render(<PrivacySelector privacyLevel="private" onPrivacyChange={() => {}}
     onAIUsageChange={() => {}} />);

@@ -342,10 +342,21 @@ def _import_privacy(data):
 
 
 def _require_importable_privacy(privacy_level):
-    """Backstop under the routes' 400: an import task given a level other
-    than private stops before it writes anything."""
+    """Backstop under the routes' 400: the functions that create the
+    entries stop before writing anything for a level other than private."""
     if privacy_level != 'private':
         raise ValueError(IMPORT_PRIVATE_ONLY)
+
+
+def _queued_privacy(options):
+    """(privacy_level, note) for an import task. A job queued by code from
+    before imports were always private may carry Public or Circles; it is
+    imported as private and its result says so, so a queued job (and the
+    upload behind it) is not lost. New requests never get this far: the
+    routes answer them with a 400."""
+    if options.get("privacy_level", "private") == "private":
+        return "private", None
+    return "private", IMPORT_PRIVATE_ONLY
 
 
 def _requested_ai_usage(data):
@@ -3091,11 +3102,12 @@ def _run_conversation_import(user_id, token, task_id, options, *,
             on_progress(done, total)
 
     progress(state["done"])
+    privacy_level, private_note = _queued_privacy(options)
     try:
         state = create_conversation_nodes(
             user_id, source,
             cs.iter_conversations(path, start=state["next_conv"]),
-            options.get("privacy_level", "private"),
+            privacy_level,
             options.get("ai_usage", "none"),
             options.get("on_deleted"),
             state=state, batch_size=batch_size,
@@ -3129,6 +3141,8 @@ def _run_conversation_import(user_id, token, task_id, options, *,
         "partly_updated": state.get("partly_updated", 0),
         "total": total,
     }
+    if private_note:
+        result["private_note"] = private_note
     roles = header.get("roles") or {}
     current_app.logger.info(
         "%s import job done: user_msgs=%s assistant_msgs=%s user_tokens=%s "

@@ -878,6 +878,11 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
               {importResult.archive_messages > 0 && <> with {importResult.archive_messages.toLocaleString()} messages</>}.
             </p>
           )}
+          {importResult.private_note && (
+            <p style={{ fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.88rem", color: "var(--text-secondary)", margin: "0 0 1.4rem" }}>
+              {importResult.private_note}
+            </p>
+          )}
           {importResult.created === 0 && !importResult.restored && !importResult.updated ? (
             <p style={{ fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.92rem", color: "var(--text-secondary)", margin: "0 0 1.4rem" }}>
               Everything in this archive was already imported — nothing new was added.
