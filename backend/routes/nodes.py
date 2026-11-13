@@ -3155,18 +3155,18 @@ def finalize_chunked_upload():
     # Measured before it is encrypted: its seconds count toward the
     # account's usage at a start until its cost is recorded
     # (utils/recording_limits.pending_audio_seconds).
+    # Committed below with the file's URL, before the transcription is
+    # queued.
     from backend.utils.recording_limits import finalized_upload_seconds
-    waiting = finalized_upload_seconds(target_path)
+    node.audio_pending_seconds = finalized_upload_seconds(target_path)
 
     # Encrypt the assembled audio file at rest (URL stored without .enc)
     encrypt_file(str(target_path))
 
-    # Update node with audio info; its measured seconds count from the
-    # same commit (utils/recording_limits.pending_audio_seconds)
+    # Update node with audio info
     rel_path = target_path.relative_to(AUDIO_STORAGE_ROOT)
     node.audio_original_url = f"/media/{rel_path.as_posix()}"
     node.audio_mime_type = f"audio/{ext}"
-    node.audio_pending_seconds = waiting
     node.set_content("[Voice note – transcription pending]")
     db.session.commit()
 
