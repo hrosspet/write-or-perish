@@ -2682,6 +2682,30 @@ def maybe_trigger_profile_update(user_id, model_id=None,
     return task.id
 
 
+def new_units_since_cutoff(user, cutoff):
+    """Units of new AI-readable, alive writing since a profile's cutoff:
+    the volume the update gate compares with UPDATE_THRESHOLD_UNITS. One
+    query for both gates (the batch seeder and the hourly check).
+
+    Deleted nodes are left out: an update never reads their content (the
+    export renders a tombstone). Writing created after the cutoff, as the
+    window reads it: updated_at counted every imported node (its import
+    time) as new, so the first entry after a large import triggered a tiny
+    update and a re-integration (R11, #545). No cutoff (a legacy version
+    saved before cutoffs were recorded, or a hand-written first profile,
+    which the ladder decides for): all the user's data counts."""
+    from sqlalchemy import func, or_
+    from backend.models import Node
+    q = db.session.query(func.coalesce(func.sum(Node.token_count), 0)).filter(
+        or_(Node.user_id == user.id, Node.human_owner_id == user.id),
+        Node.ai_usage.in_(['chat', 'train']),
+        Node.deleted_at.is_(None),
+    )
+    if cutoff is not None:
+        q = q.filter(Node.created_at > cutoff)
+    return q.scalar()
+
+
 def maybe_trigger_incremental_profile_update(user, ignore_backoff=False):
     """
     Check if enough new writing has accumulated to trigger an
@@ -2788,30 +2812,8 @@ def maybe_trigger_incremental_profile_update(user, ignore_backoff=False):
         return maybe_trigger_profile_update(user.id, force_full_regen=True)
 
     if latest_profile:
-        cutoff = latest_profile.source_data_cutoff
-        from sqlalchemy import func, or_
-        q = db.session.query(
-            func.coalesce(func.sum(Node.token_count), 0)
-        ).filter(
-            or_(Node.user_id == user.id,
-                Node.human_owner_id == user.id),
-            Node.ai_usage.in_(['chat', 'train']),
-        )
-        if cutoff:
-            # Writing created after the cutoff, as the window reads it.
-            # updated_at counted every imported node (its import time) as
-            # new, so the first entry after a large import triggered a tiny
-            # update and a re-integration (R11, #545).
-            new_tokens = q.filter(Node.created_at > cutoff).scalar()
-        else:
-            # No cutoff (a legacy version saved before cutoffs were
-            # recorded): nothing has been folded into it yet, so all the
-            # user's data counts as new. Measure it and apply the same
-            # threshold rather than force-triggering on volume we never
-            # checked. A first profile written by hand has no cutoff either,
-            # but it covers no data, so the ladder above decides for it
-            # (profile_is_provisional; voice review, 2026-10-20).
-            new_tokens = q.scalar()
+        new_tokens = new_units_since_cutoff(
+            user, latest_profile.source_data_cutoff)
 
     if new_tokens >= UPDATE_THRESHOLD_UNITS:
         logger.info(
