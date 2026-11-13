@@ -304,7 +304,8 @@ def st(monkeypatch, tmp_path):
     monkeypatch.setenv("AUDIO_STORAGE_PATH", str(tmp_path))
 
     monkeypatch.setattr(module, "compress_audio_if_needed", lambda p, log: p)
-    monkeypatch.setattr(module, "counted_seconds", lambda p, **k: 15.0)
+    monkeypatch.setattr(module, "decoded_audio_seconds",
+                        lambda p, **k: 15.0)
     monkeypatch.setattr(module, "get_openai_chat_key", lambda cfg: "key")
     monkeypatch.setattr(
         module, "concat_fragmented_media",

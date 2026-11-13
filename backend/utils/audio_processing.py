@@ -529,8 +529,8 @@ def decoded_audio_seconds(file_path, timeout_seconds=None, logger=None):
 
     None when ffmpeg is missing, the file cannot be decoded, or decoding
     takes longer than *timeout_seconds* (default decode_timeout_seconds;
-    the process is killed); counted_seconds then counts the file by its
-    size."""
+    the process is killed). Callers then re-encode the audio on the server
+    (split_audio_for_transcription) rather than estimate its length."""
     import subprocess
     import threading
     if timeout_seconds is None:
@@ -573,28 +573,6 @@ def decoded_audio_seconds(file_path, timeout_seconds=None, logger=None):
     return total / (2 * DECODE_COUNT_RATE)
 
 
-# Heuristic: the fewest bytes a second of compressed audio takes (6 kbps, the
-# lowest Opus bitrate). Audio that cannot be decoded is counted as holding
-# its bytes at this rate: the most it could hold, never less.
-MIN_AUDIO_BYTES_PER_SECOND = 6_000 // 8
-
-
-def counted_seconds(file_path, at_most=None, logger=None):
-    """Seconds of audio in *file_path* for the length bounds and the cost
-    record: decoded (decoded_audio_seconds), or, when it cannot be decoded,
-    the most its bytes can hold (MIN_AUDIO_BYTES_PER_SECOND); never the
-    container's timestamps, never zero for a file that holds bytes.
-    *at_most*: a known upper bound (a piece this server cut to a length)."""
-    seconds = decoded_audio_seconds(file_path, logger=logger)
-    if seconds is None:
-        try:
-            size = pathlib.Path(file_path).stat().st_size
-        except OSError:
-            size = 0
-        seconds = size / MIN_AUDIO_BYTES_PER_SECOND
-    return min(seconds, at_most) if at_most is not None else seconds
-
-
 # Heuristic: how long cutting an uploaded file into pieces may take: half
 # the task's hard limit (celery_app.TASK_TIME_LIMIT). It re-encodes the audio
 # as the earlier chunking did; an hour of audio takes about 12 s on a laptop.
@@ -612,9 +590,9 @@ def split_audio_for_transcription(file_path, piece_seconds, limit_seconds,
     re-timed from its samples, so the cut and the pieces follow the audio
     itself, whatever the container's timestamps say; at most
     ceil(limit / piece) pieces. *seconds*: the piece's decoded length, or,
-    when it cannot be decoded, the most its bytes can hold (at most
-    *piece_seconds*). A last piece under a second's bytes that cannot be
-    decoded (the frames left at the end of the audio) is left out.
+    when it cannot be decoded, *piece_seconds* (the most a piece holds). A
+    last piece under a second's bytes that cannot be decoded (the frames
+    left at the end of the audio) is left out.
     *cut*: the file holds audio past *limit_seconds* (in no piece).
     ([], False) when ffmpeg fails or takes longer than *timeout_seconds*."""
     import glob
@@ -660,7 +638,7 @@ def split_audio_for_transcription(file_path, piece_seconds, limit_seconds,
             if n == len(kept) - 1 and size < PIECE_BITRATE // 8:
                 os.unlink(path)
                 continue
-            seconds = min(size / MIN_AUDIO_BYTES_PER_SECOND, piece_seconds)
+            seconds = piece_seconds
         pieces.append((path, seconds))
     if not pieces:
         shutil.rmtree(out_dir, ignore_errors=True)

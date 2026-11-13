@@ -29,7 +29,8 @@ from backend.celery_app import celery, flask_app
 from backend.models import Node, NodeTranscriptChunk, Draft, APICostLog
 from backend.extensions import db
 from backend.utils.audio_processing import (
-    compress_audio_if_needed, counted_seconds,
+    CHUNK_DURATION_SEC, compress_audio_if_needed, decoded_audio_seconds,
+    split_audio_for_transcription,
 )
 from backend.utils import recording_limits
 from backend.utils.audio_storage import (
@@ -109,11 +110,79 @@ def _log_transcription_cost(user_id, seconds):
     ))
 
 
-def _measured_seconds(path):
-    """Seconds of audio in *path* for the length bound and the cost record:
-    counted from its decoded samples, or, when it cannot be decoded, the
-    most its bytes can hold (utils/audio_processing.counted_seconds)."""
-    return counted_seconds(path, logger=logger)
+class _Plan:
+    """What of a recording's audio goes to the provider (_plan_audio)."""
+
+    def __init__(self, files=(), seconds=0.0, reason=None, folder=None):
+        self.files = list(files)    # [(path, the name it is sent as)]
+        self.seconds = seconds      # counted: the length bound, the cost
+        self.reason = reason        # why nothing is sent (recording_limits)
+        self.folder = folder        # re-encoded pieces, removed by cleanup
+
+    def cleanup(self):
+        if self.folder:
+            shutil.rmtree(self.folder, ignore_errors=True)
+            self.folder = None
+
+
+def _plan_audio(path, name, chunk_count, room):
+    """What of the audio at *path* (*chunk_count* chunks of a recording) is
+    sent to the provider, and the seconds counted for it (the length bound
+    and the cost record), never fewer than *chunk_count* ×
+    STREAMING_CHUNK_SECONDS.
+
+    Audio that decodes is sent as it is, counted at its decoded length.
+    Audio that cannot be decoded (or not in time) is re-encoded on the
+    server (utils/audio_processing.split_audio_for_transcription: decoded,
+    re-timed from its samples, cut at *room*, in MP3 pieces); the pieces
+    are sent, counted at their decoded length. Nothing is sent when the
+    audio would take the recording past MAX_TRANSCRIBED_SECONDS (*room*:
+    the seconds it may still have transcribed; reason TOO_LONG), or when
+    even the re-encode fails (UNREADABLE). The audio stays with the
+    recording either way."""
+    floor = chunk_count * recording_limits.STREAMING_CHUNK_SECONDS
+    seconds = decoded_audio_seconds(path, logger=logger)
+    if seconds is not None:
+        counted = max(seconds, floor)
+        if counted > room:
+            return _Plan(seconds=counted, reason=recording_limits.TOO_LONG)
+        return _Plan(files=[(path, name)], seconds=counted)
+    if floor > room:
+        return _Plan(seconds=floor, reason=recording_limits.TOO_LONG)
+    pieces, cut = split_audio_for_transcription(
+        path, CHUNK_DURATION_SEC, room, logger=logger)
+    plan = _Plan(files=[(piece, "audio.mp3") for piece, _ in pieces],
+                 seconds=max(sum(s for _, s in pieces), floor),
+                 folder=os.path.dirname(pieces[0][0]) if pieces else None)
+    if not pieces:
+        plan.reason = recording_limits.UNREADABLE
+    elif cut or plan.seconds > room:
+        plan.reason = recording_limits.TOO_LONG
+    if plan.reason:
+        plan.cleanup()
+        plan.files = []
+    return plan
+
+
+def _transcribe_files(client, files):
+    """The provider's text for *files* ([(path, name)]), joined."""
+    texts = []
+    for path, name in files:
+        with open(path, "rb") as audio_file:
+            resp = client.audio.transcriptions.create(
+                model="gpt-4o-transcribe",
+                file=(name, audio_file),
+                response_format="text"
+            )
+        if hasattr(resp, "text"):
+            texts.append(resp.text)
+        elif isinstance(resp, dict):
+            texts.append(resp.get("text") or resp.get("transcript") or "")
+        else:
+            texts.append(str(resp))
+    if len(texts) == 1:
+        return texts[0]
+    return "\n\n".join(t.strip() for t in texts if t and t.strip())
 
 
 def _voice_approval_skip(user_id, parent_id):
@@ -252,40 +321,30 @@ def transcribe_chunk(self, node_id: int, chunk_index: int, chunk_path: str):
             # Compress if needed (webm -> mp3 for better compatibility)
             processed_path = compress_audio_if_needed(file_path, logger)
 
-            # Measure audio duration for cost tracking and the length bound
-            # (utils/recording_limits): decoded, or the most its bytes hold
-            chunk_duration_sec = _measured_seconds(processed_path)
+            # What is sent and counted (the length bound, the cost):
+            # utils/recording_limits, _plan_audio.
+            plan = _plan_audio(
+                processed_path, processed_path.name, 1,
+                recording_limits.MAX_TRANSCRIBED_SECONDS
+                - recording_limits.transcribed_seconds(node_id=node_id))
+            chunk_duration_sec = plan.seconds
 
             try:
-                # Past the length one recording may have transcribed
-                # (utils/recording_limits): kept without its text.
-                if recording_limits.too_long(
-                        recording_limits.transcribed_seconds(node_id=node_id),
-                        chunk_duration_sec
-                        or recording_limits.STREAMING_CHUNK_SECONDS):
-                    recording_limits.mark_untranscribed([chunk_record])
+                if plan.reason:
+                    # Kept without its text (utils/recording_limits).
+                    recording_limits.mark_untranscribed(
+                        [chunk_record], plan.reason)
                     db.session.commit()
                     logger.info(f"Node {node_id} chunk {chunk_index}: not "
-                                f"transcribed, past the length limit")
+                                f"transcribed ({plan.reason})")
                     return {'node_id': node_id, 'chunk_index': chunk_index,
                             'status': 'not_transcribed'}
 
                 # Transcribe the chunk
-                with open(processed_path, "rb") as audio_file:
-                    resp = client.audio.transcriptions.create(
-                        model="gpt-4o-transcribe",
-                        file=audio_file,
-                        response_format="text"
-                    )
-
-                    if hasattr(resp, "text"):
-                        transcript = resp.text
-                    elif isinstance(resp, dict):
-                        transcript = resp.get("text") or resp.get("transcript") or ""
-                    else:
-                        transcript = str(resp)
+                transcript = _transcribe_files(client, plan.files)
 
             finally:
+                plan.cleanup()
                 # Clean up compressed file if different from original
                 if processed_path != file_path:
                     try:
@@ -303,8 +362,7 @@ def transcribe_chunk(self, node_id: int, chunk_index: int, chunk_path: str):
             chunk_record.set_text(transcript)
             chunk_record.status = 'completed'
             chunk_record.completed_at = datetime.utcnow()
-            chunk_record.audio_seconds = (
-                chunk_duration_sec or recording_limits.STREAMING_CHUNK_SECONDS)
+            chunk_record.audio_seconds = chunk_duration_sec
 
             # Log transcription cost
             node = Node.query.get(node_id)
@@ -580,40 +638,29 @@ def transcribe_draft_chunk(self, session_id: str, chunk_index: int, chunk_path: 
             # Compress if needed (webm -> mp3 for better compatibility)
             processed_path = compress_audio_if_needed(file_path, logger)
 
-            # Measure audio duration for cost tracking and the length bound
-            # (utils/recording_limits): decoded, or the most its bytes hold
-            draft_chunk_duration_sec = _measured_seconds(processed_path)
+            # What is sent and counted (the length bound, the cost):
+            # utils/recording_limits, _plan_audio.
+            plan = _plan_audio(
+                processed_path, processed_path.name, 1,
+                recording_limits.MAX_TRANSCRIBED_SECONDS
+                - recording_limits.transcribed_seconds(session_id=session_id))
+            draft_chunk_duration_sec = plan.seconds
 
             try:
-                # Past the length one recording may have transcribed
-                # (utils/recording_limits): kept without its text.
-                if recording_limits.too_long(
-                        recording_limits.transcribed_seconds(
-                            session_id=session_id),
-                        draft_chunk_duration_sec
-                        or recording_limits.STREAMING_CHUNK_SECONDS):
-                    recording_limits.mark_untranscribed([chunk_record])
+                if plan.reason:
+                    # Kept without its text (utils/recording_limits).
+                    recording_limits.mark_untranscribed(
+                        [chunk_record], plan.reason)
                     db.session.commit()
                     return {'session_id': session_id,
                             'chunk_index': chunk_index,
                             'status': 'not_transcribed'}
 
                 # Transcribe the chunk
-                with open(processed_path, "rb") as audio_file:
-                    resp = client.audio.transcriptions.create(
-                        model="gpt-4o-transcribe",
-                        file=audio_file,
-                        response_format="text"
-                    )
-
-                    if hasattr(resp, "text"):
-                        transcript = resp.text
-                    elif isinstance(resp, dict):
-                        transcript = resp.get("text") or resp.get("transcript") or ""
-                    else:
-                        transcript = str(resp)
+                transcript = _transcribe_files(client, plan.files)
 
             finally:
+                plan.cleanup()
                 # Clean up compressed file if different from original
                 if processed_path != file_path:
                     try:
@@ -631,9 +678,7 @@ def transcribe_draft_chunk(self, session_id: str, chunk_index: int, chunk_path: 
             chunk_record.set_text(transcript)
             chunk_record.status = 'completed'
             chunk_record.completed_at = datetime.utcnow()
-            chunk_record.audio_seconds = (
-                draft_chunk_duration_sec
-                or recording_limits.STREAMING_CHUNK_SECONDS)
+            chunk_record.audio_seconds = draft_chunk_duration_sec
 
             # Log transcription cost
             draft = Draft.query.filter_by(session_id=session_id).first()
@@ -888,11 +933,12 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
             # Sub-batches whose merged file holds less audio than their
             # chunks: those chunks are kept (renamed, see below).
             short_subbatches = set()
-            # Chunks kept without their text, past the length one
-            # recording may have transcribed (utils/recording_limits):
-            # their audio is merged and stored like the rest, only the
-            # provider call is left out.
-            untranscribed = set()
+            # Chunks kept without their text, by index: the reason
+            # (utils/recording_limits; past the length one recording may
+            # have transcribed, or audio that could not be read). Their
+            # audio is merged and stored like the rest, only the provider
+            # call is left out.
+            untranscribed = {}
             transcribed_before = recording_limits.transcribed_seconds(
                 session_id=session_id)
             for sub_indices in sub_batches:
@@ -912,40 +958,26 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
                 processed_path = compress_audio_if_needed(
                     merge_input_path, logger)
 
-                # What is sent to the provider, for the length bound and the
-                # cost record: decoded, or the most its bytes can hold; never
-                # the container's timestamps.
-                sub_duration = _measured_seconds(processed_path)
+                # What is sent to the provider and counted for the length
+                # bound and the cost record (_plan_audio). The name carries
+                # `ext`, so the API infers the format from it rather than
+                # the tempfile's auto-generated suffix.
+                plan = _plan_audio(
+                    processed_path, f"audio{ext}", len(sub_indices),
+                    recording_limits.MAX_TRANSCRIBED_SECONDS
+                    - transcribed_before - batch_duration_sec)
 
                 try:
-                    if recording_limits.too_long(
-                            transcribed_before + batch_duration_sec,
-                            sub_duration):
-                        untranscribed.update(sub_indices)
+                    if plan.reason:
+                        untranscribed.update(
+                            {idx: plan.reason for idx in sub_indices})
                         continue
-                    batch_duration_sec += sub_duration
-                    with open(processed_path, "rb") as audio_file:
-                        # Explicit (name, file) tuple so the API infers
-                        # the format from `ext` rather than the
-                        # tempfile's auto-generated suffix.
-                        resp = client.audio.transcriptions.create(
-                            model="gpt-4o-transcribe",
-                            file=(f"audio{ext}", audio_file),
-                            response_format="text"
-                        )
-
-                        if hasattr(resp, "text"):
-                            sub_text = resp.text
-                        elif isinstance(resp, dict):
-                            sub_text = (
-                                resp.get("text")
-                                or resp.get("transcript") or ""
-                            )
-                        else:
-                            sub_text = str(resp)
+                    batch_duration_sec += plan.seconds
+                    sub_text = _transcribe_files(client, plan.files)
                     if sub_text and sub_text.strip():
                         transcripts.append(sub_text.strip())
                 finally:
+                    plan.cleanup()
                     if processed_path != merge_input_path:
                         try:
                             os.unlink(processed_path)
@@ -967,7 +999,8 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
                     chunk_index=idx
                 ).first()
                 if chunk_record and idx in untranscribed:
-                    recording_limits.mark_untranscribed([chunk_record])
+                    recording_limits.mark_untranscribed(
+                        [chunk_record], untranscribed[idx])
                 elif chunk_record:
                     if idx == first_idx:
                         chunk_record.set_text(transcript)

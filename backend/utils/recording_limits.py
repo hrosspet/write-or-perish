@@ -31,8 +31,8 @@ audio for quiet time or for the usage limit, whatever the gap; only these
 limits apply:
 
 - One recording is transcribed up to MAX_TRANSCRIBED_SECONDS of audio, as
-  the server counts it from the decoded audio (utils/audio_processing
-  .counted_seconds), the same measure the cost is recorded with. The
+  the server counts it (see the end of this note), the same measure the
+  cost is recorded with. The
   audio past it is still stored and kept with the recording; its chunks
   end ``failed`` with NOT_TRANSCRIBED_TEXT, so the finalize waits for them
   no longer, and the recording's text ends with a note
@@ -60,9 +60,11 @@ and an uploaded file is transcribed up to MAX_UPLOAD_TRANSCRIBED_SECONDS
 (its audio is cut there before it is sent).
 
 Lengths for these bounds and for the transcription cost are counted from
-the decoded audio (utils/audio_processing.counted_seconds); audio that
-cannot be decoded counts as the most its bytes can hold, never as its
-container's timestamps say.
+the decoded audio (utils/audio_processing.decoded_audio_seconds), never
+from the container's timestamps. Audio that cannot be decoded is
+re-encoded on the server and the re-encoded audio is what is sent and
+counted; audio that cannot be re-encoded either is not sent (UNREADABLE).
+A recording's audio counts at least STREAMING_CHUNK_SECONDS a chunk.
 """
 import os
 from datetime import datetime, timedelta
@@ -186,19 +188,27 @@ _LOCK_NOT_AVAILABLE = "55P03"
 
 # Why a chunk's audio is kept without its text: the code the transcription
 # stream sends with the chunk (``chunk_error``), so the apps tell it apart
-# from a failure.
+# from a failure. TOO_LONG: past MAX_TRANSCRIBED_SECONDS. UNREADABLE: the
+# server could neither measure the audio nor re-encode it, so it was not
+# sent (the apps treat it as a failed chunk).
 TOO_LONG = "recording_too_long"
+UNREADABLE = "audio_unreadable"
 
 # NodeTranscriptChunk.error of a chunk kept without its text.
 NOT_TRANSCRIBED_TEXT = ("Saved as audio, not turned into text: the "
                         "recording is longer than six hours.")
+NOT_READ_TEXT = ("Saved as audio, not turned into text: this part of the "
+                 "recording could not be read.")
+_ERROR_TEXTS = {TOO_LONG: NOT_TRANSCRIBED_TEXT, UNREADABLE: NOT_READ_TEXT}
 
 # The note at the end of a recording's text: some of it was transcribed,
-# none of it was.
+# none of it was; part of it could not be read.
 NOTE_PART = ("*Note: The recording is longer than six hours, so the rest "
              "of it was not turned into text. Its audio is saved.*")
 NOTE_ALL = ("*Note: The recording is longer than six hours, so it was not "
             "turned into text. Its audio is saved.*")
+NOTE_UNREADABLE = ("*Note: Part of this recording could not be read, so it "
+                   "was not turned into text. Its audio is saved.*")
 
 
 def body_too_large(max_bytes):
@@ -477,32 +487,40 @@ def too_long(done_seconds, next_seconds):
     return done_seconds + next_seconds > MAX_TRANSCRIBED_SECONDS
 
 
-def mark_untranscribed(chunks):
+def mark_untranscribed(chunks, reason=TOO_LONG):
     """Keep chunk rows' audio without their text: status ``failed`` (the
-    finalize waits for them no longer) with NOT_TRANSCRIBED_TEXT as the
-    error. Their audio files stay where they are. The caller commits."""
+    finalize waits for them no longer) with the text for *reason*
+    (NOT_TRANSCRIBED_TEXT, NOT_READ_TEXT) as the error. Their audio files
+    stay where they are. The caller commits."""
     now = datetime.utcnow()
     for chunk in chunks:
         if chunk is None or chunk.status == "completed":
             continue
         chunk.status = "failed"
-        chunk.error = NOT_TRANSCRIBED_TEXT
+        chunk.error = _ERROR_TEXTS[reason]
         chunk.completed_at = now
 
 
 def untranscribed_code(error):
-    """TOO_LONG for a chunk with this error kept without its text, None
-    for any other error."""
-    return TOO_LONG if error == NOT_TRANSCRIBED_TEXT else None
+    """TOO_LONG or UNREADABLE for a chunk with this error kept without its
+    text, None for any other error."""
+    for code, text_ in _ERROR_TEXTS.items():
+        if error == text_:
+            return code
+    return None
 
 
 def untranscribed_note(chunks, has_text):
     """The note for a recording with *chunks* kept without their text
     (nothing when there are none). *has_text*: some of it was
     transcribed."""
-    if not chunks:
-        return ""
-    return NOTE_PART if has_text else NOTE_ALL
+    codes = {untranscribed_code(chunk.error) for chunk in chunks}
+    notes = []
+    if TOO_LONG in codes:
+        notes.append(NOTE_PART if has_text else NOTE_ALL)
+    if UNREADABLE in codes:
+        notes.append(NOTE_UNREADABLE)
+    return "\n\n".join(notes)
 
 
 def with_note(content, note):
