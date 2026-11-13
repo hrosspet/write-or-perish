@@ -77,7 +77,12 @@ test.each([
   'https:evil.example',
   '/%2F%2Fevil.example',
   '/@user\nhttps://evil.example',
-])('a destination outside Loore (%j) is dropped for the default page', async (value) => {
+  '/node/1?x\n',
+  '/%2e%2e/auth/logout',
+  '/x/../auth/x/connect',
+  '/invite/AbCdEfGh1234',
+  '/account?subscription=success&session_id=cs_test_1',
+])('a destination that is not an ordinary page (%j) is dropped for the default page', async (value) => {
   renderAt(`/login?returnUrl=${encodeURIComponent(value)}`);
   fireEvent.click(screen.getByRole('button', { name: /sign in with x/i }));
   expect(xNext()).toBe('/dashboard');

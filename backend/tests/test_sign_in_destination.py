@@ -34,6 +34,15 @@ CASES_FILE = (Path(__file__).resolve().parents[2]
 HOSTILE = [
     "//evil.example", "/\\evil.example", "https:evil.example",
     "/%2F%2Fevil.example", "/@user\nhttps://evil.example",
+    # A newline after a query or fragment: the redirect's header would
+    # refuse it (a 500) if the check let it through.
+    "/node/1?x\n", "/node/1#r\n",
+    # Dot segments a browser resolves into an excluded route.
+    "/./auth/logout", "/%2e%2e/auth/logout", "/x/../auth/x/connect",
+    "/%2E/api/export/threads",
+    # Routes that act when opened.
+    "/auth/magic-link/verify?token=abc", "/invite/AbCdEfGh1234",
+    "/account?subscription=success&session_id=cs_test_1",
     "/" + "a" * 2048,
 ]
 
@@ -278,12 +287,15 @@ class TestSignInByEmail:
         assert location == f"{FRONTEND_URL}/dashboard"
         assert user_id == str(ana.id)
 
-    def test_a_destination_minted_into_a_link_by_hand_is_checked_again(self, app):
+    @pytest.mark.parametrize("value", [
+        "/%2F%2Fevil.example", "/node/1?x\n", "/%2e%2e/auth/logout"])
+    def test_a_destination_minted_into_a_link_by_hand_is_checked_again(self, app, value):
         """A link made with the helper (#703) and a destination the routes
-        would have refused: the open drops it."""
+        would have refused: the open drops it (a newline used to end the
+        sign-in on a 500, the redirect's header refusing it)."""
         from backend.utils.sign_in_links import make_link_token
         _add(username="ana", email="ana@example.com", approved=True)
-        token = make_link_token("ana@example.com", next_url="/%2F%2Fevil.example")
+        token = make_link_token("ana@example.com", next_url=value)
         location, _ = _open_elsewhere(app, token)
         assert location == f"{FRONTEND_URL}/dashboard"
 

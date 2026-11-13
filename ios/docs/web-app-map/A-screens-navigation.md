@@ -354,7 +354,7 @@ Common page chrome for app pages: centered column, `max-width` 720px (Log, Refer
 - `GET /share/public/{username}` → `{username, shares[] {id, public_node_id, permalink, share_type, content, published_at, pinned}, canonical}`. Shell max 640px. H1 username; cards (type eyebrow, markdown, date, pin icon); tap → thread. Empty "{username}'s public entries will appear here as they share thoughts with Loore." Not found "Nothing here."
 
 #### Public thread `/node/:id` (visitor), `/@u/:slug` (visitor) — `pages/PublicThreadPage.js`
-- `GET /commons/node/{id}` → `{thread (recursive: id, username, node_type, llm_model, content, created_at, children), focus_id, truncated}`. Nested cards (focused one has an `accent` border); author line "{model} · via {user}" for LLM nodes; author links to `/@{user}`. "thread truncated". Funnel: "Respond, or ask the AI about this thread — from your own Loore." + **Sign in to respond** (`/login?returnUrl=/node/{id}`). Not found: visitor → login redirect; member → "Nothing here."
+- `GET /commons/node/{id}` → `{thread (recursive: id, username, node_type, llm_model, content, created_at, children), focus_id, truncated}`. Nested cards (focused one has an `accent` border); author line "{model} · via {user}" for LLM nodes; author links to `/@{user}`. "thread truncated". Funnel: "Respond, or ask the AI about this thread — from your own Loore." + **Sign in to respond** (`/login?returnUrl=` the page’s own address, `/node/{id}` or `/@{user}/{slug}`, query and fragment kept; #704). Not found: visitor → login redirect, on the way back to this page; member → the not-shared notice ("This entry isn't shared with you" / "It may be private, or it may have been deleted." / **Go to your Home page →**).
 
 ### 3.4 ADMIN
 
