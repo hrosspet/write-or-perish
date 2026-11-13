@@ -560,6 +560,40 @@ class _Matched:
             invalidate_for_nodes(ids)
 
 
+def _claim_prefilled_tweets(user_id, node_ids, changes):
+    """The person's own archive upload holds tweets a pre-fill already
+    brought in (#662): skipped as duplicates, they become the upload's
+    (provenance archive_upload), since the person gave them to Loore
+    themselves; the user's own input wins over the pre-fill's. After a
+    no to the tweet seed this is what brings them back into what AI reads
+    (utils/privacy.withheld_prefill_clauses), so each such tweet counts
+    as an entry this import added when the import lets AI read it, and
+    takes the import's settings without being counted again. On any other
+    account nothing that is read changes: an upload needs a signed-in
+    account, which is never public-only (utils/profile_providers).
+
+    *node_ids* are the matched tweets (_Matched.skipped), deleted ones
+    included; only alive ones are claimed.
+
+    Returns the ids that were left out before (empty without a no)."""
+    from backend.utils.privacy import (
+        PREFILL_PROVENANCES, withheld_prefill_clauses)
+    withheld = bool(withheld_prefill_clauses(user_id))
+    ids = [i for i in node_ids if i is not None]
+    was_withheld = set()
+    for start in range(0, len(ids), 1000):
+        for node in Node.query.filter(
+                Node.id.in_(ids[start:start + 1000]),
+                Node.deleted_at.is_(None),
+                Node.provenance.in_(PREFILL_PROVENANCES)).all():
+            node.provenance = PROVENANCE_ARCHIVE_UPLOAD
+            if withheld:
+                was_withheld.add(node.id)
+                changes.entry_added(node.created_at, node.token_count)
+        db.session.flush()
+    return was_withheld
+
+
 def _release_deleted_docx_key(file_data, source_key, key_index,
                               deleted_keys, on_deleted):
     """Re-importing a deleted Word document or PDF with "restore" is a new
@@ -1834,7 +1868,21 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
             if on_progress:
                 on_progress(done)
 
-    nodes_updated = matched.apply(privacy_level, ai_usage, changes=changes)
+    withheld_claimed = set()
+    if provenance == PROVENANCE_ARCHIVE_UPLOAD:
+        withheld_claimed = _claim_prefilled_tweets(
+            user_id, matched.skipped, changes)
+    claimed_updated = 0
+    if withheld_claimed:
+        # Counted as added by the claim (#662): they take this import's
+        # settings without being counted again.
+        matched.skipped = [i for i in matched.skipped
+                           if i not in withheld_claimed]
+        claimed_updated = _apply_settings_to_skipped(
+            sorted(withheld_claimed), privacy_level, ai_usage,
+            privacy_changed=matched.privacy_changed)
+    nodes_updated = claimed_updated + matched.apply(
+        privacy_level, ai_usage, changes=changes)
     nodes_skipped -= nodes_updated
     db.session.commit()
     matched.after_commit()

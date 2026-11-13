@@ -86,6 +86,9 @@ struct SelectField<Value: Hashable>: View {
     let options: [(Value, String)]
     @Binding var selection: Value
     var disabled = false
+    /// Shown while the selection is none of the options (web: a disabled first
+    /// option such as "Not answered yet", which the menu does not offer).
+    var placeholder = ""
 
     var body: some View {
         Menu {
@@ -102,7 +105,7 @@ struct SelectField<Value: Hashable>: View {
             }
         } label: {
             HStack {
-                Text(options.first(where: { $0.0 == selection })?.1 ?? "")
+                Text(options.first(where: { $0.0 == selection })?.1 ?? placeholder)
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Spacer(minLength: 8)

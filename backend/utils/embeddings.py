@@ -261,6 +261,16 @@ def retrieve_relevant_snippets(user_id, query_text, exclude_node_ids,
         NodeEmbedding.user_id == user_id,
         ~NodeEmbedding.node_id.in_(exclude_node_ids or [-1]),
     )
+    from backend.utils.privacy import (
+        PREFILL_PROVENANCES, withheld_prefill_clauses)
+    if withheld_prefill_clauses(user_id):
+        # After a no to the tweet seed, the AI's search of the archive
+        # skips the tweets a pre-fill brought in (#662).
+        from sqlalchemy import or_
+        rows = rows.filter(~NodeEmbedding.node_id.in_(
+            db.session.query(Node.id).filter(
+                or_(Node.user_id == user_id, Node.human_owner_id == user_id),
+                Node.provenance.in_(PREFILL_PROVENANCES))))
     ranked = rank_embeddings(query_vector, rows, NodeEmbedding, k=k,
                              min_score=min_score)
     if not ranked:
