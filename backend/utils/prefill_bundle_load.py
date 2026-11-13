@@ -365,12 +365,17 @@ def _new_account(x_id, handle):
     return user
 
 
-def start_admin_load(query, admin_id, *, force=False, dispatch=None):
+def start_admin_load(query, admin_id, *, force=False, merge=True,
+                     dispatch=None):
     """The admin's "Make ready from prepared material". Returns (load,
     None) or (None, (code, message)). Safe to repeat: a load under way
     is returned as it is, a failed or stopped one continues in a new load
     (entries already there are skipped), and a finished one of the same
-    bundle is not loaded again. Storage errors are StorageError."""
+    bundle is not loaded again. Storage errors are StorageError.
+
+    ``merge`` (the admin's option, on by default): when the bundle's final
+    profile was written by another model than this account's merge model,
+    merge the loaded windows again once, live (prefill_bundle_merge)."""
     if not pb.bundles_enabled():
         return None, ("disabled", "Pre-fill bundles are switched off here.")
     storage = pb.configured_storage()
@@ -402,6 +407,7 @@ def start_admin_load(query, admin_id, *, force=False, dispatch=None):
     load = PrefillBundleLoad(
         user_id=user.id, x_id=str(x_id), origin="admin",
         requested_by_id=admin_id, forced=bool(force), approve_when_done=False,
+        merge_wanted=bool(merge),
         status="queued", stage="header", heartbeat_at=now, created_at=now)
     _fill_from_manifest(load, manifest)
     db.session.add(load)
@@ -437,6 +443,7 @@ def maybe_start_self_load(user, dispatch=None):
         now = _now()
         load = PrefillBundleLoad(
             user_id=user.id, x_id=x_id, origin="self", approve_when_done=True,
+            merge_wanted=True,
             status="queued", stage="check", bundle_sha256="",
             heartbeat_at=now, created_at=now)
         db.session.add(load)
@@ -489,6 +496,8 @@ def serialize_load(load, user=None):
         "links_done": load.links_done, "created": load.created_count,
         "skipped": load.skipped_count, "relinked": load.relinked_count,
         "profiles": load.profiles_count, "artifacts": load.artifacts_count,
+        "merge_status": load.merge_status, "merge_model": load.merge_model,
+        "merge_error": load.merge_error,
         "exported_at": iso_utc(load.exported_at),
         "newest_entry_at": iso_utc(load.newest_entry_at),
         "created_at": iso_utc(load.created_at),
@@ -524,6 +533,8 @@ def check(query):
         "newest_entry_at": manifest.get("newest_entry_at"),
         "counts": manifest.get("counts") or {},
         "profile_generated_by": manifest.get("profile_generated_by"),
+        "final_generated_by": manifest.get("final_generated_by"),
+        "intentions_generated_by": manifest.get("intentions_generated_by"),
         "bytes": (manifest.get("object") or {}).get("bytes"),
     }
     excluded = pb.exclusion(storage, x_id)
@@ -854,13 +865,27 @@ def _link_chunk(load, storage, token):
     return True
 
 
-def _finish(load, token):
+def _finish(load, token, dispatch):
     """Done, or stopped by a no. Only a done load of the person's own Yes
-    lets them in."""
+    lets them in. A load that asks for the final merge again (#698,
+    prefill_bundle_merge) first waits for it, at most MERGE_WAIT: the load
+    stays "running" in stage "merge", so the person still sees "Preparing
+    your starting point…", and the profile they first read is the merged
+    one."""
+    from backend.utils import prefill_bundle_merge as pbm
     PrefillBundleNodeMap.query.filter_by(load_id=load.id).delete(
         synchronize_session=False)
     user = db.session.get(User, load.user_id)
     declined = load.error == "prefill_declined" or user.prefill_consent == "no"
+    if not declined and load.merge_wanted and load.merge_status is None:
+        now = _now()
+        _progress(load.id, token, stage="merge", merge_status="due",
+                  merge_started_at=now, merge_heartbeat_at=now,
+                  run_token=None)
+        db.session.commit()
+        pbm._dispatch(load.id)
+        dispatch(load.id, countdown=pbm.MERGE_POLL_SECONDS)
+        return "merging"
     approved = False
     if load.approve_when_done and not declined:
         approved = let_in_when_ready(user)
@@ -950,9 +975,20 @@ def run_load(load_id, *, budget=RUN_SECONDS, dispatch=None, max_chunks=None):
         reason = _stop_reason(load, user, storage)
         if reason:
             raise pb.BundleError(reason, reason)
+        if load.stage == "merge":
+            # Waiting for the final merge: done when it ended or the wait
+            # is over (the merge then goes on in the background).
+            from backend.utils import prefill_bundle_merge as pbm
+            if pbm.merge_waiting_over(load):
+                return _finish(load, token, dispatch)
+            _progress(load_id, token, stalled_runs=0, run_token=None)
+            db.session.commit()
+            dispatch(load_id, countdown=pbm.MERGE_POLL_SECONDS)
+            return "continuing"
         stage = _work(load_id, token, storage, user, deadline, max_chunks)
         if stage == "finish":
-            return _finish(db.session.get(PrefillBundleLoad, load_id), token)
+            return _finish(db.session.get(PrefillBundleLoad, load_id), token,
+                           dispatch)
         _release(load_id, token)
         dispatch(load_id)
         return "continuing"

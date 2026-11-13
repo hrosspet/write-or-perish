@@ -148,6 +148,20 @@ A deletion request also covers the lab's own copy (the lab account); remove it t
 
 **An unclaimed loaded account** falls under the deletion of pre-filled accounts nobody signed in to (#685): every load sets `User.prefilled_handle`, and nothing a person's own action sets (sign-in, terms, X handle, the tweet-seed answer, settings, defaults, time zone). The entries' `updated_at` is when production stored them, so the 90 days count from the load, not from the lab's import. That job removes the account, not the bundle.
 
+## After a load: the final merge again
+
+Decision (Peter, 2026-11-13): when the bundle's final profile was written by another model than the account's merge model, production merges the loaded window versions again once, live, with the merge model a normal build would use for this account. For a new person that is Opus 5.5. The model that wrote the final is in each manifest (`final_generated_by`, and `intentions_generated_by` for the intentions).
+
+- **What runs.** The final merge only. Nothing reads the tweets again, and no window is written again. The windows travel in the bundle, so the merge reads those.
+- **No call is made** when the lab already merged the final with that model (the outreach accounts), for an account set to no AI, after a "no", when the person's current profile is a version they wrote, or when the account was merged this way before (a second Yes, a re-load).
+- **The person's Yes** asks for the merge. The admin's "Make ready" asks for it with its option, which is on by default.
+- **Cost:** one paid call, on the account's cost log, before the person has a trial or a subscription. Measured on window sets of the lab's size (about 2,000 tokens per window), with output about 3,900 tokens:
+  - one window: about 4,000 tokens in, about $0.09;
+  - three windows: about 8,000 tokens in, about $0.11;
+  - ten windows: about 22,000 tokens in, about $0.17.
+- **Waiting.** The person sees "Preparing your starting point…" until the merge is done, at most 3 minutes. After that they are let in with the loaded profile, and the merge continues in the background, 3 attempts at most. A final failure is logged as an error, and the admin panel shows it.
+- **The person's edit wins.** A merge that lands after the person saved a version of their own is not saved.
+
 ## After a load: how current the account is
 
 A bundle is a snapshot: tweets up to its `newest_entry_at` (the lab's Community Archive export). After a load the account is consistent: its entries, the profile drafted from them (with its cutoff), intentions where built. The profile pipeline treats that profile as current and builds nothing on its own. Newer tweets arrive only by:

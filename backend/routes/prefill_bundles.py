@@ -48,7 +48,10 @@ def check_bundle():
 @login_required
 @admin_required
 def start_load():
-    """Body: {"q": handle or X id, "force": bool}. Returns 202 {"load"} or
+    """Body: {"q": handle or X id, "force": bool, "merge": bool (default
+    true: merge the loaded windows again with the account's merge model
+    when another model wrote the bundle's final, one paid call)}.
+    Returns 202 {"load"} or
     4xx {"error", "code"}; 502 {"code": "storage"} when the storage cannot
     be reached. The load lets nobody in: the admin approves as for any
     account."""
@@ -57,7 +60,8 @@ def start_load():
     data = request.get_json() or {}
     try:
         load, refusal = start_admin_load(
-            data.get("q"), current_user.id, force=bool(data.get("force")))
+            data.get("q"), current_user.id, force=bool(data.get("force")),
+            merge=bool(data.get("merge", True)))
     except StorageError as e:
         db.session.rollback()
         return jsonify({"error": str(e), "code": "storage"}), 502

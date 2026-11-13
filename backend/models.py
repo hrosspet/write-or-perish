@@ -2377,7 +2377,7 @@ class PrefillBundleLoad(db.Model):
     automatic load that found a bundle but did not start (``error`` says
     why), so the admin sees it.
     stage: check (a Yes: is there a bundle?) -> header -> nodes -> links
-    -> finish -> done.
+    -> finish -> (merge ->) done.
 
     Nothing here is content: counts, the bundle's checksum and dates, the
     X id and the handle the bundle was made under, and ``error`` (a code
@@ -2431,6 +2431,23 @@ class PrefillBundleLoad(db.Model):
     # Runs started since the last committed chunk: a run that is killed
     # again and again by the same chunk stops the load.
     stalled_runs = db.Column(db.Integer, nullable=False, default=0)
+    # The final merge run again on production (Peter, 2026-11-13): when the
+    # bundle's final profile was written by another model than this
+    # account's merge model, one live call merges the loaded windows again
+    # (backend/utils/prefill_bundle_merge.py). merge_wanted: the load asks
+    # for it (the person's Yes; the admin's option, on by default).
+    # merge_status: None (not asked) | due | running | retry | done |
+    # skipped | superseded | failed; merge_error a code. The person waits
+    # for it ("Preparing your starting point…") at most MERGE_WAIT from
+    # merge_started_at; the attempts are bounded.
+    merge_wanted = db.Column(db.Boolean, nullable=False, default=False,
+                             server_default=db.text("false"))
+    merge_status = db.Column(db.String(16), nullable=True)
+    merge_attempts = db.Column(db.Integer, nullable=False, default=0)
+    merge_started_at = db.Column(db.DateTime, nullable=True)
+    merge_heartbeat_at = db.Column(db.DateTime, nullable=True)
+    merge_model = db.Column(db.String(64), nullable=True)
+    merge_error = db.Column(db.String(64), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     started_at = db.Column(db.DateTime, nullable=True)
     finished_at = db.Column(db.DateTime, nullable=True)

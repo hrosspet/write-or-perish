@@ -42,6 +42,7 @@ from backend.models import (  # noqa: E402
 from backend.utils import encryption  # noqa: E402
 from backend.utils import prefill_bundles as pb  # noqa: E402
 from backend.utils import prefill_bundle_load as pbl  # noqa: E402
+from backend.utils import prefill_bundle_merge as pbm  # noqa: E402
 from backend.utils.bundle_storage import (  # noqa: E402
     GCSStorage, LocalDirStorage, StorageError, storage_for,
 )
@@ -49,18 +50,35 @@ from backend.scripts import load_user  # noqa: E402
 from backend.scripts import prefill_bundles as cli  # noqa: E402
 
 KMS_KEY = "projects/t/locations/l/keyRings/r/cryptoKeys/k"
+# What the stand-in merge model answers: a final profile's three maps.
+MERGED_PROFILE = ("# Surface Map\nmerged surface\n\n# Shadow Map\nmerged shadow"
+                  "\n\n# Light Map\nmerged light\n")
 
 
 # ── Servers ───────────────────────────────────────────────────────────────
 
 def _make_app(db_path, location, enabled=True):
     from flask_login import LoginManager
+    from backend.config import Config
     app = Flask(__name__)
     app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{db_path}"
     app.config["SECRET_KEY"] = "test-secret"
     app.config["TESTING"] = True
     app.config["PREFILL_BUNDLE_LOCATION"] = str(location)
     app.config["PREFILL_BUNDLES_ENABLED"] = enabled
+    # The profile models a normal build uses (the final merge after a load).
+    app.config.update(
+        DEFAULT_LLM_MODEL="claude-opus-5.5",
+        SUPPORTED_MODELS=Config.SUPPORTED_MODELS,
+        PROFILE_INDEPENDENT_VERSIONS=True,
+        PROFILE_VERSION_MODEL_ANTHROPIC="claude-haiku-5.5",
+        PROFILE_VERSION_MODEL_OPENAI="gpt-6-luna",
+        PROFILE_MERGE_MODEL_ANTHROPIC="claude-opus-5.5",
+        PROFILE_MERGE_MODEL_OPENAI="gpt-6.1-sol",
+        PROFILE_MERGE_REASONING_EFFORT_OPENAI="",
+        PROFILE_VERSION_MODEL_CROSS_PROVIDER="gpt-6-luna",
+        PROFILE_MERGE_MODEL_CROSS_PROVIDER="claude-opus-5.5",
+        PROFILE_MERGE_STRUCTURE="flat")
     db.init_app(app)
     login_manager = LoginManager(app)
 
@@ -99,6 +117,32 @@ def world(tmp_path, monkeypatch):
     dispatched = []
     monkeypatch.setattr(pbl, "_dispatch",
                         lambda load_id, countdown=0: dispatched.append(load_id))
+    merges = []
+    monkeypatch.setattr(pbm, "_dispatch",
+                        lambda load_id, countdown=0: merges.append(load_id))
+    # Model calls: a stand-in that records each call and answers with a
+    # profile; no test reaches a provider.
+    import backend.llm_providers as lp
+    import backend.utils.api_keys as api_keys
+    calls = []
+
+    def fake_completion(model_id, messages, api_keys_, **kw):
+        calls.append({"model": model_id, "messages": messages})
+        if world_state.get("during"):
+            world_state.pop("during")()
+        if world_state.get("fail"):
+            world_state["fail"] -= 1
+            raise RuntimeError("provider down")
+        return {"content": MERGED_PROFILE, "total_tokens": 5000,
+                "input_tokens": 1000, "output_tokens": 4000,
+                "model": model_id}
+    world_state = {}
+    monkeypatch.setattr(lp.LLMProvider, "get_completion",
+                        staticmethod(fake_completion))
+    monkeypatch.setattr(lp.LLMProvider, "count_tokens",
+                        staticmethod(lambda model_id, messages, k: None))
+    monkeypatch.setattr(api_keys, "get_api_keys_for_usage",
+                        lambda *a, **k: {"anthropic": "k", "openai": "k"})
 
     class World:
         pass
@@ -107,6 +151,9 @@ def world(tmp_path, monkeypatch):
     w.bucket = bucket
     w.storage = LocalDirStorage(str(bucket))
     w.dispatched = dispatched
+    w.merges = merges
+    w.calls = calls
+    w.state = world_state
     w.lab = _make_app(tmp_path / "lab.db", bucket)
     w.prod = lambda name="prod", enabled=True: _make_app(
         tmp_path / f"{name}.db", bucket, enabled)
@@ -254,6 +301,8 @@ class _Started:
 
 
 def _start(query, admin_id=None, **kw):
+    """The admin's load; without the final merge unless a test asks."""
+    kw.setdefault("merge", False)
     load, refusal = pbl.start_admin_load(query, admin_id=admin_id, **kw)
     return (_Started(load) if load is not None else None), refusal
 
@@ -266,8 +315,14 @@ def _run_until_done(load_id, max_runs=50, **kw):
     try:
         for _ in range(max_runs):
             outcome = pbl.run_load(load_id, dispatch=lambda *a, **k: None, **kw)
-            if outcome != "continuing":
-                return outcome
+            if outcome in ("continuing", "merging"):
+                # A load waiting for its final merge: run the merge as its
+                # task would (inline, once per round).
+                load = db.session.get(PrefillBundleLoad, load_id)
+                if load is not None and load.merge_status in ("due", "retry"):
+                    pbm.run_merge(load_id, dispatch=lambda *a, **k: None)
+                continue
+            return outcome
         raise AssertionError("the load did not finish")
     finally:
         g.pop("_login_user", None)
@@ -1247,14 +1302,17 @@ def test_a_yes_loads_the_prepared_material_and_lets_the_person_in(world, monkeyp
         assert state["starting_point"]["status"] == "ready" and state["approved"] is True
         user = db.session.get(User, user_id)
         assert user.prefilled_handle == "alice" and user.plan == "alpha"
-        assert UserProfile.query.filter_by(user_id=user_id).count() == 2
+        # The loaded window and final, and the final merged again (#698).
+        assert UserProfile.query.filter_by(user_id=user_id).count() == 3
+        assert len(world.calls) == 1
         assert UserArtifact.latest_for(user_id, "intentions").get_content() == "intentions of alice"
         assert Node.query.filter_by(human_owner_id=user_id, provenance="prefill_ca").count() == 7
         load = PrefillBundleLoad.query.one()
         assert load.origin == "self" and load.approve_when_done is True
-        # A second Yes starts nothing new.
+        assert load.merge_status == "done"
+        # A second Yes starts nothing new, and makes no second call.
         _yes(client)
-        assert PrefillBundleLoad.query.count() == 1
+        assert PrefillBundleLoad.query.count() == 1 and len(world.calls) == 1
 
 
 def test_a_yes_after_a_no_continues_where_the_no_stopped(world, monkeypatch):
@@ -1292,7 +1350,11 @@ def test_a_yes_after_a_no_continues_where_the_no_stopped(world, monkeypatch):
         later = db.session.get(PrefillBundleLoad, second)
         assert (later.created_count, later.skipped_count) == (4, 3)
         assert Node.query.filter_by(human_owner_id=user_id).count() == 7
-        assert UserProfile.query.filter_by(user_id=user_id).count() == 2
+        # The loaded profile versions once; the merge once, by the second
+        # load (the stopped one made none: a no).
+        assert UserProfile.query.filter(UserProfile.user_id == user_id,
+                                        UserProfile.generated_by != "claude-opus-5.5").count() == 2
+        assert len(world.calls) == 1
         assert db.session.get(User, user_id).approved is True
         # The continuation from an entry of the first load to one of the
         # second is set: an entry already there gets the links it lacks.
@@ -1376,6 +1438,187 @@ def test_a_yes_from_someone_with_own_writing_is_recorded_not_loaded(world, monke
         refused = PrefillBundleLoad.query.one()
         assert (refused.status, refused.error) == ("refused", "own_writing")
         assert pbl.starting_point(user_id) is None
+
+
+# ── The final merge again on production (Peter, 2026-11-13) ─────────────
+
+def _current_profile(user_id):
+    from backend.utils.profile_versions import current_profile_query
+    return current_profile_query(user_id).first()
+
+
+def test_a_small_model_final_is_merged_again_once_from_the_windows(world, monkeypatch):
+    """The lab's final was written by a small model: one live call by the
+    account's merge model (Opus 5.5 for a new person), whose input is the
+    loaded window versions and the merge prompt, never a tweet. Its
+    result is the account's profile; its cost is on the account."""
+    from backend.models import APICostLog
+    _bundle(world, monkeypatch)
+    m = json.loads(world.storage.read_bytes("bundles/1001/manifest.json"))
+    assert m["final_generated_by"] == "gpt-6.1-sol"
+    prod = world.prod()
+    with prod.app_context():
+        load, _ = _start("alice", merge=True)
+        assert _run_until_done(load.id) == "done"
+        assert len(world.calls) == 1
+        call = world.calls[0]
+        assert call["model"] == "claude-opus-5.5"
+        text = "\n".join(c["text"] for msg in call["messages"] for c in msg["content"])
+        assert "window profile of alice" in text
+        assert not any(f"tweet {i} by alice" in text for i in range(7))
+        assert "final profile of alice" not in text
+        current = _current_profile(load.user_id)
+        assert (current.generated_by, current.generation_type) == ("claude-opus-5.5", "integration")
+        assert current.window_set == "set-1"
+        assert current.get_content().endswith(MERGED_PROFILE)
+        cost = APICostLog.query.filter_by(user_id=load.user_id).one()
+        assert (cost.model_id, cost.request_type) == ("claude-opus-5.5", "profile")
+        done = db.session.get(PrefillBundleLoad, load.id)
+        assert (done.merge_status, done.merge_model) == ("done", "claude-opus-5.5")
+
+
+def test_a_frontier_final_makes_no_call(world, monkeypatch):
+    """An account the lab merged again with the account's merge model
+    (the outreach accounts) needs no call."""
+    with world.lab.app_context():
+        u = _seed_lab_member()
+        final = UserProfile.query.filter_by(user_id=u.id, generation_type="integration").one()
+        final.generated_by = "claude-opus-5.5"
+        db.session.commit()
+    _export(world, monkeypatch)
+    _prod_mode(monkeypatch)
+    prod = world.prod()
+    with prod.app_context():
+        load, _ = _start("alice", merge=True)
+        assert _run_until_done(load.id) == "done"
+        assert world.calls == []
+        done = db.session.get(PrefillBundleLoad, load.id)
+        assert (done.merge_status, done.merge_error) == ("skipped", "current")
+
+
+def test_the_admin_option_off_makes_no_call(world, monkeypatch):
+    _bundle(world, monkeypatch)
+    prod = world.prod()
+    with prod.app_context():
+        load, _ = _start("alice", merge=False)
+        assert _run_until_done(load.id) == "done"
+        assert world.calls == [] and db.session.get(PrefillBundleLoad, load.id).merge_status is None
+
+
+def test_a_failed_merge_lets_the_person_in_and_is_retried_and_their_edit_wins(world, monkeypatch):
+    """The merge fails: after the wait the person is let in with the
+    loaded profile; the merge is retried. A version the person saved
+    meanwhile wins: the late merge is not saved (its cost row is)."""
+    _bundle(world, monkeypatch)
+    prod = world.prod()
+    with prod.app_context():
+        user_id = _x_user(prefill_consent="yes").id
+        check_id = pbl.maybe_start_self_load(db.session.get(User, user_id)).id
+        world.state["fail"] = 1
+        # Run the load to the merge; the first merge attempt fails.
+        for _ in range(10):
+            out = pbl.run_load(check_id, dispatch=lambda *a, **k: None)
+            if out == "merging":
+                break
+        assert pbm.run_merge(check_id, dispatch=lambda *a, **k: None) == "retry"
+        assert pbl.starting_point(user_id)["status"] == "preparing"
+        # The wait is over: the person is let in with the loaded profile.
+        db.session.query(PrefillBundleLoad).update(
+            {PrefillBundleLoad.merge_started_at: datetime.utcnow() - timedelta(minutes=4)})
+        db.session.commit()
+        assert pbl.run_load(check_id, dispatch=lambda *a, **k: None) == "done"
+        assert db.session.get(User, user_id).approved is True
+        assert _current_profile(user_id).generated_by == "gpt-6.1-sol"
+        assert pbl.starting_point(user_id)["status"] == "ready"
+        # The person edits their profile while the retry runs: the merge
+        # lands after the edit and is not saved (its cost row is).
+        def edit_now():
+            edit = UserProfile(user_id=user_id, generated_by="user", generation_type="user")
+            edit.set_content("my own words")
+            db.session.add(edit)
+            db.session.commit()
+        world.state["during"] = edit_now
+        assert pbm.run_merge(check_id, dispatch=lambda *a, **k: None) == "superseded"
+        assert len(world.calls) == 2
+        assert _current_profile(user_id).get_content() == "my own words"
+        assert db.session.get(PrefillBundleLoad, check_id).merge_attempts == 2
+        # An edit made before a retry: no call at all.
+        db.session.query(PrefillBundleLoad).update({PrefillBundleLoad.merge_status: "retry"})
+        db.session.commit()
+        assert pbm.run_merge(check_id, dispatch=lambda *a, **k: None) == "skipped"
+        assert db.session.get(PrefillBundleLoad, check_id).merge_error == "user_version"
+        assert len(world.calls) == 2
+
+
+def test_a_merge_failing_every_time_stops_and_reports(world, monkeypatch, caplog):
+    import logging
+    _bundle(world, monkeypatch)
+    prod = world.prod()
+    with prod.app_context():
+        load, _ = _start("alice", merge=True)
+        world.state["fail"] = 10
+        for _ in range(10):
+            if pbl.run_load(load.id, dispatch=lambda *a, **k: None) == "merging":
+                break
+        with caplog.at_level(logging.ERROR):
+            outcomes = [pbm.run_merge(load.id, dispatch=lambda *a, **k: None)
+                        for _ in range(pbm.MAX_MERGE_ATTEMPTS + 1)]
+        assert outcomes == ["retry", "retry", "failed", "busy"]
+        assert len(world.calls) == pbm.MAX_MERGE_ATTEMPTS
+        assert any("final merge failed" in r.getMessage() for r in caplog.records)
+
+
+def test_no_merge_for_ai_none_or_a_no(world, monkeypatch):
+    """No AI means no AI, and a no stops it: no call; the loaded profile
+    stays."""
+    _bundle(world, monkeypatch)
+    prod = world.prod()
+    with prod.app_context():
+        load, _ = _start("alice", merge=True)
+        for _ in range(10):
+            if pbl.run_load(load.id, dispatch=lambda *a, **k: None) == "merging":
+                break
+        user = db.session.get(User, load.user_id)
+        user.default_ai_usage = "none"
+        db.session.commit()
+        assert pbm.run_merge(load.id, dispatch=lambda *a, **k: None) == "skipped"
+        assert db.session.get(PrefillBundleLoad, load.id).merge_error == "ai_none"
+        user = db.session.get(User, load.user_id)
+        user.default_ai_usage = "chat"
+        user.prefill_consent = "no"
+        db.session.query(PrefillBundleLoad).update({PrefillBundleLoad.merge_status: "retry"})
+        db.session.commit()
+        assert pbm.run_merge(load.id, dispatch=lambda *a, **k: None) == "skipped"
+        assert db.session.get(PrefillBundleLoad, load.id).merge_error == "declined"
+        assert world.calls == []
+
+
+def test_a_reload_makes_no_second_merge(world, monkeypatch):
+    """Once an account's final was merged again, a later load of a newer
+    bundle (re-exported on the lab) makes no second call."""
+    _bundle(world, monkeypatch)
+    prod = world.prod()
+    with prod.app_context():
+        load, _ = _start("alice", merge=True)
+        assert _run_until_done(load.id) == "done"
+        assert len(world.calls) == 1
+    _lab_mode(monkeypatch)
+    with world.lab.app_context():
+        u = User.query.filter_by(username="ca_alice").one()
+        n = Node(user_id=u.id, human_owner_id=u.id, node_type="user",
+                 privacy_level="private", ai_usage="chat", origin="twitter",
+                 provenance="prefill_ca", source_key="twitter:1001999", token_count=1)
+        n.set_content("a late tweet")
+        db.session.add(n)
+        db.session.commit()
+    _export(world, monkeypatch, only="alice")
+    _prod_mode(monkeypatch)
+    with prod.app_context():
+        again, refusal = _start("alice", merge=True)
+        assert refusal is None
+        assert _run_until_done(again.id) == "done"
+        assert len(world.calls) == 1
+        assert db.session.get(PrefillBundleLoad, again.id).merge_error in ("already_merged", "current")
 
 
 def test_let_in_when_ready_leaves_a_blocked_account_out(world, monkeypatch):

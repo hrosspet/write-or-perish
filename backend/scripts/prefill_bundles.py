@@ -306,6 +306,19 @@ def check_archive_snapshot(value):
     return value
 
 
+def _set_internal_types():
+    from backend.utils.profile_versions import SET_INTERNAL_TYPES
+    return SET_INTERNAL_TYPES
+
+
+def _newest_generated_by(rows):
+    """generated_by of the newest of ``rows`` (dumped dicts), by time."""
+    rows = [r for r in rows if r.get("created_at")]
+    if not rows:
+        return None
+    return max(rows, key=lambda r: r["created_at"]).get("generated_by")
+
+
 def export_one(user, storage, workdir, fp, snapshot=None):
     """Dump, gzip and upload one account; the manifest last. Returns it,
     or None when the X id was excluded meanwhile (nothing stays)."""
@@ -341,6 +354,14 @@ def export_one(user, storage, workdir, fp, snapshot=None):
             "oldest_entry_at": _iso_z(stats["oldest"]),
             "newest_entry_at": _iso_z(stats["newest"]),
             "profile_generated_by": profiles[-1].get("generated_by") if profiles else None,
+            # Which model wrote the final profile and the intentions (#698):
+            # production merges the windows again with the account's merge
+            # model when another model wrote the final.
+            "final_generated_by": _newest_generated_by(
+                [p for p in profiles
+                 if p.get("generation_type") not in _set_internal_types()]),
+            "intentions_generated_by": _newest_generated_by(
+                [a for a in artifacts if a.get("kind") == "intentions"]),
             "object": obj,
         }
         # Checked again just before writing and once more after: a

@@ -56,10 +56,23 @@ export function bundleCheckLabel(c) {
   return parts.join(" · ");
 }
 
+// The final merge run again after a load (#698): what happened to it.
+function mergeNote(l) {
+  if (!l.merge_status) return "";
+  if (l.merge_status === "done") return `; final merged again by ${l.merge_model}`;
+  if (l.merge_status === "skipped") {
+    return l.merge_error === "current" ? "; final already by the merge model" : `; no merge (${l.merge_error})`;
+  }
+  if (l.merge_status === "superseded") return "; merge not saved: the person edited their profile";
+  if (l.merge_status === "failed") return `; merge failed (${l.merge_error}), the loaded profile stays`;
+  return "; merging…";
+}
+
 export function bundleLoadLabel(l) {
   if (!l) return null;
   if (l.status === "queued") return "Queued…";
   if (l.status === "running") {
+    if (l.stage === "merge") return "Merging the final profile again…";
     if (l.stage === "links") return `Linking replies ${n(l.links_done)} / ${n(l.nodes_total)}`;
     if (l.stage === "nodes") return `Loading entries ${n(l.nodes_done)} / ${n(l.nodes_total)}`;
     return "Preparing…";
@@ -68,7 +81,7 @@ export function bundleLoadLabel(l) {
     return `Done: @${l.username} — ${n(l.created)} entries` +
       `${l.skipped ? ` (${n(l.skipped)} already there)` : ""}, ` +
       `${n(l.profiles)} profile versions, ${n(l.artifacts)} artifacts, ` +
-      `${n(l.relinked)} linked; ${l.approved ? "let in" : "not let in yet (Activate)"}`;
+      `${n(l.relinked)} linked; ${l.approved ? "let in" : "not let in yet (Activate)"}` + mergeNote(l);
   }
   if (l.status === "stopped") {
     return `Stopped by the person's No: ${n(l.nodes_done)} of ${n(l.nodes_total)} entries loaded (they stay)`;
@@ -85,6 +98,7 @@ export default function AdminPrefillBundles({ onLoaded }) {
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState("");
   const [force, setForce] = useState(false);
+  const [merge, setMerge] = useState(true);
   const [load, setLoad] = useState(null);
   const [recent, setRecent] = useState([]);
 
@@ -153,7 +167,7 @@ export default function AdminPrefillBundles({ onLoaded }) {
     setError("");
     try {
       const res = await api.post("/admin/prefill-bundles/loads",
-        { q: query.trim(), force });
+        { q: query.trim(), force, merge });
       setLoad(res.data.load);
       fetchRecent();
     } catch (e) {
@@ -185,6 +199,13 @@ export default function AdminPrefillBundles({ onLoaded }) {
       <button onClick={runCheck} disabled={checking || busy || !query.trim()}>
         {checking ? "Checking…" : "Check"}
       </button>{" "}
+      <label
+        style={{ fontSize: "0.85em", whiteSpace: "nowrap" }}
+        title="When another model wrote the bundle's final profile, merge its windows again once with this account's merge model: one paid call"
+      >
+        <input type="checkbox" checked={merge} onChange={(e) => setMerge(e.target.checked)} />{" "}
+        Merge the final again (one paid call)
+      </label>{" "}
       {refusal && refusal.forceable && (
         <label style={{ fontSize: "0.85em", whiteSpace: "nowrap" }}>
           <input type="checkbox" checked={force} onChange={(e) => setForce(e.target.checked)} />{" "}
