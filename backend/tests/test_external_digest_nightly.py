@@ -110,7 +110,8 @@ def app():
     _digest.flask_app = _app
     with _app.app_context():
         _db.create_all()
-        user = User(username="tester")
+        # In use: an account nobody used for a month is paused (#647).
+        user = User(username="tester", last_seen_at=datetime.utcnow())
         _db.session.add(user)
         _db.session.commit()
         yield _app
@@ -291,12 +292,16 @@ def test_nightly_sweep_submits_one_batch_request_per_stale_user_in_their_night(
 
     night_user = User.query.first()
     night_user.timezone = night_tz
-    day_user = User(username="daytime", timezone=day_tz)
-    current_user_ = User(username="unchanged", timezone=night_tz)
-    quiet_user = User(username="no-references", timezone=night_tz)
-    in_flight_user = User(username="already-submitted", timezone=night_tz)
+    seen = datetime.utcnow()
+    day_user = User(username="daytime", timezone=day_tz, last_seen_at=seen)
+    current_user_ = User(username="unchanged", timezone=night_tz,
+                         last_seen_at=seen)
+    quiet_user = User(username="no-references", timezone=night_tz,
+                      last_seen_at=seen)
+    in_flight_user = User(username="already-submitted", timezone=night_tz,
+                          last_seen_at=seen)
     oai_user = User(username="openai-user", timezone=night_tz,
-                    preferred_model="gpt-6-astra")
+                    preferred_model="gpt-6-astra", last_seen_at=seen)
     _db.session.add_all([day_user, current_user_, quiet_user,
                          in_flight_user, oai_user])
     _db.session.commit()
@@ -890,3 +895,44 @@ def test_rebuild_does_not_retry_a_policy_block(app, monkeypatch):
         _digest.rebuild_external_digest(_RecordingSelf(), uid)
     assert retried == []
     assert APICostLog.query.one().request_ref == "policy_block:bio_policy"
+
+
+def test_no_digest_for_an_account_nobody_used_for_a_month(app, monkeypatch):
+    """#647 (Peter, 2026-11-12: a month): references keep arriving for an
+    account its owner last opened 40 days ago, and for a pre-filled
+    account nobody has signed into. The nightly sweep builds no digest for
+    either. When the owner is back, their next night rebuilds it once,
+    from the whole corpus the pause left stale."""
+    now = datetime.utcnow()
+    night_tz = _tz_at_hour(_digest.NIGHTLY_DIGEST_LOCAL_HOUR)
+    away = User.query.first()
+    away.timezone = night_tz
+    away.last_seen_at = now - timedelta(days=40)
+    never = User(username="prefilled", timezone=night_tz,
+                 prefilled_handle="prefilled")
+    _db.session.add(never)
+    _db.session.commit()
+    _mk_item(away.id, "before", fetched_at=now - timedelta(days=41))
+    _mk_digest(away.id, created_at=now - timedelta(days=41) + timedelta(
+        hours=1))
+    for i in range(12):   # what the sync brought while nobody looked
+        _mk_item(away.id, f"paused-{i}",
+                 fetched_at=now - timedelta(days=i + 1))
+    _mk_item(never.id, "n1")
+    submitted = _stub_batch_submit(monkeypatch)
+
+    for _ in range(2):
+        assert _digest.sweep_external_digests() == {"status": "ok",
+                                                    "submitted": 0}
+    assert submitted == []
+    assert APICostLog.query.count() == 0
+
+    away.last_seen_at = datetime.utcnow()
+    _db.session.commit()
+    assert _digest.sweep_external_digests() == {"status": "ok",
+                                                "submitted": 1}
+    requests_ = submitted[0]["anthropic"]
+    assert [r["custom_id"] for r in requests_] == [
+        f"external-digest-{away.id}"]
+    assert ("The corpus holds 13 saved items"
+            in requests_[0]["messages"][0]["content"])

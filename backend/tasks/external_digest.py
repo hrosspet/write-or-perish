@@ -44,6 +44,7 @@ from backend.utils.llm_batch import (
 )
 from backend.utils.timefmt import user_local_hour
 
+from backend.utils.activity import in_use_user_ids
 from backend.utils.hidden_rows import account_on_hold, corpus_changed
 
 logger = get_task_logger(__name__)
@@ -364,14 +365,21 @@ def sweep_external_digests():
     This is the ONLY scheduled dispatcher. Saving a reference (clipper,
     import, bookmark sync) deliberately does not rebuild — a burst of
     clips would otherwise pay for one whole-corpus LLM call each.
+
+    Accounts nobody uses (#647): no digest while the owner has not used
+    Loore for UNUSED_ACCOUNT_PAUSE_DAYS (utils/activity.in_use_user_ids).
+    The digest stays stale meanwhile, so it is rebuilt once, from the whole
+    corpus, in the owner's first night after they are back.
     """
     with flask_app.app_context():
         stale_ids = set(_stale_user_ids()) - _users_in_pending_batches()
         if not stale_ids:
             return {"status": "ok", "submitted": 0}
+        in_use = in_use_user_ids(stale_ids, flask_app.config)
         due = [
             user for user in User.query.filter(User.id.in_(stale_ids)).all()
             if user_local_hour(user) == NIGHTLY_DIGEST_LOCAL_HOUR
+            and user.id in in_use   # #647: paused while nobody uses it
             and account_allows_ai(user)   # #346
             and user.deleted_at is None   # hidden: account deleted (#269)
             # Account being deleted (#269). A waiting "Delete all my

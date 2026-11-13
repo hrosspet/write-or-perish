@@ -771,6 +771,14 @@ class Config:
         "https://loore.org/api/external/twitter/callback",
     )
 
+    # Accounts nobody uses (#647; Peter, 2026-11-12: "I'd say a month?"):
+    # after this many days without use, the nightly X bookmark sync and the
+    # saved-references digest stop running for the account, and they catch
+    # up once when its owner is back (backend/utils/activity.py,
+    # in_use_user_ids). 0 turns the pause off.
+    UNUSED_ACCOUNT_PAUSE_DAYS = float_from_env(
+        "UNUSED_ACCOUNT_PAUSE_DAYS", 30.0)
+
     # Magic link email authentication (SMTP)
     MAIL_SERVER = os.environ.get("MAIL_SERVER", "localhost")
     # `or "587"` (not just a get() default): docker compose injects UNSET
