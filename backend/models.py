@@ -2676,6 +2676,20 @@ class Invite(db.Model):
     made an unused one expires. An account deletion keeps the row without
     the deleted account."""
     __tablename__ = "invite"
+    __table_args__ = (
+        # One open invite per inviter, and one used invite per inviter and
+        # month it was made in, held by the database too (utils/referrals
+        # also takes a per-inviter lock and changes a state only while it
+        # is open).
+        db.Index("uq_invite_one_open_per_inviter", "inviter_id",
+                 unique=True,
+                 postgresql_where=db.text("state = 'open'"),
+                 sqlite_where=db.text("state = 'open'")),
+        db.Index("uq_invite_one_used_per_inviter_month", "inviter_id",
+                 "month", unique=True,
+                 postgresql_where=db.text("state = 'used'"),
+                 sqlite_where=db.text("state = 'used'")),
+    )
 
     id = db.Column(db.Integer, primary_key=True)
     inviter_id = db.Column(db.Integer, db.ForeignKey("user.id"),
@@ -2689,6 +2703,11 @@ class Invite(db.Model):
     # sign up, so it is cleared when the invite is used, withdrawn or
     # expires. Matching is all it is for.
     target = db.Column(db.String(320), nullable=True)
+    # For an X handle: the X account id it named when the invite was made
+    # (a sign-in matches on it, so a handle taken over by someone else
+    # does not match). NULL when it could not be looked up then (the
+    # handle's text is matched instead). Cleared with the target.
+    target_x_id = db.Column(db.String(32), nullable=True)
     # "YYYY-MM" (UTC): the month whose invite this is.
     month = db.Column(db.String(7), nullable=False)
     created_at = db.Column(db.DateTime, nullable=False,

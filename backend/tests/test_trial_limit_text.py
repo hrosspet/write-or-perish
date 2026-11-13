@@ -161,13 +161,14 @@ class TestTheCodeItDescribes:
 
 
 class TestSaidAloud:
-    def test_the_spoken_sentence_fits_every_usage_limit(self):
-        """One sentence for the month's cap and for the trial's: neither
-        "monthly" nor "resets", which the trial's never does."""
-        text = SPOKEN_REFUSALS[SPEND_CAP_CODE]
-        assert text == ("You've reached your usage limit, so Loore can't "
-                        "reply until it lifts.")
-        assert "monthly" not in text and "reset" not in text
+    def test_the_spoken_sentence_is_unchanged(self):
+        """Control: the sentence said aloud for any usage limit stays the
+        month's (Peter, 2026-11-13, of it spoken for the trial's and the
+        free month's ceilings: "this is fine, leave it"). Only the texts on
+        the screen changed."""
+        assert SPOKEN_REFUSALS[SPEND_CAP_CODE] == (
+            "You've reached your monthly usage limit, so Loore can't reply "
+            "until it resets.")
 
 
 class TestRecordingsAndUploads:

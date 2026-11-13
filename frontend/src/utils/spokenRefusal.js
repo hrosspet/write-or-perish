@@ -20,8 +20,8 @@ export const THREAD_LIMIT_SPOKEN = 'This thread is too long for another '
   + 'reply. Start a new thread to keep talking.';
 
 export const REFUSAL_SENTENCES = {
-  [SPEND_CAP_REFUSAL]: "You've reached your usage limit, so Loore can't "
-    + 'reply until it lifts.',
+  [SPEND_CAP_REFUSAL]: "You've reached your monthly usage limit, so Loore "
+    + "can't reply until it resets.",
   [AI_USAGE_REFUSAL]: "AI usage is set to None, so Loore can't reply here.",
   [APPROVAL_REFUSAL]: 'A change to your data is waiting for your approval. '
     + 'Approve or reject it on the screen to continue.',

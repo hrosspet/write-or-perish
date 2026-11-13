@@ -27,6 +27,44 @@ from backend.utils.referrals import InviteRefused
 
 NOW = datetime(2026, 11, 13, 12, 0)
 
+# X account ids by handle, as the Community Archive (free) or X (one paid
+# read) answer them; anything else is not on X.
+ARCHIVE = {"fred_x": "4242"}
+ON_X = {"ben_x": "9001", "fred": "5555", "fred_x": "4242"}
+
+
+class XLookups:
+    def __init__(self):
+        self.archive, self.x = dict(ARCHIVE), dict(ON_X)
+        self.archive_down = self.x_down = False
+        self.x_reads = []
+
+    def fetch_account(self, handle, timeout=None):
+        if self.archive_down:
+            raise ConnectionError("archive down")
+        x_id = self.archive.get(handle.lower())
+        return {"account_id": x_id, "username": handle} if x_id else None
+
+    def lookup_user(self, handle, creds, timeout=None):
+        from backend.utils.x_api import XApiError
+        self.x_reads.append(handle)
+        if self.x_down:
+            raise XApiError("X API rate limit hit — try again later.",
+                            sent=True)
+        x_id = self.x.get(handle.lower())
+        return {"id": x_id, "username": handle} if x_id else None
+
+
+@pytest.fixture(autouse=True)
+def x_lookups(monkeypatch):
+    """No outside call: the archive and X answer from the tables above."""
+    from backend.utils import community_archive, x_api
+    fake = XLookups()
+    monkeypatch.setattr(community_archive, "fetch_account",
+                        fake.fetch_account)
+    monkeypatch.setattr(x_api, "lookup_user", fake.lookup_user)
+    return fake
+
 
 def _inviter(name="ana", **kw):
     """An account let in (alpha, set by hand) with an address and an X
@@ -78,6 +116,7 @@ class TestMaking:
                       "twitter.com/ben_x/"):
             invite = _invite(ana, typed)
             assert (invite.kind, invite.target) == ("x", "ben_x"), typed
+            assert invite.target_x_id == "9001"
             referrals.withdraw_invite(ana, NOW)
 
     @pytest.mark.parametrize("typed", [
@@ -87,13 +126,29 @@ class TestMaking:
         assert _refused(_inviter(), typed).status == 400
 
     @pytest.mark.parametrize("typed", [
-        "ANA@example.com", "@ana_x", "https://x.com/Ana_X", "new@example.com"])
+        "ANA@example.com", "@ana_x", "https://x.com/Ana_X", "new@example.com",
+        "ana+loore@example.com", "Ana+X@Example.COM", "new+1@example.com"])
     def test_not_oneself(self, app, typed):  # noqa: F811
-        """Own address (any case), own handle, the address being changed
-        to."""
+        """Own address (any case, or with a plus-tag), own handle, the
+        address being changed to."""
         ana = _inviter(pending_email="new@example.com")
         assert _refused(ana, typed).message.startswith("That's your own")
         assert Invite.query.count() == 0
+
+    def test_a_plus_tag_is_ignored_only_for_that(self, app):  # noqa: F811
+        """Control: another address that only looks like the inviter's is
+        fine, and the stored address keeps its plus-tag."""
+        ana = _inviter(email="ana+work@example.com")
+        assert _refused(ana, "ana@example.com").status == 400
+        invite = _invite(ana, "ana.b+x@example.com")
+        assert invite.target == "ana.b+x@example.com"
+
+    def test_not_ones_own_x_account_under_another_handle(
+            self, app):  # noqa: F811
+        """The handle typed is someone's current one, and its X account is
+        the inviter's own (renamed)."""
+        ana = _inviter(twitter_id="9001", twitter_handle="ana_old")
+        assert _refused(ana, "@ben_x").message.startswith("That's your own")
 
     def test_one_open_at_a_time(self, app):  # noqa: F811
         ana = _inviter()
@@ -253,6 +308,137 @@ class TestTheRoutes:
         assert client.get("/api/referrals/invite").status_code == 404
         assert client.post("/api/referrals/invite",
                            json={"to": "ben@example.com"}).status_code == 404
+
+
+# ── An X handle's account (the lookup the admin whitelist uses) ─────────
+
+class TestXAccounts:
+    def test_the_id_is_stored_and_deleted_with_the_handle(
+            self, app, x_lookups):  # noqa: F811
+        """The Community Archive knows it: no paid read. X knows it: one
+        read, on the inviter's ledger, naming no handle."""
+        from backend.models import APICostLog
+        ana = _inviter()
+        free = _invite(ana, "@fred_x")
+        assert (free.target, free.target_x_id) == ("fred_x", "4242")
+        assert x_lookups.x_reads == [] and APICostLog.query.count() == 0
+        referrals.withdraw_invite(ana, NOW)
+        free = _db.session.get(Invite, free.id)
+        assert (free.target, free.target_x_id) == (None, None)
+        paid = _invite(ana, "@ben_x")
+        assert paid.target_x_id == "9001"
+        row = APICostLog.query.one()
+        assert (row.user_id, row.request_type, row.request_ref) == (
+            ana.id, "x_id_lookup", "invite")
+        assert row.cost_microdollars == 10000
+        assert "ben" not in repr(row.__dict__)
+
+    def test_a_handle_nobody_has_is_a_typo(self, app):  # noqa: F811
+        refused = _refused(_inviter(), "@fredd_x")
+        assert (refused.status, refused.message) == (
+            400, "There is no X account @fredd_x. Check the spelling.")
+        assert Invite.query.count() == 0
+
+    def test_an_outage_never_stops_an_invite(self, app, x_lookups):  # noqa: F811
+        """The archive is down and X answers with a rate limit: the invite
+        is made with the handle only, and a sign-in matches its text."""
+        x_lookups.archive_down = x_lookups.x_down = True
+        ana = _inviter()
+        invite = _invite(ana, "@fred_x")
+        assert (invite.target, invite.target_x_id) == ("fred_x", None)
+        assert _redeem(_friend(), invite, x_handle="Fred_X", x_id="31337")
+
+    def test_a_taken_over_handle_does_not_match(self, signup_app):  # noqa: F811
+        """Fred renamed; someone else took @fred_x and follows the link:
+        told the invitation was for someone else, nothing recorded. Fred,
+        as @fred_new, signs up through it: recorded."""
+        ana, invite = _open("@fred_x")
+        client = signup_app.test_client()
+        r = _x_answer(signup_app, client, invite.code, 8888, "fred_x")
+        assert r.headers["Location"] == MISMATCH + "x"
+        assert Referral.query.count() == 0
+        fred = _x_signup(signup_app, invite.code, 4242, "fred_new")
+        assert Referral.query.one().friend_id == fred.id
+
+
+# ── Two things at once ──────────────────────────────────────────────────
+# An invite's state changes only while it is open, and one open invite per
+# person is held by the database. sqlite runs one request at a time, so
+# the interleavings are built by hand: a stale view of an invite, and both
+# requests passing their checks before either writes.
+
+class TestAtOnce:
+    def test_a_withdrawal_that_lost_to_the_sign_up_changes_nothing(
+            self, app, monkeypatch):  # noqa: F811
+        """Withdraw read the invite as open; the friend's sign-up used it
+        first: it stays used, and the month stays spent."""
+        ana = _inviter()
+        invite = _invite(ana, "fred@example.com")
+        stale = referrals.open_invite(ana.id)
+        assert _redeem(_friend(), invite, email="fred@example.com")
+        monkeypatch.setattr(referrals, "open_invite", lambda _uid: stale)
+        assert referrals.withdraw_invite(ana, NOW) is False
+        assert _db.session.get(Invite, invite.id).state == "used"
+        monkeypatch.undo()
+        assert _refused(ana, "cy@example.com").message == \
+            "You've used this month's invite."
+
+    def test_a_sign_up_that_lost_to_the_withdrawal_records_nothing(
+            self, app):  # noqa: F811
+        """The other order: withdrawn first, the sign-up finds it closed,
+        and the month is free again."""
+        ana = _inviter()
+        invite = _invite(ana, "fred@example.com")
+        referrals.withdraw_invite(ana, NOW)
+        assert _redeem(_friend(), invite, email="fred@example.com") is None
+        assert _invite(ana, "cy@example.com").state == "open"
+
+    def test_an_expiry_that_lost_to_the_sign_up_changes_nothing(
+            self, app):  # noqa: F811
+        ana = _inviter()
+        invite = _invite(ana, "fred@example.com")
+        assert _redeem(_friend(), invite, email="fred@example.com")
+        assert referrals.expire_due(NOW + timedelta(days=31)) == 0
+        assert _db.session.get(Invite, invite.id).state == "used"
+
+    def test_two_makes_at_once_leave_one_open(self, app, monkeypatch):  # noqa: F811
+        """Both requests saw no open invite (one had expired and was not
+        swept yet): the database keeps the second from being a second
+        open invite, and it is refused."""
+        ana = _inviter()
+        old = _invite(ana, "ben@example.com")
+        later = NOW + timedelta(days=31)
+        first = _invite(ana, "cy@example.com", later)
+        assert _db.session.get(Invite, old.id).state == "expired"
+        monkeypatch.setattr(referrals, "open_invite", lambda _uid: None)
+        refused = _refused(ana, "dee@example.com", later)
+        assert (refused.status, refused.message) == (
+            409, referrals.OPEN_ALREADY)
+        assert [i.id for i in Invite.query.filter_by(state="open")] == [
+            first.id]
+
+    def test_the_database_holds_one_open_and_one_used_a_month(
+            self, app):  # noqa: F811
+        from sqlalchemy.exc import IntegrityError
+        ana = _inviter()
+
+        def add(state, month, code):
+            _db.session.add(Invite(inviter_id=ana.id, code=code, kind="email",
+                                   month=month, state=state,
+                                   expires_at=NOW + timedelta(days=1)))
+            _db.session.commit()
+
+        for state, month, code in (("withdrawn", "2026-11", "w" * 16),
+                                   ("withdrawn", "2026-11", "x" * 16),
+                                   ("used", "2026-10", "u" * 16),
+                                   ("used", "2026-11", "v" * 16),
+                                   ("open", "2026-11", "o" * 16)):
+            add(state, month, code)
+        for state, month, code in (("open", "2026-12", "p" * 16),
+                                   ("used", "2026-11", "q" * 16)):
+            with pytest.raises(IntegrityError):
+                add(state, month, code)
+            _db.session.rollback()
 
 
 # ── The sign-up that uses it ─────────────────────────────────────────────

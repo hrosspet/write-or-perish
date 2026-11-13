@@ -31,7 +31,7 @@ enum SpokenRefusal: String, CaseIterable, Equatable, Sendable {
     var text: String {
         switch self {
         case .usageLimit:
-            return "You've reached your usage limit, so Loore can't reply until it lifts."
+            return "You've reached your monthly usage limit, so Loore can't reply until it resets."
         case .aiUsage:
             return "AI usage is set to None, so Loore can't reply here."
         case .approvalWaiting:

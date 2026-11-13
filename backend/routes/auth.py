@@ -276,7 +276,8 @@ def login():
     if _counts_as_new(user):
         # An invite made for someone else (#439): ask first; no account
         # is made until they choose to go on without it.
-        kind = referrals.invite_mismatch(invite, x_handle=username)
+        kind = referrals.invite_mismatch(invite, x_handle=username,
+                                         x_id=twitter_id)
         if kind:
             return _ask_about_invite(kind, {
                 "method": "x", "twitter_id": twitter_id,
@@ -331,8 +332,10 @@ def _finish_x_sign_in(user, new_account, invite, username):
 
     # Who invited this account (#439), before the sign-in is recorded: an
     # account set up ahead of its owner counts as new until then. Only an
-    # invite made for this X handle counts.
-    referrals.redeem_invite(user, invite, new_account, x_handle=username)
+    # invite made for this X account counts (its id; its handle when the
+    # invite's lookup was down).
+    referrals.redeem_invite(user, invite, new_account, x_handle=username,
+                            x_id=user.twitter_id)
     login_user(user, remember=True)
     # Record the sign-in itself, not only the app requests that follow:
     # "has anyone ever signed into this account" (a placeholder has not)
@@ -475,7 +478,9 @@ def invite_choice_continue():
     """Go on without the invitation (#439): finish the sign-in that was
     held, with no inviter; the invite stays open for the person it names.
     410 when there is nothing held, or it waited longer than a sign-in
-    link lasts. {"redirect": url}."""
+    link lasts. {"redirect": url}. 404 while referrals are off."""
+    if not referrals.referrals_enabled():
+        return jsonify({"error": "Not found"}), 404
     pending = session.pop(INVITE_CHOICE_KEY, None)
     max_age = current_app.config.get("MAGIC_LINK_EXPIRY_SECONDS", 900)
     if (not isinstance(pending, dict)
@@ -510,7 +515,10 @@ def invite_choice_continue():
 def invite_choice_cancel():
     """Sign in differently (#439): forget the held sign-in. No account was
     made; the X sign-in's token is dropped so the next one asks X which
-    account. The invite code stays in the browser for the right one."""
+    account. The invite code stays in the browser for the right one. 404
+    while referrals are off."""
+    if not referrals.referrals_enabled():
+        return jsonify({"error": "Not found"}), 404
     pending = session.pop(INVITE_CHOICE_KEY, None)
     if isinstance(pending, dict) and pending.get("method") == "x":
         _drop_x_token()

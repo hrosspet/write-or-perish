@@ -682,7 +682,8 @@ def delete_identity(user_id):
         synchronize_session=False)
     counts["invite.inviter_id"] += Invite.query.filter(
         Invite.inviter_id == U).update(
-        {Invite.inviter_id: None, Invite.target: None},
+        {Invite.inviter_id: None, Invite.target: None,
+         Invite.target_x_id: None},
         synchronize_session=False)
 
     handles = {(user.username or "").lower()}

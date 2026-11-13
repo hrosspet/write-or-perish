@@ -5,9 +5,9 @@ Decided on #439 (Peter, 2026-10-09):
 
 * a free week for both, granted on the friend's first payment (not at
   signup, not when a trial starts), so signups alone earn nothing;
-* a friend without Community Archive data signs up through the invite and
-  waits for approval like any other signup: the invite records who invited
-  whom and lets nobody in;
+* a friend signs up through the invite like any other signup: the invite
+  records who invited whom and changes nothing about how the account is
+  let in;
 * no clawback when the friend's payment is refunded or withdrawn;
 * no prompts to invite and no counts: the invite sits on the Account page,
   and the inviter learns that a reward arrived, nothing about the friend.
@@ -137,23 +137,110 @@ def parse_target(raw):
     return ("x", handle) if handle else None
 
 
-def _own_targets(user):
-    """The handles and addresses that are the account's own: inviting
-    them is inviting oneself."""
-    own = set()
-    for value in (user.email, getattr(user, "pending_email", None)):
-        email = normalise_email(value)
-        if email:
-            own.add(("email", email))
-    for value in (user.twitter_handle, getattr(user, "prefilled_handle",
-                                               None)):
-        handle = normalise_handle(value)
-        if handle:
-            own.add(("x", handle))
-    return own
+def _without_plus_tag(email):
+    """*email* without a "+tag" in its local part. Only for telling whether
+    an invite is the inviter's own (a plus address reaches the same
+    mailbox at most providers); stored and matched addresses keep it."""
+    local, _, domain = email.partition("@")
+    return f"{local.split('+', 1)[0]}@{domain}"
+
+
+def _is_own(user, target):
+    """Inviting *target* is inviting oneself: the account's own address
+    (also with a plus-tag or in another case), the address it is changing
+    to, its X handle or its pre-filled handle."""
+    kind, value = target
+    if kind == "email":
+        own = {_without_plus_tag(e) for e in (
+            normalise_email(user.email),
+            normalise_email(getattr(user, "pending_email", None))) if e}
+        return _without_plus_tag(value) in own
+    own = {normalise_handle(h) for h in (
+        user.twitter_handle, getattr(user, "prefilled_handle", None))}
+    return value in own
+
+
+# ── An X handle's account ───────────────────────────────────────────────
+# A handle can change hands: the named person renames and someone else
+# takes the old handle. So an X invite stores the X account id the handle
+# names when the invite is made, and a sign-in matches on the id. The
+# lookup is the admin whitelist's (utils/x_identity.resolve_x_id): the
+# Community Archive first (free), then one X user read (X_USER_READ_COST,
+# 0.01 USD) on the inviter's ledger. It is made here from its two parts so
+# that neither the cost row nor the log names the invited handle (personal
+# data of someone who may never sign up).
+
+def _log_x_read(user_id):
+    from backend.models import APICostLog
+    from backend.utils import x_api
+    db.session.add(APICostLog(
+        user_id=user_id, model_id="x-api/user-lookup",
+        request_type="x_id_lookup", request_ref="invite",
+        input_tokens=0, output_tokens=0,
+        cost_microdollars=x_api.cost_microdollars(0, user_reads=1)))
+    db.session.commit()
+
+
+def lookup_x_id(handle, inviter, config=None):
+    """The X account id *handle* names, or None when it cannot be known now
+    (the archive and X unreachable, no X credentials, a rate limit): the
+    invite then matches the handle's text. An outage never stops an
+    invite. Raises InviteRefused when X says no account has that handle
+    (a typo)."""
+    import time
+    from backend.utils import community_archive as ca
+    from backend.utils import x_api
+    from backend.utils.x_identity import LOOKUP_TIMEOUT
+    deadline = time.monotonic() + LOOKUP_TIMEOUT
+    try:
+        account = ca.fetch_account(handle, timeout=LOOKUP_TIMEOUT)
+        if account and account.get("account_id"):
+            return str(account["account_id"])
+    except Exception as e:  # noqa: BLE001 - unreachable, or ambiguous
+        logger.warning("Invite: Community Archive lookup failed (%s)",
+                       type(e).__name__)
+    cfg = _config(config)
+    creds = (cfg.get("TWITTER_API_KEY"), cfg.get("TWITTER_API_SECRET"))
+    remaining = deadline - time.monotonic()
+    if remaining <= 1:
+        return None
+    try:
+        account = x_api.lookup_user(handle, creds, timeout=remaining)
+    except x_api.XApiError as e:
+        if e.sent:
+            _log_x_read(inviter.id)
+        logger.warning("Invite: X user lookup failed (%s)", type(e).__name__)
+        return None
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Invite: X user lookup failed (%s)", type(e).__name__)
+        return None
+    _log_x_read(inviter.id)
+    if account is None:
+        raise InviteRefused(f"There is no X account @{handle}. Check the "
+                            "spelling.")
+    return str(account["id"])
+
+
+def _identity_matches(invite, email=None, x_handle=None, x_id=None):
+    """The sign-in (its *email*, or its X account: *x_id* and *x_handle*)
+    is the person *invite* names. An X invite with an X account id matches
+    on the id only; one made while the lookup was down, on the handle."""
+    if invite.kind == "email":
+        address = normalise_email(email)
+        return bool(address) and address == invite.target
+    if invite.target_x_id:
+        return x_id is not None and str(x_id) == invite.target_x_id
+    handle = normalise_handle(x_handle)
+    return bool(handle) and handle == invite.target
 
 
 # ── The month's invite ──────────────────────────────────────────────────
+# Races (two requests at once, a withdrawal while the friend signs up):
+# an invite's state changes only while it is open (a conditional update,
+# acting on the rows it changed); making an invite and recording its use
+# take the same per-inviter lock, with no commit in between; and the
+# database holds one open invite per inviter and one used invite per
+# inviter and month (models.Invite).
 
 def _month(now):
     return now.strftime("%Y-%m")
@@ -165,27 +252,38 @@ def _next_month_start(now):
     return datetime(now.year, now.month + 1, 1)
 
 
-def _end(invite, state, now):
-    """The invite stops being open; its handle or address is deleted."""
-    invite.state = state
-    invite.ended_at = now
-    invite.target = None
+_ENDED = {"ended_at": None, "target": None, "target_x_id": None}
 
 
-def expire_due(now=None, inviter_id=None):
+def _end_if_open(invite_id, state, now):
+    """The invite stops being open, and its handle or address is deleted,
+    only if it is still open. Does not commit. Returns whether it did."""
+    changed = (Invite.query
+               .filter(Invite.id == invite_id, Invite.state == OPEN)
+               .update({**_ENDED, "state": state, "ended_at": now},
+                       synchronize_session=False))
+    return changed == 1
+
+
+def expire_due(now=None, inviter_id=None, commit=True):
     """Mark open invites past their end as expired (deleting the handle or
-    address in them). Commits. Returns how many. Run hourly
+    address in them). Returns how many. Run hourly
     (tasks/invites.expire_invites) and before reading an inviter's."""
     now = now or datetime.utcnow()
     q = Invite.query.filter(Invite.state == OPEN, Invite.expires_at <= now)
     if inviter_id is not None:
         q = q.filter(Invite.inviter_id == inviter_id)
-    due = q.all()
-    for invite in due:
-        _end(invite, EXPIRED, now)
-    if due:
+    changed = q.update({**_ENDED, "state": EXPIRED, "ended_at": now},
+                       synchronize_session=False)
+    if changed and commit:
         db.session.commit()
-    return len(due)
+    return changed
+
+
+def _lock_inviter(inviter_id):
+    """The per-inviter lock (a no-op on sqlite, where the indexes hold)."""
+    db.session.query(User.id).filter(User.id == inviter_id) \
+        .with_for_update().first()
 
 
 def open_invite(user_id):
@@ -200,8 +298,8 @@ def _month_used(user_id, month):
 
 def may_invite(user, config=None):
     """An account let in (a trial included; a lapsed one too) may make
-    invites; one waiting for approval, being deleted, or never let in
-    may not."""
+    invites; one not let in yet, being deleted, or never let in may
+    not."""
     from backend.utils.subscriptions import access_state
     if user is None or not user.approved or user.deleted_at is not None:
         return False
@@ -245,6 +343,18 @@ class InviteRefused(Exception):
         self.status = status
 
 
+OPEN_ALREADY = ("You have an invite out already. Withdraw it to invite "
+                "someone else.")
+MONTH_USED = "You've used this month's invite."
+
+
+def _refuse_if_taken(user_id, now):
+    if open_invite(user_id) is not None:
+        raise InviteRefused(OPEN_ALREADY, 409)
+    if _month_used(user_id, _month(now)):
+        raise InviteRefused(MONTH_USED, 409)
+
+
 def create_invite(user, raw_to, now=None, config=None):
     """Make *user*'s invite for the person *raw_to* names (an X handle or
     an email address). Raises InviteRefused. Commits.
@@ -262,56 +372,79 @@ def create_invite(user, raw_to, now=None, config=None):
     if target is None:
         raise InviteRefused(
             "Enter your friend's X handle (like @ana) or email address.")
-    if target in _own_targets(user):
-        raise InviteRefused("That's your own address or handle. Invite "
-                            "someone else.")
-    # One request at a time per inviter (a no-op on sqlite).
-    db.session.query(User.id).filter(User.id == user.id) \
-        .with_for_update().first()
+    own = InviteRefused("That's your own address or handle. Invite "
+                        "someone else.")
+    if _is_own(user, target):
+        raise own
+    # Before a paid lookup; checked again under the lock below.
     expire_due(now, inviter_id=user.id)
-    if open_invite(user.id) is not None:
-        raise InviteRefused("You have an invite out already. Withdraw it "
-                            "to invite someone else.", 409)
-    if _month_used(user.id, _month(now)):
-        raise InviteRefused("You've used this month's invite.", 409)
+    _refuse_if_taken(user.id, now)
+    x_id = None
+    if target[0] == "x":
+        x_id = lookup_x_id(target[1], user, cfg)
+        if x_id and user.twitter_id and x_id == str(user.twitter_id):
+            raise own
     days = int(cfg.get("INVITE_EXPIRY_DAYS") or 30)
     for _attempt in range(3):
+        try:
+            _lock_inviter(user.id)
+            expire_due(now, inviter_id=user.id, commit=False)
+            _refuse_if_taken(user.id, now)
+        except InviteRefused:
+            db.session.rollback()
+            raise
         invite = Invite(inviter_id=user.id,
                         code=secrets.token_urlsafe(CODE_BYTES),
-                        kind=target[0], target=target[1], month=_month(now),
+                        kind=target[0], target=target[1],
+                        target_x_id=x_id, month=_month(now),
                         created_at=now,
                         expires_at=now + timedelta(days=days), state=OPEN)
         db.session.add(invite)
         try:
             db.session.commit()
         except IntegrityError:
-            # The code is another invite's (96 random bits: never in
-            # practice); draw again.
+            # Another request made one at the same moment (the open-invite
+            # index), or the code is another invite's (96 random bits:
+            # never in practice): look again.
             db.session.rollback()
             continue
         return invite
-    raise RuntimeError("could not make an invite code")
+    raise InviteRefused(OPEN_ALREADY, 409)
 
 
 def withdraw_invite(user, now=None):
     """End *user*'s open invite; its handle or address is deleted. Another
     may then be made, unless this month's was used. Commits. Returns
-    whether there was one."""
+    whether it was withdrawn (not when it was used or ended meanwhile)."""
     invite = open_invite(user.id)
     if invite is None:
         return False
-    _end(invite, WITHDRAWN, now or datetime.utcnow())
+    withdrawn = _end_if_open(invite.id, WITHDRAWN, now or datetime.utcnow())
     db.session.commit()
-    return True
+    return withdrawn
 
 
 # ── Recording who invited whom ──────────────────────────────────────────
 
-def invite_mismatch(raw_code, email=None, x_handle=None, now=None,
-                    config=None):
+def _live_open_invite(code, now):
+    """The open, unexpired invite of a live inviter that *code* names, or
+    None."""
+    invite = Invite.query.filter_by(code=code, state=OPEN).first()
+    if invite is None or invite.expires_at <= now:
+        return None
+    inviter = (db.session.get(User, invite.inviter_id)
+               if invite.inviter_id else None)
+    if inviter is None or inviter.deleted_at is not None:
+        return None
+    return invite
+
+
+def invite_mismatch(raw_code, email=None, x_handle=None, x_id=None,
+                    now=None, config=None):
     """For a sign-up that came with *raw_code* and has just proven its
-    *email* or X *x_handle*: the kind of identity the invite names ("x" or
-    "email") when it is an open invite made for someone else, else None.
+    *email* or X account (*x_id*, *x_handle*): the kind of identity the
+    invite names ("x" or "email") when it is an open invite made for
+    someone else, else None.
 
     Peter, 2026-11-13: someone the invite was meant for may sign in with
     another address or X account by accident, so they are told the
@@ -322,26 +455,18 @@ def invite_mismatch(raw_code, email=None, x_handle=None, now=None,
     code = clean_code(raw_code)
     if code is None or not referrals_enabled(config):
         return None
-    now = now or datetime.utcnow()
-    invite = Invite.query.filter_by(code=code, state=OPEN).first()
-    if invite is None or invite.expires_at <= now:
-        return None
-    inviter = (db.session.get(User, invite.inviter_id)
-               if invite.inviter_id else None)
-    if inviter is None or inviter.deleted_at is not None:
-        return None
-    identity = (normalise_email(email) if invite.kind == "email"
-                else normalise_handle(x_handle))
-    if identity and identity == invite.target:
+    invite = _live_open_invite(code, now or datetime.utcnow())
+    if invite is None or _identity_matches(invite, email, x_handle, x_id):
         return None
     return invite.kind
 
 
 def redeem_invite(friend, raw_code, new_account, email=None, x_handle=None,
-                  now=None, config=None):
+                  x_id=None, now=None, config=None):
     """At a sign-in that came with the invite code *raw_code*: record that
     the invite's maker invited *friend*, when *friend* is the person the
-    invite names (the sign-in's *email*, or its X *x_handle*).
+    invite names (the sign-in's *email*, or its X account: *x_id*, or
+    *x_handle* for an invite made while the X lookup was down).
 
     Only for an account made by this sign-in (*new_account*), or one set
     up ahead of its owner that nobody has signed in to yet (admin
@@ -349,8 +474,7 @@ def redeem_invite(friend, raw_code, new_account, email=None, x_handle=None,
     was not brought by it. Records nothing, and leaves the invite as it
     was, for anyone else, an invite that is not open (used, withdrawn,
     expired), the inviter's own account or a deleted inviter's; the first
-    inviter is kept. Approval is untouched: a friend outside the Community
-    Archive waits as before. Never raises. Returns the Referral or None."""
+    inviter is kept. Never raises. Returns the Referral or None."""
     code = clean_code(raw_code)
     if friend is None or code is None or not referrals_enabled(config):
         return None
@@ -360,29 +484,30 @@ def redeem_invite(friend, raw_code, new_account, email=None, x_handle=None,
             from backend.utils.activity import sign_in_status
             if sign_in_status(friend) != "never":
                 return None
-        invite = (Invite.query.filter_by(code=code)
-                  .with_for_update().first())
+        invite = Invite.query.filter_by(code=code).first()
         if invite is None or invite.state != OPEN:
             return None
         if invite.expires_at <= now:
-            _end(invite, EXPIRED, now)
-            db.session.commit()
+            if _end_if_open(invite.id, EXPIRED, now):
+                db.session.commit()
             return None
-        identity = (normalise_email(email) if invite.kind == "email"
-                    else normalise_handle(x_handle))
-        if not identity or identity != invite.target:
+        if not _identity_matches(invite, email, x_handle, x_id):
             return None   # someone else followed the link: it stays open
         inviter = (db.session.get(User, invite.inviter_id)
                    if invite.inviter_id else None)
         if (inviter is None or inviter.id == friend.id
                 or inviter.deleted_at is not None):
             return None
+        _lock_inviter(inviter.id)
         if Referral.query.filter_by(friend_id=friend.id).first() is not None:
+            db.session.rollback()
             return None   # one inviter per friend: the first one
+        if not _end_if_open(invite.id, USED, now):
+            db.session.rollback()
+            return None   # withdrawn or ended meanwhile
         referral = Referral(inviter_id=inviter.id, friend_id=friend.id,
                             invite_id=invite.id)
         db.session.add(referral)
-        _end(invite, USED, now)
         db.session.commit()
         logger.info("Referral recorded: user %s invited user %s (invite %s)",
                     inviter.id, friend.id, invite.id)

@@ -185,7 +185,7 @@ export default function InviteSection() {
       ) : null}
       {error && <div role="status" style={{ ...helperStyle, color: "var(--error, #c0392b)" }}>{error}</div>}
       <div style={helperStyle}>
-        Your friend signs up as anyone does and may wait for approval. You'll get a note when the credit arrives.
+        Your friend signs up as anyone does. You'll get a note when the credit arrives.
       </div>
     </div>
   );
