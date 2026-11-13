@@ -633,6 +633,27 @@ def test_a_batch_it_cannot_close_is_abandoned_after_the_window(
     assert _check(rc)["submitted"] == 1
 
 
+@pytest.mark.parametrize("provider_key", ["openai:gpt-x", "anthropic"])
+def test_an_abandoned_openai_batch_is_dropped_with_its_files(
+        app, rc, world, monkeypatch, provider_key):
+    """#667: nothing reads an abandoned batch again, so an OpenAI one is
+    cancelled if it still runs and its files are deleted."""
+    user = _user("dropped-batch")
+    _previous_summary(user)
+    _check(rc)
+    [job] = _job_for(user)
+    job.provider_key = provider_key
+    job.submitted_at = datetime.utcnow() - timedelta(hours=25, minutes=1)
+    _db.session.commit()
+    dropped = []
+    monkeypatch.setattr(rc, "drop_openai_batch",
+                        lambda key, batch_id: dropped.append(batch_id))
+
+    assert _collect_with(rc, monkeypatch, pending=True) == {
+        "collected": 0, "abandoned": 1}
+    assert dropped == ([job.batch_id] if provider_key != "anthropic" else [])
+
+
 def test_an_overlapping_collector_run_does_not_save_twice(
         app, rc, world, monkeypatch):
     user = _user("raced")

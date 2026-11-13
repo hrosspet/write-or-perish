@@ -994,9 +994,16 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // it defaults to the thread's, not the read reply's 'chat' (#362).
   const submitReadReplyMessage = async ({ content, privacy_level, ai_usage, streaming_session_id }) => {
     if (streaming_session_id) {
+      // The form's settings as they are now; with AI usage None the
+      // recording is a plain note, as a typed one is below.
       const res = await api.post(
         `/drafts/streaming/${streaming_session_id}/save-as-node`,
-        { content, agentic: true, auto_generate: autoGenerateActive, model: selectedModel },
+        ai_usage === 'none'
+          ? { content, privacy_level, ai_usage }
+          : {
+            content, privacy_level, ai_usage, agentic: true,
+            auto_generate: autoGenerateActive, model: selectedModel,
+          },
       );
       return res.data;
     }

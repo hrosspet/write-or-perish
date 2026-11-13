@@ -982,7 +982,7 @@ def activate_and_welcome(user_id):
         backend_url = request.host_url.rstrip("/")
         magic_link_url = f"{backend_url}/auth/magic-link/verify?token={token}"
 
-        send_welcome_email(user.email, magic_link_url)
+        send_welcome_email(user.email, magic_link_url, user_id=user.id)
     except Exception:
         logger.exception("Failed to send welcome email to user %s", user_id)
         return jsonify({

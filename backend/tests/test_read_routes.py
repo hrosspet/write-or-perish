@@ -506,8 +506,12 @@ class TestRerun:
         import json
         from backend.utils import llm_batch
         cancelled = []
-        monkeypatch.setattr(llm_batch, "openai_batch_cancel_one",
-                            lambda key, batch_id: cancelled.append(batch_id))
+        # The rerun never reads the old batch again, so it asks for its
+        # files to be deleted with the cancel (#667).
+        monkeypatch.setattr(
+            llm_batch, "openai_batch_cancel_one",
+            lambda key, batch_id, delete_files=False: cancelled.append(
+                (batch_id, delete_files)))
         client = app.test_client()
         alice = _make_user("alice", is_admin=True)
         prompt, reply = _make_read_reply(alice)
@@ -519,7 +523,7 @@ class TestRerun:
         data = resp.get_json()
         assert data["live"] is True
         assert data["cancelled_batches"] == ["batch_1"]
-        assert cancelled == ["batch_1"]
+        assert cancelled == [("batch_1", True)]
         task.app.control.revoke \
             .assert_called_once_with("old-task")
         task.apply_async.assert_called_once()
@@ -547,8 +551,10 @@ class TestRerun:
         import json
         from backend.utils import llm_batch
         cancelled = []
-        monkeypatch.setattr(llm_batch, "openai_batch_cancel_one",
-                            lambda key, batch_id: cancelled.append(batch_id))
+        monkeypatch.setattr(
+            llm_batch, "openai_batch_cancel_one",
+            lambda key, batch_id, delete_files=False: cancelled.append(
+                batch_id))
         client = app.test_client()
         alice = _make_user("alice", is_admin=True)
         prompt, reply = _make_read_reply(alice)
@@ -573,7 +579,7 @@ class TestRerun:
         task = _llm_task(monkeypatch)
         from backend.utils import llm_batch
         monkeypatch.setattr(llm_batch, "openai_batch_cancel_one",
-                            lambda key, batch_id: None)
+                            lambda key, batch_id, delete_files=False: None)
         client = app.test_client()
         alice = _make_user("alice", is_admin=True)
         prompt, reply = _make_read_reply(alice)
@@ -591,7 +597,7 @@ class TestRerun:
         import json
         from backend.utils import llm_batch
 
-        def boom(key, batch_id):
+        def boom(key, batch_id, delete_files=False):
             raise RuntimeError("already ended")
         monkeypatch.setattr(llm_batch, "openai_batch_cancel_one", boom)
         client = app.test_client()

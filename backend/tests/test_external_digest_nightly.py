@@ -651,6 +651,50 @@ def test_collector_saves_and_costs_an_expired_batchs_finished_items(
     assert _digest.digest_is_stale(late.id) is True
 
 
+@pytest.mark.parametrize("delete_fails", [False, True])
+def test_collector_deletes_the_batch_files_once_saved(
+        app, monkeypatch, delete_fails):
+    """#667: the batch's input, output and error files at OpenAI are
+    deleted after the digest and the job are saved, never before; a
+    delete that fails leaves the job collected."""
+    user = User.query.first()
+    _mk_item(user.id, "a")
+    job = _pending_job(user, datetime.utcnow(),
+                       provider_key="openai:gpt-6-astra",
+                       batch_id="batch_files", model_id="gpt-6-astra")
+    client = _fake_openai_batch(
+        monkeypatch, {
+            "file-out": [{
+                "custom_id": f"external-digest-{user.id}", "response": {
+                    "status_code": 200, "body": {
+                        "choices": [{"message": {"content": "# Topics\n- x"},
+                                     "finish_reason": "stop"}],
+                        "usage": {"prompt_tokens": 10,
+                                  "completion_tokens": 1}}}}],
+            "file-err": []},
+        status="completed", completed_at=1060, input_file_id="file-in",
+        output_file_id="file-out", error_file_id="file-err",
+        request_counts=_counts(1, 0))
+    seen = []
+
+    def delete(file_id):
+        _db.session.expire_all()
+        seen.append((file_id,
+                     ExternalDigestBatchJob.query.get(job.id).status,
+                     UserArtifact.latest_for(
+                         user.id, _digest.DIGEST_KIND) is not None))
+        if delete_fails:
+            raise RuntimeError("503")
+    client.files.delete.side_effect = delete
+
+    assert _digest._collect_digest_batches() == {"collected": 1,
+                                                 "abandoned": 0}
+    assert seen == [(f, "collected", True)
+                    for f in ("file-in", "file-out", "file-err")]
+    _db.session.expire_all()
+    assert ExternalDigestBatchJob.query.get(job.id).status == "collected"
+
+
 def _raise_not_found(ids, keys):
     raise RuntimeError("404: no such batch")
 
@@ -679,6 +723,27 @@ def test_collector_abandons_a_batch_it_cannot_close_past_max_age(
     # ...which frees the user for the next nightly sweep.
     assert user.id not in _digest._users_in_pending_batches()
     assert _digest.digest_is_stale(user.id) is True
+
+
+def test_an_abandoned_openai_batch_is_dropped_with_its_files(
+        app, monkeypatch):
+    """#667: nothing reads an abandoned batch again, so it is cancelled
+    if it still runs and its files are deleted."""
+    user = User.query.first()
+    _mk_item(user.id, "a")
+    _pending_job(
+        user, datetime.utcnow(), provider_key="openai:gpt-6-astra",
+        batch_id="stuck-oai", model_id="gpt-6-astra",
+        submitted_at=datetime.utcnow() - _digest.BATCH_JOB_MAX_AGE
+        - timedelta(minutes=1))
+    monkeypatch.setattr(_digest, "batch_check_and_collect", _raise_not_found)
+    dropped = []
+    monkeypatch.setattr(_digest, "drop_openai_batch",
+                        lambda key, batch_id: dropped.append(batch_id))
+
+    assert _digest._collect_digest_batches() == {"collected": 0,
+                                                 "abandoned": 1}
+    assert dropped == ["stuck-oai"]
 
 
 def test_collector_keeps_a_young_unreadable_batch_pending(app, monkeypatch):
