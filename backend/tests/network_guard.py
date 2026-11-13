@@ -25,6 +25,7 @@ Not covered: sockets a C library opens without Python's socket module.
 import ipaddress
 import os
 import socket
+import threading
 from urllib.parse import urlsplit
 
 # The URL schemes whose hosts are local services a run may use.
@@ -88,8 +89,15 @@ def is_local(host):
     return host in _service_hosts()
 
 
+FROM_THREAD = " from thread "
+
+
 def _refuse(host, port):
     where = _text(host) if port is None else f"{_text(host)}:{port}"
+    thread = threading.current_thread()
+    if thread is not threading.main_thread():
+        # A thread an earlier test left running is not the running test.
+        where += f"{FROM_THREAD}{thread.name!r}"
     _refused.append(where)
     raise OutsideConnectionRefused(
         f"A test tried to connect to {where}, a host outside this machine. "
@@ -171,8 +179,9 @@ def install():
 
 
 def take():
-    """The refusals recorded since the last call ("host:port" each), which
-    are then forgotten."""
+    """The refusals recorded since the last call ("host:port" each, with
+    " from thread 'name'" when not the main thread's), which are then
+    forgotten."""
     taken = _refused[:]
     del _refused[:len(taken)]
     return taken

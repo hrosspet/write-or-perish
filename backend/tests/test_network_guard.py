@@ -119,18 +119,91 @@ def test_a_refusal_the_code_swallows_still_fails_the_test():
     assert network_guard.take() == []
 
 
-def test_a_refusal_in_a_thread_fails_the_test():
+def test_a_refusal_in_a_thread_fails_the_test_and_names_the_thread():
+    """The message names the thread, so that a thread an earlier test
+    left running is not taken for the running test without a hint."""
     def in_a_thread():
         def connect():
             try:
                 socket.create_connection(("api.openai.com", 443))
             except OutsideConnectionRefused:
                 pass
-        thread = threading.Thread(target=connect)
+        thread = threading.Thread(target=connect, name="leftover")
         thread.start()
         thread.join()
-    with pytest.raises(pytest.fail.Exception, match=r"api\.openai\.com:443"):
+    with pytest.raises(pytest.fail.Exception) as info:
         _run_hook(in_a_thread)
+    message = str(info.value)
+    assert "api.openai.com:443 from thread 'leftover'" in message
+    assert "a thread an earlier test left running" in message
+
+
+def test_a_refusal_in_the_main_thread_names_no_thread():
+    with pytest.raises(pytest.fail.Exception) as info:
+        _run_hook(lambda: _swallow(("api.openai.com", 443)))
+    assert "from thread" not in str(info.value)
+    assert "earlier test" not in str(info.value)
+
+
+def _swallow(address):
+    try:
+        socket.create_connection(address)
+    except OutsideConnectionRefused:
+        pass
+
+
+@pytest.fixture
+def stand_in_proxy():
+    """A listener on this machine standing in for an HTTP proxy: it
+    records the first line of every connection it accepts (a proxied
+    HTTPS request starts with CONNECT host:443) and closes it."""
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(4)
+    server.settimeout(0.05)
+    received, stop = [], threading.Event()
+
+    def serve():
+        while not stop.is_set():
+            try:
+                conn, _ = server.accept()
+            except (socket.timeout, OSError):
+                continue
+            with conn:
+                conn.settimeout(2)
+                try:
+                    received.append(conn.recv(4096).split(b"\r\n")[0])
+                except OSError:
+                    received.append(b"")
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.getsockname()[1]}", received
+    stop.set()
+    thread.join(timeout=2)
+    server.close()
+
+
+def test_a_proxy_in_the_environment_does_not_carry_a_request_out(
+        monkeypatch, stand_in_proxy):
+    """A proxy on this machine is a loopback address, which the guard
+    allows: through it, the SDK's request to the provider would leave
+    unseen (CONNECT api.anthropic.com:443), and count_tokens would take
+    the proxy's failure for a failed count. Conftest's clean-up, as at the
+    start of the session, drops the proxy settings, so the request goes
+    to the provider's host, and the guard refuses it."""
+    proxy, received = stand_in_proxy
+    for name in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "ALL_PROXY"):
+        monkeypatch.setenv(name, proxy)
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+    conftest.neutralize_provider_environment()
+    with anthropic.Anthropic(api_key="k", max_retries=0) as client:
+        with pytest.raises(OutsideConnectionRefused):
+            client.messages.count_tokens(
+                model="claude-x",
+                messages=[{"role": "user", "content": "hi"}])
+    assert network_guard.take() == ["api.anthropic.com:443"]
+    assert received == []
 
 
 def test_a_test_without_refusals_passes_the_hook():
@@ -147,5 +220,8 @@ def test_no_real_provider_key_reaches_a_test():
     for name, value in vars(Config).items():
         if name.startswith(prefixes):
             assert value is None, name
-    assert "ANTHROPIC_BASE_URL" not in os.environ
-    assert "OPENAI_BASE_URL" not in os.environ
+    for name in ("ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "HTTPS_PROXY",
+                 "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY",
+                 "all_proxy"):
+        assert name not in os.environ, name
+    assert os.environ["NO_PROXY"] == os.environ["no_proxy"] == "*"

@@ -19,24 +19,41 @@ from backend.tests import network_guard
 # test module is imported, so it covers collection too.
 network_guard.install()
 
-# No test holds a real provider key (#633). By the time this file runs,
-# importing backend has loaded the developer's .env into the environment
-# and into Config. A key that is set becomes empty, not unset, so that a
-# later load_dotenv (a subprocess a test starts imports backend again)
-# cannot fill it back in from .env; Config gets None, as in CI, where no
-# key is set. The SDKs' base-URL variables go: the SDKs' defaults are
-# outside hosts, which the guard refuses by name, where a local proxy
-# could pass a request on.
 _PROVIDER_KEY_PREFIXES = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
                           "OPENAI_API_KEY")
-for _name in list(os.environ):
-    if _name.startswith(_PROVIDER_KEY_PREFIXES):
-        os.environ[_name] = ""
-for _name in list(vars(Config)):
-    if _name.startswith(_PROVIDER_KEY_PREFIXES):
-        setattr(Config, _name, None)
-for _name in ("ANTHROPIC_BASE_URL", "OPENAI_BASE_URL"):
-    os.environ.pop(_name, None)
+# Variables that send a request somewhere else than the host it names:
+# the SDKs' base URLs and the proxies the HTTP clients read.
+_REROUTING_VARIABLES = ("ANTHROPIC_BASE_URL", "OPENAI_BASE_URL") + tuple(
+    name for proxy in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY")
+    for name in (proxy, proxy.lower()))
+
+
+def neutralize_provider_environment():
+    """No test holds a real provider key or reaches a host by a detour
+    (#633).
+
+    By the time this file runs, importing backend has loaded the
+    developer's .env into the environment and into Config. A key that is
+    set becomes empty, not unset, so that a later load_dotenv (a
+    subprocess a test starts imports backend again) cannot fill it back
+    in from .env; Config gets None, as in CI, where no key is set.
+
+    The base URLs and proxies go, and NO_PROXY=* turns off a proxy the
+    operating system's settings name: a request then goes to the host it
+    names, which the guard sees and refuses, where a proxy on this
+    machine would have carried it out unseen."""
+    for name in list(os.environ):
+        if name.startswith(_PROVIDER_KEY_PREFIXES):
+            os.environ[name] = ""
+    for name in list(vars(Config)):
+        if name.startswith(_PROVIDER_KEY_PREFIXES):
+            setattr(Config, name, None)
+    for name in _REROUTING_VARIABLES:
+        os.environ.pop(name, None)
+    os.environ["NO_PROXY"] = os.environ["no_proxy"] = "*"
+
+
+neutralize_provider_environment()
 
 
 def align_package_attributes():
@@ -87,9 +104,13 @@ def pytest_runtest_call(item):
     finally:
         refused = network_guard.take()
     if refused:
-        pytest.fail("This test tried to connect outside this machine: "
-                    + ", ".join(refused) + ". Stub the call "
-                    "(backend/tests/network_guard.py).", pytrace=False)
+        message = ("This test tried to connect outside this machine: "
+                   + ", ".join(refused) + ". Stub the call "
+                   "(backend/tests/network_guard.py).")
+        if any(network_guard.FROM_THREAD in where for where in refused):
+            message += (" A connection from another thread can come from a"
+                        " thread an earlier test left running.")
+        pytest.fail(message, pytrace=False)
     return result
 
 
