@@ -354,8 +354,8 @@ def test_control_no_destination_in_the_logs(app, mails, caplog):
         client.get("/auth/login")
         _start_x(client, _next(dest))
         client.get("/auth/twitter/authorized?oauth_token=REQ-2&oauth_verifier=V")
+        _start_x(app.test_client(), _next("//" + MARKER))
     _x_callback(client, x_id=666, screen_name="ana")
-    _start_x(app.test_client(), _next("//" + MARKER))
 
     _ask(app, "ana@example.com", dest)
     _open_elsewhere(app, _link_token(mails))
