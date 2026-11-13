@@ -70,8 +70,6 @@ function FadeSection({ children, delay = 0, className = "", style = {} }) {
 
 const styles = {
   global: `
-    @import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;0,600;1,300;1,400;1,500&family=Outfit:wght@300;400;500&display=swap');
-
     .loore-landing * {
       margin: 0;
       padding: 0;
