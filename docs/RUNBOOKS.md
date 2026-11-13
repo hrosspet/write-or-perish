@@ -920,3 +920,23 @@ EXTENSION vector;` removes it too.
 A table that has copies cannot be dropped without `CASCADE` (the copies'
 foreign keys point at `node_embedding` and `external_item_embedding`);
 nothing in the app drops them.
+
+## Limits on emails to typed-in addresses
+
+`POST /auth/magic-link/send` (sign-in) and `POST /api/dashboard/email`
+(email change) count requests per client (network address) in Redis
+(`backend/utils/send_limits.py`). Two environment settings size that
+bound, for both routes:
+
+- `SEND_LIMIT_CLIENT_PER_15_MIN`: requests per client in 15 minutes;
+- `SEND_LIMIT_CLIENT_PER_DAY`: requests per client in a day.
+
+Unset, the defaults in `send_limits.py` apply. Raise them before an event
+where many people sign up from one network (a workshop, a talk), then
+restart the web service so it reads them. The limits per address and per
+account are fixed in the code.
+
+A client over the bound gets a 429 with a calm message. To let a network
+in at once, delete its counters:
+`redis-cli --scan --pattern 'loore:send-limit:*:client:*' | xargs -r redis-cli del`
+(that clears every client's counters, not one network's).

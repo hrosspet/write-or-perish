@@ -46,12 +46,10 @@ app = create_app()
 with app.app_context():
     from backend.extensions import db
     from backend.models import User
-    from backend.utils.magic_link import generate_magic_link_token, hash_token
-    from backend.utils.sign_in_links import record_link
+    from backend.utils.sign_in_links import make_link_token
     u = db.session.get(User, $TEST_USER_ID)
     assert u.username == "$TEST_USERNAME"
-    token = generate_magic_link_token(u.email, "$NEXT_PATH" or None)
-    record_link(u.email, hash_token(token), 15 * 60, limit=False)
+    token = make_link_token(u.email, "$NEXT_PATH" or None)
     print("http://localhost:5010/auth/magic-link/verify?token=" + token)
 EOF
     ;;

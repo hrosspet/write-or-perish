@@ -291,8 +291,7 @@ def test_a_sign_in_link_opened_twice_signs_in_both_times(app, mails):
 
 
 def test_a_link_past_its_expiry_does_not_sign_in(app, mails):
-    _ask(app, "alice@example.com")
-    token = _token(mails)
+    token = sign_in_links.make_link_token("alice@example.com")
     row = SignInLink.query.one()
     row.expires_at = datetime.utcnow() - timedelta(seconds=1)
     _db.session.commit()
@@ -359,7 +358,117 @@ class TestLinksSentBeforeTheChange:
         assert _open(app, token) == (f"{FRONTEND_URL}/login?error=link_already_used", None)
 
 
+# ── A link signs in only to the account it was sent for ─────────────────
+
+CONFIRM_SUBJECT = "Confirm your email for Loore"
+IN_USE_SUBJECT = "This address already signs in to Loore"
+
+
+def _change(app, name, address, addr="203.0.113.1"):
+    return _signed_in(app, name, addr).post("/api/dashboard/email",
+                                            json={"email": address})
+
+
+def _change_token(mails):
+    mail = [m for m in mails if m["subject"] == CONFIRM_SUBJECT][-1]
+    return re.search(r"/confirm-email\?token=(\S+)", mail["text"]).group(1)
+
+
+def _confirm(app, name, token):
+    return _signed_in(app, name).post("/api/dashboard/email/confirm",
+                                      json={"token": token})
+
+
+def test_a_link_sent_before_an_account_took_the_address_does_not_sign_in_to_it(app, mails):
+    """A link sent to an address without an account; Bob then changes his
+    address to it and confirms. The link does not open Bob's account."""
+    _ask(app, "free@example.com")
+    link = _token(mails)
+    assert _change(app, "bob", "free@example.com").status_code == 200
+    assert _confirm(app, "bob", _change_token(mails)).status_code == 200
+    assert _open(app, link) == (f"{FRONTEND_URL}/login?error=invalid_or_expired", None)
+
+
+def test_a_link_sent_for_no_account_never_opens_an_account_that_has_the_address_later(app, mails):
+    """However the address got to the account (here written directly, as
+    an admin's edit would), a link sent while it had no account cannot
+    sign in to it: it could only have made the account."""
+    _ask(app, "free@example.com")
+    link = _token(mails)
+    bob = _user("bob")
+    bob.email = "free@example.com"
+    _db.session.commit()
+    assert _open(app, link) == (f"{FRONTEND_URL}/login?error=invalid_or_expired", None)
+
+
+def test_the_open_that_makes_the_account_binds_the_addresss_links_to_it(app, mails):
+    """Two links asked for a new address: the first open makes the
+    account, and both links then sign in to it (they went to the same
+    inbox), on any device, however often."""
+    _ask(app, "new@example.com")
+    first = _token(mails)
+    _ask(app, "new@example.com")
+    second = _token(mails)
+    _, made = _open(app, first)
+    new = User.query.filter_by(email="new@example.com").one()
+    assert made == str(new.id)
+    assert _open(app, second) == (f"{FRONTEND_URL}/dashboard", str(new.id))
+    assert _open(app, first) == (f"{FRONTEND_URL}/dashboard", str(new.id))
+    assert {r.user_id for r in SignInLink.query.all()} == {new.id}
+
+
+def test_a_link_for_an_account_does_not_follow_the_address_to_another(app, mails):
+    """A link sent for Alice, then Alice moves to a new address and Bob
+    takes her old one: neither the old link nor the address opens either
+    account."""
+    _ask(app, "alice@example.com")
+    link = _token(mails)
+    assert _change(app, "alice", "alice2@example.com").status_code == 200
+    assert _confirm(app, "alice", _change_token(mails)).status_code == 200
+    assert _open(app, link) == (f"{FRONTEND_URL}/login?error=invalid_or_expired", None)
+    assert _change(app, "bob", "alice@example.com").status_code == 200
+    assert _confirm(app, "bob", _change_token(mails)).status_code == 200
+    assert _open(app, link) == (f"{FRONTEND_URL}/login?error=invalid_or_expired", None)
+
+
+def test_confirming_an_email_change_withdraws_both_addresses_links(app, mails):
+    _ask(app, "alice@example.com")
+    _ask(app, "alice2@example.com")
+    assert SignInLink.query.count() == 2
+    assert _change(app, "alice", "alice2@example.com").status_code == 200
+    assert _confirm(app, "alice", _change_token(mails)).status_code == 200
+    assert SignInLink.query.count() == 0
+
+
+def test_make_link_token_issues_a_link_that_works(app):
+    """The supported way to issue a link outside the routes (tests, dev
+    scripts): a token minted by hand has no row and does not sign in."""
+    from backend.utils.magic_link import generate_magic_link_token
+    token = sign_in_links.make_link_token("alice@example.com", "/welcome")
+    assert _open(app, token) == (f"{FRONTEND_URL}/welcome", str(_user("alice").id))
+    fresh = sign_in_links.make_link_token("fresh@example.com")
+    assert _open(app, fresh)[1] == str(
+        User.query.filter_by(email="fresh@example.com").one().id)
+    by_hand = generate_magic_link_token("alice@example.com")
+    assert _open(app, by_hand) == (f"{FRONTEND_URL}/login?error=invalid_or_expired", None)
+
+
 # ── Limits ───────────────────────────────────────────────────────────────
+
+def _small_client_limits(app):
+    app.config["SEND_LIMIT_CLIENT_PER_15_MIN"] = 10
+    app.config["SEND_LIMIT_CLIENT_PER_DAY"] = 30
+
+
+def _relay_down(monkeypatch):
+    import backend.utils.email as email_mod
+
+    def fail(*a):
+        raise OSError("relay down")
+    real = email_mod._deliver
+    monkeypatch.setattr(email_mod, "_deliver", fail)
+    return lambda: monkeypatch.setattr(email_mod, "_deliver", real)
+
 
 def test_an_address_gets_at_most_five_an_hour_and_ten_a_day(app, mails, clock):
     """Asked from different clients, so only the address limit counts. A
@@ -373,6 +482,7 @@ def test_an_address_gets_at_most_five_an_hour_and_ten_a_day(app, mails, clock):
     assert len(mails) == 5
     ask(5)
     assert len(mails) == 5
+    assert SignInLink.query.count() == 5        # no link for the refused one
 
     clock(minutes=61)
     for i in range(10, 15):
@@ -389,7 +499,40 @@ def test_an_address_gets_at_most_five_an_hour_and_ten_a_day(app, mails, clock):
     assert all(m["to"] == "alice@example.com" for m in mails)
 
 
-def test_a_client_gets_ten_requests_in_fifteen_minutes(app, mails, clock):
+def test_a_failed_send_neither_works_nor_counts(app, mails, monkeypatch):
+    """The relay is down: five requests, five failures. Once it is back,
+    the next request sends; the links of the failed sends do not exist."""
+    back = _relay_down(monkeypatch)
+    for i in range(5):
+        assert _ask(app, "alice@example.com", addr=f"192.0.2.{i}").get_json() == SENT
+    assert SignInLink.query.count() == 0
+    back()
+    assert _ask(app, "alice@example.com", addr="192.0.2.9").get_json() == SENT
+    assert len(mails) == 1
+    assert _open(app, _token(mails))[1] == str(_user("alice").id)
+
+
+def test_parallel_requests_never_exceed_the_address_limit(app):
+    """The count and its check are one step: twenty requests at once for
+    one address get five claims."""
+    import threading
+    got = []
+    start = threading.Barrier(20)
+
+    def ask():
+        with app.app_context():
+            start.wait()
+            got.append(send_limits.claim_address("sign-in", "a@example.com"))
+    threads = [threading.Thread(target=ask) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sum(1 for c in got if c is not None) == 5
+
+
+def test_a_client_gets_the_configured_requests_in_fifteen_minutes(app, mails, clock):
+    _small_client_limits(app)
     for i in range(10):
         assert _ask(app, f"person{i}@example.com", addr="203.0.113.9").status_code == 200
     assert len(mails) == 10
@@ -406,7 +549,8 @@ def test_a_client_gets_ten_requests_in_fifteen_minutes(app, mails, clock):
     assert _ask(app, "person12@example.com", addr="203.0.113.9").status_code == 200
 
 
-def test_a_client_gets_thirty_requests_a_day(app, mails, clock):
+def test_a_client_gets_the_configured_requests_a_day(app, mails, clock):
+    _small_client_limits(app)
     n = 0
     for _ in range(3):
         for _ in range(10):
@@ -419,7 +563,17 @@ def test_a_client_gets_thirty_requests_a_day(app, mails, clock):
     assert len(mails) == 31
 
 
+def test_unconfigured_a_shared_network_gets_sixty_requests_in_fifteen_minutes(app, mails):
+    """The default per-client bound, sized for a workshop signing up on one
+    network."""
+    for i in range(60):
+        assert _ask(app, f"w{i}@example.com", addr="203.0.113.60").status_code == 200
+    assert _ask(app, "w60@example.com", addr="203.0.113.60").status_code == 429
+    assert send_limits.client_limits() == ((15 * 60, 60), (24 * 3600, 200))
+
+
 def test_an_ipv6_client_is_counted_by_its_64(app, mails):
+    _small_client_limits(app)
     for i in range(10):
         assert _ask(app, f"v6-{i}@example.com", addr=f"2001:db8::{i + 1:x}").status_code == 200
     assert _ask(app, "v6-x@example.com", addr="2001:db8::ffff").status_code == 429
@@ -440,6 +594,7 @@ def test_the_same_answer_in_every_case(app, mails, monkeypatch):
     """An address with an account, without one, over its limit, a send
     that fails: one answer. The client's own limit says nothing about any
     address."""
+    _small_client_limits(app)
     answers = [_ask(app, "alice@example.com", addr="192.0.2.1"),
                _ask(app, "nobody@example.com", addr="192.0.2.2")]
     for i in range(5):
@@ -447,12 +602,7 @@ def test_the_same_answer_in_every_case(app, mails, monkeypatch):
     sent = len(mails)
     answers.append(_ask(app, "bob@example.com", addr="192.0.2.20"))
     assert len(mails) == sent                   # over the address's limit
-
-    import backend.utils.email as email_mod
-
-    def fail(*a):
-        raise OSError("relay down")
-    monkeypatch.setattr(email_mod, "_deliver", fail)
+    _relay_down(monkeypatch)
     answers.append(_ask(app, "alice@example.com", addr="192.0.2.30"))
 
     assert [(r.status_code, r.get_json()) for r in answers] == [(200, SENT)] * 4
@@ -467,6 +617,7 @@ def test_the_same_answer_in_every_case(app, mails, monkeypatch):
 def test_an_invalid_address_is_refused_before_anything_is_counted(app, mails):
     """Control (passes before the change too): a malformed address is a
     400, and those do not use up the client's requests."""
+    _small_client_limits(app)
     for _ in range(12):
         r = _ask(app, "not-an-address", addr="203.0.113.50")
         assert r.status_code == 400
@@ -502,28 +653,42 @@ class _FakePipeline:
 
 
 class _FakeRedis:
+    """SET NX EX + INCR in a pipeline, and the give-back script."""
+
     def __init__(self):
         self.store = {}
 
     def pipeline(self):
         return _FakePipeline(self.store)
 
+    def eval(self, script, numkeys, name):
+        assert "decr" in script
+        if name in self.store and self.store[name][0] > 0:
+            self.store[name][0] -= 1
+        return 0
+
 
 def test_the_counters_live_in_redis_with_a_ttl(app, monkeypatch):
+    _small_client_limits(app)
     fake = _FakeRedis()
     monkeypatch.setattr(send_limits, "_redis", lambda: fake)
     for _ in range(10):
         assert send_limits.client_may_ask("sign-in", "203.0.113.77")
     assert not send_limits.client_may_ask("sign-in", "203.0.113.77")
     assert sorted(ttl for _, ttl in fake.store.values()) == [15 * 60, 24 * 3600]
-    for _ in range(6):
-        send_limits.address_may_receive("email-change", "alice@example.com")
+    claims = [send_limits.claim_address("email-change", "alice@example.com")
+              for _ in range(6)]
+    assert [c is not None for c in claims] == [True] * 5 + [False]
+    send_limits.release(claims[0])              # a send that failed
+    assert send_limits.claim_address("email-change", "alice@example.com")
     names = list(fake.store)
     assert not any("203.0.113.77" in n or "alice" in n for n in names)
     assert all(n.startswith(send_limits.KEY_PREFIX) for n in names)
 
 
 def test_without_redis_each_process_counts_on_its_own(app, monkeypatch):
+    _small_client_limits(app)
+
     def unreachable():
         raise ConnectionError("no redis")
     monkeypatch.setattr(send_limits, "_redis", unreachable)
@@ -537,6 +702,7 @@ def test_without_redis_each_process_counts_on_its_own(app, monkeypatch):
 def test_behind_the_proxy_the_client_is_the_address_the_proxy_saw(real_app, mails):
     """ProxyFix takes the last X-Forwarded-For entry, the one the proxy
     appended; whatever the client wrote before it does not count."""
+    _small_client_limits(real_app)
     for i in range(10):
         r = real_app.test_client().post(
             "/auth/magic-link/send", json={"email": f"q{i}@example.com"},
@@ -567,10 +733,6 @@ def test_deleting_the_account_withdraws_its_links(real_app, mails):
 
 # ── The same limits on the email-change confirmation ─────────────────────
 
-CONFIRM_SUBJECT = "Confirm your email for Loore"
-IN_USE_SUBJECT = "This address already signs in to Loore"
-
-
 def _accounts(n):
     """n more accounts, named u0, u1, …"""
     for i in range(n):
@@ -578,11 +740,6 @@ def _accounts(n):
                              approved=True))
     _db.session.commit()
     return [f"u{i}" for i in range(n)]
-
-
-def _change(app, name, address, addr="203.0.113.1"):
-    return _signed_in(app, name, addr).post("/api/dashboard/email",
-                                            json={"email": address})
 
 
 def _sent_answer(name, address):
@@ -593,11 +750,6 @@ def _sent_answer(name, address):
         "pending_email": address,
         "pending_email_expired": False,
     }
-
-
-def _change_token(mails):
-    mail = [m for m in mails if m["subject"] == CONFIRM_SUBJECT][-1]
-    return re.search(r"/confirm-email\?token=(\S+)", mail["text"]).group(1)
 
 
 def test_an_address_gets_at_most_five_change_links_an_hour(app, mails):
@@ -616,8 +768,7 @@ def test_an_address_gets_at_most_five_change_links_an_hour(app, mails):
     assert r.status_code == 200
     assert r.get_json() == _sent_answer("alice", "target@example.com")
     assert len(mails) == 5
-    r = _signed_in(app, "alice").post("/api/dashboard/email/confirm",
-                                      json={"token": link})
+    r = _confirm(app, "alice", link)
     assert r.status_code == 200, r.get_json()
     assert _user("alice").email == "target@example.com"
 
@@ -656,7 +807,21 @@ def test_an_account_asks_at_most_five_times_an_hour(app, mails):
     assert _user("alice").pending_email == "new4@example.com"
 
 
-def test_a_client_asks_at_most_ten_times_in_fifteen_minutes(app, mails, clock):
+def test_failed_change_sends_count_toward_nothing(app, mails, monkeypatch):
+    """Five 502s while the relay is down; once it is back the next request
+    sends (not a 429)."""
+    back = _relay_down(monkeypatch)
+    for i in range(5):
+        r = _change(app, "alice", "new@example.com", addr=f"192.0.2.{i}")
+        assert r.status_code == 502
+    back()
+    r = _change(app, "alice", "new@example.com", addr="192.0.2.9")
+    assert r.status_code == 200, r.get_json()
+    assert len(mails) == 1
+
+
+def test_a_client_asks_at_most_the_configured_times(app, mails, clock):
+    _small_client_limits(app)
     names = _accounts(11)
     for name in names[:10]:
         assert _change(app, name, f"{name}-new@example.com",
@@ -672,6 +837,7 @@ def test_a_client_asks_at_most_ten_times_in_fifteen_minutes(app, mails, clock):
 
 def test_the_two_routes_count_separately(app, mails):
     """A person's sign-in requests do not use up their email change."""
+    _small_client_limits(app)
     for i in range(10):
         _ask(app, f"s{i}@example.com", addr="203.0.113.120")
     assert _change(app, "alice", "mine@example.com",

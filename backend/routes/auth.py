@@ -312,16 +312,20 @@ def magic_link_send():
         # address.
         logger.info("Sign-in email request over the client limit")
         return jsonify({"error": send_limits.WAIT_MESSAGE}), 429
+    issued = None
 
     try:
         token = generate_magic_link_token(email, next_url)
         token_h = hash_token(token)
-        # A link of its own: the links already sent to the address keep
-        # working until they expire (utils/sign_in_links.py).
+        # A link of its own, for the account that holds the address now
+        # (or none): the links already sent keep working until they expire
+        # (utils/sign_in_links.py).
         user = User.query.filter_by(email=email).first()
-        if not sign_in_links.record_link(
-                email, token_h,
-                current_app.config.get("MAGIC_LINK_EXPIRY_SECONDS", 900)):
+        issued = sign_in_links.issue_for_sending(
+            email, token_h,
+            current_app.config.get("MAGIC_LINK_EXPIRY_SECONDS", 900),
+            user.id if user else None)
+        if issued is None:
             # Over the address's limit: nothing is sent, and the answer is
             # the one a sent link gets.
             logger.info("Sign-in email not sent: the address's limit is "
@@ -335,6 +339,8 @@ def magic_link_send():
     except Exception:
         logger.exception("Error in magic link send")
         # Fall through — always return the same message to prevent enumeration
+        # A link whose email did not go out neither works nor counts.
+        sign_in_links.give_back(issued)
 
     return _link_sent_answer()
 
@@ -367,7 +373,8 @@ def magic_link_verify():
     token_h = hash_token(token)
 
     # Valid until it expires, however often it is opened (mail apps open
-    # links first), unless withdrawn (utils/sign_in_links.py).
+    # links first), for the account it was sent for, unless withdrawn
+    # (utils/sign_in_links.py).
     refused = sign_in_links.redeem(token_h, payload)
     if refused is not None:
         return redirect(f"{frontend_url}/login?error={refused}")

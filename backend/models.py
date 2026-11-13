@@ -398,20 +398,20 @@ class SignInLink(db.Model):
     One row per link, so a new link for an address leaves the ones
     already sent working: each stays valid until it expires. Only hashes
     are kept: the token's (sha256, like the other emailed links) and the
-    address's, keyed with the app's secret, so the rows can be counted per
-    address without holding the address. The address the link signs in to
+    address's, keyed with the app's secret, so an address's links can be
+    found without holding the address. The address the link signs in to
     travels in the signed token itself.
     """
     __tablename__ = "sign_in_link"
-    __table_args__ = (
-        # The per-address count of recent links (the sending limit).
-        db.Index("ix_sign_in_link_address_created", "address_hash",
-                 "created_at"),
-    )
 
     id = db.Column(db.Integer, primary_key=True)
     token_hash = db.Column(db.String(64), nullable=False, unique=True)
-    address_hash = db.Column(db.String(64), nullable=False)
+    address_hash = db.Column(db.String(64), nullable=False, index=True)
+    # The account the link was sent for (the one holding the address
+    # then); null when the address had none, until the link's first open
+    # makes it. Not a foreign key: the address's links are withdrawn when
+    # the account is deleted, and an id nobody holds matches no account.
+    user_id = db.Column(db.Integer, nullable=True)
     created_at = db.Column(db.DateTime, nullable=False,
                            default=datetime.utcnow)
     expires_at = db.Column(db.DateTime, nullable=False, index=True)
