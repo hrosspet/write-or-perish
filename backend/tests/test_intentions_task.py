@@ -300,6 +300,55 @@ def test_poller_marks_a_refused_item_gave_up(app, wired, monkeypatch):  # noqa: 
     assert UserArtifact.query.filter_by(user_id=u.id, kind="intentions").count() == 0
 
 
+@pytest.mark.parametrize("save_raises", [True, False])
+def test_poller_keeps_the_batch_of_a_result_it_could_not_save(
+        app, wired, monkeypatch, save_raises):  # noqa: F811
+    """#693 review: a result that came back but whose save raised is
+    shown as failed, and its batch stays at Anthropic while Anthropic keeps
+    results, for `backfill_intentions.py --collect`; the sweep deletes it
+    after that. The saved case is the control: deleted at once."""
+    from datetime import datetime, timedelta
+    from unittest.mock import MagicMock
+    import backend.tasks.profile_batch as pb
+    from backend.models import AnthropicBatchDeletion
+    from backend.tests import anthropic_batch_fake as fake
+    from backend.utils import anthropic_batch_deletion as abd
+    monkeypatch.setitem(app.config, "ANTHROPIC_API_KEY", "k")
+    monkeypatch.setattr(pb, "get_api_keys_for_usage",
+                        lambda cfg, usage: {"anthropic": "k"})
+    monkeypatch.setattr(pb, "apply_batch_key_override", lambda keys, cfg: keys)
+    u = _make_user("unsaved_item")
+    _db.session.commit()
+    item = {"custom_id": f"int-u{u.id}", "user_id": u.id, "kind": "intentions",
+            "model_id": "claude-opus-5.5", "budget": 1_000_000,
+            "resubmitted": False}
+    job = _job_for(item)
+    abd.register("anthropic", "b-old", "profile_batch_job")
+    _db.session.commit()
+    batches = fake.install(monkeypatch)
+    batches.add("b-old", results=[fake.succeeded(
+        item["custom_id"], "# Intentions\nA")])
+    if save_raises:
+        monkeypatch.setattr(it, "apply_intentions_item", MagicMock(
+            side_effect=RuntimeError("db down")))
+
+    pb._poll_profile_batches()
+
+    _db.session.expire_all()
+    row = ProfileBatchJob.query.get(job.id)
+    assert row.status == "collected"
+    if not save_raises:
+        assert batches.calls_of("delete") == ["b-old"]
+        return
+    assert row.items[0]["gave_up"] is True
+    assert row.items[0][abd.UNSAVED_RESULT] is True
+    assert batches.calls_of("delete") == []
+    assert abd.sweep() == {"needed": 1}
+    assert abd.sweep(now=datetime.utcnow() + abd.RESULTS_AVAILABLE
+                     + timedelta(hours=1)) == {"deleted": 1}
+    assert AnthropicBatchDeletion.query.one().deleted_at is not None
+
+
 def _job_for(item):
     from datetime import datetime
     j = ProfileBatchJob(provider_key="anthropic", batch_id="b-old",
@@ -668,6 +717,45 @@ def test_backfill_script_skips_and_keeps_a_user_version(app, wired, monkeypatch,
     assert _current(u).id == mine.id
     assert APICostLog.query.filter_by(
         user_id=u.id, request_type="intentions_backfill").one().request_ref == KEPT_USER_EDIT_REF
+
+
+@pytest.mark.parametrize("model_known", [False, True])
+def test_backfill_script_collect_keeps_a_batch_it_could_not_save(
+        app, wired, monkeypatch, capsys, model_known):  # noqa: F811
+    """#693 review: `--collect` for a user whose model cannot be resolved
+    (the saved model is no longer offered) saves nothing and keeps the
+    batch, so the re-run with --model that it asks for saves the result.
+    The control: with --model from the start, it is saved and deleted."""
+    import importlib
+    import sys
+    from unittest.mock import MagicMock
+    from backend.tests import anthropic_batch_fake as fake
+    monkeypatch.setitem(sys.modules, "backend.app", MagicMock())
+    monkeypatch.delitem(sys.modules, "backend.scripts.backfill_intentions",
+                        raising=False)
+    script = importlib.import_module("backend.scripts.backfill_intentions")
+    monkeypatch.delitem(sys.modules, "backend.scripts.backfill_intentions")
+    monkeypatch.setitem(app.config, "ANTHROPIC_API_KEY", "k")
+    monkeypatch.setattr(script, "model_for_user", MagicMock(
+        side_effect=RuntimeError("Model no longer offered.")))
+    u = _make_user("retired_model")
+    _db.session.commit()
+    batches = fake.install(monkeypatch)
+    batches.add("msgbatch_r", results=[fake.succeeded(
+        f"int-u{u.id}", "# Intentions\nA")])
+    versions = lambda: UserArtifact.query.filter_by(  # noqa: E731
+        user_id=u.id, kind="intentions").count()
+
+    if not model_known:
+        script.collect_batches(app, ["msgbatch_r"], None)
+        assert "Pass --model" in capsys.readouterr().out
+        assert versions() == 0
+        assert batches.calls_of("delete") == []
+        assert "msgbatch_r" in batches.batches
+
+    script.collect_batches(app, ["msgbatch_r"], "claude-opus-5.5")
+    assert versions() == 1
+    assert batches.calls_of("delete") == ["msgbatch_r"]
 
 
 @pytest.mark.parametrize("save_fails", [False, True])

@@ -542,6 +542,11 @@ def collect_batches(app, batch_ids, model_override):
             # Nothing left to read from it (#667, #693).
             _delete_batch(results, keys)
             continue
+        # Whether every result that can be saved was: only then does the
+        # batch go. A result skipped for a reason a later run can fix
+        # (the model, a failed save) keeps it; one no run of this script
+        # can save (an unknown custom_id, a user who no longer exists)
+        # does not.
         saved_all = True
         for cid, r in results.items():
             m = re.match(r"int-u(\d+)$", cid)
@@ -557,6 +562,8 @@ def collect_batches(app, batch_ids, model_override):
             try:
                 model_id = model_override or model_for_user(user)
             except RuntimeError as e:
+                # The re-run this asks for needs the batch.
+                saved_all = False
                 print(f"  ! batch {batch_id}: {e} Pass --model with the "
                       f"model the batch ran on.")
                 continue
@@ -577,8 +584,11 @@ def collect_batches(app, batch_ids, model_override):
                       f"{type(e).__name__}: {e}")
         if saved_all:
             # Every result saved: the batch goes at the provider (#667,
-            # #693). A failed save keeps it for another --collect.
+            # #693).
             _delete_batch(results, keys)
+        else:
+            print(f"  - batch {batch_id}: kept at the provider for another "
+                  f"--collect")
 
 
 def _delete_batch(results, keys):

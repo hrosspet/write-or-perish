@@ -26,19 +26,25 @@ Bookkeeping (``AnthropicBatchDeletion``, one row per batch):
   (``still_needed``): a job that is no longer pending (or no longer
   exists), a reply that is no longer at work (or no longer exists). A
   batch still running is cancelled first and deleted by a later sweep.
+  One exception: a job with a result that came back but could not be
+  saved (``UNSAVED_RESULT``, an intentions save that raised) keeps its
+  batch while Anthropic keeps results, for
+  ``backfill_intentions.py --collect``.
 
 A 404 counts as deleted. A delete that fails is counted on the row
 (``attempts``, ``last_error``: the error's type) and tried again by the
-next sweep; it never fails the job. Batch ids and error types only are
-logged: nothing of a request or a result. The task's soft time limit is
-let through (utils/soft_limit).
+next sweep; it never fails the job. After ``ERROR_AFTER_ATTEMPTS``
+failures in a row it is reported once at ERROR (Sentry) and then tried
+once a day (``BACKOFF_AFTER_ERROR``); the admin script tries it at once.
+Batch ids and error types only are logged: nothing of a request or a
+result. The task's soft time limit is let through (utils/soft_limit).
 
 Batches created before this change have no row: the admin script
 ``backend/scripts/delete_anthropic_batches.py`` finds the ones Loore has
 recorded (dry run by default) and registers them for deletion.
 """
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from backend.extensions import db
 from backend.utils import soft_limit
@@ -67,6 +73,44 @@ NODE_IN_FLIGHT = ("pending", "processing")
 # API's own limit of 1,000 requests per minute at the lowest tier, which
 # the collectors' polls share.
 SWEEP_LIMIT = 100
+# HEURISTIC: failed deletes in a row after which the batch is reported at
+# ERROR (once) and no longer tried every hour. 5: the delete right after
+# the save and four hourly sweeps; a passing outage or rate limit is over
+# by then, and what is left (a revoked key, a refused request) does not
+# go away by itself.
+ERROR_AFTER_ATTEMPTS = 5
+# HEURISTIC: after that, the row is tried again once a day, so a fixed
+# key deletes it without anyone running the script.
+BACKOFF_AFTER_ERROR = timedelta(days=1)
+# An item flag on a batch job: a result came back but its save raised
+# (tasks/profile_batch, an intentions item). Its batch stays while
+# Anthropic keeps results: 29 days after the batch was created (the job
+# is submitted after that, so its submission time is a safe stand-in).
+UNSAVED_RESULT = "result_unsaved"
+RESULTS_AVAILABLE = timedelta(days=29)
+
+
+def holds_unsaved_result(items):
+    """Whether a job's items flag a result that was not saved."""
+    return any(isinstance(i, dict) and i.get(UNSAVED_RESULT)
+               for i in items or ())
+
+
+def job_needs_batch(status, unsaved, submitted_at, now=None):
+    """Whether a batch job still needs its batch: it is pending, or it
+    holds a result that was not saved and Anthropic still keeps it."""
+    if status == "pending":
+        return True
+    now = now or datetime.utcnow()
+    return bool(unsaved) and submitted_at is not None and (
+        now - submitted_at < RESULTS_AVAILABLE)
+
+
+def unsaved_result_flagged(model):
+    """SQL: the job's items carry UNSAVED_RESULT (a text match on the
+    JSON, so no job's items are loaded)."""
+    from sqlalchemy import Text, cast
+    return cast(model.items, Text).like(f'%"{UNSAVED_RESULT}"%')
 
 
 def job_models():
@@ -99,17 +143,21 @@ def register(provider_key, batch_id, source, key_type="chat",
     return row
 
 
-def still_needed(row):
+def still_needed(row, now=None):
     """Whether Loore may still read the batch of *row*: the job that owns
-    it is pending, or the reply that owns it is still at work (a reply
-    keeps polling while it is pending or processing). Ids and statuses
-    only. A row of another source (a script's batch, a purge's) is
-    registered only once nothing needs the batch."""
+    it is pending or holds a result that was not saved
+    (``job_needs_batch``), or the reply that owns it is still at work (a
+    reply keeps polling while it is pending or processing). Ids and
+    statuses only. A row of another source (a script's batch, a purge's)
+    is registered only once nothing needs the batch."""
     if row.source in JOB_SOURCES:
         model = job_models()[row.source]
-        return db.session.query(model.id).filter(
-            model.batch_id == row.batch_id,
-            model.status == "pending").first() is not None
+        return any(
+            job_needs_batch(status, unsaved, submitted_at, now)
+            for status, submitted_at, unsaved in db.session.query(
+                model.status, model.submitted_at,
+                unsaved_result_flagged(model)).filter(
+                model.batch_id == row.batch_id))
     if row.source == READ_SOURCE and row.node_id is not None:
         from backend.models import Node
         status = db.session.query(Node.llm_task_status).filter(
@@ -139,11 +187,21 @@ def _gone(row, now, outcome):
 
 
 def _failed(row, now, error_type):
+    """Count a failed call on the row. The ERROR_AFTER_ATTEMPTS-th failure
+    in a row is reported once at ERROR (it reaches Sentry); the row is
+    then tried once a day (due_rows)."""
     row.attempts = (row.attempts or 0) + 1
     row.last_error = error_type[:64]
     row.checked_at = now
-    log.warning("Deleting Anthropic batch %s failed (%s); the hourly sweep "
-                "tries again", row.batch_id, row.last_error)
+    if row.attempts == ERROR_AFTER_ATTEMPTS:
+        log.error("Deleting Anthropic batch %s failed %s times in a row "
+                  "(%s); tried once a day from now on, or at once with "
+                  "backend/scripts/delete_anthropic_batches.py --apply",
+                  row.batch_id, row.attempts, row.last_error)
+    else:
+        log.warning("Deleting Anthropic batch %s failed (%s, %s in a row); "
+                    "tried again later", row.batch_id, row.last_error,
+                    row.attempts)
     return "failed"
 
 
@@ -165,6 +223,7 @@ def delete_row(row, client, now=None, ended=False, cancel_running=True):
             status = getattr(batch, "processing_status", None)
             if status != "ended":
                 row.checked_at = now
+                row.attempts = 0   # the calls work: no failure in a row
                 if (status == "in_progress" and cancel_running
                         and row.cancel_requested_at is None):
                     client.messages.batches.cancel(row.batch_id)
@@ -225,13 +284,20 @@ def delete_collected_batches(results, api_keys, source):
     delete_now(getattr(results, "anthropic_batches", None) or (), source)
 
 
-def due_rows(limit=SWEEP_LIMIT):
+def due_rows(limit=SWEEP_LIMIT, now=None, backed_off_too=False):
     """The rows not yet deleted, the ones looked at longest ago (or never)
-    first."""
-    from sqlalchemy import func
+    first. A row whose delete failed ERROR_AFTER_ATTEMPTS times in a row
+    is due once a day (BACKOFF_AFTER_ERROR), unless *backed_off_too*
+    (the admin script)."""
+    from sqlalchemy import func, or_
     from backend.models import AnthropicBatchDeletion as R
-    q = R.query.filter(R.deleted_at.is_(None)).order_by(
-        func.coalesce(R.checked_at, R.created_at), R.id)
+    q = R.query.filter(R.deleted_at.is_(None))
+    if not backed_off_too:
+        now = now or datetime.utcnow()
+        q = q.filter(or_(R.attempts < ERROR_AFTER_ATTEMPTS,
+                         R.checked_at.is_(None),
+                         R.checked_at <= now - BACKOFF_AFTER_ERROR))
+    q = q.order_by(func.coalesce(R.checked_at, R.created_at), R.id)
     return q.limit(limit).all() if limit else q.all()
 
 
@@ -245,7 +311,7 @@ def process(rows, now=None, cancel_running=True, pause=None):
     counts = {}
     clients = {}
     for row in rows:
-        if still_needed(row):
+        if still_needed(row, now):
             row.checked_at = now
             outcome = "needed"
         else:
@@ -264,13 +330,14 @@ def process(rows, now=None, cancel_running=True, pause=None):
     return counts
 
 
-def sweep(limit=SWEEP_LIMIT):
-    """One bounded pass over the rows not yet deleted. Returns
+def sweep(limit=SWEEP_LIMIT, now=None):
+    """One bounded pass over the rows due (``due_rows``). Returns
     {outcome: count}."""
-    rows = due_rows(limit)
+    now = now or datetime.utcnow()
+    rows = due_rows(limit, now)
     if not rows:
         return {}
-    counts = process(rows)
+    counts = process(rows, now)
     done = counts.get("deleted", 0) + counts.get("gone", 0)
     if done or counts.get("failed"):
         log.info("Anthropic batch sweep: %s", counts)

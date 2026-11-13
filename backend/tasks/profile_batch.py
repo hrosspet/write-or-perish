@@ -1479,6 +1479,14 @@ def _poll_profile_batches():
                 except Exception as e:
                     logger.error(f"Apply intentions result failed for user "
                                  f"{user.id}: {e}", exc_info=True)
+                    if result is not None:
+                        # A paid result that was not saved: shown as
+                        # failed, and its batch is kept while the provider
+                        # keeps results, for `backfill_intentions.py
+                        # --collect <batch id>` (#693 review).
+                        db.session.rollback()
+                        intentions_mod.mark_intentions_item_unsaved(
+                            item, job)
                 continue
             if item["custom_id"] in blocked:
                 _stop_for_policy_block(user, item, blocked[item["custom_id"]])
@@ -1579,10 +1587,18 @@ def _poll_profile_batches():
         job.status = "failed" if queue_full else "collected"
         job.collected_at = datetime.utcnow()
         db.session.commit()
-        # Saved: the batch's files at OpenAI (#667) and the batch at
-        # Anthropic (#693) can go.
-        anthropic_batch_deletion.delete_collected_batches(
-            results, keys, ProfileBatchJob.__tablename__)
+        if anthropic_batch_deletion.holds_unsaved_result(job.items):
+            # A result a save failed on stays at the provider for a
+            # --collect; the sweep deletes the batch once the provider no
+            # longer keeps results.
+            logger.warning(f"Profile batch {job.batch_id} kept at the "
+                           f"provider: it holds a result that was not "
+                           f"saved")
+        else:
+            # Saved: the batch's files at OpenAI (#667) and the batch at
+            # Anthropic (#693) can go.
+            anthropic_batch_deletion.delete_collected_batches(
+                results, keys, ProfileBatchJob.__tablename__)
         if queue_full and set_items:
             # Nothing of these window sets is in flight any more (unless a
             # user has another job pending): clear the flag as the chained

@@ -17,7 +17,8 @@ run): a batch Loore has no record of is never deleted. What it finds
 
 - batch job rows on Anthropic that are no longer pending (collected,
   failed, abandoned or cancelled): profile builds and intentions, poll
-  drafts, external digests, recent context;
+  drafts, external digests, recent context; a job holding a result whose
+  save failed keeps its batch while Anthropic keeps results;
 - Glean replies' "_batch" entries on Anthropic whose reply is no longer
   at work (completed, failed or cancelled);
 - registrations not yet deleted (the hourly sweep's work).
@@ -33,8 +34,12 @@ key's batches at Anthropic to say how many of the recorded ones still
 exist and how many listed batches Loore has no record of. --apply
 registers the batches found and deletes them, one at a time with a pause
 between them; a batch still running is left to the hourly sweep, which
-cancels it first. Idempotent: run it again and it finds only what is
-left. Prints counts only: no ids, no keys, no content.
+cancels it first. A registration whose deletes kept failing (tried once a
+day by the sweep) is tried at once. --limit N registers and deletes at
+most N of the batches found, and registers none of the others, so the
+sweep does not take them either: a way to try a few first. Idempotent:
+run it again and it finds only what is left. Prints counts only: no ids,
+no keys, no content.
 
     python backend/scripts/delete_anthropic_batches.py            # dry run
     python backend/scripts/delete_anthropic_batches.py --apply
@@ -79,17 +84,24 @@ def find_recorded():
 
 def _job_batches():
     """[(batch_id, (source, key_type, None), needed)] of the batch job
-    rows on Anthropic."""
+    rows on Anthropic (needed: pending, or holding a result whose save
+    failed while Anthropic keeps it)."""
+    from datetime import datetime
     from backend.extensions import db
-    from backend.utils.anthropic_batch_deletion import NOT_A_BATCH, job_models
+    from backend.utils.anthropic_batch_deletion import (
+        NOT_A_BATCH, job_models, job_needs_batch, unsaved_result_flagged,
+    )
+    now = datetime.utcnow()
     out = []
     for source, model in job_models().items():
-        for batch_id, status in db.session.query(
-                model.batch_id, model.status).filter(
+        for batch_id, status, submitted_at, unsaved in db.session.query(
+                model.batch_id, model.status, model.submitted_at,
+                unsaved_result_flagged(model)).filter(
                 model.provider_key == "anthropic"):
             if batch_id and batch_id not in NOT_A_BATCH:
                 out.append((batch_id, (source, "chat", None),
-                            status == "pending"))
+                            job_needs_batch(status, unsaved, submitted_at,
+                                            now)))
     return out
 
 
@@ -219,13 +231,39 @@ def run(apply=False, list_at_anthropic=True, limit=None, pause=PAUSE_SECONDS,
         out("Dry run: nothing registered or deleted. --apply registers "
             "these and deletes them.")
         return {}
-    from backend.utils.anthropic_batch_deletion import due_rows, process
-    register_found(found)
-    counts = process(due_rows(limit=limit), cancel_running=False,
-                     pause=pause)
+    from backend.utils.anthropic_batch_deletion import process
+    # --limit N: only N are registered, so the hourly sweep does not
+    # delete the others either.
+    picked = dict(list(found.items())[:limit]) if limit else found
+    register_found(picked)
+    if len(picked) < len(found):
+        out(f"Registered {len(picked)} of the {len(found)} found; the other "
+            f"{len(found) - len(picked)} are left for a later run")
+    counts = process(_rows_to_process(list(picked), limit),
+                     cancel_running=False, pause=pause)
     out("Applied: " + ", ".join(f"{k}: {v}" for k, v in sorted(
         counts.items())) if counts else "Applied: nothing to delete")
     return counts
+
+
+def _rows_to_process(picked_ids, limit):
+    """The registrations this run works on: without a limit, every one
+    not yet deleted (those whose deletes kept failing included); with
+    one, the batches just registered first, then the waiting ones, at
+    most *limit* in all."""
+    from backend.models import AnthropicBatchDeletion as R
+    from backend.utils.anthropic_batch_deletion import due_rows
+    if not limit:
+        return due_rows(limit=None, backed_off_too=True)
+    rows = []
+    for start in range(0, len(picked_ids), COMMIT_EVERY):
+        chunk = picked_ids[start:start + COMMIT_EVERY]
+        rows += R.query.filter(R.batch_id.in_(chunk),
+                               R.deleted_at.is_(None)).all()
+    taken = {r.batch_id for r in rows}
+    rows += [r for r in due_rows(limit=limit, backed_off_too=True)
+             if r.batch_id not in taken]
+    return rows[:limit]
 
 
 def main():
@@ -235,7 +273,9 @@ def main():
     ap.add_argument("--no-list", action="store_true",
                     help="skip listing the key's batches at Anthropic")
     ap.add_argument("--limit", type=int, default=None,
-                    help="delete at most this many batches in this run")
+                    help="register and delete at most this many batches "
+                         "in this run (the others are not registered, so "
+                         "the hourly sweep does not take them either)")
     ap.add_argument("--pause", type=float, default=PAUSE_SECONDS,
                     help=f"seconds between batches (default "
                          f"{PAUSE_SECONDS})")

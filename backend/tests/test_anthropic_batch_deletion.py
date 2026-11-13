@@ -187,6 +187,27 @@ class TestRegister:
         _db.session.commit()
         assert abd.still_needed(row) is False
 
+    def test_a_job_holding_an_unsaved_result_keeps_its_batch(self, app):
+        """#693 review: an intentions result whose save raised can still
+        be saved by `backfill_intentions.py --collect` while Anthropic
+        keeps results (29 days after the batch was created)."""
+        from datetime import datetime, timedelta
+        job = _job(ProfileBatchJob, "msgbatch_1", status="collected")
+        job.items = [{"custom_id": "int-u1", "kind": "intentions",
+                      "gave_up": True, abd.UNSAVED_RESULT: True}]
+        _db.session.commit()
+        row = abd.register("anthropic", "msgbatch_1", "profile_batch_job")
+        _db.session.commit()
+
+        assert abd.still_needed(row) is True
+        later = job.submitted_at + abd.RESULTS_AVAILABLE + timedelta(
+            minutes=1)
+        assert abd.still_needed(row, later) is False
+        # The control: the same job without the flag.
+        job.items = [{"custom_id": "int-u1", "kind": "intentions"}]
+        _db.session.commit()
+        assert abd.still_needed(row, datetime.utcnow()) is False
+
     def test_a_purge_or_script_row_is_never_needed(self, app):
         for source in (abd.PURGE_SOURCE, abd.SCRIPT_SOURCE):
             row = abd.register("anthropic", f"msgbatch_{source}", source)
@@ -338,6 +359,61 @@ class TestSweep:
         # The next run starts with the row not looked at yet.
         assert [r.batch_id for r in abd.due_rows(limit=1)] == ["msgbatch_2"]
 
+    def test_a_delete_that_keeps_failing_is_reported_once_and_backs_off(
+            self, app, anthropic, caplog):
+        """#693 review ("Problems show"): the ERROR_AFTER_ATTEMPTS-th
+        failure in a row is reported once at ERROR (batch id and error
+        type only); the row is then tried once a day, not every hour; the
+        admin script tries it at once."""
+        import logging
+        from datetime import datetime, timedelta
+        _job(PollDraftBatchJob, "msgbatch_1", status="collected")
+        anthropic.add("msgbatch_1")
+        anthropic.delete_error = PermissionError("403")
+        abd.register("anthropic", "msgbatch_1", "poll_draft_batch_job")
+        _db.session.commit()
+        now = datetime.utcnow()
+        caplog.set_level(logging.WARNING, logger=abd.log.name)
+
+        for hour in range(abd.ERROR_AFTER_ATTEMPTS):
+            assert abd.sweep(now=now + timedelta(hours=hour)) == {
+                "failed": 1}
+        errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert len(errors) == 1
+        assert "msgbatch_1" in errors[0].getMessage()
+        assert "PermissionError" in errors[0].getMessage()
+        assert _row("msgbatch_1").attempts == abd.ERROR_AFTER_ATTEMPTS
+
+        # Not every hour any more...
+        calls = len(anthropic.calls)
+        last = now + timedelta(hours=abd.ERROR_AFTER_ATTEMPTS - 1)
+        for hour in range(1, 24):
+            assert abd.sweep(now=last + timedelta(hours=hour)) == {}
+        assert len(anthropic.calls) == calls
+        # ...but once a day, without a second ERROR.
+        assert abd.sweep(now=last + abd.BACKOFF_AFTER_ERROR) == {
+            "failed": 1}
+        assert len([r for r in caplog.records
+                    if r.levelno >= logging.ERROR]) == 1
+
+        # The admin script tries it at once, and it goes once fixed.
+        anthropic.delete_error = None
+        assert script.run(apply=True, list_at_anthropic=False, pause=0,
+                          out=lambda *_: None) == {"deleted": 1}
+
+    def test_a_working_call_resets_the_failures_in_a_row(
+            self, app, anthropic):
+        _job(PollDraftBatchJob, "msgbatch_1", status="collected")
+        anthropic.add("msgbatch_1", status="in_progress")
+        row = abd.register("anthropic", "msgbatch_1", "poll_draft_batch_job")
+        from datetime import datetime
+        row.attempts = abd.ERROR_AFTER_ATTEMPTS - 1
+        row.cancel_requested_at = datetime.utcnow()   # asked already
+        _db.session.commit()
+
+        assert abd.sweep() == {"running": 1}
+        assert _row("msgbatch_1").attempts == 0
+
     def test_the_sweep_task_runs_in_the_app(self, app, anthropic,
                                             monkeypatch):
         """backend.tasks.anthropic_batch_deletion: one sweep."""
@@ -430,6 +506,39 @@ class TestScript:
                           out=lines.append) == {}
         assert "not registered: 0 batch(es)" in lines[0]
         assert "Registered: 4 deleted, 0 waiting" in lines[1]
+
+    def test_a_limit_bounds_what_is_registered_too(self, app, anthropic):
+        """#693 review: --limit N registers only N, so the hourly sweep
+        does not delete the others; a later run takes them. The control
+        is the run without a limit above (all four)."""
+        _old_batches(anthropic)
+        lines = []
+
+        counts = script.run(apply=True, list_at_anthropic=False, pause=0,
+                            limit=1, out=lines.append)
+
+        assert counts == {"deleted": 1}
+        assert AnthropicBatchDeletion.query.count() == 1
+        assert "Registered 1 of the 4 found" in "\n".join(lines)
+        assert abd.sweep() == {}
+        assert len(anthropic.calls_of("delete")) == 1
+
+        assert script.run(apply=True, list_at_anthropic=False, pause=0,
+                          out=lambda *_: None) == {"deleted": 3}
+
+    def test_a_job_holding_an_unsaved_result_is_left_alone(
+            self, app, anthropic):
+        """Its batch is still in use (a --collect can save the result)."""
+        job = _job(ProfileBatchJob, "msgbatch_1", status="collected")
+        job.items = [{"custom_id": "int-u1", abd.UNSAVED_RESULT: True}]
+        _db.session.commit()
+        anthropic.add("msgbatch_1")
+        lines = []
+
+        assert script.run(apply=True, out=lines.append, pause=0) == {}
+        assert "not registered: 0 batch(es)" in lines[0]
+        assert "1 still in use here" in "\n".join(lines)
+        assert anthropic.calls_of("delete") == []
 
     def test_apply_leaves_a_running_batch_to_the_sweep(self, app, anthropic):
         _job(PollDraftBatchJob, "msgbatch_1", status="collected")

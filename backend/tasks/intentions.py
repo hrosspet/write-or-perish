@@ -557,6 +557,16 @@ def mark_intentions_item_gave_up(item, job):
     _mark_item(item, job, gave_up=True)
 
 
+def mark_intentions_item_unsaved(item, job):
+    """A result that came back but could not be saved (the save raised):
+    shown as "failed", and flagged so its batch stays at the provider
+    while the provider keeps results (anthropic_batch_deletion
+    .UNSAVED_RESULT), where `backfill_intentions.py --collect <batch id>`
+    can still save it (#693 review)."""
+    from backend.utils.anthropic_batch_deletion import UNSAVED_RESULT
+    _mark_item(item, job, gave_up=True, **{UNSAVED_RESULT: True})
+
+
 def handle_failed_intentions_item(user, item, job, keys):
     """Called by the poller when a kind="intentions" item ended without a
     result. One calibrated resubmit — a new persisted job — sized from the
