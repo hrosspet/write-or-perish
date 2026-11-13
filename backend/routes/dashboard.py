@@ -224,6 +224,28 @@ def request_email_change():
         return jsonify({"error": "That is already your email address."}), 400
     taken = User.query.filter(db.func.lower(User.email) == new_email,
                               User.id != current_user.id).first() is not None
+    # Limits (utils/send_limits.py). The account's and the client's say
+    # nothing about the address; over the address's own, nothing is sent
+    # and the answer is the one a sent link gets.
+    from backend.utils import send_limits
+    if not (send_limits.client_may_ask("email-change", request.remote_addr)
+            and send_limits.account_may_ask("email-change", current_user.id)):
+        logger.info("Email change request of user %s over the account or "
+                    "client limit", current_user.id)
+        return jsonify({"error": send_limits.WAIT_MESSAGE}), 429
+    if not send_limits.address_may_receive("email-change", new_email):
+        logger.info("Email change link for user %s not sent: the address's "
+                    "limit is reached", current_user.id)
+        if (current_user.pending_email != new_email
+                or _pending_email_expired(current_user)):
+            # As for a taken address: pending, without a usable link. A
+            # link already out for this address stays as it was.
+            current_user.pending_email = new_email
+            current_user.email_change_token_hash = None
+            current_user.email_change_expires_at = datetime.utcnow() + \
+                timedelta(seconds=email_change_expiry_seconds())
+            db.session.commit()
+        return _email_change_sent_answer(new_email)
 
     # Persist first, send second: a delivered link always has its hash on
     # the row. A failed send puts back whatever was pending before, so it
@@ -259,6 +281,13 @@ def request_email_change():
             db.session.commit()
         return jsonify({"error": "Could not send the confirmation email. "
                                  "Please try again."}), 502
+    return _email_change_sent_answer(new_email)
+
+
+def _email_change_sent_answer(new_email):
+    """The answer to an email change that is not refused for the account
+    or its client: the address taken or not, the link sent or not (the
+    address's limit)."""
     return jsonify({
         "message": f"Confirmation link sent to {new_email}. The address "
                    "becomes yours once you confirm it.",

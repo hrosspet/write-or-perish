@@ -1,8 +1,9 @@
-"""Sign-in emails: limits, and a link stays valid until it is used or
-expires (backend/utils/sign_in_links.py).
+"""Sign-in emails: limits, and a link stays valid until it expires
+(backend/utils/sign_in_links.py, backend/utils/send_limits.py); the same
+limits on the email-change confirmation.
 
-Most tests use a bare app (auth + admin blueprints), as test_email_change
-does; the client address behind the proxy and the account deletion use
+Most tests use a bare app (auth + dashboard + admin blueprints), as
+test_email_change does; the client address behind the proxy and the account deletion use
 create_app(). sqlite in memory; mail is captured below the senders.
 """
 import os
@@ -32,7 +33,7 @@ import flask_login as _real_flask_login  # noqa: E402
 from backend.extensions import db as _db  # noqa: E402
 from backend.models import SignInLink, User  # noqa: E402
 import backend.models as _real_backend_models  # noqa: E402
-from backend.utils import sign_in_links  # noqa: E402
+from backend.utils import send_limits, sign_in_links  # noqa: E402
 
 FRONTEND_URL = "https://loore.test"
 SIGN_IN_SUBJECT = "Your Loore sign-in link"
@@ -93,8 +94,10 @@ def _bare_app():
 
     from backend.routes.auth import auth_bp
     from backend.routes.admin import admin_bp
+    from backend.routes.dashboard import dashboard_bp
     app.register_blueprint(auth_bp, url_prefix="/auth")
     app.register_blueprint(admin_bp, url_prefix="/api/admin")
+    app.register_blueprint(dashboard_bp, url_prefix="/api/dashboard")
     return app
 
 
@@ -148,15 +151,15 @@ def mails(monkeypatch):
 
 @pytest.fixture
 def clock(monkeypatch):
-    """Moves the links' clock (sign_in_links._now) and the per-client
-    counters' clock (time.monotonic) forward together. The signatures
-    keep real time: the tests stay within a token's signed lifetime."""
+    """Moves the links' clock (sign_in_links._now) and the counters' clock
+    (time.monotonic in send_limits) forward together. The signatures keep
+    real time: the tests stay within a token's signed lifetime."""
     import time as _time
     state = {"offset": timedelta(0)}
     real_now, real_monotonic = sign_in_links._now, _time.monotonic
     monkeypatch.setattr(sign_in_links, "_now",
                         lambda: real_now() + state["offset"])
-    monkeypatch.setattr(sign_in_links.time, "monotonic",
+    monkeypatch.setattr(send_limits.time, "monotonic",
                         lambda: real_monotonic() + state["offset"].total_seconds())
 
     def advance(**kw):
@@ -177,14 +180,16 @@ def _anonymous(app, addr="203.0.113.1"):
     return c
 
 
-def _admin(app):
-    from flask import g
-    g.pop("_login_user", None)
-    c = app.test_client()
+def _signed_in(app, name, addr="203.0.113.1"):
+    c = _anonymous(app, addr)
     with c.session_transaction() as sess:
-        sess["_user_id"] = str(_user("root").id)
+        sess["_user_id"] = str(_user(name).id)
         sess["_fresh"] = True
     return c
+
+
+def _admin(app):
+    return _signed_in(app, "root")
 
 
 def _session_user_id(client):
@@ -221,7 +226,7 @@ def _earlier_format_token(email, next_url=None, max_age=None):
     return _get_serializer().dumps(payload, salt="magic-link")
 
 
-# ── A link stays valid until it is used or expires ──────────────────────
+# ── A link stays valid until it expires ──────────────────────────────────
 
 def test_a_new_request_leaves_the_links_already_sent_working(app, mails):
     _ask(app, "alice@example.com")
@@ -237,8 +242,8 @@ def test_a_new_request_leaves_the_links_already_sent_working(app, mails):
     rows = SignInLink.query.all()
     assert {r.token_hash for r in rows} == {hash_token(first), hash_token(second)}
     assert {r.address_hash for r in rows} == {
-        sign_in_links.address_key("alice@example.com")}
-    assert sign_in_links.address_key("alice@example.com") != hash_token(
+        send_limits.address_key("alice@example.com")}
+    assert send_limits.address_key("alice@example.com") != hash_token(
         "alice@example.com")                    # keyed, not a plain sha256
 
 
@@ -258,29 +263,30 @@ def test_the_welcome_link_survives_later_sign_in_requests(app, mails):
     assert _open(app, welcome) == (f"{FRONTEND_URL}/welcome", str(_user("bob").id))
 
 
-def test_a_link_is_used_up_after_the_reuse_window(app, mails, clock):
-    """The first use is recorded; the link keeps working for
-    REUSE_SECONDS (a mail app's preview, then the person), then not."""
+def test_a_link_works_every_time_it_is_opened_until_it_expires(app, mails, clock):
+    """Mail apps and scanners open links before the person does: opening
+    one uses nothing up. The welcome link, opened on arrival by a scanner,
+    still signs the person in days later. Control: as before the change."""
     r = _admin(app).post(f"/api/admin/users/{_user('bob').id}/activate_and_welcome")
     assert r.status_code == 200
     welcome = _token(mails, WELCOME_SUBJECT)
-
-    assert _open(app, welcome)[1] == str(_user("bob").id)   # the preview
-    clock(seconds=sign_in_links.REUSE_SECONDS - 60)
-    assert _open(app, welcome)[1] == str(_user("bob").id)   # the person
-    clock(seconds=120)
+    bob = str(_user("bob").id)
+    assert _open(app, welcome)[1] == bob        # the scanner, on arrival
+    clock(days=3)
+    assert _open(app, welcome) == (f"{FRONTEND_URL}/welcome", bob)   # the person
+    assert _open(app, welcome)[1] == bob        # and again, on the phone
+    clock(days=28)
     assert _open(app, welcome) == (
-        f"{FRONTEND_URL}/login?error=link_already_used", None)
+        f"{FRONTEND_URL}/login?error=invalid_or_expired", None)
 
 
-def test_a_sign_in_link_is_used_up_too(app, mails, clock):
-    app.config["MAGIC_LINK_EXPIRY_SECONDS"] = 3600
+def test_a_sign_in_link_opened_twice_signs_in_both_times(app, mails):
     _ask(app, "newcomer@example.com")
     token = _token(mails)
-    _, who = _open(app, token)
-    assert who == str(User.query.filter_by(email="newcomer@example.com").one().id)
-    clock(seconds=sign_in_links.REUSE_SECONDS + 1)
-    assert _open(app, token) == (f"{FRONTEND_URL}/login?error=link_already_used", None)
+    first = _open(app, token)
+    second = _open(app, token)
+    newcomer = str(User.query.filter_by(email="newcomer@example.com").one().id)
+    assert first == second == (f"{FRONTEND_URL}/dashboard", newcomer)
     assert User.query.filter_by(email="newcomer@example.com").count() == 1
 
 
@@ -305,54 +311,47 @@ def test_a_link_without_its_row_does_not_sign_in(app, mails):
 
 class TestLinksSentBeforeTheChange:
     """Tokens in inboxes at deploy time carry no nonce and have no row.
-    They sign in once, as they would have before, and are used up like
-    any link after that."""
+    They work as they did: controls (they pass before the change too),
+    except that a later request no longer replaces them."""
 
-    def test_an_accounts_link_signs_in_once(self, app, clock):
-        # Longer-lived than the reuse window, so "used up" can show.
-        app.config["MAGIC_LINK_EXPIRY_SECONDS"] = 3600
-        alice = _user("alice")
-        token = _earlier_format_token("alice@example.com")
+    def _earlier_link(self, name, email, **kw):
         from backend.utils.magic_link import hash_token
-        expiry = datetime.utcnow().replace(microsecond=0) + timedelta(minutes=50)
-        alice.magic_link_token_hash = hash_token(token)
-        alice.magic_link_expires_at = expiry
+        user = _user(name)
+        token = _earlier_format_token(email, **kw)
+        user.magic_link_token_hash = hash_token(token)
+        user.magic_link_expires_at = datetime.utcnow() + timedelta(minutes=10)
         _db.session.commit()
+        return token, str(user.id)
 
-        assert _open(app, token) == (f"{FRONTEND_URL}/dashboard", str(alice.id))
-        alice = _user("alice")
-        assert alice.magic_link_token_hash is None
-        row = SignInLink.query.one()
-        assert row.used_at is not None
-        assert row.expires_at == expiry            # the account's, kept
-        clock(seconds=sign_in_links.REUSE_SECONDS + 1)
-        assert _open(app, token) == (f"{FRONTEND_URL}/login?error=link_already_used", None)
+    def test_an_accounts_link_works_until_it_expires(self, app):
+        token, alice = self._earlier_link("alice", "alice@example.com")
+        assert _open(app, token) == (f"{FRONTEND_URL}/dashboard", alice)
+        assert _open(app, token) == (f"{FRONTEND_URL}/dashboard", alice)
 
-    def test_the_welcome_link_of_before_signs_in_once(self, app, clock):
-        bob = _user("bob")
-        token = _earlier_format_token("bob@example.com", "/welcome",
-                                      max_age=30 * 24 * 3600)
-        from backend.utils.magic_link import hash_token
-        bob.magic_link_token_hash = hash_token(token)
-        bob.magic_link_expires_at = datetime.utcnow() + timedelta(days=30)
-        _db.session.commit()
+    def test_a_later_request_leaves_it_working(self, app, mails):
+        """Not a control: before the change, the new request replaced it."""
+        token, alice = self._earlier_link("alice", "alice@example.com")
+        _ask(app, "alice@example.com")
+        assert _open(app, token) == (f"{FRONTEND_URL}/dashboard", alice)
 
-        assert _open(app, token) == (f"{FRONTEND_URL}/welcome", str(bob.id))
-        clock(hours=1)
-        assert _open(app, token) == (f"{FRONTEND_URL}/login?error=link_already_used", None)
+    def test_the_welcome_link_of_before(self, app):
+        token, bob = self._earlier_link("bob", "bob@example.com",
+                                        next_url="/welcome",
+                                        max_age=30 * 24 * 3600)
+        assert _open(app, token) == (f"{FRONTEND_URL}/welcome", bob)
+        assert _open(app, token) == (f"{FRONTEND_URL}/welcome", bob)
 
-    def test_a_sign_up_link_signs_in_once(self, app, clock):
-        app.config["MAGIC_LINK_EXPIRY_SECONDS"] = 3600
+    def test_a_sign_up_link(self, app):
+        """As before: it makes the account, and then the account holds no
+        hash for it. (A sign-up link sent now has a row and works again.)"""
         token = _earlier_format_token("fresh@example.com")
         location, who = _open(app, token)
         assert location == f"{FRONTEND_URL}/dashboard"
         assert who == str(User.query.filter_by(email="fresh@example.com").one().id)
-        clock(seconds=sign_in_links.REUSE_SECONDS + 1)
         assert _open(app, token) == (f"{FRONTEND_URL}/login?error=link_already_used", None)
+        assert User.query.filter_by(email="fresh@example.com").count() == 1
 
     def test_a_link_replaced_before_the_change_stays_refused(self, app):
-        """Control: as before, only the newest link sent to an account
-        then works."""
         alice = _user("alice")
         alice.magic_link_token_hash = "the hash of a later link"
         _db.session.commit()
@@ -397,7 +396,7 @@ def test_a_client_gets_ten_requests_in_fifteen_minutes(app, mails, clock):
 
     r = _ask(app, "person10@example.com", addr="203.0.113.9")
     assert r.status_code == 429
-    assert r.get_json() == {"error": sign_in_links.WAIT_MESSAGE}
+    assert r.get_json() == {"error": send_limits.WAIT_MESSAGE}
     assert len(mails) == 10
     # Another client is not affected.
     assert _ask(app, "person11@example.com", addr="203.0.113.10").status_code == 200
@@ -428,7 +427,7 @@ def test_an_ipv6_client_is_counted_by_its_64(app, mails):
 
 
 def test_client_buckets():
-    b = sign_in_links.client_bucket
+    b = send_limits.client_bucket
     assert b("203.0.113.9") == "203.0.113.9"
     assert b("2001:db8::1") == b("2001:db8::abcd") == "2001:db8::/64"
     assert b("2001:db8:0:1::1") != b("2001:db8::1")
@@ -510,24 +509,27 @@ class _FakeRedis:
         return _FakePipeline(self.store)
 
 
-def test_the_client_counters_live_in_redis_with_a_ttl(app, monkeypatch):
+def test_the_counters_live_in_redis_with_a_ttl(app, monkeypatch):
     fake = _FakeRedis()
-    monkeypatch.setattr(sign_in_links, "_redis", lambda: fake)
+    monkeypatch.setattr(send_limits, "_redis", lambda: fake)
     for _ in range(10):
-        assert sign_in_links.client_may_ask("203.0.113.77")
-    assert not sign_in_links.client_may_ask("203.0.113.77")
+        assert send_limits.client_may_ask("sign-in", "203.0.113.77")
+    assert not send_limits.client_may_ask("sign-in", "203.0.113.77")
     assert sorted(ttl for _, ttl in fake.store.values()) == [15 * 60, 24 * 3600]
-    assert not any("203.0.113.77" in name for name in fake.store)
-    assert all(name.startswith(sign_in_links.CLIENT_KEY_PREFIX) for name in fake.store)
+    for _ in range(6):
+        send_limits.address_may_receive("email-change", "alice@example.com")
+    names = list(fake.store)
+    assert not any("203.0.113.77" in n or "alice" in n for n in names)
+    assert all(n.startswith(send_limits.KEY_PREFIX) for n in names)
 
 
 def test_without_redis_each_process_counts_on_its_own(app, monkeypatch):
     def unreachable():
         raise ConnectionError("no redis")
-    monkeypatch.setattr(sign_in_links, "_redis", unreachable)
+    monkeypatch.setattr(send_limits, "_redis", unreachable)
     for _ in range(10):
-        assert sign_in_links.client_may_ask("203.0.113.78")
-    assert not sign_in_links.client_may_ask("203.0.113.78")
+        assert send_limits.client_may_ask("sign-in", "203.0.113.78")
+    assert not send_limits.client_may_ask("sign-in", "203.0.113.78")
 
 
 # ── Behind the proxy, and account deletion (create_app) ─────────────────
@@ -561,3 +563,116 @@ def test_deleting_the_account_withdraws_its_links(real_app, mails):
     assert SignInLink.query.count() == 0
     assert _open(real_app, token) == (
         f"{FRONTEND_URL}/login?error=invalid_or_expired", None)
+
+
+# ── The same limits on the email-change confirmation ─────────────────────
+
+CONFIRM_SUBJECT = "Confirm your email for Loore"
+IN_USE_SUBJECT = "This address already signs in to Loore"
+
+
+def _accounts(n):
+    """n more accounts, named u0, u1, …"""
+    for i in range(n):
+        _db.session.add(User(username=f"u{i}", email=f"u{i}@example.com",
+                             approved=True))
+    _db.session.commit()
+    return [f"u{i}" for i in range(n)]
+
+
+def _change(app, name, address, addr="203.0.113.1"):
+    return _signed_in(app, name, addr).post("/api/dashboard/email",
+                                            json={"email": address})
+
+
+def _sent_answer(name, address):
+    return {
+        "message": f"Confirmation link sent to {address}. The address "
+                   "becomes yours once you confirm it.",
+        "email": _user(name).email,
+        "pending_email": address,
+        "pending_email_expired": False,
+    }
+
+
+def _change_token(mails):
+    mail = [m for m in mails if m["subject"] == CONFIRM_SUBJECT][-1]
+    return re.search(r"/confirm-email\?token=(\S+)", mail["text"]).group(1)
+
+
+def test_an_address_gets_at_most_five_change_links_an_hour(app, mails):
+    """From different accounts and clients, so only the address limit
+    counts. Over it nothing is sent, the answer is the one a sent link
+    gets, and a link already out for the address keeps working."""
+    for i, name in enumerate(_accounts(4)):
+        assert _change(app, name, "target@example.com",
+                       addr=f"192.0.2.{i}").status_code == 200
+    r = _change(app, "alice", "target@example.com", addr="192.0.2.50")
+    assert r.get_json() == _sent_answer("alice", "target@example.com")
+    link = _change_token(mails)
+    assert len(mails) == 5
+
+    r = _change(app, "alice", "target@example.com", addr="192.0.2.51")
+    assert r.status_code == 200
+    assert r.get_json() == _sent_answer("alice", "target@example.com")
+    assert len(mails) == 5
+    r = _signed_in(app, "alice").post("/api/dashboard/email/confirm",
+                                      json={"token": link})
+    assert r.status_code == 200, r.get_json()
+    assert _user("alice").email == "target@example.com"
+
+
+def test_over_the_address_limit_a_new_pending_address_has_no_usable_link(app, mails):
+    for i, name in enumerate(_accounts(5)):
+        _change(app, name, "busy@example.com", addr=f"192.0.2.{i}")
+    assert len(mails) == 5
+    r = _change(app, "bob", "busy@example.com", addr="192.0.2.60")
+    assert r.get_json() == _sent_answer("bob", "busy@example.com")
+    assert len(mails) == 5
+    bob = _user("bob")
+    assert bob.pending_email == "busy@example.com"
+    assert bob.email_change_token_hash is None
+
+
+def test_the_same_answer_for_a_taken_address_over_its_limit(app, mails):
+    """A taken address gets an "in use" notice instead of a link; over the
+    limit it gets nothing, and the asker cannot tell either case."""
+    for i, name in enumerate(_accounts(5)):
+        _change(app, name, "alice@example.com", addr=f"192.0.2.{i}")
+    assert [m["subject"] for m in mails] == [IN_USE_SUBJECT] * 5
+    r = _change(app, "bob", "alice@example.com", addr="192.0.2.70")
+    assert r.get_json() == _sent_answer("bob", "alice@example.com")
+    assert len(mails) == 5
+
+
+def test_an_account_asks_at_most_five_times_an_hour(app, mails):
+    for i in range(5):
+        assert _change(app, "alice", f"new{i}@example.com",
+                       addr=f"192.0.2.{i}").status_code == 200
+    r = _change(app, "alice", "new5@example.com", addr="192.0.2.9")
+    assert r.status_code == 429
+    assert r.get_json() == {"error": send_limits.WAIT_MESSAGE}
+    assert len(mails) == 5
+    assert _user("alice").pending_email == "new4@example.com"
+
+
+def test_a_client_asks_at_most_ten_times_in_fifteen_minutes(app, mails, clock):
+    names = _accounts(11)
+    for name in names[:10]:
+        assert _change(app, name, f"{name}-new@example.com",
+                       addr="203.0.113.99").status_code == 200
+    r = _change(app, names[10], "late@example.com", addr="203.0.113.99")
+    assert r.status_code == 429
+    assert "late" not in r.get_data(as_text=True)
+    assert len(mails) == 10
+    clock(minutes=16)
+    assert _change(app, names[10], "late@example.com",
+                   addr="203.0.113.99").status_code == 200
+
+
+def test_the_two_routes_count_separately(app, mails):
+    """A person's sign-in requests do not use up their email change."""
+    for i in range(10):
+        _ask(app, f"s{i}@example.com", addr="203.0.113.120")
+    assert _change(app, "alice", "mine@example.com",
+                   addr="203.0.113.120").status_code == 200

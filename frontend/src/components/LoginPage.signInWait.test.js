@@ -1,5 +1,5 @@
 // A sign-in email asked for too often from one client is answered with a
-// 429 and a calm message (backend/utils/sign_in_links.py). The form shows
+// 429 and a calm message (backend/utils/send_limits.py). The form shows
 // the server's words and stays open, so the person can try again later.
 // Control: the form already showed any error the server sent.
 jest.mock('../contexts/UserContext', () => ({

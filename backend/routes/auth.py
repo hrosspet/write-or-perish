@@ -11,7 +11,7 @@ from backend.utils.magic_link import (
     generate_magic_link_token, verify_magic_link_token,
     hash_token, generate_unique_username,
 )
-from backend.utils import sign_in_links
+from backend.utils import send_limits, sign_in_links
 from backend.utils.email import (
     send_magic_link_email, send_x_connected_notice, is_valid_email)
 from backend.utils.reserved_usernames import derive_available_username
@@ -307,17 +307,17 @@ def magic_link_send():
 
     if next_url and not is_safe_redirect_url(next_url):
         next_url = None
-    if not sign_in_links.client_may_ask(request.remote_addr):
-        # About this client only (utils/sign_in_links.py), never about
-        # the address.
+    if not send_limits.client_may_ask("sign-in", request.remote_addr):
+        # About this client only (utils/send_limits.py), never about the
+        # address.
         logger.info("Sign-in email request over the client limit")
-        return jsonify({"error": sign_in_links.WAIT_MESSAGE}), 429
+        return jsonify({"error": send_limits.WAIT_MESSAGE}), 429
 
     try:
         token = generate_magic_link_token(email, next_url)
         token_h = hash_token(token)
         # A link of its own: the links already sent to the address keep
-        # working until they are used or expire (utils/sign_in_links.py).
+        # working until they expire (utils/sign_in_links.py).
         user = User.query.filter_by(email=email).first()
         if not sign_in_links.record_link(
                 email, token_h,
@@ -366,8 +366,8 @@ def magic_link_verify():
 
     token_h = hash_token(token)
 
-    # Valid until used or expired; a first use leaves it working for a
-    # while, for mail apps that open links first (utils/sign_in_links.py).
+    # Valid until it expires, however often it is opened (mail apps open
+    # links first), unless withdrawn (utils/sign_in_links.py).
     refused = sign_in_links.redeem(token_h, payload)
     if refused is not None:
         return redirect(f"{frontend_url}/login?error={refused}")

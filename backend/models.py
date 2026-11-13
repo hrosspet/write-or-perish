@@ -396,11 +396,11 @@ class SignInLink(db.Model):
     welcome email's (backend/utils/sign_in_links.py).
 
     One row per link, so a new link for an address leaves the ones
-    already sent working: each stays valid until it is used or expires.
-    Only hashes are kept: the token's (sha256, like the other emailed
-    links) and the address's, keyed with the app's secret, so the rows
-    can be counted per address without holding the address. The address
-    the link signs in to travels in the signed token itself.
+    already sent working: each stays valid until it expires. Only hashes
+    are kept: the token's (sha256, like the other emailed links) and the
+    address's, keyed with the app's secret, so the rows can be counted per
+    address without holding the address. The address the link signs in to
+    travels in the signed token itself.
     """
     __tablename__ = "sign_in_link"
     __table_args__ = (
@@ -415,8 +415,6 @@ class SignInLink(db.Model):
     created_at = db.Column(db.DateTime, nullable=False,
                            default=datetime.utcnow)
     expires_at = db.Column(db.DateTime, nullable=False, index=True)
-    # The first time the link signed someone in; null until then.
-    used_at = db.Column(db.DateTime, nullable=True)
 
 
 class ProfileBatchJob(db.Model):

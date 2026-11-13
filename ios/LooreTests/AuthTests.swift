@@ -210,7 +210,7 @@ final class MagicLinkTests: XCTestCase {
 }
 
 /// `POST /auth/magic-link/send` answers a client that asked too often with a
-/// 429 and a calm message (backend/utils/sign_in_links.py); the sign-in screen
+/// 429 and a calm message (backend/utils/send_limits.py); the sign-in screen
 /// shows the AuthFailure's message under the address field. Control: any
 /// server error text already came through this way.
 @MainActor
