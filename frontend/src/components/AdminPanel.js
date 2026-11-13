@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from "react";
 import XLookupConfirmDialog from "./XLookupConfirmDialog";
 import PurgeDataDialog from "./PurgeDataDialog";
 import AdminDeleteAccountDialog from "./AdminDeleteAccountDialog";
+import AdminUnclaimedAccounts from "./AdminUnclaimedAccounts";
 import ProfileBuildConfirmDialog from "./ProfileBuildConfirmDialog";
 import IntentionsReplaceDialog from "./IntentionsReplaceDialog";
 import AdminRefusalDialog, { REFUSAL_TITLES } from "./AdminRefusalDialog";
@@ -564,6 +565,20 @@ const smallActionStyle = {
 export function purgeLabel(job) {
   if (!job) return "";
   const who = job.source === "admin" ? "an admin" : "the user";
+  if (job.delete_account && job.source === "unclaimed") {
+    // A pre-filled account nobody claimed within the period (#685): due
+    // at once, so this shows only for the minute before the purge runs,
+    // or after a failure.
+    switch (job.status) {
+      case "scheduled":
+      case "running":
+        return "Deleting: pre-filled, nobody signed in within the period";
+      case "failed":
+        return `Deletion of the unclaimed account failed: ${job.error || "unknown error"}`;
+      default:
+        return `Unclaimed account deletion: ${job.status}`;
+    }
+  }
   if (job.delete_account) {
     switch (job.status) {
       case "scheduled":
@@ -1230,6 +1245,7 @@ function AdminPanel() {
         {newHandleError && <div style={{ color: "var(--error)" }}>{newHandleError}</div>}
         {newHandleNotice && <div style={{ color: "var(--text-secondary)" }}>{newHandleNotice}</div>}
       </div>
+      <AdminUnclaimedAccounts />
       <XLookupConfirmDialog
         open={!!xLookupAsk}
         handle={xLookupAsk?.handle}

@@ -112,6 +112,8 @@ TASK_QUEUES = {
     "backend.tasks.user_purge.cancel_batches_read_before": _B,
     "backend.tasks.user_purge.process_user_data_purges": _B,
     "backend.tasks.user_purge.run_user_data_purge": _B,
+    # Nightly: pre-filled accounts nobody claimed (#685).
+    "backend.tasks.unclaimed_accounts.delete_unclaimed_accounts": _B,
 }
 
 # The queues each worker reads while the split is on.

@@ -568,6 +568,8 @@ def create_app():
     )
     app.cli.add_command(pgvector_enable_command)
     app.cli.add_command(pgvector_compare_command)
+    from backend.unclaimed_cli import unclaimed_accounts_command
+    app.cli.add_command(unclaimed_accounts_command)
 
     try:
         from experiments.prompt_rct.run_rct import rct_cli

@@ -175,6 +175,16 @@ celery.conf.update(
             'task': 'backend.tasks.user_purge.process_user_data_purges',
             'schedule': 60.0,  # every minute
         },
+        # Pre-filled accounts nobody claimed within UNCLAIMED_ACCOUNT_DAYS
+        # (#685): a dry run that only logs unless
+        # UNCLAIMED_ACCOUNT_DELETION_ENABLED; on, it schedules at most a
+        # few account deletions, which the purge beat above runs. A fixed
+        # time (#614); 02:41 UTC is away from the :00 and :07 hourly jobs
+        # and the 03:17 cleanup.
+        'delete-unclaimed-accounts': {
+            'task': 'backend.tasks.unclaimed_accounts.delete_unclaimed_accounts',
+            'schedule': schedules.crontab(hour=2, minute=41),  # daily, 02:41 UTC
+        },
         # Import stashes (an analyzed ChatGPT/Claude export, encrypted, or
         # a Twitter archive's tweets) that nobody confirmed within their
         # 24 h TTL. A directory listing when there is nothing to remove.
@@ -247,3 +257,4 @@ from backend.tasks import imports  # noqa: F401
 from backend.tasks import chat_imports  # noqa: F401
 from backend.tasks import intentions  # noqa: F401
 from backend.tasks import user_purge  # noqa: F401
+from backend.tasks import unclaimed_accounts  # noqa: F401

@@ -67,6 +67,7 @@ def _check_schema(db):
         "user_profile": {"parent_profile_id", "generation_type", "source_data_cutoff",
                          "source_origin_stats", "source_tokens_used"},
         "user_recent_context": {"profile_id", "source_data_cutoff"},
+        "user": {"prefilled_at"},
     }
     for table, cols in need.items():
         have = {c["name"] for c in insp.get_columns(table)}
@@ -356,6 +357,14 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
             db.session.query(Node).filter(Node.id == new_id).update(
                 values, synchronize_session=False)
             relinked += 1
+    db.session.commit()
+
+    # The account was made ready ahead of its owner now, on this server:
+    # the 90 days after which a pre-filled account nobody claimed is
+    # deleted count from the load (#685), never from a time in the bundle
+    # (its entries keep the lab's timestamps).
+    db.session.query(User).filter(User.id == user_id).update(
+        {"prefilled_at": datetime.utcnow()}, synchronize_session=False)
     db.session.commit()
 
     print(f"loaded '{username}' (id {user_id}): {created} nodes created, "
