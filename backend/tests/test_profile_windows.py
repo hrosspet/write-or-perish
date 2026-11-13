@@ -2129,16 +2129,19 @@ def test_an_import_date_under_a_flagged_rebuild_is_dropped(world):
 
 def _failing_retip(monkeypatch, user):
     """The re-tip of ``user``'s set raises (a version that cannot be
-    decrypted, say); every other user's runs."""
-    module = pb._exports
-    real = module._retip_window_set
+    decrypted, say); every other user's runs. Patched in every copy of
+    the exports module the pipeline may call (``ex`` can be another
+    object than ``pb._exports`` after other test files reloaded the
+    package)."""
+    for module in {id(m): m for m in (ex, pb._exports, pw._exports)}.values():
+        real = module._retip_window_set
 
-    def retip(user_id, set_id, earliest):
-        if user_id == user.id:
-            raise RuntimeError("synthetic decrypt failure")
-        return real(user_id, set_id, earliest)
+        def retip(user_id, set_id, earliest, real=real):
+            if user_id == user.id:
+                raise RuntimeError("synthetic decrypt failure")
+            return real(user_id, set_id, earliest)
 
-    monkeypatch.setattr(module, "_retip_window_set", retip)
+        monkeypatch.setattr(module, "_retip_window_set", retip)
 
 
 def test_a_failing_retip_does_not_stop_the_seeder_for_the_others(
