@@ -144,19 +144,19 @@ def _raw(node):
         db.text("SELECT content FROM node WHERE id = :id"), {"id": node.id}).scalar()
 
 
-def test_public_import_is_stored_plaintext(app):
+def test_public_import_is_refused_before_anything_is_written(app):
     from backend.routes.import_data import create_twitter_nodes
     u = _user()
-    rows = [{"id_str": "1", "full_text": "a public tweet", "created_at": "Mon Aug 24 10:00:00 +0000 2026",
+    rows = [{"id_str": "1", "full_text": "a tweet", "created_at": "Mon Aug 24 10:00:00 +0000 2026",
              "is_reply": False, "token_count": 3}]
-    create_twitter_nodes(
-        user_id=u.id, rows=iter(rows), total=1, import_type="separate_nodes",
-        include_replies=False, privacy_level="public", ai_usage="chat", on_deleted=None,
-        provenance="archive_upload",
-    )
-    node = Node.query.filter_by(source_key="twitter:1").one()
-    assert _raw(node) == "a public tweet"
-    assert node.get_content() == "a public tweet"
+    # Twitter nodes of an existing entry are the path that applies settings.
+    with pytest.raises(ValueError):
+        create_twitter_nodes(
+            user_id=u.id, rows=iter(rows), total=1, import_type="separate_nodes",
+            include_replies=False, privacy_level="public", ai_usage="chat",
+            on_deleted=None, provenance="archive_upload",
+        )
+    assert Node.query.filter_by(source_key="twitter:1").count() == 0
 
 
 def test_set_privacy_level_moves_content_across_the_boundary(app):

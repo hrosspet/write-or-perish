@@ -12,6 +12,10 @@ const PrivacySelector = ({
   // Replies in public threads inherit the thread's privacy (#228) —
   // render a quiet static note instead of the dropdown.
   lockPrivacy = false,
+  // Levels left out of the dropdown (imports never offer 'public', #677).
+  omitLevels = [],
+  // One calm line shown under the privacy choice, in place of its description.
+  privacyNote = null,
 }) => {
   const labelStyle = {
     display: 'block',
@@ -74,14 +78,21 @@ const PrivacySelector = ({
           disabled={disabled}
           style={selectStyle}
         >
-          <option value="private">🔒 Private · Only I can see this</option>
-          <option value="circles">👥 Circles · Shared with specific groups (coming soon)</option>
-          <option value="public">🌐 Public · Anyone can see this</option>
+          {!omitLevels.includes('private') && (
+            <option value="private">🔒 Private · Only I can see this</option>
+          )}
+          {!omitLevels.includes('circles') && (
+            <option value="circles">👥 Circles · Shared with specific groups (coming soon)</option>
+          )}
+          {!omitLevels.includes('public') && (
+            <option value="public">🌐 Public · Anyone can see this</option>
+          )}
         </select>
         <div style={descStyle}>
-          {privacyLevel === 'private' && 'This note is private and only visible to you.'}
-          {privacyLevel === 'circles' && 'This note will be shared with your selected circles (feature coming soon).'}
-          {privacyLevel === 'public' && 'This note will be visible to all users.'}
+          {privacyNote}
+          {!privacyNote && privacyLevel === 'private' && 'This note is private and only visible to you.'}
+          {!privacyNote && privacyLevel === 'circles' && 'This note will be shared with your selected circles (feature coming soon).'}
+          {!privacyNote && privacyLevel === 'public' && 'This note will be visible to all users.'}
         </div>
       </div>
       )}

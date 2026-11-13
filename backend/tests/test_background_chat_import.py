@@ -352,10 +352,10 @@ def test_a_run_with_other_settings_starts_over_and_updates(app, monkeypatch):
         run_conversation_import(alice.id, token, "t1", OPTIONS, batch_size=2)
     restore()
     _db.session.rollback()
-    public = dict(OPTIONS, privacy_level="public")
-    result = run_conversation_import(alice.id, token, "t2", public)
+    circles = dict(OPTIONS, privacy_level="circles")
+    result = run_conversation_import(alice.id, token, "t2", circles)
     assert result["created"] == 4 and result["updated"] == 4
-    assert all(n.privacy_level == "public"
+    assert all(n.privacy_level == "circles"
                for n in Node.query.filter_by(human_owner_id=alice.id))
 
 
@@ -562,9 +562,12 @@ def test_a_settings_only_reimport_is_chunked_too(app, kms, monkeypatch):
     from backend.routes.import_data import run_conversation_import
     alice = _make_user("alice")
     _db.session.commit()
-    public = dict(OPTIONS, privacy_level="public")
     run_conversation_import(alice.id, _stash(alice.id, _analyzed(30, 40)),
-                            "t1", public)  # 1200 messages, no keys
+                            "t1", OPTIONS)  # 1200 messages
+    # The user made every entry public by hand: stored as plaintext.
+    for n in Node.query.filter_by(human_owner_id=alice.id):
+        n.set_privacy_level("public")
+    _db.session.commit()
     token = _stash(alice.id, _analyzed(30, 40))
     saves = []
     real_write = cs.write_state
@@ -584,17 +587,15 @@ def test_a_settings_only_reimport_is_chunked_too(app, kms, monkeypatch):
     assert kms["encrypt"] - wraps == len(keys) <= 3
 
 
-def test_a_public_import_makes_no_data_key(app, kms):
+def test_a_public_run_is_refused_and_writes_nothing(app):
     from backend.routes.import_data import run_conversation_import
     alice = _make_user("alice")
     _db.session.commit()
     token = _stash(alice.id, _analyzed(3, 3))
-    wraps = kms["encrypt"]
-    run_conversation_import(alice.id, token, "t1",
-                            dict(OPTIONS, privacy_level="public"))
-    assert kms["encrypt"] == wraps
-    assert {n.content for n in Node.query.filter_by(
-        human_owner_id=alice.id)} >= {"c0 message 1"}
+    with pytest.raises(ValueError):
+        run_conversation_import(alice.id, token, "t1",
+                                dict(OPTIONS, privacy_level="public"))
+    assert Node.query.filter_by(human_owner_id=alice.id).count() == 0
 
 
 # ── the stash ────────────────────────────────────────────────────────────

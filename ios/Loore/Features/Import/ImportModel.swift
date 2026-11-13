@@ -210,6 +210,8 @@ final class ImportModel {
     var dateOrdering = "modified"
     var includeReplies = false
     var privacy: PrivacyLevel = .private
+    /// Shown under the privacy choice; imports never offer Public (#677). Same wording as the web.
+    static let privacyNote = "Imported entries start private. You can make any of them public afterwards."
     /// Starts at the account's AI usage setting (#593, as the web), again each
     /// time a confirm dialog opens; the value shown is the value sent.
     var aiUsage: AIUsage = .off

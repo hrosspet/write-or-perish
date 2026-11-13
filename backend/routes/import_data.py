@@ -311,6 +311,33 @@ class _ProfileChanges:
         })
 
 
+IMPORT_PUBLIC_REFUSAL = ("Imported entries can't be public. Import them, "
+                         "then make public the ones you choose.")
+IMPORT_PRIVACY_LEVELS = ("private", "circles")
+
+
+def _import_privacy(data):
+    """(privacy_level, error_response) for an import request. Imports are
+    never public (#677): a public entry goes through the normal publish
+    path, where every check runs, one entry at a time. Unknown values are
+    refused too. A request without a level gets 'private'."""
+    level = data.get('privacy_level', 'private')
+    if level == 'public':
+        return None, (jsonify({"error": IMPORT_PUBLIC_REFUSAL}), 400)
+    if not isinstance(level, str) or level not in IMPORT_PRIVACY_LEVELS:
+        return None, (jsonify({
+            "error": "Invalid privacy_level. Must be 'private' or "
+                     "'circles'."}), 400)
+    return level, None
+
+
+def _require_importable_privacy(privacy_level):
+    """Backstop under the routes' 400: an import task given a level
+    imports may not use (Public) stops before it writes anything."""
+    if privacy_level not in IMPORT_PRIVACY_LEVELS:
+        raise ValueError(IMPORT_PUBLIC_REFUSAL)
+
+
 def _requested_ai_usage(data):
     """The AI usage an import applies: the value the request names, else
     the account's AI usage setting, the default every new entry gets
@@ -334,6 +361,8 @@ def _apply_settings_to_skipped(node_ids, privacy_level, ai_usage, dek=None,
     moves them into or out of what the profile reads (#625).
     """
     from sqlalchemy import or_
+    # Keeps a re-import from ever making an entry public.
+    _require_importable_privacy(privacy_level)
     ids = [i for i in node_ids if i is not None]
     updated = 0
     # Chunked so a huge archive doesn't produce an unbounded IN clause.
@@ -860,7 +889,9 @@ def confirm_import():
     files = data.get('files', [])
     import_type = data.get('import_type', 'separate_nodes')
     date_ordering = data.get('date_ordering', 'modified')
-    privacy_level = data.get('privacy_level', 'private')
+    privacy_level, refusal = _import_privacy(data)
+    if refusal:
+        return refusal
     ai_usage = _requested_ai_usage(data)
     on_deleted = data.get('on_deleted')
 
@@ -1526,6 +1557,7 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
 
     Returns the dict the frontend renders as the import result.
     """
+    _require_importable_privacy(privacy_level)
     if import_type not in ('single_thread', 'separate_nodes'):
         raise ValueError("Invalid import_type")
     if provenance not in PROVENANCES:
@@ -1996,7 +2028,9 @@ def confirm_twitter_import():
 
     import_type = data.get('import_type', 'separate_nodes')
     include_replies = bool(data.get('include_replies', False))
-    privacy_level = data.get('privacy_level', 'private')
+    privacy_level, refusal = _import_privacy(data)
+    if refusal:
+        return refusal
     ai_usage = _requested_ai_usage(data)
     on_deleted = data.get('on_deleted')
 
@@ -2495,7 +2529,9 @@ def _confirm_conversation_import(source):
         # conversations themselves.
         return jsonify({"error": IMPORT_OUTDATED_CLIENT_MESSAGE}), 400
 
-    privacy_level = data.get('privacy_level', 'private')
+    privacy_level, refusal = _import_privacy(data)
+    if refusal:
+        return refusal
     ai_usage = _requested_ai_usage(data)
     on_deleted = data.get('on_deleted')
 
@@ -2614,6 +2650,7 @@ def create_conversation_nodes(user_id, source, conversations, privacy_level,
     be continued from it. Calls ``on_progress(messages_done)`` at most
     every ``progress_interval`` seconds. Returns the final state.
     """
+    _require_importable_privacy(privacy_level)
     import time
     spec = _CONVERSATION_SOURCES[source]
     state = dict(state) if state else _new_conversation_state(None)

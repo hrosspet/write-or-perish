@@ -17,6 +17,10 @@ import ProfileRebuildQuestion from "./ProfileRebuildQuestion";
 import { noteBothProvidersLater } from "../hooks/useBothProvidersQuestion";
 import { useUser } from "../contexts/UserContext";
 
+// Imports never offer Public (#677); same wording on the iPhone app.
+const IMPORT_PRIVACY_NOTE =
+  "Imported entries start private. You can make any of them public afterwards.";
+
 const ghostBtnStyle = {
   backgroundColor: "transparent",
   color: "var(--text-secondary)",
@@ -1249,6 +1253,8 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
             privacyLevel={importPrivacy}
             aiUsage={importAiUsage}
             onPrivacyChange={setImportPrivacy}
+            omitLevels={['public']}
+            privacyNote={IMPORT_PRIVACY_NOTE}
             onAIUsageChange={setImportAiUsage}
           />
           </>)}
@@ -1309,6 +1315,8 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
             privacyLevel={importPrivacy}
             aiUsage={importAiUsage}
             onPrivacyChange={setImportPrivacy}
+            omitLevels={['public']}
+            privacyNote={IMPORT_PRIVACY_NOTE}
             onAIUsageChange={setImportAiUsage}
           />
 
@@ -1367,6 +1375,8 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
             privacyLevel={importPrivacy}
             aiUsage={importAiUsage}
             onPrivacyChange={setImportPrivacy}
+            omitLevels={['public']}
+            privacyNote={IMPORT_PRIVACY_NOTE}
             onAIUsageChange={setImportAiUsage}
           />
 
@@ -1475,6 +1485,8 @@ export default function ImportData({ buttonStyle: customButtonStyle, buttonLabel
             privacyLevel={importPrivacy}
             aiUsage={importAiUsage}
             onPrivacyChange={setImportPrivacy}
+            omitLevels={['public']}
+            privacyNote={IMPORT_PRIVACY_NOTE}
             onAIUsageChange={setImportAiUsage}
           />
 

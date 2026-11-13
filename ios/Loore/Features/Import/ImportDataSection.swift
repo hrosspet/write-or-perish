@@ -156,7 +156,8 @@ private struct ConfirmImportDialog: View {
                     ])
                 }
             }
-            PrivacySelectorView(privacy: $model.privacy, aiUsage: $model.aiUsage, disabled: model.busy)
+            PrivacySelectorView(privacy: $model.privacy, aiUsage: $model.aiUsage, disabled: model.busy,
+                                omitLevels: [.public], privacyNote: ImportModel.privacyNote)
             if let error = model.error {
                 Text(error).font(LooreFont.sans(13.6, .light)).foregroundStyle(LooreColor.accent)
             }

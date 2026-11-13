@@ -471,8 +471,8 @@ def test_a_rerun_with_other_settings_keeps_what_the_first_run_changed(
         u.id, "chatgpt", enumerate(convs[:1]), "private", "chat", None,
         state=import_data._new_conversation_state(chat))
     cs.write_state(u.id, token, dict(state, task_id="t-first"))
-    public = dict(chat, privacy_level="public")
-    import_data.run_conversation_import(u.id, token, "t-second", public)
+    circles = dict(chat, privacy_level="circles")
+    import_data.run_conversation_import(u.id, token, "t-second", circles)
     assert [ts for _u, ts, _t in hand_offs] == [datetime(2021, 2, 1, 10, 0)]
 
 
