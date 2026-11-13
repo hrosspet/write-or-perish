@@ -288,6 +288,10 @@ EXPECTED_OTHER_RULES = {
     ("GET", "/auth/magic-link/verify"), ("POST", "/auth/magic-link/send"),
     ("GET", "/auth/twitter"), ("GET", "/auth/twitter/authorized"),
     ("GET", "/auth/x/connect"), ("GET", "/health"), ("GET", "/how-to"),
+    # A sign-in held because its invite named someone else (#439): it is
+    # finished or forgotten here, before any account exists.
+    ("POST", "/auth/invite-choice/continue"),
+    ("POST", "/auth/invite-choice/cancel"),
     ("GET", "/landing"), ("GET", "/login"), ("GET", "/node/<int:node_id>"),
     ("GET", "/ready"), ("GET", "/sitemap.xml"),
     ("GET", "/static/<path:filename>"), ("GET", "/vision"),
