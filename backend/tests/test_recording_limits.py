@@ -22,7 +22,11 @@ the older ``/api/nodes/<id>/audio-chunk``):
   first audio is a new start; a burst of Voice turns never reaches the
   count;
 - starts at the same moment are counted again under the account's lock;
-- lengths and the transcription cost come from the decoded audio;
+- lengths and the transcription cost come from the decoded audio; audio
+  that cannot be decoded counts as the most its bytes can hold;
+- a recording is active through its start and its audio: opening the
+  transcription stream marks it live for the takeover between devices, not
+  for these limits;
 - a recording of realistic size and length passes untouched (controls).
 
 Chunked file uploads (``/api/nodes/upload/...``): the init's size and piece
@@ -32,8 +36,9 @@ upload is refused while MAX_UPLOADS_IN_PROGRESS of the account's uploads
 wait for their transcript (deleted ones not counted); an upload that
 received no piece for UPLOAD_IDLE_EXPIRES_AFTER takes no more, one the app
 reports failed stops counting, a finalize at the usage limit keeps the
-file untranscribed, and an uploaded file is transcribed up to
-MAX_UPLOAD_TRANSCRIBED_SECONDS.
+file untranscribed, and an uploaded file is cut at
+MAX_UPLOAD_TRANSCRIBED_SECONDS before it is sent, measured or not; the cost
+is recorded from the pieces sent.
 
 The data download (``/api/export/threads``): one at a time per account and
 EXPORTS_PER_HOUR an hour.
@@ -690,6 +695,72 @@ class TestRecordingsWithoutAudio:
         assert resp.status_code == 429
 
 
+class TestTheTranscriptionStreamIsNotActivity:
+    """Opening the transcription stream marks a recording live for the
+    takeover between devices; for the limits a recording is active through
+    its start and its audio only."""
+
+    @pytest.fixture(autouse=True)
+    def _quick_stream(self, app, monkeypatch):
+        # The stream's clock runs fast, so its first heartbeat comes at once
+        # (it would come after 15 s). After ``app``: it imports the routes
+        # afresh.
+        import itertools
+        import types
+        sse = sys.modules["backend.routes.sse"]
+        ticks = itertools.count()
+        monkeypatch.setattr(sse, "time", types.SimpleNamespace(
+            time=lambda: next(ticks) * 20.0, sleep=lambda s: None))
+
+    def _open_stream(self, client, session_id):
+        resp = client.get(f"/api/sse/drafts/{session_id}/transcription-stream"
+                          f"?device_key={KEY}", buffered=False)
+        resp.close()
+        return resp.status_code
+
+    def test_a_stream_does_not_keep_recordings_left_behind_open(
+            self, app, client, alice):
+        for n in range(limits.MAX_OPEN_RECORDINGS):
+            _left_behind(app, alice, f"old-{n}", timedelta(hours=25))
+            assert self._open_stream(client, f"old-{n}") == 200
+
+        assert _init_recording(client).status_code == 201
+
+    def test_a_stream_does_not_take_up_a_recording_left_behind(
+            self, app, client, alice):
+        _left_behind(app, alice, "old", timedelta(hours=25))
+        for n in range(limits.MAX_OPEN_RECORDINGS):
+            _left_behind(app, alice, f"open-{n}", timedelta(hours=1))
+        assert self._open_stream(client, "old") == 200
+
+        resp = _chunk(client, "old", 2, _payload(WEB_CHUNK_BYTES))
+
+        assert resp.status_code == 429
+        assert resp.get_json()["code"] == "too_many_recordings"
+
+    def test_control_a_stream_does_not_lengthen_a_recording_without_audio(
+            self, app, client, alice):
+        # Control: its time runs from its start.
+        _empty(app, alice, "late", timedelta(minutes=16))
+        assert self._open_stream(client, "late") == 200
+        _cap(alice)
+
+        resp = _chunk(client, "late", 0, _payload(WEB_CHUNK_BYTES))
+
+        assert resp.status_code == 402
+
+    def test_control_the_stream_still_marks_the_recording_live(
+            self, app, client, alice):
+        # Control (as on main): the takeover between devices reads it.
+        draft = _left_behind(app, alice, "rec", timedelta(hours=2))
+
+        assert self._open_stream(client, "rec") == 200
+
+        _db.session.refresh(draft)
+        assert draft.streaming_heartbeat_at > datetime.utcnow() - timedelta(
+            minutes=1)
+
+
 def _waiting_uploads(user, n, status="pending", activity=None, deleted=False,
                      handed=False):
     for _ in range(n):
@@ -1160,12 +1231,17 @@ def st(monkeypatch, tmp_path):
     monkeypatch.setenv("AUDIO_STORAGE_PATH", str(tmp_path))
 
     monkeypatch.setattr(module, "compress_audio_if_needed", lambda p, log: p)
-    module._duration = 300.0     # a batch of 20 chunks of 15 s
+    # What a container says (the tasks no longer read it).
+    module._duration = 15.0
     monkeypatch.setattr(module, "get_audio_duration",
-                        lambda p, log: module._duration)
-    # The decoded length: None (cannot be decoded) uses _duration, as the
-    # task does (utils/audio_processing.decoded_audio_seconds).
-    module._decoded = None
+                        lambda p, log: module._duration, raising=False)
+    # The decoded length (utils/audio_processing.decoded_audio_seconds): a
+    # batch of 20 chunks of 15 s; None when it cannot be decoded.
+    import backend.utils.audio_processing as audio_processing
+    module._real_decoded = audio_processing.decoded_audio_seconds
+    module._decoded = 300.0
+    monkeypatch.setattr(audio_processing, "decoded_audio_seconds",
+                        lambda p, *a, **k: module._decoded)
     monkeypatch.setattr(module, "decoded_audio_seconds",
                         lambda p, *a, **k: module._decoded, raising=False)
     monkeypatch.setattr(module, "get_openai_chat_key", lambda cfg: "key")
@@ -1323,7 +1399,7 @@ class TestLengthLimit:
         _recording(st, "sess-long", range(20, 40))
         _batch(st, "sess-long", range(20, 40))   # exactly at the limit
         _recording(st, "sess-long", range(40, 41))
-        st._duration = 15.0
+        st._decoded = 15.0
         _batch(st, "sess-long", [40])             # past it
 
         statuses = _statuses("sess-long")
@@ -1351,19 +1427,43 @@ class TestLengthLimit:
 
 # ── The length, from the decoded audio ───────────────────────────────────
 
-def _ffmpeg_with_opus():
+def _ffmpeg_with(*encoders):
     import shutil
     import subprocess
     if not shutil.which("ffmpeg"):
         return False
     out = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"],
                          capture_output=True, text=True)
-    return "libopus" in out.stdout
+    return all(name in out.stdout for name in encoders)
+
+
+def _sine(path, seconds, squeeze=None):
+    """*seconds* of a tone in *path* (Opus in WebM); with *squeeze*, the
+    same audio with timestamps that many times shorter."""
+    import subprocess
+    plain = path.with_name("plain-" + path.name) if squeeze else path
+    subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+                    f"sine=frequency=440:duration={seconds}", "-ac", "1",
+                    "-c:a", "libopus", str(plain)], check=True)
+    if squeeze:
+        subprocess.run(["ffmpeg", "-v", "error", "-i", str(plain), "-c",
+                        "copy", "-bsf:a", f"setts=ts=TS/{squeeze}", str(path)],
+                       check=True)
+    return path
+
+
+def _container_seconds(path):
+    import subprocess
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "csv=p=0", str(path)], capture_output=True, text=True)
+    return float(out.stdout)
 
 
 class TestDecodedLength:
     """The length bound and the transcription cost use the length of the
-    decoded audio, not the container's timestamps."""
+    decoded audio, not the container's timestamps; audio that cannot be
+    decoded counts as the most its bytes can hold."""
 
     def test_the_cost_and_the_bound_use_the_decoded_length(self, st):
         from backend.models import APICostLog
@@ -1378,33 +1478,71 @@ class TestDecodedLength:
         assert head.audio_seconds == 300.0
         assert APICostLog.query.one().audio_duration_seconds == 300.0
 
-    def test_control_undecodable_audio_is_measured_as_before(self, st):
-        # Control (passes on main too).
+    def test_audio_that_cannot_be_measured_counts_at_the_most_it_can_hold(
+            self, st):
         from backend.models import APICostLog
-        st._duration = 15.0
-        st._decoded = None
-        _recording(st, "sess-u", range(0, 20))
+        from backend.utils.audio_processing import MIN_AUDIO_BYTES_PER_SECOND
+        st._duration = 15.0      # what the container says
+        st._decoded = None       # decoding fails or takes too long
+        _, folder = _recording(st, "sess-u", range(0, 20))
+        for idx in range(1, 20):
+            (folder / f"chunk_{idx:04d}.webm").write_bytes(
+                _payload(WEB_CHUNK_BYTES))
+        size = sum(p.stat().st_size for p in folder.glob("chunk_*"))
 
         _batch(st, "sess-u", range(0, 20))
 
-        assert APICostLog.query.one().audio_duration_seconds == 15.0
+        most = size / MIN_AUDIO_BYTES_PER_SECOND
+        head = NodeTranscriptChunk.query.filter_by(
+            session_id="sess-u", chunk_index=0).one()
+        assert head.audio_seconds == pytest.approx(most)
+        assert APICostLog.query.one().audio_duration_seconds \
+            == pytest.approx(most)
 
-    @pytest.mark.skipif(not _ffmpeg_with_opus(), reason="needs ffmpeg with libopus")
+    def test_audio_sent_before_a_failure_is_recorded(self, st):
+        from backend.models import APICostLog
+        _, folder = _recording(st, "sess-f", range(0, 10))
+        # A resume at chunk 5: two sub-batches, two requests.
+        (folder / "init.5.webm").write_bytes(b"\x1aE\xdf\xa3-webm-head")
+        st._decoded = 75.0
+        words = type("R", (), {"text": "words"})()
+        st._provider.side_effect = [words, RuntimeError("provider")]
+
+        with pytest.raises(RuntimeError):
+            _batch(st, "sess-f", range(0, 10))
+
+        assert st._provider.call_count == 2
+        assert sum(row.audio_duration_seconds
+                   for row in APICostLog.query) == 150.0
+
+    def test_audio_that_cannot_be_measured_is_held_to_the_length_limit(
+            self, st):
+        _recording(st, "sess-n", range(0, 20))
+        _batch(st, "sess-n", range(0, 20))
+        head = NodeTranscriptChunk.query.filter_by(
+            session_id="sess-n", chunk_index=0).one()
+        head.audio_seconds = limits.MAX_TRANSCRIBED_SECONDS - 60
+        _db.session.commit()
+        st._duration = 15.0      # the container claims a short batch
+        st._decoded = None
+        _, folder = _recording(st, "sess-n", range(20, 40))
+        for idx in range(20, 40):
+            (folder / f"chunk_{idx:04d}.webm").write_bytes(
+                _payload(WEB_CHUNK_BYTES))
+
+        _batch(st, "sess-n", range(20, 40))
+
+        statuses = _statuses("sess-n")
+        assert {statuses[i] for i in range(20, 40)} == {"failed"}
+        assert st._provider.call_count == 1
+
+    @pytest.mark.skipif(not _ffmpeg_with("libopus"),
+                        reason="needs ffmpeg with libopus")
     def test_decoded_seconds_count_the_audio_not_the_timestamps(self, tmp_path):
-        import subprocess
         from backend.utils.audio_processing import decoded_audio_seconds
-        plain = tmp_path / "plain.webm"
-        moved = tmp_path / "moved.webm"
-        subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
-                        "sine=frequency=440:duration=20", "-ac", "1",
-                        "-c:a", "libopus", str(plain)], check=True)
-        # The same audio with timestamps a twentieth as long.
-        subprocess.run(["ffmpeg", "-v", "error", "-i", str(plain), "-c", "copy",
-                        "-bsf:a", "setts=ts=TS/20", str(moved)], check=True)
-        probed = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "csv=p=0", str(moved)], capture_output=True, text=True)
-        assert float(probed.stdout) < 2
+        plain = _sine(tmp_path / "plain.webm", 20)
+        moved = _sine(tmp_path / "moved.webm", 20, squeeze=20)
+        assert _container_seconds(moved) < 2
 
         assert abs(decoded_audio_seconds(plain) - 20) < 0.1
         assert abs(decoded_audio_seconds(moved) - 20) < 0.1
@@ -1412,27 +1550,46 @@ class TestDecodedLength:
         assert abs(decoded_audio_seconds(FIXTURES / "chunk_0000.mp4")
                    - 2.07) < 0.05
 
-    def test_undecodable_bytes_give_none(self, tmp_path):
-        from backend.utils.audio_processing import decoded_audio_seconds
+    def test_undecodable_bytes_give_none_and_count_by_their_size(
+            self, tmp_path):
+        from backend.utils.audio_processing import (
+            MIN_AUDIO_BYTES_PER_SECOND, counted_seconds,
+            decoded_audio_seconds,
+        )
         junk = tmp_path / "junk.webm"
-        junk.write_bytes(FRAGMENT)
+        junk.write_bytes(_payload(WEB_CHUNK_BYTES))
 
         assert decoded_audio_seconds(junk) is None
+        assert counted_seconds(junk) == pytest.approx(
+            WEB_CHUNK_BYTES / MIN_AUDIO_BYTES_PER_SECOND)
+        assert counted_seconds(junk, at_most=15) == 15
 
 
 @pytest.fixture
 def tr(st, monkeypatch):
     """backend.tasks.transcription (uploaded files) on the st app, with the
-    provider and the measures stood in."""
+    provider stood in. The uploaded file's decoded length is ``_decoded``
+    (None: it cannot be measured); other files (the pieces sent) are
+    measured for real, unless ``_pieces_measured`` is False."""
     import backend.tasks.transcription as module
     import backend.utils.audio_processing as audio_processing
+    real_decoded = st._real_decoded
     module.flask_app = st.flask_app
     monkeypatch.setattr(module, "compress_audio_if_needed", lambda p, log: p)
-    monkeypatch.setattr(module, "get_audio_duration", lambda p, log: 15.0)
+    monkeypatch.setattr(module, "get_audio_duration", lambda p, log: 15.0,
+                        raising=False)
     monkeypatch.setattr(module, "get_openai_chat_key", lambda cfg: "key")
     module._decoded = None
-    monkeypatch.setattr(audio_processing, "decoded_audio_seconds",
-                        lambda p, *a, **k: module._decoded, raising=False)
+    module._upload_path = None
+    module._pieces_measured = True
+
+    def _decoded(p, *a, **k):
+        if str(p) == str(module._upload_path):
+            return module._decoded
+        return real_decoded(p, *a, **k) if module._pieces_measured else None
+    monkeypatch.setattr(audio_processing, "decoded_audio_seconds", _decoded)
+    monkeypatch.setattr(module, "decoded_audio_seconds", _decoded,
+                        raising=False)
     fake_openai = MagicMock()
     fake_openai.return_value.audio.transcriptions.create.return_value = (
         type("R", (), {"text": "uploaded words"})())
@@ -1441,49 +1598,142 @@ def tr(st, monkeypatch):
     return module
 
 
-def _uploaded(st, name="upload.m4a"):
+def _uploaded(st, tr, name="upload.m4a", audio=None):
     node = Node(user_id=st._user.id, human_owner_id=st._user.id,
                 node_type="user", transcription_status="pending",
                 ai_usage="chat")
     node.set_content("[Voice note – transcription pending]")
     _db.session.add(node)
     _db.session.commit()
-    path = st._root / name
-    path.write_bytes(b"fake audio")
+    path = audio or st._root / name
+    if audio is None:
+        path.write_bytes(b"fake audio")
+    tr._upload_path = path
     return node, path
 
 
-class TestUploadedFileLength:
-    def test_a_file_past_eight_hours_is_kept_untranscribed(self, st, tr):
-        from backend.models import APICostLog
-        node, path = _uploaded(st)
-        tr._decoded = limits.MAX_UPLOAD_TRANSCRIBED_SECONDS + 1
+@pytest.fixture
+def short_bound(tr, monkeypatch):
+    """The upload bound at 25 s in pieces of 10 s (sent whole up to 10 s),
+    so a 30-second file stands for one past eight hours."""
+    monkeypatch.setattr(tr, "MAX_UPLOAD_TRANSCRIBED_SECONDS", 25,
+                        raising=False)
+    monkeypatch.setattr(tr, "CHUNK_DURATION_SEC", 10, raising=False)
+    monkeypatch.setattr(tr, "OPENAI_MAX_DURATION_SEC", 10)
+    return tr
 
-        tr.transcribe_audio(MagicMock(), node.id, str(path), "upload.m4a")
+
+def _cost_seconds():
+    from backend.models import APICostLog
+    return sum(row.audio_duration_seconds for row in APICostLog.query)
+
+
+needs_ffmpeg = pytest.mark.skipif(not _ffmpeg_with("libopus", "libmp3lame"),
+                                  reason="needs ffmpeg with libopus, libmp3lame")
+
+
+class TestUploadedFileLength:
+    @needs_ffmpeg
+    def test_a_file_past_the_bound_is_transcribed_to_it_with_a_note(
+            self, st, short_bound):
+        tr = short_bound
+        node, path = _uploaded(st, tr, audio=_sine(st._root / "long.webm", 30))
+        tr._decoded = 30.0
+
+        tr.transcribe_audio(MagicMock(), node.id, str(path), "long.webm")
+
+        _db.session.refresh(node)
+        assert node.transcription_status == "completed"
+        assert tr._provider.call_count == 3      # 10 + 10 + 5 s
+        assert _cost_seconds() == pytest.approx(25, abs=0.2)
+        assert node.get_content().endswith(limits.UPLOAD_NOTE_PART)
+        assert path.exists()                     # the whole file is kept
+
+    @needs_ffmpeg
+    def test_the_bound_holds_when_the_length_cannot_be_measured(
+            self, st, short_bound):
+        tr = short_bound
+        # 30 s of audio whose container says 1.5 s; decoding it for the
+        # length fails (or takes too long).
+        audio = _sine(st._root / "squeezed.webm", 30, squeeze=20)
+        assert _container_seconds(audio) < 2
+        node, path = _uploaded(st, tr, audio=audio)
+        tr._decoded = None
+
+        tr.transcribe_audio(MagicMock(), node.id, str(path), "squeezed.webm")
+
+        _db.session.refresh(node)
+        assert node.transcription_status == "completed"
+        assert tr._provider.call_count == 3
+        assert _cost_seconds() == pytest.approx(25, abs=0.2)
+        assert node.get_content().endswith(limits.UPLOAD_NOTE_PART)
+
+    @needs_ffmpeg
+    def test_pieces_that_cannot_be_measured_count_at_their_most(
+            self, st, short_bound):
+        tr = short_bound
+        node, path = _uploaded(st, tr, audio=_sine(st._root / "f.webm", 30))
+        tr._decoded = None
+        tr._pieces_measured = False
+
+        tr.transcribe_audio(MagicMock(), node.id, str(path), "f.webm")
+
+        # Three pieces, each counted as the most a piece can be.
+        assert tr._provider.call_count == 3
+        assert _cost_seconds() == pytest.approx(30)
+
+    @needs_ffmpeg
+    def test_audio_sent_before_a_failure_is_recorded(self, st, short_bound):
+        tr = short_bound
+        node, path = _uploaded(st, tr, audio=_sine(st._root / "f.webm", 20))
+        tr._decoded = 20.0
+        words = type("R", (), {"text": "words"})()
+        tr._provider.side_effect = [words, RuntimeError("provider")]
+
+        with pytest.raises(RuntimeError):
+            tr.transcribe_audio(MagicMock(), node.id, str(path), "f.webm")
 
         _db.session.refresh(node)
         assert node.transcription_status == "failed"
-        assert node.transcription_error == limits.UPLOAD_TOO_LONG_TEXT
-        assert tr._provider.call_count == 0
-        assert APICostLog.query.count() == 0
+        # Both pieces were sent; the failed request is counted too.
+        assert _cost_seconds() == pytest.approx(20, abs=0.2)
         assert path.exists()
 
+    @needs_ffmpeg
+    def test_control_a_file_under_the_bound_is_transcribed_in_full(
+            self, st, short_bound):
+        # Control (passes on main too).
+        tr = short_bound
+        node, path = _uploaded(st, tr, audio=_sine(st._root / "s.webm", 20))
+        tr._decoded = 20.0
+
+        tr.transcribe_audio(MagicMock(), node.id, str(path), "s.webm")
+
+        _db.session.refresh(node)
+        assert node.transcription_status == "completed"
+        assert _cost_seconds() == pytest.approx(20, abs=0.2)
+        assert "*Note" not in node.get_content()
+
     def test_the_cost_uses_the_decoded_length(self, st, tr):
-        from backend.models import APICostLog
-        node, path = _uploaded(st)
+        node, path = _uploaded(st, tr)
         tr._decoded = 600.0
 
         tr.transcribe_audio(MagicMock(), node.id, str(path), "upload.m4a")
 
         _db.session.refresh(node)
         assert node.transcription_status == "completed"
-        assert APICostLog.query.one().audio_duration_seconds == 600.0
+        assert tr._provider.call_count == 1
+        assert _cost_seconds() == 600.0
 
-    def test_control_an_undecodable_file_is_measured_as_before(self, st, tr):
-        # Control (passes on main too).
-        from backend.models import APICostLog
-        node, path = _uploaded(st)
+    def test_a_file_that_cannot_be_decoded_is_kept_and_not_sent(self, st, tr):
+        node, path = _uploaded(st, tr)
+        tr._decoded = None
 
-        tr.transcribe_audio(MagicMock(), node.id, str(path), "upload.m4a")
+        with pytest.raises(Exception):
+            tr.transcribe_audio(MagicMock(), node.id, str(path), "upload.m4a")
 
-        assert APICostLog.query.one().audio_duration_seconds == 15.0
+        _db.session.refresh(node)
+        assert node.transcription_status == "failed"
+        assert tr._provider.call_count == 0
+        assert _cost_seconds() == 0
+        assert path.exists()

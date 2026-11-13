@@ -29,7 +29,7 @@ from backend.celery_app import celery, flask_app
 from backend.models import Node, NodeTranscriptChunk, Draft, APICostLog
 from backend.extensions import db
 from backend.utils.audio_processing import (
-    compress_audio_if_needed, decoded_audio_seconds, get_audio_duration,
+    compress_audio_if_needed, counted_seconds,
 )
 from backend.utils import recording_limits
 from backend.utils.audio_storage import (
@@ -95,14 +95,25 @@ VOICE_REPLY_SKIPPED_APPROVAL = (
 )
 
 
+def _log_transcription_cost(user_id, seconds):
+    """A cost row for *seconds* of audio sent to the provider (none for 0)."""
+    if seconds <= 0:
+        return
+    db.session.add(APICostLog(
+        user_id=user_id,
+        model_id="gpt-4o-transcribe",
+        request_type="transcription",
+        audio_duration_seconds=seconds,
+        cost_microdollars=calculate_audio_cost_microdollars(
+            "gpt-4o-transcribe", seconds),
+    ))
+
+
 def _measured_seconds(path):
-    """Seconds of audio in *path*, counted from its decoded samples
-    (utils/audio_processing.decoded_audio_seconds); the container's length
-    when it cannot be decoded, as before."""
-    seconds = decoded_audio_seconds(path, logger=logger)
-    if seconds is None:
-        return get_audio_duration(path, logger)
-    return seconds
+    """Seconds of audio in *path* for the length bound and the cost record:
+    counted from its decoded samples, or, when it cannot be decoded, the
+    most its bytes can hold (utils/audio_processing.counted_seconds)."""
+    return counted_seconds(path, logger=logger)
 
 
 def _voice_approval_skip(user_id, parent_id):
@@ -241,8 +252,8 @@ def transcribe_chunk(self, node_id: int, chunk_index: int, chunk_path: str):
             # Compress if needed (webm -> mp3 for better compatibility)
             processed_path = compress_audio_if_needed(file_path, logger)
 
-            # Measure audio duration for cost tracking: decoded, as the
-            # length bound (utils/recording_limits)
+            # Measure audio duration for cost tracking and the length bound
+            # (utils/recording_limits): decoded, or the most its bytes hold
             chunk_duration_sec = _measured_seconds(processed_path)
 
             try:
@@ -569,8 +580,8 @@ def transcribe_draft_chunk(self, session_id: str, chunk_index: int, chunk_path: 
             # Compress if needed (webm -> mp3 for better compatibility)
             processed_path = compress_audio_if_needed(file_path, logger)
 
-            # Measure audio duration for cost tracking: decoded, as the
-            # length bound (utils/recording_limits)
+            # Measure audio duration for cost tracking and the length bound
+            # (utils/recording_limits): decoded, or the most its bytes hold
             draft_chunk_duration_sec = _measured_seconds(processed_path)
 
             try:
@@ -765,6 +776,11 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
         temp_files = []
         paths_by_idx = {}
         merged_by_subbatch = []  # [(sub_indices, merged_path)] (#124)
+        # Seconds of audio sent to the provider: the cost record, also when
+        # a later sub-batch fails.
+        batch_duration_sec = 0.0
+        cost_recorded = False
+        user_id = draft.user_id
 
         try:
             for idx in sorted(chunk_indices):
@@ -869,7 +885,6 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
             client = OpenAI(api_key=api_key)
 
             transcripts = []
-            batch_duration_sec = 0.0
             # Sub-batches whose merged file holds less audio than their
             # chunks: those chunks are kept (renamed, see below).
             short_subbatches = set()
@@ -880,7 +895,6 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
             untranscribed = set()
             transcribed_before = recording_limits.transcribed_seconds(
                 session_id=session_id)
-            batch_counted_sec = 0.0
             for sub_indices in sub_batches:
                 merge_report = {}
                 merged_path = concat_fragmented_media(
@@ -898,22 +912,18 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
                 processed_path = compress_audio_if_needed(
                     merge_input_path, logger)
 
-                # Decoded, not read from the container: the length bound and
-                # the cost record use what is sent to the provider.
+                # What is sent to the provider, for the length bound and the
+                # cost record: decoded, or the most its bytes can hold; never
+                # the container's timestamps.
                 sub_duration = _measured_seconds(processed_path)
-                # Counted against the length limit: 15 s a chunk when the
-                # length could not be read.
-                sub_counted = sub_duration or (
-                    len(sub_indices) * recording_limits.STREAMING_CHUNK_SECONDS)
 
                 try:
                     if recording_limits.too_long(
-                            transcribed_before + batch_counted_sec,
-                            sub_counted):
+                            transcribed_before + batch_duration_sec,
+                            sub_duration):
                         untranscribed.update(sub_indices)
                         continue
                     batch_duration_sec += sub_duration
-                    batch_counted_sec += sub_counted
                     with open(processed_path, "rb") as audio_file:
                         # Explicit (name, file) tuple so the API infers
                         # the format from `ext` rather than the
@@ -961,7 +971,7 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
                 elif chunk_record:
                     if idx == first_idx:
                         chunk_record.set_text(transcript)
-                        chunk_record.audio_seconds = batch_counted_sec
+                        chunk_record.audio_seconds = batch_duration_sec
                     else:
                         # Other chunks in batch don't carry text —
                         # their audio is merged into the first chunk
@@ -970,18 +980,7 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
                     chunk_record.completed_at = datetime.utcnow()
 
             # Log transcription cost
-            if draft and batch_duration_sec > 0:
-                transcription_cost = calculate_audio_cost_microdollars(
-                    "gpt-4o-transcribe", batch_duration_sec
-                )
-                cost_log = APICostLog(
-                    user_id=draft.user_id,
-                    model_id="gpt-4o-transcribe",
-                    request_type="transcription",
-                    audio_duration_seconds=batch_duration_sec,
-                    cost_microdollars=transcription_cost,
-                )
-                db.session.add(cost_log)
+            _log_transcription_cost(user_id, batch_duration_sec)
 
             # Encrypt the merged audio and store as batch files — one
             # per subsession (#124); delete individual chunk .enc files
@@ -1031,6 +1030,7 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
                                 )
 
             db.session.commit()
+            cost_recorded = True
 
             # Reassemble draft.content from all completed chunks
             completed_chunks = NodeTranscriptChunk.query.filter_by(
@@ -1067,6 +1067,16 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
             # and any further query/commit would raise PendingRollbackError,
             # masking the real error.
             db.session.rollback()
+
+            # The audio sent to the provider before the failure is recorded.
+            if not cost_recorded and batch_duration_sec > 0:
+                try:
+                    _log_transcription_cost(user_id, batch_duration_sec)
+                    db.session.commit()
+                except Exception:
+                    logger.warning("Could not record the transcription cost "
+                                   f"of session {session_id}", exc_info=True)
+                    db.session.rollback()
 
             # If the draft was deleted mid-batch (user discarded the session
             # while we were transcribing), there's nothing left to fail —

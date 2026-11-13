@@ -31,8 +31,8 @@ audio for quiet time or for the usage limit, whatever the gap; only these
 limits apply:
 
 - One recording is transcribed up to MAX_TRANSCRIBED_SECONDS of audio, as
-  the server measures it by decoding (utils/audio_processing
-  .decoded_audio_seconds), the same measure the cost is recorded with. The
+  the server counts it from the decoded audio (utils/audio_processing
+  .counted_seconds), the same measure the cost is recorded with. The
   audio past it is still stored and kept with the recording; its chunks
   end ``failed`` with NOT_TRANSCRIBED_TEXT, so the finalize waits for them
   no longer, and the recording's text ends with a note
@@ -43,7 +43,9 @@ limits apply:
   all. Audio accepted before stays.
 
 An account holds at most MAX_OPEN_RECORDINGS open recordings
-(open_recordings); a new start beyond them is refused. A recording that
+(open_recordings); a new start beyond them is refused. A recording is
+active through its start and the chunks it stores; its liveness stamp (for
+the takeover between devices) plays no part in these limits. A recording that
 holds no audio yet is open only for EMPTY_SESSION_EXPIRES_AFTER from its
 start; its first audio after that is a new start: the usage limit, then
 the count (audio_refusal), as a new recording's init would be. Each start
@@ -54,7 +56,13 @@ An account has at most MAX_UPLOADS_IN_PROGRESS audio uploads waiting for
 their transcript (uploads_in_progress). An upload that receives no piece
 for UPLOAD_IDLE_EXPIRES_AFTER takes no more pieces; its app still holds
 the file and starts again. Its finalize asks for the usage limit again,
-and an uploaded file is transcribed up to MAX_UPLOAD_TRANSCRIBED_SECONDS.
+and an uploaded file is transcribed up to MAX_UPLOAD_TRANSCRIBED_SECONDS
+(its audio is cut there before it is sent).
+
+Lengths for these bounds and for the transcription cost are counted from
+the decoded audio (utils/audio_processing.counted_seconds); audio that
+cannot be decoded counts as the most its bytes can hold, never as its
+container's timestamps say.
 """
 import os
 from datetime import datetime, timedelta
@@ -110,8 +118,8 @@ MAX_UPLOAD_CHUNKS = 200
 FORM_OVERHEAD_BYTES = 64 * 1024
 
 # INTRODUCED HEURISTIC: open recordings (dictation and Voice) one account
-# may hold. Open: recording, with audio and active (a chunk, a sign of life,
-# or its start) within OPEN_COUNTS_FOR, or without audio yet and started
+# may hold. Open: recording, with audio and active (its start or a chunk
+# stored) within OPEN_COUNTS_FOR, or without audio yet and started
 # within EMPTY_SESSION_EXPIRES_AFTER (also once its app released it); or
 # finalizing while its app still sends the chunks it announced. Saving,
 # discarding or finishing a recording frees its place at once; a recording
@@ -145,8 +153,10 @@ HANDED_UPLOAD_COUNTS_FOR = timedelta(hours=24)
 
 # INTRODUCED HEURISTIC: the most audio of one uploaded file that is turned
 # into text, as decoded. A 200 MB file (the largest upload) at the iPhone's
-# 64 kbps is about 7 hours; eight leaves room. A longer file is kept with
-# its entry, not transcribed, and the entry says why.
+# 64 kbps is about 7 hours; eight leaves room. A longer file is transcribed
+# to this length (the audio is cut there before it is sent, so the bound
+# holds also when the length cannot be measured); the whole file stays with
+# its entry, and its text ends with UPLOAD_NOTE_PART.
 MAX_UPLOAD_TRANSCRIBED_SECONDS = 8 * 60 * 60
 
 TOO_MANY_RECORDINGS_TEXT = (
@@ -158,8 +168,9 @@ TOO_MANY_UPLOADS_TEXT = (
 UPLOAD_EXPIRED_TEXT = ("This upload stopped arriving. Please upload the "
                        "file again.")
 UPLOAD_FAILED_TEXT = "The upload did not finish. Please upload the file again."
-UPLOAD_TOO_LONG_TEXT = ("Saved as audio, not turned into text: the file is "
-                        "longer than eight hours.")
+UPLOAD_NOTE_PART = ("*Note: The file is longer than eight hours, so the "
+                    "rest of it was not turned into text. Its audio is "
+                    "saved.*")
 RECORDINGS_BUSY_TEXT = ("Loore is busy starting another recording of "
                         "yours. Try again in a moment.")
 
@@ -239,15 +250,16 @@ def _has_audio():
 
 
 def _active_since(since):
-    """A recording started, stamped alive or sent a chunk since *since*."""
+    """A recording started or stored a chunk since *since*. Its liveness
+    stamp (``streaming_heartbeat_at``, renewed by its transcription stream)
+    is for the takeover between devices and plays no part here; a claim
+    runs audio_refusal itself."""
     from backend.extensions import db
     from backend.models import Draft, NodeTranscriptChunk
     recent_chunk = db.exists().where(db.and_(
         NodeTranscriptChunk.session_id == Draft.session_id,
         NodeTranscriptChunk.created_at >= since))
-    return db.or_(Draft.created_at >= since,
-                  Draft.streaming_heartbeat_at >= since,
-                  recent_chunk)
+    return db.or_(Draft.created_at >= since, recent_chunk)
 
 
 def open_recordings(user_id, now=None, exclude_draft_id=None):
