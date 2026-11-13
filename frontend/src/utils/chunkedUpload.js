@@ -71,6 +71,16 @@ export async function uploadFileInChunks(
 }
 
 /**
+ * True for an answer from the server that no retry can change (a 4xx other
+ * than a timeout or "too many requests"): e.g. 410 when the upload stopped
+ * arriving too long ago. Its words go to the form as they are.
+ */
+export function isFinalRefusal(error) {
+  const status = error?.response?.status;
+  return status >= 400 && status < 500 && status !== 408 && status !== 429;
+}
+
+/**
  * Uploads a single chunk with retry logic
  */
 async function uploadChunkWithRetry(formData, chunkIndex, maxRetries = 3) {
@@ -84,6 +94,10 @@ async function uploadChunkWithRetry(formData, chunkIndex, maxRetries = 3) {
       });
       return; // Success
     } catch (error) {
+      if (isFinalRefusal(error)) {
+        // The form shows error.response.data.error, the server's words.
+        throw error;
+      }
       lastError = error;
       console.warn(
         `Chunk ${chunkIndex} upload failed (attempt ${attempt}/${maxRetries}):`,

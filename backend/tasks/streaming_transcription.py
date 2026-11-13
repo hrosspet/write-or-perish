@@ -19,11 +19,13 @@ text ends with a note saying so.
 from celery import Task
 from celery.utils.log import get_task_logger
 from openai import OpenAI
+import math
 import pathlib
 import os
 import shutil
 import subprocess
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from backend.celery_app import celery, flask_app
@@ -113,25 +115,57 @@ def _log_transcription_cost(user_id, seconds):
     ))
 
 
-# INTRODUCED HEURISTIC: one deadline for a transcription task's audio work
-# (measuring and, when that fails, re-encoding each batch, and the requests
-# between them): 20 minutes from the task's start. Each ffmpeg call gets the
-# time left as its timeout; audio not reached by then is kept without its
-# text (recording_limits.UNREADABLE), never retried. A batch of 20 chunks is
+# INTRODUCED HEURISTIC: how much local audio work (merging, measuring and,
+# when that fails, re-encoding) one run of a transcription task may do: 20
+# minutes. The time spent waiting for the provider is not counted. Each
+# ffmpeg call gets at most the time left as its timeout. A part the run does
+# not reach in time is left for a follow-up run of the task, which starts
+# with it; a part that cannot be done within a whole budget is kept without
+# its text (recording_limits.UNREADABLE). A batch of 20 chunks is merged and
 # measured in well under a second.
-TASK_AUDIO_DEADLINE_SECONDS = 20 * 60
+TASK_AUDIO_BUDGET_SECONDS = 20 * 60
 # INTRODUCED HEURISTIC: re-encoding a recording's audio may take at most this
 # long per chunk (twice its 15 s); it runs at hundreds of times real time.
 REENCODE_SECONDS_PER_CHUNK = 2 * recording_limits.STREAMING_CHUNK_SECONDS
+
+# A part left for a follow-up run (_LocalBudget ran out before it was done).
+_LATER = "later"
 
 
 def _now():
     return time.monotonic()
 
 
-def _task_deadline():
-    """The deadline of a task's audio work (TASK_AUDIO_DEADLINE_SECONDS)."""
-    return _now() + TASK_AUDIO_DEADLINE_SECONDS
+class _LocalBudget:
+    """TASK_AUDIO_BUDGET_SECONDS of local audio work for one task run."""
+
+    def __init__(self, seconds=None):
+        self.remaining = TASK_AUDIO_BUDGET_SECONDS if seconds is None \
+            else seconds
+        self.parts_done = 0         # parts this run worked on
+
+    def left(self):
+        return self.remaining
+
+    def deadline(self):
+        """The time.monotonic() value the budget runs out at, for code
+        that takes a deadline (webm_utils.audio_work_deadline)."""
+        return time.monotonic() + max(self.remaining, 0)
+
+    @contextmanager
+    def spending(self):
+        start = _now()
+        try:
+            yield
+        finally:
+            self.remaining -= _now() - start
+
+    def ran_out(self):
+        return self.remaining <= 0
+
+    def fresh(self):
+        """No other part has used this run's budget yet."""
+        return self.parts_done == 0
 
 
 class _Plan:
@@ -140,7 +174,8 @@ class _Plan:
     def __init__(self, files=(), seconds=0.0, reason=None, folder=None):
         self.files = list(files)    # [(path, the name it is sent as)]
         self.seconds = seconds      # counted: the length bound, the cost
-        self.reason = reason        # why nothing is sent (recording_limits)
+        self.reason = reason        # why nothing is sent (recording_limits,
+        #                             or _LATER)
         self.folder = folder        # re-encoded pieces, removed by cleanup
 
     def cleanup(self):
@@ -149,55 +184,86 @@ class _Plan:
             self.folder = None
 
 
-def _plan_audio(path, name, chunk_count, room, deadline):
+def _plan_audio(path, name, chunk_count, room, budget):
     """What of the audio at *path* (*chunk_count* chunks of a recording) is
     sent to the provider, and the seconds counted for it (the length bound
-    and the cost record), never fewer than *chunk_count* ×
-    STREAMING_CHUNK_SECONDS.
+    and the cost record).
 
-    Audio that decodes is sent as it is, counted at its decoded length.
-    Audio that cannot be decoded (or not in time) is re-encoded on the
-    server (utils/audio_processing.split_audio_for_transcription: decoded,
-    re-timed from its samples, cut at *room*, in MP3 pieces); the pieces
-    are sent, counted at their decoded length. Nothing is sent when the
-    audio would take the recording past MAX_TRANSCRIBED_SECONDS (*room*:
-    the seconds it may still have transcribed; reason TOO_LONG), or when
-    even the re-encode fails or *deadline* (_task_deadline) has come
-    (UNREADABLE). The audio stays with the recording either way. Each
-    ffmpeg call's timeout is the time left; the re-encode's at most
-    REENCODE_SECONDS_PER_CHUNK a chunk."""
+    Audio that decodes is sent as it is, counted at its decoded length. Its
+    decode stops at MAX_CHUNK_AUDIO_SECONDS a chunk: a part that reaches it
+    is not re-encoded or sent (recording_limits.INVALID). Audio that cannot
+    be decoded is re-encoded on the server
+    (utils/audio_processing.split_audio_for_transcription: decoded,
+    re-timed from its samples, cut at *room* or at MAX_CHUNK_AUDIO_SECONDS
+    a chunk, in MP3 pieces); the pieces are sent, counted at their decoded
+    length, at least STREAMING_CHUNK_SECONDS a chunk. Nothing is sent when
+    the audio would take the recording past MAX_TRANSCRIBED_SECONDS (*room*:
+    the seconds it may still have transcribed; TOO_LONG), or when even the
+    re-encode fails (UNREADABLE). The audio stays with the recording either
+    way.
+
+    The work comes out of *budget* (_LocalBudget): each ffmpeg call's
+    timeout is at most the time left, the re-encode's at most
+    REENCODE_SECONDS_PER_CHUNK a chunk. When the budget runs out first, the
+    reason is _LATER: the caller leaves the part for a follow-up run, or,
+    when no other part used this run's budget, keeps it as UNREADABLE."""
     floor = chunk_count * recording_limits.STREAMING_CHUNK_SECONDS
-    unread = _Plan(seconds=floor, reason=recording_limits.UNREADABLE)
-    left = deadline - _now()
-    if left <= 0:
-        return unread
-    seconds = decoded_audio_seconds(
-        path, timeout_seconds=min(decode_timeout_seconds(path), left),
-        logger=logger)
+    most = chunk_count * recording_limits.MAX_CHUNK_AUDIO_SECONDS
+    if budget.ran_out():
+        return _Plan(seconds=floor, reason=_LATER)
+    with budget.spending():
+        seconds = decoded_audio_seconds(
+            path, timeout_seconds=min(decode_timeout_seconds(path),
+                                      budget.left()),
+            logger=logger, stop_after=most)
+    if seconds == math.inf:
+        return _Plan(seconds=most, reason=recording_limits.INVALID)
     if seconds is not None:
-        counted = max(seconds, floor)
-        if counted > room:
-            return _Plan(seconds=counted, reason=recording_limits.TOO_LONG)
-        return _Plan(files=[(path, name)], seconds=counted)
+        if seconds > room:
+            return _Plan(seconds=seconds, reason=recording_limits.TOO_LONG)
+        return _Plan(files=[(path, name)], seconds=seconds)
+    if budget.ran_out():
+        return _Plan(seconds=floor, reason=_LATER)
     if floor > room:
         return _Plan(seconds=floor, reason=recording_limits.TOO_LONG)
-    left = min(deadline - _now(), chunk_count * REENCODE_SECONDS_PER_CHUNK)
-    if left <= 0:
-        return unread
-    pieces, cut = split_audio_for_transcription(
-        path, CHUNK_DURATION_SEC, room, timeout_seconds=left, logger=logger,
-        deadline=time.monotonic() + left)
+    limit = min(room, most)
+    timeout = min(budget.left(), chunk_count * REENCODE_SECONDS_PER_CHUNK)
+    with budget.spending():
+        pieces, cut = split_audio_for_transcription(
+            path, CHUNK_DURATION_SEC, limit, timeout_seconds=timeout,
+            logger=logger, deadline=time.monotonic() + timeout)
     plan = _Plan(files=[(piece, "audio.mp3") for piece, _ in pieces],
                  seconds=max(sum(s for _, s in pieces), floor),
                  folder=os.path.dirname(pieces[0][0]) if pieces else None)
     if not pieces:
-        plan.reason = recording_limits.UNREADABLE
-    elif cut or plan.seconds > room:
+        plan.reason = (_LATER if budget.ran_out()
+                       else recording_limits.UNREADABLE)
+    elif cut:
+        plan.reason = (recording_limits.INVALID if most <= room
+                       else recording_limits.TOO_LONG)
+    elif plan.seconds > room:
         plan.reason = recording_limits.TOO_LONG
     if plan.reason:
         plan.cleanup()
         plan.files = []
     return plan
+
+
+def _settled_reason(plan_reason, budget):
+    """The reason a part is kept without its text, or _LATER when a
+    follow-up run takes it: a part that ran out of a budget no other part
+    used cannot be done in any run (UNREADABLE)."""
+    if plan_reason == _LATER and budget.fresh():
+        return recording_limits.UNREADABLE
+    return plan_reason
+
+
+def _queue_follow_up(session_id, chunk_indices):
+    """A follow-up run of transcribe_chunk_batch for the parts this run left
+    (_LATER); its task id."""
+    task = transcribe_chunk_batch.delay(session_id=session_id,
+                                        chunk_indices=list(chunk_indices))
+    return task.id
 
 
 def _transcribe_files(client, files):
@@ -359,19 +425,19 @@ def transcribe_chunk(self, node_id: int, chunk_index: int, chunk_path: str):
 
             # What is sent and counted (the length bound, the cost):
             # utils/recording_limits, _plan_audio.
-            deadline = _task_deadline()
+            budget = _LocalBudget()
             plan = _plan_audio(
                 processed_path, processed_path.name, 1,
                 recording_limits.MAX_TRANSCRIBED_SECONDS
                 - recording_limits.transcribed_seconds(node_id=node_id),
-                deadline)
+                budget)
             chunk_duration_sec = plan.seconds
 
             try:
                 if plan.reason:
                     # Kept without its text (utils/recording_limits).
                     recording_limits.mark_untranscribed(
-                        [chunk_record], plan.reason)
+                        [chunk_record], _settled_reason(plan.reason, budget))
                     db.session.commit()
                     logger.info(f"Node {node_id} chunk {chunk_index}: not "
                                 f"transcribed ({plan.reason})")
@@ -678,19 +744,19 @@ def transcribe_draft_chunk(self, session_id: str, chunk_index: int, chunk_path: 
 
             # What is sent and counted (the length bound, the cost):
             # utils/recording_limits, _plan_audio.
-            deadline = _task_deadline()
+            budget = _LocalBudget()
             plan = _plan_audio(
                 processed_path, processed_path.name, 1,
                 recording_limits.MAX_TRANSCRIBED_SECONDS
                 - recording_limits.transcribed_seconds(session_id=session_id),
-                deadline)
+                budget)
             draft_chunk_duration_sec = plan.seconds
 
             try:
                 if plan.reason:
                     # Kept without its text (utils/recording_limits).
                     recording_limits.mark_untranscribed(
-                        [chunk_record], plan.reason)
+                        [chunk_record], _settled_reason(plan.reason, budget))
                     db.session.commit()
                     return {'session_id': session_id,
                             'chunk_index': chunk_index,
@@ -866,7 +932,6 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
         batch_duration_sec = 0.0
         cost_recorded = False
         user_id = draft.user_id
-        deadline = _task_deadline()
 
         try:
             for idx in sorted(chunk_indices):
@@ -980,28 +1045,38 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
             # audio is merged and stored like the rest, only the provider
             # call is left out.
             untranscribed = {}
+            # Chunks of the parts left for a follow-up run of this task
+            # (TASK_AUDIO_BUDGET_SECONDS): kept as they are, still waiting.
+            later = []
+            budget = _LocalBudget()
             transcribed_before = recording_limits.transcribed_seconds(
                 session_id=session_id)
             for sub_indices in sub_batches:
-                # Past the task's deadline (TASK_AUDIO_DEADLINE_SECONDS):
-                # this part is kept as it is (its chunk files), not merged,
-                # not sent.
-                if _now() >= deadline:
-                    untranscribed.update({idx: recording_limits.UNREADABLE
-                                          for idx in sub_indices})
+                # This run's local budget is spent: the part, and every
+                # part after it, waits for the follow-up run.
+                if later or (budget.ran_out() and not budget.fresh()):
+                    later.extend(sub_indices)
                     continue
                 merge_report = {}
-                deadline_token = audio_work_deadline.set(deadline)
+                deadline_token = audio_work_deadline.set(budget.deadline())
                 try:
-                    merged_path = concat_fragmented_media(
-                        [paths_by_idx[i] for i in sub_indices],
-                        init_segment_path=_resolve_init(sub_indices),
-                        output_suffix=ext,
-                        report=merge_report,
-                    )
+                    with budget.spending():
+                        merged_path = concat_fragmented_media(
+                            [paths_by_idx[i] for i in sub_indices],
+                            init_segment_path=_resolve_init(sub_indices),
+                            output_suffix=ext,
+                            report=merge_report,
+                        )
                 except subprocess.TimeoutExpired:
-                    untranscribed.update({idx: recording_limits.UNREADABLE
-                                          for idx in sub_indices})
+                    reason = _settled_reason(
+                        _LATER if budget.ran_out()
+                        else recording_limits.UNREADABLE, budget)
+                    budget.parts_done += 1
+                    if reason == _LATER:
+                        later.extend(sub_indices)
+                    else:
+                        untranscribed.update(
+                            {idx: reason for idx in sub_indices})
                     continue
                 finally:
                     audio_work_deadline.reset(deadline_token)
@@ -1021,12 +1096,23 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
                 plan = _plan_audio(
                     processed_path, f"audio{ext}", len(sub_indices),
                     recording_limits.MAX_TRANSCRIBED_SECONDS
-                    - transcribed_before - batch_duration_sec, deadline)
+                    - transcribed_before - batch_duration_sec, budget)
+                reason = _settled_reason(plan.reason, budget)
+                budget.parts_done += 1
 
                 try:
-                    if plan.reason:
+                    if reason == _LATER:
+                        # Its chunk files stay for the follow-up run.
+                        later.extend(sub_indices)
+                        merged_by_subbatch.pop()
+                        try:
+                            os.unlink(merged_path)
+                        except OSError:
+                            pass
+                        continue
+                    if reason:
                         untranscribed.update(
-                            {idx: plan.reason for idx in sub_indices})
+                            {idx: reason for idx in sub_indices})
                         continue
                     batch_duration_sec += plan.seconds
                     sub_text = _transcribe_files(client, plan.files)
@@ -1047,9 +1133,12 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
             # their text as failed with the reason (the finalize then
             # waits for them no longer and notes them).
             transcribed_indices = [
-                i for i in chunk_indices if i not in untranscribed]
+                i for i in chunk_indices
+                if i not in untranscribed and i not in later]
             first_idx = min(transcribed_indices, default=None)
             for idx in chunk_indices:
+                if idx in later:
+                    continue
                 chunk_record = NodeTranscriptChunk.query.filter_by(
                     session_id=session_id,
                     chunk_index=idx
@@ -1121,6 +1210,17 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
             db.session.commit()
             cost_recorded = True
 
+            # The parts this run left: a follow-up run of the task takes
+            # them (their chunks stay 'processing').
+            if later:
+                follow_up = _queue_follow_up(session_id, later)
+                NodeTranscriptChunk.query.filter(
+                    NodeTranscriptChunk.session_id == session_id,
+                    NodeTranscriptChunk.chunk_index.in_(later),
+                ).update({NodeTranscriptChunk.task_id: follow_up},
+                         synchronize_session=False)
+                db.session.commit()
+
             # Reassemble draft.content from all completed chunks
             completed_chunks = NodeTranscriptChunk.query.filter_by(
                 session_id=session_id,
@@ -1137,8 +1237,9 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
             logger.info(
                 f"Batch transcription successful for session {session_id}, "
                 f"chunks {chunk_indices}: {len(transcript)} characters"
-                + (f"; kept without text, past the length limit: "
-                   f"{sorted(untranscribed)}" if untranscribed else "")
+                + (f"; kept without text: {sorted(untranscribed)}"
+                   if untranscribed else "")
+                + (f"; left for a follow-up run: {later}" if later else "")
             )
 
             return {
@@ -1147,6 +1248,7 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
                 'status': 'completed',
                 'transcript_length': len(transcript),
                 'not_transcribed': sorted(untranscribed),
+                'later': later,
             }
 
         except Exception as e:

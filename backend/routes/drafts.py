@@ -715,7 +715,7 @@ def init_streaming():
     # Counted under the account's lock right before the insert, so two
     # starts at once cannot both pass (utils/recording_limits).
     from backend.utils.recording_limits import recording_start_refusal
-    refused = recording_start_refusal(current_user.id)
+    refused = recording_start_refusal(current_user.id, new=True)
     if refused is not None:
         return refused
     db.session.add(draft)

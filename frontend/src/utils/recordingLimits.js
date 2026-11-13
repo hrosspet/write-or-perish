@@ -49,8 +49,9 @@ export function finalRefusalMessage(err) {
 }
 
 // A new recording refused while the account holds several open
-// recordings: shown in the server's words.
-const START_REFUSAL_CODES = new Set(['too_many_recordings']);
+// recordings, or after many starts without audio: shown in the server's
+// words.
+const START_REFUSAL_CODES = new Set(['too_many_recordings', 'too_many_starts']);
 
 export const TOO_MANY_RECORDINGS_MESSAGE =
   'You have several recordings that are not finished. Save, finish or '

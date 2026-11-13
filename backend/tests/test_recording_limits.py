@@ -15,17 +15,24 @@ the older ``/api/nodes/<id>/audio-chunk``):
   not transcribed, the text ends with a note, and the transcription stream
   tells the apps why;
 - a recording that holds audio is never refused more for quiet time or
-  the usage limit (a pause, a phone call, time offline, an app killed and
-  reopened later);
-- an account holds at most MAX_OPEN_RECORDINGS open recordings; one
-  without audio is open for EMPTY_SESSION_EXPIRES_AFTER, after which its
-  first audio is a new start; a burst of Voice turns never reaches the
-  count;
+  the usage limit within a day of its last activity (a pause, a phone
+  call, time offline, an app killed and reopened later); one left
+  untouched longer is a new start when it takes audio again;
+- an account holds at most MAX_OPEN_RECORDINGS open recordings with audio,
+  and the refusal's words match what recovery offers; recordings without
+  audio are bounded apart (MAX_EMPTY_STARTS), one older than
+  EMPTY_SESSION_EXPIRES_AFTER is a new start at its first audio, and the
+  daily clean-up removes them after EMPTY_SESSION_REMOVED_AFTER; a burst of
+  Voice turns never reaches the count;
 - starts at the same moment are counted again under the account's lock;
-- lengths and the transcription cost come from the decoded audio, at
-  least 15 s a chunk; audio that cannot be decoded is re-encoded on the
-  server and only that is sent and counted, and audio that cannot be
+- lengths and the transcription cost come from the decoded audio (a
+  measured short turn counts its length); a chunk decodes to at most
+  MAX_CHUNK_AUDIO_SECONDS, past which its part is not re-encoded or sent;
+  audio that cannot be decoded is re-encoded on the server and only that
+  is sent and counted (at least 15 s a chunk), and audio that cannot be
   re-encoded either is kept, not sent, with a note;
+- a task run's local audio work has one budget, the provider's time not
+  counted; parts it does not reach go to a follow-up run;
 - a recording is active through its start and its audio: opening the
   transcription stream marks it live for the takeover between devices, not
   for these limits;
@@ -35,10 +42,10 @@ Chunked file uploads (``/api/nodes/upload/...``): the init's size and piece
 count, each piece's index and size, and the finalize's total are held to
 what the init announced; a refused finalize deletes the pieces. A new
 upload is refused while MAX_UPLOADS_IN_PROGRESS of the account's uploads
-wait for their transcript (deleted ones not counted); an upload that
-received no piece for UPLOAD_IDLE_EXPIRES_AFTER takes no more, one the app
-reports failed stops counting, a finalize at the usage limit keeps the
-file untranscribed, and an uploaded file is cut at
+with activity within UPLOAD_COUNTS_FOR wait for their transcript (deleted
+ones not counted); an upload takes pieces within UPLOAD_COUNTS_FOR of its
+last activity, one the app reports failed stops counting, one accepted at
+its start is transcribed, and an uploaded file is cut at
 MAX_UPLOAD_TRANSCRIBED_SECONDS before it is sent, measured or not; the cost
 is recorded from the pieces sent.
 
@@ -50,6 +57,7 @@ control, marked so.
 """
 import io
 import json
+import math
 import os
 import pathlib
 import sys
@@ -497,21 +505,30 @@ def _claim(client, session_id):
                        json={"device_key": KEY})
 
 
+def _recording_with_audio(client):
+    """A recording started and holding its first chunk; its session id."""
+    sid = _init_recording(client).get_json()["session_id"]
+    assert _chunk(client, sid, 1, _payload(WEB_CHUNK_BYTES)).status_code == 202
+    return sid
+
+
 class TestOpenRecordings:
     def test_a_new_recording_waits_while_six_are_open(self, app, client,
                                                       alice):
-        for _ in range(limits.MAX_OPEN_RECORDINGS):
-            assert _init_recording(client).status_code == 201
+        sids = [_recording_with_audio(client)
+                for _ in range(limits.MAX_OPEN_RECORDINGS)]
 
         resp = _init_recording(client)
 
+        # All six are recording (none offered for recovery): the words
+        # say to wait, not to save or discard.
         assert resp.status_code == 429
-        assert resp.get_json() == {"error": limits.TOO_MANY_RECORDINGS_TEXT,
-                                   "code": "too_many_recordings"}
+        assert resp.get_json() == {
+            "error": limits.RECORDINGS_IN_PROGRESS_TEXT,
+            "code": "too_many_recordings"}
         # Discarding one lets the next one start.
-        sid = Draft.query.filter_by(user_id=alice.id).first().session_id
         assert client.delete(
-            f"/api/drafts/streaming/{sid}/discard").status_code == 200
+            f"/api/drafts/streaming/{sids[0]}/discard").status_code == 200
         assert _init_recording(client).status_code == 201
 
     def test_recordings_left_behind_with_audio_count_for_a_day(
@@ -519,7 +536,18 @@ class TestOpenRecordings:
         for n in range(limits.MAX_OPEN_RECORDINGS):
             _left_behind(app, alice, f"left-{n}", timedelta(hours=20))
 
-        assert _init_recording(client).status_code == 429
+        resp = _init_recording(client)
+
+        # Recovery offers them: the words say to save, finish or discard.
+        assert resp.status_code == 429
+        assert resp.get_json()["error"] == limits.TOO_MANY_RECORDINGS_TEXT
+
+    def test_starts_without_audio_do_not_count(self, app, client, alice):
+        # A microphone that failed to start, many times in a row.
+        for _ in range(limits.MAX_OPEN_RECORDINGS + 4):
+            assert _init_recording(client).status_code == 201
+
+        assert _recording_with_audio(client)
 
     def test_control_after_a_day_or_without_audio_past_their_time_they_do_not_count(
             self, app, client, alice):
@@ -639,8 +667,8 @@ class TestRecordingsWithoutAudio:
     def test_past_its_time_the_first_audio_must_fit_the_count(
             self, app, client, alice):
         _empty(app, alice, "late", timedelta(minutes=16))
-        for _ in range(limits.MAX_OPEN_RECORDINGS):
-            assert _init_recording(client).status_code == 201
+        for n in range(limits.MAX_OPEN_RECORDINGS):
+            _left_behind(app, alice, f"open-{n}", timedelta(hours=1))
 
         resp = _chunk(client, "late", 1, _payload(WEB_CHUNK_BYTES))
 
@@ -665,36 +693,64 @@ class TestRecordingsWithoutAudio:
         assert _chunk(client, "late", 1,
                       _payload(WEB_CHUNK_BYTES)).status_code == 202
 
+    def test_starts_without_audio_are_bounded_on_their_own(
+            self, app, client, alice):
+        started = [_init_recording(client).get_json()["session_id"]
+                   for _ in range(limits.MAX_EMPTY_STARTS)]
+
+        resp = _init_recording(client)
+
+        assert resp.status_code == 429
+        assert resp.get_json() == {"error": limits.TOO_MANY_STARTS_TEXT,
+                                   "code": "too_many_starts"}
+        # Once their time has passed they no longer count.
+        Draft.query.update({Draft.created_at: datetime.utcnow()
+                            - limits.EMPTY_SESSION_EXPIRES_AFTER
+                            - timedelta(minutes=1)})
+        _db.session.commit()
+        assert _init_recording(client).status_code == 201
+        assert len(started) == limits.MAX_EMPTY_STARTS
+
     def test_prepared_recordings_cannot_get_past_the_count(
             self, app, client, alice):
-        started = []
-        for _ in range(5):
-            for _ in range(3):
-                resp = _init_recording(client)
-                if resp.status_code == 201:
-                    started.append(resp.get_json()["session_id"])
-            # A minute passes between rounds: none of them is live any more.
-            Draft.query.filter(Draft.session_id.in_(started)).update(
-                {Draft.streaming_heartbeat_at:
-                 datetime.utcnow() - timedelta(minutes=1)},
-                synchronize_session=False)
-            _db.session.commit()
+        started = [_init_recording(client).get_json()["session_id"]
+                   for _ in range(limits.MAX_OPEN_RECORDINGS + 3)]
 
-        assert len(started) == limits.MAX_OPEN_RECORDINGS
+        codes = [_chunk(client, sid, 1, _payload(WEB_CHUNK_BYTES)).status_code
+                 for sid in started]
 
-    def test_a_recording_with_audio_taken_up_after_a_day_must_fit_the_count(
+        assert codes == ([202] * limits.MAX_OPEN_RECORDINGS + [429] * 3)
+
+    def test_a_recording_left_untouched_for_a_day_is_a_new_start(
+            self, app, client, alice, tasks):
+        _left_behind(app, alice, "old", timedelta(hours=25), chunks=4)
+        _cap(alice)
+
+        resp = _chunk(client, "old", 4, _payload(WEB_CHUNK_BYTES))
+        assert resp.status_code == 402
+        assert _claim(client, "old").status_code == 402
+        assert _rows("old") == 4
+        # Its audio is kept and can be saved.
+        resp = client.post("/api/drafts/streaming/old/finalize",
+                           json={"total_chunks": 4, "device_key": KEY})
+        assert resp.status_code == 202, resp.get_data(as_text=True)
+
+    def test_a_recording_left_untouched_for_a_day_must_fit_the_count(
+            self, app, client, alice):
+        _left_behind(app, alice, "older", timedelta(hours=26))
+        for n in range(limits.MAX_OPEN_RECORDINGS):
+            _left_behind(app, alice, f"open-{n}", timedelta(hours=1))
+
+        resp = _chunk(client, "older", 2, _payload(WEB_CHUNK_BYTES))
+
+        assert resp.status_code == 429
+
+    def test_control_under_the_limit_it_takes_audio_again(
             self, app, client, alice):
         _left_behind(app, alice, "old", timedelta(hours=25))
-        _cap(alice)
-        # Under the count, the limit does not matter: it holds audio.
+
         assert _chunk(client, "old", 2,
                       _payload(WEB_CHUNK_BYTES)).status_code == 202
-
-        _left_behind(app, alice, "older", timedelta(hours=26))
-        for n in range(limits.MAX_OPEN_RECORDINGS - 1):
-            _left_behind(app, alice, f"open-{n}", timedelta(hours=1))
-        resp = _chunk(client, "older", 2, _payload(WEB_CHUNK_BYTES))
-        assert resp.status_code == 429
 
 
 class TestTheTranscriptionStreamIsNotActivity:
@@ -763,6 +819,52 @@ class TestTheTranscriptionStreamIsNotActivity:
             minutes=1)
 
 
+class TestEmptyRecordingCleanup:
+    """The daily clean-up (tasks/recording_cleanup) removes recordings that
+    never received audio, a week old, and nothing else."""
+
+    def _old(self, app, user, session_id, age=timedelta(days=8)):
+        draft, folder = _session(app, user, session_id)
+        draft.created_at = datetime.utcnow() - age
+        _db.session.commit()
+        return draft, folder
+
+    def test_old_recordings_without_audio_are_removed(self, app, alice):
+        _, folder = self._old(app, alice, "gone")
+
+        removed = limits.remove_empty_recordings(root=app.media_root)
+
+        assert removed == 1
+        assert Draft.query.filter_by(session_id="gone").count() == 0
+        assert not folder.exists()
+
+    def test_nothing_with_audio_or_text_or_recent_is_touched(
+            self, app, alice):
+        _left_behind(app, alice, "audio", timedelta(days=8))
+        Draft.query.filter_by(session_id="audio").one().created_at = (
+            datetime.utcnow() - timedelta(days=9))
+        _, folder = self._old(app, alice, "file")
+        (folder / "init.webm").write_bytes(b"\x1aE\xdf\xa3")
+        draft, _ = self._old(app, alice, "text")
+        draft.set_content("typed words")
+        self._old(app, alice, "recent", age=timedelta(days=1))
+        done, _ = self._old(app, alice, "done")
+        done.streaming_status = "completed"
+        _db.session.commit()
+
+        assert limits.remove_empty_recordings(root=app.media_root) == 0
+        assert Draft.query.count() == 5
+        assert (folder / "init.webm").exists()
+
+    def test_a_run_removes_at_most_its_bound(self, app, alice):
+        for n in range(5):
+            self._old(app, alice, f"old-{n}")
+
+        assert limits.remove_empty_recordings(root=app.media_root,
+                                              limit=3) == 3
+        assert Draft.query.count() == 2
+
+
 def _waiting_uploads(user, n, status="pending", activity=None, deleted=False,
                      handed=False):
     for _ in range(n):
@@ -814,36 +916,57 @@ class TestUploadsInProgress:
 
     def test_control_idle_failed_and_finished_ones_do_not_count(
             self, app, client, alice):
-        # Control (passes on main too): uploads that stopped receiving
-        # pieces, failed ones and transcribed ones.
-        _waiting_uploads(alice, 3, activity=datetime.utcnow()
-                         - limits.UPLOAD_IDLE_EXPIRES_AFTER
-                         - timedelta(minutes=1))
-        _waiting_uploads(alice, 3, status="failed")
-        _waiting_uploads(alice, 3, status="completed")
+        # Control: uploads without activity for a day, failed ones and
+        # transcribed ones.
+        n = limits.MAX_UPLOADS_IN_PROGRESS
+        _waiting_uploads(alice, n, activity=datetime.utcnow()
+                         - limits.UPLOAD_COUNTS_FOR - timedelta(minutes=1))
+        _waiting_uploads(alice, n, status="failed")
+        _waiting_uploads(alice, n, status="completed")
 
         assert _init_upload(client, 8, 2).status_code == 201
 
     def test_ones_handed_to_transcription_count_until_their_transcript(
             self, app, client, alice):
-        _waiting_uploads(alice, 3, handed=True,
+        _waiting_uploads(alice, limits.MAX_UPLOADS_IN_PROGRESS, handed=True,
                          activity=datetime.utcnow() - timedelta(hours=2))
 
         assert _init_upload(client, 8, 2).status_code == 429
 
-    def test_a_piece_after_thirty_minutes_without_one_is_refused(
+    def test_one_upload_left_behind_does_not_block(self, app, client, alice):
+        # One upload stuck mid-way, as many presses as before.
+        _waiting_uploads(alice, 1)
+        for n in range(3):
+            assert _init_upload(client, 8, 2,
+                                upload_id=f"up-{n}").status_code == 201
+
+    @pytest.mark.parametrize("asleep", [timedelta(minutes=31),
+                                        timedelta(hours=5),
+                                        timedelta(hours=23)])
+    def test_an_upload_continues_after_the_device_slept(
+            self, app, client, alice, asleep):
+        node_id = _init_upload(client, 8, 2).get_json()["node_id"]
+        assert _send_piece(client, node_id, 0, b"abcd").status_code == 200
+        Node.query.get(node_id).upload_activity_at = (
+            datetime.utcnow() - asleep)
+        _db.session.commit()
+
+        assert _send_piece(client, node_id, 1, b"efgh").status_code == 200
+
+    def test_a_piece_after_a_day_without_activity_is_refused(
             self, app, client, alice):
         node_id = _init_upload(client, 8, 2).get_json()["node_id"]
         assert _send_piece(client, node_id, 0, b"abcd").status_code == 200
         Node.query.get(node_id).upload_activity_at = (
-            datetime.utcnow() - limits.UPLOAD_IDLE_EXPIRES_AFTER
+            datetime.utcnow() - limits.UPLOAD_COUNTS_FOR
             - timedelta(minutes=1))
         _db.session.commit()
 
         resp = _send_piece(client, node_id, 1, b"efgh")
 
         assert resp.status_code == 410
-        assert resp.get_json()["code"] == "upload_expired"
+        assert resp.get_json() == {"error": limits.UPLOAD_EXPIRED_TEXT,
+                                   "code": "upload_expired"}
 
     def test_control_a_slow_upload_keeps_going(self, app, client, alice):
         # Control (passes on main too): a piece every 25 minutes, for hours.
@@ -856,11 +979,11 @@ class TestUploadsInProgress:
             _db.session.commit()
             assert _send_piece(client, node_id, index, piece).status_code == 200
 
-    def test_an_older_path_recording_idle_for_thirty_minutes_takes_no_audio(
+    def test_an_older_path_recording_idle_for_a_day_takes_no_audio(
             self, app, client, alice, tasks):
         node = TestOlderNodePath()._node(app, alice)
         node.upload_activity_at = (datetime.utcnow()
-                                   - limits.UPLOAD_IDLE_EXPIRES_AFTER
+                                   - limits.UPLOAD_COUNTS_FOR
                                    - timedelta(minutes=1))
         _db.session.commit()
 
@@ -885,8 +1008,12 @@ class TestUploadsInProgress:
         assert failed.transcription_error == limits.UPLOAD_FAILED_TEXT
         assert _init_upload(client, 8, 2, upload_id="up-y").status_code == 201
 
-    def test_finalized_at_the_limit_the_file_is_kept_untranscribed(
-            self, app, client, alice, tasks):
+    def test_an_upload_accepted_at_its_start_is_transcribed(
+            self, app, client, alice, tasks, monkeypatch):
+        # As a recording (#341): the limit reached while it was uploading.
+        import backend.routes.nodes as nodes_routes
+        monkeypatch.setattr(nodes_routes, "get_openai_chat_key",
+                            lambda cfg: "key")
         node_id = _init_upload(client, 8, 2).get_json()["node_id"]
         assert _send_piece(client, node_id, 0, b"abcd").status_code == 200
         assert _send_piece(client, node_id, 1, b"efgh").status_code == 200
@@ -895,14 +1022,10 @@ class TestUploadsInProgress:
         resp = _finalize_upload(client, node_id)
 
         assert resp.status_code == 200, resp.get_data(as_text=True)
-        assert resp.get_json()["spend_capped"] is True
+        assert "spend_capped" not in resp.get_json()
         node = Node.query.get(node_id)
-        assert node.transcription_status == "failed"
-        assert node.transcription_error.startswith(
-            "Your file is saved, but not turned into text.")
-        stored = app.media_root / f"user/{alice.id}/node/{node_id}"
-        assert (stored / "original.m4a").read_bytes() == b"abcdefgh"
-        tasks.transcribe_audio.delay.assert_not_called()
+        assert node.transcription_status == "pending"
+        tasks.transcribe_audio.delay.assert_called_once()
 
 
 class TestStartsAtOnce:
@@ -917,7 +1040,8 @@ class TestStartsAtOnce:
         def others_started_meanwhile(user_id):
             locked.append(user_id)
             for n in range(limits.MAX_OPEN_RECORDINGS):
-                _session(app, alice, f"meanwhile-{n}")
+                _left_behind(app, alice, f"meanwhile-{n}",
+                             timedelta(minutes=1))
         monkeypatch.setattr(limits, "lock_account", others_started_meanwhile)
         before = Draft.query.count()
 
@@ -1265,6 +1389,13 @@ def st(monkeypatch, tmp_path):
     monkeypatch.setattr(module, "OpenAI", fake_openai)
     module._provider = fake_openai.return_value.audio.transcriptions.create
     module._root = tmp_path
+    # Follow-up runs of a batch (parts left for later): recorded, not queued.
+    module._follow_ups = []
+
+    def _follow_up(session_id, chunk_indices):
+        module._follow_ups.append(list(chunk_indices))
+        return f"follow-up-{len(module._follow_ups)}"
+    monkeypatch.setattr(module, "_queue_follow_up", _follow_up, raising=False)
 
     with app.app_context():
         _db.create_all()
@@ -1483,18 +1614,69 @@ class TestDecodedLength:
         assert head.audio_seconds == 300.0
         assert APICostLog.query.one().audio_duration_seconds == 300.0
 
-    def test_chunks_count_at_least_their_length(self, st):
+    def test_a_short_turn_counts_its_measured_length(self, st):
         from backend.models import APICostLog
-        st._decoded = 1.0        # the audio says one second
-        _recording(st, "sess-s", range(0, 20))
+        st._decoded = 5.0        # a five-second Voice turn
+        _recording(st, "sess-s", range(0, 1))
 
-        _batch(st, "sess-s", range(0, 20))
+        _batch(st, "sess-s", range(0, 1))
 
         head = NodeTranscriptChunk.query.filter_by(
             session_id="sess-s", chunk_index=0).one()
-        assert head.audio_seconds == 20 * limits.STREAMING_CHUNK_SECONDS
-        assert APICostLog.query.one().audio_duration_seconds \
-            == 20 * limits.STREAMING_CHUNK_SECONDS
+        assert head.audio_seconds == 5.0
+        assert APICostLog.query.one().audio_duration_seconds == 5.0
+
+    def test_chunks_that_decode_past_their_bound_are_not_sent(
+            self, st, monkeypatch):
+        from backend.models import APICostLog
+        reencoded = []
+        monkeypatch.setattr(st, "split_audio_for_transcription",
+                            lambda *a, **k: reencoded.append(a) or ([], False))
+        st._decoded = math.inf   # the decode stopped at the bound
+        _recording(st, "sess-x", range(0, 2))
+
+        _batch(st, "sess-x", range(0, 2))
+
+        assert st._provider.call_count == 0
+        assert reencoded == []
+        assert APICostLog.query.count() == 0
+        kept = NodeTranscriptChunk.query.filter_by(session_id="sess-x").all()
+        assert {limits.untranscribed_code(c.error) for c in kept} \
+            == {limits.INVALID}
+        st.finalize_draft_streaming(MagicMock(), "sess-x", 2)
+        assert Draft.query.filter_by(session_id="sess-x").one() \
+            .get_content().endswith(limits.NOTE_INVALID)
+
+    @pytest.mark.skipif(not _ffmpeg_with("libopus"),
+                        reason="needs ffmpeg with libopus")
+    def test_a_chunk_of_minutes_of_quiet_is_refused_without_decoding_it_all(
+            self, st, monkeypatch):
+        import subprocess
+        import time
+        import backend.utils.audio_processing as audio_processing
+        # Ten minutes of quiet in one chunk: small, and far more audio than
+        # a chunk holds.
+        _, folder = _recording(st, "sess-q", range(0, 1))
+        quiet = folder / "chunk_0000.webm"
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                        "anullsrc=r=48000:cl=mono", "-t", "600", "-c:a",
+                        "libopus", "-b:a", "6k", "-application", "voip",
+                        "-dtx", "1", str(quiet)], check=True)
+        monkeypatch.setattr(audio_processing, "decoded_audio_seconds",
+                            st._real_decoded)
+        monkeypatch.setattr(st, "decoded_audio_seconds", st._real_decoded)
+        reencoded = []
+        monkeypatch.setattr(st, "split_audio_for_transcription",
+                            lambda *a, **k: reencoded.append(a) or ([], False))
+
+        started = time.monotonic()
+        _batch(st, "sess-q", range(0, 1))
+
+        assert time.monotonic() - started < 5
+        assert st._provider.call_count == 0
+        assert reencoded == []
+        chunk = NodeTranscriptChunk.query.filter_by(session_id="sess-q").one()
+        assert limits.untranscribed_code(chunk.error) == limits.INVALID
 
     def test_audio_that_cannot_be_read_is_kept_and_not_sent(self, st):
         from backend.models import APICostLog
@@ -1608,6 +1790,24 @@ class TestDecodedLength:
         assert abs(decoded_audio_seconds(FIXTURES / "chunk_0000.mp4")
                    - 2.07) < 0.05
 
+    @pytest.mark.skipif(not _ffmpeg_with("libopus"),
+                        reason="needs ffmpeg with libopus")
+    def test_the_decode_stops_past_its_bound(self, tmp_path):
+        import subprocess
+        import time
+        from backend.utils.audio_processing import decoded_audio_seconds
+        quiet = tmp_path / "quiet.webm"
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                        "anullsrc=r=48000:cl=mono", "-t", "1200", "-c:a",
+                        "libopus", "-b:a", "6k", "-application", "voip",
+                        "-dtx", "1", str(quiet)], check=True)
+
+        started = time.monotonic()
+        assert decoded_audio_seconds(quiet, stop_after=60) == math.inf
+        assert time.monotonic() - started < 2
+        assert decoded_audio_seconds(quiet, stop_after=1500) \
+            == pytest.approx(1200, abs=0.1)
+
     def test_undecodable_bytes_give_none(self, tmp_path):
         from backend.utils.audio_processing import decoded_audio_seconds
         junk = tmp_path / "junk.webm"
@@ -1616,18 +1816,89 @@ class TestDecodedLength:
         assert decoded_audio_seconds(junk) is None
 
 
-class TestAudioWorkDeadline:
-    """One deadline for a task's audio work: each ffmpeg call gets the time
-    left as its timeout, a re-encode at most 30 s a chunk; audio not reached
-    in time is kept without its text, not sent and not retried."""
+def _parts(st, session_id, parts=3, size=5):
+    """A recording of *parts* resumed parts of *size* chunks each: one
+    batch of several sub-batches."""
+    _, folder = _recording(st, session_id, range(0, parts * size))
+    for start in range(size, parts * size, size):
+        (folder / f"init.{start}.webm").write_bytes(
+            b"\x1aE\xdf\xa3-webm-head")
+    return folder
 
-    def test_a_slow_decoder_cannot_hold_the_task_past_its_deadline(
+
+def _fake_clock(st, monkeypatch):
+    clock = {"t": 0.0}
+    monkeypatch.setattr(st, "_now", lambda: clock["t"], raising=False)
+    return clock
+
+
+def _run_with_follow_ups(st, session_id, indices, most=10):
+    """Run the batch, then each follow-up run it asks for; the runs."""
+    runs = [list(indices)]
+    _batch(st, session_id, indices)
+    while st._follow_ups:
+        indices = st._follow_ups.pop(0)
+        runs.append(indices)
+        assert len(runs) <= most
+        _batch(st, session_id, indices)
+    return runs
+
+
+class TestAudioWorkBudget:
+    """A task run's local audio work (merge, measure, re-encode) has one
+    budget; the time spent waiting for the provider is not counted. Parts
+    not reached in it go to a follow-up run; only a part that cannot be done
+    within a whole budget is kept as unreadable."""
+
+    def test_a_slow_provider_does_not_cost_the_rest_of_the_recording(
+            self, st, monkeypatch):
+        clock = _fake_clock(st, monkeypatch)
+        words = type("R", (), {"text": "words"})()
+
+        def slow_provider(**kwargs):
+            clock["t"] += 21 * 60      # the first request takes 21 minutes
+            return words
+        st._provider.side_effect = slow_provider
+        st._decoded = 75.0
+        _parts(st, "sess-p", parts=2)
+
+        _batch(st, "sess-p", range(0, 10))
+
+        assert set(_statuses("sess-p").values()) == {"completed"}
+        assert st._provider.call_count == 2
+        assert st._follow_ups == []
+
+    def test_parts_not_reached_go_to_a_follow_up_run(self, st, monkeypatch):
+        from backend.models import APICostLog
+        clock = _fake_clock(st, monkeypatch)
+        budget = getattr(st, "TASK_AUDIO_BUDGET_SECONDS", 20 * 60)
+        measuring = 0.6 * budget       # each part measures slowly, but well
+
+        def slow_decode(p, timeout_seconds=None, logger=None, **k):
+            spent = min(measuring, timeout_seconds or measuring)
+            clock["t"] += spent
+            return 75.0 if spent >= measuring else None
+        monkeypatch.setattr(st, "decode_timeout_seconds",
+                            lambda p: budget, raising=False)
+        monkeypatch.setattr(st, "decoded_audio_seconds", slow_decode)
+        _parts(st, "sess-l", parts=3)
+
+        runs = _run_with_follow_ups(st, "sess-l", range(0, 15))
+
+        assert runs == [list(range(0, 15)), list(range(5, 15)),
+                        list(range(10, 15))]
+        assert set(_statuses("sess-l").values()) == {"completed"}
+        assert st._provider.call_count == 3
+        assert sum(r.audio_duration_seconds
+                   for r in APICostLog.query) == 3 * 75.0
+
+    def test_a_slow_decoder_cannot_hold_a_run_past_its_budget(
             self, st, monkeypatch):
         from backend.models import APICostLog
-        clock = {"t": 0.0}
+        clock = _fake_clock(st, monkeypatch)
         calls = []
 
-        def slow_decode(p, timeout_seconds=None, logger=None):
+        def slow_decode(p, timeout_seconds=None, logger=None, **k):
             # Runs to its limit, then fails.
             spent = 600.0 if timeout_seconds is None else timeout_seconds
             calls.append(("decode", spent))
@@ -1640,7 +1911,6 @@ class TestAudioWorkDeadline:
             clock["t"] += timeout_seconds
             return [], False
 
-        monkeypatch.setattr(st, "_now", lambda: clock["t"], raising=False)
         monkeypatch.setattr(st, "decode_timeout_seconds", lambda p: 600.0,
                             raising=False)
         monkeypatch.setattr(st, "decoded_audio_seconds", slow_decode)
@@ -1652,22 +1922,27 @@ class TestAudioWorkDeadline:
             merges.append(len(paths))
             return merge(paths, **kwargs)
         monkeypatch.setattr(st, "concat_fragmented_media", counted_merge)
-        # Three resumed parts of five chunks: three sub-batches.
-        _, folder = _recording(st, "sess-slow", range(0, 15))
-        for start in (5, 10):
-            (folder / f"init.{start}.webm").write_bytes(
-                b"\x1aE\xdf\xa3-webm-head")
+        folder = _parts(st, "sess-slow", parts=3)
+        budget = getattr(st, "TASK_AUDIO_BUDGET_SECONDS", 20 * 60)
+        per_chunk = getattr(st, "REENCODE_SECONDS_PER_CHUNK", 30)
 
         _batch(st, "sess-slow", range(0, 15))
 
-        deadline = getattr(st, "TASK_AUDIO_DEADLINE_SECONDS", 20 * 60)
-        assert clock["t"] <= deadline
-        per_chunk = getattr(st, "REENCODE_SECONDS_PER_CHUNK", 30)
+        # The first run: the first part fails within its own limits; the
+        # second runs out of the budget and is left, with the third.
+        assert clock["t"] <= budget
         assert all(spent <= 5 * per_chunk
                    for step, spent in calls if step == "re-encode")
-        # The third part was not reached: no ffmpeg call for it, no merge.
         assert len(calls) == 3
         assert merges == [5, 5]
+        assert st._follow_ups == [list(range(5, 15))]
+        statuses = _statuses("sess-slow")
+        assert {statuses[i] for i in range(0, 5)} == {"failed"}
+        assert {statuses[i] for i in range(5, 15)} == {"stored"}
+        # The parts left are each done in a run of their own.
+        runs = 1 + len(_run_with_follow_ups(
+            st, "sess-slow", st._follow_ups.pop(0)))
+        assert runs == 3
         assert st._provider.call_count == 0
         assert APICostLog.query.count() == 0
         kept = NodeTranscriptChunk.query.filter_by(

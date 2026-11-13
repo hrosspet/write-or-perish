@@ -80,6 +80,13 @@ celery.conf.update(
             'task': 'backend.tasks.node_cleanup.cleanup_deleted_nodes',
             'schedule': schedules.crontab(hour=3, minute=17),  # daily, 03:17 UTC
         },
+        # Recordings that never received audio, a week old (bounded per
+        # run; tasks/recording_cleanup). 03:37 UTC: after the node
+        # cleanup, away from the :00 hourly jobs.
+        'remove-abandoned-empty-recordings': {
+            'task': 'backend.tasks.recording_cleanup.remove_abandoned_empty_recordings',
+            'schedule': schedules.crontab(hour=3, minute=37),  # daily, 03:37 UTC
+        },
         # Backstop for the {ca_tweets} batch poll: a hard worker kill loses
         # the scheduled retry; this re-dispatches nodes whose poll
         # heartbeat stopped (see llm_completion.resume_stuck_feed_batches).
@@ -247,3 +254,4 @@ from backend.tasks import imports  # noqa: F401
 from backend.tasks import chat_imports  # noqa: F401
 from backend.tasks import intentions  # noqa: F401
 from backend.tasks import user_purge  # noqa: F401
+from backend.tasks import recording_cleanup  # noqa: F401

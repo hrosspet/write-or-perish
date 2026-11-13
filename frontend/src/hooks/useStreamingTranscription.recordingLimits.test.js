@@ -51,11 +51,13 @@ jest.mock('../utils/errorSound', () => ({
 }));
 
 const mockPost = jest.fn();
+const mockDelete = jest.fn(() => Promise.resolve({ data: {} }));
 jest.mock('../api', () => ({
   __esModule: true,
   default: {
     post: (...args) => mockPost(...args),
     get: () => new Promise(() => {}),
+    delete: (...args) => mockDelete(...args),
   },
 }));
 
@@ -69,7 +71,9 @@ const flush = () => new Promise((r) => setTimeout(r, 0));
 const callsTo = (suffix) => mockPost.mock.calls.filter(([u]) => u.includes(suffix));
 
 beforeEach(() => {
-  mockStartRecording.mockClear();
+  mockDelete.mockClear();
+  mockStartRecording.mockReset();
+  mockStartRecording.mockImplementation(() => Promise.resolve());
   mockStopRecording.mockClear();
   mockResetRecording.mockClear();
   mockAddToast.mockClear();
@@ -163,6 +167,43 @@ describe('several open recordings', () => {
     const err = onError.mock.calls[0][0];
     expect(err.message).toBe(text);
     expect(err.fatal).toBe(true);   // the Voice screen shows it verbatim
+    expect(result.current.errorMessage).toBe(text);
+  });
+});
+
+describe('a start whose microphone fails', () => {
+  test.each(['NotFoundError', 'NotReadableError', 'NotAllowedError'])(
+    '%s: the empty recording is discarded', async (name) => {
+      const failure = new Error('could not start');
+      failure.name = name;
+      mockStartRecording.mockImplementation(() => Promise.reject(failure));
+      const onError = jest.fn();
+      const { result } = renderHook(() => useStreamingTranscription({ onError }));
+
+      await act(async () => { await result.current.startStreaming(); });
+
+      expect(mockDelete).toHaveBeenCalledWith('/drafts/streaming/s1/discard');
+      expect(result.current.sessionState).toBe('error');
+      expect(onError).toHaveBeenCalledTimes(1);
+    });
+
+  test("a start refused after many starts without audio shows the server's words", async () => {
+    const text = 'Many recordings were started without any audio in the last few minutes. Wait a few minutes, then start a new one.';
+    mockPost.mockImplementation((url) => {
+      if (url === '/drafts/streaming/init') {
+        const err = new Error('Request failed with status code 429');
+        err.response = { status: 429, data: { error: text, code: 'too_many_starts' } };
+        return Promise.reject(err);
+      }
+      return Promise.resolve({ data: {} });
+    });
+    const onError = jest.fn();
+    const { result } = renderHook(() => useStreamingTranscription({ onError }));
+
+    await act(async () => { await result.current.startStreaming(); });
+
+    expect(mockStartRecording).not.toHaveBeenCalled();
+    expect(onError.mock.calls[0][0].message).toBe(text);
     expect(result.current.errorMessage).toBe(text);
   });
 });

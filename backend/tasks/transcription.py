@@ -208,11 +208,13 @@ def transcribe_audio(self, node_id: int, audio_file_path: str, filename: str = N
             # One deadline for the file's audio work (measuring, cutting,
             # measuring the pieces): SPLIT_TIMEOUT_SECONDS.
             deadline = time.monotonic() + SPLIT_TIMEOUT_SECONDS
+            # The decode stops just past the bound: a longer file is cut
+            # there below, so it is not measured further.
             decoded_sec = decoded_audio_seconds(
                 processed_path,
                 timeout_seconds=seconds_left(
                     deadline, decode_timeout_seconds(processed_path)),
-                logger=logger)
+                logger=logger, stop_after=MAX_UPLOAD_TRANSCRIBED_SECONDS + 1)
             needs_chunking = (decoded_sec is None
                               or file_size > OPENAI_MAX_AUDIO_BYTES
                               or decoded_sec > OPENAI_MAX_DURATION_SEC)

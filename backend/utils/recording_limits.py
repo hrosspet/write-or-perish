@@ -42,22 +42,26 @@ limits apply:
   MAX_STREAMING_CHUNKS on, or more than MAX_STREAMING_SESSION_BYTES in
   all. Audio accepted before stays.
 
-An account holds at most MAX_OPEN_RECORDINGS open recordings
-(open_recordings); a new start beyond them is refused. A recording is
-active through its start and the chunks it stores; its liveness stamp (for
-the takeover between devices) plays no part in these limits. A recording that
-holds no audio yet is open only for EMPTY_SESSION_EXPIRES_AFTER from its
-start; its first audio after that is a new start: the usage limit, then
-the count (audio_refusal), as a new recording's init would be. Each start
-takes the account's lock and counts again inside it (lock_account), so two
-starts at once cannot both pass.
+An account holds at most MAX_OPEN_RECORDINGS open recordings that hold
+audio (open_recordings); a new start beyond them is refused. A recording
+is active through its start and the chunks it stores; its liveness stamp
+(for the takeover between devices) plays no part in these limits. A
+recording without audio does not count there: at most MAX_EMPTY_STARTS of
+them are started within EMPTY_SESSION_EXPIRES_AFTER, and one older than
+that is a new start when its first audio comes. A recording left untouched
+for OPEN_COUNTS_FOR is treated as a new start too when it takes audio
+again (audio_refusal): the usage limit, then the count. Its audio is kept
+either way and can be saved. Each start takes the account's lock and
+counts again inside it (lock_account), so two starts at once cannot both
+pass. Recordings without audio older than EMPTY_SESSION_REMOVED_AFTER are
+removed daily (tasks/recording_cleanup).
 
 An account has at most MAX_UPLOADS_IN_PROGRESS audio uploads waiting for
-their transcript (uploads_in_progress). An upload that receives no piece
-for UPLOAD_IDLE_EXPIRES_AFTER takes no more pieces; its app still holds
-the file and starts again. Its finalize asks for the usage limit again,
-and an uploaded file is transcribed up to MAX_UPLOAD_TRANSCRIBED_SECONDS
-(its audio is cut there before it is sent).
+their transcript with activity within UPLOAD_COUNTS_FOR
+(uploads_in_progress). An upload takes pieces as long as it had one within
+UPLOAD_COUNTS_FOR. An upload accepted at its start is transcribed (as a
+recording is, #341), up to MAX_UPLOAD_TRANSCRIBED_SECONDS (its audio is
+cut there before it is sent).
 
 Lengths for these bounds and for the transcription cost are counted from
 the decoded audio (utils/audio_processing.decoded_audio_seconds), never
@@ -119,17 +123,19 @@ MAX_UPLOAD_CHUNKS = 200
 # when a request's Content-Length is checked before the form is read.
 FORM_OVERHEAD_BYTES = 64 * 1024
 
-# INTRODUCED HEURISTIC: open recordings (dictation and Voice) one account
-# may hold. Open: recording, with audio and active (its start or a chunk
-# stored) within OPEN_COUNTS_FOR, or without audio yet and started
-# within EMPTY_SESSION_EXPIRES_AFTER (also once its app released it); or
-# finalizing while its app still sends the chunks it announced. Saving,
-# discarding or finishing a recording frees its place at once; a recording
-# an app left behind (killed mid-recording) frees it after a day without
-# activity, and stays offered for recovery. A Voice turn frees its place as
-# soon as its last chunk is in. Six is room for one recording, a second
-# device and a few interrupted recordings not recovered yet.
+# INTRODUCED HEURISTIC: open recordings (dictation and Voice) with audio one
+# account may hold. Open: recording, with audio and active (its start or a
+# chunk stored) within OPEN_COUNTS_FOR; or finalizing while its app still
+# sends the chunks it announced. Saving, discarding or finishing a recording
+# frees its place at once; a recording an app left behind (killed
+# mid-recording) frees it after a day without activity, and stays offered
+# for recovery. A Voice turn frees its place as soon as its last chunk is
+# in. Six is room for one recording, a second device and a few interrupted
+# recordings not recovered yet.
 MAX_OPEN_RECORDINGS = 6
+# INTRODUCED HEURISTIC: a recording with audio counts as open for a day
+# after its last activity; one left untouched longer is treated as a new
+# start when it takes audio again.
 OPEN_COUNTS_FOR = timedelta(hours=24)
 
 # INTRODUCED HEURISTIC: how long a recording with no audio stored yet stays
@@ -137,21 +143,30 @@ OPEN_COUNTS_FOR = timedelta(hours=24)
 # a pause or Stop); fifteen minutes covers a start followed by a long time
 # offline. After it, its first audio is checked as a new start.
 EMPTY_SESSION_EXPIRES_AFTER = timedelta(minutes=15)
+# INTRODUCED HEURISTIC: recordings without audio one account may start
+# within EMPTY_SESSION_EXPIRES_AFTER. A start whose microphone fails, or a
+# Voice screen opened and left, makes one; thirty in fifteen minutes is far
+# past what a person does by hand.
+MAX_EMPTY_STARTS = 30
+# INTRODUCED HEURISTIC: a recording without audio older than this is removed
+# by the daily clean-up: long past EMPTY_SESSION_EXPIRES_AFTER, and long
+# enough for a phone that lost its connection before its first chunk got
+# through to send it. At most EMPTY_SESSIONS_REMOVED_PER_RUN a run.
+EMPTY_SESSION_REMOVED_AFTER = timedelta(days=7)
+EMPTY_SESSIONS_REMOVED_PER_RUN = 500
 
 # INTRODUCED HEURISTIC: audio uploads (chunked or in one request) and older
 # node-path recordings of one account that may wait for their transcript at
-# once. The apps upload one file per press; three leaves room for presses in
-# quick succession.
-MAX_UPLOADS_IN_PROGRESS = 3
-# INTRODUCED HEURISTIC: an upload (or older node-path recording) that has
-# received no piece for this long takes no more pieces and stops counting
-# (410; the app still has the file and starts again). A continuous upload,
-# however slow, keeps going: each piece renews it. One the app reports as
-# failed (/upload/cleanup) stops counting at once.
-UPLOAD_IDLE_EXPIRES_AFTER = timedelta(minutes=30)
-# An upload handed to transcription counts until its transcript is in, at
-# most this long (a transcription that died then frees its place).
-HANDED_UPLOAD_COUNTS_FOR = timedelta(hours=24)
+# once. The apps upload one file per press; five leaves room for presses in
+# quick succession and for an upload left behind.
+MAX_UPLOADS_IN_PROGRESS = 5
+# INTRODUCED HEURISTIC: an upload (or older node-path recording) takes
+# pieces, and counts, while it had activity (its start, a piece, its
+# finalize) within this time. A device that slept mid-upload continues
+# where it stopped; after a day the upload ends (410) and the app shows the
+# server's words. One the app reports as failed (/upload/cleanup) stops
+# counting at once.
+UPLOAD_COUNTS_FOR = timedelta(hours=24)
 
 # INTRODUCED HEURISTIC: the most audio of one uploaded file that is turned
 # into text, as decoded. A 200 MB file (the largest upload) at the iPhone's
@@ -161,14 +176,22 @@ HANDED_UPLOAD_COUNTS_FOR = timedelta(hours=24)
 # its entry, and its text ends with UPLOAD_NOTE_PART.
 MAX_UPLOAD_TRANSCRIBED_SECONDS = 8 * 60 * 60
 
+# At the count, when recovery offers some of the open recordings, and when
+# it offers none (they are being recorded elsewhere or saved).
 TOO_MANY_RECORDINGS_TEXT = (
     "You have several recordings that are not finished. Save, finish or "
     "discard one of them, then start a new one.")
+RECORDINGS_IN_PROGRESS_TEXT = (
+    "Several of your recordings are still being recorded or saved. Wait "
+    "for one of them to finish, then start a new one.")
+TOO_MANY_STARTS_TEXT = (
+    "Many recordings were started without any audio in the last few "
+    "minutes. Wait a few minutes, then start a new one.")
 TOO_MANY_UPLOADS_TEXT = (
     "Other audio files of yours are still being uploaded or turned into "
     "text. Wait for one of them to finish, then upload this one.")
-UPLOAD_EXPIRED_TEXT = ("This upload stopped arriving. Please upload the "
-                       "file again.")
+UPLOAD_EXPIRED_TEXT = ("This upload stopped arriving more than a day ago. "
+                       "Please upload the file again.")
 UPLOAD_FAILED_TEXT = "The upload did not finish. Please upload the file again."
 UPLOAD_NOTE_PART = ("*Note: The file is longer than eight hours, so the "
                     "rest of it was not turned into text. Its audio is "
@@ -190,16 +213,30 @@ _LOCK_NOT_AVAILABLE = "55P03"
 # stream sends with the chunk (``chunk_error``), so the apps tell it apart
 # from a failure. TOO_LONG: past MAX_TRANSCRIBED_SECONDS. UNREADABLE: the
 # server could neither measure the audio nor re-encode it, so it was not
-# sent (the apps treat it as a failed chunk).
+# sent. INVALID: its chunks decode to more than MAX_CHUNK_AUDIO_SECONDS each
+# (the apps treat both as a failed chunk).
 TOO_LONG = "recording_too_long"
 UNREADABLE = "audio_unreadable"
+INVALID = "chunk_invalid"
+
+# INTRODUCED HEURISTIC: the most audio a chunk may decode to, on average over
+# the chunks merged and sent together. Both apps cut a chunk every 15 s
+# (useStreamingMediaRecorder's timeslice, FMP4SegmentWriter's segments); the
+# longest measured is 30 s (Chrome handing two slices over at once). The
+# decode stops just past this, so measuring a chunk takes a fraction of a
+# second whatever it holds; a part that reaches it is not re-encoded or
+# sent.
+MAX_CHUNK_AUDIO_SECONDS = 2 * 60
 
 # NodeTranscriptChunk.error of a chunk kept without its text.
 NOT_TRANSCRIBED_TEXT = ("Saved as audio, not turned into text: the "
                         "recording is longer than six hours.")
 NOT_READ_TEXT = ("Saved as audio, not turned into text: this part of the "
                  "recording could not be read.")
-_ERROR_TEXTS = {TOO_LONG: NOT_TRANSCRIBED_TEXT, UNREADABLE: NOT_READ_TEXT}
+NOT_VALID_TEXT = ("Saved as audio, not turned into text: this part of the "
+                  "recording is not valid audio.")
+_ERROR_TEXTS = {TOO_LONG: NOT_TRANSCRIBED_TEXT, UNREADABLE: NOT_READ_TEXT,
+                INVALID: NOT_VALID_TEXT}
 
 # The note at the end of a recording's text: some of it was transcribed,
 # none of it was; part of it could not be read.
@@ -209,6 +246,8 @@ NOTE_ALL = ("*Note: The recording is longer than six hours, so it was not "
             "turned into text. Its audio is saved.*")
 NOTE_UNREADABLE = ("*Note: Part of this recording could not be read, so it "
                    "was not turned into text. Its audio is saved.*")
+NOTE_INVALID = ("*Note: Part of this recording is not valid audio, so it "
+                "was not turned into text. Its audio is saved.*")
 
 
 def body_too_large(max_bytes):
@@ -272,32 +311,46 @@ def _active_since(since):
     return db.or_(Draft.created_at >= since, recent_chunk)
 
 
-def open_recordings(user_id, now=None, exclude_draft_id=None):
+def _open_query(user_id, now=None, exclude_draft_id=None):
     """The account's open recordings (MAX_OPEN_RECORDINGS): recording with
-    audio and active within OPEN_COUNTS_FOR; recording without audio,
-    started within EMPTY_SESSION_EXPIRES_AFTER; finalizing
-    with fewer chunks stored than it announced."""
+    audio and active within OPEN_COUNTS_FOR; finalizing with fewer chunks
+    stored than it announced, active within OPEN_COUNTS_FOR. Recordings
+    without audio are not counted (MAX_EMPTY_STARTS)."""
     from backend.extensions import db
     from backend.models import Draft, NodeTranscriptChunk
     now = now or datetime.utcnow()
     stored = (db.select(db.func.count(NodeTranscriptChunk.id))
               .where(NodeTranscriptChunk.session_id == Draft.session_id)
               .scalar_subquery())
-    has_audio = _has_audio()
+    active = _active_since(_since(now, OPEN_COUNTS_FOR))
     query = Draft.query.filter(Draft.user_id == user_id,
                                Draft.session_id.isnot(None))
     if exclude_draft_id is not None:
         query = query.filter(Draft.id != exclude_draft_id)
     return query.filter(db.or_(
-        db.and_(Draft.streaming_status == "recording", has_audio,
-                _active_since(_since(now, OPEN_COUNTS_FOR))),
-        db.and_(Draft.streaming_status == "recording", ~has_audio,
-                Draft.created_at >= _since(now, EMPTY_SESSION_EXPIRES_AFTER)),
+        db.and_(Draft.streaming_status == "recording", _has_audio(), active),
         db.and_(Draft.streaming_status == "finalizing",
                 Draft.streaming_total_chunks.isnot(None),
-                stored < Draft.streaming_total_chunks,
-                _active_since(_since(now, OPEN_COUNTS_FOR))),
-    )).count()
+                stored < Draft.streaming_total_chunks, active),
+    ))
+
+
+def open_recordings(user_id, now=None, exclude_draft_id=None):
+    """How many open recordings the account holds (_open_query)."""
+    return _open_query(user_id, now, exclude_draft_id).count()
+
+
+def empty_starts(user_id, now=None):
+    """Recordings without audio the account started within
+    EMPTY_SESSION_EXPIRES_AFTER (MAX_EMPTY_STARTS)."""
+    from backend.models import Draft
+    return Draft.query.filter(
+        Draft.user_id == user_id,
+        Draft.session_id.isnot(None),
+        Draft.streaming_status == "recording",
+        ~_has_audio(),
+        Draft.created_at >= _since(now, EMPTY_SESSION_EXPIRES_AFTER),
+    ).count()
 
 
 def _activity():
@@ -308,42 +361,78 @@ def _activity():
 
 def uploads_in_progress(user_id, now=None):
     """The account's audio entries waiting for their transcript
-    (MAX_UPLOADS_IN_PROGRESS), deleted ones left out: still receiving pieces
-    (a piece within UPLOAD_IDLE_EXPIRES_AFTER), or handed to transcription
-    within HANDED_UPLOAD_COUNTS_FOR."""
-    from backend.extensions import db
+    (MAX_UPLOADS_IN_PROGRESS), deleted ones left out, with activity (start,
+    a piece, the finalize) within UPLOAD_COUNTS_FOR."""
     from backend.models import Node
-    now = now or datetime.utcnow()
     return Node.query.filter(
         Node.user_id == user_id,
         Node.deleted_at.is_(None),
         Node.transcription_status.in_(("pending", "processing")),
-        db.or_(
-            db.and_(Node.audio_original_url.is_(None),
-                    _activity() >= _since(now, UPLOAD_IDLE_EXPIRES_AFTER)),
-            db.and_(Node.audio_original_url.isnot(None),
-                    _activity() >= _since(now, HANDED_UPLOAD_COUNTS_FOR)),
-        ),
+        _activity() >= _since(now, UPLOAD_COUNTS_FOR),
     ).count()
 
 
 def upload_expired(node, now=None):
     """True for an upload (or older node-path recording) not yet handed to
-    transcription that has received nothing for UPLOAD_IDLE_EXPIRES_AFTER:
-    it no longer counts, and takes no more pieces."""
+    transcription that has had no activity for UPLOAD_COUNTS_FOR: it no
+    longer counts, and takes no more pieces."""
     last = node.upload_activity_at or node.created_at
     return (node.audio_original_url is None and last is not None
-            and last < _since(now, UPLOAD_IDLE_EXPIRES_AFTER))
+            and last < _since(now, UPLOAD_COUNTS_FOR))
 
 
 def touch_upload(node_id, now=None):
-    """An upload received a piece: renew it (UPLOAD_IDLE_EXPIRES_AFTER). A
-    Core UPDATE that keeps ``updated_at``: a piece is not an edit."""
+    """An upload received a piece: renew it (UPLOAD_COUNTS_FOR). A Core
+    UPDATE that keeps ``updated_at``: a piece is not an edit."""
     from backend.models import Node
     Node.query.filter(Node.id == node_id).update(
         {Node.upload_activity_at: now or datetime.utcnow(),
          Node.updated_at: Node.updated_at},
         synchronize_session=False)
+
+
+def remove_empty_recordings(now=None, limit=None, root=None):
+    """The daily clean-up (tasks/recording_cleanup): delete up to *limit*
+    (EMPTY_SESSIONS_REMOVED_PER_RUN) recording rows that never received
+    audio and started more than EMPTY_SESSION_REMOVED_AFTER ago, with their
+    empty session folders. A start whose microphone failed, or a Voice
+    screen opened and left, makes one.
+
+    Never touches a recording that holds audio: a row with a chunk row, a
+    session folder that holds a file, or text in the draft is left alone.
+    The draft's text is compared as stored (an empty draft is stored
+    empty), so nothing is decrypted. Returns how many were removed."""
+    import pathlib
+    from backend.extensions import db
+    from backend.models import Draft
+    from backend.utils.audio_storage import AUDIO_STORAGE_ROOT, storage_path
+    now = now or datetime.utcnow()
+    limit = limit or EMPTY_SESSIONS_REMOVED_PER_RUN
+    root = AUDIO_STORAGE_ROOT if root is None else pathlib.Path(root)
+    candidates = Draft.query.filter(
+        Draft.session_id.isnot(None),
+        Draft.streaming_status == "recording",
+        ~_has_audio(),
+        db.or_(Draft.content.is_(None), Draft.content == ""),
+        Draft.created_at < now - EMPTY_SESSION_REMOVED_AFTER,
+    ).order_by(Draft.id).limit(limit).all()
+    removed = 0
+    for draft in candidates:
+        try:
+            folder = storage_path(root, "drafts", draft.user_id,
+                                  draft.session_id)
+            if folder.is_symlink():
+                continue
+            if folder.exists():
+                if any(folder.iterdir()):
+                    continue    # it holds a file: left alone
+                folder.rmdir()
+        except (ValueError, OSError):
+            continue
+        db.session.delete(draft)
+        removed += 1
+    db.session.commit()
+    return removed
 
 
 class RecordingsBusy(Exception):
@@ -388,18 +477,28 @@ def _refused(text_, code, status):
     return jsonify({"error": text_, "code": code}), status
 
 
-def recording_start_refusal(user_id, exclude_draft_id=None):
+def recording_start_refusal(user_id, exclude_draft_id=None, new=False):
     """Take the account's lock and count: 429 ``too_many_recordings`` when
     the account already holds MAX_OPEN_RECORDINGS open recordings (the
-    recording *exclude_draft_id* not counted), else None, the lock held
+    recording *exclude_draft_id* not counted), worded by what recovery
+    offers; for a *new* recording (an init, without audio yet) also 429
+    ``too_many_starts`` past MAX_EMPTY_STARTS. Else None, the lock held
     until the caller commits."""
+    from backend.utils.streaming_session import not_live_clause
     try:
         lock_account(user_id)
     except RecordingsBusy:
         return _refused(RECORDINGS_BUSY_TEXT, "recordings_busy", 503)
-    if open_recordings(user_id, exclude_draft_id=exclude_draft_id) \
-            >= MAX_OPEN_RECORDINGS:
-        return _refused(TOO_MANY_RECORDINGS_TEXT, "too_many_recordings", 429)
+    open_ = _open_query(user_id, exclude_draft_id=exclude_draft_id)
+    if open_.count() >= MAX_OPEN_RECORDINGS:
+        from backend.models import Draft
+        offered = open_.filter(Draft.streaming_status == "recording",
+                               not_live_clause()).count()
+        return _refused(TOO_MANY_RECORDINGS_TEXT if offered
+                        else RECORDINGS_IN_PROGRESS_TEXT,
+                        "too_many_recordings", 429)
+    if new and empty_starts(user_id) >= MAX_EMPTY_STARTS:
+        return _refused(TOO_MANY_STARTS_TEXT, "too_many_starts", 429)
     return None
 
 
@@ -433,11 +532,15 @@ def audio_refusal(draft, now=None):
     may take it.
 
     - A recording that holds audio is never refused for quiet time or the
-      usage limit (#341). Only one inactive for OPEN_COUNTS_FOR (left
-      behind, then taken up again) must fit under the count again.
+      usage limit (#341) while it had activity within OPEN_COUNTS_FOR. One
+      left untouched longer is a new start when it takes audio again: the
+      usage limit (402), then the count. Its stored audio stays and can be
+      saved either way.
     - A recording without audio is open for EMPTY_SESSION_EXPIRES_AFTER
-      from its start (also once its app released it). After that its first
-      audio is a new start: the usage limit (402), then the count.
+      from its start (also once its app released it): its first audio must
+      fit under the count of open recordings (MAX_OPEN_RECORDINGS; the
+      usage limit was asked at its start). After that its first audio is a
+      new start: the usage limit (402), then the count.
     Under the account's lock when a check runs (held until the caller
     commits)."""
     from backend.extensions import db
@@ -451,11 +554,10 @@ def audio_refusal(draft, now=None):
             _active_since(_since(now, OPEN_COUNTS_FOR))).count()
         if active:
             return None
+    elif (draft.created_at
+            and draft.created_at >= _since(now, EMPTY_SESSION_EXPIRES_AFTER)):
         return recording_start_refusal(draft.user_id,
                                        exclude_draft_id=draft.id)
-    if (draft.created_at
-            and draft.created_at >= _since(now, EMPTY_SESSION_EXPIRES_AFTER)):
-        return None
     from backend.models import User
     from backend.utils.spend import spend_cap_response, user_is_capped
     user = db.session.get(User, draft.user_id)
@@ -520,6 +622,8 @@ def untranscribed_note(chunks, has_text):
         notes.append(NOTE_PART if has_text else NOTE_ALL)
     if UNREADABLE in codes:
         notes.append(NOTE_UNREADABLE)
+    if INVALID in codes:
+        notes.append(NOTE_INVALID)
     return "\n\n".join(notes)
 
 

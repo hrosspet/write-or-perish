@@ -2,6 +2,7 @@
 Audio processing utilities for voice transcription.
 Extracted from routes/nodes.py to be shared between API and Celery tasks.
 """
+import math
 import os
 import pathlib
 import re
@@ -520,7 +521,8 @@ def decode_timeout_seconds(file_path):
                + DECODE_TIMEOUT_SECONDS_PER_MB * megabytes)
 
 
-def decoded_audio_seconds(file_path, timeout_seconds=None, logger=None):
+def decoded_audio_seconds(file_path, timeout_seconds=None, logger=None,
+                          stop_after=None):
     """Seconds of audio in *file_path*, counted from its decoded samples, not
     from its container's timestamps (which the recording client writes): the
     first audio stream is decoded to 8 kHz mono 16-bit PCM on a pipe and the
@@ -530,7 +532,11 @@ def decoded_audio_seconds(file_path, timeout_seconds=None, logger=None):
     None when ffmpeg is missing, the file cannot be decoded, or decoding
     takes longer than *timeout_seconds* (default decode_timeout_seconds;
     the process is killed). Callers then re-encode the audio on the server
-    (split_audio_for_transcription) rather than estimate its length."""
+    (split_audio_for_transcription) rather than estimate its length.
+
+    *stop_after*: the decode stops once it has more than this many seconds
+    of audio (the process is killed) and math.inf is returned, so a file
+    that decodes to hours costs no more to measure than this."""
     import subprocess
     import threading
     if timeout_seconds is None:
@@ -549,12 +555,19 @@ def decoded_audio_seconds(file_path, timeout_seconds=None, logger=None):
     timer = threading.Timer(timeout_seconds, proc.kill)
     timer.start()
     total = 0
+    most = (None if stop_after is None
+            else int(stop_after * 2 * DECODE_COUNT_RATE))
+    reached = False
     try:
         while True:
             data = proc.stdout.read(1 << 16)
             if not data:
                 break
             total += len(data)
+            if most is not None and total > most:
+                reached = True
+                proc.kill()
+                break
         returncode = proc.wait()
     finally:
         timed_out = not timer.is_alive()
@@ -563,6 +576,8 @@ def decoded_audio_seconds(file_path, timeout_seconds=None, logger=None):
             proc.kill()
             proc.wait()
         proc.stdout.close()
+    if reached:
+        return math.inf
     if timed_out or returncode != 0 or total == 0:
         if logger:
             logger.warning(

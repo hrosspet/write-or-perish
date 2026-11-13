@@ -892,25 +892,23 @@ export function useStreamingTranscription(options = {}) {
       // Always land in a terminal state. The error path here means recording
       // never started, so the session must not be left in 'recording' or
       // 'initializing' (which would strand the parent UI). 'error' is set
-      // below; permission denials with an orphaned draft are cleaned up first.
-      const name = err?.name || err?.error?.name;
-      const isPermissionDenial =
-        name === 'NotAllowedError' || name === 'PermissionDeniedError';
+      // below; an orphaned draft is cleaned up first.
 
-      // If initSession created a draft but recording could not start because
-      // the mic permission was denied, the draft is a dead streaming session
-      // (streaming_status='recording', zero chunks). Best-effort discard it so
-      // the "resume interrupted session" recovery banner — which lists drafts
-      // with streaming_status='recording' — doesn't later offer this empty,
-      // doomed session. The discard endpoint is keyed by session_id (not
-      // draft_id) and removes the draft, its chunk records, and audio dir.
-      // Failures here are non-fatal (network/permissions).
-      if (isPermissionDenial && initSucceeded && sessionIdRef.current) {
+      // If initSession created a draft but recording could not start (the
+      // mic permission denied, no microphone, the microphone held by
+      // another app, any other failure), the draft is a dead streaming
+      // session (streaming_status='recording', zero chunks): discard it, so
+      // the recovery banner doesn't later offer it and it doesn't count
+      // among the account's recent starts (backend/utils/recording_limits).
+      // The discard endpoint is keyed by session_id (not draft_id) and
+      // removes the draft, its chunk records, and audio dir. Failures here
+      // are non-fatal (network/permissions).
+      if (initSucceeded && sessionIdRef.current) {
         try {
           await api.delete(`/drafts/streaming/${sessionIdRef.current}/discard`);
-          console.log('[StreamingTranscription] Discarded orphaned draft after permission denial (session):', sessionIdRef.current);
+          console.log('[StreamingTranscription] Discarded orphaned draft after a failed start (session):', sessionIdRef.current);
         } catch (delErr) {
-          console.warn('[StreamingTranscription] Failed to discard orphaned draft after permission denial (non-fatal):', delErr?.message);
+          console.warn('[StreamingTranscription] Failed to discard orphaned draft after a failed start (non-fatal):', delErr?.message);
         }
       }
 

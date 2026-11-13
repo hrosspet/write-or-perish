@@ -109,6 +109,7 @@ TASK_QUEUES = {
     "backend.tasks.disk_monitor.check_disk_usage": _B,
     "backend.tasks.embeddings.sweep_embeddings": _B,
     "backend.tasks.node_cleanup.cleanup_deleted_nodes": _B,
+    "backend.tasks.recording_cleanup.remove_abandoned_empty_recordings": _B,
     "backend.tasks.user_purge.cancel_batches_read_before": _B,
     "backend.tasks.user_purge.process_user_data_purges": _B,
     "backend.tasks.user_purge.run_user_data_purge": _B,

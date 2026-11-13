@@ -511,7 +511,7 @@ class Node(db.Model):
     # When an audio upload last received a piece (or was handed to
     # transcription): how long it counts among the account's uploads in
     # progress, and whether it still takes pieces
-    # (utils/recording_limits.UPLOAD_IDLE_EXPIRES_AFTER). NULL for entries
+    # (utils/recording_limits.UPLOAD_COUNTS_FOR). NULL for entries
     # that are not uploads, and for uploads from before it was kept.
     upload_activity_at = db.Column(db.DateTime, nullable=True)
 
