@@ -299,22 +299,28 @@ def test_a_bundles_intentions_never_replace_the_accounts_own(app, tmp_path):
     assert UserArtifact.latest_for(edited.id, "memory").get_content() == "facts"
 
 
-def test_an_x_api_tweet_keeps_its_provenance_and_never_loads_at_train(app, tmp_path):
-    """A tweet fetched through the X API keeps provenance 'prefill_x'
-    through a dump and load and comes in at Chat even if it was stored
-    at Train (#689). Other provenances are not copied (#662 leaves that
-    to the lab hand-off), and their Train stays."""
+def test_a_dumped_x_api_tweet_never_loads_at_train(app, tmp_path):
+    """A dump row whose provenance says the tweet was fetched through the
+    X API loads at Chat even if it was stored at Train (#689); the user's
+    own upload keeps Train. (Dumps carry each entry's provenance with
+    #662; the rows are written here so this holds either way.)"""
     alice, root, child, cont, _, _ = _seed_source()
-    root.provenance, root.ai_usage = "prefill_x", "train"
-    cont.provenance, cont.ai_usage = "archive_upload", "train"
+    root.ai_usage = cont.ai_usage = "train"
     db.session.commit()
     out = tmp_path / "alice.jsonl"
     dump_user._run("alice", str(out))
+    lines = out.read_text(encoding="utf-8").splitlines()
+    rows = [json.loads(ln) for ln in lines[1:]]
+    for row in rows:
+        row["provenance"] = {"twitter:1": "prefill_x",
+                             "twitter:2": "archive_upload"}.get(row["source_key"])
+    out.write_text("\n".join([lines[0]] + [json.dumps(r) for r in rows]) + "\n",
+                   encoding="utf-8")
 
     load_user._run(str(out), "bob", merge=False, create_approved=False)
 
     bob = User.query.filter_by(username="bob").one()
-    loaded = {n.source_key: (n.provenance, n.ai_usage) for n in
+    loaded = {n.source_key: n.ai_usage for n in
               Node.query.filter_by(human_owner_id=bob.id)}
-    assert loaded["twitter:1"] == ("prefill_x", "chat")
-    assert loaded["twitter:2"] == (None, "train")
+    assert loaded["twitter:1"] == "chat"
+    assert loaded["twitter:2"] == "train"

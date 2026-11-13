@@ -23,7 +23,7 @@ What it carries (all of it, not "latest N"):
   - nodes: every alive PUBLIC node the user authored or owns (imported
     archives, published writing, LLM replies in those threads) with parent /
     continuation links,
-    origin, provenance, source_key, privacy, ai_usage, timestamps, token counts,
+    origin, source_key, privacy, ai_usage, timestamps, token counts,
     tool_calls_meta; LLM authors are referenced by username
   - node embeddings (vectors, so no re-embedding on load)
   - user_profile: the FULL iterative chain with every column, incl.
@@ -151,8 +151,6 @@ def _run(username, out_path, include_private=False):
                 "ai_usage": n.ai_usage,
                 "source_key": n.source_key,
                 "origin": n.origin,
-                # load_user keeps "prefill_x" (never at Train, #689).
-                "provenance": n.provenance,
                 "tool_calls_meta": n.tool_calls_meta,
                 "created_at": _iso(n.created_at),
                 "updated_at": _iso(n.updated_at),

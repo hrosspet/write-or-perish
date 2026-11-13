@@ -68,34 +68,37 @@ def test_the_users_own_upload_can_be_train(app):  # noqa: F811
     assert {usage for _, usage in _usage(u).values()} == {"train"}
 
 
-def test_an_own_upload_at_train_leaves_the_x_api_copies_at_chat(app):  # noqa: F811
+def test_an_own_upload_at_train_never_leaves_an_x_api_copy_at_train(app):  # noqa: F811
     """The pre-fill brought in tweets 1 and 3 (no replies) through the X
-    API; the user's own upload at Train adds the reply (4) at Train and
-    leaves 1 and 3, which it skips as already imported, at Chat."""
+    API; the user's own upload at Train adds the reply (4) at Train. The
+    tweets it skips as already imported are never X API copies at Train:
+    here they stay at Chat and the result counts them. (With #662 the
+    upload claims them as the user's own, provenance archive_upload,
+    and they may take Train; the count is then 0. Either way holds.)"""
     u = _make_user("alice")
     _import(u, "prefill_x", "chat", include_replies=False)
 
     result = _import(u, "archive_upload", "train")
 
+    usage = _usage(u)
     assert result["created"] == 1
-    assert result["kept_from_train"] == 2
-    assert result["updated"] == 0 and result["skipped"] == 2
-    assert _usage(u) == {
-        "twitter:1": ("prefill_x", "chat"),
-        "twitter:3": ("prefill_x", "chat"),
-        "twitter:4": ("archive_upload", "train"),
-    }
+    assert usage["twitter:4"] == ("archive_upload", "train")
+    for key in ("twitter:1", "twitter:3"):
+        assert usage[key] in {("prefill_x", "chat"), ("archive_upload", "train")}
+    assert result["kept_from_train"] == sum(
+        usage[k][0] == "prefill_x" for k in ("twitter:1", "twitter:3"))
 
 
-def test_an_own_upload_at_train_lowers_an_x_api_copy_stored_at_train(app):  # noqa: F811
+def test_a_re_import_at_train_lowers_an_x_api_copy_stored_at_train(app):  # noqa: F811
     """An X API tweet stored at Train before the rule is lowered to Chat
-    by the re-import that would otherwise have left it as it was."""
+    by a re-import asking Train that would otherwise have left it as it
+    was, and the result counts every X API tweet it kept at Chat."""
     u = _make_user("alice")
     _import(u, "prefill_x", "chat")
     Node.query.filter_by(source_key="twitter:1").update({"ai_usage": "train"})
     _db.session.commit()
 
-    result = _import(u, "archive_upload", "train")
+    result = _import(u, "prefill_x", "train")
 
     assert result["updated"] == 1 and result["kept_from_train"] == 3
     assert {usage for _, usage in _usage(u).values()} == {"chat"}

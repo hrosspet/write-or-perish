@@ -257,7 +257,7 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
     # Nodes last, so context pins on system nodes resolve to the rows above.
     from backend.models import NodeContextArtifact, UserPrompt
     from backend.utils.context_artifacts import sync_context_artifacts
-    from backend.utils.privacy import cap_ai_usage, train_refused_for
+    from backend.utils.privacy import cap_ai_usage
     prompt_cache = {}
     pinned = 0
 
@@ -297,10 +297,8 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
             id_map[nd["id"]] = existing_keys[key]
             skipped += 1
             continue
-        # A tweet fetched through the X API keeps that provenance and
-        # comes in at Chat at most (#689), so no load lifts it to Train.
-        # Other provenances are not copied yet (#662: the lab hand-off).
-        x_api = train_refused_for(nd.get("provenance"))
+        # A tweet the dump says was fetched through the X API comes in at
+        # Chat at most (#689), so no load lifts it to Train.
         new = Node(
             user_id=_author_id(nd.get("author_username"), user_id, cache, db, User),
             human_owner_id=user_id if nd.get("owner_is_user", True) else None,
@@ -313,7 +311,6 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
                                   nd.get("provenance")),
             source_key=key,
             origin=nd.get("origin"),
-            provenance=nd.get("provenance") if x_api else None,
             tool_calls_meta=nd.get("tool_calls_meta"),
             prompt_key=nd.get("prompt_key"),
         )
