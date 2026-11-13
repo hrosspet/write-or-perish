@@ -521,26 +521,12 @@ def decode_timeout_seconds(file_path):
                + DECODE_TIMEOUT_SECONDS_PER_MB * megabytes)
 
 
-def decoded_audio_seconds(file_path, timeout_seconds=None, logger=None,
-                          stop_after=None):
-    """Seconds of audio in *file_path*, counted from its decoded samples, not
-    from its container's timestamps (which the recording client writes): the
-    first audio stream is decoded to 8 kHz mono 16-bit PCM on a pipe and the
-    bytes are counted as they come, never held. Used for the length bounds
-    and for the transcription cost (utils/recording_limits).
-
-    None when ffmpeg is missing, the file cannot be decoded, or decoding
-    takes longer than *timeout_seconds* (default decode_timeout_seconds;
-    the process is killed). Callers then re-encode the audio on the server
-    (split_audio_for_transcription) rather than estimate its length.
-
-    *stop_after*: the decode stops once it has more than this many seconds
-    of audio (the process is killed) and math.inf is returned, so a file
-    that decodes to hours costs no more to measure than this."""
+def _count_decoded(file_path, timeout_seconds, stop_after=None):
+    """(bytes of 8 kHz mono 16-bit PCM decoded, how it ended): "done",
+    "reached" (past *stop_after* seconds; killed), "timeout" (killed), or
+    "failed" (ffmpeg missing, or a nonzero exit)."""
     import subprocess
     import threading
-    if timeout_seconds is None:
-        timeout_seconds = decode_timeout_seconds(file_path)
     cmd = ["ffmpeg", "-nostdin", "-v", "error", "-i", str(file_path),
            "-map", "0:a:0", "-ac", "1", "-ar", str(DECODE_COUNT_RATE),
            "-f", "s16le", "-"]
@@ -548,10 +534,8 @@ def decoded_audio_seconds(file_path, timeout_seconds=None, logger=None,
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                 stderr=subprocess.DEVNULL,
                                 stdin=subprocess.DEVNULL)
-    except OSError as e:
-        if logger:
-            logger.warning(f"Could not start ffmpeg to measure audio: {e}")
-        return None
+    except OSError:
+        return 0, "failed"
     timer = threading.Timer(timeout_seconds, proc.kill)
     timer.start()
     total = 0
@@ -577,15 +561,79 @@ def decoded_audio_seconds(file_path, timeout_seconds=None, logger=None,
             proc.wait()
         proc.stdout.close()
     if reached:
+        return total, "reached"
+    if timed_out:
+        return total, "timeout"
+    if returncode != 0:
+        return total, "failed"
+    return total, "done"
+
+
+def decoded_audio_seconds(file_path, timeout_seconds=None, logger=None,
+                          stop_after=None):
+    """Seconds of audio in *file_path*, counted from its decoded samples, not
+    from its container's timestamps (which the recording client writes): the
+    first audio stream is decoded to 8 kHz mono 16-bit PCM on a pipe and the
+    bytes are counted as they come, never held. Used for the length bounds
+    and for the transcription cost (utils/recording_limits).
+
+    None when ffmpeg is missing, the file cannot be decoded, or decoding
+    takes longer than *timeout_seconds* (default decode_timeout_seconds;
+    the process is killed). Callers then re-encode the audio on the server
+    (split_audio_for_transcription) rather than estimate its length.
+
+    *stop_after*: the decode stops once it has more than this many seconds
+    of audio (the process is killed) and math.inf is returned, so a file
+    that decodes to hours costs no more to measure than this."""
+    if timeout_seconds is None:
+        timeout_seconds = decode_timeout_seconds(file_path)
+    total, ended = _count_decoded(file_path, timeout_seconds, stop_after)
+    if ended == "reached":
         return math.inf
-    if timed_out or returncode != 0 or total == 0:
+    if ended != "done" or total == 0:
         if logger:
             logger.warning(
-                "Could not count decoded audio of %s (exit %s, %s bytes%s)",
-                pathlib.Path(file_path).name, returncode, total,
-                ", timed out" if timed_out else "")
+                "Could not count decoded audio of %s (%s, %s bytes)",
+                pathlib.Path(file_path).name, ended, total)
         return None
     return total / (2 * DECODE_COUNT_RATE)
+
+
+def container_seconds(file_path, timeout_seconds=10):
+    """The length *file_path*'s container states (ffprobe), or None."""
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", str(file_path)],
+            capture_output=True, text=True, timeout=timeout_seconds)
+        return float(out.stdout.strip())
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def quick_audio_seconds(file_path, budget_seconds, at_most,
+                        unmeasured_bytes_per_second):
+    """A length for *file_path* within *budget_seconds* (for a request that
+    must not wait long): its decoded length when the decode ends in time.
+    When it does not (it takes longer, or fails), the largest of what it
+    decoded so far, the length its container states, and its size at
+    *unmeasured_bytes_per_second* (a low bitrate): the container's length
+    is the sender's to write, so it never counts alone. At most *at_most*."""
+    total, ended = _count_decoded(file_path, budget_seconds,
+                                  stop_after=at_most)
+    decoded = total / (2 * DECODE_COUNT_RATE)
+    if ended == "done":
+        return min(decoded, at_most)
+    if ended == "reached":
+        return float(at_most)
+    stated = container_seconds(file_path, timeout_seconds=5) or 0.0
+    try:
+        size = pathlib.Path(file_path).stat().st_size
+    except OSError:
+        size = 0
+    by_size = size / unmeasured_bytes_per_second
+    return min(max(decoded, stated, by_size), float(at_most))
 
 
 # Heuristic: how long the audio work for one uploaded file may take in all
