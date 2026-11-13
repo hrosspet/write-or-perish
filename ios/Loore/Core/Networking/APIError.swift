@@ -69,9 +69,11 @@ enum APIError: Error, Equatable, Sendable {
     /// text is what it was before payments.
     static var paymentsEnabled = false
 
-    /// The spend-cap text when the server sent none.
+    /// The spend-cap text when the server sent none. A cap only the first
+    /// payment lifts (#438) says so instead of a reset.
     static var spendCapFallbackMessage: String {
-        paymentsEnabled ? paidSpendCapMessage : defaultSpendCapMessage
+        if SpendCap.liftsWithPayment { return SpendCap.untilPaymentMessage }
+        return paymentsEnabled ? paidSpendCapMessage : defaultSpendCapMessage
     }
 
     /// Maps a non-2xx HTTP answer. Checks `Content-Type` before reading the body.
@@ -82,6 +84,8 @@ enum APIError: Error, Equatable, Sendable {
         case 401:
             return .unauthorized
         case 402 where body?.error == spendCapCode:
+            // Which cap it is (#438), before the caller's toast reads it.
+            SpendCap.liftsWithPayment = body?.extra["lifts_with_payment"]?.boolValue == true
             return .spendCap(message: body?.message ?? spendCapFallbackMessage)
         case 402 where body?.error == subscriptionRequiredCode:
             return .subscriptionRequired(message: body?.message ?? defaultSubscriptionMessage)

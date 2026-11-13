@@ -287,7 +287,7 @@ final class VoiceRefusalSpeechTurnTests: XCTestCase {
     func testTheSentencesAreTheServersInPlainWords() {
         // backend/utils/voice_refusals.py SPOKEN_REFUSALS, and the web's.
         XCTAssertEqual(SpokenRefusal.usageLimit.text,
-                       "You've reached your monthly usage limit, so Loore can't reply until it resets.")
+                       "You've reached your usage limit, so Loore can't reply until it lifts.")
         XCTAssertEqual(SpokenRefusal.aiUsage.text, "AI usage is set to None, so Loore can't reply here.")
         XCTAssertEqual(SpokenRefusal.approvalWaiting.text,
                        "A change to your data is waiting for your approval. Approve or reject it on the screen to continue.")

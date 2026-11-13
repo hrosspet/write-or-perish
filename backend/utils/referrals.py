@@ -16,10 +16,15 @@ Decided on #439 (Peter, 2026-10-09):
 The free week is credit on the Stripe customer (a customer balance
 transaction), the provider's credit feature, which a Managed Payments
 subscription honours (sandbox, 2026-11-12): it is taken off the next
-invoice, and Checkout applies it to a first payment. It is worth
-REFERRAL_REWARD_DAYS / 30 of what the account's next invoice charges, tax
-included, or of its level's price before tax when it has no live
-subscription.
+invoice, and Checkout applies it to a first payment. Its worth is fixed
+and the same for both sides (Peter, 2026-11-13: "one week, or 1/4th of
+the standard subscription. If the inviter or the invitee have higher level
+of subscription, that shouldn't change the amount they are credited"):
+REFERRAL_CREDIT_FRACTION of the Standard level's monthly price before tax,
+whatever level either is on, whatever tax either pays, with or without a
+live subscription. Stripe takes customer credit off an invoice's total,
+after tax, so a taxed subscriber's tax is unchanged and the credit comes
+off what they pay.
 
 A code is random, never derived from the account, and turns into an
 account only at signup; no answer anywhere says whether a code exists.
@@ -34,9 +39,7 @@ from flask import current_app, has_app_context
 from sqlalchemy.exc import IntegrityError
 
 from backend.extensions import db
-from backend.models import (
-    SUBSCRIPTION_GRANTING_STATUSES, SUBSCRIPTION_LEVELS, Referral, User,
-    UserNotification)
+from backend.models import Referral, User, UserNotification
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +47,6 @@ logger = logging.getLogger(__name__)
 # account, and short enough to paste.
 CODE_BYTES = 12
 CODE_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
-# A month, for the value of a week of it.
-DAYS_PER_MONTH = 30
 # Where a pending invite waits through the X sign-in round trip.
 SESSION_KEY = "invite_code"
 
@@ -156,53 +157,30 @@ def _permanent(exc):
     return isinstance(exc, RewardRefused) or status in (400, 402, 403, 404)
 
 
-def _live(user):
-    return bool(user.stripe_subscription_id) and \
-        user.subscription_status in SUBSCRIPTION_GRANTING_STATUSES
-
-
-def week_credit(gateway, user, config=None):
-    """(cents, currency) of a free week for *user*: REFERRAL_REWARD_DAYS
-    of DAYS_PER_MONTH of what its next invoice charges, tax included,
-    in the subscription's currency; without a live subscription, of its
-    level's monthly price (Standard when it never had one), before tax."""
+def referral_credit(config=None):
+    """(cents, currency) of the free week, the same for the inviter and the
+    friend: REFERRAL_CREDIT_FRACTION of the Standard level's monthly price
+    before tax (SUBSCRIPTION_PRICE_CENTS_STANDARD), in the prices' currency
+    (SUBSCRIPTION_CURRENCY). Nothing about the account changes it: not its
+    level, not the tax it pays, not whether it has a live subscription."""
     from backend.utils.subscriptions import level_price_cents
     cfg = _config(config)
-    days = int(cfg.get("REFERRAL_REWARD_DAYS") or 7)
-    if user.stripe_customer_id and _live(user):
-        try:
-            preview = gateway.preview_invoice(user.stripe_customer_id,
-                                              user.stripe_subscription_id)
-        except Exception as e:  # noqa: BLE001
-            if not _permanent(e):
-                raise
-            preview = None
-        total = (preview or {}).get("total") or 0
-        currency = (preview or {}).get("currency")
-        if total > 0 and currency:
-            return round(total * days / DAYS_PER_MONTH), currency.lower()
-    level = user.subscription_level if user.subscription_level in \
-        SUBSCRIPTION_LEVELS else "standard"
-    return (round(level_price_cents(level, cfg) * days / DAYS_PER_MONTH),
+    fraction = float(cfg.get("REFERRAL_CREDIT_FRACTION") or 0)
+    return (round(level_price_cents("standard", cfg) * fraction),
             (cfg.get("SUBSCRIPTION_CURRENCY") or "usd").lower())
 
 
-def inviter_cap(invoice, currency, config=None):
-    """The most the inviter's week may be: what the friend paid on the
-    first invoice, when both are in one currency (always, while every
-    price is in SUBSCRIPTION_CURRENCY). In two currencies, a week of the
-    Standard price when the inviter's currency is the prices' own; None
-    when there is no sound comparison (the credit is then left to be
-    given by hand)."""
-    from backend.utils.subscriptions import level_price_cents
-    cfg = _config(config)
+def inviter_cap(invoice, currency):
+    """The most the inviter's credit may be: what the friend paid on the
+    first invoice, when it was paid in the credit's *currency* (always,
+    while every price is in SUBSCRIPTION_CURRENCY). It only bites when the
+    friend paid less than the credit (a deep discount code). In another
+    currency there is no sound comparison: None, and the fixed credit
+    stands (it is the Standard price's share, which was the bound there
+    before)."""
     paid_currency = (invoice.get("currency") or "").lower()
     if paid_currency and paid_currency == currency:
         return int(invoice.get("amount_paid") or 0)
-    if currency == (cfg.get("SUBSCRIPTION_CURRENCY") or "usd").lower():
-        days = int(cfg.get("REFERRAL_REWARD_DAYS") or 7)
-        return round(level_price_cents("standard", cfg) * days
-                     / DAYS_PER_MONTH)
     return None
 
 
@@ -238,18 +216,24 @@ def _credit_key(referral, side):
     """Stripe's idempotency key for one side's credit. The referral's
     creation time is in it: databases sharing one Stripe account (staging
     and local development on the sandbox) have the same referral ids. The
-    mark in the credit's metadata, looked up first, is the real guard."""
+    mark in the credit's metadata, looked up first, is the real guard.
+
+    The amount is deliberately not in it (it changed on 2026-11-13, from
+    7/30 of the next invoice to a fixed share of the Standard price): a
+    retry of a credit made under the old amount finds it by its mark, and
+    if it did not, Stripe would refuse the same key with another amount
+    within its window rather than make a second credit."""
     created = referral.created_at
     stamp = f"-{int(created.timestamp())}" if created else ""
     return f"loore-referral-{referral.id}{stamp}-{side}"
 
 
 def _grant_side(gateway, referral, side, user, config=None, invoice=None):
-    """Give *user* (the inviter or the friend) its free week, once. The
-    inviter's is at most what the friend paid on *invoice* (inviter_cap).
-    A refusal Stripe would repeat is recorded as "failed" and logged, so
-    the friend's subscription event still applies; anything else raises,
-    and the event is sent again."""
+    """Give *user* (the inviter or the friend) its free week, once: the
+    fixed referral_credit. The inviter's is at most what the friend paid
+    on *invoice* (inviter_cap). A refusal Stripe would repeat is recorded
+    as "failed" and logged, so the friend's subscription event still
+    applies; anything else raises, and the event is sent again."""
     if user is None:
         setattr(referral, f"{side}_reward", "skipped_no_account")
         return False
@@ -260,12 +244,11 @@ def _grant_side(gateway, referral, side, user, config=None, invoice=None):
         customer = _customer_for(gateway, user)
         txn = _existing_credit(gateway, customer, referral, side)
         if txn is None:
-            cents, currency = week_credit(gateway, user, config)
+            cents, currency = referral_credit(config)
             if side == "inviter" and invoice is not None:
-                cap = inviter_cap(invoice, currency, config)
-                if cap is None:
-                    raise RewardRefused("no sound comparison of currencies")
-                cents = min(cents, cap)
+                cap = inviter_cap(invoice, currency)
+                if cap is not None:
+                    cents = min(cents, cap)
             if cents <= 0:
                 raise RewardRefused("nothing to credit")
             txn = gateway.create_balance_transaction(

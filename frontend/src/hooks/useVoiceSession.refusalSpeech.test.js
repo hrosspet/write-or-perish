@@ -333,7 +333,7 @@ test('a new turn drops a sentence still waiting for the audio', async () => {
 test('the sentences are the server\'s', () => {
   // backend/utils/voice_refusals.py SPOKEN_REFUSALS, and the iPhone app's.
   expect(REFUSAL_SENTENCES).toEqual({
-    monthly_spend_limit_reached: "You've reached your monthly usage limit, so Loore can't reply until it resets.",
+    monthly_spend_limit_reached: "You've reached your usage limit, so Loore can't reply until it lifts.",
     ai_usage_none: "AI usage is set to None, so Loore can't reply here.",
     approval_pending: 'A change to your data is waiting for your approval. Approve or reject it on the screen to continue.',
     thread_too_long: 'This thread is too long for another reply. Start a new thread to keep talking.',

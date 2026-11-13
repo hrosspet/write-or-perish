@@ -243,9 +243,15 @@ class Config:
     # referrals off by itself (a free week already earned is still given).
     REFERRALS_ENABLED = os.environ.get(
         "REFERRALS_ENABLED", "true").lower() in ("1", "true", "yes")
-    # Days of the free week (Peter, 2026-10-09: "a free week for both"):
-    # credit worth this many thirtieths of the next invoice.
-    REFERRAL_REWARD_DAYS = int(os.environ.get("REFERRAL_REWARD_DAYS") or "7")
+    # The free week's worth, as a share of the Standard level's monthly
+    # price before tax (SUBSCRIPTION_PRICE_CENTS_STANDARD), so a price
+    # change carries over. Peter, 2026-11-13: "the credit from referrals
+    # should be one week, or 1/4th of the standard subscription. If the
+    # inviter or the invitee have higher level of subscription, that
+    # shouldn't change the amount they are credited". 0.25 of 30.00 USD is
+    # 7.50 USD for each side; 7 days of 30 would be 7/30 (7.00 USD).
+    REFERRAL_CREDIT_FRACTION = float_from_env(
+        "REFERRAL_CREDIT_FRACTION", 0.25)
 
     # Long threads (#648; Peter, 2026-11-12): every AI reply sends the
     # whole thread above it. A reply whose prompt would be over

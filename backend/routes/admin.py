@@ -1630,4 +1630,9 @@ def list_referrals():
             "friend_credit_cents": r.friend_credit_cents,
             "friend_credit_currency": r.friend_credit_currency,
         })
-    return jsonify({"referrals": rows}), 200
+    # What each side gets now (utils/referrals.referral_credit): the table
+    # says it, and it is the amount to give by hand for a "failed" one.
+    from backend.utils.referrals import referral_credit
+    cents, currency = referral_credit()
+    return jsonify({"referrals": rows,
+                    "credit": {"cents": cents, "currency": currency}}), 200

@@ -178,8 +178,9 @@ class User(db.Model, UserMixin):
     subscription_trial_sub_id = db.Column(db.String(255), nullable=True)
     subscription_trial_start = db.Column(db.DateTime, nullable=True)
     # The trial's own usage ceiling was reached (SUBSCRIPTION_TRIAL_SPEND_
-    # LIMIT_USD over the whole trial): capped until the trial ends, also
-    # across a month boundary (utils/spend.user_is_capped).
+    # LIMIT_USD over the whole trial): capped until the first payment,
+    # also across a month boundary and past the trial's end
+    # (utils/spend.user_is_capped).
     subscription_trial_capped = db.Column(
         db.Boolean, nullable=False, default=False,
         server_default=db.text("false"))

@@ -34,21 +34,17 @@ class StripeRefused(Exception):
 
 
 class ReferralGateway(tp.FakeGateway):
-    """The stub gateway with customer balance and invoice previews."""
+    """The stub gateway with customer balance. It has no invoice preview:
+    the credit is a fixed amount (Peter, 2026-11-13), so nothing about an
+    account's next invoice is asked for."""
 
     def __init__(self):
         super().__init__()
         self.balance = {}       # customer -> [transactions]
-        self.previews = {}      # subscription -> preview
         self.fail_credit = 0    # this many creates raise (Stripe down)
         self.fail_after_credit = 0  # created at Stripe, then the call fails
         self.refuse_credit_for = set()  # customers whose credit is refused
         self._idem = {}
-
-    def preview_invoice(self, customer_id, subscription_id):
-        self._call("preview_invoice", customer_id, subscription_id)
-        return self.previews.get(subscription_id,
-                                 {"total": 3570, "currency": "usd"})
 
     def list_balance_transactions(self, customer_id):
         self._call("list_balance_transactions", customer_id)
@@ -254,23 +250,86 @@ class TestRecording:
 # ── The reward ───────────────────────────────────────────────────────────
 
 class TestReward:
-    def test_the_first_payment_gives_both_a_week(self, app, gateway):
+    def test_the_first_payment_gives_both_the_same_credit(self, app, gateway):
+        """A quarter of Standard's monthly price before tax, 7.50 USD, for
+        each side (Peter, 2026-11-13: "one week, or 1/4th of the standard
+        subscription")."""
         inviter, friend = _pair()
-        gateway.previews["sub_i"] = {"total": 3570, "currency": "usd"}
-        gateway.previews["sub_f"] = {"total": 1428, "currency": "usd"}
         r = _post_event(app, _event("invoice.paid", _paid(gateway)))
         assert r.status_code == 200, r.get_data(as_text=True)
         credits = {t["customer"]: t for t in gateway.credits()}
-        # 7/30 of the next invoice, tax included.
-        assert credits["cus_f"]["amount"] == -round(1428 * 7 / 30)
-        assert credits["cus_i"]["amount"] == -round(3570 * 7 / 30) == -833
+        assert credits["cus_f"]["amount"] == -750
+        assert credits["cus_i"]["amount"] == -750
         assert credits["cus_f"]["currency"] == "usd"
+        assert credits["cus_i"]["currency"] == "usd"
         ref = _referral()
         assert ref.rewarded_at is not None
         assert ref.reward_invoice_id == "in_1"
         assert (ref.friend_reward, ref.inviter_reward) == ("granted",
                                                            "granted")
-        assert ref.inviter_credit_cents == 833
+        assert ref.inviter_credit_cents == ref.friend_credit_cents == 750
+
+    def test_levels_and_tax_change_nothing(self, app, gateway):
+        """A Supporter inviter whose next invoice is 99.00 + 18.81 VAT, and
+        a friend on the reduced price who paid 12.00 + 2.28 VAT: both get
+        the same 7.50, and nobody's next invoice is asked for."""
+        _pair(inviter_kw={"subscription_level": "supporter"},
+              friend_kw={"subscription_level": "discounted"})
+        r = _post_event(app, _event("invoice.paid", _paid(
+            gateway, amount=1428)))
+        assert r.status_code == 200
+        credits = {t["customer"]: t["amount"] for t in gateway.credits()}
+        assert credits == {"cus_i": -750, "cus_f": -750}
+        assert not any("preview" in name for name in gateway.names())
+
+    def test_the_credit_is_a_share_of_the_standard_price(self, app):
+        """One setting, read against Standard's price: a price change
+        carries over, and 7 days of 30 would be 7.00."""
+        cfg = {"SUBSCRIPTION_PRICE_CENTS_STANDARD": 3000,
+               "REFERRAL_CREDIT_FRACTION": 0.25,
+               "SUBSCRIPTION_CURRENCY": "usd"}
+        assert referrals.referral_credit(cfg) == (750, "usd")
+        dearer = {**cfg, "SUBSCRIPTION_PRICE_CENTS_STANDARD": 4000}
+        assert referrals.referral_credit(dearer) == (1000, "usd")
+        assert referrals.referral_credit(
+            {**cfg, "REFERRAL_CREDIT_FRACTION": 7 / 30}) == (700, "usd")
+        # Other levels' prices play no part.
+        assert referrals.referral_credit(
+            {**cfg, "SUBSCRIPTION_PRICE_CENTS_SUPPORTER": 1}) == (750, "usd")
+
+    def test_the_default_is_a_quarter(self):
+        from backend.config import Config
+        if os.environ.get("REFERRAL_CREDIT_FRACTION") or os.environ.get(
+                "SUBSCRIPTION_PRICE_CENTS_STANDARD"):
+            pytest.skip("the referral settings are set in this environment")
+        assert Config.REFERRAL_CREDIT_FRACTION == 0.25
+        assert not hasattr(Config, "REFERRAL_REWARD_DAYS")
+        settings = {k: getattr(Config, k) for k in dir(Config) if k.isupper()}
+        assert referrals.referral_credit(settings) == (750, "usd")
+
+    def test_a_credit_made_under_the_old_amount_is_not_made_again(
+            self, app, gateway):
+        """Control (the exactly-once machinery, unchanged): a delivery
+        before the change made the friend's credit at the old amount
+        (8.33) and its answer was lost. The resent event finds it by its
+        mark and makes only the inviter's, under the same key as before."""
+        _pair()
+        ref = Referral.query.one()
+        gateway.balance["cus_f"] = [{
+            "id": "cbtxn_old", "customer": "cus_f", "amount": -833,
+            "currency": "usd",
+            "metadata": {"loore_referral": f"{ref.id}:friend"}}]
+        r = _post_event(app, _event("invoice.paid", _paid(gateway)))
+        assert r.status_code == 200
+        made = [c for c in gateway.calls
+                if c[0] == "create_balance_transaction"]
+        assert [c[1] for c in made] == ["cus_i"]
+        stamp = int(ref.created_at.timestamp())
+        assert made[0][3] == f"loore-referral-{ref.id}-{stamp}-inviter"
+        ref = _referral()
+        assert ref.friend_credit_cents == 833     # what Stripe holds
+        assert ref.friend_credit_txn == "cbtxn_old"
+        assert ref.inviter_credit_cents == 750
 
     def test_the_notices_name_nobody(self, app, gateway):
         inviter, friend = _pair()
@@ -401,41 +460,29 @@ class TestReward:
         assert len(gateway.credits()) == 2
         assert _referral().friend_reward == "granted"
 
-    def test_the_inviters_week_is_at_most_what_the_friend_paid(
+    def test_the_inviters_credit_is_at_most_what_the_friend_paid(
             self, app, gateway):
-        """A Supporter inviter, a friend on the discounted price: the
-        inviter's week is capped at the friend's first payment; the
-        friend's own week is 7/30 of their next invoice."""
+        """A friend who paid 5.00 on the first invoice (a deep discount
+        code): the inviter's credit is 5.00, not 7.50; the friend's own is
+        the full 7.50."""
         _pair(inviter_kw={"subscription_level": "supporter"},
               friend_kw={"subscription_level": "discounted"})
-        gateway.previews["sub_i"] = {"total": 11781, "currency": "usd"}
-        gateway.previews["sub_f"] = {"total": 1428, "currency": "usd"}
-        r = _post_event(app, _event("invoice.paid", dict(
-            _paid(gateway, amount=1428), currency="usd")))
+        r = _post_event(app, _event("invoice.paid", _paid(gateway,
+                                                          amount=500)))
         assert r.status_code == 200
         credits = {t["customer"]: t["amount"] for t in gateway.credits()}
-        assert credits["cus_i"] == -1428          # not -2749
-        assert credits["cus_f"] == -round(1428 * 7 / 30)
-        assert _referral().inviter_credit_cents == 1428
+        assert credits["cus_i"] == -500
+        assert credits["cus_f"] == -750
+        assert _referral().inviter_credit_cents == 500
 
-    def test_a_cheaper_inviter_keeps_their_own_week(self, app, gateway):
-        """Control: below the cap, the inviter's own 7/30."""
-        _pair()
-        gateway.previews["sub_i"] = {"total": 1428, "currency": "usd"}
-        _post_event(app, _event("invoice.paid", dict(
-            _paid(gateway, amount=3570), currency="usd")))
-        credits = {t["customer"]: t["amount"] for t in gateway.credits()}
-        assert credits["cus_i"] == -round(1428 * 7 / 30)
-
-    def test_two_currencies_cap_at_a_standard_week(self, app, gateway):
-        """The friend paid in another currency: the inviter's week is at
-        most a week of the Standard price (7.00 USD)."""
+    def test_another_currency_gives_the_fixed_credit(self, app, gateway):
+        """The friend paid in another currency (impossible while every
+        price is in USD): no comparison, and the fixed credit stands."""
         _pair(inviter_kw={"subscription_level": "supporter"})
-        gateway.previews["sub_i"] = {"total": 11781, "currency": "usd"}
         _post_event(app, _event("invoice.paid", dict(
             _paid(gateway, amount=3200), currency="eur")))
         credits = {t["customer"]: t["amount"] for t in gateway.credits()}
-        assert credits["cus_i"] == -700
+        assert credits["cus_i"] == -750
 
     def test_the_credit_key_differs_between_databases(self, app):
         """Two databases sharing the sandbox have the same referral ids:
@@ -448,8 +495,7 @@ class TestReward:
 
     def test_an_inviter_without_a_stripe_customer(self, app, gateway):
         """An account set by hand (alpha) never checked out: a customer is
-        made with the checkout's key, and the week is the Standard price's,
-        before tax."""
+        made with the checkout's key, and the credit is the same 7.50."""
         inviter = _user("ines", plan="alpha")
         friend = _user("fred", stripe_customer_id="cus_f",
                        stripe_subscription_id="sub_f",
@@ -464,7 +510,7 @@ class TestReward:
         assert made[0][2].startswith(f"loore-customer-{inviter.id}-")
         cus = _db.session.get(User, inviter.id).stripe_customer_id
         credit = [t for t in gateway.credits() if t["customer"] == cus][0]
-        assert credit["amount"] == -700
+        assert credit["amount"] == -750
         assert credit["currency"] == "usd"
 
     def test_a_deleted_inviter_gets_nothing_the_friend_does(
@@ -565,13 +611,16 @@ class TestAdmin:
         inviter, friend = _pair()
         _post_event(app, _event("invoice.paid", _paid(gateway)))
         admin = _client(app, _user("root", is_admin=True))
-        rows = admin.get("/api/admin/referrals").get_json()["referrals"]
+        data = admin.get("/api/admin/referrals").get_json()
+        rows = data["referrals"]
         assert len(rows) == 1
         row = rows[0]
         assert (row["inviter"], row["friend"]) == ("ines", "fred")
         assert row["inviter_reward"] == "granted"
-        assert row["inviter_credit_cents"] == 833
+        assert row["inviter_credit_cents"] == 750
         assert row["rewarded_at"]
+        # What each side gets now, for the table and for one given by hand.
+        assert data["credit"] == {"cents": 750, "currency": "usd"}
 
     def test_only_admins(self, app):
         r = _client(app, _user()).get("/api/admin/referrals")

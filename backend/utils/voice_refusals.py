@@ -31,8 +31,11 @@ APPROVAL_PENDING_CODE = "approval_pending"        # utils/tool_approvals
 THREAD_TOO_LONG_CODE = "thread_too_long"          # utils/thread_size
 
 SPOKEN_REFUSALS = {
-    SPEND_CAP_CODE: ("You've reached your monthly usage limit, so Loore "
-                     "can't reply until it resets."),
+    # True of every usage limit: the month's, and the trial's or the free
+    # month's, which only the first payment lifts (#438). The screen says
+    # when it lifts.
+    SPEND_CAP_CODE: ("You've reached your usage limit, so Loore can't "
+                     "reply until it lifts."),
     AI_USAGE_NONE_CODE: "AI usage is set to None, so Loore can't reply here.",
     APPROVAL_PENDING_CODE: ("A change to your data is waiting for your "
                             "approval. Approve or reject it on the screen "
@@ -51,6 +54,9 @@ SPOKEN_REFUSALS = {
 _SKIPPED_REPLY_CODES = {
     ("Your recording is saved. Loore didn't reply because you've reached "
      "your monthly usage limit, which resets at the start of next month."):
+        SPEND_CAP_CODE,
+    ("Your recording is saved. Loore didn't reply because you've reached "
+     "your usage limit, which lifts with your first payment."):
         SPEND_CAP_CODE,
     ("Your recording is saved. Loore didn't reply because AI usage is set "
      "to None."): AI_USAGE_NONE_CODE,
