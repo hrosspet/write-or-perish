@@ -2119,15 +2119,22 @@ def _heartbeat_for(job_id, token):
 def run_purge_job(job_id, token):
     """Run the claimed job. Returns "done", "wait" (call again after
     PURGE_WAIT_RETRY_SECONDS: the user's tasks are still running),
-    "superseded", "refused" or "error".
+    "superseded", "refused", "kept" (an unclaimed account someone signed
+    in to meanwhile, #685) or "error".
 
     A job with ``delete_account`` (#269) deletes the account after the
     purge (backend/utils/account_deletion.py), in the same commit as the
     job's "done"."""
+    from backend.utils.unclaimed_accounts import (
+        UNCLAIMED_SOURCE, recheck_before_purge,
+    )
     if not start_runner(job_id, token):
         return "superseded"
     job = db.session.get(UserDataPurge, job_id)
     delete_account = bool(job.delete_account)
+    # A pre-filled account nobody claimed (#685): no email, no handle held
+    # back (account_deletion.delete_identity), and a last check first.
+    unclaimed = job.source == UNCLAIMED_SOURCE
     user = db.session.get(User, job.user_id)
     if user is None:
         job.status = "done"
@@ -2150,6 +2157,11 @@ def run_purge_job(job_id, token):
     heartbeat = _heartbeat_for(job_id, token)
     scope = scope_of(job)
     try:
+        # Checked once more under the user row lock, held until the first
+        # commit below: a sign-in that landed after the account was hidden
+        # wins (the job is cancelled, the account shown again).
+        if unclaimed and not recheck_before_purge(job):
+            return "kept"
         inflight = stop_in_flight(user.id, scope=scope)
         job = db.session.get(UserDataPurge, job_id)
         now = _now()
@@ -2182,10 +2194,6 @@ def run_purge_job(job_id, token):
         after_commit = None
         if delete_account:
             from backend.utils.account_deletion import delete_identity
-            from backend.utils.unclaimed_accounts import UNCLAIMED_SOURCE
-            # A pre-filled account nobody claimed (#685): no email, no
-            # handle held back (account_deletion.delete_identity).
-            unclaimed = job.source == UNCLAIMED_SOURCE
             identity, after_commit = delete_identity(
                 user_id, notify=not unclaimed, reserve_handles=not unclaimed)
             for key, value in identity.items():

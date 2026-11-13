@@ -27,15 +27,21 @@ Which accounts (``assess``), all of these:
   with a subscription or payment record, an account whose deletion
   already waits or runs.
 * its date has passed (``delete_on``): the period after it was opened,
-  and not before an admin's "Keep" date (``User.unclaimed_keep_until``)
-  or the end of a sign-in link it was sent (an admin's Activate & Welcome
-  link is valid 30 days).
+  and not before an admin's "Keep" date (``User.unclaimed_keep_until``,
+  which Activate & Welcome also sets for its link's 30 days).
 
-Opened: ``User.created_at``. A row that existed before its pre-fill (an
-earlier whitelist) counts from when its first pre-filled entry was stored
-instead (the earliest ``updated_at`` of its fetched entries: an entry's
-insert time, which a later change only moves later). A second pre-fill
-does not move it: the admin restarts the period with "Keep".
+Opened (``Assessment.opened_at``): ``User.prefilled_at``, the time this
+server last made the account ready ahead of its owner (the admin's
+pre-fills and scripts/load_user.py set it to now, every time: preparing an
+account again opens it again). Accounts pre-filled before that column
+existed fall back to ``User.created_at``, or to when their first
+pre-filled entry was stored if that is later (a row whitelisted earlier;
+the earliest ``updated_at`` of its fetched entries).
+
+Only what the person does counts as a sign of use. Fields the admin or the
+system write (approval, plan, the alpha free month, a time zone a loader
+copies) do not; a mail scanner that opens a sign-in link does count, which
+errs towards keeping the account.
 
 Deleting: the account deletion of #269
 (``account_deletion.schedule_account_deletion``) with its date set to
@@ -45,9 +51,9 @@ dumps of the pre-filled handle; cost records stay, detached from the
 person. There is no 30-day restore window (nobody ever had the account),
 no email (they never joined) and the handle is not held back (no page of
 theirs ever existed, and the person whose handle it is may sign up
-later). Someone who signs in between the scheduling and the purge (at
-most about a minute, the purge beat's interval) is offered a restore as
-after any deletion.
+later). The purge checks once more under the user row lock before it
+deletes anything (``recheck_before_purge``): a sign-in that landed in
+between wins, and the account is shown again.
 
 The nightly task (backend/tasks/unclaimed_accounts.py) is a dry run
 unless UNCLAIMED_ACCOUNT_DELETION_ENABLED: it then only reports. Real
@@ -108,6 +114,15 @@ def deletion_enabled(config=None):
     return bool(config.get("UNCLAIMED_ACCOUNT_DELETION_ENABLED"))
 
 
+# Where the period counts from (Assessment.basis).
+BASIS_LABELS = {
+    "prefilled": "pre-filled or loaded",
+    "opened": "account opened (pre-filled before pre-fill dates were kept)",
+    "first_entry": "first pre-filled entry stored (pre-filled before "
+                   "pre-fill dates were kept; the row is older)",
+}
+
+
 class Assessment(NamedTuple):
     user_id: int
     username: str
@@ -120,6 +135,21 @@ class Assessment(NamedTuple):
     # Why it is used, kept or waiting past the period (short labels).
     reasons: tuple = ()
     keep_until: Optional[datetime] = None
+    # What opened_at is (a BASIS_LABELS key).
+    basis: Optional[str] = None
+
+    def why(self, days):
+        """One line for the lists: why the account is due, or what it
+        waits for; the reasons otherwise."""
+        if self.status not in ("due", "waiting") or self.opened_at is None:
+            return "; ".join(self.reasons)
+        start = (f"{days} days counted from {self.opened_at:%Y-%m-%d} "
+                 f"({BASIS_LABELS.get(self.basis, self.basis)})")
+        tail = f"; {'; '.join(self.reasons)}" if self.reasons else ""
+        if self.status == "due":
+            return (f"no sign of a person and not excluded; {start}; date "
+                    f"{self.delete_on:%Y-%m-%d} passed{tail}")
+        return f"{start}; date {self.delete_on:%Y-%m-%d}{tail}"
 
 
 # ── Signals that a person used the account ──────────────────────────────
@@ -151,8 +181,8 @@ _COLUMN_SIGNALS = (
     ("changed a default", lambda u: (
         (u.default_ai_usage or "chat") != "chat"
         or (u.default_privacy_level or "private") != "private")),
-    ("the browser reported a time zone",
-     lambda u: (u.timezone or "UTC") != "UTC"),
+    # Not the time zone: the browser reports it, but scripts/load_user.py
+    # copies one from a bundle too, and the two cannot be told apart.
 )
 
 
@@ -290,8 +320,10 @@ def _tester_ids(config):
     return ids
 
 
-def _exclusions(user, config, active_job_ids):
-    """Why the account is never deleted here (for as long as it holds)."""
+def _exclusions(user, config, active_job_ids, ignore_own_deletion=False):
+    """Why the account is never deleted here (for as long as it holds).
+    *ignore_own_deletion*: the purge's own check of an account its job
+    has already hidden."""
     from backend.utils.system_accounts import SYSTEM_USERNAMES
     out = []
     if user.is_admin:
@@ -304,15 +336,16 @@ def _exclusions(user, config, active_job_ids):
     if user.id in _tester_ids(config):
         out.append("named in a tester list")
     # Payments (#438): read by name, so this holds before and after those
-    # columns exist.
+    # columns exist. Only what a person's checkout leads to: the alpha
+    # free month (alpha_free_granted_at) is given by a command to approved
+    # accounts, pre-filled ones included, and says nothing about a person.
     if (getattr(user, "stripe_customer_id", None)
             or getattr(user, "stripe_subscription_id", None)
             or getattr(user, "subscription_status", None) not in (None, "none")
             or getattr(user, "subscription_ever_paid", False)):
         out.append("subscription or payment record")
-    if getattr(user, "alpha_free_granted_at", None) is not None:
-        out.append("alpha tester")
-    if user.deleted_at is not None or user.id in active_job_ids:
+    if not ignore_own_deletion and (
+            user.deleted_at is not None or user.id in active_job_ids):
         out.append("a deletion already waits or runs")
     if user.unclaimed_keep_until is not None and \
             user.unclaimed_keep_until >= KEEP_FOREVER:
@@ -330,56 +363,63 @@ def first_prefill_at(user_id):
         _own_nodes(user_id), _fetched()).scalar()
 
 
-def _postponed(user, base, now):
-    """(delete_on, reasons): the period's end, moved to an admin's Keep
-    date or the end of an open sign-in link when those are later."""
+def _postponed(user, base):
+    """(delete_on, reasons): the period's end, moved to the Keep date (an
+    admin's, or Activate & Welcome's) when that is later. Not a pending
+    sign-in link itself: a later link request replaces its expiry."""
     delete_on, reasons = base, []
     keep = user.unclaimed_keep_until
     if keep is not None and keep > delete_on:
         delete_on = keep
-        reasons.append("kept by an admin")
-    link = user.magic_link_expires_at
-    if link is not None and link > now and link > delete_on:
-        delete_on = link
-        reasons.append("its sign-in link is still valid")
+        reasons.append(f"kept until {keep:%Y-%m-%d} (an admin's Keep or "
+                       "Activate & Welcome)")
     return delete_on, reasons
 
 
-def assess(user, now, *, config, active_job_ids=frozenset()):
+def assess(user, now, *, config, active_job_ids=frozenset(),
+           ignore_own_deletion=False):
     """The Assessment of one pre-filled account at *now*. The queries
-    (other tables, the pre-fill date) run only once the date by its
-    creation has passed: before that it cannot be due, and its listed
-    date is the earliest it could be deleted."""
+    (other tables, the pre-fill date of an older account) run only once
+    its date has passed: before that it cannot be due, and its listed date
+    is the earliest it could be deleted."""
     from backend.utils.activity import LAST_SEEN_SINCE
     period = timedelta(days=period_days(config))
-    opened = user.created_at
+    if user.prefilled_at is not None:
+        opened, basis = user.prefilled_at, "prefilled"
+    else:
+        opened, basis = user.created_at, "opened"
 
-    def result(status, reasons=(), opened_at=opened, delete_on=None):
+    def result(status, reasons=(), opened_at=opened, delete_on=None,
+               basis=basis):
         return Assessment(user.id, user.username, status, opened_at,
-                          delete_on, tuple(reasons), user.unclaimed_keep_until)
+                          delete_on, tuple(reasons), user.unclaimed_keep_until,
+                          basis)
 
     signals = person_signals(user, rows=False)
     if signals:
         return result("used", signals)
-    excluded = _exclusions(user, config, active_job_ids)
+    excluded = _exclusions(user, config, active_job_ids, ignore_own_deletion)
     if excluded:
         return result("kept", excluded)
-    if opened is None or opened < LAST_SEEN_SINCE:
+    # Whether a sign-in could have gone unrecorded depends on when the row
+    # existed, whatever was done to it later.
+    if user.created_at is None or user.created_at < LAST_SEEN_SINCE:
         return result("before_record")
 
-    delete_on, reasons = _postponed(user, opened + period, now)
+    delete_on, reasons = _postponed(user, opened + period)
     if delete_on > now:
         return result("waiting", reasons, delete_on=delete_on)
 
     signals = person_signals(user)
     if signals:
         return result("used", signals)
-    first = first_prefill_at(user.id)
-    if first is not None and first > opened:
-        opened = first
-        delete_on, reasons = _postponed(user, opened + period, now)
+    if basis == "opened":
+        first = first_prefill_at(user.id)
+        if first is not None and first > opened:
+            opened, basis = first, "first_entry"
+            delete_on, reasons = _postponed(user, opened + period)
     return result("waiting" if delete_on > now else "due", reasons,
-                  opened_at=opened, delete_on=delete_on)
+                  opened_at=opened, delete_on=delete_on, basis=basis)
 
 
 def active_job_user_ids():
@@ -444,6 +484,46 @@ def delete_one(user_id, now, *, config):
         user, requested_by_id=None, source=UNCLAIMED_SOURCE, at=now)
 
 
+def recheck_before_purge(job, now=None, *, config=None):
+    """The purge's own check, right before it deletes anything of an
+    unclaimed account (``user_purge.run_purge_job``): the user row is
+    locked and the account assessed again. Still unclaimed and due: True,
+    and the lock holds until the purge's first commit. Otherwise (a
+    sign-in landed after the account was hidden, an admin's Keep, an
+    exclusion): the job is cancelled and the account shown again, in this
+    one transaction, and False. The sign-in wins."""
+    from flask import current_app
+    config = config if config is not None else current_app.config
+    # The job was scheduled when the account was due and runs no earlier.
+    now = now or max(datetime.utcnow(), job.scheduled_for)
+    user = db.session.query(User).filter(
+        User.id == job.user_id).populate_existing().with_for_update(
+    ).one_or_none()
+    if user is None:
+        return True
+    a = assess(user, now, config=config, ignore_own_deletion=True)
+    if a.status == "due":
+        return True
+    n = UserDataPurge.query.filter(
+        UserDataPurge.id == job.id,
+        UserDataPurge.status.in_(UserDataPurge.ACTIVE_STATUSES),
+    ).update({UserDataPurge.status: "cancelled",
+              UserDataPurge.cancelled_at: now,
+              UserDataPurge.error: f"kept at the last check: {a.status}"},
+             synchronize_session=False)
+    if n:
+        user.deleted_at = None
+    db.session.commit()
+    if n:
+        from backend.utils import user_purge
+        user_purge.settle_restore([job.id])
+        user_purge._drop_public_pages(user)
+        logger.warning("Unclaimed account %s: kept at the purge's last check "
+                       "(%s); job %s cancelled, account shown again",
+                       user.id, a.status, job.id)
+    return False
+
+
 def run(now=None, *, config=None, enabled=None, limit=None):
     """One nightly pass. Dry run unless *enabled* (default: the config
     switch): it reports what it would delete and changes nothing. Real:
@@ -458,11 +538,18 @@ def run(now=None, *, config=None, enabled=None, limit=None):
 
     assessments = report(now, config=config)
     due = [a.user_id for a in assessments if a.status == "due"]
+    # Per due account: where its period counts from and when it ended
+    # (ids and dates, no handles).
+    due_detail = [
+        f"{a.user_id} (counted from {a.opened_at:%Y-%m-%d}, {a.basis}; "
+        f"date {a.delete_on:%Y-%m-%d})"
+        for a in assessments if a.status == "due"]
     out = {
         "dry_run": not enabled,
         "period_days": period_days(config),
         "counts": {k: v["count"] for k, v in summary(assessments).items()},
         "due": due,
+        "due_detail": due_detail,
         "tonight": due[:limit],
         "before_record": [a.user_id for a in assessments
                           if a.status == "before_record"],
@@ -473,10 +560,11 @@ def run(now=None, *, config=None, enabled=None, limit=None):
     if not enabled:
         logger.warning(
             "Unclaimed pre-filled accounts (dry run, nothing deleted): %d "
-            "due %s, a real run would delete %s; %d waiting; %d opened "
-            "before %s, never deleted here", len(due), due, out["tonight"],
-            out["counts"].get("waiting", 0), len(out["before_record"]),
-            since)
+            "due (no sign of a person, not excluded, period over) %s, a "
+            "real run would delete %s; %d waiting; %d opened before %s, "
+            "never deleted here", len(due), "; ".join(due_detail),
+            out["tonight"], out["counts"].get("waiting", 0),
+            len(out["before_record"]), since)
         return out
 
     for user_id in out["tonight"]:
@@ -525,12 +613,44 @@ def set_keep(user, until):
     return user.unclaimed_keep_until
 
 
-def assessment_json(a):
+def keep_at_least(user, until):
+    """Keep *user* at least until *until* (Activate & Welcome): a later
+    Keep stays. The caller commits."""
+    if user.unclaimed_keep_until is None or user.unclaimed_keep_until < until:
+        user.unclaimed_keep_until = until
+
+
+# Which accounts a bulk Keep takes besides a list of ids (keep_many).
+BULK_SCOPES = {"due": ("due",), "upcoming": ("due", "waiting")}
+
+
+def keep_many(*, until, user_ids=None, scope=None, now=None, config=None):
+    """The admin's Keep on several accounts at once (accounts are
+    prepared and invited in waves): the ids given, or every account of
+    *scope* ("due", or "upcoming" = due and waiting) in the report now.
+    Unknown ids are skipped. One commit. Returns the ids changed."""
+    if scope is not None:
+        statuses = BULK_SCOPES[scope]
+        user_ids = [a.user_id for a in report(now, config=config)
+                    if a.status in statuses]
+    ids = sorted({int(i) for i in (user_ids or ())})
+    users = User.query.filter(User.id.in_(ids)).all() if ids else []
+    for user in users:
+        user.unclaimed_keep_until = until
+    db.session.commit()
+    return sorted(u.id for u in users)
+
+
+def assessment_json(a, days=None):
     from backend.utils.timefmt import iso_utc
     forever = a.keep_until is not None and a.keep_until >= KEEP_FOREVER
     return {
         "user_id": a.user_id, "username": a.username, "status": a.status,
         "opened_at": iso_utc(a.opened_at),
+        # Where the period counts from, and why the account is due (or
+        # what it waits for).
+        "counted_from": BASIS_LABELS.get(a.basis),
+        "why": a.why(days if days is not None else period_days()),
         "delete_on": None if (a.delete_on is None or a.delete_on >= KEEP_FOREVER)
         else iso_utc(a.delete_on),
         "reasons": list(a.reasons),

@@ -883,6 +883,11 @@ def test_prefill_impl_imports_pins_batch_and_reports(app, monkeypatch):
     assert all(n.provenance == "prefill_ca" for n in nodes)
     assert User.query.get(u.id).profile_force_batch is True
     assert User.query.get(u.id).prefilled_handle == "TylerAlterman"
+    # #685: the 90 days of an unclaimed account count from this pre-fill,
+    # on this server's clock.
+    prefilled_at = User.query.get(u.id).prefilled_at
+    assert prefilled_at is not None
+    assert abs((datetime.utcnow() - prefilled_at).total_seconds()) < 60
     assert sync.call_count == 0  # never the synchronous path
     assert states[0]["stage"] == "fetching" and states[-1]["stage"] == "importing"
     assert result["profile_batch_queued"] is False  # tiny corpus < 10k tokens

@@ -761,7 +761,8 @@ def unclaimed_accounts_report():
     from backend.utils import unclaimed_accounts as ua
     from backend.utils.activity import LAST_SEEN_SINCE
     assessments = ua.report()
-    listed = [ua.assessment_json(a) for a in assessments
+    days = ua.period_days()
+    listed = [ua.assessment_json(a, days) for a in assessments
               if a.status in ("due", "waiting", "kept")]
     before = [a.user_id for a in assessments if a.status == "before_record"]
     return jsonify({
@@ -798,6 +799,37 @@ def unclaimed_keep(user_id):
     return jsonify({"account": ua.assessment_json(ua.assess(
         user, datetime.utcnow(), config=current_app.config,
         active_job_ids=ua.active_job_user_ids()))}), 200
+
+
+@admin_bp.route("/unclaimed_accounts/keep", methods=["POST"])
+@login_required
+@admin_required
+def unclaimed_keep_many():
+    """The admin's Keep on several pre-filled accounts at once (#685: the
+    owner prepares and invites people in waves). Body: {"until":
+    "YYYY-MM-DD" | "forever" | null, and either "user_ids": [ids] or
+    "scope": "due" | "upcoming" (every account due now, or due and
+    waiting, in the report at this moment)}. Returns the ids changed."""
+    from backend.utils import unclaimed_accounts as ua
+    data = request.get_json(silent=True) or {}
+    try:
+        until = ua.parse_until(data.get("until"))
+    except (ValueError, AttributeError):
+        return jsonify({"error": 'Give a date (YYYY-MM-DD), "forever", or '
+                                 'nothing to clear.'}), 400
+    scope = data.get("scope")
+    ids = data.get("user_ids")
+    if scope is not None and scope not in ua.BULK_SCOPES:
+        return jsonify({"error": "scope must be due or upcoming."}), 400
+    if scope is None and (not isinstance(ids, list) or not all(
+            isinstance(i, int) for i in ids)):
+        return jsonify({"error": "Give user_ids (a list of ids) or a "
+                                 "scope."}), 400
+    changed = ua.keep_many(until=until, user_ids=ids, scope=scope)
+    logger.warning("Admin %s set the unclaimed-account Keep of users %s to "
+                   "%s", current_user.id, changed,
+                   "forever" if until == ua.KEEP_FOREVER else until)
+    return jsonify({"user_ids": changed}), 200
 
 
 @admin_bp.route("/users/<int:user_id>/toggle_spam", methods=["POST"])
@@ -1011,13 +1043,19 @@ def activate_and_welcome(user_id):
     if not user.email:
         return jsonify({"error": "User has no email address. Add one first."}), 400
 
+    # Generate magic link pointing to /welcome (30-day expiry)
+    welcome_max_age = 30 * 24 * 3600  # 30 days in seconds
+
     # Approve the user
     user.approved = True
     user.approved_at = datetime.utcnow()
+    # The invited person gets the link's 30 days to come, whatever else
+    # happens to sign-in links meanwhile: a pre-filled account nobody has
+    # claimed is not deleted before then (#685). Never moves a Keep the
+    # admin set earlier.
+    from backend.utils.unclaimed_accounts import keep_at_least
+    keep_at_least(user, user.approved_at + timedelta(seconds=welcome_max_age))
     db.session.commit()
-
-    # Generate magic link pointing to /welcome (30-day expiry)
-    welcome_max_age = 30 * 24 * 3600  # 30 days in seconds
     try:
         token = generate_magic_link_token(
             user.email, next_url="/welcome", max_age=welcome_max_age

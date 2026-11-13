@@ -240,6 +240,15 @@ class User(db.Model, UserMixin):
     # Community Archive handle this account was pre-filled from (admin
     # cold-start bootstrap); null for organically-grown accounts.
     prefilled_handle = db.Column(db.String(64), nullable=True)
+    # When the account was last made ready ahead of its owner, on this
+    # server's clock (UTC): the admin's Community Archive and X API
+    # pre-fills and scripts/load_user.py set it to now, every time, never
+    # to a time carried in a bundle. The 90 days after which an account
+    # nobody claimed is deleted count from it (#685), so preparing an
+    # account again opens it again. NULL on accounts pre-filled before
+    # the column existed (backend/utils/unclaimed_accounts.py falls back
+    # to the creation and the first pre-filled entry).
+    prefilled_at = db.Column(db.DateTime, nullable=True)
     # Opt-in answer to "seed your Loore from your public tweets?" asked on
     # /alpha-thank-you (and once more on /welcome). "yes" | "no" | NULL.
     # NULL = never answered / dismissed: the question is deliberately
@@ -250,8 +259,9 @@ class User(db.Model, UserMixin):
     # backend/utils/unclaimed_accounts.py): it is not deleted before this
     # time (UTC), e.g. when someone was promised more time. KEEP_FOREVER
     # there keeps it for good. NULL: the period from the day the account
-    # was opened applies. Nothing but the admin sets it; a re-pre-fill
-    # does not restart the period.
+    # was opened applies. Set by the admin's Keep (which may also clear
+    # it) and by Activate & Welcome (the welcome link's 30 days; it never
+    # moves an existing Keep earlier).
     unclaimed_keep_until = db.Column(db.DateTime, nullable=True)
     # Admin-flagged spam signup. Hidden from the admin Users table by
     # default (eye toggle); nothing else changes — the account keeps

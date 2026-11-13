@@ -9,6 +9,7 @@ stubbed, and no model API is called.
 """
 import logging
 import re
+import sys
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock
 
@@ -47,14 +48,22 @@ def _fetched_node(user, i, *, stored=None):
     return _add(n)
 
 
-def _prefilled(username, *, opened=OPENED, posts=3, **kw):
+_SAME = object()
+
+
+def _prefilled(username, *, opened=OPENED, posts=3, prefilled_at=_SAME,
+               **kw):
     """An account the admin opened and pre-filled, that nobody used: its
     fetched posts, the profile and intentions built from them, an
-    automation cost row."""
+    automation cost row. ``prefilled_at`` is the opening time unless
+    given (None: pre-filled before the column existed)."""
     kw.setdefault("twitter_id", f"x-{username}")
-    u = _add(User(username=username, approved=False,
+    kw.setdefault("approved", False)
+    u = _add(User(username=username,
                   prefilled_handle=kw.pop("handle", username),
-                  profile_force_batch=True, created_at=opened, **kw))
+                  profile_force_batch=True, created_at=opened,
+                  prefilled_at=opened if prefilled_at is _SAME
+                  else prefilled_at, **kw))
     for i in range(posts):
         _fetched_node(u, i, stored=opened + timedelta(minutes=5))
     _add(UserProfile(user_id=u.id, content="profile", generated_by="claude"))
@@ -94,6 +103,9 @@ def test_an_unclaimed_account_at_day_91_dry_run_records_then_real_deletes(
     out = _run()
     assert out["dry_run"] is True
     assert out["due"] == [a_id] and out["tonight"] == [a_id]
+    # Why, and from which date: in the result and the worker log.
+    assert out["due_detail"] == [
+        f"{a_id} (counted from 2026-09-10, prefilled; date 2026-12-09)"]
     assert out["scheduled"] == []
     assert UserDataPurge.query.count() == 0
     assert _db.session.get(User, a_id).deleted_at is None
@@ -168,7 +180,6 @@ SIGNALS = {
     "signed in with X": lambda u: setattr(u, "twitter_handle", "alicebirds"),
     "answered the tweet seed": lambda u: setattr(u, "prefill_consent", "yes"),
     "chose a Glean setting": lambda u: setattr(u, "glean_enabled", False),
-    "time zone": lambda u: setattr(u, "timezone", "Europe/Prague"),
     "changed a default": lambda u: setattr(u, "default_ai_usage", "none"),
     "asked to change the email": lambda u: setattr(u, "pending_email", "a@b.c"),
     "an entry written in Loore": lambda u: _own_entry(u),
@@ -232,7 +243,13 @@ CONTROLS = {
     "an admin's earlier purge": lambda u: _add(UserDataPurge(
         user_id=u.id, source="admin", status="cancelled",
         requested_at=OPENED, scheduled_for=OPENED + 30 * DAY)),
-    "an approval by the admin": lambda u: setattr(u, "approved", True),
+    "an approval by the admin": lambda u: (
+        setattr(u, "approved", True), setattr(u, "approved_at", OPENED)),
+    "plan free (the default while payments are on)": lambda u: setattr(
+        u, "plan", "free"),
+    # A loader copies the time zone from a bundle; the browser's report
+    # cannot be told apart from it.
+    "a time zone": lambda u: setattr(u, "timezone", "Europe/Prague"),
     "a pre-fill from before the provenance column": lambda u: _own_entry(
         u, origin="twitter", source_key="twitter:legacy-1"),
 }
@@ -280,27 +297,62 @@ def test_a_subscription_keeps_the_account(app, stubs, monkeypatch):
     u = _prefilled("subscriber")
     monkeypatch.setattr(User, "stripe_customer_id", "cus_1", raising=False)
     assert _status(u).status == "kept"
-    monkeypatch.setattr(User, "stripe_customer_id", None, raising=False)
+
+
+def test_the_alpha_free_month_is_not_a_sign_of_a_person(
+        app, stubs, monkeypatch):
+    """Control: the payments train's command gives the alpha free month to
+    approved accounts, pre-filled ones the admin approved included."""
+    u = _prefilled("alphagift", approved=True, approved_at=OPENED)
     monkeypatch.setattr(User, "alpha_free_granted_at", OPENED, raising=False)
-    assert _status(u).status == "kept"
+    monkeypatch.setattr(User, "plan", "free", raising=False)
+    assert _status(u).status == "due"
 
 
-def test_an_admins_keep_and_an_open_invitation_postpone_the_date(app, stubs):
+def test_an_admins_keep_postpones_the_date(app, stubs):
     u = _prefilled("promised")
     u.unclaimed_keep_until = OPENED + 120 * DAY
     _db.session.commit()
     s = _status(u)
     assert s.status == "waiting" and s.delete_on == OPENED + 120 * DAY
-    assert "kept by an admin" in s.reasons
+    assert any(r.startswith("kept until") for r in s.reasons)
     assert _status(u, OPENED + 121 * DAY).status == "due"
 
-    v = _prefilled("invited", email="inv@example.com")
-    # Activate & Welcome on day 80: a 30-day sign-in link.
-    v.magic_link_expires_at = OPENED + 110 * DAY
+
+def test_activate_and_welcome_keeps_the_account_for_the_links_30_days(
+        app, stubs, mail, monkeypatch):
+    """The welcome sets the Keep itself: a later sign-in link request for
+    the address, which replaces the link's expiry, does not cut it."""
+    import backend.routes.admin as adm
+    u = _prefilled("invited", email="inv@example.com")
+    uid = u.id
+    admin = _add(User(username="root", approved=True, is_admin=True))
     _db.session.commit()
-    s = _status(v)
-    assert s.status == "waiting" and s.delete_on == OPENED + 110 * DAY
-    assert _status(v, OPENED + 111 * DAY).status == "due"
+    day_70 = OPENED + 70 * DAY
+
+    class At70(datetime):
+        @classmethod
+        def utcnow(cls):
+            return day_70
+    monkeypatch.setattr(adm, "datetime", At70)
+    r = _client(app, admin).post(f"/api/admin/users/{uid}/activate_and_welcome")
+    assert r.status_code == 200 and r.get_json()["email_sent"] is True
+    s = _status(u)
+    assert s.status == "waiting" and s.delete_on == day_70 + 30 * DAY
+
+    # An unclicked sign-in link request on day 85 (its expiry: minutes).
+    assert app.test_client().post(
+        "/auth/magic-link/send",
+        json={"email": "inv@example.com"}).status_code == 200
+    assert _status(u).status == "waiting"
+    assert _status(u, day_70 + 31 * DAY).status == "due"
+
+    # A longer Keep the admin set earlier stays.
+    u = _db.session.get(User, uid)
+    u.unclaimed_keep_until = ua.KEEP_FOREVER
+    _db.session.commit()
+    _client(app, admin).post(f"/api/admin/users/{uid}/activate_and_welcome")
+    assert _db.session.get(User, uid).unclaimed_keep_until == ua.KEEP_FOREVER
 
 
 def test_accounts_opened_before_the_record_are_counted_never_deleted(
@@ -313,21 +365,100 @@ def test_accounts_opened_before_the_record_are_counted_never_deleted(
     assert _db.session.get(User, old.id).deleted_at is None
 
 
-def test_a_row_opened_before_its_prefill_counts_from_the_prefill(app, stubs):
-    """A whitelisted row pre-filled 30 days later: the period starts with
-    the pre-fill. A second pre-fill later does not restart it."""
-    u = _prefilled("later", posts=0)
+def test_the_period_counts_from_the_prefill_and_a_new_prefill_restarts_it(
+        app, stubs):
+    """A row whitelisted on day 0 and pre-filled on day 30 counts from day
+    30. Pre-filling it again on day 80 opens it again."""
+    u = _prefilled("later", prefilled_at=OPENED + 30 * DAY)
+    s = _status(u)
+    assert s.status == "waiting" and s.basis == "prefilled"
+    assert s.opened_at == OPENED + 30 * DAY
+    assert s.delete_on == OPENED + 120 * DAY
+    assert "pre-filled or loaded" in s.why(90)
+    u = _db.session.get(User, u.id)
+    u.prefilled_at = OPENED + 80 * DAY
+    _db.session.commit()
+    s = _status(u, OPENED + 121 * DAY)
+    assert s.status == "waiting" and s.delete_on == OPENED + 170 * DAY
+    assert _status(u, OPENED + 171 * DAY).status == "due"
+
+
+def test_an_account_prefilled_before_the_date_was_kept_falls_back(
+        app, stubs):
+    """No prefilled_at (pre-filled before this change): the creation, or
+    the first pre-filled entry when the row is older than its pre-fill."""
+    u = _prefilled("legacy", posts=0, prefilled_at=None)
     for i in range(2):
         _fetched_node(u, i, stored=OPENED + 30 * DAY)
     _db.session.commit()
     s = _status(u)
-    assert s.status == "waiting"
+    assert s.status == "waiting" and s.basis == "first_entry"
     assert s.opened_at == OPENED + 30 * DAY
-    assert s.delete_on == OPENED + 120 * DAY
-    # A re-pre-fill on day 100 adds posts; the date stays.
-    _fetched_node(u, 9, stored=OPENED + 100 * DAY)
+    s = _status(u, OPENED + 121 * DAY)
+    assert s.status == "due" and "first pre-filled entry" in s.why(90)
+    v = _prefilled("legacy2", posts=0, prefilled_at=None)
+    _fetched_node(v, 0, stored=OPENED - DAY)   # a bundle's older timestamp
     _db.session.commit()
-    assert _status(u, OPENED + 121 * DAY).status == "due"
+    s = _status(v)
+    assert s.status == "due" and s.basis == "opened"
+
+
+def _bundle(path, username, *, stored, timezone="UTC"):
+    import json
+    path.write_text(json.dumps({
+        "format": 1,
+        "user": {"username": username, "timezone": timezone, "plan": "alpha"},
+        "nodes": [{"id": i, "content": f"t{i}", "source_key": f"twitter:{i}",
+                   "origin": "twitter", "privacy_level": "private",
+                   "ai_usage": "chat", "token_count": 3,
+                   "created_at": "2019-01-01T00:00:00",
+                   "updated_at": stored} for i in range(3)],
+        "profiles": [], "recent_contexts": [], "todos": [], "artifacts": []}))
+    return str(path)
+
+
+def _load_user_module():
+    import os
+    scripts = os.path.join(os.path.dirname(__file__), "..", "scripts")
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    import load_user
+    return load_user
+
+
+def test_a_bundle_loaded_onto_an_older_row_counts_from_the_load(
+        app, stubs, tmp_path):
+    """The bundle's entries carry the lab's timestamps; the period counts
+    from the load on this server (the reviewer's probe: before, a row
+    whitelisted months ago was due the night its bundle was loaded)."""
+    load_user = _load_user_module()
+    _add(User(username="wlfoo", twitter_id="9001", approved=False,
+              created_at=OPENED))
+    _db.session.commit()
+    before = datetime.utcnow()
+    load_user._run(_bundle(tmp_path / "b.json", "wlfoo",
+                           stored="2026-09-11T10:00:00"), None, False, False)
+    _db.session.expire_all()
+    u = User.query.filter_by(username="wlfoo").one()
+    assert u.prefilled_at is not None and u.prefilled_at >= before
+    u.prefilled_handle = "wlfoo"     # as #687's load sets it
+    _db.session.commit()
+    s = _status(u, before + 89 * DAY)
+    assert s.status == "waiting" and s.basis == "prefilled"
+    assert s.delete_on == u.prefilled_at + 90 * DAY
+    assert _status(u, u.prefilled_at + 91 * DAY).status == "due"
+
+    # A new account created by the load copies the bundle's time zone:
+    # no sign of use.
+    load_user._run(_bundle(tmp_path / "c.json", "tzfoo",
+                           stored="2026-09-11T10:00:00",
+                           timezone="Europe/Prague"), None, False, False)
+    _db.session.expire_all()
+    v = User.query.filter_by(username="tzfoo").one()
+    assert v.timezone == "Europe/Prague"
+    v.prefilled_handle = "tzfoo"
+    _db.session.commit()
+    assert _status(v, v.prefilled_at + 91 * DAY).status == "due"
 
 
 # ── Running it ──────────────────────────────────────────────────────────
@@ -394,6 +525,47 @@ def test_a_sign_in_found_at_the_last_check_keeps_the_account(
     assert out["tonight"] == [u.id]
     assert out["scheduled"] == [] and out["skipped"] == [u.id]
     assert UserDataPurge.query.count() == 0
+
+
+def test_a_sign_in_that_lands_after_the_hide_wins_at_the_purge(app, stubs):
+    """The reviewer's ordering: the deletion is scheduled (the account
+    hidden), then a sign-in that waited for the row lock writes its
+    last-seen and X handle. The purge checks again under the lock, keeps
+    the account and shows it again."""
+    u = _prefilled("racer2")
+    uid = u.id
+    assert _run(enabled=True)["scheduled"] == [uid]
+    _db.session.execute(User.__table__.update().where(User.id == uid).values(
+        last_seen_at=DAY_91 + timedelta(seconds=5), twitter_handle="racer2"))
+    _db.session.commit()
+    job = UserDataPurge.query.one()
+    assert _run_due(job, DAY_91 + timedelta(minutes=1)) == "kept"
+    _db.session.expire_all()
+    user = _db.session.get(User, uid)
+    assert user is not None and user.deleted_at is None
+    job = _db.session.get(UserDataPurge, job.id)
+    assert job.status == "cancelled" and job.error.endswith("used")
+    assert Node.query.filter_by(human_owner_id=uid).count() == 3
+    assert _status(user, DAY_91 + 365 * DAY).status == "used"
+    # Nothing is claimed again.
+    assert up_dispatch(DAY_91 + 2 * DAY) == []
+
+
+def test_a_keep_set_after_the_scheduling_wins_at_the_purge(app, stubs):
+    u = _prefilled("keptlate")
+    assert _run(enabled=True)["scheduled"] == [u.id]
+    _db.session.execute(User.__table__.update().where(User.id == u.id).values(
+        unclaimed_keep_until=DAY_91 + 30 * DAY))
+    _db.session.commit()
+    assert _run_due(UserDataPurge.query.one(),
+                    DAY_91 + timedelta(minutes=1)) == "kept"
+    _db.session.expire_all()
+    assert _db.session.get(User, u.id).deleted_at is None
+
+
+def up_dispatch(at):
+    from backend.utils import user_purge as up
+    return up.dispatch_due_jobs(lambda j, t: pytest.fail("claimed"), now=at)
 
 
 def test_signing_in_before_the_purge_runs_offers_a_restore(
@@ -523,6 +695,10 @@ def test_the_admin_sees_due_waiting_and_kept_accounts_and_can_keep_one(
     by = {a["user_id"]: a for a in data["accounts"]}
     assert set(by) == {due.id, waiting.id}
     assert by[due.id]["status"] == "due" and by[due.id]["delete_on"]
+    # Why it is due, and where its 30 days count from.
+    assert by[due.id]["counted_from"] == "pre-filled or loaded"
+    assert by[due.id]["why"].startswith("no sign of a person and not excluded")
+    assert "30 days counted from" in by[due.id]["why"]
     assert by[waiting.id]["status"] == "waiting"
     assert data["used_count"] == 1
     assert data["before_record"]["count"] == 1
@@ -541,6 +717,24 @@ def test_the_admin_sees_due_waiting_and_kept_accounts_and_can_keep_one(
     assert r.get_json()["account"]["status"] == "due"
     assert c.put(f"/api/admin/users/{due.id}/unclaimed_keep",
                  json={"until": "next week"}).status_code == 400
+
+    # In bulk: chosen ids, or every upcoming account (due and waiting).
+    r = c.post("/api/admin/unclaimed_accounts/keep",
+               json={"user_ids": [due.id, 999999], "until": "2099-02-01"})
+    assert r.status_code == 200 and r.get_json()["user_ids"] == [due.id]
+    r = c.post("/api/admin/unclaimed_accounts/keep",
+               json={"user_ids": [due.id], "until": None})
+    r = c.post("/api/admin/unclaimed_accounts/keep",
+               json={"scope": "upcoming", "until": "2099-03-01"})
+    assert r.get_json()["user_ids"] == sorted([due.id, waiting.id])
+    _db.session.expire_all()
+    assert _db.session.get(User, waiting.id).unclaimed_keep_until.date() \
+        == datetime(2099, 3, 1).date()
+    assert c.post("/api/admin/unclaimed_accounts/keep",
+                  json={"scope": "everyone", "until": "2099-03-01"}
+                  ).status_code == 400
+    assert c.post("/api/admin/unclaimed_accounts/keep",
+                  json={"until": "2099-03-01"}).status_code == 400
     # Not for members.
     member = _add(User(username="member2", approved=True))
     _db.session.commit()
@@ -564,11 +758,35 @@ def test_the_cli_prints_counts_and_ids_without_handles(app, stubs):
         in result.output
     assert "clihandle" not in result.output and "cliold" not in result.output
 
+    assert "counted from" in result.output and "pre-filled or loaded" \
+        in result.output
+
     result = runner.invoke(args=["unclaimed-accounts", "--keep", str(due.id),
                                  "--until", "forever"])
     assert result.exit_code == 0 and "for good" in result.output
     _db.session.expire_all()
     assert _db.session.get(User, due.id).unclaimed_keep_until == ua.KEEP_FOREVER
+
+    # Several ids, and every account due now.
+    more = [_prefilled(f"cli{i}", opened=datetime.utcnow() - 40 * DAY)
+            for i in range(3)]
+    result = runner.invoke(args=[
+        "unclaimed-accounts", "--keep", f"{more[0].id},{more[1].id}",
+        "--keep", str(more[2].id), "--until", "2099-01-31"])
+    assert result.exit_code == 0, result.output
+    assert "on 3 account(s)" in result.output
+    _db.session.expire_all()
+    assert all(_db.session.get(User, m.id).unclaimed_keep_until.year == 2099
+               for m in more)
+    result = runner.invoke(args=["unclaimed-accounts", "--keep",
+                                 ",".join(str(m.id) for m in more),
+                                 "--until", "clear"])
+    assert "cleared on 3 account(s)" in result.output
+    result = runner.invoke(args=["unclaimed-accounts", "--keep-all-due",
+                                 "--until", "2099-01-31"])
+    assert result.exit_code == 0 and "on 3 account(s)" in result.output
+    assert runner.invoke(args=["unclaimed-accounts", "--keep-all-due"]
+                         ).exit_code != 0
 
 
 def test_the_task_runs_nightly_on_the_background_queue():
