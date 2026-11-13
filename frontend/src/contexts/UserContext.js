@@ -26,7 +26,8 @@ export const UserProvider = ({ children }) => {
         // Remember an already-capped user so cost actions (e.g. starting a
         // voice recording) can be blocked up front this session (issue #85).
         if (fetchedUser?.spend_blocked) {
-          markSpendBlocked(fetchedUser.spend_cap_lifts_on);
+          markSpendBlocked(fetchedUser.spend_cap_lifts_on,
+            fetchedUser.spend_cap_lifts_with_payment);
         }
         // Payments (#438): inert unless the server sends payments_enabled.
         rememberSubscription(fetchedUser);

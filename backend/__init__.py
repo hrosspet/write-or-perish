@@ -485,7 +485,7 @@ def create_app():
     from backend.routes.billing import billing_bp
     app.register_blueprint(billing_bp, url_prefix="/api/billing")
 
-    # The invite link (#439): 404 unless payments and referrals are on.
+    # The invite (#439): 404 unless payments and referrals are on.
     from backend.routes.referrals import referrals_bp
     app.register_blueprint(referrals_bp, url_prefix="/api/referrals")
 

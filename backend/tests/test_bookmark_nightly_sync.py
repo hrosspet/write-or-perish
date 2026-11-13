@@ -1520,3 +1520,107 @@ def test_a_clip_is_use_and_the_pause_setting_can_turn_it_off(
     finally:
         _app.config.pop("UNUSED_ACCOUNT_PAUSE_DAYS")
     assert sorted(dispatched) == sorted([clipper.id, away.id])
+
+
+# ── Payments on: the paid check before #659's rules (PR #680) ───────────
+# The payments train merged #649's "no background job for an account
+# without the paid set" with #659's per-account _sync_due (nightly, pause,
+# catch-up) by hand: the paid check runs first, for every account, then
+# _sync_due. So an account without the paid set gets neither the nightly
+# sync nor a catch-up, and its pause stays as it is.
+
+@pytest.fixture
+def payments_on():
+    _app.config["PAYMENTS_ENABLED"] = True
+    yield
+    _app.config.pop("PAYMENTS_ENABLED", None)
+
+
+def _subscriber(user, paid):
+    """*user* on "free" with a subscription that is active (the paid set)
+    or ended (lapsed: let in, without the paid set)."""
+    user.plan = "free"
+    user.subscription_level = "standard"
+    user.subscription_status = "active" if paid else "ended"
+    user.subscription_ever_paid = True
+    _db.session.commit()
+    return user
+
+
+def test_payments_on_the_nightly_sync_needs_the_paid_set(
+        app, payments_on, monkeypatch):
+    """At their local 3am, both in use: the subscriber is synced, the
+    lapsed account is not, and no pause is recorded for it. Guards the
+    merged ``if not ai_replies_allowed(account.user): continue`` (merged
+    the other way, #659's gate alone, the lapsed account is synced)."""
+    from datetime import datetime
+    night_tz = _tz_at_hour(_sync_mod.NIGHTLY_SYNC_LOCAL_HOUR)
+    paid = _subscriber(User.query.first(), paid=True)
+    paid.timezone = night_tz
+    lapsed = _subscriber(User(username="lapsed", timezone=night_tz,
+                              last_seen_at=datetime.utcnow()), paid=False)
+    _db.session.add(lapsed)
+    _db.session.commit()
+    _mk_account(paid.id)
+    lapsed_account = _mk_account(lapsed.id)
+    dispatched = _record_dispatches(monkeypatch)
+
+    assert _sync_mod.sync_all_twitter_bookmarks()["dispatched"] == 1
+    assert dispatched == [paid.id]
+    _db.session.expire_all()
+    assert ExternalAccount.query.get(lapsed_account.id).sync_paused_at is None
+
+
+def test_payments_on_no_catch_up_without_the_paid_set_the_pause_waits(
+        app, payments_on, monkeypatch):
+    """Both owners are back after a pause, at midday their time: the
+    subscriber gets #659's catch-up and the pause is lifted; the lapsed
+    account gets none, and its pause is kept as it was. Guards the order
+    of the merge: the paid check before _sync_due (after it, _sync_due
+    would already have lifted the lapsed account's pause)."""
+    from datetime import datetime, timedelta
+    day_tz = _tz_at_hour((_sync_mod.NIGHTLY_SYNC_LOCAL_HOUR + 9) % 24)
+    began = datetime.utcnow() - timedelta(days=20)
+    owners = []
+    for name, paid in (("paid", True), ("lapsed", False)):
+        user = _subscriber(User(username=name, timezone=day_tz,
+                                last_seen_at=datetime.utcnow()), paid=paid)
+        _db.session.add(user)
+        _db.session.commit()
+        account = _mk_account(user.id)
+        account.sync_paused_at = began
+        account.last_synced_at = began - timedelta(days=1)
+        _db.session.commit()
+        owners.append((user, account))
+    (paid, paid_account), (lapsed, lapsed_account) = owners
+    dispatched = _record_dispatches(monkeypatch)
+
+    assert _sync_mod.sync_all_twitter_bookmarks()["dispatched"] == 1
+    assert dispatched == [paid.id]
+    _db.session.expire_all()
+    assert ExternalAccount.query.get(paid_account.id).sync_paused_at is None
+    assert ExternalAccount.query.get(lapsed_account.id).sync_paused_at == \
+        began
+
+    # The subscription comes back: the next hourly run catches up.
+    _subscriber(_db.session.get(User, lapsed.id), paid=True)
+    dispatched = _record_dispatches(monkeypatch)
+    assert _sync_mod.sync_all_twitter_bookmarks()["dispatched"] == 1
+    assert dispatched == [lapsed.id]
+
+
+def test_payments_on_a_subscriber_nobody_uses_is_paused(
+        app, payments_on, monkeypatch):
+    """Control: #659's pause for a subscriber away for 40 days."""
+    from datetime import datetime, timedelta
+    away = _subscriber(User.query.first(), paid=True)
+    away.timezone = _tz_at_hour(_sync_mod.NIGHTLY_SYNC_LOCAL_HOUR)
+    away.last_seen_at = datetime.utcnow() - timedelta(days=40)
+    _db.session.commit()
+    account = _mk_account(away.id)
+    dispatched = _record_dispatches(monkeypatch)
+
+    assert _sync_mod.sync_all_twitter_bookmarks()["dispatched"] == 0
+    assert dispatched == []
+    _db.session.expire_all()
+    assert ExternalAccount.query.get(account.id).sync_paused_at is not None

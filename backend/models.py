@@ -178,8 +178,9 @@ class User(db.Model, UserMixin):
     subscription_trial_sub_id = db.Column(db.String(255), nullable=True)
     subscription_trial_start = db.Column(db.DateTime, nullable=True)
     # The trial's own usage ceiling was reached (SUBSCRIPTION_TRIAL_SPEND_
-    # LIMIT_USD over the whole trial): capped until the trial ends, also
-    # across a month boundary (utils/spend.user_is_capped).
+    # LIMIT_USD over the whole trial): capped until the first payment,
+    # also across a month boundary and past the trial's end
+    # (utils/spend.user_is_capped).
     subscription_trial_capped = db.Column(
         db.Boolean, nullable=False, default=False,
         server_default=db.text("false"))
@@ -219,10 +220,6 @@ class User(db.Model, UserMixin):
     # plan's access.
     alpha_free_start = db.Column(db.DateTime, nullable=True)
     alpha_free_until = db.Column(db.DateTime, nullable=True)
-
-    # The account's invite code (#439): random, never derived from the
-    # account, made the first time its link is asked for. NULL: none yet.
-    referral_code = db.Column(db.String(32), nullable=True, unique=True)
 
     # Per-user monthly spend hard cap (issue: free-alpha guardrail). Stores the
     # "YYYY-MM" (UTC) in which the user crossed PER_USER_MONTHLY_LIMIT_USD. While
@@ -2779,9 +2776,62 @@ class CheckoutSession(db.Model):
                            default=datetime.utcnow)
 
 
+class Invite(db.Model):
+    """A personal invite (#439; Peter, 2026-11-13: "one invite a month, no
+    accumulation of invites"): made by an account for one named person,
+    by X handle or email address. Its link records a referral for exactly
+    one sign-up, that person's (utils/referrals). One a calendar month
+    (UTC) per inviter, one open at a time; INVITE_EXPIRY_DAYS after it is
+    made an unused one expires. An account deletion keeps the row without
+    the deleted account."""
+    __tablename__ = "invite"
+    __table_args__ = (
+        # One open invite per inviter, and one used invite per inviter and
+        # month it was made in, held by the database too (utils/referrals
+        # also takes a per-inviter lock and changes a state only while it
+        # is open).
+        db.Index("uq_invite_one_open_per_inviter", "inviter_id",
+                 unique=True,
+                 postgresql_where=db.text("state = 'open'"),
+                 sqlite_where=db.text("state = 'open'")),
+        db.Index("uq_invite_one_used_per_inviter_month", "inviter_id",
+                 "month", unique=True,
+                 postgresql_where=db.text("state = 'used'"),
+                 sqlite_where=db.text("state = 'used'")),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    inviter_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                           nullable=True, index=True)
+    # Random (secrets.token_urlsafe), never derived from anything.
+    code = db.Column(db.String(32), nullable=False, unique=True)
+    # "x" (an X handle) or "email".
+    kind = db.Column(db.String(8), nullable=False)
+    # The handle (lower case, no "@") or the address (lower case), only
+    # while the invite is open: personal data of someone who may never
+    # sign up, so it is cleared when the invite is used, withdrawn or
+    # expires. Matching is all it is for.
+    target = db.Column(db.String(320), nullable=True)
+    # For an X handle: the X account id it named when the invite was made
+    # (a sign-in matches on it, so a handle taken over by someone else
+    # does not match). NULL when it could not be looked up then (the
+    # handle's text is matched instead). Cleared with the target.
+    target_x_id = db.Column(db.String(32), nullable=True)
+    # "YYYY-MM" (UTC): the month whose invite this is.
+    month = db.Column(db.String(7), nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False,
+                           default=datetime.utcnow)
+    expires_at = db.Column(db.DateTime, nullable=False)
+    # "open", "used", "withdrawn" or "expired"; ended_at when it stopped
+    # being open.
+    state = db.Column(db.String(16), nullable=False, default="open",
+                      index=True)
+    ended_at = db.Column(db.DateTime, nullable=True)
+
+
 class Referral(db.Model):
     """Who invited whom (#439), recorded at the friend's signup through
-    the inviter's link, and the free week each got on the friend's first
+    the inviter's invite, and the free week each got on the friend's first
     payment (utils/referrals). One per friend: the first inviter is kept.
     An account deletion keeps the row without the deleted account."""
     __tablename__ = "referral"
@@ -2790,6 +2840,10 @@ class Referral(db.Model):
     inviter_id = db.Column(db.Integer, db.ForeignKey("user.id"),
                            nullable=True, index=True)
     friend_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                          nullable=True, unique=True)
+    # The invite the friend signed up through (NULL for a referral made
+    # through the reusable link that invites replaced).
+    invite_id = db.Column(db.Integer, db.ForeignKey("invite.id"),
                           nullable=True, unique=True)
     created_at = db.Column(db.DateTime, nullable=False,
                            default=datetime.utcnow)

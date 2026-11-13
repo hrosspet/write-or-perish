@@ -146,14 +146,16 @@ def redeem(token_hash, payload):
 
     @after_this_request
     def _bind(response):
-        _bind_new_account(address)
+        bind_new_account(address)
         return response
     return None
 
 
-def _bind_new_account(address):
-    """After an open that made the account for *address*: the address's
-    unbound links are the new account's."""
+def bind_new_account(address):
+    """After the account for *address* was made by opening one of its
+    links (here, after the request), or later from the held sign-in of
+    /auth/invite-choice/continue (#439): the address's unbound links are
+    the new account's."""
     from backend.extensions import db
     from backend.models import SignInLink, User
     try:

@@ -673,7 +673,8 @@ final class ThreadModel {
             }
             let answer: SaveAsNodeResponse = try await app.api.post(APIPath.streamingSaveAsNode(sid), json: .object(body))
             return NodeFormResult(id: answer.id, userNodeId: answer.userNodeId, llmNodeId: answer.llmNodeId,
-                                  spendCapped: answer.spendCapped, llmError: answer.llmError,
+                                  spendCapped: answer.spendCapped,
+                                  spendCapLiftsWithPayment: answer.spendCapLiftsWithPayment, llmError: answer.llmError,
                                   subscriptionMessage: answer.subscriptionNotice,
                                   llmErrorCode: answer.llmErrorCode)
         }
@@ -689,7 +690,8 @@ final class ThreadModel {
             "model": .optional(selectedModel), "auto_generate": .bool(auto),
         ]))
         return NodeFormResult(id: answer.userNodeId, userNodeId: answer.userNodeId, llmNodeId: answer.llmNodeId,
-                              promptNodeId: answer.promptNodeId, spendCapped: answer.spendCapped, llmError: answer.llmError,
+                              promptNodeId: answer.promptNodeId, spendCapped: answer.spendCapped,
+                                  spendCapLiftsWithPayment: answer.spendCapLiftsWithPayment, llmError: answer.llmError,
                               subscriptionMessage: answer.subscriptionNotice,
                               llmErrorCode: answer.llmErrorCode)
     }

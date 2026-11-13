@@ -65,22 +65,41 @@ enum MagicLink {
     enum VerifyOutcome: Equatable {
         case success
         case failure(code: String?)
+        /// The link came with an invite made for someone else (#439): the server
+        /// holds the sign-in, and makes no account, until the person chooses.
+        /// `kind` is what the invite names ("x" or "email"), never whom.
+        case inviteMismatch(kind: String?)
     }
 
     /// Interprets `GET /auth/magic-link/verify` fetched with redirects disabled:
-    /// a redirect to `/login?error=<code>` is a failure, any other redirect a success.
+    /// a redirect to `/login?error=<code>` is a failure, one to
+    /// `/invite-mismatch?for=<kind>` a held sign-in, any other redirect a success.
     static func outcome(status: Int, location: String?) -> VerifyOutcome {
         guard (300..<400).contains(status), let location, !location.isEmpty else {
             return .failure(code: nil)
         }
         let url = URL(string: location)
         let path = url?.path ?? location
+        let query = url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false) }?.queryItems
         if path == "/login" || path.hasSuffix("/login") {
-            let code = url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false) }?
-                .queryItems?.first(where: { $0.name == "error" })?.value
-            return .failure(code: code)
+            return .failure(code: query?.first(where: { $0.name == "error" })?.value)
+        }
+        if path == "/invite-mismatch" || path.hasSuffix("/invite-mismatch") {
+            return .inviteMismatch(kind: query?.first(where: { $0.name == "for" })?.value)
         }
         return .success
+    }
+
+    /// The notice for a held sign-in (web `InviteMismatchPage`; Peter, 2026-11-13):
+    /// the kind of sign-in the invitation was made for, never for whom.
+    static func inviteMismatchText(kind: String?) -> String {
+        var text = "This invitation was made for a different email address or X account."
+        switch kind {
+        case "x": text += " It was made for an X account."
+        case "email": text += " It was made for an email address."
+        default: break
+        }
+        return text + " If it was meant for you, sign in with that one. You can also continue without the invitation."
     }
 
     /// Where a successful verify sends the browser (the link's `next_url`, e.g.

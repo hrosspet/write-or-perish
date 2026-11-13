@@ -63,6 +63,8 @@ struct NodeFormResult {
     /// Replies "apply to my replies" left at Chat: written from X posts (#689).
     var keptFromTrain = 0
     var spendCapped = false
+    /// The cap only the first payment lifts (#438), from the answer.
+    var spendCapLiftsWithPayment = false
     var llmError: String?
     /// Payments on, no AI replies (#438): why the reply was skipped.
     var subscriptionMessage: String?
@@ -474,7 +476,7 @@ final class NodeFormModel {
                                                                streamingSessionId: streamingSessionId))
             await clearAfterSend()
             streamingSessionId = nil
-            if result.spendCapped { app.notifySpendBlocked() }
+            if result.spendCapped { app.notifySpendBlocked(liftsWithPayment: result.spendCapLiftsWithPayment) }
             if let notice = result.subscriptionMessage { app.notifySubscriptionRequired(notice) }
             if let llmError = result.llmError, !ThreadLength.isRefusal(result.llmErrorCode) {
                 app.toasts.show(llmError, duration: 10)
@@ -492,7 +494,7 @@ final class NodeFormModel {
             ])
             let answer: TextmodeStartResponse = try await api.post(APIPath.textmodeStart, json: body)
             await clearAfterSend()
-            if answer.spendCapped { app.notifySpendBlocked() }
+            if answer.spendCapped { app.notifySpendBlocked(liftsWithPayment: answer.spendCapLiftsWithPayment) }
             if let notice = answer.subscriptionNotice { app.notifySubscriptionRequired(notice) }
             // A first entry too large for a reply (#648): its page shows the limit.
             if let llmError = answer.llmError, !ThreadLength.isRefusal(answer.llmErrorCode) {
@@ -516,7 +518,7 @@ final class NodeFormModel {
             let answer: SaveAsNodeResponse = try await api.post(APIPath.streamingSaveAsNode(sid), json: .object(body))
             await clearAfterSend()
             streamingSessionId = nil
-            if answer.spendCapped { app.notifySpendBlocked() }
+            if answer.spendCapped { app.notifySpendBlocked(liftsWithPayment: answer.spendCapLiftsWithPayment) }
             if let notice = answer.subscriptionNotice { app.notifySubscriptionRequired(notice) }
             return NodeFormResult(id: answer.id, awaitLLM: answer.llmNodeId, userNodeId: answer.userNodeId,
                                   llmNodeId: answer.llmNodeId, tipId: answer.tipId, spendCapped: answer.spendCapped,

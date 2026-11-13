@@ -115,6 +115,8 @@ TASK_QUEUES = {
     # Nightly: pre-filled accounts nobody claimed (#685).
     "backend.tasks.unclaimed_accounts.delete_unclaimed_accounts": _B,
     "backend.tasks.anthropic_batch_deletion.sweep_anthropic_batches": _B,
+    # An unused invite's end (#439).
+    "backend.tasks.invites.expire_invites": _B,
 }
 
 # The queues each worker reads while the split is on.

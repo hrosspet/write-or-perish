@@ -81,6 +81,7 @@ def _serialize_current_user():
     its deletion state after any settings change)."""
     voice_mode_enabled = current_user.has_voice_mode
     spend_blocked = user_is_capped(current_user)
+    cap = spend_cap_payload(current_user) if spend_blocked else {}
     return {
         "id": current_user.id,
         "username": current_user.username,
@@ -115,10 +116,13 @@ def _serialize_current_user():
         "spend_blocked": spend_blocked,
         # The date (UTC) a capped user's limit lifts: the first of next
         # month, or later while a carry over a whole month's limit holds
-        # the cap (#594). Null when not capped.
-        "spend_cap_lifts_on": (
-            spend_cap_payload(current_user)["lifts_on"]
-            if spend_blocked else None),
+        # the cap (#594). Null when not capped, and for a cap only the
+        # first payment lifts (#438: the trial's, the free month's), which
+        # alone adds spend_cap_lifts_with_payment: true (payments off: the
+        # key never appears).
+        "spend_cap_lifts_on": cap.get("lifts_on"),
+        **({"spend_cap_lifts_with_payment": True}
+           if cap.get("lifts_with_payment") else {}),
         # Public side (#228): enabled = deployed (env) AND the user's
         # own opt-in — every frontend surface keys off this. available
         # = deployed only; it decides whether Account shows the toggle.

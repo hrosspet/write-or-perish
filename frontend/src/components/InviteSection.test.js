@@ -1,17 +1,20 @@
-// Referrals (#439): the invite link on the Account page, the code kept
-// from /invite/<code> to the sign-in, and nothing shown about the inviter.
+// Referrals (#439): one personal invite a month on the Account page
+// (Peter, 2026-11-13), the code kept from /invite/<code> to the sign-in,
+// and nothing shown about the inviter.
 let mockUserCtx;
 jest.mock('../contexts/UserContext', () => ({
   useUser: () => mockUserCtx,
 }));
 const mockGet = jest.fn();
+const mockPost = jest.fn();
+const mockDelete = jest.fn();
 jest.mock('../api', () => ({
   __esModule: true,
   default: {
     get: (...args) => mockGet(...args),
-    post: jest.fn(),
+    post: (...args) => mockPost(...args),
     put: jest.fn(),
-    delete: jest.fn(),
+    delete: (...args) => mockDelete(...args),
   },
 }));
 jest.mock('./ModelSelector', () => () => null);
@@ -30,28 +33,76 @@ const CODE = 'Abc_def-123456XY';
 
 beforeEach(() => {
   mockGet.mockReset();
+  mockPost.mockReset();
+  mockDelete.mockReset();
   window.localStorage.clear();
 });
 
-test('the link is shown when asked for, and copied', async () => {
-  const writeText = jest.fn().mockResolvedValue();
-  Object.assign(navigator, { clipboard: { writeText } });
-  mockGet.mockResolvedValue({ data: { url: `https://loore.org/invite/${CODE}` } });
+const CREDIT = { cents: 750, currency: 'usd' };
+const NONE = { invite: null, can_invite: true, next_invite_on: null, credit: CREDIT };
+const OPEN = {
+  invite: {
+    url: `https://loore.org/invite/${CODE}`, kind: 'x', to: 'ben_x',
+    expires_at: '2026-12-13T12:00:00Z',
+  },
+  can_invite: false, next_invite_on: null, credit: CREDIT,
+};
+const USED = { invite: null, can_invite: false, next_invite_on: '2026-12-01', credit: CREDIT };
+
+test('one invite a month, made for one person', async () => {
+  mockGet.mockResolvedValue({ data: NONE });
+  mockPost.mockResolvedValue({ data: OPEN });
   render(<InviteSection />);
-  expect(screen.getByText(/you both get a free week/)).toBeInTheDocument();
-  // Nothing is made until asked for.
-  expect(mockGet).not.toHaveBeenCalled();
-  fireEvent.click(screen.getByText('Show my invite link'));
-  const input = await screen.findByLabelText('Your invite link');
-  expect(mockGet).toHaveBeenCalledWith('/referrals/link');
-  expect(input.value).toBe(`https://loore.org/invite/${CODE}`);
-  fireEvent.click(screen.getByText('Copy'));
-  await waitFor(() => expect(writeText).toHaveBeenCalledWith(`https://loore.org/invite/${CODE}`));
-  expect(await screen.findByText('Copied')).toBeInTheDocument();
+  expect(await screen.findByText(/you both get \$7\.50 off your next payment/)).toBeInTheDocument();
+  expect(screen.getByText(/invite one person a month/)).toBeInTheDocument();
+  const field = screen.getByLabelText("Your friend's X handle or email address");
+  fireEvent.change(field, { target: { value: ' @Ben_X ' } });
+  fireEvent.click(screen.getByText('Make invite'));
+  const link = await screen.findByLabelText('Your invite link');
+  expect(mockPost).toHaveBeenCalledWith('/referrals/invite', { to: '@Ben_X' });
+  expect(link.value).toBe(`https://loore.org/invite/${CODE}`);
+  expect(screen.getByText(/Your invite for @ben_x works until/)).toBeInTheDocument();
+  expect(screen.getByText(/works only for them, when they sign up with that X account/)).toBeInTheDocument();
 });
 
-test('no counts and no names', () => {
+test('the open invite: copy and withdraw', async () => {
+  const writeText = jest.fn().mockResolvedValue();
+  Object.assign(navigator, { clipboard: { writeText } });
+  mockGet.mockResolvedValue({ data: OPEN });
+  mockDelete.mockResolvedValue({ data: NONE });
   render(<InviteSection />);
+  fireEvent.click(await screen.findByText('Copy'));
+  await waitFor(() => expect(writeText).toHaveBeenCalledWith(`https://loore.org/invite/${CODE}`));
+  expect(await screen.findByText('Copied')).toBeInTheDocument();
+  fireEvent.click(screen.getByText('Withdraw'));
+  expect(await screen.findByText('Make invite')).toBeInTheDocument();
+  expect(mockDelete).toHaveBeenCalledWith('/referrals/invite');
+  expect(screen.queryByLabelText('Your invite link')).toBeNull();
+});
+
+test("this month's invite used: when the next one comes, no counter", async () => {
+  mockGet.mockResolvedValue({ data: USED });
+  render(<InviteSection />);
+  expect(await screen.findByText(
+    /You've used this month's invite\. A new one is available on (December 1|1 December)\./,
+  )).toBeInTheDocument();
+  expect(screen.queryByText('Make invite')).toBeNull();
+});
+
+test('a refusal says why', async () => {
+  mockGet.mockResolvedValue({ data: NONE });
+  mockPost.mockRejectedValue({ response: { data: { error: "That's your own address or handle. Invite someone else." } } });
+  render(<InviteSection />);
+  fireEvent.change(await screen.findByLabelText("Your friend's X handle or email address"),
+    { target: { value: 'ana@example.com' } });
+  fireEvent.click(screen.getByText('Make invite'));
+  expect(await screen.findByText(/That's your own address/)).toBeInTheDocument();
+});
+
+test('no counts and no names', async () => {
+  mockGet.mockResolvedValue({ data: USED });
+  render(<InviteSection />);
+  await screen.findByText(/You've used this month's invite/);
   const text = document.body.textContent;
   expect(text).not.toMatch(/\d+ (friends|people|invit)/i);
   expect(text).not.toMatch(/invited \d/i);

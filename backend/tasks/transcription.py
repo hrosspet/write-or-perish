@@ -59,6 +59,12 @@ UPLOAD_REPLY_SKIPPED_SPEND_CAP = (
     "Your entry is saved. Loore didn't reply because you've reached your "
     "monthly usage limit, which resets at the start of next month."
 )
+# The same for a ceiling only the first payment lifts (#438: the trial's,
+# an alpha tester's free month's), which does not reset with the month.
+UPLOAD_REPLY_SKIPPED_SPEND_CAP_UNTIL_PAYMENT = (
+    "Your entry is saved. Loore didn't reply because you've reached your "
+    "usage limit, which lifts with your first payment."
+)
 # ...and whose reply AI usage refused (llm_nodes.reply_refusal).
 UPLOAD_REPLY_SKIPPED_AI_USAGE = (
     "Your entry is saved. Loore didn't reply because AI usage is set to "
@@ -72,10 +78,13 @@ def _start_upload_reply(node, tip, model_id):
     the reply was skipped: a spend-capped user, a refused placeholder, or
     any other failure. The reason is recorded on the entry, which is
     already committed and always kept."""
-    from backend.utils.spend import user_is_capped
+    from backend.utils.spend import cap_lifts_with_payment, user_is_capped
     from backend.utils.task_warnings import record_task_warning
     if user_is_capped(node.user_id):
-        record_task_warning(node, UPLOAD_REPLY_SKIPPED_SPEND_CAP)
+        record_task_warning(
+            node, UPLOAD_REPLY_SKIPPED_SPEND_CAP_UNTIL_PAYMENT
+            if cap_lifts_with_payment(node.user_id)
+            else UPLOAD_REPLY_SKIPPED_SPEND_CAP)
         return None
     # Payments on and no AI replies for this account (#438).
     from backend.utils.subscriptions import (

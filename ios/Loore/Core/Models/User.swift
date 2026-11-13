@@ -29,6 +29,10 @@ struct CurrentUser: Decodable, Equatable, Sendable {
     var prefilledHandle: String?
     var timezone: String
     var spendBlocked: Bool
+    /// Payments on (#438): the cap is the trial's or the free month's, which
+    /// only the first payment lifts, not the month (`spend_cap_lifts_with_payment`,
+    /// sent only then).
+    var spendCapLiftsWithPayment: Bool
     var shareV1Enabled: Bool
     var shareV1Available: Bool
     var publicSharingEnabled: Bool
@@ -68,6 +72,7 @@ struct CurrentUser: Decodable, Equatable, Sendable {
         case prefillConsent = "prefill_consent"
         case prefilledHandle = "prefilled_handle"
         case spendBlocked = "spend_blocked"
+        case spendCapLiftsWithPayment = "spend_cap_lifts_with_payment"
         case shareV1Enabled = "share_v1_enabled"
         case shareV1Available = "share_v1_available"
         case publicSharingEnabled = "public_sharing_enabled"
@@ -106,6 +111,7 @@ struct CurrentUser: Decodable, Equatable, Sendable {
         prefilledHandle = c.tolerant(.prefilledHandle)
         timezone = c.tolerant(.timezone, default: "UTC")
         spendBlocked = c.tolerant(.spendBlocked, default: false)
+        spendCapLiftsWithPayment = c.tolerant(.spendCapLiftsWithPayment, default: false)
         shareV1Enabled = c.tolerant(.shareV1Enabled, default: false)
         shareV1Available = c.tolerant(.shareV1Available, default: false)
         publicSharingEnabled = c.tolerant(.publicSharingEnabled, default: false)

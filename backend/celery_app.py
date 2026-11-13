@@ -209,6 +209,13 @@ celery.conf.update(
             'task': 'backend.tasks.anthropic_batch_deletion.sweep_anthropic_batches',
             'schedule': schedules.crontab(minute=43),  # hourly, at :43 UTC
         },
+        # Invites (#439): an unused one expires after INVITE_EXPIRY_DAYS,
+        # and the handle or address in it is deleted. One indexed query
+        # when nothing is due.
+        'expire-invites': {
+            'task': 'backend.tasks.invites.expire_invites',
+            'schedule': 3600.0,  # hourly
+        },
     },
 )
 
@@ -268,3 +275,4 @@ from backend.tasks import intentions  # noqa: F401
 from backend.tasks import user_purge  # noqa: F401
 from backend.tasks import unclaimed_accounts  # noqa: F401
 from backend.tasks import anthropic_batch_deletion  # noqa: F401
+from backend.tasks import invites  # noqa: F401

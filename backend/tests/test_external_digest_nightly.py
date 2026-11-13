@@ -1082,3 +1082,40 @@ def test_no_digest_for_an_account_nobody_used_for_a_month(app, monkeypatch):
         f"external-digest-{away.id}"]
     assert ("The corpus holds 13 saved items"
             in requests_[0]["messages"][0]["content"])
+
+
+def test_payments_on_the_sweep_needs_both_use_and_the_paid_set(
+        app, monkeypatch):
+    """The payments train (PR #680) merged this sweep without a conflict;
+    both filters must hold together. Four accounts with new references in
+    their night: in use with a subscription, in use with one that ended,
+    away 40 days with a subscription, away with one that ended. Only the
+    first gets a digest. Guards ``and user.id in in_use`` (#659) and
+    ``and ai_replies_allowed(user)`` (#649): without either, a second
+    account is submitted."""
+    now = datetime.utcnow()
+    night_tz = _tz_at_hour(_digest.NIGHTLY_DIGEST_LOCAL_HOUR)
+    monkeypatch.setitem(_digest.flask_app.config, "PAYMENTS_ENABLED", True)
+    users = {}
+    for name, seen, paid in (
+            ("tester", now, True), ("lapsed", now, False),
+            ("away", now - timedelta(days=40), True),
+            ("away_lapsed", now - timedelta(days=40), False)):
+        user = User.query.filter_by(username=name).first() or User(
+            username=name)
+        user.timezone = night_tz
+        user.last_seen_at = seen
+        user.plan = "free"
+        user.subscription_level = "standard"
+        user.subscription_status = "active" if paid else "ended"
+        user.subscription_ever_paid = True
+        _db.session.add(user)
+        _db.session.commit()
+        _mk_item(user.id, f"clip_{name}")
+        users[name] = user
+    submitted = _stub_batch_submit(monkeypatch)
+
+    assert _digest.sweep_external_digests() == {"status": "ok",
+                                                "submitted": 1}
+    assert [r["custom_id"] for r in submitted[0]["anthropic"]] == [
+        f"external-digest-{users['tester'].id}"]

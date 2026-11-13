@@ -79,6 +79,9 @@ _SKIPPED_REPLY_CODES = {
     ("Your recording is saved. Loore didn't reply because you've reached "
      "your monthly usage limit, which resets at the start of next month."):
         SPEND_CAP_CODE,
+    ("Your recording is saved. Loore didn't reply because you've reached "
+     "your usage limit, which lifts with your first payment."):
+        SPEND_CAP_CODE,
     ("Your recording is saved. Loore didn't reply because AI usage is set "
      "to None."): AI_USAGE_NONE_CODE,
     ("Your recording is saved. Loore didn't reply because a change to your "

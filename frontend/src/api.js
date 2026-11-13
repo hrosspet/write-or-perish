@@ -36,7 +36,12 @@ api.interceptors.response.use(
         data && data.error === "monthly_spend_limit_reached") {
       try {
         window.dispatchEvent(new CustomEvent("loore:spend-capped", {
-          detail: { message: data.message, liftsOn: data.lifts_on },
+          detail: {
+            message: data.message,
+            liftsOn: data.lifts_on,
+            // Payments on (#438): a cap only the first payment lifts.
+            liftsWithPayment: !!data.lifts_with_payment,
+          },
         }));
       } catch (e) {
         // Ignore — CustomEvent unavailable; the rejection below still flows.
