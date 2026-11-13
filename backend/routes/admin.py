@@ -229,8 +229,10 @@ def list_users():
         get_user_spend_limit_usd, month_start, rolled_spend_carry,
         user_is_capped,
     )
+    from backend.utils.approval import approval_waived, is_blocked
 
     config = current_app.config
+    waived = approval_waived(config)
     now = datetime.utcnow()
     users = User.query.order_by(User.created_at.desc()).all()
     profile_status = _profile_status_map()
@@ -290,6 +292,9 @@ def list_users():
             "created_at": iso_utc(user.created_at),
             "accepted_terms_at": iso_utc(user.accepted_terms_at),
             "approved": user.approved,
+            # Payments on (#697): the admin blocked it (Inactive otherwise
+            # only means it has not come back since payments went on).
+            **({"blocked": is_blocked(user)} if waived else {}),
             "email": user.email,
             "plan": user.plan,
             "deactivated_at": iso_utc(user.deactivated_at),
@@ -358,6 +363,13 @@ def list_users():
 @login_required
 @admin_required
 def toggle_user_status(user_id):
+    """Activate / Deactivate. While payments are on (#697) the Users tab
+    calls it Block / Unblock for an approved or a blocked account: a
+    deactivated account is a blocked one (utils/approval.is_blocked). An
+    account never approved is let in at its next request anyway; this
+    approves it by hand, as before (an "alpha" account then gets the
+    alpha testers' free month, convert_if_alpha)."""
+    from backend.utils.approval import approval_waived, is_blocked
     user = User.query.get_or_404(user_id)
     user.approved = not user.approved  # Toggle the approved flag
     if not user.approved:
@@ -370,7 +382,10 @@ def toggle_user_status(user_id):
         from backend.utils.subscriptions import convert_if_alpha
         convert_if_alpha(user)
     db.session.commit()
-    return jsonify({"message": "User status updated", "approved": user.approved}), 200
+    body = {"message": "User status updated", "approved": user.approved}
+    if approval_waived():
+        body["blocked"] = is_blocked(user)
+    return jsonify(body), 200
 
 @admin_bp.route("/activity", methods=["GET"])
 @login_required
@@ -382,6 +397,16 @@ def activity():
     from backend.utils.activity import activity_report
     days = min(max(request.args.get("days", 14, type=int), 7), 60)
     return jsonify(activity_report(days=days)), 200
+
+
+def _approve_with_prefill(user):
+    """Payments on (#697; Peter, 2026-11-13): starting a pre-fill counts
+    as the approval, so the account is ready at its owner's first sign-in
+    (at the trial step). Not an account the admin blocked. No welcome
+    email: the outreach is the admin's own."""
+    from backend.utils.approval import let_in
+    if let_in(user):
+        db.session.commit()
 
 
 def _prefill_refusal_response(user):
@@ -881,10 +906,13 @@ def whitelist_user():
     admin confirmed the spend in a dialog, per whitelist. That read is
     billed to the account it creates (the admin's ledger only when there
     is no account to bill).
-    Created unapproved: whitelisting starts the pre-fill workflow, not
-    ends it — the account is pre-filled (and may be claimed by its owner
-    meanwhile) before it is ready, and the admin approves it by hand once
-    it is. Body: {"handle", "x_lookup"?: bool}."""
+    Created unapproved while payments are off: whitelisting starts the
+    pre-fill workflow, not ends it — the account is pre-filled (and may be
+    claimed by its owner meanwhile) before it is ready, and the admin
+    approves it by hand once it is. While payments are on (#697),
+    whitelisting counts as the approval: the account is ready at its
+    owner's first sign-in, at the trial step. Body: {"handle",
+    "x_lookup"?: bool}."""
     from backend.utils.x_identity import resolve_x_id, XIdUnresolved, log_user_read
     data = request.get_json() or {}
     handle = (data.get("handle") or "").strip().lstrip("@")
@@ -924,6 +952,8 @@ def whitelist_user():
         }), 409
 
     user = User(twitter_id=resolved.x_id, username=handle, approved=False)
+    from backend.utils.approval import let_in
+    let_in(user)   # payments on (#697): approved now, no welcome email
     db.session.add(user)
     try:
         db.session.commit()
@@ -1023,6 +1053,7 @@ def prefill_from_community_archive(user_id):
     handle = (data.get("handle") or user.username or "").strip().lstrip("@")
     if not handle:
         return jsonify({"error": "Handle is required."}), 400
+    _approve_with_prefill(user)
     from backend.tasks.imports import prefill_community_archive
     task = prefill_community_archive.delay(user.id, handle, {
         "include_replies": bool(data.get("include_replies", True)),
@@ -1160,6 +1191,7 @@ def prefill_from_x_api(user_id):
     max_tweets = x_api.fetchable(x_api.TIMELINE_CAP, max_tweets)
     if max_tweets <= 0:
         return jsonify({"error": "max_tweets must be positive."}), 400
+    _approve_with_prefill(user)
     from backend.tasks.imports import prefill_x_api
     task = prefill_x_api.delay(user.id, handle, {
         "max_tweets": max_tweets,

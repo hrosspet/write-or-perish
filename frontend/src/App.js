@@ -159,7 +159,9 @@ function App() {
   useEffect(() => {
     if (user) {
       // Show terms modal if not accepted or if terms version is outdated.
-      if (!user.terms_up_to_date) {
+      // Not for an account the admin blocked (payments on, #697): it can
+      // use nothing the terms are for.
+      if (!user.terms_up_to_date && !user.account_blocked) {
         setShowTerms(true);
       } else {
         setShowTerms(false);

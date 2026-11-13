@@ -44,6 +44,11 @@ export default function AlphaThankYouPage() {
   if (!user) {
     return <Navigate to="/landing" replace />;
   }
+  // Payments on (#697): nobody waits for approval, so the only account
+  // not let in is one the admin blocked. It gets no waitlist.
+  if (user.account_blocked) {
+    return <AccountNotActive user={user} />;
+  }
 
   const sendLink = async (address, { isResend = false } = {}) => {
     if (inFlight.current) return;
@@ -314,6 +319,41 @@ export default function AlphaThankYouPage() {
       <Fade delay={0.48}>
         <WaitlistDeleteAccount user={user} />
       </Fade>
+    </div>
+  );
+}
+
+export const NOT_ACTIVE_TEXT = "This account is not active. Write to info@loore.org.";
+
+// An account the admin blocked, while payments are on (#697): the plain
+// fact and the address, signing out, and deleting the account (every
+// account can delete itself). Nothing about subscribing.
+function AccountNotActive({ user }) {
+  return (
+    <div style={{
+      minHeight: "100vh", display: "flex", flexDirection: "column",
+      alignItems: "center", justifyContent: "center",
+      padding: "4rem 2rem", textAlign: "center",
+    }}>
+      <img
+        src={process.env.PUBLIC_URL + "/loore-logo-transparent.svg"}
+        alt="Loore"
+        style={{ width: "2.5rem", height: "2.5rem", marginBottom: "2rem", opacity: 0.6 }}
+      />
+      <p role="status" style={{
+        fontFamily: "var(--serif)", fontWeight: 300,
+        fontSize: "clamp(1.4rem, 3.5vw, 1.9rem)", lineHeight: 1.4,
+        color: "var(--text-primary)", maxWidth: 520, marginBottom: "2.5rem",
+      }}>
+        {NOT_ACTIVE_TEXT}
+      </p>
+      <a href={`${process.env.REACT_APP_BACKEND_URL || ""}/auth/logout`} style={{
+        fontFamily: "var(--sans)", fontWeight: 300, fontSize: "0.88rem",
+        color: "var(--accent)", textDecoration: "none",
+      }}>
+        Sign out
+      </a>
+      <WaitlistDeleteAccount user={user} />
     </div>
   );
 }

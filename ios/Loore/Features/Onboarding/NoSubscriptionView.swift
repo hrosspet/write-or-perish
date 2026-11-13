@@ -28,6 +28,10 @@ struct NoSubscriptionView: View {
                         .padding(.bottom, 40)
                         .accessibilityAddTraits(.isHeader)
                         .accessibilityIdentifier("noSubscription.message")
+                    // "Start from your tweets?" (#697): with payments on, a new
+                    // account comes here, not to the waitlist that asked it before.
+                    PrefillConsentCard(eyebrow: "Already on X?")
+                        .padding(.bottom, 40)
                     Button("Sign out") { Task { await app.signOut() } }
                         .buttonStyle(.looreLink)
                         .accessibilityIdentifier("noSubscription.signOut")

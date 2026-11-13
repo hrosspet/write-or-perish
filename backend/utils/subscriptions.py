@@ -108,6 +108,9 @@ def access_state(user, config=None):
 # Everything else under /api and /media answers no_subscription_response.
 _OPEN_EXACT = {
     ("GET", "/api/dashboard"),            # who am I (no profile in it)
+    # Its own settings, as a waitlisted account always could: the
+    # subscribe page asks "Start from your tweets?" (#697). Starts nothing.
+    ("PUT", "/api/dashboard/user"),
     ("PATCH", "/api/dashboard/timezone"),
     ("POST", "/api/account/delete"),
     ("POST", "/api/account/delete/confirm"),

@@ -599,11 +599,23 @@ export function purgeLabel(job) {
   }
 }
 
+// The Users tab's Status cell. Payments on (#697): "Blocked" for an
+// account the admin blocked; "Inactive" is then one that has not come back
+// since payments went on (it is let in at its next visit).
+export function statusLabel(u, letInWithoutApproval) {
+  if (u.approved) return "Active";
+  if (letInWithoutApproval && u.blocked) return "Blocked";
+  return "Inactive";
+}
+
 function AdminPanel() {
   const [activeTab, setActiveTab] = useState("users");
   const userCtx = useUser();
   const tabs = userCtx?.user?.payments_enabled
     ? [...ADMIN_TABS, SUBSCRIPTIONS_TAB] : ADMIN_TABS;
+  // Payments on (#697): nobody waits for approval, and the Users tab's
+  // switch blocks and unblocks.
+  const letInWithoutApproval = !!userCtx?.user?.payments_enabled;
   const [users, setUsers] = useState([]);
   const [allowedPlans, setAllowedPlans] = useState([]);
   // Start of the cache hit-rate window (ISO, from the backend) — the
@@ -1151,7 +1163,11 @@ function AdminPanel() {
       setNewHandle("");
       setNewHandleError("");
       setNewHandleNotice(
-        `Whitelisted @${u.username} as ${who}, X id ${u.twitter_id} (${source}); unapproved until you approve them.`
+        `Whitelisted @${u.username} as ${who}, X id ${u.twitter_id} (${source}); `
+        + (u.approved
+          // Payments on (#697): whitelisting is the approval.
+          ? "ready at their first sign-in, at the trial step."
+          : "unapproved until you approve them.")
       );
       fetchUsers();
     } catch (err) {
@@ -1358,7 +1374,7 @@ function AdminPanel() {
                 )}
               </td>
               <td style={{ border: "1px solid var(--border)", padding: "8px" }}>
-                {u.approved ? "Active" : "Inactive"}
+                {statusLabel(u, letInWithoutApproval)}
               </td>
               <td style={{ border: "1px solid var(--border)", padding: "8px" }}>
                 <select
@@ -1555,7 +1571,14 @@ function AdminPanel() {
                   : `${(u.cache_hit_rate * 100).toFixed(0)}%`}
               </td>
               <td style={{ border: "1px solid var(--border)", padding: "8px" }}>
-                {!u.approved && u.email ? (
+                {letInWithoutApproval && (u.approved || u.blocked) ? (
+                  // Payments on (#697): nobody waits for approval; the
+                  // switch blocks and unblocks. An account never approved
+                  // keeps Activate: it approves by hand, as before.
+                  <button onClick={() => toggleApproved(u.id)}>
+                    {u.blocked ? "Unblock" : "Block"}
+                  </button>
+                ) : !u.approved && u.email ? (
                   <>
                     <button onClick={() => activateAndWelcome(u.id)}>
                       Activate &amp; Welcome

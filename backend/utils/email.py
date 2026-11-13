@@ -501,21 +501,30 @@ def send_user_spend_block_email(to_email, username, spend_usd, limit_usd,
           "Failed to send spend block email")
 
 
-def send_admin_signup_notification(username, user_email):
+def send_admin_signup_notification(username, user_email, let_in=False):
+    """A new account accepted the terms. *let_in* (payments on, #697): it
+    went on to the subscribe step without anyone's approval, so the email
+    is information and asks for nothing."""
     admin_email = "signup@loore.org"
     admin_url = "https://loore.org/admin"
+    if let_in:
+        next_text = ("They went on to the subscribe step. "
+                     "Nothing to approve.")
+        next_line = f"{next_text}\n\nAdmin dashboard:\n{admin_url}\n"
+    else:
+        next_line = f"Review and approve in the admin dashboard:\n{admin_url}\n"
     text_body = (
         f"New signup on Loore\n\n"
         f"Username: {username}\n"
         f"Email: {user_email or 'not provided'}\n\n"
-        f"Review and approve in the admin dashboard:\n{admin_url}\n"
+        f"{next_line}"
     )
     shown_email = escape(user_email) if user_email else "<em>not provided</em>"
-    html_body = _card(
-        "New signup",
-        [f'<strong style="color: #ede8dd;">{escape(str(username))}</strong> just accepted the terms.',
-         f"Email: {shown_email}"],
-        "Open admin dashboard", admin_url)
+    lines = [f'<strong style="color: #ede8dd;">{escape(str(username))}</strong> just accepted the terms.',
+             f"Email: {shown_email}"]
+    if let_in:
+        lines.append(next_text)
+    html_body = _card("New signup", lines, "Open admin dashboard", admin_url)
     _send(admin_email, f"New signup: {username}", text_body, html_body,
           f"Admin signup notification sent for user {username}",
           f"Failed to send admin signup notification for user {username}",

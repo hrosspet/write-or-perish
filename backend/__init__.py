@@ -321,6 +321,8 @@ def create_app():
     #     their address before approval).
     #   - For other API requests, return a 403 JSON error.
     #   - For other (HTML) requests, redirect to "/" with the query flag ?alpha=1.
+    # While payments are on, only an account the admin blocked is held here
+    # (utils/approval.py): every other one is approved on arrival.
     @app.before_request
     def touch_last_seen_hook():
         # Admin Activity tab: who came back, and where they last were.
@@ -336,6 +338,16 @@ def create_app():
 
         if current_user.approved:
             return  # approved users proceed
+
+        # Payments on (#697; Peter, 2026-11-13): nobody waits for approval.
+        # An account never approved is approved on its first request and
+        # goes on to the trial step (block_accounts_without_subscription
+        # below); one the admin blocked is refused here, with its own text.
+        # No-op while payments are off.
+        from backend.utils.approval import let_in
+        if let_in(current_user):
+            db.session.commit()
+            return
 
         # Allow access to specific URL prefixes regardless.
         allowed_prefixes = ["/auth", "/static", "/favicon.ico"]
@@ -380,7 +392,9 @@ def create_app():
         # For API calls, check if the request expects JSON.
         accept_header = request.headers.get("Accept", "")
         if request.path.startswith("/api") or request.is_json or "application/json" in accept_header:
-            return jsonify({"error": "Your account is not approved. Please wait for approval."}), 403
+            # The waiting text, or, payments on, the blocked account's.
+            from backend.utils.approval import refusal_body
+            return jsonify(refusal_body(current_user)), 403
 
         # For HTML (or non-JSON) requests, redirect to the landing page with an alpha flag.
         return redirect("/landing?alpha=1")
