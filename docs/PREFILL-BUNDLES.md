@@ -3,10 +3,12 @@
 The lab holds accounts pre-filled from the Community Archive: each member's public tweets and the profile (and intentions, where built) a model drafted from them. A **bundle** is that material for one member, written by the lab into private object storage and loaded into an account on production without running any model.
 
 - **Lab:** `backend/scripts/prefill_bundles.py export` writes one bundle per account, keyed by the account's X id, plus a manifest (no content).
-- **Production, admin:** Admin → Users → "Make ready from prepared material" (handle or X id) fills the account with that X id, or opens one under the bundle's handle, so the person's X sign-in finds it.
-- **Production, automatic:** a signed-in person whose X id an X sign-in proved answers Yes to "Start from your tweets"; when a bundle exists for that X id, it loads, the person sees "Preparing your starting point…", then their profile, and the account is let in. With no bundle nothing changes.
+- **Production, admin:** Admin → Users → "Make ready from prepared material" (handle or X id) fills the account with that X id, or opens one under the bundle's handle, so the person's X sign-in finds it. It lets nobody in: Activate the account as for any other.
+- **Production, automatic:** a signed-in person whose X id an X sign-in proved answers Yes to "Start from your tweets". The request only records the Yes; a background task looks for a bundle for that X id. When there is one it loads, the person sees "Preparing your starting point…" (web and iPhone), then their profile, and the account is let in. With no bundle nothing changes.
 
-A bundle is only ever loaded into the account whose X id is the bundle's. A "no" to the tweet seed and AI usage None are always refused. The admin's load also refuses an account someone signed in to or one with writing of its own, unless the admin ticks "Load anyway".
+A bundle is only ever loaded into the account whose X id is the bundle's. A "no" to the tweet seed and AI usage None are always refused. The admin's load also refuses an account someone signed in to or one with writing of its own, unless the admin ticks "Load anyway". A "no" given while a load runs stops it; what was loaded stays (linked), and a later Yes continues where it stopped.
+
+Nothing in a bundle is trusted beyond what a pre-fill makes. Entries must be public posts Loore fetched, by the bundle's account, with no model fields (an allow-list; other fields are dropped). They are stored private, with AI usage at most "chat", and encrypted with production's key. The same holds for the profile, recent contexts and intentions. Todos, other artifact kinds and versions a person saved are refused.
 
 Code: `backend/utils/bundle_storage.py` (storage), `backend/utils/prefill_bundles.py` (layout, manifest, exclusions), `backend/utils/prefill_bundle_load.py` (the load), `backend/tasks/prefill_bundles.py` (its runs), `backend/routes/prefill_bundles.py` (admin).
 
@@ -15,13 +17,13 @@ Code: `backend/utils/bundle_storage.py` (storage), `backend/utils/prefill_bundle
 Under the storage location (`gs://<BUCKET>[/<PREFIX>]`, or a directory for local development):
 
 ```
-bundles/<x_id>/bundle.jsonl.gz   dump_user.py's file (format 2), gzipped
-bundles/<x_id>/manifest.json     formats, X id, handle, counts, dates, sha256, size
+bundles/<x_id>/bundle.jsonl.gz   dump_user.py's file (format 2), as gzip parts
+bundles/<x_id>/manifest.json     formats, X id, handle, counts, dates, sha256, size, part index
 handles/<handle>.json            {"x_id"}: lets the admin type a handle
 excluded/<x_id>.json             {"x_id", "reason", "excluded_at"}
 ```
 
-The manifest is written after the bundle; a bundle without a manifest is never read. Production checks the bundle's sha256 against the manifest after every download and refuses a format it does not know.
+The bundle is a series of gzip members: the header line alone, then 500 entries per member. `gzip -d` reads it as one file. A load reads one member at a time by its byte range and never downloads the whole object. The manifest lists each member's offset, length, line count and sha256. Before writing anything, a load checks every part and the whole object against the manifest. It checks each part again when it reads it, and refuses a format it does not know. The manifest is written after the bundle; a bundle without a manifest is never read.
 
 ## How the bucket's contents are protected
 
@@ -78,9 +80,11 @@ python backend/scripts/prefill_bundles.py status                 # bundles and e
 python backend/scripts/prefill_bundles.py status --x-id <X_ID>   # one manifest
 ```
 
-**Expected counts:** about one bundle per account with a profile (roughly 2,000). The summary line counts the skips by reason: `skipped_ai_none` (accounts set to no AI), `skipped_no_profile`, `skipped_no_x_id`, `skipped_signed_in` (any account someone signed in to on the lab, or with an email login), `skipped_admin`, `skipped_excluded`, `skipped_declined`, `skipped_other_material` (an entry that is not a fetched tweet, or a version a person saved: a bundle holds a pre-fill's material only, and production refuses anything else). Look at any reason you did not expect before the real run.
+**Expected counts:** about one bundle per account with a profile (roughly 2,000). The summary line counts the skips by reason: `skipped_ai_none` (accounts set to no AI), `skipped_no_profile`, `skipped_no_x_id`, `skipped_signed_in` (any account someone signed in to on the lab, or with an email login), `skipped_admin`, `skipped_excluded`, `skipped_declined`, `skipped_other_material` (an entry that is not a fetched tweet, a todo list, an artifact other than intentions, or a version a person saved: a bundle holds a pre-fill's material only, and production refuses anything else). Look at any reason you did not expect before the real run. The manifests' `counts.embeddings` say whether the lab's entries carry embeddings (the lab ran without the embedding sweep, so expect 0).
 
-**How long:** about one to two hours for ~2,000 accounts and ~14 million entries (dump, gzip at about 4×, upload). The `--limit 20` run gives the rate. Memory stays flat: one account at a time, written to a temporary file and uploaded in chunks.
+**How long:** an estimate of one to two hours for ~2,000 accounts and ~14 million entries (dump, gzip, upload); not measured on the lab. The `--limit 20` run gives the rate. Memory stays flat: one account at a time, its entries, embeddings and prompt pins read in batches, written to a temporary file and uploaded in chunks.
+
+**A deletion during an export holds.** The export checks the exclusion list just before it writes an account and again after. If the X id was excluded meanwhile, it removes what it wrote. A `delete` run while an export is going is therefore never undone by that export.
 
 **Resume:** run the same command again. An account whose manifest fingerprint matches the lab's metadata is skipped as unchanged; one changed on the lab since is exported again. `--force` exports everything again. `--only <handle|x_id>` does one account.
 
@@ -130,6 +134,8 @@ A bundle is a snapshot: tweets up to its `newest_entry_at` (the lab's Community 
 - a newer lab export of the account, loaded again with "Make ready" (entries already there are skipped; the newer profile versions are added on top).
 
 Nothing tops a loaded account up automatically.
+
+Entries that arrive without an embedding (the lab's carry none) are embedded later by the existing embedding sweep, as after any import, also on an account nobody claimed. The sweep does 100 entries every 5 minutes, so 10,000 entries take about 8 hours. That is paid, but cheap at the embedding model's price.
 
 ## Local development
 
