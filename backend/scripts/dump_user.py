@@ -70,8 +70,8 @@ def _run(username, out_path, include_private=False):
     from sqlalchemy import or_
     from backend.extensions import db
     from backend.models import (
-        Node, NodeEmbedding, User, UserProfile, UserRecentContext,
-        UserTodo, UserArtifact,
+        Node, NodeContextArtifact, NodeEmbedding, User, UserProfile,
+        UserRecentContext, UserTodo, UserArtifact,
     )
     from backend.utils.encryption import is_encrypted, decrypt_content
 
@@ -92,13 +92,17 @@ def _run(username, out_path, include_private=False):
     print(f"@{user.username} (id {user.id}): {total} nodes "
           f"({'all' if include_private else 'public only'})", file=sys.stderr)
 
-    embeddings = {}
-    for e in NodeEmbedding.query.filter_by(user_id=user.id).all():
-        embeddings[e.node_id] = {
+    def _embeddings(node_ids):
+        """The batch's embeddings only (#698): an account's vectors are
+        about 14 KB per entry, so they are read with the entries they
+        belong to, not all at once."""
+        return {e.node_id: {
             "model": e.model, "content_hash": e.content_hash,
             "vector": base64.b64encode(e.vector).decode("ascii"),
             "node_updated_at": _iso(e.node_updated_at),
-        }
+        } for e in NodeEmbedding.query.filter(
+            NodeEmbedding.user_id == user.id,
+            NodeEmbedding.node_id.in_(node_ids))} if node_ids else {}
 
     # Everything small goes in the header line; nodes stream one per line
     # so neither this script nor load_user.py ever holds the corpus in
@@ -132,6 +136,14 @@ def _run(username, out_path, include_private=False):
         batch = (node_q.filter(Node.id > last_id).limit(NODE_BATCH).all())
         if not batch:
             break
+        ids = [n.id for n in batch]
+        embeddings = _embeddings(ids)
+        # The batch's prompt pins in one query, not one per entry (#698: a
+        # lab account can hold hundreds of thousands of entries).
+        pinned = {node_id for (node_id,) in db.session.query(
+            NodeContextArtifact.node_id).filter(
+            NodeContextArtifact.node_id.in_(ids),
+            NodeContextArtifact.artifact_type == "prompt")}
         for n in batch:
             row = {
                 "id": n.id,
@@ -148,7 +160,7 @@ def _run(username, out_path, include_private=False):
                 # are plaintext under #257 (no KMS round-trip).
                 "content": (n.content if not is_encrypted(n.content)
                             else decrypt_content(n.content)),
-                "prompt": _prompt_ref(n),
+                "prompt": _prompt_ref(n) if n.id in pinned else None,
                 "prompt_key": n.prompt_key,
                 "token_count": n.token_count,
                 "distributed_tokens": n.distributed_tokens,

@@ -7,51 +7,58 @@ for one Community Archive member: their public tweets and the profile
 - the admin's "Make ready from prepared material" for a handle or an X id
   (``start_admin_load``): it fills the account with the bundle's X id, or
   opens one under the bundle's handle with that X id, so the person's X
-  sign-in finds it;
+  sign-in finds it. It does not let anyone in: the admin approves as for
+  any account (and with payments on, #700's gate does);
 - the person's Yes on "Start from your tweets" (``maybe_start_self_load``):
-  only for a signed-in account whose X id an X sign-in proved, and only
-  when a bundle exists for that X id. With no bundle nothing changes.
+  only for a signed-in account whose X id an X sign-in proved. The request
+  only records the Yes and queues a check; the background task looks for
+  a bundle and loads it, so a Yes never waits on the storage. With no
+  bundle nothing changes. When the load is done the person is let in
+  (``let_in_when_ready``).
 
 A bundle is only ever loaded into the account whose X id is the bundle's;
-a handle or an email never matches one. A "no" to the tweet seed, AI
-usage None, a deleted account and an X id on the exclusion list are always
-refused. The admin's load also refuses an account whose owner signed in
-or that has writing of its own, unless the admin forces it; the person's
-own Yes refuses only the second (their writing wins over a snapshot).
+a handle or an email never matches one. A "no" to the tweet seed and AI
+usage None are always refused. The admin's load also refuses an account
+whose owner signed in or that has writing of its own, unless the admin
+forces it; the person's own Yes refuses only the second (their writing
+wins over a snapshot). A "no" given while a load runs stops it: what was
+loaded stays and is linked (#662: a no keeps what was made), and a later
+Yes continues where it stopped.
 
-The load runs as background tasks (backend/tasks/prefill_bundles.py) in
-committed chunks of NODE_CHUNK entries, and records its place in its
-PrefillBundleLoad row: the bundle is downloaded and its sha256 checked
-against the manifest, the header (profile versions, recent contexts,
-todos, artifacts and the account's fields) is written in one commit, the
-entries in chunks (each chunk with the map of dumped id -> new id, so a
-resumed run needs nothing in memory), then the links between entries in
-chunks. A run stops after RUN_SECONDS and sends the next; a run that
-dies is resumed by the beat (``stalled_load_ids``) once its heartbeat is
-STALE_AFTER old. Entries already in the account (same tweet key) are
-not written again, so loading a bundle twice adds nothing twice; two
-loads into one account run one after the other.
+Nothing in a bundle is trusted beyond what a pre-fill makes. Each entry
+is checked against an allow-list (``clean_entry``): a public post Loore
+fetched, by the bundle's account, with no model fields; it is stored
+private, with AI usage at most "chat" (never "train"; a lower value in
+the bundle stays: a load never raises anything), and encrypted on write
+like any private entry. The profile, recent contexts and intentions are
+stored the same way; todos, other artifacts and versions a person saved
+are refused.
 
-A bundle holds a pre-fill's material only (fetched tweets; model-drafted
-profile, intentions and the like; ``check_prefill_entry``), and the load
-changes nothing of the account that only a person's own action sets
-(sign-in, terms, X handle, consent, settings, time zone). So an account
-the admin made ready that nobody signs in to stays recognisable as
-unclaimed, and is deleted after 90 days like any pre-filled one (#685):
+The load runs as background tasks (backend/tasks/prefill_bundles.py), one
+bundle part (MEMBER_LINES entries, one gzip member) per committed chunk,
+read by its byte range, checked against its sha256, and never re-read: a
+run continues at the next part. Its PrefillBundleLoad row holds the place
+(entries done, links done) and the map of dumped id -> new id is in
+PrefillBundleNodeMap, so a resumed run needs nothing in memory. A run
+stops after RUN_SECONDS and sends the next; a run that dies is resumed by
+the beat (``stalled_load_ids``) once its heartbeat is STALE_AFTER old.
+Entries already in the account (same tweet key) are not written again,
+and two loads into one account run one after the other.
+
+The load changes nothing of the account that only a person's own action
+sets (sign-in, terms, X handle, consent, settings, time zone), so an
+account the admin made ready that nobody signs in to stays recognisable
+as unclaimed and is deleted after 90 days like any pre-filled one (#685):
 ``prefilled_handle`` is set, and the entries' ``updated_at`` is when this
 server stored them.
 
-Content is encrypted on write with this server's key, one data key per
-chunk, as imports do (backend/utils/dump_rows.py). Nothing here
-decrypts content or calls a model; the profile pipeline treats the
-loaded profile as current (its cutoff and window set come with it).
+Content is encrypted with this server's key, one data key per chunk, as
+imports do (backend/utils/dump_rows.py). Nothing here decrypts content or
+calls a model; the profile pipeline treats the loaded profile as current.
 """
 import logging
-import os
-import tempfile
 import time
 from datetime import datetime, timedelta
-from itertools import islice
 from uuid import uuid4
 
 from sqlalchemy import func, or_, update
@@ -60,7 +67,7 @@ from sqlalchemy.exc import IntegrityError
 from backend.extensions import db
 from backend.models import (
     Node, PrefillBundleLoad, PrefillBundleNodeMap, User, UserArtifact,
-    UserProfile, UserRecentContext, UserTodo,
+    UserProfile, UserRecentContext,
 )
 from backend.utils import dump_rows
 from backend.utils import prefill_bundles as pb
@@ -68,16 +75,12 @@ from backend.utils import prefill_bundles as pb
 logger = logging.getLogger(__name__)
 
 # ── Heuristics (#698, flagged in the PR) ─────────────────────────────────
-# Entries per committed chunk: what load_user.py and the imports use. One
-# chunk is about half a megabyte of entries in memory and one data key.
-NODE_CHUNK = 500
 # How long one task run works before it sends the next run and ends, so
 # a large bundle is many short tasks the worker can interleave with
 # others, not one that holds a worker for an hour.
 RUN_SECONDS = 120
 # A load whose run has sent no heartbeat for this long is resumed by the
-# beat. A chunk takes seconds; the download of a large bundle well under
-# a minute.
+# beat. A chunk takes seconds.
 STALE_AFTER = timedelta(minutes=5)
 # Runs in a row that ended without committing a chunk (killed, or an
 # error) before the load is stopped as failed: two can be a deploy, a
@@ -87,6 +90,47 @@ MAX_STALLED_RUNS = 3
 RETRY_COUNTDOWN_SECONDS = 60
 
 ACTIVE = ("queued", "running")
+# Outcomes that are a person's or an admin's choice, not a fault: logged
+# as information, not as errors.
+EXPECTED_STOPS = ("prefill_declined", "ai_opt_out", "excluded", "deleted",
+                  "no_account")
+
+# What a person's own action makes (an edit, a revert): a bundle holds
+# none of it (PERSON_VERSIONS of the unclaimed-account deletion, #685).
+PERSON_MADE = ("user", "revert")
+# What a load gives every entry, profile version, recent context and
+# artifact, whatever the bundle says: a pre-fill's own values
+# (tasks/imports._import_prefill_rows). Never public; AI usage at most
+# "chat" (never "train"), and a lower value in the bundle stays lower:
+# a load never raises anything.
+LOADED_PRIVACY = "private"
+LOADED_AI_USAGE = "chat"
+
+
+def capped_ai_usage(value):
+    """A bundle's AI usage, capped at what a pre-fill gives."""
+    return "none" if value == "none" else LOADED_AI_USAGE
+
+
+# Allow-lists: the only fields of a bundle that reach a row. Anything
+# else is dropped; MUST_BE_EMPTY refuses the bundle when set.
+ENTRY_FIELDS = ("id", "author_username", "owner_is_user", "parent_id",
+                "continuation_node_id", "linked_node_id", "node_type",
+                "content", "token_count", "source_key", "origin",
+                "provenance", "created_at", "embedding")
+MUST_BE_EMPTY = ("llm_model", "prompt", "prompt_key", "tool_calls_meta")
+EMBEDDING_FIELDS = ("model", "content_hash", "vector", "node_updated_at")
+PROFILE_FIELDS = ("id", "content", "generated_by", "tokens_used",
+                  "created_at", "source_tokens_used", "source_data_cutoff",
+                  "source_origin_stats", "generation_type",
+                  "parent_profile_id", "merged_profile_id", "window_set",
+                  "covers_start", "source_rendered_at")
+RECENT_FIELDS = ("content", "generated_by", "tokens_used", "created_at",
+                 "source_data_cutoff", "source_tokens_covered", "profile_id")
+ARTIFACT_FIELDS = ("kind", "title", "description", "content",
+                   "generated_by", "tokens_used", "created_at")
+# Artifact kinds a pre-fill drafts.
+ARTIFACT_KINDS = ("intentions",)
 
 
 class LostClaim(Exception):
@@ -103,6 +147,68 @@ def _dispatch(load_id, countdown=0):
     load_prefill_bundle.apply_async(args=(load_id,), countdown=countdown)
 
 
+# ── What a bundle may hold ────────────────────────────────────────────────
+
+def _not_prefill(what):
+    return pb.BundleError("not_prefill", f"The bundle holds {what} no "
+                                         "pre-fill makes.")
+
+
+def clean_entry(nd, dump_username):
+    """The fields of a dumped entry a load writes, from the allow-list,
+    with the load's own privacy and AI usage; or BundleError. An entry is
+    a public post Loore fetched (origin "twitter", a pre-fill provenance,
+    a source key), written by the bundle's account, with no model fields:
+    anything else would also make an account nobody claimed look used."""
+    from backend.utils.privacy import PREFILL_PROVENANCES
+    if any(nd.get(k) for k in MUST_BE_EMPTY):
+        raise _not_prefill("a model's or a session's entry")
+    if (nd.get("origin") != "twitter" or not nd.get("source_key")
+            or nd.get("provenance") not in PREFILL_PROVENANCES
+            or nd.get("node_type", "user") != "user"
+            or nd.get("owner_is_user", True) is not True
+            or not isinstance(nd.get("content", ""), str)):
+        raise _not_prefill("an entry")
+    if (nd.get("author_username") or dump_username) != dump_username:
+        raise pb.BundleError("foreign_author",
+                             "An entry in the bundle is by another account.")
+    out = {k: nd[k] for k in ENTRY_FIELDS if k in nd}
+    out["privacy_level"] = LOADED_PRIVACY
+    out["ai_usage"] = capped_ai_usage(nd.get("ai_usage"))
+    out["token_count"] = max(0, int(out.get("token_count") or 0))
+    emb = out.get("embedding")
+    if emb is not None:
+        if not isinstance(emb, dict) or not emb.get("model") or not emb.get("vector"):
+            raise _not_prefill("an embedding")
+        out["embedding"] = {k: emb.get(k) for k in EMBEDDING_FIELDS}
+    return out
+
+
+def clean_header(header):
+    """The header's profile versions, recent contexts and artifacts from
+    their allow-lists, private and "chat"; or BundleError. Todos, artifact
+    kinds no pre-fill drafts and versions a person saved are refused. The
+    header's account fields are never read."""
+    if header.get("todos"):
+        raise _not_prefill("a todo list")
+
+    def pick(row, fields):
+        out = {k: row[k] for k in fields if k in row}
+        if out.get("generated_by") in PERSON_MADE:
+            raise _not_prefill("a version a person saved")
+        out["privacy_level"] = LOADED_PRIVACY
+        out["ai_usage"] = capped_ai_usage(row.get("ai_usage"))
+        return out
+    profiles = [pick(p, PROFILE_FIELDS) for p in header.get("profiles") or []]
+    recents = [pick(r, RECENT_FIELDS) for r in header.get("recent_contexts") or []]
+    artifacts = []
+    for a in header.get("artifacts") or []:
+        if a.get("kind") not in ARTIFACT_KINDS:
+            raise _not_prefill("an artifact")
+        artifacts.append(pick(a, ARTIFACT_FIELDS))
+    return profiles, recents, artifacts
+
+
 # ── Who may receive a bundle ──────────────────────────────────────────────
 
 def account_signed_in(user):
@@ -112,22 +218,45 @@ def account_signed_in(user):
     return sign_in_status(user) != "never"
 
 
-def has_own_writing(user_id):
-    """Whether the account holds writing of its own: an entry or upload
-    that no pre-fill brought in, or a profile version the person wrote.
-    Metadata only."""
+def own_writing_reason(user_id):
+    """Why the account counts as holding writing of its own, or None:
+    "own_writing" for an entry or upload no pre-fill brought in, or a
+    profile version the person wrote; "unlabelled_tweets" for tweets
+    with no provenance (pre-fills made before 2026-09-21 left it empty).
+    Those cannot be told apart from an upload without guessing: PR
+    #691's labelling settles them. Metadata only."""
     from backend.utils.privacy import PREFILL_PROVENANCES
-    own_node = db.session.query(Node.id).filter(
+    own = db.session.query(Node.id).filter(
         or_(Node.user_id == user_id, Node.human_owner_id == user_id),
-        Node.deleted_at.is_(None),
-        Node.node_type != "llm",
-        func.coalesce(Node.provenance, "").notin_(PREFILL_PROVENANCES),
-    ).first()
-    if own_node is not None:
-        return True
-    return db.session.query(UserProfile.id).filter(
-        UserProfile.user_id == user_id,
-        UserProfile.generated_by == "user").first() is not None
+        Node.deleted_at.is_(None), Node.node_type != "llm")
+    unlabelled = (Node.origin == "twitter") & Node.provenance.is_(None)
+    # Spelled out, not ~unlabelled: NOT of a NULL comparison (no origin)
+    # would drop the row.
+    labelled_or_not_a_tweet = or_(Node.origin.is_(None),
+                                  Node.origin != "twitter",
+                                  Node.provenance.isnot(None))
+    if own.filter(
+            func.coalesce(Node.provenance, "").notin_(PREFILL_PROVENANCES),
+            labelled_or_not_a_tweet).first() is not None:
+        return "own_writing"
+    if db.session.query(UserProfile.id).filter(
+            UserProfile.user_id == user_id,
+            UserProfile.generated_by.in_(PERSON_MADE)).first() is not None:
+        return "own_writing"
+    if own.filter(unlabelled).first() is not None:
+        return "unlabelled_tweets"
+    return None
+
+
+REFUSAL_MESSAGES = {
+    "signed_in": "Someone has signed in to this account. Load only with "
+                 "the force option.",
+    "own_writing": "The account has writing of its own. Load only with the "
+                   "force option.",
+    "unlabelled_tweets": "The account holds tweets without a provenance "
+                         "label (pre-fills before 2026-09-21); label them "
+                         "first (#691), or load with the force option.",
+}
 
 
 def hard_refusal(user, x_id):
@@ -152,12 +281,33 @@ def target_refusal(user, x_id, *, allow_signed_in, allow_own_writing):
     if refusal:
         return refusal
     if not allow_signed_in and account_signed_in(user):
-        return ("signed_in", "Someone has signed in to this account. "
-                             "Load only with the force option.")
-    if not allow_own_writing and has_own_writing(user.id):
-        return ("own_writing", "The account has writing of its own. "
-                               "Load only with the force option.")
+        return "signed_in", REFUSAL_MESSAGES["signed_in"]
+    if not allow_own_writing:
+        reason = own_writing_reason(user.id)
+        if reason:
+            return reason, REFUSAL_MESSAGES[reason]
     return None
+
+
+def let_in_when_ready(user):
+    """The one place a bundle load lets a person in: after their own Yes,
+    when the load is done (Peter, 2026-11-13: "lets them in when it is
+    ready", no approval step). It approves an account that was never let
+    in and that no admin blocked (deactivated_at), as the admin's
+    Activate does. Returns whether it approved.
+
+    MERGE WITH #700 (payments): with payments on, #700's gate has let the
+    person in at their first request, before they could answer, so this
+    finds them approved and does nothing. When both are merged, this body
+    must call #700's ``approval.let_in(user)`` instead of setting
+    ``approved`` itself, so the plan rule (the default "alpha" becomes
+    "free") applies here too, and nothing else in this module may set
+    ``approved`` or ``plan``."""
+    if user.approved or user.deactivated_at is not None:
+        return False
+    user.approved = True
+    user.approved_at = _now()
+    return True
 
 
 # ── Starting a load ───────────────────────────────────────────────────────
@@ -180,36 +330,17 @@ def _latest_load(user_id, x_id=None, statuses=None):
     return q.order_by(PrefillBundleLoad.id.desc()).first()
 
 
-def _new_load(user, manifest, *, origin, requested_by_id=None, forced=False,
-              approve_when_done=False, status="queued", error=None):
+def _fill_from_manifest(load, manifest):
     obj = manifest.get("object") or {}
     counts = manifest.get("counts") or {}
-    now = _now()
-    load = PrefillBundleLoad(
-        user_id=user.id, x_id=str(manifest["x_id"]),
-        handle=pb.clean_handle(manifest.get("handle")), origin=origin,
-        requested_by_id=requested_by_id, forced=bool(forced),
-        approve_when_done=bool(approve_when_done), status=status,
-        stage="download", error=error, bundle_sha256=obj.get("sha256") or "",
-        bundle_format=manifest.get("bundle_format"),
-        dump_format=manifest.get("dump_format"),
-        exported_at=pb.parse_time(manifest.get("exported_at")),
-        newest_entry_at=pb.parse_time(manifest.get("newest_entry_at")),
-        nodes_total=int(counts.get("nodes") or 0),
-        heartbeat_at=now, created_at=now,
-        finished_at=now if status == "refused" else None)
-    db.session.add(load)
-    return load
-
-
-def _resume(load):
-    """A failed load of the same bundle continues from where it stopped."""
-    load.status = "queued"
-    load.error = None
-    load.run_token = None
-    load.stalled_runs = 0
-    load.finished_at = None
-    load.heartbeat_at = _now()
+    load.handle = pb.clean_handle(manifest.get("handle"))
+    load.bundle_sha256 = obj.get("sha256") or ""
+    load.bundle_format = manifest.get("bundle_format")
+    load.dump_format = manifest.get("dump_format")
+    load.exported_at = pb.parse_time(manifest.get("exported_at"))
+    load.newest_entry_at = pb.parse_time(manifest.get("newest_entry_at"))
+    load.nodes_total = int(counts.get("nodes") or 0)
+    load.members = obj.get("members")
 
 
 def _new_account(x_id, handle):
@@ -234,12 +365,12 @@ def _new_account(x_id, handle):
     return user
 
 
-def start_admin_load(query, admin_id, *, force=False, approve=True,
-                     dispatch=None):
+def start_admin_load(query, admin_id, *, force=False, dispatch=None):
     """The admin's "Make ready from prepared material". Returns (load,
-    None) or (None, (code, message)). Safe to repeat: a load of the
-    bundle under way is returned as it is, a failed one continues, and a
-    finished one is not loaded again."""
+    None) or (None, (code, message)). Safe to repeat: a load under way
+    is returned as it is, a failed or stopped one continues in a new load
+    (entries already there are skipped), and a finished one of the same
+    bundle is not loaded again. Storage errors are StorageError."""
     if not pb.bundles_enabled():
         return None, ("disabled", "Pre-fill bundles are switched off here.")
     storage = pb.configured_storage()
@@ -259,23 +390,21 @@ def start_admin_load(query, admin_id, *, force=False, approve=True,
                              allow_own_writing=force)
     if refusal:
         return None, refusal
-    sha = (manifest.get("object") or {}).get("sha256")
     active = _latest_load(user.id, x_id, ACTIVE)
     if active is not None:
         return active, None
-    previous = _latest_load(user.id, x_id, ("done", "failed"))
-    if previous is not None and previous.bundle_sha256 == sha:
-        if previous.status == "done":
-            return None, ("already_loaded",
-                          "This bundle is already loaded into the account.")
-        _resume(previous)
-        previous.forced = previous.forced or bool(force)
-        previous.approve_when_done = bool(approve)
-        db.session.commit()
-        (dispatch or _dispatch)(previous.id)
-        return previous, None
-    load = _new_load(user, manifest, origin="admin", requested_by_id=admin_id,
-                     forced=force, approve_when_done=approve)
+    sha = (manifest.get("object") or {}).get("sha256")
+    done = _latest_load(user.id, x_id, ("done",))
+    if done is not None and done.bundle_sha256 == sha:
+        return None, ("already_loaded",
+                      "This bundle is already loaded into the account.")
+    now = _now()
+    load = PrefillBundleLoad(
+        user_id=user.id, x_id=str(x_id), origin="admin",
+        requested_by_id=admin_id, forced=bool(force), approve_when_done=False,
+        status="queued", stage="header", heartbeat_at=now, created_at=now)
+    _fill_from_manifest(load, manifest)
+    db.session.add(load)
     db.session.commit()
     logger.info("Pre-fill bundle load %s queued by admin %s for user %s",
                 load.id, admin_id, user.id)
@@ -283,25 +412,14 @@ def start_admin_load(query, admin_id, *, force=False, approve=True,
     return load, None
 
 
-def _record_refused(user, manifest, code):
-    """A refused automatic load, once per bundle and reason, for the
-    admin's list."""
-    sha = (manifest.get("object") or {}).get("sha256") or ""
-    seen = PrefillBundleLoad.query.filter_by(
-        user_id=user.id, x_id=str(user.twitter_id), status="refused",
-        bundle_sha256=sha, error=code).first()
-    if seen is None:
-        _new_load(user, manifest, origin="self", status="refused", error=code)
-        db.session.commit()
-    logger.info("Pre-fill bundle for user %s not loaded on their Yes: %s",
-                user.id, code)
-
-
 def maybe_start_self_load(user, dispatch=None):
-    """On a Yes to "Start from your tweets": start the load of the
-    person's bundle, if there is one. Returns the load, or None when
-    nothing starts (no bundle: nothing changes from before). Never
-    raises: the Yes itself is saved either way."""
+    """On a Yes to "Start from your tweets": queue a check for the
+    person's bundle. No storage call here: the background task looks for
+    the bundle, and finding none changes nothing. Returns the load (the
+    check), the one already under way or done, or None. A failed,
+    stopped or refused earlier load does not block a new Yes: the new
+    load skips what is already there. Never raises: the Yes itself is
+    saved either way."""
     try:
         if not pb.bundles_enabled():
             return None
@@ -313,31 +431,16 @@ def maybe_start_self_load(user, dispatch=None):
                 or not pb.valid_x_id(user.twitter_id):
             return None
         x_id = str(user.twitter_id)
-        current = _latest_load(user.id, x_id, ACTIVE + ("done", "failed"))
+        current = _latest_load(user.id, x_id, ACTIVE + ("done",))
         if current is not None:
             return current
-        storage = pb.configured_storage()
-        manifest = pb.read_manifest(storage, x_id)
-        if manifest is None:
-            return None
-        problem = pb.manifest_problem(manifest, x_id)
-        if problem:
-            logger.error("Pre-fill bundle for user %s not loadable: %s",
-                         user.id, problem.code)
-            _record_refused(user, manifest, problem.code)
-            return None
-        if pb.exclusion(storage, x_id) is not None:
-            _record_refused(user, manifest, "excluded")
-            return None
-        refusal = target_refusal(user, x_id, allow_signed_in=True,
-                                 allow_own_writing=False)
-        if refusal:
-            _record_refused(user, manifest, refusal[0])
-            return None
-        load = _new_load(user, manifest, origin="self", approve_when_done=True)
+        now = _now()
+        load = PrefillBundleLoad(
+            user_id=user.id, x_id=x_id, origin="self", approve_when_done=True,
+            status="queued", stage="check", bundle_sha256="",
+            heartbeat_at=now, created_at=now)
+        db.session.add(load)
         db.session.commit()
-        logger.info("Pre-fill bundle load %s started by user %s's Yes",
-                    load.id, user.id)
         (dispatch or _dispatch)(load.id)
         return load
     except Exception as e:  # noqa: BLE001 - the Yes must not fail
@@ -351,16 +454,19 @@ def maybe_start_self_load(user, dispatch=None):
 
 def starting_point(user_id):
     """The state of the account's newest load, for the person's screen:
-    None (no load), or {"status": "preparing" | "ready" | "failed",
-    "done", "total"}. Refused loads change nothing for the person."""
+    None, or {"status": "checking" | "preparing" | "ready" | "failed",
+    "done", "total"}. A refused or stopped load, or no bundle, changes
+    nothing for the person."""
     load = PrefillBundleLoad.query.filter(
         PrefillBundleLoad.user_id == user_id,
-        PrefillBundleLoad.status != "refused",
+        PrefillBundleLoad.status.notin_(("refused", "stopped")),
     ).order_by(PrefillBundleLoad.id.desc()).first()
     if load is None:
         return None
-    status = {"queued": "preparing", "running": "preparing",
-              "done": "ready", "failed": "failed"}.get(load.status)
+    if load.status in ACTIVE:
+        status = "checking" if load.stage == "check" else "preparing"
+    else:
+        status = {"done": "ready", "failed": "failed"}.get(load.status)
     if status is None:
         return None
     return {"status": status, "done": load.nodes_done,
@@ -377,8 +483,8 @@ def serialize_load(load, user=None):
         "username": user.username if user else None,
         "approved": bool(user.approved) if user else None,
         "x_id": load.x_id, "handle": load.handle, "origin": load.origin,
-        "forced": load.forced, "approve_when_done": load.approve_when_done,
-        "status": load.status, "stage": load.stage, "error": load.error,
+        "forced": load.forced, "status": load.status, "stage": load.stage,
+        "error": load.error,
         "nodes_total": load.nodes_total, "nodes_done": load.nodes_done,
         "links_done": load.links_done, "created": load.created_count,
         "skipped": load.skipped_count, "relinked": load.relinked_count,
@@ -394,7 +500,8 @@ def serialize_load(load, user=None):
 def check(query):
     """What "Make ready" would do for ``query`` (handle or X id), for the
     admin's Check button: the bundle's metadata, the account it would go
-    into, and why it would be refused. Reads no content."""
+    into, and why it would be refused. Reads no content. Storage errors
+    are StorageError."""
     from backend.utils.activity import sign_in_status
     if not pb.bundles_enabled():
         return {"error": "Pre-fill bundles are switched off here.",
@@ -436,7 +543,7 @@ def check(query):
     out["account"] = {
         "exists": True, "user_id": user.id, "username": user.username,
         "approved": bool(user.approved), "sign_in": sign_in_status(user),
-        "own_writing": has_own_writing(user.id),
+        "own_writing": own_writing_reason(user.id),
         "prefill_consent": user.prefill_consent,
     }
     refusal = target_refusal(user, x_id, allow_signed_in=False,
@@ -453,27 +560,6 @@ def check(query):
 
 
 # ── Running a load ────────────────────────────────────────────────────────
-
-def _work_dir():
-    """Where a worker keeps the bundles it is loading (a tests hook)."""
-    return os.path.join(tempfile.gettempdir(), "loore-prefill-bundles")
-
-
-def _work_path(load_id, sha=""):
-    folder = _work_dir()
-    os.makedirs(folder, exist_ok=True)
-    return os.path.join(folder, f"load-{load_id}-{(sha or '')[:16]}.jsonl.gz")
-
-
-def _remove_quietly(path):
-    if not path:
-        return
-    for p in (path, path + ".part"):
-        try:
-            os.remove(p)
-        except OSError:
-            pass
-
 
 def _claim(load_id):
     """Take the load for this run, or None when another run holds it or
@@ -526,71 +612,67 @@ def _release(load_id, token):
     db.session.commit()
 
 
-def _fail(load_id, token, code):
+def _fail(load_id, token, code, status="failed"):
     db.session.rollback()
     db.session.execute(
         update(PrefillBundleLoad).where(
             PrefillBundleLoad.id == load_id,
             or_(PrefillBundleLoad.run_token == token,
                 PrefillBundleLoad.run_token.is_(None)),
-        ).values(status="failed", error=str(code)[:255], run_token=None,
+        ).values(status=status, error=str(code)[:255], run_token=None,
                  finished_at=_now()))
     db.session.commit()
-    # Problems show: the admin sees the load as failed, and this reaches
-    # the error monitor. A code or a class name only, never content.
-    logger.error("Pre-fill bundle load %s failed: %s", load_id, code)
+    # Problems show: the admin sees the load as failed, and a fault
+    # reaches the error monitor. A person's or an admin's choice (a no,
+    # an exclusion) is no fault. A code only, never content.
+    (logger.info if code in EXPECTED_STOPS else logger.error)(
+        "Pre-fill bundle load %s %s: %s", load_id, status, code)
 
 
-def _local_copy(load, storage):
-    """The bundle as a local file, downloaded when this worker has none,
-    with its sha256 checked against the manifest's on every run. A local
-    copy that does not match is downloaded once more; a download that
-    does not match stops the load before anything else is written."""
-    path = _work_path(load.id, load.bundle_sha256)
-    if os.path.exists(path) and pb.sha256_file(path) == load.bundle_sha256:
-        return path
-    _remove_quietly(path)
-    part = path + ".part"
-    if not storage.download(pb.bundle_name(load.x_id), part):
-        raise pb.BundleError("no_bundle", "The bundle is gone from storage.")
-    os.replace(part, path)
-    if pb.sha256_file(path) != load.bundle_sha256:
-        _remove_quietly(path)
-        raise pb.BundleError("checksum", "The bundle's checksum does not "
-                                         "match its manifest.")
-    return path
-
-
-# What a person's own action makes (an edit, a revert): a bundle holds
-# none of it (PERSON_VERSIONS of the unclaimed-account deletion, #685).
-PERSON_MADE = ("user", "revert")
-
-
-def check_prefill_entry(nd, dump_username):
-    """A bundle holds what a pre-fill makes and nothing else: the person's
-    public posts Loore fetched (origin "twitter", a pre-fill provenance, a
-    source key), by the bundle's account. Anything else (a model's reply,
-    an entry someone wrote) would make an account nobody claimed look
-    used, and is refused."""
-    from backend.utils.privacy import PREFILL_PROVENANCES
-    if (nd.get("origin") != "twitter" or not nd.get("source_key")
-            or nd.get("provenance") not in PREFILL_PROVENANCES
-            or nd.get("node_type", "user") != "user" or nd.get("prompt")):
-        raise pb.BundleError("not_prefill",
-                             "The bundle holds an entry no pre-fill makes.")
-    if (nd.get("author_username") or dump_username) != dump_username:
-        raise pb.BundleError("foreign_author",
-                             "An entry in the bundle is by another account.")
-
-
-def check_prefill_header(header):
-    """Refuse versions a person saved (an edit, a revert): a pre-fill's
-    profile, todos and artifacts are all drafted by a model."""
-    for key in ("profiles", "todos", "artifacts"):
-        for row in header.get(key) or []:
-            if row.get("generated_by") in PERSON_MADE:
-                raise pb.BundleError(
-                    "not_prefill", "The bundle holds a version a person saved.")
+def _check_self_load(load, token, storage):
+    """A Yes's check: is there a bundle for the person's X id that may be
+    loaded? No bundle: the check is removed and nothing changes. A bundle
+    that may not be loaded: the check is kept as "refused" (once per
+    bundle and reason) for the admin to see. Else the load goes on."""
+    user = db.session.get(User, load.user_id)
+    manifest = pb.read_manifest(storage, load.x_id)
+    if manifest is None:
+        db.session.delete(load)
+        db.session.commit()
+        return "no_bundle"
+    problem = pb.manifest_problem(manifest, load.x_id)
+    code = problem.code if problem else None
+    if code is None and pb.exclusion(storage, load.x_id) is not None:
+        code = "excluded"
+    if code is None:
+        refusal = target_refusal(user, load.x_id, allow_signed_in=True,
+                                 allow_own_writing=False)
+        code = refusal[0] if refusal else None
+    sha = (manifest.get("object") or {}).get("sha256") or ""
+    if code is not None:
+        seen = PrefillBundleLoad.query.filter(
+            PrefillBundleLoad.id != load.id,
+            PrefillBundleLoad.user_id == load.user_id,
+            PrefillBundleLoad.status == "refused",
+            PrefillBundleLoad.bundle_sha256 == sha,
+            PrefillBundleLoad.error == code).first()
+        if seen is not None:
+            db.session.delete(load)
+            db.session.commit()
+        else:
+            _fill_from_manifest(load, manifest)
+            load.status, load.error, load.run_token = "refused", code, None
+            load.finished_at = _now()
+            db.session.commit()
+        (logger.error if problem else logger.info)(
+            "Pre-fill bundle for user %s not loaded on their Yes: %s",
+            load.user_id, code)
+        return "refused"
+    _fill_from_manifest(load, manifest)
+    db.session.flush()
+    _progress(load.id, token, stage="header")
+    db.session.commit()
+    return None
 
 
 def _load_header(load, user, header, token):
@@ -598,6 +680,7 @@ def _load_header(load, user, header, token):
     account already has from an earlier load of the material (same time,
     model and type) are not written again."""
     from backend.utils.intentions_versions import KIND as INTENTIONS, protected_version
+    profiles, recents, artifacts = clean_header(header)
     uid = user.id
     handle = pb.clean_handle(load.handle)
     if handle and not user.prefilled_handle:
@@ -611,13 +694,10 @@ def _load_header(load, user, header, token):
     # As every pre-fill: a bootstrapped corpus is built on the Batch path.
     user.profile_force_batch = True
     # Nothing else of the account changes: not its time zone, consent,
-    # sign-in, X handle, settings or defaults. Each of those is a sign
-    # that a person used the account, and an account nobody claimed must
-    # stay recognisable as unclaimed for its deletion after 90 days
-    # (#685). The bundle's own time zone is the lab's, not the person's.
-    check_prefill_header(header)
+    # sign-in, X handle, approval, plan, settings or defaults. Each is a
+    # sign that a person used the account, and an account nobody claimed
+    # must stay recognisable as unclaimed (#685).
 
-    profiles = header.get("profiles") or []
     have = {(p.created_at, p.generated_by, p.generation_type): p.id
             for p in UserProfile.query.with_entities(
                 UserProfile.created_at, UserProfile.generated_by,
@@ -629,12 +709,12 @@ def _load_header(load, user, header, token):
                pf.get("generated_by") or "import",
                pf.get("generation_type") or "initial")
         if key[0] is not None and key in have:
-            profile_map[pf["id"]] = have[key]
+            profile_map[pf.get("id")] = have[key]
             continue
         row = dump_rows.new_profile(pf, uid)
         db.session.add(row)
         db.session.flush()
-        profile_map[pf["id"]] = row.id
+        profile_map[pf.get("id")] = row.id
         made.append(pf)
     dump_rows.remap_profile_links(made, profile_map)
 
@@ -644,21 +724,16 @@ def _load_header(load, user, header, token):
             model.user_id == uid)}
 
     have_rc = seen(UserRecentContext)
-    for rc in header.get("recent_contexts") or []:
+    for rc in recents:
         if (dump_rows.dt(rc.get("created_at")), rc.get("generated_by") or "import") in have_rc:
             continue
         db.session.add(dump_rows.new_recent_context(
             rc, uid, profile_map.get(rc.get("profile_id"))))
-    have_td = seen(UserTodo)
-    for td in header.get("todos") or []:
-        if (dump_rows.dt(td.get("created_at")), td.get("generated_by") or "import") in have_td:
-            continue
-        db.session.add(dump_rows.new_todo(td, uid))
     # The user's edit wins (#412): intentions the person wrote stay.
     kept_intentions = protected_version(uid)
     have_a = seen(UserArtifact, UserArtifact.kind)
-    artifacts = 0
-    for a in header.get("artifacts") or []:
+    count = 0
+    for a in artifacts:
         if a.get("kind") == INTENTIONS and kept_intentions is not None:
             continue
         key = (dump_rows.dt(a.get("created_at")),
@@ -666,37 +741,33 @@ def _load_header(load, user, header, token):
         if key in have_a:
             continue
         db.session.add(dump_rows.new_artifact(a, uid))
-        artifacts += 1
+        count += 1
     _progress(load.id, token, stage="nodes", profiles_count=len(made),
-              artifacts_count=artifacts, stalled_runs=0)
+              artifacts_count=count, stalled_runs=0)
     db.session.commit()
 
 
-def _node_chunk(load, uid, path, token, chunk):
-    """Pass 1: write the next chunk of entries. False when none are left.
-    Every entry is checked to be a pre-fill's (check_prefill_entry) before
-    the chunk writes anything."""
+def _node_chunk(load, uid, storage, dump_username, token):
+    """Pass 1: write the next part's entries. False when none are left.
+    Every entry is cleaned (clean_entry) before the chunk writes
+    anything."""
     from backend.utils.encryption import new_dek
-    header, entries = pb.open_bundle(path, skip=load.nodes_done)
-    try:
-        batch = list(islice(entries, chunk))
-    finally:
-        entries.close()
-    if not batch:
+    members = load.members or []
+    index = pb.member_at(members, load.nodes_done)
+    if index is None:
         _progress(load.id, token, stage="links", stalled_runs=0)
         db.session.commit()
         return False
-    dump_username = (header.get("user") or {}).get("username")
-    for nd in batch:
-        check_prefill_entry(nd, dump_username)
+    batch = [clean_entry(nd, dump_username)
+             for nd in pb.read_member(storage, load.x_id, members[index])]
     # Already in the account (a load run again, or a pre-fill made here
     # before): matched on the tweet's key. Metadata only.
     keys = [nd["source_key"] for nd in batch]
     existing = dict(db.session.query(Node.source_key, Node.id).filter(
-        Node.human_owner_id == uid, Node.source_key.in_(keys)))
-    # Stored now: an entry's updated_at is when it was stored here (the
-    # deletion of unclaimed accounts, #685, counts from the first one),
-    # not when the lab stored it.
+        Node.human_owner_id == uid, Node.source_key.in_(keys))) if keys else {}
+    # An entry's updated_at is when it was stored here (the deletion of
+    # unclaimed accounts, #685, counts from the first one), not when the
+    # lab stored it.
     stored_at = _now()
     dek = None
     created = skipped = 0
@@ -708,7 +779,7 @@ def _node_chunk(load, uid, path, token, chunk):
                 created=False, user_id=uid))
             skipped += 1
             continue
-        if dek is None and nd.get("privacy_level", "private") != "public":
+        if dek is None:
             dek = new_dek() or False   # False: encryption is off here
         node = dump_rows.new_node(nd, uid, uid, dek=dek or None)
         node.updated_at = stored_at
@@ -731,18 +802,19 @@ def _node_chunk(load, uid, path, token, chunk):
     return True
 
 
-def _link_chunk(load, path, token, chunk):
-    """Pass 2: point the next chunk's new entries at their parents and
-    continuations. False when none are left."""
-    _header, entries = pb.open_bundle(path, skip=load.links_done)
-    try:
-        batch = list(islice(entries, chunk))
-    finally:
-        entries.close()
-    if not batch:
+def _link_chunk(load, storage, token):
+    """Pass 2: point the next part's entries at their parents and
+    continuations, up to the entries pass 1 wrote (all of them, or as
+    many as were loaded before a no). An entry this load wrote gets its
+    links; one that was already there gets only links it lacks (a load
+    a no stopped earlier left them unset). False when none are left."""
+    members = load.members or []
+    index = pb.member_at(members, load.links_done)
+    if index is None or load.links_done >= load.nodes_done:
         _progress(load.id, token, stage="finish", stalled_runs=0)
         db.session.commit()
         return False
+    batch = pb.read_member(storage, load.x_id, members[index])
     linked = [nd for nd in batch
               if any(nd.get(c) for c in dump_rows.LINK_COLUMNS)]
     relinked = 0
@@ -754,12 +826,20 @@ def _link_chunk(load, path, token, chunk):
                   for r in PrefillBundleNodeMap.query.filter(
                       PrefillBundleNodeMap.load_id == load.id,
                       PrefillBundleNodeMap.old_id.in_(wanted))}
+        kept = [mapped[nd["id"]][0] for nd in linked
+                if nd["id"] in mapped and not mapped[nd["id"]][1]]
+        current = {row[0]: row[1:] for row in db.session.query(
+            Node.id, Node.parent_id, Node.continuation_node_id,
+            Node.linked_node_id).filter(Node.id.in_(kept))} if kept else {}
         for nd in linked:
             own = mapped.get(nd["id"])
-            if own is None or not own[1]:
-                continue    # an entry that was already here keeps its links
+            if own is None:
+                continue
             values = {c: mapped[nd[c]][0] for c in dump_rows.LINK_COLUMNS
                       if nd.get(c) in mapped}
+            if not own[1]:
+                have = dict(zip(dump_rows.LINK_COLUMNS, current.get(own[0], ())))
+                values = {c: v for c, v in values.items() if have.get(c) is None}
             if values:
                 # updated_at kept: the entry was stored, not edited (its
                 # embedding stays current; #685 reads it as the store time).
@@ -775,51 +855,54 @@ def _link_chunk(load, path, token, chunk):
 
 
 def _finish(load, token):
+    """Done, or stopped by a no. Only a done load of the person's own Yes
+    lets them in."""
     PrefillBundleNodeMap.query.filter_by(load_id=load.id).delete(
         synchronize_session=False)
     user = db.session.get(User, load.user_id)
+    declined = load.error == "prefill_declined" or user.prefill_consent == "no"
     approved = False
-    if load.approve_when_done and not user.approved \
-            and user.deactivated_at is None:
-        # "Lets them in when it is ready" (Peter, 2026-11-13). An account
-        # an admin deactivated stays deactivated.
-        user.approved = True
-        user.approved_at = _now()
-        approved = True
-    _progress(load.id, token, status="done", stage="done", error=None,
+    if load.approve_when_done and not declined:
+        approved = let_in_when_ready(user)
+    _progress(load.id, token, status="stopped" if declined else "done",
+              stage="done", error="prefill_declined" if declined else None,
               run_token=None, finished_at=_now())
     db.session.commit()
-    logger.info("Pre-fill bundle load %s done for user %s: %s entries "
+    logger.info("Pre-fill bundle load %s %s for user %s: %s entries "
                 "created, %s already there, %s relinked%s", load.id,
-                load.user_id, load.created_count, load.skipped_count,
-                load.relinked_count, ", account approved" if approved else "")
+                "stopped by a no" if declined else "done", load.user_id,
+                load.created_count, load.skipped_count, load.relinked_count,
+                ", account let in" if approved else "")
+    return "stopped" if declined else "done"
 
 
 def _stop_reason(load, user, storage):
-    """Why the load must stop now (a code), or None. A "no" given
-    meanwhile stops it (#662): what was loaded stays, as for any
-    pre-fill."""
+    """Why the load must stop now (a code), or None. A no is not a stop
+    here: _work links what was loaded first."""
     if load.stalled_runs > MAX_STALLED_RUNS:
         return "stalled"
     refusal = hard_refusal(user, load.x_id)
-    if refusal:
+    if refusal and refusal[0] != "prefill_declined":
         return refusal[0]
     if pb.exclusion(storage, load.x_id) is not None:
         return "excluded"
     return None
 
 
-def _work(load_id, token, path, user, deadline, chunk, max_chunks):
-    """The header, then chunks of entries and of links, until the load
-    reaches "finish" or the run's time (or chunk count) is up. Returns
-    the stage reached."""
-    header, entries = pb.open_bundle(path)
-    entries.close()
+def _work(load_id, token, storage, user, deadline, max_chunks):
+    """The header, then parts of entries and of links, until the load
+    reaches "finish" or the run's time (or part count) is up. Returns the
+    stage reached. A no given meanwhile ends pass 1 where it is: the
+    entries loaded so far are linked and stay (#662)."""
     load = db.session.get(PrefillBundleLoad, load_id)
-    if load.stage == "download":
-        _progress(load_id, token, stage="header")
-        db.session.commit()
-        load = db.session.get(PrefillBundleLoad, load_id)
+    if load.stage == "header":
+        if user.prefill_consent == "no":
+            raise pb.BundleError("prefill_declined", "The person said no.")
+        # Every part checked before anything is written; each is checked
+        # again when it is read, in case the object changes meanwhile.
+        pb.verify_bundle(storage, load.x_id, load.members, load.bundle_sha256)
+    header = pb.read_member(storage, load.x_id, load.members[0])[0]
+    dump_username = (header.get("user") or {}).get("username")
     if load.stage == "header":
         _load_header(load, user, header, token)
     steps = 0
@@ -829,23 +912,25 @@ def _work(load_id, token, path, user, deadline, chunk, max_chunks):
             consent = db.session.query(User.prefill_consent).filter(
                 User.id == load.user_id).scalar()
             if consent == "no":
-                raise pb.BundleError("prefill_declined", "The person said no.")
-            _node_chunk(load, load.user_id, path, token, chunk)
+                _progress(load_id, token, stage="links",
+                          error="prefill_declined")
+                db.session.commit()
+                continue
+            _node_chunk(load, load.user_id, storage, dump_username, token)
         elif load.stage == "links":
-            _link_chunk(load, path, token, chunk)
+            _link_chunk(load, storage, token)
         else:
             break
         steps += 1
     return db.session.get(PrefillBundleLoad, load_id).stage
 
 
-def run_load(load_id, *, budget=RUN_SECONDS, chunk=NODE_CHUNK, dispatch=None,
-             max_chunks=None):
+def run_load(load_id, *, budget=RUN_SECONDS, dispatch=None, max_chunks=None):
     """One run of a load (the task's body). Works until the load is done
-    or ``budget`` seconds have passed (or ``max_chunks`` chunks, a tests
-    hook), then sends the next run. Returns "done", "continuing",
-    "failed", "retrying", "busy" (another run holds it), "lost" or
-    "disabled"."""
+    or ``budget`` seconds have passed (or ``max_chunks`` parts, a tests
+    hook), then sends the next run. Returns "done", "stopped",
+    "continuing", "failed", "refused", "no_bundle", "retrying", "busy"
+    (another run holds it), "lost" or "disabled"."""
     dispatch = dispatch or _dispatch
     if not pb.bundles_enabled():
         return "disabled"   # the beat resumes it once switched on again
@@ -853,21 +938,21 @@ def run_load(load_id, *, budget=RUN_SECONDS, chunk=NODE_CHUNK, dispatch=None,
     if token is None:
         return "busy"
     deadline = time.monotonic() + budget
-    path = None
     try:
-        load = db.session.get(PrefillBundleLoad, load_id)
-        path = _work_path(load_id, load.bundle_sha256)
-        user = db.session.get(User, load.user_id)
         storage = pb.configured_storage()
+        load = db.session.get(PrefillBundleLoad, load_id)
+        if load.stage == "check":
+            outcome = _check_self_load(load, token, storage)
+            if outcome is not None:
+                return outcome
+            load = db.session.get(PrefillBundleLoad, load_id)
+        user = db.session.get(User, load.user_id)
         reason = _stop_reason(load, user, storage)
         if reason:
             raise pb.BundleError(reason, reason)
-        path = _local_copy(load, storage)
-        stage = _work(load_id, token, path, user, deadline, chunk, max_chunks)
+        stage = _work(load_id, token, storage, user, deadline, max_chunks)
         if stage == "finish":
-            _finish(db.session.get(PrefillBundleLoad, load_id), token)
-            _remove_quietly(path)
-            return "done"
+            return _finish(db.session.get(PrefillBundleLoad, load_id), token)
         _release(load_id, token)
         dispatch(load_id)
         return "continuing"
@@ -875,10 +960,12 @@ def run_load(load_id, *, budget=RUN_SECONDS, chunk=NODE_CHUNK, dispatch=None,
         db.session.rollback()
         return "lost"
     except pb.BundleError as e:
-        _fail(load_id, token, e.code)
-        _remove_quietly(path)
-        return "failed"
-    except Exception as e:  # noqa: BLE001 - counted, retried, then failed
+        # A no before anything was loaded stops the load: nothing to show
+        # the person. Anything else is a failure the admin sees.
+        stopped = e.code == "prefill_declined"
+        _fail(load_id, token, e.code, status="stopped" if stopped else "failed")
+        return "stopped" if stopped else "failed"
+    except Exception as e:  # noqa: BLE001 - storage errors included: retried
         db.session.rollback()
         logger.warning("Pre-fill bundle load %s: a run stopped (%s); "
                        "trying again", load_id, type(e).__name__)

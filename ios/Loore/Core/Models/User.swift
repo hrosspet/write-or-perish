@@ -43,6 +43,9 @@ struct CurrentUser: Decodable, Equatable, Sendable {
     /// The gate and the user's own switch: every Glean card, button and menu
     /// entry shows only when this is true (#475).
     var gleanEnabled: Bool
+    /// A load of the material Loore prepared for the person's X account
+    /// (#698), after their Yes on "Start from your tweets"; nil when none.
+    var startingPoint: StartingPoint?
 
     enum CodingKeys: String, CodingKey {
         case id, username, email, plan, timezone
@@ -73,6 +76,7 @@ struct CurrentUser: Decodable, Equatable, Sendable {
         case dataDeletion = "data_deletion"
         case gleanAvailable = "glean_available"
         case gleanEnabled = "glean_enabled"
+        case startingPoint = "starting_point"
     }
 
     init(from decoder: Decoder) throws {
@@ -109,6 +113,7 @@ struct CurrentUser: Decodable, Equatable, Sendable {
         dataDeletion = c.tolerant(.dataDeletion)
         gleanAvailable = c.tolerant(.gleanAvailable, default: false)
         gleanEnabled = c.tolerant(.gleanEnabled, default: false)
+        startingPoint = c.tolerant(.startingPoint)
     }
 
     /// Applies an email-state answer from any `/api/dashboard/email*` call
@@ -286,4 +291,35 @@ struct TimezoneResponse: Decodable, Sendable {
 /// Generic `{ "message": … }` answer.
 struct MessageResponse: Decodable, Sendable {
     var message: String?
+}
+
+
+/// `starting_point` in the user and `GET /api/dashboard/starting-point` (#698):
+/// the state of the load of the material Loore prepared for the person's X
+/// account (their public tweets and the profile drafted from them).
+struct StartingPoint: Decodable, Equatable, Sendable {
+    /// "checking" (is there material?), "preparing" (loading it), "ready",
+    /// "failed"; any other value reads as nothing to show.
+    var status: String
+    var done: Int?
+    var total: Int?
+
+    var isUnderWay: Bool { status == "checking" || status == "preparing" }
+}
+
+/// `GET /api/dashboard/starting-point` (#698).
+struct StartingPointResponse: Decodable, Sendable {
+    var startingPoint: StartingPoint?
+    var approved: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case startingPoint = "starting_point"
+        case approved
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        startingPoint = c.tolerant(.startingPoint)
+        approved = c.tolerant(.approved, default: false)
+    }
 }

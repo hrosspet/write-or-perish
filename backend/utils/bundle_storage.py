@@ -11,24 +11,30 @@ two implementations.
 An empty location gives None: nothing is read or written.
 
 Object names are relative ("bundles/<x_id>/manifest.json") and always use
-"/". Large objects move between storage and a local file in chunks
-(``download``, ``upload``), never as one bytes object; ``read_bytes`` is
-for the small ones (a manifest, a marker).
+"/". A bundle is uploaded from a local file in chunks (``upload``) and
+read back one part at a time by byte range (``read_range``); nothing
+reads a whole bundle into memory. ``read_bytes`` is for the small
+objects (a manifest, a marker).
+
+Every failure of the storage service, its credentials included, is a
+StorageError, raised within seconds: each call has a short timeout and no
+retries of the library's own (its default retry waits up to two
+minutes). The callers retry where it makes sense: a load's next run.
 """
 import os
 import shutil
 import tempfile
 
-# HEURISTIC: seconds one storage call may take before it fails. A
-# manifest read happens inside a request (the Yes on "Start from your
-# tweets"); a bundle download runs in a background task and may take
-# longer (DOWNLOAD_TIMEOUT_SECONDS).
+# HEURISTIC: seconds one storage call may take before it fails (small
+# reads and writes, one bundle part), and an upload of a whole bundle
+# from the lab.
 CALL_TIMEOUT_SECONDS = 10
-DOWNLOAD_TIMEOUT_SECONDS = 600
+UPLOAD_TIMEOUT_SECONDS = 600
 
 
 class StorageError(Exception):
-    """A storage call failed (network, permissions, a missing bucket)."""
+    """A storage call failed (network, credentials, permissions, a
+    missing bucket)."""
 
 
 def _clean(name):
@@ -49,12 +55,12 @@ class BundleStorage:
         """The object's bytes, or None. Small objects only."""
         raise NotImplementedError
 
-    def write_bytes(self, name, data, content_type="application/json"):
+    def read_range(self, name, start, length):
+        """``length`` bytes of the object from ``start``, or None when it
+        does not exist."""
         raise NotImplementedError
 
-    def download(self, name, dest_path):
-        """Copy the object to ``dest_path`` in chunks. False when it does
-        not exist."""
+    def write_bytes(self, name, data, content_type="application/json"):
         raise NotImplementedError
 
     def upload(self, name, src_path, content_type="application/gzip"):
@@ -91,6 +97,14 @@ class LocalDirStorage(BundleStorage):
         with open(path, "rb") as f:
             return f.read()
 
+    def read_range(self, name, start, length):
+        path = self._path(name)
+        if not os.path.isfile(path):
+            return None
+        with open(path, "rb") as f:
+            f.seek(start)
+            return f.read(length)
+
     def _atomic(self, name):
         path = self._path(name)
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -102,13 +116,6 @@ class LocalDirStorage(BundleStorage):
         with os.fdopen(fd, "wb") as f:
             f.write(data)
         os.replace(tmp, path)
-
-    def download(self, name, dest_path):
-        path = self._path(name)
-        if not os.path.isfile(path):
-            return False
-        shutil.copyfile(path, dest_path)
-        return True
 
     def upload(self, name, src_path, content_type="application/gzip"):
         path, fd, tmp = self._atomic(name)
@@ -135,22 +142,21 @@ class LocalDirStorage(BundleStorage):
                 yield os.path.relpath(full, self.root).replace(os.sep, "/")
 
 
+class _Missing(Exception):
+    """An object that does not exist (inside GCSStorage only)."""
+
+
 class GCSStorage(BundleStorage):
     """A bucket, optionally under a prefix. The client comes from the
     environment's default credentials (the VM's service account), made on
-    first use, so importing this module needs no network and no
-    google-cloud-storage package."""
+    first use inside the error handling, so importing this module needs no
+    network and no google-cloud-storage package, and missing credentials
+    are a StorageError like any other failure."""
 
     def __init__(self, bucket, prefix="", client=None):
         self.bucket_name = bucket
         self.prefix = (prefix or "").strip("/")
         self._client = client
-
-    def _bucket(self):
-        if self._client is None:
-            from google.cloud import storage
-            self._client = storage.Client()
-        return self._client.bucket(self.bucket_name)
 
     def _key(self, name):
         name = _clean(name)
@@ -160,73 +166,77 @@ class GCSStorage(BundleStorage):
     def _not_found(e):
         return type(e).__name__ == "NotFound" or getattr(e, "code", None) == 404
 
-    def _call(self, fn, *args, **kwargs):
+    def _call(self, fn):
+        """Run ``fn(client)``: a missing object is _Missing, every other
+        failure (credentials, network, timeouts, permissions) a
+        StorageError."""
         try:
-            return fn(*args, **kwargs)
+            if self._client is None:
+                from google.cloud import storage
+                self._client = storage.Client()
+            return fn(self._client)
         except Exception as e:  # noqa: BLE001 - one error type for callers
             if self._not_found(e):
-                raise
-            raise StorageError(f"storage call failed ({type(e).__name__})") from e
+                raise _Missing() from e
+            raise StorageError(
+                f"storage call failed ({type(e).__name__})") from e
+
+    def _blob(self, client, name):
+        return client.bucket(self.bucket_name).blob(self._key(name))
 
     def exists(self, name):
-        blob = self._bucket().blob(self._key(name))
-        return bool(self._call(blob.exists, timeout=CALL_TIMEOUT_SECONDS))
+        try:
+            return bool(self._call(lambda c: self._blob(c, name).exists(
+                timeout=CALL_TIMEOUT_SECONDS, retry=None)))
+        except _Missing:
+            return False
 
     def read_bytes(self, name):
-        blob = self._bucket().blob(self._key(name))
         try:
-            return self._call(blob.download_as_bytes,
-                              timeout=CALL_TIMEOUT_SECONDS)
-        except Exception as e:  # noqa: BLE001
-            if self._not_found(e):
-                return None
-            raise
+            return self._call(lambda c: self._blob(c, name).download_as_bytes(
+                timeout=CALL_TIMEOUT_SECONDS, retry=None))
+        except _Missing:
+            return None
+
+    def read_range(self, name, start, length):
+        # end is inclusive; a partial download has no whole-object
+        # checksum (the caller checks the part's own sha256).
+        try:
+            return self._call(lambda c: self._blob(c, name).download_as_bytes(
+                start=start, end=start + length - 1, checksum=None,
+                timeout=CALL_TIMEOUT_SECONDS, retry=None))
+        except _Missing:
+            return None
 
     def write_bytes(self, name, data, content_type="application/json"):
-        blob = self._bucket().blob(self._key(name))
-        self._call(blob.upload_from_string, data, content_type=content_type,
-                   timeout=CALL_TIMEOUT_SECONDS)
-
-    def download(self, name, dest_path):
-        blob = self._bucket().blob(self._key(name))
-        try:
-            # Chunked download to the file; the library checks its own
-            # checksum on the way, the caller its sha256 after.
-            self._call(blob.download_to_filename, dest_path,
-                       timeout=DOWNLOAD_TIMEOUT_SECONDS)
-        except Exception as e:  # noqa: BLE001
-            if self._not_found(e):
-                if os.path.exists(dest_path):
-                    os.remove(dest_path)
-                return False
-            raise
-        return True
+        self._call(lambda c: self._blob(c, name).upload_from_string(
+            data, content_type=content_type, timeout=CALL_TIMEOUT_SECONDS,
+            retry=None))
 
     def upload(self, name, src_path, content_type="application/gzip"):
-        blob = self._bucket().blob(self._key(name))
-        self._call(blob.upload_from_filename, src_path,
-                   content_type=content_type, timeout=DOWNLOAD_TIMEOUT_SECONDS)
+        self._call(lambda c: self._blob(c, name).upload_from_filename(
+            src_path, content_type=content_type,
+            timeout=UPLOAD_TIMEOUT_SECONDS))
 
     def delete(self, name):
-        blob = self._bucket().blob(self._key(name))
         try:
-            self._call(blob.delete, timeout=CALL_TIMEOUT_SECONDS)
-        except Exception as e:  # noqa: BLE001
-            if self._not_found(e):
-                return False
-            raise
+            self._call(lambda c: self._blob(c, name).delete(
+                timeout=CALL_TIMEOUT_SECONDS, retry=None))
+        except _Missing:
+            return False
         return True
 
     def list(self, prefix):
         key = self._key(prefix) if (prefix or "").strip("/") else self.prefix
         cut = len(self.prefix) + 1 if self.prefix else 0
-        if self._client is None:
-            self._bucket()
-        blobs = self._call(self._client.list_blobs, self.bucket_name,
-                           prefix=(key + "/") if key else None,
-                           timeout=CALL_TIMEOUT_SECONDS)
-        for blob in blobs:
-            yield blob.name[cut:]
+        try:
+            names = self._call(lambda c: [b.name for b in c.list_blobs(
+                self.bucket_name, prefix=(key + "/") if key else None,
+                timeout=CALL_TIMEOUT_SECONDS, retry=None)])
+        except _Missing:
+            return
+        for name in names:
+            yield name[cut:]
 
 
 def storage_for(location):

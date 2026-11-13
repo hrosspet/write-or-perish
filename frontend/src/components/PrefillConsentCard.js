@@ -30,11 +30,18 @@ export default function PrefillConsentCard({ style, delayHint }) {
   const [error, setError] = useState("");
   const [answered, setAnswered] = useState(null);
 
-  // A Yes found material Loore had prepared for this X account (#698):
-  // it is being loaded, and the card says so until it is ready (also
-  // after a reload, while the load runs).
-  if (user && user.starting_point && user.starting_point.status === "preparing") {
-    return <StartingPointProgress style={style} />;
+  // After a Yes the server looks for material Loore prepared for this X
+  // account (#698); while it looks or loads, the card follows it (also
+  // after a reload).
+  const sp = user && user.starting_point && user.starting_point.status;
+  if (sp === "checking" || sp === "preparing") {
+    return (
+      <StartingPointProgress
+        initial={sp}
+        noted={tweetSeedNoted(user, "yes")}
+        style={style}
+      />
+    );
   }
 
   // Gate on the server state — except right after answering, when the

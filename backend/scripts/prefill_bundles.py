@@ -39,7 +39,6 @@ bundle yet. unexclude takes an X id off the list (the person opted in
 again); the next export writes the bundle.
 """
 import argparse
-import gzip
 import hashlib
 import json
 import os
@@ -49,8 +48,6 @@ import tempfile
 from contextlib import redirect_stderr, redirect_stdout
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
-
-GZIP_LEVEL = 6   # HEURISTIC: about 4x on tweet JSON, several times faster than 9
 
 
 def _storage(location):
@@ -107,7 +104,7 @@ def holds_other_material(user_id):
     from sqlalchemy import func, or_
     from backend.extensions import db
     from backend.models import Node, UserArtifact, UserProfile, UserTodo
-    from backend.utils.prefill_bundle_load import PERSON_MADE
+    from backend.utils.prefill_bundle_load import ARTIFACT_KINDS, PERSON_MADE
     from backend.utils.privacy import PREFILL_PROVENANCES
     other = db.session.query(Node.id).filter(
         or_(Node.user_id == user_id, Node.human_owner_id == user_id),
@@ -123,7 +120,13 @@ def holds_other_material(user_id):
                 model.user_id == user_id,
                 model.generated_by.in_(PERSON_MADE)).first() is not None:
             return True
-    return False
+    # Todos and artifact kinds no pre-fill drafts (production refuses them).
+    if db.session.query(UserTodo.id).filter(
+            UserTodo.user_id == user_id).first() is not None:
+        return True
+    return db.session.query(UserArtifact.id).filter(
+        UserArtifact.user_id == user_id, UserArtifact.deleted_at.is_(None),
+        UserArtifact.kind.notin_(ARTIFACT_KINDS)).first() is not None
 
 
 def fingerprint(user):
@@ -166,32 +169,33 @@ def _node_count(user):
 
 
 def compress(raw_path, gz_path):
-    """Gzip the dump line by line and count what it holds. Returns
-    (header, stats); one line in memory at a time."""
-    stats = {"lines": 0, "nodes": 0, "embeddings": 0,
-             "oldest": None, "newest": None}
-    header = None
-    with open(raw_path, encoding="utf-8") as src, \
-            open(gz_path, "wb") as raw_out, \
-            gzip.GzipFile(filename="", mode="wb", fileobj=raw_out,
-                          compresslevel=GZIP_LEVEL, mtime=0) as out:
-        for line in src:
-            if not line.strip():
-                continue
-            out.write(line.encode("utf-8"))
-            stats["lines"] += 1
-            if header is None:
-                header = json.loads(line)
-                continue
-            nd = json.loads(line)
-            stats["nodes"] += 1
-            if nd.get("embedding"):
-                stats["embeddings"] += 1
-            at = nd.get("created_at")
-            if at:
-                stats["oldest"] = at if stats["oldest"] is None else min(stats["oldest"], at)
-                stats["newest"] = at if stats["newest"] is None else max(stats["newest"], at)
-    return header, stats
+    """Write the dump as the bundle's gzip members (prefill_bundles.
+    write_members) and count what it holds. Returns (header, stats,
+    object): the header line, counts and dates, and the manifest's
+    ``object`` part. One line, and one member, in memory at a time."""
+    from backend.utils import prefill_bundles as pb
+    stats = {"nodes": 0, "embeddings": 0, "oldest": None, "newest": None}
+    seen = {"header": None}
+
+    def lines():
+        with open(raw_path, encoding="utf-8") as src:
+            for line in src:
+                if not line.strip():
+                    continue
+                if seen["header"] is None:
+                    seen["header"] = json.loads(line)
+                else:
+                    nd = json.loads(line)
+                    stats["nodes"] += 1
+                    if nd.get("embedding"):
+                        stats["embeddings"] += 1
+                    at = nd.get("created_at")
+                    if at:
+                        stats["oldest"] = at if stats["oldest"] is None else min(stats["oldest"], at)
+                        stats["newest"] = at if stats["newest"] is None else max(stats["newest"], at)
+                yield line
+    obj = pb.write_members(lines(), gz_path)
+    return seen["header"], stats, obj
 
 
 def _iso_z(value):
@@ -212,7 +216,8 @@ def _archive_snapshot():
 
 
 def export_one(user, storage, workdir, fp, snapshot=None):
-    """Dump, gzip and upload one account; the manifest last. Returns it."""
+    """Dump, gzip and upload one account; the manifest last. Returns it,
+    or None when the X id was excluded meanwhile (nothing stays)."""
     from backend.scripts import dump_user
     from backend.utils import prefill_bundles as pb
     x_id = str(user.twitter_id)
@@ -222,7 +227,7 @@ def export_one(user, storage, workdir, fp, snapshot=None):
         with open(os.devnull, "w") as devnull, redirect_stdout(devnull), \
                 redirect_stderr(devnull):
             dump_user._run(user.username, raw, include_private=True)
-        header, stats = compress(raw, gz)
+        header, stats, obj = compress(raw, gz)
         os.remove(raw)
         artifacts = header.get("artifacts") or []
         profiles = header.get("profiles") or []
@@ -245,14 +250,23 @@ def export_one(user, storage, workdir, fp, snapshot=None):
             "oldest_entry_at": _iso_z(stats["oldest"]),
             "newest_entry_at": _iso_z(stats["newest"]),
             "profile_generated_by": profiles[-1].get("generated_by") if profiles else None,
-            "object": {"name": pb.BUNDLE_OBJECT, "sha256": pb.sha256_file(gz),
-                       "bytes": os.path.getsize(gz), "lines": stats["lines"]},
+            "object": obj,
         }
+        # Checked again just before writing and once more after: a
+        # deletion (delete --x-id) made while this run was going must not
+        # be undone by it. delete writes the exclusion first and then
+        # removes the objects, so either the check here sees it, or the
+        # delete removes what was written before it.
+        if pb.exclusion(storage, x_id) is not None:
+            return None
         storage.upload(pb.bundle_name(x_id), gz)
         pb.write_manifest(storage, manifest)
         handle = pb.clean_handle(user.prefilled_handle)
         if handle:
             pb.write_handle_index(storage, handle, x_id)
+        if pb.exclusion(storage, x_id) is not None:
+            pb.remove_objects(storage, x_id, handle)
+            return None
         return manifest
     finally:
         for p in (raw, gz):
@@ -315,6 +329,10 @@ def run_export(storage, *, dry_run=False, only=None, limit=None, force=False,
                 db.session.expunge_all()
                 continue
             manifest = export_one(user, storage, workdir, fp, snapshot)
+            if manifest is None:
+                counts["skipped_excluded"] += 1
+                db.session.expunge_all()
+                continue
             counts["exported"] += 1
             counts["exported_nodes"] += manifest["counts"]["nodes"]
             counts["exported_bytes"] += manifest["object"]["bytes"]

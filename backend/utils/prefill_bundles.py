@@ -9,13 +9,20 @@ keyed by the member's X id, the identity an X sign-in proves:
     handles/<handle>.json            {"x_id"}: finds an X id for the admin
     excluded/<x_id>.json             {"x_id", "reason", "excluded_at"}
 
+The bundle is a series of gzip members: the header line alone, then
+MEMBER_LINES entries per member. ``gzip`` reads it as one file; a load
+reads one member at a time by its byte range (``read_member``), checks
+that member's sha256, and never downloads or decompresses the rest. So
+a load resumes at any member without reading what came before, and holds
+one member in memory.
+
 The manifest is written after the bundle, so a bundle without a manifest
 (an export that stopped between the two) is never read; the next export
 writes both again. It carries the formats, the X id, the handle at
 export time, counts, the date range of the entries, when it was
-exported, the bundle object's sha256 and size, and a fingerprint of the
-lab account's metadata (an export skips an account whose fingerprint has
-not changed).
+exported, the bundle object's sha256 and size with each member's offset,
+length, line count and sha256, and a fingerprint of the lab account's
+metadata (an export skips an account whose fingerprint has not changed).
 
 An X id on the exclusion list is never exported again and never loaded:
 a person who asked for deletion, declined, or whose account went
@@ -28,6 +35,7 @@ import gzip
 import hashlib
 import json
 import re
+import zlib
 from datetime import datetime, timezone
 
 from backend.utils.bundle_storage import storage_for
@@ -35,6 +43,11 @@ from backend.utils.bundle_storage import storage_for
 BUNDLE_FORMAT = 1
 # dump_user.FORMAT_VERSION values a load understands.
 DUMP_FORMATS = (2,)
+# HEURISTIC: entries per gzip member, which is also a load's chunk (one
+# commit, one data key): what load_user.py and the imports use. About
+# half a megabyte without embeddings, a few megabytes with them.
+MEMBER_LINES = 500
+_GZIP_LEVEL = 6   # about 4x on tweet JSON, several times faster than 9
 
 BUNDLE_OBJECT = "bundle.jsonl.gz"
 MANIFEST_OBJECT = "manifest.json"
@@ -162,7 +175,30 @@ def manifest_problem(manifest, x_id):
     obj = manifest.get("object") or {}
     if not obj.get("sha256") or not isinstance(obj.get("lines"), int):
         return BundleError("manifest", "The manifest has no checksum.")
+    if member_problem(obj):
+        return BundleError("manifest", "The manifest's member index is not "
+                                       "consistent.")
     return None
+
+
+def member_problem(obj):
+    """Whether a manifest object's member index is unusable: members must
+    be contiguous byte ranges, the first one the header line alone, with a
+    sha256 each, adding up to the object's lines and bytes."""
+    members = obj.get("members")
+    if not isinstance(members, list) or not members:
+        return True
+    at, lines = 0, 0
+    for m in members:
+        if not isinstance(m, dict) or m.get("offset") != at \
+                or not isinstance(m.get("length"), int) or m["length"] <= 0 \
+                or not isinstance(m.get("lines"), int) or m["lines"] <= 0 \
+                or not m.get("sha256"):
+            return True
+        at += m["length"]
+        lines += m["lines"]
+    return (members[0]["lines"] != 1 or lines != obj.get("lines")
+            or (obj.get("bytes") is not None and at != obj.get("bytes")))
 
 
 def write_manifest(storage, manifest):
@@ -219,14 +255,24 @@ def delete_bundle(storage, x_id, reason):
     the names deleted. Works whether or not a bundle exists."""
     if not valid_x_id(x_id):
         raise ValueError("an X id is digits only")
-    deleted = []
     manifest = read_manifest(storage, x_id)
-    # Exclusion first: an export running meanwhile skips the X id.
+    # The exclusion first, then the objects: an export checks the list
+    # just before it writes an account and again after, and removes what
+    # it wrote when the X id was excluded meanwhile, so either it sees
+    # the exclusion or this deletes what it wrote.
     write_exclusion(storage, x_id, reason)
+    return remove_objects(storage, x_id, (manifest or {}).get("handle"))
+
+
+def remove_objects(storage, x_id, handle=None):
+    """Delete the bundle, the manifest and the handle index entry of
+    ``x_id`` (the entry only while it points at this X id). The
+    exclusion list is not touched. Returns the names deleted."""
+    deleted = []
     for name in (manifest_name(x_id), bundle_name(x_id)):
         if storage.delete(name):
             deleted.append(name)
-    handle = clean_handle((manifest or {}).get("handle"))
+    handle = clean_handle(handle)
     if handle and lookup_handle(storage, handle) == str(x_id):
         if storage.delete(handle_index_name(handle)):
             deleted.append(handle_index_name(handle))
@@ -244,6 +290,95 @@ def sha256_file(path):
                 break
             h.update(block)
     return h.hexdigest()
+
+
+def write_members(lines, dest_path, member_lines=None):
+    """Write ``lines`` (JSON strings: the header, then the entries) to
+    ``dest_path`` as gzip members: the header alone, then ``member_lines``
+    (MEMBER_LINES) entries each. Returns the manifest's ``object`` part
+    (sha256, bytes, lines, members). One member in memory at a time."""
+    member_lines = member_lines or MEMBER_LINES
+    whole = hashlib.sha256()
+    members = []
+    state = {"at": 0, "lines": 0}
+
+    with open(dest_path, "wb") as out:
+        def flush(batch):
+            comp = zlib.compressobj(_GZIP_LEVEL, zlib.DEFLATED, 31)
+            data = comp.compress("".join(batch).encode("utf-8")) + comp.flush()
+            out.write(data)
+            whole.update(data)
+            members.append({"offset": state["at"], "length": len(data),
+                            "lines": len(batch),
+                            "sha256": hashlib.sha256(data).hexdigest()})
+            state["at"] += len(data)
+            state["lines"] += len(batch)
+
+        batch, header_done = [], False
+        for line in lines:
+            if not line.strip():
+                continue
+            batch.append(line if line.endswith("\n") else line + "\n")
+            if not header_done or len(batch) >= member_lines:
+                flush(batch)
+                batch, header_done = [], True
+        if batch:
+            flush(batch)
+    return {"name": BUNDLE_OBJECT, "sha256": whole.hexdigest(),
+            "bytes": state["at"], "lines": state["lines"], "members": members}
+
+
+def member_start(members, index):
+    """How many lines come before member ``index`` (the header counts)."""
+    return sum(m["lines"] for m in members[:index])
+
+
+def member_at(members, entries_done):
+    """The member that starts after ``entries_done`` entries (the header
+    not counted), or None when every entry has been read."""
+    seen = 0
+    for i, m in enumerate(members[1:], 1):
+        if seen == entries_done:
+            return i
+        seen += m["lines"]
+    return None
+
+
+def verify_bundle(storage, x_id, members, sha256):
+    """Check every part, and the whole object, against the manifest before
+    a load writes anything: one streaming read, one part in memory at a
+    time, nothing decompressed. BundleError("checksum") on a mismatch."""
+    whole = hashlib.sha256()
+    for member in members:
+        data = storage.read_range(bundle_name(x_id), member["offset"],
+                                  member["length"])
+        if data is None:
+            raise BundleError("no_bundle", "The bundle is gone from storage.")
+        if len(data) != member["length"] or \
+                hashlib.sha256(data).hexdigest() != member["sha256"]:
+            raise BundleError("checksum", "A part of the bundle does not "
+                                          "match its manifest.")
+        whole.update(data)
+    if whole.hexdigest() != sha256:
+        raise BundleError("checksum", "The bundle does not match its manifest.")
+
+
+def read_member(storage, x_id, member):
+    """The parsed lines of one member, read by its byte range and checked
+    against its sha256 before anything is parsed."""
+    data = storage.read_range(bundle_name(x_id), member["offset"],
+                              member["length"])
+    if data is None:
+        raise BundleError("no_bundle", "The bundle is gone from storage.")
+    if len(data) != member["length"] or \
+            hashlib.sha256(data).hexdigest() != member["sha256"]:
+        raise BundleError("checksum", "A part of the bundle does not match "
+                                      "its manifest.")
+    try:
+        text = zlib.decompress(data, 31).decode("utf-8")
+        return [json.loads(line) for line in text.splitlines() if line.strip()]
+    except (zlib.error, UnicodeDecodeError, ValueError):
+        raise BundleError("format", "A part of the bundle cannot be read.")
 
 
 def open_bundle(path, skip=0):

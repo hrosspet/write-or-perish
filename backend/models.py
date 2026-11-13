@@ -2372,10 +2372,12 @@ class PrefillBundleLoad(db.Model):
 
     origin: "admin" (the admin's "Make ready from prepared material") or
     "self" (the person's Yes on "Start from your tweets").
-    status: queued -> running -> done | failed; "refused" records an
+    status: queued -> running -> done | failed | stopped (a "no" given
+    while it ran: what was loaded stays, linked); "refused" records an
     automatic load that found a bundle but did not start (``error`` says
     why), so the admin sees it.
-    stage: download -> header -> nodes -> links -> finish -> done.
+    stage: check (a Yes: is there a bundle?) -> header -> nodes -> links
+    -> finish -> done.
 
     Nothing here is content: counts, the bundle's checksum and dates, the
     X id and the handle the bundle was made under, and ``error`` (a code
@@ -2400,7 +2402,7 @@ class PrefillBundleLoad(db.Model):
     approve_when_done = db.Column(db.Boolean, nullable=False, default=False,
                                   server_default=db.text("false"))
     status = db.Column(db.String(16), nullable=False, default="queued")
-    stage = db.Column(db.String(16), nullable=False, default="download")
+    stage = db.Column(db.String(16), nullable=False, default="check")
     error = db.Column(db.String(255), nullable=True)
     # The bundle object's sha256 from its manifest, checked after every
     # download; the formats and dates the manifest gave.
@@ -2409,6 +2411,10 @@ class PrefillBundleLoad(db.Model):
     dump_format = db.Column(db.Integer, nullable=True)
     exported_at = db.Column(db.DateTime, nullable=True)
     newest_entry_at = db.Column(db.DateTime, nullable=True)
+    # The bundle's parts as the manifest gave them ([{offset, length,
+    # lines, sha256}], the header first): a run reads the next part by its
+    # byte range and checks its sha256.
+    members = db.Column(db.JSON, nullable=True)
     # Progress: entries in the bundle, entries read by the first pass
     # (created or found already there) and by the link pass.
     nodes_total = db.Column(db.Integer, nullable=False, default=0)

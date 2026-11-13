@@ -926,10 +926,15 @@ export default function AccountPage() {
             </div>
           )}
           <div style={helperStyle}>{tweetSeedHelp(user)}</div>
-          {user.starting_point && user.starting_point.status === "preparing" && (
-            // A Yes found material Loore had prepared for this X account
-            // (#698): it is being loaded; the profile opens when ready.
-            <StartingPointProgress style={{ marginTop: "0.8rem", maxWidth: "none" }} />
+          {user.starting_point && ["checking", "preparing"].includes(user.starting_point.status) && (
+            // After a Yes the server looks for material Loore prepared for
+            // this X account (#698): nothing shows while it looks; if it
+            // finds some, it says so and opens the profile when ready.
+            <StartingPointProgress
+              key={user.starting_point.status}
+              initial={user.starting_point.status}
+              style={{ marginTop: "0.8rem", maxWidth: "none" }}
+            />
           )}
         </div>
       )}

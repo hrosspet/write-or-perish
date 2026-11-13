@@ -67,6 +67,34 @@ test('a Yes that found prepared material says the starting point is being prepar
   expect(screen.queryByText(/^Noted\./)).toBeNull();
 });
 
+test('while the server looks, the usual line shows; once it finds material, it says so', async () => {
+  jest.useFakeTimers();
+  mockGet.mockResolvedValue({ data: { starting_point: { status: 'preparing' }, approved: false } });
+  mockPut.mockResolvedValue({ data: { user: {
+    ...baseUser, prefill_consent: 'yes', starting_point: { status: 'checking' },
+  } } });
+  renderAt(<PrefillConsentCard />, {});
+  fireEvent.click(screen.getByRole('button', { name: 'Yes, seed from my tweets' }));
+  expect(await screen.findByText(/^Noted\. We'll seed your Loore/)).toBeInTheDocument();
+  await act(async () => { jest.advanceTimersByTime(STARTING_POINT_POLL_MS); });
+  jest.useRealTimers();
+  expect(await screen.findByText('Preparing your starting point…')).toBeInTheDocument();
+});
+
+test('when the server finds nothing, the usual line stays and it stops asking', async () => {
+  jest.useFakeTimers();
+  mockGet.mockResolvedValue({ data: { starting_point: null, approved: false } });
+  renderAt(<PrefillConsentCard />, {
+    prefill_consent: 'yes', starting_point: { status: 'checking' },
+  });
+  await act(async () => { jest.advanceTimersByTime(STARTING_POINT_POLL_MS); });
+  await act(async () => { jest.advanceTimersByTime(STARTING_POINT_POLL_MS * 3); });
+  jest.useRealTimers();
+  expect(screen.getByText(/^Noted\. We'll seed your Loore/)).toBeInTheDocument();
+  expect(screen.queryByText('Preparing your starting point…')).toBeNull();
+  expect(mockGet).toHaveBeenCalledTimes(1);
+});
+
 test('control: a Yes with nothing prepared shows the usual line', async () => {
   mockPut.mockResolvedValue({ data: { user: { ...baseUser, prefill_consent: 'yes' } } });
   renderAt(<PrefillConsentCard />, {});

@@ -4,10 +4,10 @@ layout, and the load on production (admin and automatic paths).
 No network: storage is a local directory (LocalDirStorage), and a fake
 key service stands in for KMS. Each "server" is its own sqlite file: the
 lab (encryption off, as on the lab), and one or more production
-databases (encryption on).
+databases (encryption on). Bundle parts hold 3 entries here (500 in
+production), so every load spans several parts.
 """
 import gzip
-import inspect
 import json
 import os
 import socket
@@ -43,7 +43,7 @@ from backend.utils import encryption  # noqa: E402
 from backend.utils import prefill_bundles as pb  # noqa: E402
 from backend.utils import prefill_bundle_load as pbl  # noqa: E402
 from backend.utils.bundle_storage import (  # noqa: E402
-    GCSStorage, LocalDirStorage, storage_for,
+    GCSStorage, LocalDirStorage, StorageError, storage_for,
 )
 from backend.scripts import load_user  # noqa: E402
 from backend.scripts import prefill_bundles as cli  # noqa: E402
@@ -93,13 +93,12 @@ def world(tmp_path, monkeypatch):
 
     monkeypatch.setattr(encryption, "_wrap_dek", lambda dek: b"w:" + dek)
     monkeypatch.setattr(encryption, "_unwrap_dek", lambda w: w[2:])
+    monkeypatch.setattr(pb, "MEMBER_LINES", 3)
     bucket = tmp_path / "bucket"
     bucket.mkdir()
     dispatched = []
     monkeypatch.setattr(pbl, "_dispatch",
                         lambda load_id, countdown=0: dispatched.append(load_id))
-    work = tmp_path / "work"
-    monkeypatch.setattr(pbl, "_work_dir", lambda: str(work))
 
     class World:
         pass
@@ -134,8 +133,8 @@ T0 = datetime(2024, 1, 1, 12, 0, 0)
 def _seed_lab_member(username="ca_alice", handle="alice", x_id="1001", n=7,
                      **user_kw):
     """A pre-filled lab account: n tweets (a reply chain, a continuation),
-    a one-window profile set with its final merge, an
-    intentions artifact and a recent context."""
+    a one-window profile set with its final merge, an intentions artifact
+    and a recent context."""
     user = User(username=username, prefilled_handle=handle, twitter_id=x_id,
                 approved=False, **user_kw)
     db.session.add(user)
@@ -188,10 +187,54 @@ def _seed_lab_member(username="ca_alice", handle="alice", x_id="1001", n=7,
     return user
 
 
-def _export(world, monkeypatch, **kw):
+def _export(world, monkeypatch, storage=None, **kw):
     _lab_mode(monkeypatch)
     with world.lab.app_context():
-        return cli.run_export(world.storage, out=lambda *_: None, **kw)
+        return cli.run_export(storage or world.storage, out=lambda *_: None, **kw)
+
+
+def _bundle(world, monkeypatch, **seed):
+    with world.lab.app_context():
+        _seed_lab_member(**seed)
+    _export(world, monkeypatch)
+    _prod_mode(monkeypatch)
+
+
+def _entry(i, x_id="1001", **over):
+    """One dumped tweet as dump_user writes it."""
+    row = {"id": 100 + i, "author_username": "ca_hand", "owner_is_user": True,
+           "parent_id": None, "continuation_node_id": None,
+           "linked_node_id": None, "node_type": "user", "llm_model": None,
+           "content": f"hand tweet {i}", "prompt": None, "prompt_key": None,
+           "token_count": 4, "distributed_tokens": 0,
+           "privacy_level": "private", "ai_usage": "chat",
+           "source_key": f"twitter:{x_id}9{i:02d}", "origin": "twitter",
+           "provenance": "prefill_ca", "tool_calls_meta": None,
+           "created_at": (T0 + timedelta(days=i)).isoformat(),
+           "updated_at": "2026-11-03T00:00:00", "embedding": None}
+    row.update(over)
+    return row
+
+
+def _put_bundle(world, entries, x_id="1001", handle="hand", **header_over):
+    """A bundle written by hand (members, manifest, handle index): what a
+    lab-side bug or an edited file could put in the bucket."""
+    header = {"format": 2, "user": {"username": "ca_hand"},
+              "profiles": [{"id": 1, "content": "a drafted profile",
+                            "generated_by": "gpt-6.1-sol",
+                            "generation_type": "integration",
+                            "created_at": "2024-02-01T00:00:00",
+                            "privacy_level": "private", "ai_usage": "chat"}],
+              "recent_contexts": [], "todos": [], "artifacts": []}
+    header.update(header_over)
+    lines = [json.dumps(header)] + [json.dumps(e) for e in entries]
+    path = world.tmp / f"hand-{x_id}.jsonl.gz"
+    obj = pb.write_members(iter(lines), str(path))
+    world.storage.upload(pb.bundle_name(x_id), str(path))
+    pb.write_manifest(world.storage, {
+        "bundle_format": pb.BUNDLE_FORMAT, "dump_format": 2, "x_id": x_id,
+        "handle": handle, "counts": {"nodes": len(entries)}, "object": obj})
+    pb.write_handle_index(world.storage, handle, x_id)
 
 
 class _Started:
@@ -240,12 +283,10 @@ def _snapshot(user_id):
 
     def ref(nid):
         return by_id[nid].get_content() if nid in by_id else None
-    authors = {u.id: u.username for u in User.query.all()}
     out_nodes = sorted(
         (n.get_content(), n.source_key, n.provenance, n.origin, n.privacy_level,
          n.ai_usage, n.node_type, n.created_at, n.token_count,
-         ref(n.parent_id), ref(n.continuation_node_id),
-         "self" if n.user_id == user_id else authors.get(n.user_id))
+         ref(n.parent_id), ref(n.continuation_node_id), n.user_id == user_id)
         for n in nodes)
     profiles = UserProfile.query.filter_by(user_id=user_id).order_by(UserProfile.id).all()
     pid = {p.id: p for p in profiles}
@@ -253,9 +294,9 @@ def _snapshot(user_id):
         (p.get_content(), p.generated_by, p.generation_type, p.window_set,
          p.covers_start, p.source_rendered_at, p.source_data_cutoff,
          pid[p.parent_profile_id].get_content() if p.parent_profile_id in pid else None,
-         p.created_at)
+         p.created_at, p.privacy_level, p.ai_usage)
         for p in profiles]
-    arts = [(a.kind, a.get_content(), a.generated_by, a.created_at)
+    arts = [(a.kind, a.get_content(), a.generated_by, a.created_at, a.privacy_level)
             for a in UserArtifact.query.filter_by(user_id=user_id).order_by(UserArtifact.id)]
     rcs = [(r.get_content(), pid[r.profile_id].get_content() if r.profile_id in pid else None)
            for r in UserRecentContext.query.filter_by(user_id=user_id)]
@@ -265,6 +306,22 @@ def _snapshot(user_id):
 def _raw(node_id):
     return db.session.execute(db.text("SELECT content FROM node WHERE id=:i"),
                               {"i": node_id}).scalar()
+
+
+def _x_user(**kw):
+    """An account as an X sign-in makes it (twitter_handle is written
+    only by an X sign-in or Connect X)."""
+    fields = dict(username="alice", twitter_id="1001", twitter_handle="alice",
+                  approved=False, last_seen_at=datetime.utcnow())
+    fields.update(kw)
+    user = User(**fields)
+    db.session.add(user)
+    db.session.commit()
+    return user
+
+
+def _yes(client):
+    return client.put("/api/dashboard/user", json={"prefill_consent": "yes"})
 
 
 # ── Storage ───────────────────────────────────────────────────────────────
@@ -280,17 +337,16 @@ def test_storage_for_reads_the_location():
         storage_for("gs://")
 
 
-def test_local_storage_round_trip_and_names(tmp_path):
+def test_local_storage_round_trip_and_ranges(tmp_path):
     s = LocalDirStorage(str(tmp_path))
     assert s.read_bytes("a/b.json") is None and not s.exists("a/b.json")
     s.write_bytes("a/b.json", b"{}")
     src = tmp_path / "src.bin"
-    src.write_bytes(b"x" * 10)
+    src.write_bytes(b"0123456789")
     s.upload("a/c.gz", str(src))
     assert sorted(s.list("a")) == ["a/b.json", "a/c.gz"]
-    assert s.download("a/c.gz", str(tmp_path / "out")) is True
-    assert (tmp_path / "out").read_bytes() == b"x" * 10
-    assert s.download("a/none", str(tmp_path / "out2")) is False
+    assert s.read_range("a/c.gz", 3, 4) == b"3456"
+    assert s.read_range("a/none", 0, 1) is None
     assert s.delete("a/b.json") is True and s.delete("a/b.json") is False
     with pytest.raises(ValueError):
         s.read_bytes("../escape")
@@ -304,32 +360,28 @@ class _FakeBlob:
     def __init__(self, store, name, calls):
         self.store, self.name, self.calls = store, name, calls
 
-    def exists(self, timeout=None):
+    def exists(self, **kw):
+        self.calls.append(("exists", self.name, kw))
         return self.name in self.store
 
-    def download_as_bytes(self, timeout=None):
-        self.calls.append(("download_as_bytes", self.name))
+    def download_as_bytes(self, start=None, end=None, **kw):
+        self.calls.append(("download_as_bytes", self.name, kw))
         if self.name not in self.store:
             raise _NotFound()
-        return self.store[self.name]
+        data = self.store[self.name]
+        return data if start is None else data[start:end + 1]
 
-    def download_to_filename(self, path, timeout=None):
-        self.calls.append(("download_to_filename", self.name))
-        if self.name not in self.store:
-            open(path, "wb").close()   # the library leaves an empty file
-            raise _NotFound()
-        with open(path, "wb") as f:
-            f.write(self.store[self.name])
-
-    def upload_from_filename(self, path, content_type=None, timeout=None):
-        self.calls.append(("upload_from_filename", self.name))
+    def upload_from_filename(self, path, content_type=None, **kw):
+        self.calls.append(("upload_from_filename", self.name, kw))
         with open(path, "rb") as f:
             self.store[self.name] = f.read()
 
-    def upload_from_string(self, data, content_type=None, timeout=None):
+    def upload_from_string(self, data, content_type=None, **kw):
+        self.calls.append(("upload_from_string", self.name, kw))
         self.store[self.name] = data
 
-    def delete(self, timeout=None):
+    def delete(self, **kw):
+        self.calls.append(("delete", self.name, kw))
         if self.name not in self.store:
             raise _NotFound()
         del self.store[self.name]
@@ -347,32 +399,52 @@ class _FakeClient:
                 return _FakeBlob(client.store, key, client.calls)
         return _B()
 
-    def list_blobs(self, bucket, prefix=None, timeout=None):
+    def list_blobs(self, bucket, prefix=None, **kw):
+        self.calls.append(("list_blobs", prefix, kw))
         return [type("B", (), {"name": k})() for k in sorted(self.store)
                 if prefix is None or k.startswith(prefix)]
 
 
-def test_gcs_storage_keys_under_its_prefix_and_streams_downloads(tmp_path):
+def test_gcs_storage_reads_ranges_under_its_prefix_without_retries(tmp_path):
     """The bucket implementation, against a stand-in client: names live
-    under the prefix, a missing object reads as None / False, and a
-    download goes to a file in chunks, never through download_as_bytes."""
+    under the prefix, a part is read by its byte range, a missing object
+    reads as None / False, and no call uses the library's own retry (its
+    default waits up to two minutes)."""
     client = _FakeClient()
     s = GCSStorage("bkt", "pf", client=client)
     s.write_bytes("bundles/1/manifest.json", b"{}")
     assert "pf/bundles/1/manifest.json" in client.store
     src = tmp_path / "b.gz"
-    src.write_bytes(b"data")
+    src.write_bytes(b"0123456789")
     s.upload("bundles/1/bundle.jsonl.gz", str(src))
     assert list(s.list("bundles")) == ["bundles/1/bundle.jsonl.gz",
                                        "bundles/1/manifest.json"]
-    assert s.download("bundles/1/bundle.jsonl.gz", str(tmp_path / "o")) is True
-    assert ("download_to_filename", "pf/bundles/1/bundle.jsonl.gz") in client.calls
-    assert not any(c[0] == "download_as_bytes" and c[1].endswith(".gz")
-                   for c in client.calls)
-    assert s.read_bytes("nope") is None
-    assert s.download("nope", str(tmp_path / "n")) is False
-    assert not (tmp_path / "n").exists()
-    assert s.delete("nope") is False
+    assert s.read_range("bundles/1/bundle.jsonl.gz", 2, 3) == b"234"
+    assert s.read_bytes("nope") is None and s.read_range("nope", 0, 1) is None
+    assert s.delete("nope") is False and s.exists("nope") is False
+    for name, _key, kw in client.calls:
+        if name != "upload_from_filename":
+            assert kw.get("retry", "unset") is None, name
+            assert kw.get("timeout") <= 10, name
+
+
+def test_gcs_storage_turns_every_failure_into_a_storage_error(monkeypatch):
+    """Missing credentials (raised when the client is made) and timeouts
+    are StorageError, so an admin route answers 502, not 500."""
+    from google.auth.exceptions import DefaultCredentialsError
+    import google.cloud.storage as gcs_lib
+
+    def no_creds(*a, **k):
+        raise DefaultCredentialsError("no credentials")
+    monkeypatch.setattr(gcs_lib, "Client", no_creds)
+    with pytest.raises(StorageError):
+        GCSStorage("bkt").read_bytes("bundles/1/manifest.json")
+
+    class Slow(_FakeClient):
+        def bucket(self, name):
+            raise TimeoutError("read timed out")
+    with pytest.raises(StorageError):
+        GCSStorage("bkt", client=Slow()).read_range("x", 0, 1)
 
 
 # ── Export on the lab ─────────────────────────────────────────────────────
@@ -423,20 +495,28 @@ def test_export_writes_the_layout_with_a_contentless_manifest(world, monkeypatch
     assert m["bundle_format"] == pb.BUNDLE_FORMAT and m["dump_format"] == 2
     assert m["counts"]["nodes"] == 7 and m["counts"]["profiles"] == 2
     assert m["counts"]["intentions"] == 1 and m["counts"]["recent_contexts"] == 1
+    assert m["counts"]["embeddings"] == 0
     assert m["newest_entry_at"] == "2024-01-07T12:00:00Z"
     assert m["profile_generated_by"] == "gpt-6.1-sol"
+    # Parts: the header alone, then 3 entries each (500 in production).
+    assert [p["lines"] for p in m["object"]["members"]] == [1, 3, 3, 1]
+    assert pb.manifest_problem(m, "1001") is None
     # No content in the manifest or the index.
     for text in (b"tweet", b"profile of", b"intentions of"):
         assert text not in raw_manifest
         assert text not in world.storage.read_bytes("handles/alice.json")
     local = world.tmp / "b.gz"
-    world.storage.download("bundles/1001/bundle.jsonl.gz", str(local))
+    local.write_bytes(world.storage.read_bytes("bundles/1001/bundle.jsonl.gz"))
     assert pb.sha256_file(str(local)) == m["object"]["sha256"]
-    with gzip.open(local, "rt") as f:
+    with gzip.open(local, "rt") as f:      # one gzip file to any reader
         lines = [json.loads(x) for x in f]
     assert len(lines) == m["object"]["lines"] == 8
-    assert all(n["provenance"] == "prefill_ca" for n in lines[1:] if n["node_type"] == "user")
+    assert all(n["provenance"] == "prefill_ca" for n in lines[1:])
     assert lines[0]["profiles"][1]["window_set"] == "set-1"
+    # Each part reads alone by its range.
+    second = pb.read_member(world.storage, "1001", m["object"]["members"][2])
+    assert [n["content"] for n in second] == ["tweet 3 by alice", "tweet 4 by alice",
+                                              "tweet 5 by alice"]
 
     # Idempotent: a second run finds the fingerprint unchanged.
     again = _export(world, monkeypatch)
@@ -453,6 +533,41 @@ def test_export_writes_the_layout_with_a_contentless_manifest(world, monkeypatch
     assert _export(world, monkeypatch, only="alice")["exported"] == 1
 
 
+def test_export_reads_embeddings_with_their_entries(world, monkeypatch):
+    """An account's vectors are read per batch of entries, not all at once
+    (they are about 14 KB per entry), and travel in the bundle."""
+    import base64
+    from backend.models import NodeEmbedding
+    from backend.scripts import dump_user
+    with world.lab.app_context():
+        u = _seed_lab_member()
+        for node in Node.query.filter_by(human_owner_id=u.id):
+            db.session.add(NodeEmbedding(node_id=node.id, user_id=u.id,
+                                         model="text-embedding-3-small",
+                                         content_hash="h", vector=b"\x00" * 8))
+        db.session.commit()
+    from sqlalchemy import event
+    monkeypatch.setattr(dump_user, "NODE_BATCH", 3)
+    queries = []
+
+    def spy(conn, cursor, statement, params, context, many):
+        if "FROM node_embedding" in statement and "vector" in statement:
+            queries.append(statement)
+    with world.lab.app_context():
+        event.listen(db.engine, "before_cursor_execute", spy)
+        try:
+            counts = _export(world, monkeypatch)
+        finally:
+            event.remove(db.engine, "before_cursor_execute", spy)
+    # One query per batch of 3 entries (7 entries: 3 batches), not one for
+    # the whole account.
+    assert counts["exported"] == 1 and len(queries) == 3
+    m = json.loads(world.storage.read_bytes("bundles/1001/manifest.json"))
+    assert m["counts"]["embeddings"] == 7
+    entries = pb.read_member(world.storage, "1001", m["object"]["members"][1])
+    assert base64.b64decode(entries[0]["embedding"]["vector"]) == b"\x00" * 8
+
+
 def test_export_only_and_the_encryption_guard(world, monkeypatch):
     with world.lab.app_context():
         _seed_lab_member()
@@ -466,22 +581,81 @@ def test_export_only_and_the_encryption_guard(world, monkeypatch):
         cli.run_export(world.storage, out=lambda *_: None)
 
 
-# ── Load on production ────────────────────────────────────────────────────
-
-def _bundle(world, monkeypatch, **seed):
+def test_a_deletion_before_an_account_is_written_is_kept(world, monkeypatch):
+    """The export read the exclusion list, then a deletion came for an X
+    id it has still to write: the check just before writing sees it."""
     with world.lab.app_context():
-        _seed_lab_member(**seed)
-    _export(world, monkeypatch)
-    _prod_mode(monkeypatch)
+        _seed_lab_member()
+    monkeypatch.setattr(pb, "excluded_x_ids", lambda storage: set())  # read earlier
+    pb.delete_bundle(world.storage, "1001", "deletion_request")
+    counts = _export(world, monkeypatch)
+    assert counts.get("exported", 0) == 0 and counts["skipped_excluded"] == 1
+    assert sorted(world.storage.list("")) == ["excluded/1001.json"]
 
+
+def test_a_deletion_while_an_account_is_written_is_kept(world, monkeypatch):
+    """A deletion made while the account's bundle is uploading: either the
+    check after writing sees it and removes what was written, or the
+    deletion removes it. Nothing of the person stays."""
+    with world.lab.app_context():
+        _seed_lab_member()
+
+    class DeleteDuringUpload(LocalDirStorage):
+        def upload(self, name, src_path, content_type="application/gzip"):
+            super().upload(name, src_path, content_type)
+            pb.delete_bundle(LocalDirStorage(self.root), "1001", "deletion_request")
+    counts = _export(world, monkeypatch, storage=DeleteDuringUpload(str(world.bucket)))
+    assert counts.get("exported", 0) == 0 and counts["skipped_excluded"] == 1
+    assert sorted(world.storage.list("")) == ["excluded/1001.json"]
+    # And a later run writes nothing either.
+    assert _export(world, monkeypatch)["skipped_excluded"] == 1
+    assert sorted(world.storage.list("")) == ["excluded/1001.json"]
+
+
+def test_a_bundle_holds_only_what_a_prefill_makes(world, monkeypatch):
+    """A model's reply is no pre-fill material: the lab does not export
+    an account holding one."""
+    with world.lab.app_context():
+        alice = _seed_lab_member()
+        llm = User(username="claude-opus-5", twitter_id="llm-claude-opus-5")
+        db.session.add(llm)
+        db.session.flush()
+        reply = Node(user_id=llm.id, human_owner_id=alice.id, node_type="llm",
+                     privacy_level="private", ai_usage="chat", token_count=1)
+        reply.set_content("a model's reply")
+        db.session.add(reply)
+        db.session.commit()
+    counts = _export(world, monkeypatch)
+    assert counts.get("exported", 0) == 0 and counts["skipped_other_material"] == 1
+
+
+@pytest.mark.parametrize("extra", ["todo", "ai_preferences"])
+def test_the_lab_does_not_export_what_production_refuses(world, monkeypatch, extra):
+    """A todo list or an artifact kind no pre-fill drafts: production
+    would refuse the bundle, so the lab does not write it."""
+    from backend.models import UserTodo
+    with world.lab.app_context():
+        alice = _seed_lab_member()
+        row = (UserTodo(user_id=alice.id, generated_by="m") if extra == "todo"
+               else UserArtifact(user_id=alice.id, kind=extra, title=extra,
+                                 generated_by="m"))
+        row.set_content("x")
+        db.session.add(row)
+        db.session.commit()
+    counts = _export(world, monkeypatch)
+    assert counts.get("exported", 0) == 0 and counts["skipped_other_material"] == 1
+
+
+# ── Load on production ────────────────────────────────────────────────────
 
 def test_round_trip_equals_a_direct_dump_and_load(world, monkeypatch):
     """dump -> bucket -> bundle load into a fresh database holds exactly
     what load_user.py makes from the same dump in another fresh one."""
     _bundle(world, monkeypatch)
     raw = world.tmp / "direct.jsonl"
-    world.storage.download("bundles/1001/bundle.jsonl.gz", str(raw) + ".gz")
-    with gzip.open(str(raw) + ".gz", "rb") as src, open(raw, "wb") as dst:
+    gz = world.tmp / "direct.jsonl.gz"
+    gz.write_bytes(world.storage.read_bytes("bundles/1001/bundle.jsonl.gz"))
+    with gzip.open(str(gz), "rb") as src, open(raw, "wb") as dst:
         dst.write(src.read())
 
     direct = world.prod("direct")
@@ -491,17 +665,16 @@ def test_round_trip_equals_a_direct_dump_and_load(world, monkeypatch):
 
     prod = world.prod()
     with prod.app_context():
-        load, refusal = _start("alice", admin_id=None)
+        load, refusal = _start("alice")
         assert refusal is None and load.origin == "admin"
         assert _run_until_done(load.id) == "done"
         user = User.query.filter_by(twitter_id="1001").one()
         assert user.username == "alice"
-        got = _snapshot(user.id)
-        assert got == expected
-        # Encrypted on write with this server's key (one data key per chunk).
+        assert _snapshot(user.id) == expected
+        # Encrypted on write with this server's key (one data key per part).
         tweet = Node.query.filter_by(human_owner_id=user.id, source_key="twitter:1001000").one()
         assert _raw(tweet.id).startswith(encryption.ENCRYPTED_PREFIX_V2)
-        # A window set keeps its columns (no rebuild reads it as unfinished).
+        # A window set keeps its columns.
         final = UserProfile.query.filter_by(user_id=user.id, generation_type="integration").one()
         assert final.window_set == "set-1"
         assert final.parent_profile_id == UserProfile.query.filter_by(
@@ -512,7 +685,7 @@ def test_admin_load_makes_an_account_its_owner_x_sign_in_finds(world, monkeypatc
     _bundle(world, monkeypatch)
     prod = world.prod()
     with prod.app_context():
-        load, _ = _start("1001", admin_id=7, approve=True)
+        load, _ = _start("1001", admin_id=7)
         assert world.dispatched == [load.id]
         assert _run_until_done(load.id) == "done"
         load = db.session.get(PrefillBundleLoad, load.id)
@@ -521,61 +694,17 @@ def test_admin_load_makes_an_account_its_owner_x_sign_in_finds(world, monkeypatc
         assert load.relinked_count == 3      # 2 replies, 1 continuation
         assert PrefillBundleNodeMap.query.count() == 0
         user = db.session.get(User, load.user_id)
-        assert user.twitter_id == "1001" and user.approved is True
-        # Recognisable for the deletion of unclaimed pre-fills (#685).
-        from backend.utils.activity import sign_in_status
-        assert user.prefilled_handle == "alice" and sign_in_status(user) == "never"
+        assert user.twitter_id == "1001"
+        # The admin's load lets nobody in and sets no plan (#700's rule
+        # owns that): the admin approves as for any account.
+        assert user.approved is False and user.approved_at is None
+        assert user.plan == "alpha"
         assert user.profile_private_read is True and user.profile_force_batch is True
         assert user.preferred_model is None     # the lab's model is not the person's
         # Safe to repeat: the same bundle is not loaded twice.
         again, refusal = pbl.start_admin_load("alice", admin_id=7)
         assert again is None and refusal[0] == "already_loaded"
         assert Node.query.filter_by(human_owner_id=user.id).count() == 7
-
-
-def test_a_chunked_load_resumes_after_a_killed_run(world, monkeypatch):
-    """Chunks of two; the third run is killed mid-chunk (no release, as a
-    SIGKILL leaves it); the beat sends it again once stale and the load
-    ends exactly as an uninterrupted one."""
-    _bundle(world, monkeypatch)
-    prod = world.prod()
-    with prod.app_context():
-        load, _ = _start("alice", admin_id=None)
-        assert pbl.run_load(load.id, chunk=2, max_chunks=1) == "continuing"
-        assert pbl.run_load(load.id, chunk=2, max_chunks=1) == "continuing"
-        assert db.session.get(PrefillBundleLoad, load.id).nodes_done == 4
-
-        class Killed(BaseException):
-            pass
-        real = pbl.dump_rows.new_node
-        calls = {"n": 0}
-
-        def dying(*a, **k):
-            calls["n"] += 1
-            if calls["n"] == 2:
-                raise Killed()
-            return real(*a, **k)
-        monkeypatch.setattr(pbl.dump_rows, "new_node", dying)
-        with pytest.raises(Killed):
-            pbl.run_load(load.id, chunk=2, max_chunks=1)
-        db.session.rollback()
-        monkeypatch.setattr(pbl.dump_rows, "new_node", real)
-        # The dead run still holds the load until its heartbeat is stale.
-        assert pbl.run_load(load.id, chunk=2) == "busy"
-        assert pbl.stalled_load_ids() == []
-        db.session.query(PrefillBundleLoad).update(
-            {PrefillBundleLoad.heartbeat_at: datetime.utcnow() - timedelta(minutes=6)})
-        db.session.commit()
-        assert pbl.stalled_load_ids() == [load.id]
-        assert _run_until_done(load.id, chunk=2) == "done"
-        user = User.query.filter_by(twitter_id="1001").one()
-        got = _snapshot(user.id)
-
-    straight = world.prod("straight")
-    with straight.app_context():
-        load, _ = _start("alice", admin_id=None)
-        assert _run_until_done(load.id) == "done"
-        assert _snapshot(User.query.filter_by(twitter_id="1001").one().id) == got
 
 
 def _person_signs(user):
@@ -587,7 +716,6 @@ def _person_signs(user):
     from backend.models import (
         ApiToken, ChangelogReadState, Draft, ExternalAccount, NodeVersion,
         UsernameHistory, UserPrompt, UserTodo, APICostLog)
-    out = []
     checks = {
         "signed in": user.last_seen_at is not None,
         "terms": user.accepted_terms_at is not None or bool(user.accepted_terms_version),
@@ -604,7 +732,7 @@ def _person_signs(user):
         or (user.default_privacy_level or "private") != "private",
         "time zone": (user.timezone or "UTC") != "UTC",
     }
-    out += [k for k, v in checks.items() if v]
+    out = [k for k, v in checks.items() if v]
     uid = user.id
     own = Node.query.filter((Node.user_id == uid) | (Node.human_owner_id == uid))
     if own.filter((Node.origin.is_(None)) | (Node.origin != "twitter")
@@ -637,7 +765,7 @@ def test_an_account_made_ready_stays_recognisably_unclaimed(world, monkeypatch):
     prod = world.prod()
     with prod.app_context():
         before = datetime.utcnow()
-        load, _ = _start("alice", admin_id=None, approve=True)
+        load, _ = _start("alice")
         assert _run_until_done(load.id) == "done"
         user = db.session.get(User, load.user_id)
         from backend.utils.activity import sign_in_status
@@ -649,74 +777,81 @@ def test_an_account_made_ready_stays_recognisably_unclaimed(world, monkeypatch):
         assert first_stored >= before
 
 
-def test_a_bundle_holds_only_what_a_prefill_makes(world, monkeypatch):
-    """A model's reply (or anything a person wrote) is no pre-fill
-    material: the lab does not export an account holding one, and a
-    bundle with one is refused before its chunk writes anything."""
-    with world.lab.app_context():
-        alice = _seed_lab_member()
-        llm = User(username="claude-opus-5", twitter_id="llm-claude-opus-5")
-        db.session.add(llm)
-        db.session.flush()
-        reply = Node(user_id=llm.id, human_owner_id=alice.id, node_type="llm",
-                     privacy_level="private", ai_usage="chat", token_count=1)
-        reply.set_content("a model's reply")
-        db.session.add(reply)
-        db.session.commit()
-    counts = _export(world, monkeypatch)
-    assert counts.get("exported", 0) == 0 and counts["skipped_other_material"] == 1
-    # The same account written into a bundle by hand is refused on load.
-    with world.lab.app_context():
-        raw = world.tmp / "by-hand.jsonl"
-        from backend.scripts import dump_user
-        dump_user._run("ca_alice", str(raw), include_private=True)
-        gz = world.tmp / "by-hand.jsonl.gz"
-        header, stats = cli.compress(str(raw), str(gz))
-        world.storage.upload("bundles/1001/bundle.jsonl.gz", str(gz))
-        pb.write_manifest(world.storage, {
-            "bundle_format": pb.BUNDLE_FORMAT, "dump_format": 2, "x_id": "1001",
-            "handle": "alice", "counts": {"nodes": stats["nodes"]},
-            "object": {"sha256": pb.sha256_file(str(gz)), "lines": stats["lines"]}})
-        pb.write_handle_index(world.storage, "alice", "1001")
-    _prod_mode(monkeypatch)
-    prod = world.prod()
-    with prod.app_context():
-        load, _ = _start("alice", admin_id=None)
-        assert _run_until_done(load.id) == "failed"
-        assert db.session.get(PrefillBundleLoad, load.id).error == "not_prefill"
-        assert Node.query.filter_by(human_owner_id=load.user_id).count() == 0
-
-
-def test_two_loads_into_one_account_run_one_after_the_other(world, monkeypatch):
-    """Two loads started at once (a double click, or the admin and the
-    person's Yes): the later one waits for the earlier, then finds every
-    entry there and adds nothing twice."""
+def test_a_chunked_load_resumes_after_a_killed_run(world, monkeypatch):
+    """One part per step; the third run is killed mid-part (no release, as
+    a SIGKILL leaves it); the beat sends it again once stale and the load
+    ends exactly as an uninterrupted one."""
     _bundle(world, monkeypatch)
     prod = world.prod()
     with prod.app_context():
-        first, _ = _start("alice", admin_id=None)
-        earlier = db.session.get(PrefillBundleLoad, first.id)
-        second = PrefillBundleLoad(
-            user_id=earlier.user_id, x_id="1001", handle="alice", origin="self",
-            bundle_sha256=earlier.bundle_sha256, nodes_total=earlier.nodes_total,
-            heartbeat_at=datetime.utcnow())
-        db.session.add(second)
+        load, _ = _start("alice")
+        assert pbl.run_load(load.id, max_chunks=1) == "continuing"
+        assert pbl.run_load(load.id, max_chunks=1) == "continuing"
+        assert db.session.get(PrefillBundleLoad, load.id).nodes_done == 6
+
+        class Killed(BaseException):
+            pass
+        real = pbl.dump_rows.new_node
+
+        def dying(*a, **k):
+            raise Killed()
+        monkeypatch.setattr(pbl.dump_rows, "new_node", dying)
+        with pytest.raises(Killed):
+            pbl.run_load(load.id, max_chunks=1)
+        db.session.rollback()
+        monkeypatch.setattr(pbl.dump_rows, "new_node", real)
+        # The dead run still holds the load until its heartbeat is stale.
+        assert pbl.run_load(load.id) == "busy"
+        assert pbl.stalled_load_ids() == []
+        db.session.query(PrefillBundleLoad).update(
+            {PrefillBundleLoad.heartbeat_at: datetime.utcnow() - timedelta(minutes=6)})
         db.session.commit()
-        second_id = second.id
-        assert pbl.run_load(second_id) == "busy"
-        assert _run_until_done(first.id) == "done"
-        assert _run_until_done(second_id) == "done"
-        later = db.session.get(PrefillBundleLoad, second_id)
-        assert (later.created_count, later.skipped_count, later.profiles_count) == (0, 7, 0)
-        assert Node.query.filter_by(human_owner_id=first.user_id).count() == 7
-        assert UserProfile.query.filter_by(user_id=first.user_id).count() == 2
+        assert pbl.stalled_load_ids() == [load.id]
+        assert _run_until_done(load.id) == "done"
+        user = User.query.filter_by(twitter_id="1001").one()
+        got = _snapshot(user.id)
+
+    straight = world.prod("straight")
+    with straight.app_context():
+        load, _ = _start("alice")
+        assert _run_until_done(load.id) == "done"
+        assert _snapshot(User.query.filter_by(twitter_id="1001").one().id) == got
+
+
+def test_each_part_is_read_once_by_its_range(world, monkeypatch):
+    """A load reads each part by its byte range: once to check it before
+    anything is written, once per pass. Never the whole object at once,
+    never a part again for a later part."""
+    _bundle(world, monkeypatch)
+    reads = []
+    real = LocalDirStorage.read_range
+    monkeypatch.setattr(LocalDirStorage, "read_range",
+                        lambda self, n, s, ln: reads.append((n, s)) or real(self, n, s, ln))
+    monkeypatch.setattr(LocalDirStorage, "read_bytes",
+                        lambda self, n, _r=LocalDirStorage.read_bytes: (
+                            (_ for _ in ()).throw(AssertionError(n))
+                            if n.endswith(".gz") else _r(self, n)))
+    prod = world.prod()
+    with prod.app_context():
+        load, _ = _start("alice")
+        reads.clear()
+        assert _run_until_done(load.id, max_chunks=1) == "done"
+    m = json.loads(world.storage.read_bytes("bundles/1001/manifest.json"))
+    offsets = [p["offset"] for p in m["object"]["members"]]
+    entry_parts = len(offsets) - 1
+    assert all(n == "bundles/1001/bundle.jsonl.gz" for n, _ in reads)
+    # verify (all parts) + header per run + each entry part twice
+    # (entries, links); runs: one per part here.
+    per_part = {o: sum(1 for _, s in reads if s == o) for o in offsets[1:]}
+    assert all(c == 3 for c in per_part.values()), per_part
+    assert len(per_part) == entry_parts
 
 
 def test_runs_killed_again_and_again_stop_the_load(world, monkeypatch):
     _bundle(world, monkeypatch)
     prod = world.prod()
     with prod.app_context():
-        load, _ = _start("alice", admin_id=None)
+        load, _ = _start("alice")
         for _ in range(pbl.MAX_STALLED_RUNS):
             db.session.query(PrefillBundleLoad).update(
                 {PrefillBundleLoad.run_token: None})
@@ -731,10 +866,12 @@ def test_runs_killed_again_and_again_stop_the_load(world, monkeypatch):
 def test_a_checksum_mismatch_is_refused_before_anything_is_written(world, monkeypatch):
     _bundle(world, monkeypatch)
     obj = world.bucket / "bundles" / "1001" / "bundle.jsonl.gz"
-    obj.write_bytes(obj.read_bytes() + b"tampered")
+    data = bytearray(obj.read_bytes())
+    data[-5] ^= 0xFF          # a byte of the last part
+    obj.write_bytes(bytes(data))
     prod = world.prod()
     with prod.app_context():
-        load, _ = _start("alice", admin_id=None)
+        load, _ = _start("alice")
         assert pbl.run_load(load.id) == "failed"
         load = db.session.get(PrefillBundleLoad, load.id)
         assert load.status == "failed" and load.error == "checksum"
@@ -749,10 +886,10 @@ def test_an_x_id_mismatch_is_refused(world, monkeypatch):
     world.storage.write_bytes("bundles/2002/manifest.json", json.dumps(m).encode())
     prod = world.prod()
     with prod.app_context():
-        load, refusal = _start("2002", admin_id=None)
+        load, refusal = _start("2002")
         assert load is None and refusal[0] == "x_id_mismatch"
         # The account loses the bundle's X id while the load runs.
-        load, _ = _start("1001", admin_id=None)
+        load, _ = _start("1001")
         user = db.session.get(User, load.user_id)
         user.twitter_id = None
         db.session.commit()
@@ -768,14 +905,11 @@ def test_a_handle_never_matches_an_account(world, monkeypatch):
     _bundle(world, monkeypatch)
     prod = world.prod()
     with prod.app_context():
-        other = User(username="alice", twitter_id="3003", twitter_handle="alice",
-                     approved=True, last_seen_at=datetime.utcnow(),
-                     prefill_consent="yes")
-        db.session.add(other)
-        db.session.commit()
+        other = _x_user(twitter_id="3003", approved=True, prefill_consent="yes")
         other_id = other.id
-        assert pbl.maybe_start_self_load(other) is None
-        load, _ = _start("alice", admin_id=None)
+        check = pbl.maybe_start_self_load(other)
+        assert _run_until_done(check.id) == "no_bundle"
+        load, _ = _start("alice")
         assert load.user_id != other_id
         assert db.session.get(User, load.user_id).username == "alice2"
         assert _run_until_done(load.id) == "done"
@@ -793,22 +927,8 @@ def test_a_no_and_ai_none_are_refused_even_when_forced(world, monkeypatch, field
         user = User(username="alice", twitter_id="1001", **{field: value})
         db.session.add(user)
         db.session.commit()
-        load, refusal = _start("alice", admin_id=None, force=True)
+        load, refusal = _start("alice", force=True)
         assert load is None and refusal[0] == code
-
-
-def test_a_no_given_while_loading_stops_the_load(world, monkeypatch):
-    _bundle(world, monkeypatch)
-    prod = world.prod()
-    with prod.app_context():
-        load, _ = _start("alice", admin_id=None)
-        assert pbl.run_load(load.id, chunk=2, max_chunks=1) == "continuing"
-        user = db.session.get(User, load.user_id)
-        user.prefill_consent = "no"
-        db.session.commit()
-        assert pbl.run_load(load.id, chunk=2) == "failed"
-        assert db.session.get(PrefillBundleLoad, load.id).error == "prefill_declined"
-        assert Node.query.filter_by(human_owner_id=user.id).count() == 2
 
 
 def test_an_owner_who_signed_in_or_wrote_is_protected_unless_forced(world, monkeypatch):
@@ -819,7 +939,7 @@ def test_an_owner_who_signed_in_or_wrote_is_protected_unless_forced(world, monke
                     last_seen_at=datetime.utcnow())
         db.session.add(user)
         db.session.commit()
-        load, refusal = _start("alice", admin_id=None)
+        load, refusal = _start("alice")
         assert load is None and refusal[0] == "signed_in"
         assert pbl.check("alice")["refusal"]["forceable"] is True
         user.last_seen_at = None
@@ -828,13 +948,37 @@ def test_an_owner_who_signed_in_or_wrote_is_protected_unless_forced(world, monke
         own.set_content("my own entry")
         db.session.add(own)
         db.session.commit()
-        load, refusal = _start("alice", admin_id=None)
+        load, refusal = _start("alice")
         assert load is None and refusal[0] == "own_writing"
         user_id = user.id
-        load, refusal = _start("alice", admin_id=None, force=True)
+        load, refusal = _start("alice", force=True)
         assert refusal is None and load.forced is True
         assert _run_until_done(load.id) == "done"
         assert Node.query.filter_by(human_owner_id=user_id).count() == 8
+
+
+def test_old_unlabelled_prefills_are_named_not_guessed(world, monkeypatch):
+    """Tweets a production pre-fill stored before 2026-09-21 have no
+    provenance: they are neither guessed to be fetched nor counted as
+    the person's writing. A Yes is refused with its own reason, which the
+    admin sees (#691's labelling settles them)."""
+    _bundle(world, monkeypatch)
+    prod = world.prod()
+    with prod.app_context():
+        user = _x_user(prefill_consent="yes")
+        old = Node(user_id=user.id, human_owner_id=user.id, node_type="user",
+                   privacy_level="private", ai_usage="chat", token_count=1,
+                   origin="twitter", source_key="twitter:5")
+        old.set_content("an old pre-filled tweet")
+        db.session.add(old)
+        db.session.commit()
+        assert pbl.own_writing_reason(user.id) == "unlabelled_tweets"
+        check = pbl.maybe_start_self_load(user)
+        assert _run_until_done(check.id) == "refused"
+        refused = PrefillBundleLoad.query.one()
+        assert refused.error == "unlabelled_tweets"
+        assert pbl.serialize_load(refused)["error"] == "unlabelled_tweets"
+        assert pbl.check("1001")["account"]["own_writing"] == "unlabelled_tweets"
 
 
 def test_no_model_and_no_network_during_a_load(world, monkeypatch):
@@ -849,49 +993,40 @@ def test_no_model_and_no_network_during_a_load(world, monkeypatch):
     monkeypatch.setattr(socket.socket, "connect", no_network)
     monkeypatch.setattr(socket, "create_connection", no_network)
     with prod.app_context():
-        load, _ = _start("alice", admin_id=None)
+        load, _ = _start("alice")
         assert _run_until_done(load.id) == "done"
         user = db.session.get(User, load.user_id)
         user.approved = True
-        user.plan = "alpha"
         db.session.commit()
         from backend.tasks.profile_batch import _should_seed
         assert _should_seed(user) is False
         assert user.profile_needs_full_regen is False
 
 
-def test_the_load_reads_the_bundle_as_a_stream(world, monkeypatch):
-    """Entries are read one line at a time: a bundle whose last line is
-    broken has its first chunks committed before the broken line is
-    reached (a whole-file parse would write nothing), and the bundle is
-    never read as one bytes object."""
+def test_two_loads_into_one_account_run_one_after_the_other(world, monkeypatch):
+    """Two loads started at once (a double click, or the admin and the
+    person's Yes): the later one waits for the earlier, then finds every
+    entry there and adds nothing twice."""
     _bundle(world, monkeypatch)
-    obj = world.bucket / "bundles" / "1001" / "bundle.jsonl.gz"
-    with gzip.open(obj, "rt") as f:
-        lines = f.read().splitlines()
-    lines.append("{broken")
-    obj.write_bytes(b"")
-    with gzip.GzipFile(filename="", mode="wb", fileobj=open(obj, "wb"), mtime=0) as out:
-        out.write(("\n".join(lines) + "\n").encode())
-    m = json.loads(world.storage.read_bytes("bundles/1001/manifest.json"))
-    m["object"]["sha256"] = pb.sha256_file(str(obj))
-    pb.write_manifest(world.storage, m)
-    reads = []
-    real_read = LocalDirStorage.read_bytes
-    monkeypatch.setattr(LocalDirStorage, "read_bytes",
-                        lambda self, name: reads.append(name) or real_read(self, name))
     prod = world.prod()
     with prod.app_context():
-        load, _ = _start("alice", admin_id=None)
-        outcomes = [pbl.run_load(load.id, chunk=2, dispatch=lambda *a, **k: None)
-                    for _ in range(pbl.MAX_STALLED_RUNS + 2)]
-        assert outcomes[0] == "retrying"
-        assert outcomes[-1] == "failed"
-        assert Node.query.filter_by(human_owner_id=load.user_id).count() == 6
-    assert not any(n.endswith(".gz") for n in reads)
-    header, entries = pb.open_bundle(str(obj))
-    assert inspect.isgenerator(entries)
-    entries.close()
+        first, _ = _start("alice")
+        earlier = db.session.get(PrefillBundleLoad, first.id)
+        second = PrefillBundleLoad(
+            user_id=earlier.user_id, x_id="1001", handle="alice", origin="admin",
+            stage="header", bundle_sha256=earlier.bundle_sha256,
+            members=earlier.members, nodes_total=earlier.nodes_total,
+            heartbeat_at=datetime.utcnow())
+        db.session.add(second)
+        db.session.commit()
+        second_id = second.id
+        assert pbl.run_load(second_id) == "busy"
+        assert _run_until_done(first.id) == "done"
+        assert _run_until_done(second_id) == "done"
+        later = db.session.get(PrefillBundleLoad, second_id)
+        assert (later.created_count, later.skipped_count, later.profiles_count) == (0, 7, 0)
+        assert Node.query.filter_by(human_owner_id=first.user_id).count() == 7
+        assert UserProfile.query.filter_by(user_id=first.user_id).count() == 2
 
 
 def test_switched_off_nothing_reads_the_storage(world, monkeypatch):
@@ -900,10 +1035,7 @@ def test_switched_off_nothing_reads_the_storage(world, monkeypatch):
     monkeypatch.setattr(LocalDirStorage, "read_bytes",
                         lambda *a: (_ for _ in ()).throw(AssertionError("read")))
     with prod.app_context():
-        user = User(username="alice", twitter_id="1001", twitter_handle="alice",
-                    prefill_consent="yes")
-        db.session.add(user)
-        db.session.commit()
+        user = _x_user(prefill_consent="yes")
         assert pbl.maybe_start_self_load(user) is None
         assert pbl.start_admin_load("alice", admin_id=None)[1][0] == "disabled"
         assert pbl.run_load(1) == "disabled"
@@ -913,21 +1045,106 @@ def test_switched_off_nothing_reads_the_storage(world, monkeypatch):
         assert client.get("/api/dashboard/starting-point").get_json()["starting_point"] is None
 
 
+# ── A bundle is not trusted ──────────────────────────────────────────────
+
+def test_a_bundle_cannot_make_an_entry_public_or_trainable(world, monkeypatch):
+    """Whatever the bundle says, entries are stored private, with AI usage
+    at most "chat" (never "train"; a lower value stays), encrypted; so are
+    the profile, recent contexts and intentions. Fields outside the
+    allow-list are dropped."""
+    entries = [_entry(0, privacy_level="public", ai_usage="train",
+                      distributed_tokens=99, is_pinned=True, pinned_by=1),
+               _entry(1, ai_usage="none")]
+    _put_bundle(world, entries,
+                profiles=[{"id": 1, "content": "a drafted profile",
+                           "generated_by": "gpt-6.1-sol",
+                           "generation_type": "integration",
+                           "created_at": "2024-02-01T00:00:00",
+                           "privacy_level": "public", "ai_usage": "train"}],
+                recent_contexts=[{"content": "recent", "generated_by": "m",
+                                  "created_at": "2024-02-02T00:00:00",
+                                  "ai_usage": "train"}],
+                artifacts=[{"kind": "intentions", "title": "Intentions",
+                            "content": "to write", "generated_by": "m",
+                            "created_at": "2024-02-03T00:00:00",
+                            "privacy_level": "public", "ai_usage": "train"}])
+    _prod_mode(monkeypatch)
+    prod = world.prod()
+    with prod.app_context():
+        load, _ = _start("hand")
+        assert _run_until_done(load.id) == "done"
+        nodes = Node.query.filter_by(human_owner_id=load.user_id).all()
+        # Never public, never more than "chat"; a "none" stays "none".
+        assert sorted((n.source_key[-2:], n.privacy_level, n.ai_usage,
+                       n.distributed_tokens) for n in nodes) == [
+            ("00", "private", "chat", 0), ("01", "private", "none", 0)]
+        assert all(_raw(n.id).startswith(encryption.ENCRYPTED_PREFIX_V2) for n in nodes)
+        p = UserProfile.query.filter_by(user_id=load.user_id).one()
+        a = UserArtifact.query.filter_by(user_id=load.user_id).one()
+        r = UserRecentContext.query.filter_by(user_id=load.user_id).one()
+        assert (p.privacy_level, p.ai_usage) == ("private", "chat")
+        assert (a.privacy_level, a.ai_usage) == ("private", "chat")
+        assert r.ai_usage == "chat"
+        assert p.content.startswith(encryption.ENCRYPTED_PREFIX_V2)
+
+
+@pytest.mark.parametrize("over", [
+    {"prompt_key": "glean"},
+    {"tool_calls_meta": {"calls": 1}},
+    {"llm_model": "claude-opus-5"},
+    {"node_type": "llm"},
+    {"origin": None},
+    {"provenance": "archive_upload"},
+    {"source_key": None},
+    {"owner_is_user": False},
+    {"prompt": {"prompt_key": "textmode", "content": "You are Loore."}},
+])
+def test_an_entry_no_prefill_makes_is_refused_before_its_part_is_written(world, monkeypatch, over):
+    entries = [_entry(0), _entry(1), _entry(2), _entry(3, **over)]
+    _put_bundle(world, entries)
+    _prod_mode(monkeypatch)
+    prod = world.prod()
+    with prod.app_context():
+        load, _ = _start("hand")
+        assert _run_until_done(load.id) == "failed"
+        assert db.session.get(PrefillBundleLoad, load.id).error == "not_prefill"
+        # The first part (3 entries) went in; the part holding it did not.
+        assert Node.query.filter_by(human_owner_id=load.user_id).count() == 3
+
+
+def test_an_entry_by_another_account_is_refused(world, monkeypatch):
+    _put_bundle(world, [_entry(0, author_username="someone_else")])
+    _prod_mode(monkeypatch)
+    prod = world.prod()
+    with prod.app_context():
+        load, _ = _start("hand")
+        assert _run_until_done(load.id) == "failed"
+        assert db.session.get(PrefillBundleLoad, load.id).error == "foreign_author"
+
+
+@pytest.mark.parametrize("header_over", [
+    {"todos": [{"content": "a todo", "generated_by": "m"}]},
+    {"artifacts": [{"kind": "ai_preferences", "content": "x", "generated_by": "m"}]},
+    {"profiles": [{"id": 1, "content": "mine", "generated_by": "user",
+                   "generation_type": "user"}]},
+])
+def test_a_header_no_prefill_makes_is_refused_before_anything_is_written(world, monkeypatch, header_over):
+    _put_bundle(world, [_entry(0)], **header_over)
+    _prod_mode(monkeypatch)
+    prod = world.prod()
+    with prod.app_context():
+        load, _ = _start("hand")
+        assert _run_until_done(load.id) == "failed"
+        assert db.session.get(PrefillBundleLoad, load.id).error == "not_prefill"
+        assert Node.query.filter_by(human_owner_id=load.user_id).count() == 0
+        assert UserProfile.query.filter_by(user_id=load.user_id).count() == 0
+
+
 # ── The automatic path ───────────────────────────────────────────────────
 
-def _x_user(**kw):
-    """An account as an X sign-in makes it (twitter_handle is written
-    only by an X sign-in or Connect X)."""
-    fields = dict(username="alice", twitter_id="1001", twitter_handle="alice",
-                  approved=False, last_seen_at=datetime.utcnow())
-    fields.update(kw)
-    user = User(**fields)
-    db.session.add(user)
-    db.session.commit()
-    return user
-
-
 def test_a_yes_loads_the_prepared_material_and_lets_the_person_in(world, monkeypatch):
+    """The Yes request does no storage work: it queues a check, and the
+    background task finds the bundle, loads it and lets the person in."""
     _bundle(world, monkeypatch)
     prod = world.prod()
     with prod.app_context():
@@ -935,26 +1152,96 @@ def test_a_yes_loads_the_prepared_material_and_lets_the_person_in(world, monkeyp
         user_id = user.id
         client = prod.test_client()
         _login(client, user_id)
-        resp = client.put("/api/dashboard/user", json={"prefill_consent": "yes"})
-        assert resp.status_code == 200
-        assert resp.get_json()["user"]["starting_point"]["status"] == "preparing"
+        touched = []
+        for name in ("read_bytes", "read_range", "exists", "list"):
+            real = getattr(LocalDirStorage, name)
+            monkeypatch.setattr(LocalDirStorage, name,
+                                lambda self, *a, _r=real, _n=name: touched.append(_n) or _r(self, *a))
+        resp = _yes(client)
+        assert resp.status_code == 200 and touched == []
+        assert resp.get_json()["user"]["starting_point"]["status"] == "checking"
         assert len(world.dispatched) == 1
-        state = client.get("/api/dashboard/starting-point").get_json()
-        assert state["starting_point"]["status"] == "preparing" and state["approved"] is False
-        assert _run_until_done(world.dispatched[0]) == "done"
+        assert _run_until_done(world.dispatched[0], max_chunks=1) == "done"
         state = client.get("/api/dashboard/starting-point").get_json()
         assert state["starting_point"]["status"] == "ready" and state["approved"] is True
         user = db.session.get(User, user_id)
-        assert user.prefilled_handle == "alice"
-        assert UserProfile.query.filter_by(user_id=user.id).count() == 2
-        assert UserArtifact.latest_for(user.id, "intentions").get_content() == "intentions of alice"
-        tweets = Node.query.filter_by(human_owner_id=user.id, provenance="prefill_ca").count()
-        assert tweets == 7
+        assert user.prefilled_handle == "alice" and user.plan == "alpha"
+        assert UserProfile.query.filter_by(user_id=user_id).count() == 2
+        assert UserArtifact.latest_for(user_id, "intentions").get_content() == "intentions of alice"
+        assert Node.query.filter_by(human_owner_id=user_id, provenance="prefill_ca").count() == 7
         load = PrefillBundleLoad.query.one()
         assert load.origin == "self" and load.approve_when_done is True
         # A second Yes starts nothing new.
-        client.put("/api/dashboard/user", json={"prefill_consent": "yes"})
+        _yes(client)
         assert PrefillBundleLoad.query.count() == 1
+
+
+def test_a_yes_after_a_no_continues_where_the_no_stopped(world, monkeypatch):
+    """Yes, part of the load, No: the run stops there, links what it
+    loaded, and lets nobody in (what was loaded stays, #662). Yes again:
+    a new load skips what is there and loads the rest, with nothing
+    twice, and lets the person in."""
+    _bundle(world, monkeypatch)
+    prod = world.prod()
+    with prod.app_context():
+        user_id = _x_user().id
+        client = prod.test_client()
+        _login(client, user_id)
+        _yes(client)
+        first = world.dispatched[-1]
+        assert pbl.run_load(first, max_chunks=1) == "continuing"
+        assert Node.query.filter_by(human_owner_id=user_id).count() == 3
+        _login(client, user_id)
+        client.put("/api/dashboard/user", json={"prefill_consent": "no"})
+        assert _run_until_done(first) == "stopped"
+        stopped = db.session.get(PrefillBundleLoad, first)
+        assert (stopped.status, stopped.error) == ("stopped", "prefill_declined")
+        assert stopped.links_done == stopped.nodes_done == 3
+        assert db.session.get(User, user_id).approved is False
+        reply = Node.query.filter_by(human_owner_id=user_id,
+                                     source_key="twitter:1001002").one()
+        assert reply.parent_id is not None       # linked though stopped
+        assert client.get("/api/dashboard/starting-point").get_json()["starting_point"] is None
+        assert PrefillBundleNodeMap.query.count() == 0
+
+        _yes(client)
+        second = world.dispatched[-1]
+        assert second != first
+        assert _run_until_done(second) == "done"
+        later = db.session.get(PrefillBundleLoad, second)
+        assert (later.created_count, later.skipped_count) == (4, 3)
+        assert Node.query.filter_by(human_owner_id=user_id).count() == 7
+        assert UserProfile.query.filter_by(user_id=user_id).count() == 2
+        assert db.session.get(User, user_id).approved is True
+        # The continuation from an entry of the first load to one of the
+        # second is set: an entry already there gets the links it lacks.
+        first_entry = Node.query.filter_by(human_owner_id=user_id,
+                                           source_key="twitter:1001001").one()
+        assert first_entry.continuation_node_id == Node.query.filter_by(
+            human_owner_id=user_id, source_key="twitter:1001004").one().id
+
+
+def test_a_yes_after_a_failed_load_loads_again(world, monkeypatch):
+    """A load that failed (the bundle was gone for a moment) does not
+    block the next Yes."""
+    _bundle(world, monkeypatch)
+    obj = world.bucket / "bundles" / "1001" / "bundle.jsonl.gz"
+    data = obj.read_bytes()
+    prod = world.prod()
+    with prod.app_context():
+        user_id = _x_user().id
+        client = prod.test_client()
+        _login(client, user_id)
+        _yes(client)
+        first = world.dispatched[-1]
+        obj.unlink()
+        assert _run_until_done(first) == "failed"
+        assert db.session.get(PrefillBundleLoad, first).error == "no_bundle"
+        obj.write_bytes(data)
+        _yes(client)
+        second = world.dispatched[-1]
+        assert second != first and _run_until_done(second) == "done"
+        assert Node.query.filter_by(human_owner_id=user_id).count() == 7
 
 
 @pytest.mark.parametrize("answer", ["no", None])
@@ -977,15 +1264,18 @@ def test_a_yes_needs_an_x_sign_in_and_a_bundle(world, monkeypatch):
     prod = world.prod()
     with prod.app_context():
         # The X id set by an admin, never proven by an X sign-in.
-        unproven = _x_user(twitter_handle=None)
-        unproven.prefill_consent = "yes"
-        db.session.commit()
+        unproven = _x_user(twitter_handle=None, prefill_consent="yes")
         assert pbl.maybe_start_self_load(unproven) is None
-        # A proven X id the lab has no bundle for: nothing changes.
+        # A proven X id the lab has no bundle for: the check finds none,
+        # leaves no trace, and nothing changes.
         stranger = _x_user(username="carol", twitter_id="4004", twitter_handle="carol",
                            prefill_consent="yes")
-        assert pbl.maybe_start_self_load(stranger) is None
-        assert PrefillBundleLoad.query.count() == 0 and world.dispatched == []
+        stranger_id = stranger.id
+        check = pbl.maybe_start_self_load(stranger)
+        assert pbl.starting_point(stranger_id)["status"] == "checking"
+        assert _run_until_done(check.id) == "no_bundle"
+        assert PrefillBundleLoad.query.count() == 0
+        assert pbl.starting_point(stranger_id) is None
 
 
 def test_a_yes_from_someone_with_own_writing_is_recorded_not_loaded(world, monkeypatch):
@@ -993,17 +1283,30 @@ def test_a_yes_from_someone_with_own_writing_is_recorded_not_loaded(world, monke
     prod = world.prod()
     with prod.app_context():
         user = _x_user(prefill_consent="yes")
+        user_id = user.id
         own = Node(user_id=user.id, human_owner_id=user.id, node_type="user",
                    privacy_level="private", ai_usage="chat", token_count=1)
         own.set_content("mine")
         db.session.add(own)
         db.session.commit()
-        assert pbl.maybe_start_self_load(user) is None
-        assert pbl.maybe_start_self_load(user) is None
+        for _ in range(2):
+            check = pbl.maybe_start_self_load(db.session.get(User, user_id))
+            assert _run_until_done(check.id) == "refused"
         refused = PrefillBundleLoad.query.one()
         assert (refused.status, refused.error) == ("refused", "own_writing")
-        assert pbl.starting_point(user.id) is None
-        assert world.dispatched == []
+        assert pbl.starting_point(user_id) is None
+
+
+def test_let_in_when_ready_leaves_a_blocked_account_out(world, monkeypatch):
+    prod = world.prod()
+    with prod.app_context():
+        blocked = User(username="b", approved=False, deactivated_at=datetime.utcnow())
+        fresh = User(username="f", approved=False)
+        db.session.add_all([blocked, fresh])
+        db.session.commit()
+        assert pbl.let_in_when_ready(blocked) is False and blocked.approved is False
+        assert pbl.let_in_when_ready(fresh) is True and fresh.approved is True
+        assert fresh.plan == "alpha"     # the plan is #700's rule to own
 
 
 # ── Removal and the exclusion list ───────────────────────────────────────
@@ -1026,7 +1329,8 @@ def test_delete_excludes_the_x_id_from_export_and_load(world, monkeypatch):
     with prod.app_context():
         assert pbl.start_admin_load("1001", admin_id=None)[1][0] == "excluded"
         user = _x_user(prefill_consent="yes")
-        assert pbl.maybe_start_self_load(user) is None
+        check = pbl.maybe_start_self_load(user)
+        assert _run_until_done(check.id) == "refused"
         assert PrefillBundleLoad.query.one().error == "excluded"
 
 
@@ -1060,8 +1364,7 @@ def test_admin_routes_check_start_and_follow_a_load(world, monkeypatch):
         assert check["bundle"]["counts"]["nodes"] == 7
         assert "tweet" not in json.dumps(check)
         assert client.get("/api/admin/prefill-bundles/check?q=nobody").status_code == 404
-        resp = client.post("/api/admin/prefill-bundles/loads",
-                           json={"q": "alice", "approve": False})
+        resp = client.post("/api/admin/prefill-bundles/loads", json={"q": "alice"})
         assert resp.status_code == 202
         load_id = resp.get_json()["load"]["id"]
         _run_until_done(load_id)
@@ -1072,3 +1375,21 @@ def test_admin_routes_check_start_and_follow_a_load(world, monkeypatch):
         assert "tweet" not in json.dumps(listed)
         again = client.post("/api/admin/prefill-bundles/loads", json={"q": "alice"})
         assert again.status_code == 409 and again.get_json()["code"] == "already_loaded"
+
+
+def test_admin_routes_answer_502_when_the_storage_fails(world, monkeypatch):
+    prod = world.prod()
+    with prod.app_context():
+        admin = User(username="boss", is_admin=True, approved=True)
+        db.session.add(admin)
+        db.session.commit()
+        client = prod.test_client()
+        _login(client, admin.id)
+
+        class Down(LocalDirStorage):
+            def read_bytes(self, name):
+                raise StorageError("storage call failed (TimeoutError)")
+        monkeypatch.setattr(pb, "configured_storage", lambda config=None: Down(str(world.bucket)))
+        for resp in (client.get("/api/admin/prefill-bundles/check?q=alice"),
+                     client.post("/api/admin/prefill-bundles/loads", json={"q": "alice"})):
+            assert resp.status_code == 502 and resp.get_json()["code"] == "storage"

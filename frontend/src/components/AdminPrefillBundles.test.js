@@ -62,7 +62,7 @@ test('check, then make ready', async () => {
     /8,000 entries · 2 profile versions \(gpt-6.1-sol\) · 1 intentions · new account @alice/);
   fireEvent.click(makeReady);
   await waitFor(() => expect(mockPost).toHaveBeenCalledWith(
-    '/admin/prefill-bundles/loads', { q: '@alice', force: false, approve: true }));
+    '/admin/prefill-bundles/loads', { q: '@alice', force: false }));
   expect(await screen.findByText('Queued…')).toBeInTheDocument();
 });
 
@@ -88,6 +88,8 @@ test('labels say what a load did, in counts', () => {
     status: 'done', username: 'alice', created: 8000, skipped: 3, profiles: 2, artifacts: 1,
     relinked: 900, approved: true,
   })).toBe('Done: @alice — 8,000 entries (3 already there), 2 profile versions, 1 artifacts, 900 linked; let in');
+  expect(bundleLoadLabel({ status: 'stopped', nodes_done: 1000, nodes_total: 8000 }))
+    .toBe("Stopped by the person's No: 1,000 of 8,000 entries loaded (they stay)");
   expect(bundleLoadLabel({ status: 'failed', error: 'checksum' }))
     .toBe("Failed: the bundle's checksum does not match its manifest");
   expect(bundleCheckLabel(null)).toBeNull();

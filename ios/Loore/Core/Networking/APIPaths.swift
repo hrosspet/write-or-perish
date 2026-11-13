@@ -17,6 +17,7 @@ enum APIPath {
     // MARK: Account
     static let dashboard = "/api/dashboard/"
     static let user = "/api/dashboard/user"
+    static let startingPoint = "/api/dashboard/starting-point"
     static let timezone = "/api/dashboard/timezone"
     static let email = "/api/dashboard/email"
     static let emailConfirm = "/api/dashboard/email/confirm"

@@ -23,7 +23,10 @@ const ERRORS = {
   format: "a bundle format this server does not load",
   foreign_author: "an entry in the bundle is by another account",
   own_writing: "the account has writing of its own",
+  unlabelled_tweets: "the account holds tweets without a provenance label (pre-fills before 2026-09-21; label them first, #691)",
   signed_in: "someone has signed in to the account",
+  not_prefill: "the bundle holds something no pre-fill makes",
+  manifest: "the manifest is not consistent",
 };
 
 const n = (v) => (v == null ? "?" : Number(v).toLocaleString());
@@ -48,7 +51,7 @@ export function bundleCheckLabel(c) {
       : `new account @${a.username}`);
   } else if (a) {
     parts.push(`into @${a.username} (${a.sign_in === "never" ? "never signed in" : "signed in"}` +
-      `${a.own_writing ? ", has own writing" : ""}${a.approved ? ", let in" : ""})`);
+      `${a.own_writing ? `, ${ERRORS[a.own_writing] || a.own_writing}` : ""}${a.approved ? ", let in" : ""})`);
   }
   return parts.join(" · ");
 }
@@ -65,7 +68,10 @@ export function bundleLoadLabel(l) {
     return `Done: @${l.username} — ${n(l.created)} entries` +
       `${l.skipped ? ` (${n(l.skipped)} already there)` : ""}, ` +
       `${n(l.profiles)} profile versions, ${n(l.artifacts)} artifacts, ` +
-      `${n(l.relinked)} linked; ${l.approved ? "let in" : "not let in yet"}`;
+      `${n(l.relinked)} linked; ${l.approved ? "let in" : "not let in yet (Activate)"}`;
+  }
+  if (l.status === "stopped") {
+    return `Stopped by the person's No: ${n(l.nodes_done)} of ${n(l.nodes_total)} entries loaded (they stay)`;
   }
   if (l.status === "failed") return `Failed: ${ERRORS[l.error] || l.error}`;
   if (l.status === "refused") return `Not loaded on their Yes: ${ERRORS[l.error] || l.error}`;
@@ -78,7 +84,6 @@ export default function AdminPrefillBundles({ onLoaded }) {
   const [check, setCheck] = useState(null);
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState("");
-  const [approve, setApprove] = useState(true);
   const [force, setForce] = useState(false);
   const [load, setLoad] = useState(null);
   const [recent, setRecent] = useState([]);
@@ -148,7 +153,7 @@ export default function AdminPrefillBundles({ onLoaded }) {
     setError("");
     try {
       const res = await api.post("/admin/prefill-bundles/loads",
-        { q: query.trim(), force, approve });
+        { q: query.trim(), force });
       setLoad(res.data.load);
       fetchRecent();
     } catch (e) {
@@ -164,7 +169,8 @@ export default function AdminPrefillBundles({ onLoaded }) {
       <h2>Make ready from prepared material</h2>
       <p style={{ fontSize: "0.85em", color: "var(--text-secondary)", marginTop: 0 }}>
         Loads the lab's bundle for an X account (public tweets and the profile drafted from them)
-        into the account with that X id, or a new one under its handle. No model runs.
+        into the account with that X id, or a new one under its handle. No model runs. It lets
+        nobody in: Activate the account when you want to.
       </p>
       <input
         type="text"
@@ -179,10 +185,6 @@ export default function AdminPrefillBundles({ onLoaded }) {
       <button onClick={runCheck} disabled={checking || busy || !query.trim()}>
         {checking ? "Checking…" : "Check"}
       </button>{" "}
-      <label style={{ fontSize: "0.85em", whiteSpace: "nowrap" }}>
-        <input type="checkbox" checked={approve} onChange={(e) => setApprove(e.target.checked)} />{" "}
-        Let them in when it is ready
-      </label>{" "}
       {refusal && refusal.forceable && (
         <label style={{ fontSize: "0.85em", whiteSpace: "nowrap" }}>
           <input type="checkbox" checked={force} onChange={(e) => setForce(e.target.checked)} />{" "}

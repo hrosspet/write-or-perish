@@ -48,15 +48,16 @@ def check_bundle():
 @login_required
 @admin_required
 def start_load():
-    """Body: {"q": handle or X id, "force": bool, "approve": bool}.
-    Returns 202 {"load"} or 4xx {"error", "code"}."""
+    """Body: {"q": handle or X id, "force": bool}. Returns 202 {"load"} or
+    4xx {"error", "code"}; 502 {"code": "storage"} when the storage cannot
+    be reached. The load lets nobody in: the admin approves as for any
+    account."""
     from backend.utils.bundle_storage import StorageError
     from backend.utils.prefill_bundle_load import serialize_load, start_admin_load
     data = request.get_json() or {}
     try:
         load, refusal = start_admin_load(
-            data.get("q"), current_user.id, force=bool(data.get("force")),
-            approve=bool(data.get("approve", True)))
+            data.get("q"), current_user.id, force=bool(data.get("force")))
     except StorageError as e:
         db.session.rollback()
         return jsonify({"error": str(e), "code": "storage"}), 502
