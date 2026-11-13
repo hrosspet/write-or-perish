@@ -292,7 +292,7 @@ class TestWithheldFromAIReads:
         assert found() == {n.id for n in writer["own"]}
 
     def test_other_accounts_queries_do_not_change(self, writer, users):  # noqa: F811
-        """Control: an unanswered or yes account adds no clause."""
+        """An unanswered or yes account adds no clause."""
         from backend.utils.privacy import withheld_prefill_clauses
         u = writer["user"]
         assert withheld_prefill_clauses(u.id) == []

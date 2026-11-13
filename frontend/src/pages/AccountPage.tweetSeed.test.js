@@ -2,7 +2,9 @@
 // (PrefillConsentCard) says the answer can be changed in Settings. The
 // row shows where the question applies, shows the current answer (none
 // selected until there is one), saves a change both ways, says when a
-// change did not save, and says what each answer does.
+// change did not save, and says what each answer does. Controls (they
+// pass before #662 too): an email account has no row, and the card's no
+// before any pre-fill keeps its line.
 let mockUserCtx;
 jest.mock('../contexts/UserContext', () => ({
   useUser: () => mockUserCtx,
