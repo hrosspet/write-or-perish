@@ -51,7 +51,9 @@ how AI-reply audio stored under the model account's folder is found),
 then the user's own folders (``user/``, ``nodes/``, ``drafts/``,
 ``chunks/``, ``streaming/`` under AUDIO_STORAGE_PATH and the import stash
 ``imports/<id>/``) and the X API dumps of the handle the account was
-pre-filled from. Every stored audio URL points inside these folders.
+pre-filled from; a purge of everything also the account's Community
+Archive pre-fill stashes (``ca-prefill/<id>-*``). Every stored audio URL
+points inside these folders.
 
 Re-running is safe: each step selects what is still there. A purge that
 crashed half way continues where it stopped.
@@ -494,6 +496,20 @@ def _x_api_root():
     return _stash_root().parent / "x-api"
 
 
+def _ca_prefill_stashes(user_id):
+    """The Community Archive pre-fill's resumable stashes of the account
+    (``ca-prefill/<user id>-<archive account id>`` next to the import
+    stash, #688): the public posts a pre-fill paged in before it imported
+    them. Folders only, never followed through a link."""
+    folder = _stash_root().parent / "ca-prefill"
+    if not folder.is_dir() or folder.is_symlink():
+        return []
+    prefix = f"{int(user_id)}-"
+    return [p for p in folder.iterdir()
+            if p.name.startswith(prefix) and p.is_dir()
+            and not p.is_symlink()]
+
+
 def _x_dump_files(handle):
     """X API dumps (backend.tasks.imports.x_api_dump_path) of the handle
     the account was pre-filled from: that account's public posts."""
@@ -625,7 +641,8 @@ def _scope_files(scope, user):
     dumps, or, for a "Delete all my content" request, what existed when
     it was made."""
     if scope.everything:
-        return (_user_dirs(scope.user_id),
+        return (_user_dirs(scope.user_id)
+                + _ca_prefill_stashes(scope.user_id),
                 _x_dump_files(user.prefilled_handle if user else None))
     dirs, files = [], []
     for recorded in _recorded_paths(scope):
@@ -2165,7 +2182,12 @@ def run_purge_job(job_id, token):
         after_commit = None
         if delete_account:
             from backend.utils.account_deletion import delete_identity
-            identity, after_commit = delete_identity(user_id)
+            from backend.utils.unclaimed_accounts import UNCLAIMED_SOURCE
+            # A pre-filled account nobody claimed (#685): no email, no
+            # handle held back (account_deletion.delete_identity).
+            unclaimed = job.source == UNCLAIMED_SOURCE
+            identity, after_commit = delete_identity(
+                user_id, notify=not unclaimed, reserve_handles=not unclaimed)
             for key, value in identity.items():
                 counts[key] = counts.get(key, 0) + value
         job = db.session.get(UserDataPurge, job_id)

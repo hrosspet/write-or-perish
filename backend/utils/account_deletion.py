@@ -578,13 +578,18 @@ def _reserve_usernames(handles, now):
             row.reserved_until = max(row.reserved_until, until)
 
 
-def delete_identity(user_id):
+def delete_identity(user_id, *, notify=True, reserve_handles=True):
     """Delete the account after its data has been purged. Flushes but
     does not commit: the caller commits it together with the job's
     "done", then calls the returned function for what happens outside
     the database (cache, email). Returns (counts, after_commit). Raises
     PurgeRefused, or PurgeIncomplete when anything of the user's is left
-    that the purge should have deleted."""
+    that the purge should have deleted.
+
+    A pre-filled account nobody claimed (#685) passes both False: nobody
+    ever had the account, so no email goes to an address the admin added,
+    and its handle is not held back from the person it belongs to, who
+    may sign up later (the account never had a public page to protect)."""
     from backend.utils.system_accounts import get_erased_system_user
 
     user = db.session.get(User, user_id)
@@ -630,9 +635,10 @@ def delete_identity(user_id):
                               + ", ".join(f"{k}={v}"
                                           for k, v in sorted(left.items())))
 
-    email = user.email
-    _reserve_usernames(handles, now)
-    counts["released_username"] += len([h for h in handles if h])
+    email = user.email if notify else None
+    if reserve_handles:
+        _reserve_usernames(handles, now)
+        counts["released_username"] += len([h for h in handles if h])
     db.session.expunge(user)
     counts["user"] += User.query.filter(User.id == U).delete(
         synchronize_session=False)

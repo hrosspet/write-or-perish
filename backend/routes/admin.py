@@ -749,6 +749,57 @@ def undo_deletion_route(user_id):
     return jsonify({"job": _purge_job_json(latest)}), 200
 
 
+@admin_bp.route("/unclaimed_accounts", methods=["GET"])
+@login_required
+@admin_required
+def unclaimed_accounts_report():
+    """The pre-filled accounts nobody claimed (#685): which the nightly
+    run deletes now (dry run: would delete), which wait for their date,
+    which are excluded, with the opened and deletion dates. Accounts
+    someone used, and those opened before the sign-in record, as counts.
+    Changes nothing; metadata only."""
+    from backend.utils import unclaimed_accounts as ua
+    from backend.utils.activity import LAST_SEEN_SINCE
+    assessments = ua.report()
+    listed = [ua.assessment_json(a) for a in assessments
+              if a.status in ("due", "waiting", "kept")]
+    before = [a.user_id for a in assessments if a.status == "before_record"]
+    return jsonify({
+        "deletion_enabled": ua.deletion_enabled(),
+        "period_days": ua.period_days(),
+        "max_per_run": ua.MAX_DELETIONS_PER_RUN,
+        "record_since": iso_utc(LAST_SEEN_SINCE),
+        "accounts": listed,
+        "used_count": sum(1 for a in assessments if a.status == "used"),
+        "before_record": {"count": len(before), "ids": before},
+    }), 200
+
+
+@admin_bp.route("/users/<int:user_id>/unclaimed_keep", methods=["PUT"])
+@login_required
+@admin_required
+def unclaimed_keep(user_id):
+    """The admin's Keep on a pre-filled account nobody claimed (#685), e.g.
+    when someone was promised more time. Body: {"until": "YYYY-MM-DD"
+    (kept to the end of that day, UTC) | "forever" | null (cleared: the
+    period applies again)}."""
+    from backend.utils import unclaimed_accounts as ua
+    user = User.query.get_or_404(user_id)
+    data = request.get_json(silent=True) or {}
+    try:
+        until = ua.parse_until(data.get("until"))
+    except (ValueError, AttributeError):
+        return jsonify({"error": 'Give a date (YYYY-MM-DD), "forever", or '
+                                 'nothing to clear.'}), 400
+    ua.set_keep(user, until)
+    logger.warning("Admin %s set the unclaimed-account Keep of user %s to %s",
+                   current_user.id, user.id,
+                   "forever" if until == ua.KEEP_FOREVER else until)
+    return jsonify({"account": ua.assessment_json(ua.assess(
+        user, datetime.utcnow(), config=current_app.config,
+        active_job_ids=ua.active_job_user_ids()))}), 200
+
+
 @admin_bp.route("/users/<int:user_id>/toggle_spam", methods=["POST"])
 @login_required
 @admin_required
