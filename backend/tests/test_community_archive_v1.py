@@ -79,10 +79,20 @@ class _Resp(io.BytesIO):
         return False
 
 
+class BodyTimeout:
+    """An answer whose headers arrive and whose body read times out."""
+
+
+class _TimedOutResp(_Resp):
+    def read(self, *a):
+        raise TimeoutError("timed out")
+
+
 class FakeV1:
     """urllib.request.urlopen for the v1 host. ``routes[path]`` is a list
     of answers served in order (the last one repeats), each a body dict, a
-    V1Error, or a callable(params) returning one of those."""
+    V1Error, an exception to raise (a dropped connection, a timeout),
+    BodyTimeout, or a callable(params) returning one of those."""
 
     def __init__(self):
         self.routes = {}
@@ -101,8 +111,12 @@ class FakeV1:
                               "timeout": timeout})
         answers = self.routes[path]
         answer = answers.pop(0) if len(answers) > 1 else answers[0]
-        if callable(answer):
+        if callable(answer) and not isinstance(answer, type):
             answer = answer(params)
+        if isinstance(answer, BaseException):
+            raise answer
+        if answer is BodyTimeout:
+            return _TimedOutResp({}, dict(self.headers))
         if isinstance(answer, V1Error):
             body = {"error": {"code": answer.code, "message": "no"},
                     "request_id": "req"}
@@ -138,6 +152,7 @@ def _fresh_alert_claims():
     for kind in (ca_feed.ALERT_EXPORT, ca_feed.ALERT_API_V1_DAY):
         ca_feed._archive_problem_cleared(kind)
     ca_feed._newest_memo.clear()
+    ca_feed._local_glean_requests.clear()
     yield
     for kind in (ca_feed.ALERT_EXPORT, ca_feed.ALERT_API_V1_DAY):
         ca_feed._archive_problem_cleared(kind)
@@ -345,7 +360,8 @@ def test_external_content_uses_v1_with_a_key(v1):
     tweet_calls = [r["params"] for r in v1.requests
                    if r["path"] == "/accounts/7/tweets"]
     assert tweet_calls[0] == {"order": "desc", "limit": "3"}
-    assert tweet_calls[1] == {"order": "desc", "limit": "1", "cursor": "c1"}
+    # The same limit with the cursor; the last page is cut locally.
+    assert tweet_calls[1] == {"order": "desc", "limit": "3", "cursor": "c1"}
 
 
 # ── Glean's day from v1 ──────────────────────────────────────────────────
@@ -449,7 +465,12 @@ def test_a_failed_day_fetch_reports_once(v1, tmp_path, caplog):
     now = datetime(2026, 11, 13, 9)
     with caplog.at_level(logging.WARNING):
         assert ca_feed.refresh_v1_day_for_read(tmp_path, now=now) is None
-        assert ca_feed.refresh_v1_day_for_read(tmp_path, now=now) is None
+        # Within the hour after a failure the window is not tried at all.
+        assert ca_feed.refresh_v1_day_for_read(
+            tmp_path, now=now + timedelta(minutes=30)) is None
+        assert ca_feed.refresh_v1_day_for_read(
+            tmp_path, now=now + timedelta(hours=2)) is None
+    assert len(v1.requests) == 2
     levels = [r.levelno for r in caplog.records
               if "fetching the day for Glean failed" in r.getMessage()]
     assert levels == [logging.ERROR, logging.WARNING]
@@ -532,3 +553,239 @@ def test_the_window_line_is_told_when_the_read_was_stale():
     assert ca_feed.read_window_fields(
         row(end + timedelta(hours=36, minutes=1), end))["export_stale"] is True
     assert ca_feed.read_window_fields(row(None, end))["export_stale"] is False
+
+
+# ── transient failures, resumable reads, the budget (review of #690) ─────
+
+def test_server_errors_and_dropped_connections_are_retried(v1):
+    v1.routes["/accounts"] = [
+        V1Error(504, "timeout"), V1Error(502, "upstream_unavailable"),
+        page([v1_account(1, "bob")])]
+    assert ca.fetch_account("bob")["account_id"] == "1"
+    assert v1.sleeps == [2, 4]
+    for failure in (urllib.error.URLError("reset"), TimeoutError("timed out"),
+                    ConnectionResetError("reset by peer"), BodyTimeout):
+        v1.sleeps.clear()
+        v1.routes["/accounts"] = [failure, page([v1_account(1, "bob")])]
+        assert ca.fetch_account("bob")["account_id"] == "1"
+        assert v1.sleeps == [2]
+    # Bounded: three tries, then the error the caller always got.
+    v1.sleeps.clear()
+    n = len(v1.requests)
+    v1.routes["/accounts"] = [V1Error(500, "busy")]
+    with pytest.raises(urllib.error.HTTPError):
+        ca.fetch_account("bob")
+    assert len(v1.requests) - n == ca.V1_TRANSIENT_TRIES and v1.sleeps == [2, 4]
+    v1.routes["/accounts"] = [TimeoutError("timed out")]
+    with pytest.raises(TimeoutError):
+        ca.fetch_account("bob")
+
+
+def test_a_504_mid_account_is_retried_not_the_end_of_the_read(v1):
+    """The reviewer's probe: a 504 on one page used to end the read."""
+    pages = {None: page([v1_tweet(1, "al", "a", "2026-01-01T00:00:00.000Z")], "c1"),
+             "c1": page([v1_tweet(2, "al", "b", "2026-01-02T00:00:00.000Z")], "c2"),
+             "c2": page([v1_tweet(3, "al", "c", "2026-01-03T00:00:00.000Z")])}
+    failed = []
+
+    def answer(params):
+        if params.get("cursor") == "c1" and not failed:
+            failed.append(1)
+            return V1Error(504, "timeout")
+        return pages[params.get("cursor")]
+    v1.routes["/accounts/42/tweets"] = [answer]
+    assert [r["tweet_id"] for r in ca.iter_tweets("42")] == ["1", "2", "3"]
+
+
+def _paged_day(v1, fail_at=None, fail_times=99):
+    """A day of five pages (c0..c4), two tweets each; the page at cursor
+    *fail_at* answers 504 *fail_times* times first."""
+    failures = []
+
+    def answer(params):
+        cursor = params.get("cursor") or "c0"
+        if cursor == fail_at and len(failures) < fail_times:
+            failures.append(cursor)
+            return V1Error(504, "timeout")
+        i = int(cursor[1:])
+        rows = [v1_tweet(100 + 2 * i + k, f"user{i}", f"tweet {i}.{k}",
+                         f"2026-11-12T{8 + i:02d}:00:00.000Z", 10 + i)
+                for k in (0, 1)]
+        return page(rows, f"c{i + 1}" if i < 4 else None)
+    v1.routes["/tweets"] = [answer]
+    return failures
+
+
+def test_a_failed_day_keeps_its_pages_waits_an_hour_and_resumes(v1, tmp_path):
+    make_export(tmp_path, newest=datetime(2026, 11, 3, 6, 50))
+    _paged_day(v1, fail_at="c3")
+    t0 = datetime(2026, 11, 13, 8, 0, tzinfo=timezone.utc)
+    with pytest.raises(urllib.error.HTTPError):
+        ca.ensure_v1_day(tmp_path, now=t0)
+    assert len(v1.requests) == 3 + ca.V1_TRANSIENT_TRIES
+    # Never a partial day: nothing is served, Glean stays on the export.
+    assert ca.latest_v1_day(tmp_path) is None
+    assert ca_feed.glean_source_dir(tmp_path, 1, now=datetime(2026, 11, 13, 8)) == tmp_path
+    # Within the hour: no request at all.
+    with pytest.raises(ca.V1DayWaiting):
+        ca.ensure_v1_day(tmp_path, now=t0 + timedelta(minutes=30))
+    assert len(v1.requests) == 3 + ca.V1_TRANSIENT_TRIES
+    # After it: resumes at the page that failed, never from page 1.
+    v1.routes["/tweets"] = []
+    _paged_day(v1)
+    n = len(v1.requests)
+    assert ca.ensure_v1_day(tmp_path, now=t0 + timedelta(minutes=61))[1] is True
+    resumed = [r["params"].get("cursor") for r in v1.requests[n:]]
+    assert resumed == ["c3", "c4"]
+    _, stats, _ = ca.render_recent_tweets(ca.latest_v1_day(tmp_path), days=1)
+    assert stats["tweets"] == 10
+
+
+def test_a_refused_stored_cursor_starts_the_window_over_once(v1, tmp_path):
+    _paged_day(v1, fail_at="c2", fail_times=3)
+    t0 = datetime(2026, 11, 13, 8, 0, tzinfo=timezone.utc)
+    with pytest.raises(urllib.error.HTTPError):
+        ca.ensure_v1_day(tmp_path, now=t0)
+    stale = []
+
+    def answer(params):
+        if params.get("cursor") == "c2" and not stale:
+            stale.append(1)
+            return V1Error(400, "invalid_request")
+        return inner(params)
+    v1.routes["/tweets"] = []
+    _paged_day(v1)
+    inner = v1.routes["/tweets"][0]
+    v1.routes["/tweets"] = [answer]
+    n = len(v1.requests)
+    assert ca.ensure_v1_day(tmp_path, now=t0 + timedelta(hours=2))[1] is True
+    assert [r["params"].get("cursor") for r in v1.requests[n:]] == [
+        "c2", None, "c1", "c2", "c3", "c4"]
+    _, stats, _ = ca.render_recent_tweets(ca.latest_v1_day(tmp_path), days=1)
+    assert stats["tweets"] == 10  # the pages read twice are deduped
+
+
+def test_glean_fetching_stops_at_its_daily_budget(v1, tmp_path, monkeypatch, caplog):
+    make_export(tmp_path, newest=datetime(2026, 11, 3, 6, 50))
+    _paged_day(v1)
+    monkeypatch.setattr(ca_feed, "V1_GLEAN_DAILY_REQUESTS", 3)
+    now = datetime(2026, 11, 13, 9)
+    with caplog.at_level(logging.WARNING):
+        assert ca_feed.refresh_v1_day_for_read(tmp_path, now=now) is None
+    assert len(v1.requests) == 3  # the fourth is refused before it is sent
+    assert "V1BudgetSpent" in caplog.text
+    assert ca.latest_v1_day(tmp_path) is None
+    # Later the same UTC day: still nothing sent, whatever the backoff.
+    assert ca_feed.refresh_v1_day_for_read(
+        tmp_path, now=now + timedelta(hours=3)) is None
+    assert len(v1.requests) == 3
+    # The next UTC day has its own budget; that day's window starts afresh.
+    monkeypatch.setattr(ca_feed, "V1_GLEAN_DAILY_REQUESTS", 100)
+    assert ca_feed.refresh_v1_day_for_read(
+        tmp_path, now=datetime(2026, 11, 14, 9)) == "api-v1-2026-11-14T07-00Z"
+    assert len(v1.requests) == 3 + 5
+    # A pre-fill's requests are not counted against Glean's budget.
+    v1.routes["/accounts"] = [page([v1_account(1, "bob")])]
+    monkeypatch.setattr(ca_feed, "V1_GLEAN_DAILY_REQUESTS", 0)
+    assert ca.fetch_account("bob")["account_id"] == "1"
+
+
+def test_an_account_read_resumes_from_its_stash(v1, tmp_path):
+    def answer(params):
+        i = int((params.get("cursor") or "c0")[1:])
+        return page([v1_tweet(10 * i + k, "big", f"t{i}.{k}",
+                              "2026-01-01T00:00:00.000Z", 42) for k in (0, 1)],
+                    f"c{i + 1}" if i < 3 else None)
+    v1.routes["/accounts/42/tweets"] = [answer]
+    stash = tmp_path / "stash"
+    ticks = iter(range(0, 10_000, 10))
+    clock = lambda: next(ticks)  # noqa: E731 - each call 10 s later
+    # A run with 15 s of paging reads two pages and stops with its cursor.
+    assert ca.stage_account_tweets_v1("42", stash, run_seconds=15,
+                                      clock=clock) == (False, 4)
+    # The next run (or a later pre-fill) continues from that cursor.
+    n = len(v1.requests)
+    assert ca.stage_account_tweets_v1("42", stash, clock=clock) == (True, 8)
+    assert [r["params"].get("cursor") for r in v1.requests[n:]] == ["c2", "c3"]
+    assert [r["tweet_id"] for r in ca.iter_staged_tweets(stash)] == [
+        "0", "1", "10", "11", "20", "21", "30", "31"]
+    # Done: no request at all.
+    n = len(v1.requests)
+    assert ca.stage_account_tweets_v1("42", stash) == (True, 8)
+    assert len(v1.requests) == n
+
+
+def test_a_failed_account_read_keeps_its_stash(v1, tmp_path):
+    calls = []
+
+    def answer(params):
+        calls.append(params.get("cursor"))
+        if params.get("cursor") == "c1" and calls.count("c1") <= 3:
+            return V1Error(500, "busy")
+        i = int((params.get("cursor") or "c0")[1:])
+        return page([v1_tweet(i, "big", "t", "2026-01-01T00:00:00.000Z", 42)],
+                    f"c{i + 1}" if i < 2 else None)
+    v1.routes["/accounts/42/tweets"] = [answer]
+    stash = tmp_path / "stash"
+    with pytest.raises(urllib.error.HTTPError):
+        ca.stage_account_tweets_v1("42", stash)
+    assert calls == [None, "c1", "c1", "c1"]
+    assert ca.stage_account_tweets_v1("42", stash) == (True, 3)
+    assert calls[4:] == ["c1", "c2"]
+
+
+# ── without a key after the REST retirement ──────────────────────────────
+
+@pytest.fixture
+def retired(keyless, monkeypatch):
+    monkeypatch.setattr(ca, "REST_RETIRED_AT",
+                        datetime(2026, 1, 1, tzinfo=timezone.utc))
+    monkeypatch.setattr(ca, "_rest_retired_logged", True)
+
+
+def test_after_the_retirement_a_lookup_asks_for_the_key(retired, monkeypatch):
+    from backend.utils.x_identity import XIdUnresolved, resolve_x_id
+    # A retired API's empty answer is not "not in the archive".
+    monkeypatch.setattr(ca, "_get", lambda *a, **k: [])
+    with pytest.raises(ca.CommunityArchiveRetired, match="COMMUNITY_ARCHIVE_API_KEY"):
+        ca.fetch_account("bob")
+    with pytest.raises(XIdUnresolved) as err:
+        resolve_x_id("bob")
+    assert err.value.reason == "archive-error"
+    assert "retired" in err.value.message and "COMMUNITY_ARCHIVE_API_KEY" in err.value.message
+    assert "not in the Community Archive" not in err.value.message
+
+    def gone(*a, **k):
+        raise urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+    monkeypatch.setattr(ca, "_get", gone)
+    with pytest.raises(XIdUnresolved) as err:
+        resolve_x_id("bob")
+    assert "COMMUNITY_ARCHIVE_API_KEY" in err.value.message
+    # The admin's coverage check gets the same message (its route shows it).
+    with pytest.raises(ca.CommunityArchiveRetired):
+        ca.coverage_summary("bob")
+    # While the old API still answers, its answer is used.
+    monkeypatch.setattr(ca, "_get", lambda *a, **k: [
+        {"account_id": "7", "username": "bob"}])
+    assert ca.fetch_account("bob")["account_id"] == "7"
+
+
+def test_after_the_retirement_the_donated_archive_import_asks_too(retired, monkeypatch):
+    from backend.utils import external_content as content
+
+    class Empty:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return []
+    monkeypatch.setattr(content.requests, "get", lambda *a, **k: Empty())
+    with pytest.raises(ca.CommunityArchiveRetired):
+        content.ca_lookup_account("bob")
+
+
+def test_before_the_retirement_an_empty_answer_is_not_in_the_archive(keyless, monkeypatch):
+    """Control: before 19 November an empty REST answer means what it says."""
+    monkeypatch.setattr(ca, "REST_RETIRED_AT", datetime(2099, 1, 1, tzinfo=timezone.utc))
+    monkeypatch.setattr(ca, "_get", lambda *a, **k: [])
+    assert ca.fetch_account("bob") is None

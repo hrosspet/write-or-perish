@@ -686,6 +686,47 @@ def glean_source_dir(snapshot_dir, days=1, now=None):
     return day
 
 
+# API v1 requests the background fetch of Glean's day may send per UTC day
+# (#688), counted in Redis across processes (in this process alone without
+# it). A day window takes about 115-130 requests; 1,000 leaves room for
+# several failed runs, and is 5 % of a key's 20,000-a-day quota, so the
+# pre-fills that share the key always keep 19,000. Heuristic.
+V1_GLEAN_DAILY_REQUESTS = 1000
+GLEAN_BUDGET_PREFIX = "loore:community-archive-api:glean-requests:"
+_local_glean_requests = {}
+
+
+def _count_glean_request(key):
+    from backend.utils.provider_alerts import _redis
+    try:
+        client = _redis(_alert_config())
+        if client is not None:
+            n = client.incr(key)
+            client.expire(key, 2 * 24 * 3600)
+            return int(n)
+    except Exception:  # noqa: BLE001 - count in this process instead
+        log.warning("Glean request budget: Redis unavailable; counting in "
+                    "this process only", exc_info=True)
+    _local_glean_requests[key] = _local_glean_requests.get(key, 0) + 1
+    return _local_glean_requests[key]
+
+
+def glean_request_budget(now=None, limit=None):
+    """The ``on_request`` hook of the Glean day fetch: counts each request
+    against the UTC day's V1_GLEAN_DAILY_REQUESTS and raises
+    ca.V1BudgetSpent once they are used, before the request is sent."""
+    from backend.utils import community_archive as ca
+    key = GLEAN_BUDGET_PREFIX + (now or datetime.utcnow()).strftime("%Y-%m-%d")
+    limit = V1_GLEAN_DAILY_REQUESTS if limit is None else limit
+
+    def spend():
+        if _count_glean_request(key) > limit:
+            raise ca.V1BudgetSpent(
+                f"Glean's {limit} Community Archive API requests for the "
+                "day are used up")
+    return spend
+
+
 def refresh_v1_day_for_read(snapshot_dir, log=log, now=None):
     """Background half of glean_source_dir: with an API key and a stale
     (or absent) export, make sure the current day window is cached from
@@ -704,8 +745,13 @@ def refresh_v1_day_for_read(snapshot_dir, log=log, now=None):
         return None
     try:
         window_id, fetched = ca.ensure_v1_day(
-            snapshot_dir, now=now.replace(tzinfo=timezone.utc))
+            snapshot_dir, now=now.replace(tzinfo=timezone.utc),
+            on_request=glean_request_budget(now))
     except ca.SnapshotBusy:
+        return None
+    except ca.V1DayWaiting as e:
+        log.info("Community Archive API: Glean's day waits after a failed "
+                 "fetch (%s)", e)
         return None
     except Exception as e:  # noqa: BLE001 - Glean goes on with the cache
         _report_archive_problem(

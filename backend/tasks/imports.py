@@ -207,10 +207,24 @@ def prefill_community_archive_impl(user_id, handle, options, update_state=None,
             logger.info("@%s: snapshot holds %s rows vs %s live — using REST",
                         handle, in_snapshot, archived)
             use_parquet = False
+    stash = None
     if use_parquet:
         source = ca.iter_tweets_parquet(
             account["account_id"], snapshot_dir,
             on_page=lambda n: state("fetching", n, expected))
+    elif ca.v1_enabled():
+        # Paged into a stash on disk with its cursor (#688): a run that
+        # fails, or stops at PREFILL_V1_RUN_SECONDS, leaves what it read,
+        # and the next run (the task's follow-up, or the admin's next
+        # pre-fill of the same account) continues from the cursor.
+        stash = _prefill_stash_dir(user_id, account["account_id"])
+        state("fetching", 0, expected)
+        done, fetched = ca.stage_account_tweets_v1(
+            account["account_id"], stash, run_seconds=PREFILL_V1_RUN_SECONDS,
+            on_page=lambda n: state("fetching", n, expected))
+        if not done:
+            raise PrefillContinues(fetched)
+        source = ca.iter_staged_tweets(stash)
     else:
         source = ca.iter_tweets(
             account["account_id"], on_page=lambda n: state("fetching", n, expected))
@@ -240,7 +254,67 @@ def prefill_community_archive_impl(user_id, handle, options, update_state=None,
         "archived": len(seen), "retweets_skipped": retweets,
         "account_num_tweets": account.get("num_tweets") or 0,
     })
+    if stash is not None:
+        import shutil
+        shutil.rmtree(stash, ignore_errors=True)
     return result
+
+
+# A pre-fill through API v1 (#688) pages for at most this long in one run,
+# then continues in a follow-up run of the same task from its stored
+# cursor. Heuristic: 30 min of paging is ~1,800 requests at the key's 60 a
+# minute (~360k tweets, the largest account in the archive), and leaves
+# the import of the rows 25 min before the 55-min soft time limit.
+PREFILL_V1_RUN_SECONDS = 30 * 60
+# Follow-up runs one pre-fill may take; past them it fails with a message
+# saying that running it again continues where it stopped. Heuristic: 8
+# runs of 30 min hold any account read at one request every 2 s.
+PREFILL_V1_MAX_CONTINUATIONS = 8
+PREFILL_V1_CONTINUE_COUNTDOWN = 5  # seconds, as the chat import's resume
+# A stash nobody resumed for this long is deleted by the next pre-fill.
+PREFILL_STASH_MAX_AGE_SECONDS = 7 * 24 * 3600
+
+
+class PrefillContinues(Exception):
+    """The pre-fill's API v1 read used its run's time; the stash holds what
+    it read and the next run continues from the cursor."""
+
+    def __init__(self, fetched):
+        super().__init__(f"{fetched} tweets read so far; continuing")
+        self.fetched = fetched
+
+
+def _continue_prefill(task, user_id, handle, stop):
+    """Send the pre-fill's next run (raises celery's Retry), or, past
+    PREFILL_V1_MAX_CONTINUATIONS, fail with what the admin can do."""
+    from backend.utils.community_archive import CommunityArchiveError
+    if task.request.retries >= PREFILL_V1_MAX_CONTINUATIONS:
+        raise CommunityArchiveError(
+            f"@{handle}: {stop.fetched} tweets read in "
+            f"{PREFILL_V1_MAX_CONTINUATIONS + 1} runs and not finished; run "
+            "the pre-fill again to continue where it stopped")
+    logger.info("Community Archive pre-fill for user %s (@%s): %d tweets "
+                "read; continuing in a new run", user_id, handle, stop.fetched)
+    raise task.retry(countdown=PREFILL_V1_CONTINUE_COUNTDOWN)
+
+
+def _prefill_stash_dir(user_id, account_id):
+    """Where a pre-fill stages an account's tweets (public tweets, deleted
+    once imported), next to the X API pre-fill's stash; stashes older than
+    PREFILL_STASH_MAX_AGE_SECONDS are deleted on the way."""
+    import shutil
+    import time
+    from backend.utils.twitter_archive import STASH_ROOT
+    root = STASH_ROOT.parent / "ca-prefill"
+    root.mkdir(parents=True, exist_ok=True)
+    for old in root.iterdir():
+        try:
+            if time.time() - old.stat().st_mtime > PREFILL_STASH_MAX_AGE_SECONDS:
+                shutil.rmtree(old, ignore_errors=True)
+        except OSError:
+            continue
+    from backend.utils.community_archive import _v1_account_path
+    return root / f"{int(user_id)}-{_v1_account_path(account_id)}"
 
 
 class PrefillIdConflict(RuntimeError):
@@ -552,13 +626,19 @@ def x_api_dump_path(handle):
 
 
 @celery.task(bind=True, base=HeavyTask,
-             name="backend.tasks.imports.prefill_community_archive")
+             name="backend.tasks.imports.prefill_community_archive",
+             max_retries=PREFILL_V1_MAX_CONTINUATIONS)
 def prefill_community_archive(self, user_id, handle, options):
-    """Admin pre-fill (see prefill_community_archive_impl)."""
+    """Admin pre-fill (see prefill_community_archive_impl). A read through
+    API v1 that used its run's time continues in a follow-up run of this
+    task (same id, so the admin's status poll follows it; the heavy slot
+    is free in between)."""
     with flask_app.app_context():
         try:
             return prefill_community_archive_impl(
                 user_id, handle, options or {}, update_state=self.update_state)
+        except PrefillContinues as e:
+            return _continue_prefill(self, user_id, handle, e)
         except Exception:
             logger.exception("Community Archive pre-fill failed for user %s (@%s)",
                              user_id, handle)

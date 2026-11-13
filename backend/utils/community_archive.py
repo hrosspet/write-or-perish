@@ -32,6 +32,7 @@ before. v1 pages with an opaque cursor.
 import contextlib
 import email.utils
 import fcntl
+import http.client
 import json
 import logging
 import os
@@ -79,6 +80,26 @@ class CommunityArchiveError(Exception):
     """User-facing problem (unknown handle, API failure)."""
 
 
+# What the admin reads when a lookup or a pre-fill needs the key (#688).
+REST_RETIRED_MESSAGE = (
+    "The Community Archive retired its old API on 19 November 2026; set "
+    "COMMUNITY_ARCHIVE_API_KEY on the server to use its API v1 (see "
+    "docs/LOCAL-DEV.md).")
+
+
+class CommunityArchiveRetired(CommunityArchiveError):
+    """No API key, and the REST API is past its retirement date and did not
+    answer usefully: the admin is told to set the key, never that the
+    handle is not in the archive (that cannot be known)."""
+
+    def __init__(self):
+        super().__init__(REST_RETIRED_MESSAGE)
+
+
+class V1BudgetSpent(CommunityArchiveError):
+    """A caller's request budget (on_request) refused another request."""
+
+
 # ── Community Archive API v1 (#688) ───────────────────────────────────────
 # Reference: API_V1_URL + "/openapi.json"; migration guide
 # docs/api-v1-migration.md in TheExGenesis/community-archive.
@@ -97,6 +118,14 @@ V1_MAX_ATTEMPTS = 5
 V1_MAX_RETRY_AFTER = 60
 V1_DEFAULT_RETRY_AFTER = 5
 V1_RETRY_STATUSES = (429, 503)
+# A server error (500, 502, 504: the API's own timeout), a dropped
+# connection or a request timeout is tried V1_TRANSIENT_TRIES times in
+# all, waiting V1_TRANSIENT_BACKOFF seconds before each retry (at most 6 s
+# of waiting, plus up to three request timeouts). Repeating a page request
+# with the same cursor is safe: it reads, never writes.
+V1_TRANSIENT_STATUSES = (500, 502, 504)
+V1_TRANSIENT_TRIES = 3
+V1_TRANSIENT_BACKOFF = (2, 4)
 
 _sleep = time.sleep  # tests replace it
 # Monotonic time before which no v1 request starts in this process: set
@@ -123,6 +152,12 @@ def api_key():
 def v1_enabled():
     """Whether calls go to API v1 (a key is set) rather than REST."""
     return api_key() is not None
+
+
+def rest_retired(now=None):
+    """No key, and the REST API is past its retirement date."""
+    now = now or datetime.now(timezone.utc)
+    return now >= REST_RETIRED_AT and not v1_enabled()
 
 
 def _warn_if_rest_retired(now=None):
@@ -183,15 +218,26 @@ def _v1_error_code(err):
         return None
 
 
-def _v1_get(path, params=None, timeout=None):
+# What a request can fail with short of an HTTP status: no connection, a
+# connection dropped mid-answer, a timeout on connect or on the body read
+# (a bare socket.timeout, i.e. TimeoutError), a truncated or garbled body.
+_V1_TRANSIENT_ERRORS = (urllib.error.URLError, TimeoutError, ConnectionError,
+                        http.client.HTTPException, ValueError)
+
+
+def _v1_get(path, params=None, timeout=None, on_request=None):
     """GET one API v1 endpoint and return its decoded JSON.
 
     429 and 503 are retried after Retry-After (V1_MAX_ATTEMPTS tries); a
     response that says the minute's allowance is used up delays the next
-    request until RateLimit-Reset. ``timeout`` is a budget for the whole
-    call, waits included (the whitelist's lookup budget); without it each
-    try gets V1_TIMEOUT. Any other failure raises urllib's HTTPError or
-    URLError, as the REST calls did. The key travels only in the
+    request until RateLimit-Reset. A 500, 502 or 504, a dropped connection
+    or a timeout is retried after a short backoff (V1_TRANSIENT_TRIES
+    tries). ``timeout`` is a budget for the whole call, waits included (the
+    whitelist's lookup budget); without it each try gets V1_TIMEOUT.
+    ``on_request()`` is called before every HTTP request, retries included;
+    it may raise (a daily budget, V1BudgetSpent) to stop the call. A
+    failure past the retries raises urllib's HTTPError or URLError (or the
+    socket's error), as the REST calls did. The key travels only in the
     Authorization header and is never logged."""
     key = api_key()
     if not key:
@@ -204,9 +250,15 @@ def _v1_get(path, params=None, timeout=None):
     def remaining():
         return None if deadline is None else deadline - time.monotonic()
 
-    attempt = 0
+    def wait_or_give_up(wait):
+        left = remaining()
+        if left is not None and wait >= left:
+            return False
+        _sleep(wait)
+        return True
+
+    limited = transient = 0
     while True:
-        attempt += 1
         hold = _v1_not_before - time.monotonic()
         if hold > 0:
             left = remaining()
@@ -217,6 +269,8 @@ def _v1_get(path, params=None, timeout=None):
         left = remaining()
         if left is not None and left <= 0:
             raise urllib.error.URLError("Community Archive API time budget spent")
+        if on_request is not None:
+            on_request()
         req = urllib.request.Request(url, headers={
             "Authorization": f"Bearer {key}", "Accept": "application/json"})
         try:
@@ -226,31 +280,67 @@ def _v1_get(path, params=None, timeout=None):
                 return json.load(resp)
         except urllib.error.HTTPError as e:
             _note_rate_limit(e.headers)
-            if e.code in V1_RETRY_STATUSES and attempt < V1_MAX_ATTEMPTS:
-                wait = _seconds_header(e.headers, "Retry-After",
-                                       V1_DEFAULT_RETRY_AFTER)
-                left = remaining()
-                if left is None or wait < left:
+            if e.code in V1_RETRY_STATUSES:
+                limited += 1
+                if limited < V1_MAX_ATTEMPTS:
+                    wait = _seconds_header(e.headers, "Retry-After",
+                                           V1_DEFAULT_RETRY_AFTER)
                     log.info("Community Archive API %s: HTTP %s, retrying in "
                              "%.0f s", path, e.code, wait)
-                    _sleep(wait)
-                    continue
+                    if wait_or_give_up(wait):
+                        continue
+            elif e.code in V1_TRANSIENT_STATUSES:
+                transient += 1
+                if transient < V1_TRANSIENT_TRIES:
+                    wait = V1_TRANSIENT_BACKOFF[transient - 1]
+                    log.info("Community Archive API %s: HTTP %s, retrying in "
+                             "%d s", path, e.code, wait)
+                    if wait_or_give_up(wait):
+                        continue
             log.warning("Community Archive API %s: HTTP %s (%s)", path,
                         e.code, _v1_error_code(e) or "no error code")
             raise
+        except _V1_TRANSIENT_ERRORS as e:
+            transient += 1
+            if transient < V1_TRANSIENT_TRIES:
+                wait = V1_TRANSIENT_BACKOFF[transient - 1]
+                log.info("Community Archive API %s: %s, retrying in %d s",
+                         path, type(e).__name__, wait)
+                if wait_or_give_up(wait):
+                    continue
+            log.warning("Community Archive API %s: %s", path, type(e).__name__)
+            raise
 
 
-def _v1_pages(path, params, timeout=None):
+def _v1_pages(path, params, timeout=None, on_request=None):
     """Each page's ``data`` list of a cursor-paged v1 listing, following
     ``next_cursor`` until it is null (never stopping on a short page:
     withdrawn tweets make pages short)."""
     cursor = None
     while True:
-        page = _v1_get(path, dict(params, cursor=cursor), timeout=timeout)
+        page = _v1_get(path, dict(params, cursor=cursor), timeout=timeout,
+                       on_request=on_request)
         yield page.get("data") or []
         cursor = page.get("next_cursor")
         if not cursor:
             return
+
+
+def v1_account_tweets_page(account_id, cursor=None, order="asc",
+                           limit=V1_TWEET_PAGE_LIMIT, timeout=None):
+    """One page of an account's v1 timeline: (rows, next_cursor). The
+    ``limit`` is the same on every page of one read (whether a cursor takes
+    another limit is not documented). An account v1 does not know is an
+    empty last page, like an unknown id on REST."""
+    try:
+        page = _v1_get(f"/accounts/{_v1_account_path(account_id)}/tweets",
+                       {"order": order, "limit": limit, "cursor": cursor},
+                       timeout=timeout)
+    except urllib.error.HTTPError as e:
+        if e.code == 404 and cursor is None:
+            return [], None
+        raise
+    return page.get("data") or [], page.get("next_cursor") or None
 
 
 def _v1_account_row(a):
@@ -308,19 +398,29 @@ def fetch_account(handle, timeout=None):
     # and "*" / "%" would be wildcards in the filter below.
     if not _HANDLE_RE.fullmatch(handle):
         return None
+    retired = False
     if v1_enabled():
         rows = [_v1_account_row(a) for a in (_v1_get(
             "/accounts", {"usernames": handle},
             timeout=timeout).get("data") or [])]
     else:
-        rows = _get("all_account", {
-            # "_" is ilike's single-character wildcard: escaped, or
-            # "_____" matches every five-letter username and can overrun
-            # the server's row cap, dropping the exact match or hiding a
-            # duplicate.
-            "username": "ilike." + handle.replace("_", "\\_"),
-            "select": "account_id,username,account_display_name,num_tweets,created_via",
-        }, **({"timeout": timeout} if timeout else {}))
+        # Past the retirement date a REST failure, or no match, says the
+        # key is needed (CommunityArchiveRetired), never "not in the
+        # archive": a retired API that answers [] proves nothing.
+        retired = rest_retired()
+        try:
+            rows = _get("all_account", {
+                # "_" is ilike's single-character wildcard: escaped, or
+                # "_____" matches every five-letter username and can
+                # overrun the server's row cap, dropping the exact match
+                # or hiding a duplicate.
+                "username": "ilike." + handle.replace("_", "\\_"),
+                "select": "account_id,username,account_display_name,num_tweets,created_via",
+            }, **({"timeout": timeout} if timeout else {}))
+        except Exception as e:
+            if retired:
+                raise CommunityArchiveRetired() from e
+            raise
     exact = {}
     for row in rows:
         if (row.get("username") or "").lower() == handle.lower():
@@ -329,6 +429,8 @@ def fetch_account(handle, timeout=None):
         raise CommunityArchiveError(
             f"@{handle}: {len(exact)} Community Archive accounts have exactly "
             "that username; refusing to guess which one")
+    if not exact and retired:
+        raise CommunityArchiveRetired()
     return next(iter(exact.values()), None)
 
 
@@ -1004,6 +1106,17 @@ V1_DAYS_KEPT = 3
 # A 422 (the request exceeded its query budget) halves the window, down to
 # windows of this length.
 V1_MIN_SPLIT = timedelta(hours=1)
+# After a failed fetch of a day the same window is not tried again for
+# this long: the fetch resumes from its stored cursor, so a retry costs
+# only the pages still missing, but if the API no longer takes the cursor
+# the window starts over, and a failure that repeats must not re-read a
+# day (~120 requests) on every 30-minute beat and every Glean.
+V1_DAY_RETRY_AFTER = timedelta(hours=1)
+
+
+class V1DayWaiting(Exception):
+    """The current day window failed less than V1_DAY_RETRY_AFTER ago."""
+
 
 # What the writer keeps of each v1 tweet; read back with these types.
 _V1_TWEET_COLUMNS = {
@@ -1061,25 +1174,94 @@ def _iso_z(dt):
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def iter_window_tweets_v1(since, until, timeout=None):
-    """Every tweet the archive holds created in [since, until), oldest
-    first, V1_TWEET_PAGE_LIMIT a page (``GET /tweets?since&until``). A 422
-    halves the window, down to V1_MIN_SPLIT; rows of a window that failed
-    part-way come again from its halves, so the caller dedupes by
-    tweet_id."""
-    params = {"since": _iso_z(since), "until": _iso_z(until),
-              "order": "asc", "limit": V1_TWEET_PAGE_LIMIT}
+def _parse_z(value):
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+_PROGRESS = "progress.json"
+
+
+def _load_progress(d):
     try:
-        for rows in _v1_pages("/tweets", params, timeout=timeout):
-            yield from rows
-    except urllib.error.HTTPError as e:
-        if e.code != 422 or until - since <= V1_MIN_SPLIT:
-            raise
-        mid = since + (until - since) / 2
-        log.info("Community Archive API: %s to %s too broad; splitting",
-                 _iso_z(since), _iso_z(until))
-        yield from iter_window_tweets_v1(since, mid, timeout)
-        yield from iter_window_tweets_v1(mid, until, timeout)
+        state = json.loads((pathlib.Path(d) / _PROGRESS).read_text())
+    except (OSError, ValueError):
+        return None
+    return state if isinstance(state, dict) else None
+
+
+def _save_progress(d, state):
+    """Replace progress.json in one rename, so a crash leaves the old one."""
+    d = pathlib.Path(d)
+    tmp = d / f"{_PROGRESS}.tmp"
+    tmp.write_text(json.dumps(state))
+    os.replace(tmp, d / _PROGRESS)
+
+
+def _staged_ids(staged):
+    ids = set()
+    if staged.exists():
+        with open(staged) as f:
+            for line in f:
+                try:
+                    ids.add(str(json.loads(line)["tweet_id"]))
+                except (ValueError, KeyError, TypeError):
+                    continue
+    return ids
+
+
+def _fetch_day_pages(part, state, timeout=None, on_request=None):
+    """Page the day's windows (state["pending"], each [since, until) as
+    ``…Z`` text) into part/tweets.jsonl, from state["cursor"]. After each
+    page the rows are flushed first and the progress saved second, so a
+    crash at any point resumes at or before the page it lost (a page read
+    twice is deduped by tweet_id). A 422 halves the window at the head of
+    the queue, down to V1_MIN_SPLIT. A cursor stored by an earlier run that
+    the API no longer takes (400) starts that window over, once. Returns
+    how many distinct tweets are staged."""
+    staged = part / "tweets.jsonl"
+    seen = _staged_ids(staged)
+    resumed = state.get("cursor")
+    with open(staged, "a") as out:
+        while state["pending"]:
+            since, until = state["pending"][0]
+            params = {"since": since, "until": until, "order": "asc",
+                      "limit": V1_TWEET_PAGE_LIMIT, "cursor": state["cursor"]}
+            try:
+                page = _v1_get("/tweets", params, timeout=timeout,
+                               on_request=on_request)
+            except urllib.error.HTTPError as e:
+                span = _parse_z(until) - _parse_z(since)
+                if e.code == 422 and span > V1_MIN_SPLIT:
+                    mid = _iso_z(_parse_z(since) + span / 2)
+                    log.info("Community Archive API: %s to %s too broad; "
+                             "splitting", since, until)
+                    state["pending"][0:1] = [[since, mid], [mid, until]]
+                    state["cursor"] = None
+                    _save_progress(part, state)
+                    continue
+                if e.code == 400 and resumed and state["cursor"] == resumed:
+                    log.info("Community Archive API: the stored cursor was "
+                             "refused; %s to %s starts over", since, until)
+                    state["cursor"] = resumed = None
+                    _save_progress(part, state)
+                    continue
+                raise
+            for t in page.get("data") or []:
+                tweet_id = str(t.get("tweet_id") or "")
+                if not tweet_id or tweet_id in seen:
+                    continue
+                seen.add(tweet_id)
+                out.write(json.dumps(
+                    {k: t.get(k) for k in _V1_TWEET_COLUMNS}) + "\n")
+            out.flush()
+            state["pages"] = int(state.get("pages") or 0) + 1
+            if page.get("next_cursor"):
+                state["cursor"] = page["next_cursor"]
+            else:
+                state["pending"].pop(0)
+                state["cursor"] = None
+            _save_progress(part, state)
+    return len(seen)
 
 
 def _sql_path(path):
@@ -1127,16 +1309,21 @@ def _prune_v1_days(root, keep=V1_DAYS_KEPT):
             shutil.rmtree(old, ignore_errors=True)
 
 
-def ensure_v1_day(snapshot_dir, now=None, timeout=None):
+def ensure_v1_day(snapshot_dir, now=None, timeout=None, on_request=None):
     """Make the current day window's tweets cached from API v1; fetch only
     when that window is not cached yet. Returns (window_id, fetched).
 
-    One fetcher at a time per snapshot dir: another one running raises
-    SnapshotBusy at once. A day with no tweets at all raises
-    CommunityArchiveError and caches nothing (the next run tries again);
-    a failed request raises urllib's error. The tweets stream to a staging
-    file (memory = one page) inside a ``.part`` dir that is renamed into
-    place when complete, so a reader never sees half a day."""
+    The day is paged into a ``.part`` dir with its progress (the windows
+    still to read and the cursor) saved after every page, and renamed into
+    place only when complete: a reader never sees part of a day, and a run
+    that fails keeps what it read; the next run resumes from the stored
+    cursor. A window whose last run failed is not tried again for
+    V1_DAY_RETRY_AFTER (raises V1DayWaiting). ``on_request`` is passed to
+    every request (the caller's daily budget). One fetcher at a time per
+    snapshot dir: another one running raises SnapshotBusy at once. A day
+    with no tweets at all raises CommunityArchiveError and caches nothing;
+    a failed request raises urllib's error."""
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     since, until = v1_day_window(now)
     window_id = v1_window_id(until)
     root = _v1_days_root(snapshot_dir)
@@ -1147,31 +1334,117 @@ def ensure_v1_day(snapshot_dir, now=None, timeout=None):
         if snapshot_export_id(final) == window_id:
             return window_id, False
         part = root / f"{window_id}.part"
-        shutil.rmtree(part, ignore_errors=True)
-        part.mkdir(parents=True)
+        for other in root.iterdir():  # earlier windows never complete now
+            if (other.is_dir() and other.name.endswith(".part")
+                    and other != part):
+                shutil.rmtree(other, ignore_errors=True)
+        state = _load_progress(part)
+        if (state is None or state.get("window_id") != window_id
+                or not isinstance(state.get("pending"), list)):
+            shutil.rmtree(part, ignore_errors=True)
+            part.mkdir(parents=True)
+            state = {"window_id": window_id, "cursor": None, "pages": 0,
+                     "pending": [[_iso_z(since), _iso_z(until)]]}
+            _save_progress(part, state)
+        failed_at = state.get("failed_at")
+        if failed_at and now - _parse_z(failed_at) < V1_DAY_RETRY_AFTER:
+            raise V1DayWaiting(f"{window_id} failed at {failed_at}")
+        state.pop("failed_at", None)
         try:
-            staged = part / "tweets.jsonl"
-            seen = set()
-            with open(staged, "w") as out:
-                for t in iter_window_tweets_v1(since, until, timeout=timeout):
-                    tweet_id = str(t.get("tweet_id") or "")
-                    if not tweet_id or tweet_id in seen:
-                        continue
-                    seen.add(tweet_id)
-                    out.write(json.dumps(
-                        {k: t.get(k) for k in _V1_TWEET_COLUMNS}) + "\n")
-            if not seen:
+            count = _fetch_day_pages(part, state, timeout, on_request)
+            if not count:
+                # Nothing at all: start the window over on the next try.
+                state.update(cursor=None, pending=[[_iso_z(since),
+                                                    _iso_z(until)]])
+                (part / "tweets.jsonl").unlink()
                 raise CommunityArchiveError(
                     "Community Archive API: no tweets from "
                     f"{_iso_z(since)} to {_iso_z(until)}")
-            _write_v1_day(part, window_id, staged)
-            staged.unlink()
-            if final.exists():  # an incomplete leftover
-                shutil.rmtree(final)
-            os.replace(part, final)
-        finally:
-            shutil.rmtree(part, ignore_errors=True)
+            _write_v1_day(part, window_id, part / "tweets.jsonl")
+        except BaseException:
+            state["failed_at"] = _iso_z(now)
+            _save_progress(part, state)
+            raise
+        (part / "tweets.jsonl").unlink()
+        (part / _PROGRESS).unlink()
+        if final.exists():  # an incomplete leftover
+            shutil.rmtree(final)
+        os.replace(part, final)
         _prune_v1_days(root)
-    log.info("Community Archive API: cached %d tweets for %s", len(seen),
-             window_id)
+    log.info("Community Archive API: cached %d tweets for %s in %d pages",
+             count, window_id, state.get("pages") or 0)
     return window_id, True
+
+
+# ── a pre-fill's read of one account, resumable (#688) ────────────────────
+
+# What a pre-fill keeps of each tweet: what to_export_entry reads.
+_V1_PREFILL_COLUMNS = (
+    "tweet_id", "created_at", "full_text", "favorite_count", "retweet_count",
+    "reply_to_tweet_id", "reply_to_user_id", "reply_to_username")
+
+
+def stage_account_tweets_v1(account_id, stash_dir, run_seconds=None,
+                            on_page=None, clock=time.monotonic):
+    """Page an account's v1 timeline, oldest first, into
+    ``stash_dir/tweets.jsonl``, with the cursor saved in
+    ``stash_dir/progress.json`` after every page. A stash left by an
+    earlier run for the same account (one that failed, or stopped at its
+    time budget) is resumed from its cursor, so no page is read twice; a
+    stash of another account is discarded. After ``run_seconds`` of paging
+    (at least one page) it stops with the progress saved. Returns (done,
+    fetched): done is True once the timeline's last page is staged. A
+    stored cursor the API no longer takes (400) starts the read over,
+    once. ``on_page(fetched)`` after each page."""
+    d = pathlib.Path(stash_dir)
+    state = _load_progress(d)
+    if not state or state.get("account_id") != str(account_id):
+        shutil.rmtree(d, ignore_errors=True)
+        d.mkdir(parents=True)
+        state = {"account_id": str(account_id), "cursor": None,
+                 "fetched": 0, "done": False}
+        _save_progress(d, state)
+    if state.get("done"):
+        return True, int(state.get("fetched") or 0)
+    resumed = state.get("cursor")
+    started = clock()
+    with open(d / "tweets.jsonl", "a") as out:
+        while True:
+            try:
+                rows, next_cursor = v1_account_tweets_page(
+                    account_id, cursor=state.get("cursor"))
+            except urllib.error.HTTPError as e:
+                if e.code == 400 and resumed and state.get("cursor") == resumed:
+                    log.info("Community Archive API: the stored cursor for "
+                             "account %s was refused; reading it again",
+                             account_id)
+                    out.seek(0)
+                    out.truncate()
+                    state.update(cursor=None, fetched=0)
+                    resumed = None
+                    _save_progress(d, state)
+                    continue
+                raise
+            for row in rows:
+                out.write(json.dumps(
+                    {k: row.get(k) for k in _V1_PREFILL_COLUMNS}) + "\n")
+            out.flush()
+            state["fetched"] = int(state.get("fetched") or 0) + len(rows)
+            state["cursor"] = next_cursor
+            state["done"] = not next_cursor
+            _save_progress(d, state)
+            if on_page:
+                on_page(state["fetched"])
+            if state["done"]:
+                return True, state["fetched"]
+            if run_seconds is not None and clock() - started >= run_seconds:
+                return False, state["fetched"]
+
+
+def iter_staged_tweets(stash_dir):
+    """The rows stage_account_tweets_v1 staged, in the order read."""
+    with open(pathlib.Path(stash_dir) / "tweets.jsonl") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                yield json.loads(line)

@@ -68,13 +68,22 @@ def ca_lookup_account(username):
         account = ca.fetch_account(username)
         return account["account_id"] if account else None
     ca._warn_if_rest_retired()
-    resp = requests.get(
-        f"{CA_BASE_URL}/rest/v1/account",
-        params={"username": f"ilike.{username}", "select": "account_id,username"},
-        headers=_ca_headers(), timeout=CA_TIMEOUT,
-    )
-    resp.raise_for_status()
-    rows = resp.json()
+    retired = ca.rest_retired()
+    try:
+        resp = requests.get(
+            f"{CA_BASE_URL}/rest/v1/account",
+            params={"username": f"ilike.{username}", "select": "account_id,username"},
+            headers=_ca_headers(), timeout=CA_TIMEOUT,
+        )
+        resp.raise_for_status()
+        rows = resp.json()
+    except Exception as e:
+        if retired:
+            raise ca.CommunityArchiveRetired() from e
+        raise
+    if not rows and retired:
+        # A retired API's empty answer says nothing about the handle.
+        raise ca.CommunityArchiveRetired()
     return rows[0]["account_id"] if rows else None
 
 
@@ -156,23 +165,22 @@ def ca_fetch_tweets(account_id, username, max_items=2000):
 
 
 def _ca_fetch_tweets_v1(account_id, username, max_items):
+    """The same ``limit`` on every page (whether a cursor accepts another
+    limit is not documented); the last page is cut here instead."""
     from backend.utils import community_archive as ca
-    path = f"/accounts/{ca._v1_account_path(account_id)}/tweets"
+    limit = max(1, min(ca.V1_TWEET_PAGE_LIMIT, int(max_items)))
     fetched = 0
     cursor = None
     while fetched < max_items:
-        page = ca._v1_get(path, {
-            "order": "desc", "cursor": cursor,
-            "limit": min(ca.V1_TWEET_PAGE_LIMIT, max_items - fetched),
-        })
-        for row in page.get("data") or []:
+        rows, cursor = ca.v1_account_tweets_page(
+            account_id, cursor=cursor, order="desc", limit=limit)
+        for row in rows:
             item = normalize_ca_tweet(row, username)
             if item is not None:
                 yield item
                 fetched += 1
                 if fetched >= max_items:
                     return
-        cursor = page.get("next_cursor")
         if not cursor:
             return
 
