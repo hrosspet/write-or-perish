@@ -10,7 +10,9 @@ from datetime import datetime, timedelta
 from sqlalchemy import func
 
 from backend.extensions import db
-from backend.models import APICostLog, ArtifactView, Node, User, UserProfile
+from backend.models import (
+    APICostLog, ApiToken, ArtifactView, Node, User, UserProfile,
+)
 
 TOUCH_INTERVAL = timedelta(minutes=5)
 # Paths the frontend polls or hits on every page — they don't say where
@@ -73,6 +75,64 @@ def sign_in_status(user):
 
 def activated_at(user):
     return user.approved_at or user.accepted_terms_at or user.created_at
+
+
+# ── Accounts nobody uses (#647) ─────────────────────────────────────────
+# Peter, 2026-11-12: background work that bills an account pauses after
+# about a month without use (UNUSED_ACCOUNT_PAUSE_DAYS, 30 days) and
+# catches up once when the owner is back. Paused: the nightly X bookmark
+# sync (tasks/external_sync) and the saved-references digest
+# (tasks/external_digest), the two jobs that bill an account with no new
+# writing in it.
+#
+# Use is read from two records that only the owner's own actions write:
+#
+# - User.last_seen_at: a request of the signed-in app (web or iPhone),
+#   written by the before_request hook (touch_last_seen above), and the
+#   sign-in and an account restore. The apps run no timer that calls the
+#   server while they sit idle: every request comes from opening a page,
+#   writing, recording, playing a reply, or a task the owner started
+#   (an upload, an import, a reply being written), and each such poll
+#   ends with its task. Jobs run outside a request and never write it,
+#   and an admin's requests write only the admin's own record.
+# - ApiToken.last_used_at: the Chrome clipper's token, sent only when the
+#   owner clips a page or checks the token in the extension's options.
+#
+# Not use: cost rows (the user-initiated ones come with an app request,
+# the rest are jobs), a profile build, a sync, a sent notification, an
+# admin's approval or pre-fill. A pre-filled account nobody has signed
+# into has no last_seen_at, so it counts as unused from the start.
+
+DEFAULT_UNUSED_PAUSE_DAYS = 30.0
+
+
+def unused_pause_window(config):
+    """How long an account may go without use before its billed background
+    work pauses, or None when the pause is off (a setting of 0)."""
+    days = config.get("UNUSED_ACCOUNT_PAUSE_DAYS", DEFAULT_UNUSED_PAUSE_DAYS)
+    try:
+        days = float(days)
+    except (TypeError, ValueError):
+        days = DEFAULT_UNUSED_PAUSE_DAYS
+    return timedelta(days=days) if days > 0 else None
+
+
+def in_use_user_ids(user_ids, config, now=None):
+    """The ids among *user_ids* whose owner used Loore within the pause
+    window (see above); all of them when the pause is off. Two indexed
+    queries, whatever the number of ids."""
+    ids = {uid for uid in user_ids if uid is not None}
+    window = unused_pause_window(config)
+    if window is None or not ids:
+        return ids
+    since = (now or datetime.utcnow()) - window
+    id_list = sorted(ids)
+    seen = {uid for (uid,) in db.session.query(User.id).filter(
+        User.id.in_(id_list), User.last_seen_at >= since).all()}
+    clipped = {uid for (uid,) in db.session.query(ApiToken.user_id).filter(
+        ApiToken.user_id.in_(id_list), ApiToken.last_used_at >= since,
+    ).distinct().all()}
+    return seen | clipped
 
 
 def _day_counts(query_col, filters, since):

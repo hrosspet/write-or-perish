@@ -4,7 +4,9 @@ from backend.utils.error_privacy import describe_exception
 from sqlalchemy.exc import IntegrityError
 from backend.models import Draft, Node, NodeTranscriptChunk
 from backend.extensions import db
-from backend.utils.privacy import can_user_edit_node
+from backend.utils.privacy import (
+    can_user_edit_node, validate_ai_usage, validate_privacy_level,
+)
 from backend.utils.proposals import PROPOSAL_TOOLS
 import uuid
 import pathlib
@@ -617,6 +619,10 @@ def init_streaming():
     reply gets 409 ``{"error", "code": "thread_too_long"}`` and no draft
     (#648); a dictation (no label) records there as before.
 
+    Any other recording (a dictation) whose ai_usage is not 'chat' or
+    'train' gets the same 403, with ``"scope": "entry"`` (#665): its
+    audio would be sent to the provider to be transcribed.
+
     A Voice recording continuing a thread where a change the AI proposed
     waits for the user's approval gets 409 ``{"error", "code":
     "approval_pending", "pending": <count>}`` and no draft
@@ -684,6 +690,16 @@ def init_streaming():
                                              user=current_user)
             if too_long is not None:
                 return thread_too_long_response(too_long)
+    else:
+        # A dictation (#665): its text comes from sending the audio to the
+        # provider, so an entry set to None is refused here, before any
+        # draft or chunk folder exists. Voice keeps its own rule above.
+        from backend.utils.recording_ai_usage import (
+            recording_refused_response,
+        )
+        refused = recording_refused_response(ai_usage)
+        if refused is not None:
+            return refused
 
     # Generate session ID
     session_id = str(uuid.uuid4())
@@ -1111,7 +1127,20 @@ def upload_streaming_chunk(session_id):
     ).order_by(NodeTranscriptChunk.chunk_index).all()
 
     task_id = None
-    if len(stored_chunks) >= BATCH_SIZE:
+    from backend.utils.recording_ai_usage import (
+        draft_may_transcribe, mark_chunks_not_transcribed,
+    )
+    if len(stored_chunks) >= BATCH_SIZE and not draft_may_transcribe(draft):
+        # No AI means no AI (#665): the entry this recording becomes no
+        # longer lets AI read it (a Voice turn whose thread was set to
+        # None meanwhile). The chunks stay stored with their audio and are
+        # not queued for the provider.
+        mark_chunks_not_transcribed(stored_chunks)
+        db.session.commit()
+        current_app.logger.info(
+            "Session %s: %d chunk(s) not transcribed, AI usage is None",
+            session_id, len(stored_chunks))
+    elif len(stored_chunks) >= BATCH_SIZE:
         # Take the first BATCH_SIZE stored chunks and queue transcription
         batch = stored_chunks[:BATCH_SIZE]
         chunk_indices = [c.chunk_index for c in batch]
@@ -1324,6 +1353,21 @@ def transcribe_remaining(session_id):
             "chunk_count": 0
         }), 200
 
+    # No AI means no AI (#665): a recording whose entry may not be read by
+    # AI keeps its stored audio, untranscribed; nothing is queued.
+    from backend.utils.recording_ai_usage import (
+        NOT_TRANSCRIBED_TEXT, draft_may_transcribe,
+        mark_chunks_not_transcribed,
+    )
+    if not draft_may_transcribe(draft):
+        mark_chunks_not_transcribed(stored_chunks)
+        db.session.commit()
+        return jsonify({
+            "message": NOT_TRANSCRIBED_TEXT,
+            "chunk_count": 0,
+            "not_transcribed": len(stored_chunks),
+        }), 200
+
     chunk_indices = [c.chunk_index for c in stored_chunks]
 
     from backend.tasks.streaming_transcription import transcribe_chunk_batch
@@ -1420,8 +1464,8 @@ def get_streaming_status(session_id):
     # a skipped reply as "no server-side chain" and saves the entry again.
     if draft.streaming_warning:
         status_data["warning"] = draft.streaming_warning
-        # A reply skipped for the thread's length (#648): Voice says it.
-        from backend.utils.thread_size import skipped_reply_code
+        # A reply skipped for a refusal (#648, #651): Voice says it.
+        from backend.utils.voice_refusals import skipped_reply_code
         code = skipped_reply_code(draft.streaming_warning)
         if code:
             status_data["warning_code"] = code
@@ -1481,7 +1525,10 @@ def save_streaming_as_node(session_id):
                                  // inside an agentic thread
         "auto_generate": false,  // create + enqueue an LLM reply after the
                                  // entry (spend cap honored, like /textmode/start)
-        "model": "optional model id for auto_generate"
+        "model": "optional model id for auto_generate",
+        "privacy_level": "private",  // optional: the form's settings when
+        "ai_usage": "chat"           // it is saved; without them the
+                                     // recording's own (older clients)
     }
 
     Returns: The created node data. With the flags above it also carries
@@ -1515,8 +1562,31 @@ def save_streaming_as_node(session_id):
     auto_generate = bool(data.get("auto_generate", False))
     model_id = data.get("model")
 
+    # The entry takes the settings the form shows when it is saved: the
+    # form sends them, and they can differ from the ones the recording
+    # started with. A client that sends neither (an installed iPhone
+    # build) gets the recording's, as before.
     privacy_level = draft.privacy_level or "private"
     ai_usage = draft.ai_usage or "none"
+    form_settings = "privacy_level" in data or "ai_usage" in data
+    if "privacy_level" in data:
+        privacy_level = data["privacy_level"]
+        if not validate_privacy_level(privacy_level):
+            return jsonify(
+                {"error": f"Invalid privacy_level: {privacy_level}"}), 400
+    if "ai_usage" in data:
+        ai_usage = data["ai_usage"]
+        if not validate_ai_usage(ai_usage):
+            return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
+    if form_settings and draft.parent_id and privacy_level != "public":
+        # As for a typed entry (#228): replies under public posts are
+        # public.
+        parent = Node.query.get(draft.parent_id)
+        if parent is not None and parent.privacy_level == "public":
+            return jsonify({
+                "error": "Replies under public posts are public.",
+                "code": "public_reply_required",
+            }), 400
 
     # A public entry quotes only public nodes (Peter, 2026-11-12); the
     # session stays, so the text can be changed and saved again.
@@ -1601,6 +1671,12 @@ def save_streaming_as_node(session_id):
     from backend.utils.tokens import approximate_token_count
     node.set_content(content)
     node.token_count = approximate_token_count(content)
+    if form_settings and privacy_level == "public" and user_parent_id is None:
+        # A public root gets its permalink slug at birth, as a typed one
+        # does (POST /nodes/, #228).
+        from backend.utils.slugs import generate_unique_public_slug
+        node.public_slug = generate_unique_public_slug(
+            current_user.id, content)
     db.session.add(node)
     db.session.flush()
     # Per-node cap: split very long transcripts into a serial chain

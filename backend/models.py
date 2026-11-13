@@ -208,6 +208,14 @@ class User(db.Model, UserMixin):
     # A yes clears it in the same UPDATE that checks it, so one question
     # starts at most one rebuild; a newer question replaces it.
     profile_rebuild_offer_id = db.Column(db.String(32), nullable=True)
+    # The date of the oldest entry an import changed while the user's
+    # profile window work was in the Batch queue or being rendered (#639).
+    # A set in flight cannot take the import's re-tip (#625), so it waits
+    # here and is applied once nothing of the user's is in flight
+    # (tasks/exports.apply_waiting_import_date): the next advance, the
+    # seeder's gate, or the synchronous check. Several imports keep the
+    # oldest date. Only applying it clears it; a collected window never does.
+    profile_import_retip_from = db.Column(db.DateTime, nullable=True)
     # The user agreed that their writing may reach both providers' models
     # for a large profile build (Peter, 2026-11-05). Set only by the user's
     # own answer to the question of #599 (the dialog, or Account), through
@@ -605,6 +613,14 @@ class Node(db.Model):
     # NULL = written in Loore, or imported before this column existed.
     # Never part of dedup: source_key alone decides a re-import match.
     provenance = db.Column(db.String(16), nullable=True)
+    # One imported item saved as several entries (the chapters of a Word
+    # or PDF document, the parts of a file or message above the per-entry
+    # cap): every entry of it holds the same random token (uuid4 hex),
+    # while source_key sits on its last entry only. A re-import finds the
+    # item's other entries by it (#638). NULL for an item saved as one
+    # entry, for anything written in Loore, and for items imported
+    # before this column existed. Says nothing about the content.
+    split_item = db.Column(db.String(32), nullable=True, index=True)
 
     # DB-level backstop against concurrent imports racing past the
     # application dedup check. NULL source_key rows are exempt (both
@@ -1630,6 +1646,11 @@ class ExternalAccount(db.Model):
     # to the end, when no sync has finished yet). Committed together
     # with the first stored page, so a killed worker leaves it set too.
     sync_incomplete = db.Column(db.Boolean, nullable=True)
+    # When the nightly sync first skipped this account because its owner
+    # had not used Loore for UNUSED_ACCOUNT_PAUSE_DAYS (#647); NULL while
+    # the nightly sync runs. Once the owner is back, the hourly gate sends
+    # one catch-up sync at once, whatever their local hour, and clears it.
+    sync_paused_at = db.Column(db.DateTime, nullable=True)
 
     user = db.relationship("User", backref="external_accounts")
 

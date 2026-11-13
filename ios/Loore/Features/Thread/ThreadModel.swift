@@ -658,10 +658,18 @@ final class ThreadModel {
         guard let app else { throw CancellationError() }
         let auto = autoGenerateActive(autoGenerate) && !submission.privacy.isSharedWithOthers
         if let sid = submission.streamingSessionId {
-            let answer: SaveAsNodeResponse = try await app.api.post(APIPath.streamingSaveAsNode(sid), json: .object([
-                "content": .string(submission.content), "agentic": .bool(true), "auto_generate": .bool(auto),
-                "model": .optional(selectedModel),
-            ]))
+            // The form's settings as they are now; with AI usage None the recording is a
+            // plain note, as a typed one is below.
+            var body: [String: JSONValue] = [
+                "content": .string(submission.content), "privacy_level": .string(submission.privacy.rawString),
+                "ai_usage": .string(submission.aiUsage.rawString),
+            ]
+            if submission.aiUsage != .off {
+                body["agentic"] = .bool(true)
+                body["auto_generate"] = .bool(auto)
+                body["model"] = .optional(selectedModel)
+            }
+            let answer: SaveAsNodeResponse = try await app.api.post(APIPath.streamingSaveAsNode(sid), json: .object(body))
             return NodeFormResult(id: answer.id, userNodeId: answer.userNodeId, llmNodeId: answer.llmNodeId,
                                   spendCapped: answer.spendCapped, llmError: answer.llmError,
                                   llmErrorCode: answer.llmErrorCode)

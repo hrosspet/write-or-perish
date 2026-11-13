@@ -30,7 +30,7 @@ from backend.utils.cost import llm_cost_log_fields
 from backend.llm_providers import is_empty_truncated, is_refused
 from backend.utils.llm_batch import (
     batch_submit, batch_check_and_collect, apply_batch_key_override,
-    blocked_items,
+    blocked_items, delete_collected_batch_files,
 )
 from backend.utils.tokens import approximate_token_count
 
@@ -324,6 +324,8 @@ def _collect_poll_draft_batches():
         job.status = "collected"
         job.collected_at = datetime.utcnow()
         db.session.commit()
+        # Saved: the batch's files at OpenAI can go (#667).
+        delete_collected_batch_files(results, keys)
 
 
 @celery.task

@@ -6,7 +6,8 @@ backend/utils/tts_stream.py.
 SpokenTextProjector is the streaming version of the text preparation the
 batch TTS task does on a finished reply (``_strip_quote_markers``,
 ``strip_edge_timestamps``, ``_strip_heading_sections``, then
-``spoken_links.speak_links``). It takes the raw text deltas and releases a
+``spoken_links.speak_links``: links spoken short, a fenced code block as
+one short phrase). It takes the raw text deltas and releases a
 character only once no later text can scrub or restructure it: an
 ambiguous tail — the start of a quote marker, of a timestamp, of a heading
 or a share fence, a link or an address not yet complete — is held until it
@@ -140,7 +141,11 @@ class SpokenTextProjector:
                 add_text(self._links.feed(value))
             else:
                 add_text(self._links.end_line())
-                out.append(("heading", self._links.heading(value)))
+                title = self._links.heading(value)
+                if title is not None:
+                    # None: a "# comment" line inside a code block (#646),
+                    # dropped with the block, as batch drops it.
+                    out.append(("heading", title))
         if final:
             add_text(self._links.close())
         return out

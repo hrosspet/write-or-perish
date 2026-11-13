@@ -432,8 +432,10 @@ def _provider_cancel(provider_key, batch_id, keys):
             from anthropic import Anthropic
             Anthropic(api_key=keys.get("anthropic")).messages.batches.cancel(batch_id)
         elif provider_key.startswith("openai:"):
-            from openai import OpenAI
-            OpenAI(api_key=keys.get("openai")).batches.cancel(batch_id)
+            # Nothing reads the batch again: its files go too (#667).
+            from backend.utils.llm_batch import openai_batch_cancel_one
+            openai_batch_cancel_one(keys.get("openai"), batch_id,
+                                    delete_files=True)
         else:
             return f"unknown provider {provider_key}"
         return None

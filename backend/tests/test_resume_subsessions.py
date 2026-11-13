@@ -109,8 +109,9 @@ def _run_batch(tmp_path, monkeypatch, chunk_indices, boundary_indices,
         user = User(username="tester")
         _db.session.add(user)
         _db.session.flush()
+        # A recording the AI may transcribe (#665).
         draft = Draft(user_id=user.id, session_id=session_id,
-                      streaming_status='recording',
+                      streaming_status='recording', ai_usage="chat",
                       streaming_mime_type=(
                           "audio/mp4" if ext == ".mp4" else "audio/webm"))
         draft.set_content("")

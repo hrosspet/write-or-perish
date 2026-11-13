@@ -32,6 +32,10 @@ from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.encryption import decrypt_file_to_temp
 from backend.utils.cost import calculate_audio_cost_microdollars
 from backend.utils.error_privacy import TRANSCRIPTION_FAILED_TEXT
+from backend.utils.recording_ai_usage import (
+    NOT_TRANSCRIBED_TEXT, draft_may_transcribe, mark_chunks_not_transcribed,
+    may_transcribe, not_transcribed_note,
+)
 from backend.utils import voice_timing
 
 logger = get_task_logger(__name__)
@@ -192,6 +196,17 @@ def transcribe_chunk(self, node_id: int, chunk_index: int, chunk_path: str):
 
         if not chunk_record:
             raise ValueError(f"Chunk record not found for node {node_id}, chunk {chunk_index}")
+
+        # No AI means no AI (#665): the entry may have been set to None
+        # since the chunk was queued. Kept, not sent to the provider.
+        node = Node.query.get(node_id)
+        if node is not None and not may_transcribe(node.ai_usage):
+            mark_chunks_not_transcribed([chunk_record])
+            db.session.commit()
+            logger.info(f"Node {node_id} chunk {chunk_index}: not "
+                        f"transcribed, AI usage is None")
+            return {'node_id': node_id, 'chunk_index': chunk_index,
+                    'status': 'not_transcribed'}
 
         # Update status to processing
         chunk_record.status = 'processing'
@@ -390,27 +405,29 @@ def finalize_streaming(self, node_id: int, session_id: str, total_chunks: int):
 
         full_transcript = "\n\n".join(transcripts)
 
+        # Chunks kept without their text because the entry was set to None
+        # while it was recorded (#665): the note says so, and the audio is
+        # kept with the entry below instead of being deleted.
+        has_text = bool(full_transcript.strip())
+        kept_note = not_transcribed_note(failed_chunks, has_text)
+        keep_audio = any(c.error == NOT_TRANSCRIBED_TEXT
+                         for c in failed_chunks)
+        if kept_note and not has_text:
+            body = kept_note
+        elif failed_chunks:
+            failed_indices = [c.chunk_index for c in failed_chunks]
+            note = (kept_note or
+                    f"*Note: Chunks {failed_indices} failed to transcribe*")
+            body = f"{note}\n\n{full_transcript}"
+        else:
+            body = full_transcript
+
         # Format final content - only add title for top-level nodes
         if node.parent_id is None:
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            if failed_chunks:
-                failed_indices = [c.chunk_index for c in failed_chunks]
-                final_content = (
-                    f"# {timestamp} Voice note\n\n"
-                    f"*Note: Chunks {failed_indices} failed to transcribe*\n\n"
-                    f"{full_transcript}"
-                )
-            else:
-                final_content = f"# {timestamp} Voice note\n\n{full_transcript}"
+            final_content = f"# {timestamp} Voice note\n\n{body}"
         else:
-            if failed_chunks:
-                failed_indices = [c.chunk_index for c in failed_chunks]
-                final_content = (
-                    f"*Note: Chunks {failed_indices} failed to transcribe*\n\n"
-                    f"{full_transcript}"
-                )
-            else:
-                final_content = full_transcript
+            final_content = body
 
         # Update node
         from backend.utils.tokens import approximate_token_count
@@ -420,7 +437,11 @@ def finalize_streaming(self, node_id: int, session_id: str, total_chunks: int):
         # it; split into a serial chain (audio stays on this head node).
         from backend.utils.node_split import split_node_into_chain
         split_node_into_chain(node)
-        node.transcription_status = 'completed'
+        if kept_note and not has_text:
+            node.transcription_status = 'failed'
+            node.transcription_error = NOT_TRANSCRIBED_TEXT
+        else:
+            node.transcription_status = 'completed'
         node.transcription_completed_at = datetime.utcnow()
         node.transcription_progress = 100
         db.session.commit()
@@ -432,7 +453,17 @@ def finalize_streaming(self, node_id: int, session_id: str, total_chunks: int):
         chunk_dir = storage_path(
             audio_storage_root, "streaming", node.user_id, session_id)
 
-        if chunk_dir.exists():
+        if keep_audio and chunk_dir.exists():
+            # Where the entry's audio is played from (GET audio-chunks).
+            from backend.utils.audio_storage import (
+                move_draft_audio_to_node_dir,
+            )
+            move_draft_audio_to_node_dir(
+                chunk_dir,
+                storage_path(audio_storage_root, "nodes", node.user_id,
+                             node.id),
+                logger)
+        elif chunk_dir.exists():
             try:
                 shutil.rmtree(chunk_dir)
                 logger.info(f"Cleaned up streaming chunks for session {session_id}")
@@ -504,6 +535,14 @@ def transcribe_draft_chunk(self, session_id: str, chunk_index: int, chunk_path: 
 
         if not chunk_record:
             raise ValueError(f"Chunk record not found for session {session_id}, chunk {chunk_index}")
+
+        # No AI means no AI (#665), as in transcribe_chunk_batch.
+        draft = Draft.query.filter_by(session_id=session_id).first()
+        if draft is not None and not draft_may_transcribe(draft):
+            mark_chunks_not_transcribed([chunk_record])
+            db.session.commit()
+            return {'session_id': session_id, 'chunk_index': chunk_index,
+                    'status': 'not_transcribed'}
 
         # Update status to processing
         chunk_record.status = 'processing'
@@ -695,6 +734,25 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
                 'session_id': session_id,
                 'chunk_indices': chunk_indices,
                 'status': 'draft_deleted',
+            }
+
+        # No AI means no AI (#665): the entry this recording becomes may
+        # not let AI read it (a Voice turn whose thread was set to None
+        # while it was recorded, or a session started before the routes
+        # refused one). Asked here, right before the provider call: the
+        # chunks keep their audio files and are marked not transcribed.
+        if not draft_may_transcribe(draft):
+            mark_chunks_not_transcribed(NodeTranscriptChunk.query.filter(
+                NodeTranscriptChunk.session_id == session_id,
+                NodeTranscriptChunk.chunk_index.in_(chunk_indices),
+            ).all())
+            db.session.commit()
+            logger.info(f"Session {session_id}: chunks {chunk_indices} not "
+                        f"transcribed, AI usage is None")
+            return {
+                'session_id': session_id,
+                'chunk_indices': chunk_indices,
+                'status': 'not_transcribed',
             }
 
         # Family-only mime drives the on-disk extension. Defensive None
@@ -1190,7 +1248,13 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
             status='stored'
         ).order_by(NodeTranscriptChunk.chunk_index).all()
 
-        if stored_chunks:
+        if stored_chunks and not draft_may_transcribe(draft):
+            # No AI means no AI (#665): kept, not queued for the provider.
+            mark_chunks_not_transcribed(stored_chunks)
+            db.session.commit()
+            logger.info(f"Session {session_id}: {len(stored_chunks)} stored "
+                        f"chunk(s) not transcribed, AI usage is None")
+        elif stored_chunks:
             remaining_indices = [c.chunk_index for c in stored_chunks]
             logger.info(
                 f"Session {session_id}: triggering transcription of "
@@ -1310,22 +1374,29 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
         # title them (also stops the title leaking onto the node via the
         # frontend POST /voice fallback when the server-side chain is skipped).
         title_label = label or "Voice note"
+        # Chunks kept without their text because the entry may not be read
+        # by AI (#665) get a note that says so, not "failed".
+        failed_note = None
+        if failed_chunks:
+            failed_note = (
+                not_transcribed_note(failed_chunks,
+                                     bool(full_transcript.strip()))
+                or f"*Note: Chunks {[c.chunk_index for c in failed_chunks]} "
+                   f"failed to transcribe*")
         if draft.parent_id is None and label != 'Voice':
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             if failed_chunks:
-                failed_indices = [c.chunk_index for c in failed_chunks]
                 final_content = (
                     f"# {timestamp} {title_label}\n\n"
-                    f"*Note: Chunks {failed_indices} failed to transcribe*\n\n"
+                    f"{failed_note}\n\n"
                     f"{full_transcript}"
                 )
             else:
                 final_content = f"# {timestamp} {title_label}\n\n{full_transcript}"
         else:
             if failed_chunks:
-                failed_indices = [c.chunk_index for c in failed_chunks]
                 final_content = (
-                    f"*Note: Chunks {failed_indices} failed to transcribe*\n\n"
+                    f"{failed_note}\n\n"
                     f"{full_transcript}"
                 )
             else:

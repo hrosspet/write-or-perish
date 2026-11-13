@@ -214,8 +214,9 @@ def _events(resp):
 class TestInit:
     def test_init_stores_the_device_key(self, app):
         client, _ = _setup(app)
+        # A recording the AI may transcribe (#665: None is refused).
         resp = client.post("/api/drafts/streaming/init",
-                           json={"device_key": KEY_A})
+                           json={"device_key": KEY_A, "ai_usage": "chat"})
         assert resp.status_code == 201
         draft = Draft.query.filter_by(
             session_id=resp.get_json()["session_id"]).one()
@@ -223,7 +224,8 @@ class TestInit:
 
     def test_an_older_client_sends_no_key(self, app):
         client, _ = _setup(app)
-        resp = client.post("/api/drafts/streaming/init", json={})
+        resp = client.post("/api/drafts/streaming/init",
+                           json={"ai_usage": "chat"})
         assert resp.status_code == 201
         draft = Draft.query.filter_by(
             session_id=resp.get_json()["session_id"]).one()

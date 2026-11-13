@@ -613,6 +613,10 @@ const NodeForm = forwardRef(
           const topLevelWithAi = !parentId && aiUsage !== 'none';
           const response = await api.post(`/drafts/streaming/${streamingSessionId}/save-as-node`, {
             content,
+            // The settings the form shows now, which can differ from the
+            // ones the recording started with.
+            privacy_level: privacyLevel,
+            ai_usage: aiUsage,
             ...(topLevelWithAi && useAgenticPrompt && { agentic: true }),
             ...(topLevelWithAi && autoGenerateOn && allowAgenticPrompt
               && { auto_generate: true }),

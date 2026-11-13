@@ -489,6 +489,34 @@ NIGHTLY_SYNC_LOCAL_HOUR = 3
 NIGHTLY_SYNC_MIN_GAP = timedelta(hours=20)
 
 
+def _sync_due(account, in_use, now):
+    """What the hourly gate does for one connected account: "catch_up"
+    (its owner is back after a pause, #647), "nightly" (their local 3am),
+    "pause" (their local 3am, but nobody has used the account for
+    UNUSED_ACCOUNT_PAUSE_DAYS), or None. Lifts a pause once the owner is
+    back; *in_use* is utils/activity.in_use_user_ids of the run."""
+    from backend.utils.hidden_rows import account_on_hold
+    if account.sync_paused_at is not None:
+        if account.user_id not in in_use:
+            return None   # still away: stays paused
+        paused_at = account.sync_paused_at
+        account.sync_paused_at = None
+        db.session.commit()
+        # A sync that finished since the pause began (the Import page's
+        # "Sync now") has already caught up; the nightly rule goes on.
+        if (account.last_synced_at is None
+                or account.last_synced_at < paused_at):
+            return None if account_on_hold(account.user_id) else "catch_up"
+    if user_local_hour(account.user) != NIGHTLY_SYNC_LOCAL_HOUR:
+        return None
+    if account_on_hold(account.user_id):   # #269
+        return None
+    if (account.last_synced_at
+            and now - account.last_synced_at < NIGHTLY_SYNC_MIN_GAP):
+        return None
+    return "nightly" if account.user_id in in_use else "pause"
+
+
 @celery.task(name='backend.tasks.external_sync.sync_all_twitter_bookmarks')
 def sync_all_twitter_bookmarks():
     """Hourly beat gate: dispatch bookmark syncs for connected, non-revoked
@@ -497,7 +525,17 @@ def sync_all_twitter_bookmarks():
     external-digest sweep gates on local 4am, an hour later, so a night's
     new bookmarks are already stored when the digest is rebuilt — X
     activity alone warrants a refresh even when the user hasn't touched
-    Loore. No-op until X_CLIENT_ID is configured."""
+    Loore. No-op until X_CLIENT_ID is configured.
+
+    Accounts nobody uses (#647): the nightly sync is skipped for an
+    account whose owner has not used Loore for UNUSED_ACCOUNT_PAUSE_DAYS
+    (utils/activity.in_use_user_ids), and ExternalAccount.sync_paused_at
+    records it. When the owner is back, the next hourly run sends one
+    catch-up sync at once, whatever their local hour. It reads every
+    bookmark saved since the last finished sync, up to X's own limit of
+    the 800 newest (the early stop ends at the first page with nothing
+    new), so the bookmarks of the paused nights are read once, by one
+    sync, and the digest is rebuilt from them in the owner's next night."""
     with flask_app.app_context():
         if not flask_app.config.get("X_CLIENT_ID"):
             return {"status": "not_configured"}
@@ -507,25 +545,35 @@ def sync_all_twitter_bookmarks():
             ExternalAccount.access_token.isnot(None),
             ExternalAccount.revoked_at.is_(None),
         ).all()
-        dispatched = 0
-        from backend.utils.hidden_rows import account_on_hold
+        from backend.utils.activity import (
+            in_use_user_ids, unused_pause_window)
+        in_use = in_use_user_ids(
+            [a.user_id for a in accounts], flask_app.config, now)
+        dispatched = paused = caught_up = 0
         for account in accounts:
             if account.user is None or account.user.deleted_at is not None:
                 continue   # a deleted account in its grace period (#269)
-            if user_local_hour(account.user) != NIGHTLY_SYNC_LOCAL_HOUR:
-                continue
-            if account_on_hold(account.user_id):   # #269
-                continue
-            if (account.last_synced_at
-                    and now - account.last_synced_at < NIGHTLY_SYNC_MIN_GAP):
-                continue
-            # Staggered so N users don't hit X (and the digest LLM) at once.
-            sync_twitter_bookmarks.apply_async(
-                args=[account.user_id], countdown=dispatched * 30)
-            dispatched += 1
+            due = _sync_due(account, in_use, now)
+            if due == "pause":
+                # No sync tonight, and none until the owner is back.
+                account.sync_paused_at = now
+                db.session.commit()
+                paused += 1
+            elif due is not None:
+                # Staggered so N users don't hit X (and the digest LLM)
+                # at once.
+                sync_twitter_bookmarks.apply_async(
+                    args=[account.user_id], countdown=dispatched * 30)
+                dispatched += 1
+                caught_up += due == "catch_up"
         if dispatched:
-            logger.info("Nightly X bookmark sync dispatched for %d accounts",
-                        dispatched)
+            logger.info("Nightly X bookmark sync dispatched for %d accounts "
+                        "(%d catching up after a pause)", dispatched,
+                        caught_up)
+        if paused:
+            logger.info("Nightly X bookmark sync paused for %d accounts "
+                        "nobody has used for %s", paused,
+                        unused_pause_window(flask_app.config))
         return {"status": "ok", "dispatched": dispatched}
 
 
