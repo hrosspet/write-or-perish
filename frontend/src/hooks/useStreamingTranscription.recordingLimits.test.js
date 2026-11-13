@@ -1,7 +1,8 @@
 // The server's limits on one recording (utils/recordingLimits): audio kept
-// without its text (the monthly usage limit, or past the length limit) is
+// without its text (past the length one recording may have transcribed) is
 // said once, with no error sound, and the recording goes on; a chunk past
-// what one recording may hold is not retried, and the recording stops.
+// what one recording may hold is not retried, and the recording stops; a
+// start refused while other recordings are in progress says so plainly.
 const mockStartRecording = jest.fn(() => Promise.resolve());
 const mockStopRecording = jest.fn(() => Promise.resolve());
 const mockResetRecording = jest.fn();
@@ -67,11 +68,6 @@ import {
 const flush = () => new Promise((r) => setTimeout(r, 0));
 const callsTo = (suffix) => mockPost.mock.calls.filter(([u]) => u.includes(suffix));
 
-const keptAtLimit = (index) => ({
-  chunk_index: index, status: 'failed', code: 'monthly_spend_limit_reached',
-  error: "Saved as audio, not turned into text: you've reached your monthly usage limit.",
-});
-
 beforeEach(() => {
   mockStartRecording.mockClear();
   mockStopRecording.mockClear();
@@ -104,7 +100,7 @@ async function startRecording(options = {}) {
 }
 
 describe('audio kept without its text', () => {
-  test('at the usage limit: said once, the banner, no error sound, the recording goes on', async () => {
+  test('past the length limit: said once, no error sound, the recording goes on', async () => {
     const onError = jest.fn();
     const banner = jest.fn();
     window.addEventListener('loore:spend-capped', banner);
@@ -112,37 +108,21 @@ describe('audio kept without its text', () => {
       const { result } = await startRecording({ onError });
 
       act(() => {
-        for (let i = 20; i < 40; i += 1) mockSse.opts.onError(keptAtLimit(i));
-      });
-
-      expect(mockAddToast).toHaveBeenCalledTimes(1);
-      expect(mockAddToast.mock.calls[0][0]).toBe(
-        UNTRANSCRIBED_MESSAGES.monthly_spend_limit_reached);
-      expect(banner).toHaveBeenCalledTimes(1);
-      expect(mockPlayErrorSound).not.toHaveBeenCalled();
-      expect(onError).not.toHaveBeenCalled();
-      expect(mockStopRecording).not.toHaveBeenCalled();
-      expect(result.current.sessionState).toBe('recording');
-    } finally {
-      window.removeEventListener('loore:spend-capped', banner);
-    }
-  });
-
-  test('past the length limit: said once, no banner', async () => {
-    const banner = jest.fn();
-    window.addEventListener('loore:spend-capped', banner);
-    try {
-      await startRecording();
-
-      act(() => {
-        mockSse.opts.onError({ chunk_index: 1440, status: 'failed', code: 'recording_too_long' });
-        mockSse.opts.onError({ chunk_index: 1441, status: 'failed', code: 'recording_too_long' });
+        for (let i = 1440; i < 1460; i += 1) {
+          mockSse.opts.onError({
+            chunk_index: i, status: 'failed', code: 'recording_too_long',
+            error: 'Saved as audio, not turned into text: the recording is longer than six hours.',
+          });
+        }
       });
 
       expect(mockAddToast).toHaveBeenCalledTimes(1);
       expect(mockAddToast.mock.calls[0][0]).toBe(UNTRANSCRIBED_MESSAGES.recording_too_long);
       expect(banner).not.toHaveBeenCalled();
       expect(mockPlayErrorSound).not.toHaveBeenCalled();
+      expect(onError).not.toHaveBeenCalled();
+      expect(mockStopRecording).not.toHaveBeenCalled();
+      expect(result.current.sessionState).toBe('recording');
     } finally {
       window.removeEventListener('loore:spend-capped', banner);
     }
@@ -159,6 +139,31 @@ describe('audio kept without its text', () => {
     expect(mockPlayErrorSound).toHaveBeenCalledTimes(1);
     expect(onError).toHaveBeenCalledTimes(1);
     expect(mockAddToast).not.toHaveBeenCalled();
+  });
+});
+
+describe('other recordings in progress', () => {
+  test('a refused start says why in plain words and opens no mic', async () => {
+    const text = 'Other recordings of yours are still in progress. Finish one of them, then start this one.';
+    mockPost.mockImplementation((url) => {
+      if (url === '/drafts/streaming/init') {
+        const err = new Error('Request failed with status code 429');
+        err.response = { status: 429, data: { error: text, code: 'too_many_recordings' } };
+        return Promise.reject(err);
+      }
+      return Promise.resolve({ data: {} });
+    });
+    const onError = jest.fn();
+    const { result } = renderHook(() => useStreamingTranscription({ onError }));
+
+    await act(async () => { await result.current.startStreaming(); });
+
+    expect(mockStartRecording).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledTimes(1);
+    const err = onError.mock.calls[0][0];
+    expect(err.message).toBe(text);
+    expect(err.fatal).toBe(true);   // the Voice screen shows it verbatim
+    expect(result.current.errorMessage).toBe(text);
   });
 });
 

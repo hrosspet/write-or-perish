@@ -529,8 +529,8 @@ def draft_transcription_stream(session_id):
                             "error": chunk.error,
                             "status": "failed"
                         }
-                        # Kept as audio without its text (the usage limit,
-                        # or past the length limit): the reason's code,
+                        # Kept as audio without its text (past the length
+                        # one recording may have transcribed): the code,
                         # so the apps say why instead of sounding an error
                         # (utils/recording_limits).
                         from backend.utils.recording_limits import (

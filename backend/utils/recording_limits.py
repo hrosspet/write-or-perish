@@ -6,8 +6,9 @@ Audio reaches the server in two ways:
   ``/api/drafts/streaming/<session>/audio-chunk``; the older
   ``/api/nodes/<id>/audio-chunk``) arrives in chunks while it is recorded.
   Both apps cut a chunk every 15 s of audio.
-- An audio file (``/api/nodes/upload/init|chunk|finalize``) arrives in
-  5 MB pieces, after an init that names its size and its piece count.
+- An audio file (``/api/nodes/upload/init|chunk|finalize``, or one request
+  to ``POST /api/nodes/``) arrives whole or in 5 MB pieces, after an init
+  that names its size and its piece count.
 
 Every number below is far above what the web and iPhone apps send, so a
 real recording never meets one, and each is checked by the routes and
@@ -21,22 +22,27 @@ tasks themselves, for every account. What the apps send (measured
   (AAC) it sometimes hands two slices over in one chunk, 486 KB. 16 KB a
   second.
 
-A streaming recording is never cut short by the server:
+A recording accepted at its start (where the monthly usage limit is
+checked, #341) is stored and transcribed to its end (Peter, 2026-11-13:
+"User's recorded message should be stored on Loore's servers, possibly
+even transcribed (transcription is cheap). Just further AI use should be
+blocked"), within these limits:
 
-- Its transcription stops at the monthly usage limit (utils/spend) and
-  at MAX_TRANSCRIBED_SECONDS of audio. The audio from there on is still
-  stored and kept with the recording; its chunks end ``failed`` with a
-  text of their own (NOT_TRANSCRIBED_TEXTS), so the finalize waits for
-  them no longer, and the recording's text ends with a note saying what
-  was not turned into text and why (untranscribed_note). Peter,
-  2026-11-13: "User's recorded message should be stored on Loore's
-  servers … Just further AI use should be blocked".
+- One recording is transcribed up to MAX_TRANSCRIBED_SECONDS of audio.
+  The audio past it is still stored and kept with the recording; its
+  chunks end ``failed`` with NOT_TRANSCRIBED_TEXT, so the finalize waits
+  for them no longer, and the recording's text ends with a note
+  (untranscribed_note).
 - Its audio is refused only past bounds no recording made in the apps
   reaches: a chunk over MAX_STREAMING_CHUNK_BYTES, a chunk index from
   MAX_STREAMING_CHUNKS on, or more than MAX_STREAMING_SESSION_BYTES in
   all. Audio accepted before stays.
+- An account starts no new recording while MAX_RECORDINGS_IN_PROGRESS of
+  its recordings are in progress, and no new audio upload while
+  MAX_UPLOADS_IN_PROGRESS of its uploads wait for their transcript.
 """
 import os
+from datetime import datetime, timedelta
 
 # Seconds of audio in one streaming chunk, in both apps.
 STREAMING_CHUNK_SECONDS = 15
@@ -85,42 +91,50 @@ MAX_UPLOAD_CHUNKS = 200
 # when a request's Content-Length is checked before the form is read.
 FORM_OVERHEAD_BYTES = 64 * 1024
 
-# Why a chunk's audio is kept without its text: the codes the transcription
+# INTRODUCED HEURISTIC: recordings (dictation and Voice) one account may
+# have in progress at once; a new one is refused while this many are. In
+# progress: being recorded (live, utils/streaming_session: a sign of life
+# within 45 s; a left-behind or crashed recording stops counting then, and
+# at once when its app released it), or finalizing, until its transcript
+# is in. Legitimate use is one device recording, plus a second device or an
+# earlier session not released yet.
+MAX_RECORDINGS_IN_PROGRESS = 3
+# A finalizing recording counts for at most this long after its last
+# change: its finalize waits up to 10 minutes for its chunks (the task's
+# own limit), so one whose task died stops counting after this.
+FINALIZING_COUNTS_FOR = timedelta(minutes=30)
+
+# INTRODUCED HEURISTIC: audio uploads (chunked or in one request) and older
+# node-path recordings of one account that may wait for their transcript at
+# once. The apps upload one file per press; three leaves room for presses in
+# quick succession.
+MAX_UPLOADS_IN_PROGRESS = 3
+# An upload counts for at most this long after it started, so one that was
+# never finished (its pieces stopped coming) does not count for ever.
+UPLOAD_COUNTS_FOR = timedelta(hours=1)
+
+TOO_MANY_RECORDINGS_TEXT = (
+    "Other recordings of yours are still in progress. Finish one of them, "
+    "then start this one.")
+TOO_MANY_UPLOADS_TEXT = (
+    "Other audio files of yours are still being uploaded or turned into "
+    "text. Wait for one of them to finish, then upload this one.")
+
+# Why a chunk's audio is kept without its text: the code the transcription
 # stream sends with the chunk (``chunk_error``), so the apps tell it apart
-# from a failure. The first is the spend cap's own error code (utils/spend).
-SPEND_CAP = "monthly_spend_limit_reached"
+# from a failure.
 TOO_LONG = "recording_too_long"
 
-# NodeTranscriptChunk.error of a chunk kept without its text, by reason.
-NOT_TRANSCRIBED_TEXTS = {
-    SPEND_CAP: ("Saved as audio, not turned into text: you've reached your "
-                "monthly usage limit."),
-    TOO_LONG: ("Saved as audio, not turned into text: the recording is "
-               "longer than six hours."),
-}
+# NodeTranscriptChunk.error of a chunk kept without its text.
+NOT_TRANSCRIBED_TEXT = ("Saved as audio, not turned into text: the "
+                        "recording is longer than six hours.")
 
-# The note at the end of a recording's text, by reason: (some of it was
-# transcribed, none of it was).
-_NOTES = {
-    SPEND_CAP: (
-        "*Note: The rest of this recording was not turned into text, "
-        "because you've reached your monthly usage limit. Its audio is "
-        "saved.*",
-        "*Note: This recording was not turned into text, because you've "
-        "reached your monthly usage limit. Its audio is saved.*",
-    ),
-    TOO_LONG: (
-        "*Note: The recording is longer than six hours, so the rest of it "
-        "was not turned into text. Its audio is saved.*",
-        "*Note: The recording is longer than six hours, so it was not "
-        "turned into text. Its audio is saved.*",
-    ),
-}
-
-
-def refusal(code, message, status):
-    """A refused upload: (body, HTTP status), for jsonify."""
-    return {"error": message, "code": code}, status
+# The note at the end of a recording's text: some of it was transcribed,
+# none of it was.
+NOTE_PART = ("*Note: The recording is longer than six hours, so the rest "
+             "of it was not turned into text. Its audio is saved.*")
+NOTE_ALL = ("*Note: The recording is longer than six hours, so it was not "
+            "turned into text. Its audio is saved.*")
 
 
 def body_too_large(max_bytes):
@@ -160,6 +174,60 @@ def int_in_range(value, low, high):
     return value if low <= value <= high else None
 
 
+def recordings_in_progress(user_id, now=None):
+    """The account's recordings in progress (MAX_RECORDINGS_IN_PROGRESS):
+    live ones, and finalizing ones changed within FINALIZING_COUNTS_FOR."""
+    from backend.extensions import db
+    from backend.models import Draft
+    from backend.utils.streaming_session import LIVE_SESSION_WINDOW_SEC
+    now = now or datetime.utcnow()
+    live_since = now - timedelta(seconds=LIVE_SESSION_WINDOW_SEC)
+    return Draft.query.filter(
+        Draft.user_id == user_id,
+        Draft.session_id.isnot(None),
+        db.or_(
+            db.and_(Draft.streaming_status == "recording",
+                    Draft.streaming_heartbeat_at >= live_since),
+            db.and_(Draft.streaming_status == "finalizing",
+                    Draft.updated_at >= now - FINALIZING_COUNTS_FOR),
+        ),
+    ).count()
+
+
+def uploads_in_progress(user_id, now=None):
+    """The account's audio entries waiting for their transcript
+    (MAX_UPLOADS_IN_PROGRESS): transcription pending or processing, started
+    within UPLOAD_COUNTS_FOR."""
+    from backend.models import Node
+    now = now or datetime.utcnow()
+    return Node.query.filter(
+        Node.user_id == user_id,
+        Node.transcription_status.in_(("pending", "processing")),
+        Node.created_at >= now - UPLOAD_COUNTS_FOR,
+    ).count()
+
+
+def too_many_recordings_response(user_id):
+    """429 ``too_many_recordings`` when the account has
+    MAX_RECORDINGS_IN_PROGRESS recordings in progress, else None."""
+    if recordings_in_progress(user_id) < MAX_RECORDINGS_IN_PROGRESS:
+        return None
+    from flask import jsonify
+    return jsonify({"error": TOO_MANY_RECORDINGS_TEXT,
+                    "code": "too_many_recordings"}), 429
+
+
+def too_many_uploads_response(user_id):
+    """429 ``too_many_uploads`` when the account has
+    MAX_UPLOADS_IN_PROGRESS uploads waiting for their transcript, else
+    None."""
+    if uploads_in_progress(user_id) < MAX_UPLOADS_IN_PROGRESS:
+        return None
+    from flask import jsonify
+    return jsonify({"error": TOO_MANY_UPLOADS_TEXT,
+                    "code": "too_many_uploads"}), 429
+
+
 def transcribed_seconds(session_id=None, node_id=None):
     """Seconds of a recording's audio already turned into text (the sum of
     NodeTranscriptChunk.audio_seconds), by its session or, for the older
@@ -176,54 +244,38 @@ def transcribed_seconds(session_id=None, node_id=None):
     return float(q.scalar() or 0.0)
 
 
-def untranscribed_reason(user_id, done_seconds, next_seconds):
-    """Why the next *next_seconds* of a recording are not sent to be
-    transcribed, or None when they may be: the user has reached the
-    monthly usage limit (SPEND_CAP; read right before the provider call,
-    as the other paid calls do), or the recording would pass
-    MAX_TRANSCRIBED_SECONDS with them (TOO_LONG)."""
-    from backend.utils.spend import user_is_capped
-    if user_id is not None and user_is_capped(user_id):
-        return SPEND_CAP
-    if done_seconds + next_seconds > MAX_TRANSCRIBED_SECONDS:
-        return TOO_LONG
-    return None
+def too_long(done_seconds, next_seconds):
+    """True when the next *next_seconds* of a recording would take what is
+    transcribed of it past MAX_TRANSCRIBED_SECONDS."""
+    return done_seconds + next_seconds > MAX_TRANSCRIBED_SECONDS
 
 
-def mark_untranscribed(chunks, reason):
+def mark_untranscribed(chunks):
     """Keep chunk rows' audio without their text: status ``failed`` (the
-    finalize waits for them no longer) with the reason's text as the
+    finalize waits for them no longer) with NOT_TRANSCRIBED_TEXT as the
     error. Their audio files stay where they are. The caller commits."""
-    from datetime import datetime
     now = datetime.utcnow()
     for chunk in chunks:
         if chunk is None or chunk.status == "completed":
             continue
         chunk.status = "failed"
-        chunk.error = NOT_TRANSCRIBED_TEXTS[reason]
+        chunk.error = NOT_TRANSCRIBED_TEXT
         chunk.completed_at = now
 
 
 def untranscribed_code(error):
-    """The reason (SPEND_CAP, TOO_LONG) a chunk with this error was kept
-    without its text, or None for any other error."""
-    for code, text in NOT_TRANSCRIBED_TEXTS.items():
-        if error == text:
-            return code
-    return None
+    """TOO_LONG for a chunk with this error kept without its text, None
+    for any other error."""
+    return TOO_LONG if error == NOT_TRANSCRIBED_TEXT else None
 
 
 def untranscribed_note(chunks, has_text):
-    """The note for a recording whose *chunks* were kept without their
-    text: one line per reason, in the order of the first chunk of each.
-    *has_text*: some of the recording was transcribed."""
-    reasons = []
-    for chunk in sorted(chunks, key=lambda c: c.chunk_index):
-        code = untranscribed_code(chunk.error)
-        if code is not None and code not in reasons:
-            reasons.append(code)
-    return "\n\n".join(_NOTES[code][0 if has_text else 1]
-                       for code in reasons)
+    """The note for a recording with *chunks* kept without their text
+    (nothing when there are none). *has_text*: some of it was
+    transcribed."""
+    if not chunks:
+        return ""
+    return NOTE_PART if has_text else NOTE_ALL
 
 
 def with_note(content, note):

@@ -193,8 +193,9 @@ final class DictationController {
                     case .contentUpdate(let content, _):
                         self.callbacks.transcript(content)
                     case .chunkError(_, _, let code):
-                        // Audio kept without its text (the usage limit, or past the
-                        // length limit): the recording goes on; said once, no error sound.
+                        // Audio kept without its text (past the length one recording
+                        // may have transcribed): the recording goes on; said once,
+                        // no error sound.
                         self.noticeUntranscribed(code)
                     case .allComplete(let done):
                         if self.state == .finalizing, let content = done.content {
@@ -217,12 +218,11 @@ final class DictationController {
     }
 
     /// A `chunk_error` that keeps the chunk's audio without its text: a toast
-    /// once per code (at the usage limit also the banner); nothing for a failure.
+    /// once per code; nothing for a failure.
     func noticeUntranscribed(_ code: String?) {
         guard let code, let message = RecordingLimits.untranscribedMessage(code),
               !untranscribedNoticed.contains(code), let app else { return }
         untranscribedNoticed.insert(code)
-        if code == RecordingLimits.spendCapCode { app.notifySpendBlocked() }
         app.toasts.show(message, duration: 10)
     }
 

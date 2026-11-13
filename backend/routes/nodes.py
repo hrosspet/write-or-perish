@@ -739,6 +739,12 @@ def create_node():
         content_length = request.content_length or 0
         if content_length > MAX_AUDIO_BYTES:
             return jsonify({"error": "File too large"}), 413
+        # Other uploads of the account still wait for their transcript
+        # (utils/recording_limits).
+        from backend.utils.recording_limits import too_many_uploads_response
+        too_many = too_many_uploads_response(current_user.id)
+        if too_many is not None:
+            return too_many
 
         parent_id = request.form.get("parent_id")
         node_type = request.form.get("node_type", "user")
@@ -2741,6 +2747,8 @@ def init_chunked_upload():
     needs, at most MAX_UPLOAD_CHUNKS and never more than the file has
     bytes (400 ``invalid_upload_size`` otherwise; utils/recording_limits).
     The chunks and finalize hold the upload to both.
+    429 ``too_many_uploads`` while MAX_UPLOADS_IN_PROGRESS uploads of the
+    account wait for their transcript.
 
     Request body:
     {
@@ -2782,6 +2790,12 @@ def init_chunked_upload():
     err = _upload_declaration_error(filesize, total_chunks)
     if err is not None:
         return err
+    # Other uploads of the account still wait for their transcript
+    # (utils/recording_limits).
+    from backend.utils.recording_limits import too_many_uploads_response
+    too_many = too_many_uploads_response(current_user.id)
+    if too_many is not None:
+        return too_many
 
     # Validate privacy settings
     if not validate_privacy_level(privacy_level):
@@ -3176,6 +3190,12 @@ def init_streaming_transcription():
     err = assert_parent_alive(parent_id)
     if err is not None:
         return err
+    # This path's recordings wait for their transcript as entries, counted
+    # with the uploads (utils/recording_limits).
+    from backend.utils.recording_limits import too_many_uploads_response
+    too_many = too_many_uploads_response(current_user.id)
+    if too_many is not None:
+        return too_many
 
     # Generate session ID
     import uuid
@@ -3245,16 +3265,12 @@ def upload_audio_chunk(node_id):
         return jsonify({"error": "Node is not in streaming transcription mode"}), 400
 
     # The limits on one recording (utils/recording_limits), as on the
-    # draft path. This older path transcribes each chunk as it arrives, so
-    # a capped user's chunk is refused (402) rather than stored untranscribed.
+    # draft path.
     from backend.utils import recording_limits as limits
     if limits.body_too_large(limits.MAX_STREAMING_CHUNK_BYTES):
         return jsonify({"error": "This part of the recording is larger than "
                                  "Loore accepts.",
                         "code": "chunk_too_large"}), 413
-    from backend.utils.spend import spend_cap_response, user_is_capped
-    if user_is_capped(current_user):
-        return spend_cap_response(current_user)
 
     # Get form data
     if "chunk" not in request.files:

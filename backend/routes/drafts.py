@@ -607,6 +607,12 @@ def init_streaming():
     Resuming an interrupted session never calls init, and its chunks
     (audio-chunk, transcribe-remaining, finalize) are not cap-checked.
 
+    429 ``too_many_recordings`` and no draft while MAX_RECORDINGS_IN_PROGRESS
+    recordings of the account are in progress (utils/recording_limits:
+    live ones and finalizing ones; a left-behind session stops counting
+    once it is no longer live). A recording accepted here is transcribed
+    to its end, within the limits on one recording.
+
     A Voice recording (label "Voice") where AI may not read gets 403
     ``{"error", "code": "ai_usage_none", "scope"}`` and no draft, so the
     mic never opens: a fresh thread when the account's Default AI usage
@@ -639,6 +645,10 @@ def init_streaming():
     Returns: { "session_id": "uuid", "draft_id": 456 }
     """
     _cleanup_stale_drafts(current_user.id)
+    from backend.utils.recording_limits import too_many_recordings_response
+    too_many = too_many_recordings_response(current_user.id)
+    if too_many is not None:
+        return too_many
 
     data = request.get_json() or {}
 

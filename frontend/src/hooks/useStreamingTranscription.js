@@ -8,8 +8,8 @@ import { isAiUsageRefusedError, aiUsageRefusalScope } from '../utils/aiUsage';
 import { isThreadTooLong } from '../utils/threadLength';
 import { isApprovalPendingError } from '../utils/toolApprovals';
 import {
-  isRecordingLimitCode, RECORDING_LIMIT_MESSAGE, noticeUntranscribed,
-  untranscribedMessage,
+  isRecordingLimitCode, RECORDING_LIMIT_MESSAGE, TOO_MANY_RECORDINGS_CODE,
+  TOO_MANY_RECORDINGS_MESSAGE, untranscribedMessage,
 } from '../utils/recordingLimits';
 import { onPageReturn } from '../utils/pageReturn';
 import { playErrorSound } from '../utils/errorSound';
@@ -567,15 +567,16 @@ export function useStreamingTranscription(options = {}) {
       }
     },
     onError: (data) => {
-      // Audio kept without its text (the monthly usage limit, or a
-      // recording past the length limit): the recording goes on and its
-      // text ends with a note. Said once per recording and reason, with
-      // no error sound (utils/recordingLimits).
-      if (untranscribedMessage(data?.code)) {
+      // Audio kept without its text (a recording past the length one
+      // recording may have transcribed): the recording goes on and its
+      // text ends with a note. Said once per recording, with no error
+      // sound (utils/recordingLimits).
+      const keptMessage = untranscribedMessage(data?.code);
+      if (keptMessage) {
         const key = `${sessionIdRef.current}:${data.code}`;
         if (!untranscribedNoticesRef.current.has(key)) {
           untranscribedNoticesRef.current.add(key);
-          addToast(noticeUntranscribed(data.code), 10000);
+          addToast(keptMessage, 10000);
         }
         return;
       }
@@ -842,6 +843,16 @@ export function useStreamingTranscription(options = {}) {
         } catch (_) { /* sealed error object */ }
         if (onError) onError(err);
         throw err;
+      }
+      if (err?.response?.data?.code === TOO_MANY_RECORDINGS_CODE) {
+        // Other recordings of this account are in progress (the server's
+        // limit, utils/recordingLimits): refused before any draft existed
+        // and before the mic opened. Shown in the server's words, by the
+        // parent as a start that failed.
+        try {
+          err.message = err.response.data.error || TOO_MANY_RECORDINGS_MESSAGE;
+          err.fatal = true;
+        } catch (_) { /* sealed error object */ }
       }
       setSessionState('error');
       setErrorMessage(err.message);

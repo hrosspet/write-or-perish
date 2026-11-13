@@ -5,16 +5,16 @@ These tasks handle real-time transcription of audio chunks as they're
 recorded, enabling the user to see transcript text appear in their
 draft while still recording.
 
-The monthly spend cap blocks starting a recording (the streaming init
-endpoints, #341) and the LLM reply. Once a recording has started, the
-transcription tasks ask for it right before each provider call (the block
-flag is set out of band, ENFORCE_CAP_DELAY_SECONDS after any cost row,
-including this module's own transcription rows, so it can flip
-mid-recording): from there on the audio is stored and kept with the
-recording, not transcribed, and the recording's text ends with a note
-saying so (Peter, 2026-11-13: "User's recorded message should be stored
-on Loore's servers … Just further AI use should be blocked"). The same
-for audio past utils/recording_limits.MAX_TRANSCRIBED_SECONDS.
+No task here checks the monthly spend cap (#341). A recording that has
+started is transcribed to the end, even when the cap flips mid-recording
+(the block flag is set out of band, ENFORCE_CAP_DELAY_SECONDS after any
+cost row, including this module's own transcription rows). The cap blocks
+starting a recording (the streaming init endpoints) and the LLM reply.
+
+"The end" is bounded (utils/recording_limits): one recording is
+transcribed up to MAX_TRANSCRIBED_SECONDS of audio; the audio past it is
+stored and kept with the recording, not transcribed, and the recording's
+text ends with a note saying so.
 """
 from celery import Task
 from celery.utils.log import get_task_logger
@@ -233,21 +233,18 @@ def transcribe_chunk(self, node_id: int, chunk_index: int, chunk_path: str):
             chunk_duration_sec = get_audio_duration(processed_path, logger)
 
             try:
-                # Not sent at the usage limit or past the length limit
+                # Past the length one recording may have transcribed
                 # (utils/recording_limits): kept without its text.
-                owner = Node.query.get(node_id)
-                reason = recording_limits.untranscribed_reason(
-                    owner.user_id if owner else None,
-                    recording_limits.transcribed_seconds(node_id=node_id),
-                    chunk_duration_sec
-                    or recording_limits.STREAMING_CHUNK_SECONDS)
-                if reason is not None:
-                    recording_limits.mark_untranscribed([chunk_record], reason)
+                if recording_limits.too_long(
+                        recording_limits.transcribed_seconds(node_id=node_id),
+                        chunk_duration_sec
+                        or recording_limits.STREAMING_CHUNK_SECONDS):
+                    recording_limits.mark_untranscribed([chunk_record])
                     db.session.commit()
                     logger.info(f"Node {node_id} chunk {chunk_index}: not "
-                                f"transcribed ({reason})")
+                                f"transcribed, past the length limit")
                     return {'node_id': node_id, 'chunk_index': chunk_index,
-                            'status': 'not_transcribed', 'reason': reason}
+                            'status': 'not_transcribed'}
 
                 # Transcribe the chunk
                 with open(processed_path, "rb") as audio_file:
@@ -563,21 +560,18 @@ def transcribe_draft_chunk(self, session_id: str, chunk_index: int, chunk_path: 
             draft_chunk_duration_sec = get_audio_duration(processed_path, logger)
 
             try:
-                # Not sent at the usage limit or past the length limit
+                # Past the length one recording may have transcribed
                 # (utils/recording_limits): kept without its text.
-                owner = Draft.query.filter_by(session_id=session_id).first()
-                reason = recording_limits.untranscribed_reason(
-                    owner.user_id if owner else None,
-                    recording_limits.transcribed_seconds(
-                        session_id=session_id),
-                    draft_chunk_duration_sec
-                    or recording_limits.STREAMING_CHUNK_SECONDS)
-                if reason is not None:
-                    recording_limits.mark_untranscribed([chunk_record], reason)
+                if recording_limits.too_long(
+                        recording_limits.transcribed_seconds(
+                            session_id=session_id),
+                        draft_chunk_duration_sec
+                        or recording_limits.STREAMING_CHUNK_SECONDS):
+                    recording_limits.mark_untranscribed([chunk_record])
                     db.session.commit()
                     return {'session_id': session_id,
                             'chunk_index': chunk_index,
-                            'status': 'not_transcribed', 'reason': reason}
+                            'status': 'not_transcribed'}
 
                 # Transcribe the chunk
                 with open(processed_path, "rb") as audio_file:
@@ -865,10 +859,11 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
             # Sub-batches whose merged file holds less audio than their
             # chunks: those chunks are kept (renamed, see below).
             short_subbatches = set()
-            # Chunks kept without their text, with the reason
-            # (utils/recording_limits): their audio is merged and stored
-            # like the rest, only the provider call is left out.
-            untranscribed = {}
+            # Chunks kept without their text, past the length one
+            # recording may have transcribed (utils/recording_limits):
+            # their audio is merged and stored like the rest, only the
+            # provider call is left out.
+            untranscribed = set()
             transcribed_before = recording_limits.transcribed_seconds(
                 session_id=session_id)
             batch_counted_sec = 0.0
@@ -896,15 +891,10 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
                     len(sub_indices) * recording_limits.STREAMING_CHUNK_SECONDS)
 
                 try:
-                    # Asked right before the provider call: the usage
-                    # limit, and the length one recording may have
-                    # transcribed.
-                    reason = recording_limits.untranscribed_reason(
-                        draft.user_id, transcribed_before + batch_counted_sec,
-                        sub_counted)
-                    if reason is not None:
-                        untranscribed.update(
-                            {i: reason for i in sub_indices})
+                    if recording_limits.too_long(
+                            transcribed_before + batch_counted_sec,
+                            sub_counted):
+                        untranscribed.update(sub_indices)
                         continue
                     batch_duration_sec += sub_duration
                     batch_counted_sec += sub_counted
@@ -951,8 +941,7 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
                     chunk_index=idx
                 ).first()
                 if chunk_record and idx in untranscribed:
-                    recording_limits.mark_untranscribed(
-                        [chunk_record], untranscribed[idx])
+                    recording_limits.mark_untranscribed([chunk_record])
                 elif chunk_record:
                     if idx == first_idx:
                         chunk_record.set_text(transcript)
@@ -1043,9 +1032,8 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
             logger.info(
                 f"Batch transcription successful for session {session_id}, "
                 f"chunks {chunk_indices}: {len(transcript)} characters"
-                + (f"; kept without text: {sorted(untranscribed)} "
-                   f"({sorted(set(untranscribed.values()))})"
-                   if untranscribed else "")
+                + (f"; kept without text, past the length limit: "
+                   f"{sorted(untranscribed)}" if untranscribed else "")
             )
 
             return {
@@ -1381,9 +1369,9 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
             # Nothing transcribed (#513): a chunk still pending when the wait
             # ran out is as lost as a failed one.
             failed_chunks = [c for c in chunks if c.status != 'completed']
-        # Chunks kept without their text (the usage limit, or a recording
-        # longer than the limit; utils/recording_limits) did not fail: their
-        # audio is kept, and a note at the end of the text says why.
+        # Chunks kept without their text (a recording longer than the
+        # limit; utils/recording_limits) did not fail: their audio is kept,
+        # and a note at the end of the text says why.
         untranscribed = [c for c in failed_chunks
                          if recording_limits.untranscribed_code(c.error)]
         if untranscribed:
@@ -1457,12 +1445,9 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
         elif no_text:
             # Keep the recording (note + audio) as an entry, with no reply.
             # Chunks still pending when the wait ran out count as failed
-            # (above); empty text gets its own note. Not transcribed at the
-            # usage limit: the limit's own warning (the Voice screens say it).
-            if any(recording_limits.untranscribed_code(c.error)
-                   == recording_limits.SPEND_CAP for c in untranscribed):
-                skip_message = VOICE_REPLY_SKIPPED_SPEND_CAP
-            elif failed_chunks or untranscribed:
+            # (above), as do chunks past the length limit; empty text gets
+            # its own note.
+            if failed_chunks or untranscribed:
                 skip_message = VOICE_REPLY_SKIPPED_NOT_TRANSCRIBED
             else:
                 skip_message = VOICE_REPLY_SKIPPED_NO_WORDS

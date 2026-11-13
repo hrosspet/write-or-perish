@@ -1,21 +1,14 @@
 import {
-  isRecordingLimitCode, noticeUntranscribed, untranscribedMessage,
+  isRecordingLimitCode, untranscribedMessage,
 } from './recordingLimits';
-import { isSpendBlocked } from './spendCap';
 
 describe('recordingLimits', () => {
-  test('a code of audio kept without its text has a message; a failure has none', () => {
-    expect(untranscribedMessage('monthly_spend_limit_reached')).toMatch(/monthly usage limit/);
+  test('audio kept past the length limit has a message; a failure has none', () => {
     expect(untranscribedMessage('recording_too_long')).toMatch(/longer than six hours/);
     expect(untranscribedMessage(undefined)).toBeNull();
     expect(untranscribedMessage('init_parse_failed')).toBeNull();
-  });
-
-  test('the usage limit also marks the account capped', () => {
-    expect(noticeUntranscribed('recording_too_long')).toMatch(/six hours/);
-    expect(isSpendBlocked()).toBe(false);
-    expect(noticeUntranscribed('monthly_spend_limit_reached')).toMatch(/usage limit/);
-    expect(isSpendBlocked()).toBe(true);
+    // The usage limit no longer stops a recording's transcription (#341).
+    expect(untranscribedMessage('monthly_spend_limit_reached')).toBeNull();
   });
 
   test('the refusals no retry can help', () => {

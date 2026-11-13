@@ -2,15 +2,16 @@ import XCTest
 @testable import Loore
 
 /// The server's limits on one recording (`backend/utils/recording_limits.py`):
-/// at the monthly usage limit, or past the length one recording may have
-/// transcribed, the rest of a dictation is kept as audio without its text.
-/// The transcription stream says so with a `chunk_error` carrying a code; the
-/// phone says it once, with no error sound, and keeps recording.
+/// past the length one recording may have transcribed, the rest of a dictation
+/// is kept as audio without its text. The transcription stream says so with a
+/// `chunk_error` carrying a code; the phone says it once, with no error sound,
+/// and keeps recording. A start refused while other recordings are in progress
+/// is shown in the server's words (`APIError.userMessage`, no change here).
 final class RecordingLimitsTests: StubbedAppTestCase {
     func testChunkErrorCarriesTheCode() {
         let kept = TranscriptionStreamEvent(SSEEvent(event: "chunk_error",
-            data: #"{"chunk_index":20,"error":"Saved as audio","status":"failed","code":"monthly_spend_limit_reached"}"#))
-        XCTAssertEqual(kept, .chunkError(chunkIndex: 20, error: "Saved as audio", code: "monthly_spend_limit_reached"))
+            data: #"{"chunk_index":1440,"error":"Saved as audio","status":"failed","code":"recording_too_long"}"#))
+        XCTAssertEqual(kept, .chunkError(chunkIndex: 1440, error: "Saved as audio", code: "recording_too_long"))
 
         // A failure carries no code (and an older server sends none).
         let failed = TranscriptionStreamEvent(SSEEvent(event: "chunk_error",
@@ -19,30 +20,20 @@ final class RecordingLimitsTests: StubbedAppTestCase {
     }
 
     func testMessages() {
-        XCTAssertNotNil(RecordingLimits.untranscribedMessage("monthly_spend_limit_reached"))
         XCTAssertNotNil(RecordingLimits.untranscribedMessage("recording_too_long"))
         XCTAssertNil(RecordingLimits.untranscribedMessage(nil))
         XCTAssertNil(RecordingLimits.untranscribedMessage("init_parse_failed"))
+        // The usage limit does not stop a recording's transcription (#341).
+        XCTAssertNil(RecordingLimits.untranscribedMessage("monthly_spend_limit_reached"))
     }
 
-    func testAtTheUsageLimitTheDictationSaysItOnceAndMarksTheAccount() {
+    func testPastTheLengthLimitTheDictationSaysItOnce() {
         let dictation = DictationController(app: app)
-        XCTAssertFalse(app.spendCapped)
 
-        for _ in 0..<20 { dictation.noticeUntranscribed("monthly_spend_limit_reached") }
+        for _ in 0..<20 { dictation.noticeUntranscribed("recording_too_long") }
 
         XCTAssertEqual(app.toasts.toasts.map(\.message),
-                       [RecordingLimits.untranscribedMessage("monthly_spend_limit_reached")!])
-        XCTAssertTrue(app.spendCapped, "the banner shows")
-    }
-
-    func testPastTheLengthLimitItIsSaidOnceWithoutTheBanner() {
-        let dictation = DictationController(app: app)
-
-        dictation.noticeUntranscribed("recording_too_long")
-        dictation.noticeUntranscribed("recording_too_long")
-
-        XCTAssertEqual(app.toasts.toasts.count, 1)
+                       [RecordingLimits.untranscribedMessage("recording_too_long")!])
         XCTAssertFalse(app.spendCapped)
     }
 
@@ -52,6 +43,13 @@ final class RecordingLimitsTests: StubbedAppTestCase {
         dictation.noticeUntranscribed(nil)
 
         XCTAssertTrue(app.toasts.toasts.isEmpty)
-        XCTAssertFalse(app.spendCapped)
+    }
+
+    func testARefusedStartShowsTheServersWords() {
+        let text = "Other recordings of yours are still in progress. Finish one of them, then start this one."
+        let error = APIError.from(status: 429, contentType: "application/json",
+                                  data: Data(#"{"error":"\#(text)","code":"too_many_recordings"}"#.utf8))
+        XCTAssertEqual(error.userMessage(fallback: "Could not start recording."), text)
+        XCTAssertEqual(error.code, "too_many_recordings")
     }
 }

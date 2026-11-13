@@ -9,14 +9,20 @@ the older ``/api/nodes/<id>/audio-chunk``):
 - a copy of a stored chunk and a re-sent failed chunk are not counted
   twice;
 - the finalize takes only a chunk count a recording can have;
-- at the monthly usage limit, and past MAX_TRANSCRIBED_SECONDS, the audio
-  is stored but not transcribed: what was transcribed stays, the text ends
-  with a note, and the transcription stream tells the apps why;
+- a recording accepted at its start is transcribed to its end, also when
+  the monthly usage limit is reached meanwhile (#341), up to
+  MAX_TRANSCRIBED_SECONDS: the audio past it is stored but not
+  transcribed, the text ends with a note, and the transcription stream
+  tells the apps why;
+- a new recording is refused while MAX_RECORDINGS_IN_PROGRESS of the
+  account's recordings are in progress; one left behind stops counting;
 - a recording of realistic size and length passes untouched (controls).
 
 Chunked file uploads (``/api/nodes/upload/...``): the init's size and piece
 count, each piece's index and size, and the finalize's total are held to
-what the init announced; a refused finalize deletes the pieces.
+what the init announced; a refused finalize deletes the pieces. A new
+upload is refused while MAX_UPLOADS_IN_PROGRESS of the account's uploads
+wait for their transcript.
 
 The data download (``/api/export/threads``): one at a time per account and
 EXPORTS_PER_HOUR an hour.
@@ -372,16 +378,16 @@ class TestOlderNodePath:
                   "chunk_index": str(index), "session_id": "legacy-1"},
             content_type="multipart/form-data")
 
-    def test_a_capped_user_s_chunk_is_refused_before_it_is_stored(
+    def test_control_a_capped_user_s_started_recording_goes_on(
             self, app, client, alice, tasks):
+        # Control (passes on main too): #341, the cap is checked at init.
         node = self._node(app, alice)
         _cap(alice)
 
         resp = self._post(client, node, 0, _payload(WEB_CHUNK_BYTES))
 
-        assert resp.status_code == 402
-        assert resp.get_json()["error"] == "monthly_spend_limit_reached"
-        tasks.transcribe_chunk.delay.assert_not_called()
+        assert resp.status_code == 202, resp.get_data(as_text=True)
+        tasks.transcribe_chunk.delay.assert_called_once()
 
     def test_an_absurd_index_is_refused(self, app, client, alice, tasks):
         node = self._node(app, alice)
@@ -417,15 +423,135 @@ class TestTranscriptionStreamSaysWhy:
                                      status="failed", error="Transcription "
                                      "failed")
         _db.session.add_all([kept, failed])
-        limits.mark_untranscribed([kept], limits.SPEND_CAP)
+        limits.mark_untranscribed([kept])
         _db.session.commit()
 
         events = self._events(client.get(
             "/api/sse/drafts/sess-1/transcription-stream"))
 
         errors = [data for name, data in events if name == "chunk_error"]
-        assert errors[0]["code"] == limits.SPEND_CAP
+        assert errors[0]["code"] == limits.TOO_LONG
         assert "code" not in errors[1]   # a failure stays a failure
+
+
+class TestRecordingsInProgress:
+    def _init(self, client):
+        return client.post("/api/drafts/streaming/init",
+                           json={"ai_usage": "chat"})
+
+    def _sessions(self, alice):
+        return Draft.query.filter(Draft.user_id == alice.id,
+                                  Draft.session_id.isnot(None)).count()
+
+    def test_a_new_recording_waits_while_three_are_in_progress(
+            self, app, client, alice):
+        for _ in range(limits.MAX_RECORDINGS_IN_PROGRESS):
+            assert self._init(client).status_code == 201
+
+        resp = self._init(client)
+
+        assert resp.status_code == 429
+        assert resp.get_json() == {"error": limits.TOO_MANY_RECORDINGS_TEXT,
+                                   "code": "too_many_recordings"}
+        assert self._sessions(alice) == limits.MAX_RECORDINGS_IN_PROGRESS
+
+    def test_finalizing_ones_count_until_their_transcript_is_in(
+            self, app, client, alice):
+        for n in range(limits.MAX_RECORDINGS_IN_PROGRESS):
+            _session(app, alice, f"fin-{n}", status="finalizing")
+        assert self._init(client).status_code == 429
+
+        # One is done: a new recording starts.
+        Draft.query.filter_by(session_id="fin-0").one() \
+            .streaming_status = "completed"
+        _db.session.commit()
+        assert self._init(client).status_code == 201
+
+    def test_control_left_behind_and_stuck_ones_do_not_count(
+            self, app, client, alice):
+        # Control (passes on main too): a crashed app's session (no sign of
+        # life for 45 s), a released one, and a finalize that died long ago
+        # never keep the user from recording.
+        from datetime import timedelta
+        long_ago = datetime.utcnow() - timedelta(hours=2)
+        for n in range(3):
+            draft, _ = _session(app, alice, f"stale-{n}")
+            draft.streaming_heartbeat_at = long_ago
+        for n in range(3):
+            draft, _ = _session(app, alice, f"released-{n}")
+            draft.streaming_heartbeat_at = None
+        for n in range(3):
+            draft, _ = _session(app, alice, f"stuck-{n}", status="finalizing")
+            draft.updated_at = long_ago
+        _db.session.commit()
+        Draft.query.filter(Draft.session_id.like("stuck-%")).update(
+            {Draft.updated_at: long_ago}, synchronize_session=False)
+        _db.session.commit()
+
+        assert self._init(client).status_code == 201
+
+    def test_control_another_account_s_recordings_do_not_count(
+            self, app, client, alice):
+        bob = User(username="bob", twitter_id="bob-tw", approved=True,
+                   plan="alpha", default_ai_usage="chat")
+        _db.session.add(bob)
+        _db.session.commit()
+        for n in range(3):
+            _session(app, bob, f"bob-{n}")
+
+        assert self._init(client).status_code == 201
+
+
+class TestUploadsInProgress:
+    def _waiting(self, user, n, status="pending", created_at=None):
+        for _ in range(n):
+            node = Node(user_id=user.id, human_owner_id=user.id,
+                        node_type="user", transcription_status=status,
+                        ai_usage="chat")
+            if created_at is not None:
+                node.created_at = created_at
+            node.set_content("[Voice note – transcription pending]")
+            _db.session.add(node)
+        _db.session.commit()
+
+    def test_a_new_upload_waits_while_three_wait_for_their_transcript(
+            self, app, client, alice):
+        for n in range(limits.MAX_UPLOADS_IN_PROGRESS):
+            resp = _init_upload(client, 8, 2, upload_id=f"up-{n}")
+            assert resp.status_code == 201, resp.get_data(as_text=True)
+        nodes = Node.query.count()
+
+        resp = _init_upload(client, 8, 2, upload_id="up-x")
+        assert resp.status_code == 429
+        assert resp.get_json() == {"error": limits.TOO_MANY_UPLOADS_TEXT,
+                                   "code": "too_many_uploads"}
+        # The same for a file sent in one request, and the older path.
+        resp = client.post("/api/nodes/", data={
+            "audio_file": (io.BytesIO(b"fake audio"), "talk.m4a"),
+            "ai_usage": "chat"}, content_type="multipart/form-data")
+        assert resp.status_code == 429
+        assert client.post("/api/nodes/streaming/init",
+                           json={"ai_usage": "chat"}).status_code == 429
+        assert Node.query.count() == nodes
+        assert not (app.media_root / f"chunks/{alice.id}/up-x").exists()
+
+        # One transcript is in: the next upload starts.
+        Node.query.filter_by(user_id=alice.id).first() \
+            .transcription_status = "completed"
+        _db.session.commit()
+        assert _init_upload(client, 8, 2, upload_id="up-y").status_code == 201
+
+    def test_control_old_failed_and_finished_ones_do_not_count(
+            self, app, client, alice):
+        # Control (passes on main too): an upload never finished an hour
+        # ago, a failed one and a transcribed one.
+        from datetime import timedelta
+        self._waiting(alice, 3, created_at=datetime.utcnow()
+                      - timedelta(hours=2))
+        self._waiting(alice, 3, status="failed")
+        self._waiting(alice, 3, status="completed")
+
+        assert _init_upload(client, 8, 2).status_code == 201
 
 
 # ── Chunked file uploads ─────────────────────────────────────────────────
@@ -778,52 +904,47 @@ def _statuses(session_id):
 
 
 class TestUsageLimitMidRecording:
-    def _two_batches_capped_between(self, st, session_id, **kw):
-        _draft, folder = _recording(st, session_id, range(0, 20), **kw)
-        _batch(st, session_id, range(0, 20))
-        assert st._provider.call_count == 1
+    def test_control_a_started_recording_is_transcribed_to_its_end(self, st):
+        # Control (passes on main too): #341. The cap is checked when a
+        # recording starts; once accepted, it is transcribed to its end.
+        _recording(st, "sess-cap", range(0, 20))
+        _batch(st, "sess-cap", range(0, 20))
         _cap(st._user)                      # the limit is reached here
-        _recording(st, session_id, range(20, 40))
-        _batch(st, session_id, range(20, 40))
-        return folder
+        _recording(st, "sess-cap", range(20, 40))
+        _batch(st, "sess-cap", range(20, 40))
 
-    def test_audio_from_the_limit_on_is_kept_and_not_transcribed(self, st):
-        folder = self._two_batches_capped_between(st, "sess-cap")
+        assert set(_statuses("sess-cap").values()) == {"completed"}
+        assert st._provider.call_count == 2
 
-        assert st._provider.call_count == 1          # no call at the limit
-        statuses = _statuses("sess-cap")
-        assert {statuses[i] for i in range(20)} == {"completed"}
+    def test_a_capped_recording_stops_being_transcribed_at_the_length_limit(
+            self, st):
+        # ... up to the length one recording may have transcribed.
+        _recording(st, "sess-cap-long", range(0, 20))
+        _batch(st, "sess-cap-long", range(0, 20))
+        head = NodeTranscriptChunk.query.filter_by(
+            session_id="sess-cap-long", chunk_index=0).one()
+        head.audio_seconds = limits.MAX_TRANSCRIBED_SECONDS
+        _db.session.commit()
+        _cap(st._user)
+        _recording(st, "sess-cap-long", range(20, 40))
+        _batch(st, "sess-cap-long", range(20, 40))
+
+        statuses = _statuses("sess-cap-long")
         assert {statuses[i] for i in range(20, 40)} == {"failed"}
-        kept = NodeTranscriptChunk.query.filter_by(
-            session_id="sess-cap", chunk_index=20).one()
-        assert limits.untranscribed_code(kept.error) == limits.SPEND_CAP
-        # Both batches' audio is stored.
-        assert sorted(p.name for p in folder.iterdir()
-                      if p.name.startswith("batch_")) == [
-            "batch_0000-0019.webm", "batch_0020-0039.webm"]
-        # The transcript so far stays in the draft.
-        draft = Draft.query.filter_by(session_id="sess-cap").one()
-        assert draft.get_content() == "spoken words"
+        assert st._provider.call_count == 1
 
-    def test_a_dictation_ends_with_its_transcript_and_a_note(self, st):
-        folder = self._two_batches_capped_between(st, "sess-dict")
-
-        st.finalize_draft_streaming(MagicMock(), "sess-dict", 40)
-
-        draft = Draft.query.filter_by(session_id="sess-dict").one()
-        assert draft.streaming_status == "completed"
-        content = draft.get_content()
-        assert "spoken words" in content
-        assert content.endswith(limits._NOTES[limits.SPEND_CAP][0])
-        assert "failed to transcribe" not in content
-        # A dictation's draft stays for the form (no warning: that would
-        # mark it saved); its audio is all there.
-        assert draft.streaming_warning is None
-        assert len([p for p in folder.iterdir()
-                    if p.name.startswith("batch_")]) == 2
-
-    def test_a_voice_turn_is_saved_with_its_transcript_and_says_why(self, st):
-        self._two_batches_capped_between(st, "sess-voice", label="Voice")
+    def test_a_voice_turn_past_the_length_limit_keeps_its_transcript(
+            self, st):
+        _recording(st, "sess-voice", range(0, 20), label="Voice")
+        _batch(st, "sess-voice", range(0, 20))
+        head = NodeTranscriptChunk.query.filter_by(
+            session_id="sess-voice", chunk_index=0).one()
+        head.audio_seconds = limits.MAX_TRANSCRIBED_SECONDS
+        _db.session.commit()
+        _cap(st._user)
+        folder = st._root / f"drafts/{st._user.id}/sess-voice"
+        _recording(st, "sess-voice", range(20, 40))
+        _batch(st, "sess-voice", range(20, 40))
 
         st.finalize_draft_streaming(
             MagicMock(), "sess-voice", 40, label="Voice",
@@ -832,34 +953,17 @@ class TestUsageLimitMidRecording:
         draft = Draft.query.filter_by(session_id="sess-voice").one()
         assert draft.streaming_status == "completed"
         assert draft.llm_node_id is None
-        # The limit's own warning, which the Voice screens say aloud.
+        # The reply is skipped for the cap, with its usual warning.
         assert draft.streaming_warning == st.VOICE_REPLY_SKIPPED_SPEND_CAP
         entry = Node.query.filter_by(node_type="user").filter(
             Node.streaming_transcription.is_(True)).one()
-        assert entry.get_content() == (
-            "spoken words\n\n" + limits._NOTES[limits.SPEND_CAP][0])
-        assert Node.query.filter_by(node_type="llm").count() == 0
+        assert entry.get_content() == "spoken words\n\n" + limits.NOTE_PART
         st._fake_llm.generate_llm_response.si.assert_not_called()
         # The audio went with the entry.
         moved = st._root / f"nodes/{st._user.id}/{entry.id}"
         assert len([p for p in moved.iterdir()
                     if p.name.startswith("batch_")]) == 2
-
-    def test_a_voice_turn_capped_from_the_start_is_kept_without_a_reply(
-            self, st):
-        _recording(st, "sess-all", range(0, 3), label="Voice")
-        _cap(st._user)
-        _batch(st, "sess-all", range(0, 3))
-
-        st.finalize_draft_streaming(
-            MagicMock(), "sess-all", 3, label="Voice",
-            user_id=st._user.id, parent_id=None, model="gpt-5")
-
-        draft = Draft.query.filter_by(session_id="sess-all").one()
-        assert draft.streaming_warning == st.VOICE_REPLY_SKIPPED_SPEND_CAP
-        entry = Node.query.one()
-        assert entry.get_content() == limits._NOTES[limits.SPEND_CAP][1]
-        assert st._provider.call_count == 0
+        assert not folder.exists()
 
     def test_control_an_uncapped_recording_is_transcribed_in_full(self, st):
         # Control (passes on main too).
@@ -903,7 +1007,7 @@ class TestLengthLimit:
         st.finalize_draft_streaming(MagicMock(), "sess-long", 41)
         content = Draft.query.filter_by(session_id="sess-long").one() \
             .get_content()
-        assert content.endswith(limits._NOTES[limits.TOO_LONG][0])
+        assert content.endswith(limits.NOTE_PART)
 
     def test_control_an_hour_long_recording_is_transcribed(self, st):
         # Control (passes on main too): twelve 5-minute batches.
