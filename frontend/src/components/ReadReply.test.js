@@ -29,6 +29,19 @@ test('nothing left out, nothing said about it; no window, no line', () => {
   expect(container.textContent).toBe('');
 });
 
+test('a read of a stale archive says how old its newest tweets are (#688)', () => {
+  const { container, rerender } = render(<ReadWindowLine window={{
+    window_start: '2026-11-02T12:00:00Z', window_end: '2026-11-03T12:00:00Z',
+    tweets: 900, accounts: 120, excluded: 0, export_stale: true,
+  }} />);
+  expect(container.textContent).toMatch(/ The newest tweets available are from 3 November; the archive's daily export has not updated since\.$/);
+  rerender(<ReadWindowLine window={{
+    window_start: '2026-11-02T12:00:00Z', window_end: '2026-11-03T12:00:00Z',
+    tweets: 900, accounts: 120, excluded: 0, export_stale: false,
+  }} />);
+  expect(container.textContent).not.toMatch(/newest tweets available/);
+});
+
 test('the tail marks the whole list read and reports back', async () => {
   api.post.mockResolvedValue({ data: { read_at: { 5: '2026-09-19T08:00:00Z', 6: '2026-09-19T08:00:00Z' } } });
   const onMarkedAll = jest.fn();

@@ -158,12 +158,15 @@ struct ReadWindow: Decodable, Hashable, Sendable {
     var tweets: Int?
     var accounts: Int?
     var excluded: Int?
+    /// The archive had nothing newer than `windowEnd` when the read was made (#688).
+    var exportStale: Bool?
 
     enum CodingKeys: String, CodingKey {
         case days, scope, tweets, accounts, excluded
         case exportId = "export_id"
         case windowStart = "window_start"
         case windowEnd = "window_end"
+        case exportStale = "export_stale"
     }
 
     init(from decoder: Decoder) throws {
@@ -176,6 +179,7 @@ struct ReadWindow: Decodable, Hashable, Sendable {
         tweets = c.flexibleInt(.tweets)
         accounts = c.flexibleInt(.accounts)
         excluded = c.flexibleInt(.excluded)
+        exportStale = c.tolerant(.exportStale)
     }
 }
 

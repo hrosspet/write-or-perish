@@ -321,6 +321,13 @@ class Config:
         os.environ.get("COMMUNITY_ARCHIVE_PARQUET_MIN_TWEETS") or "5000")
     COMMUNITY_ARCHIVE_SNAPSHOT_DIR = (
         os.environ.get("COMMUNITY_ARCHIVE_SNAPSHOT_DIR") or None)
+    # Personal key for the Community Archive API v1 (#688; created at
+    # community-archive.org, settings, API keys). Set: the pre-fill and
+    # archive lookups use API v1, and Glean reads the last day from it
+    # while the bulk export is stale. Unset: the Supabase REST API, which
+    # the archive retires on 2026-11-19. A secret: never logged.
+    COMMUNITY_ARCHIVE_API_KEY = (
+        os.environ.get("COMMUNITY_ARCHIVE_API_KEY") or "").strip() or None
 
     # Safety factor for prompt-too-long retries (0.99 = aim for 99% of the limit)
     RETRY_SAFETY_FACTOR = 0.99
