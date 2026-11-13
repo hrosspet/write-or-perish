@@ -2,7 +2,8 @@ import logging
 from urllib.parse import parse_qs, parse_qsl, urlparse
 
 from flask import g, request, session
-from flask_dance.consumer import OAuth1ConsumerBlueprint, oauth_before_login
+from flask_dance.consumer import (
+    OAuth1ConsumerBlueprint, oauth_before_login, oauth_error)
 from flask_dance.contrib.twitter import make_twitter_blueprint
 
 logger = logging.getLogger(__name__)
@@ -16,6 +17,20 @@ logger = logging.getLogger(__name__)
 # attacker's X login to the victim's account. The callback must now carry
 # the request token this session was sent to X with.
 X_REQUEST_TOKEN_SESSION_KEY = "x_oauth_request_token"
+
+# Set when flask-dance sends the browser back to /auth/login without a token
+# (#704): "cancelled" when X's Cancel came back (``denied=``), "failed" for
+# any other error (X refused a request token, the exchange failed). Without
+# it /auth/login could not tell the return from a new start, and opened X's
+# page again: Cancel led back to X, and an X outage redirected in a loop.
+X_RETURN_SESSION_KEY = "x_sign_in_returned"
+
+
+def _note_x_return(sender, message=None, response=None, **kwargs):
+    """oauth_error: flask-dance is about to redirect to /auth/login without
+    a token. The message is not logged here (flask-dance logs its own)."""
+    session[X_RETURN_SESSION_KEY] = (
+        "cancelled" if request.args.get("denied") else "failed")
 
 
 def _remember_request_token(sender, url, **kwargs):
@@ -97,6 +112,7 @@ def init_twitter_blueprint(app):
     # the subclass only replaces how `session` is stored.
     twitter_bp.__class__ = _RequestLocalSessionBlueprint
     oauth_before_login.connect(_remember_request_token, sender=twitter_bp)
+    oauth_error.connect(_note_x_return, sender=twitter_bp)
     twitter_bp.before_request(_refuse_foreign_callback)
     # Register this blueprint on the app
     app.register_blueprint(twitter_bp, url_prefix="/auth")
