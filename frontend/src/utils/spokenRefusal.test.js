@@ -3,9 +3,11 @@
 import {
   ACCESS_ENDED_SENTENCES, APPROVAL_REFUSAL, CLIP_START_TIMEOUT_MS,
   LENGTH_REFUSAL, REFUSAL_SENTENCES, SENTENCE_AFTER_SOUND_MS,
-  SPEND_CAP_REFUSAL, THREAD_LIMIT_SPOKEN, isAccessEndedRefusal,
-  refusalClipUrl, resetSpeechForTests, sayRefusal, soundThenSay, stopSpeaking,
+  SENTENCE_HOLD_MAX_MS, SPEND_CAP_REFUSAL, THREAD_LIMIT_SPOKEN,
+  isAccessEndedRefusal, refusalClipUrl, resetSpeechForTests, sayRefusal,
+  soundThenSay, stopSpeaking,
 } from './spokenRefusal';
+import { isRecordingActive } from './recordingActivity';
 
 // A clip element: play() as the browser answers it (*mode*).
 let clips;
@@ -182,4 +184,60 @@ test('no Audio element at all: the browser\'s speech', () => {
   sayRefusal(SPEND_CAP_REFUSAL, playSound);
   afterSound();
   expect(spoken).toEqual([REFUSAL_SENTENCES[SPEND_CAP_REFUSAL]]);
+});
+
+// Review of #682: while a sentence waits, loads or is said, the app does not
+// leave the Voice screen for the subscribe page (utils/recordingActivity),
+// which would cut the sentence off just after it starts.
+describe('a sentence holds the screen until it is said', () => {
+  let utterances;
+  beforeEach(() => {
+    utterances = [];
+    window.speechSynthesis = { cancel: jest.fn(), speak: (u) => utterances.push(u) };
+  });
+
+  test('its clip: until the clip has played', () => {
+    sayRefusal('subscription_required_ended', null);
+    expect(isRecordingActive()).toBe(true);
+    jest.advanceTimersByTime(0);
+    expect(clips).toHaveLength(1);
+    expect(isRecordingActive()).toBe(true);
+    clips[0].fire('ended');
+    expect(isRecordingActive()).toBe(false);
+  });
+
+  test('the browser\'s speech: until it has been said', () => {
+    mode = 'refused';
+    sayRefusal('subscription_required_none', playSound);
+    afterSound();
+    expect(utterances).toHaveLength(1);
+    expect(isRecordingActive()).toBe(true);
+    utterances[0].onend();
+    expect(isRecordingActive()).toBe(false);
+  });
+
+  test('a stopped sentence, or one that never reports its end', () => {
+    sayRefusal(SPEND_CAP_REFUSAL, null);
+    stopSpeaking();
+    expect(isRecordingActive()).toBe(false);
+
+    mode = 'refused';
+    sayRefusal(SPEND_CAP_REFUSAL, null);
+    jest.advanceTimersByTime(0);
+    expect(isRecordingActive()).toBe(true);
+    jest.advanceTimersByTime(SENTENCE_HOLD_MAX_MS);
+    expect(isRecordingActive()).toBe(false);
+  });
+
+  test('only the latest sentence ends the hold', () => {
+    mode = 'refused';
+    sayRefusal(SPEND_CAP_REFUSAL, null);
+    jest.advanceTimersByTime(0);
+    sayRefusal('subscription_required_ended', null);
+    jest.advanceTimersByTime(0);
+    utterances[0].onend();
+    expect(isRecordingActive()).toBe(true);
+    utterances[1].onend();
+    expect(isRecordingActive()).toBe(false);
+  });
 });

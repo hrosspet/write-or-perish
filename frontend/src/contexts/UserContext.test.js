@@ -60,15 +60,50 @@ describe('an account that stops being let in', () => {
     expect(mockGet).toHaveBeenCalledWith('/dashboard', { params: { profile: 0 } });
   });
 
-  test('not while a recording is in progress; the next refusal after it is', async () => {
+  test('not while a recording is in progress; once it has ended', async () => {
     await loaded();
     setRecordingActive(recording, true);
+    window.dispatchEvent(new CustomEvent('loore:no-subscription'));
     window.dispatchEvent(new CustomEvent('loore:no-subscription'));
     await new Promise((r) => setTimeout(r, 0));
     expect(mockGet).not.toHaveBeenCalled();
 
     setRecordingActive(recording, false);
-    window.dispatchEvent(new CustomEvent('loore:no-subscription'));
     await waitFor(() => expect(mockGet).toHaveBeenCalledTimes(1));
+  });
+
+  // Review of #682: in Voice, the turn's end asks for the thread's waiting
+  // changes; that request's 402 switched the app to the subscribe page and
+  // the unmount cut the sentence off just after it started. The sentence
+  // now holds the switch until it has been said.
+  test('not while Voice says why the turn got no reply; once it is said', async () => {
+    const { soundThenSay, resetSpeechForTests } = require('../utils/spokenRefusal');
+    const { ACCESS_ENDED_SENTENCES } = require('../utils/spokenRefusal');
+    const utterances = [];
+    const savedAudio = window.Audio;
+    window.Audio = undefined;
+    window.speechSynthesis = { cancel: jest.fn(), speak: (u) => utterances.push(u) };
+    window.SpeechSynthesisUtterance = function Utterance(text) { this.text = text; };
+    try {
+      await loaded();
+      // No clip for this account (402): the browser's speech says it.
+      soundThenSay(ACCESS_ENDED_SENTENCES.subscription_required_past_due, null);
+      await new Promise((r) => setTimeout(r, 0));
+      expect(utterances).toHaveLength(1);
+      const cancelsAtStart = window.speechSynthesis.cancel.mock.calls.length;
+      window.dispatchEvent(new CustomEvent('loore:no-subscription'));
+      await new Promise((r) => setTimeout(r, 0));
+      // Nothing re-read, so the screen stays and nothing cancels the speech.
+      expect(mockGet).not.toHaveBeenCalled();
+      expect(window.speechSynthesis.cancel).toHaveBeenCalledTimes(cancelsAtStart);
+
+      utterances[0].onend();
+      await waitFor(() => expect(mockGet).toHaveBeenCalledTimes(1));
+    } finally {
+      resetSpeechForTests();
+      window.Audio = savedAudio;
+      delete window.speechSynthesis;
+      delete window.SpeechSynthesisUtterance;
+    }
   });
 });

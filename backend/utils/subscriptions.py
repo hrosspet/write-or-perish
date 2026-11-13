@@ -202,18 +202,22 @@ def refuse_not_let_in(user):
 # init is refused in this state, so each session or upload these calls
 # name was started while the account was let in, or before payments were
 # on), no claim of a session from another device, no reply (the account
-# has no AI replies), nothing else to read. A streaming session must be
-# live to take more audio (utils/streaming_session: a chunk or the
-# transcription stream within the last 45 s), so a recording left behind
-# earlier is not continued; and none of it older than
-# RECORDING_IN_PROGRESS_MAX_AGE (Draft.created_at, the upload's
-# Node.created_at). The saved entry then waits in the account.
+# has no AI replies), nothing else to read. A session still recording takes
+# its chunks whatever the gap since the last one (a pause, the app killed
+# and opened again, a network gap: the audio recorded before and after it
+# is kept); and none of it older than RECORDING_IN_PROGRESS_MAX_AGE
+# (Draft.created_at, the upload's Node.created_at). The saved entry then
+# waits in the account; a dictation's text waits as a draft, which the
+# data download includes (routes/export_data.iter_drafts_part).
 
 # INTRODUCED HEURISTIC: how long after it started a recording or upload may
-# still be finished under this exception. Recordings run into a cliff at
-# about 60 minutes on the web (#127); three hours covers the longest one
-# with its finalize and transcription, and bounds what an account that is
-# not let in can still have transcribed (one recording's audio).
+# still be finished under this exception, and so what an account that is
+# not let in can still have transcribed (one recording's audio). Three
+# hours is far longer than recordings run in practice, but neither app
+# limits a recording's length (the web's ~60-minute cliff is the open bug
+# #127; the iPhone has none) and Draft.created_at counts pauses: a
+# recording still running three hours after it started loses what is
+# recorded after that (its chunks are refused; what came before is kept).
 RECORDING_IN_PROGRESS_MAX_AGE = timedelta(hours=3)
 
 _DRAFT_SESSION_CALL = re.compile(
@@ -235,7 +239,6 @@ def finishes_recording_in_progress(user, req, now=None):
     names (node_id), and a chunk is one of those its init announced."""
     from backend.extensions import db
     from backend.models import Draft, Node
-    from backend.utils.streaming_session import session_is_live
     now = now or datetime.utcnow()
     since = now - RECORDING_IN_PROGRESS_MAX_AGE
     path = req.path.rstrip("/")
@@ -254,8 +257,11 @@ def finishes_recording_in_progress(user, req, now=None):
                 or draft.created_at < since:
             return False
         status = draft.streaming_status
-        if action == "audio-chunk":
-            return session_is_live(draft, now)
+        if action in ("audio-chunk", "release"):
+            # Whatever the gap since its last sign of life: a long pause or
+            # a relaunch must not lose the rest (the route still refuses a
+            # device the session was taken over from).
+            return status == "recording"
         if action == "finalize":
             # A Voice turn joins the thread its session started in; a
             # dictation's finalize names none (its entry is saved later,
@@ -264,11 +270,6 @@ def finishes_recording_in_progress(user, req, now=None):
             return (status == "recording"
                     and (named in (None, "")
                          or _same_id(named, draft.parent_id)))
-        if action == "release":
-            return status == "recording"
-        if action == "stream" and status == "recording":
-            # Connecting stamps the session live: only for a live one.
-            return session_is_live(draft, now)
         return status in ("recording", "finalizing", "completed")
 
     if method == "POST" and path in _UPLOAD_CALLS:

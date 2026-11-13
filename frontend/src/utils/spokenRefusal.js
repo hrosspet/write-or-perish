@@ -17,6 +17,8 @@
 // to pay): the finalize's warning_code, the fallback request's 402
 // `code`, or a queued reply's llm-status `error_code`.
 
+import { setRecordingActive } from './recordingActivity';
+
 export const SPEND_CAP_REFUSAL = 'monthly_spend_limit_reached';
 export const AI_USAGE_REFUSAL = 'ai_usage_none';
 export const APPROVAL_REFUSAL = 'approval_pending';
@@ -67,19 +69,49 @@ export const refusalClipUrl = (code) => (
 export const CLIP_START_TIMEOUT_MS = 4000;
 
 // Says *text* with the browser's own speech (no server, no provider).
-// Returns whether it started.
-export function speakSentence(text) {
+// Returns whether it started; *onDone* runs when it has been said (or
+// failed), and at once when it could not start.
+export function speakSentence(text, onDone) {
+  const done = onDone || (() => {});
   try {
-    if (typeof window === 'undefined') return false;
+    if (typeof window === 'undefined') { done(); return false; }
     const synth = window.speechSynthesis;
     const Utterance = window.SpeechSynthesisUtterance;
-    if (!synth || typeof Utterance !== 'function') return false;
+    if (!synth || typeof Utterance !== 'function') { done(); return false; }
     synth.cancel();
-    synth.speak(new Utterance(text));
+    const utterance = new Utterance(text);
+    utterance.onend = done;
+    utterance.onerror = done;
+    synth.speak(utterance);
     return true;
   } catch (e) {
+    done();
     return false;
   }
+}
+
+// While a sentence is waiting, loading or being said it counts as a
+// recording in progress (utils/recordingActivity): the app does not leave
+// the Voice screen for the subscribe page meanwhile (#438), which would
+// stop the sentence a moment after it starts. It ends when the sentence
+// has been said, is stopped, or after SENTENCE_HOLD_MAX_MS at the latest.
+const SENTENCE_HOLD = {};
+// INTRODUCED CONSTANT: the longest the screen waits for a sentence. The
+// sentences take about 5 s; a browser that says nothing outside a gesture
+// may never report the end. Not measured.
+export const SENTENCE_HOLD_MAX_MS = 15000;
+let sentenceHoldTimer = null;
+
+function holdForSentence() {
+  clearTimeout(sentenceHoldTimer);
+  sentenceHoldTimer = setTimeout(releaseSentenceHold, SENTENCE_HOLD_MAX_MS);
+  setRecordingActive(SENTENCE_HOLD, true);
+}
+
+function releaseSentenceHold() {
+  clearTimeout(sentenceHoldTimer);
+  sentenceHoldTimer = null;
+  setRecordingActive(SENTENCE_HOLD, false);
 }
 
 // The sentence waits for the error sound (three tones, ~0.6 s) to end.
@@ -109,17 +141,19 @@ function dropClip() {
 // The sentence now: its clip when it is a refusal's, else (or when the clip
 // can't play, or doesn't start in time) the browser's speech.
 function sayNow(text, token) {
+  // This sentence has been said (only the latest one ends the hold).
+  const said = () => { if (token === sentenceToken) releaseSentenceHold(); };
   const code = refusalOf(text);
   const AudioElement = typeof window !== 'undefined' ? window.Audio : null;
   if (!code || typeof AudioElement !== 'function') {
-    speakSentence(text);
+    speakSentence(text, said);
     return;
   }
   let el;
   try {
     el = new AudioElement(refusalClipUrl(code));
   } catch (e) {
-    speakSentence(text);
+    speakSentence(text, said);
     return;
   }
   currentClip = el;
@@ -130,7 +164,7 @@ function sayNow(text, token) {
     settled = true;
     clearTimeout(timer);
     if (currentClip === el) dropClip();
-    if (token === sentenceToken) speakSentence(text);
+    if (token === sentenceToken) speakSentence(text, said);
   };
   const started = () => {
     settled = true;
@@ -141,6 +175,7 @@ function sayNow(text, token) {
   el.addEventListener('error', fallBack);
   el.addEventListener('ended', () => {
     if (currentClip === el) currentClip = null;
+    said();
   });
   let playing;
   try {
@@ -164,6 +199,7 @@ function sayNow(text, token) {
 // for the sentence, never for the sound.
 export function soundThenSay(text, playSound) {
   stopSpeaking();
+  holdForSentence();
   const token = sentenceToken;
   if (playSound) playSound();
   pendingSentence = setTimeout(() => {
@@ -188,6 +224,7 @@ export function stopSpeaking() {
     clearTimeout(pendingSentence);
     pendingSentence = null;
   }
+  releaseSentenceHold();
   dropClip();
   try {
     if (typeof window !== 'undefined' && window.speechSynthesis) {
@@ -221,4 +258,5 @@ export function resetSpeechForTests() {
   clipTimer = null;
   currentClip = null;
   sentenceToken += 1;
+  releaseSentenceHold();
 }

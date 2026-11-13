@@ -100,3 +100,26 @@ test('leaving the page ends the hold', async () => {
   unmount();
   expect(isRecordingActive()).toBe(false);
 });
+
+// Review of #682: a pause longer than the server's 45 s liveness window.
+// Nothing here depends on how long the pause was: Stop finalizes the whole
+// recording, and it stays a recording in progress until its transcript is
+// in. The server now takes the chunks after such a pause also from an
+// account that stopped being let in meanwhile (backend TestALongGap).
+test('a long pause, then Stop: finalized whole, held until its transcript is in', async () => {
+  mockPost.mockImplementation((url) => Promise.resolve(
+    url === '/drafts/streaming/init'
+      ? { data: { draft_id: 7, session_id: 's3' } } : { data: {} }));
+  const { result, unmount } = renderHook(() => useStreamingTranscription({ label: 'Voice' }));
+  await act(async () => { await result.current.startStreaming(); });
+  act(() => { result.current.pauseRecording(); });
+  await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+  expect(isRecordingActive()).toBe(true);
+  act(() => { result.current.resumeRecording(); });
+  await act(async () => { await result.current.stopStreaming(); });
+  const finalize = mockPost.mock.calls.find(([u]) => u.endsWith('/s3/finalize'));
+  expect(finalize).toBeTruthy();
+  expect(finalize[1].total_chunks).toBe(1);
+  expect(isRecordingActive()).toBe(true);
+  unmount();
+});

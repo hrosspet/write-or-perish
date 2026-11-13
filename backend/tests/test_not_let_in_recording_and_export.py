@@ -165,25 +165,40 @@ class TestARecordingInProgress:
             f"/api/drafts/streaming/{draft.session_id}/release"))
 
 
+class TestALongGap:
+    @pytest.mark.parametrize("gap", [timedelta(minutes=2), None])
+    def test_a_long_pause_or_a_relaunch_loses_nothing(self, app, gap):
+        # Nothing sent for longer than the 45 s liveness window: the iPhone
+        # sends no chunk and keeps no transcription stream while a Voice
+        # recording is paused (gap), and a killed app's relaunch releases
+        # the session before it sends the rest (None: the stamp cleared).
+        # The rest of the recording is still taken, and the turn finalized.
+        ben = _not_let_in()
+        draft = _session(app, ben, heartbeat=gap)
+        client = _client(app, ben)
+        _passed(_chunk(client, draft.session_id, index=5))
+        _passed(_chunk(client, draft.session_id, index=6))
+        assert _gate_lets(
+            app, ben, "GET",
+            f"/api/sse/drafts/{draft.session_id}/transcription-stream")
+        _passed(client.post(
+            f"/api/drafts/streaming/{draft.session_id}/finalize",
+            json={"total_chunks": 7, "label": "Voice"}))
+        assert NodeTranscriptChunk.query.filter_by(
+            session_id=draft.session_id).count() == 2
+
+
 class TestNothingElseOpens:
-    def test_a_recording_left_behind_takes_no_more_audio(self, app):
-        # Not live (no chunk or stream for longer than the window): it was
-        # not being recorded when the account stopped being let in. Its
-        # stored audio may still be finalized; nothing revives it.
+    def test_no_other_device_and_no_recovery_continues_it(self, app):
         ben = _not_let_in()
         draft = _session(app, ben, heartbeat=timedelta(minutes=2))
         client = _client(app, ben)
-        _refused(_chunk(client, draft.session_id))
-        assert not _gate_lets(
-            app, ben, "GET",
-            f"/api/sse/drafts/{draft.session_id}/transcription-stream")
         _refused(client.post(
             f"/api/drafts/streaming/{draft.session_id}/claim", json={}))
         _refused(client.post(
             f"/api/drafts/streaming/{draft.session_id}/transcribe-remaining"))
-        _passed(client.post(
-            f"/api/drafts/streaming/{draft.session_id}/finalize",
-            json={"total_chunks": 1, "label": "Voice"}))
+        _refused(client.delete(
+            f"/api/drafts/streaming/{draft.session_id}/discard"))
 
     def test_a_recording_older_than_the_limit(self, app):
         from backend.utils.subscriptions import RECORDING_IN_PROGRESS_MAX_AGE
@@ -504,3 +519,97 @@ class TestTheExport:
             assert "my words" in resp.get_data(as_text=True)
         finally:
             app.config["PAYMENTS_ENABLED"] = True
+
+
+# ── The download's "Drafts" part (decided 2026-11-13) ────────────────────
+# A dictation finished while the account is not let in stays a draft;
+# the download is the only way such a person reaches it. So the download
+# ends with every draft of the account that holds text, for every
+# account. Never in {user_export}, which goes to a model.
+
+def _draft(user, text, **kw):
+    d = Draft(user_id=user.id, privacy_level="private", ai_usage="none",
+              **kw)
+    d.set_content(text)
+    _db.session.add(d)
+    _db.session.commit()
+    return d
+
+
+class TestTheDraftsPart:
+    def test_the_dictation_and_typed_drafts_are_in_it(self, app,
+                                                      monkeypatch):
+        _forbid_model_calls(monkeypatch)
+        ben = _not_let_in()
+        entry = _entry(ben, "an entry")
+        _draft(ben, "the dictated words after the trial ended",
+               session_id=str(uuid.uuid4()), streaming_status="completed")
+        _draft(ben, "a reply I was typing", parent_id=entry.id)
+        _draft(ben, "a Voice turn whose reply never started",
+               session_id=str(uuid.uuid4()), label="Voice",
+               streaming_status="completed")
+        # Left out: an empty one, a recording already saved as an entry,
+        # and a change the AI proposed (not the user's writing).
+        _draft(ben, "   ")
+        _draft(ben, "saved already", session_id=str(uuid.uuid4()),
+               label="Voice", streaming_status="completed",
+               streaming_warning="Your recording is saved.")
+        _draft(ben, '{"a": "proposal"}', parent_id=entry.id,
+               label="tool_pending")
+        costs = APICostLog.query.count()
+
+        text = _client(app, ben).get("/api/export/threads").get_data(
+            as_text=True)
+
+        threads, drafts = text.split("# Drafts\n", 1)
+        assert "an entry" in threads
+        assert "## Draft 1\n" in drafts and "## Draft 3\n" in drafts
+        assert "## Draft 4" not in drafts
+        assert "the dictated words after the trial ended" in drafts
+        assert "Kind:** a dictation's transcript, for a new entry" in drafts
+        assert "a reply I was typing" in drafts
+        assert "Kind:** typed, for a reply in a thread" in drafts
+        assert "a Voice turn whose reply never started" in drafts
+        assert "saved already" not in text and "proposal" not in text
+        assert text.rstrip().endswith("*End of Export*")
+        assert APICostLog.query.count() == costs
+
+    def test_drafts_without_any_thread(self, app):
+        from backend.routes.export_data import NO_THREADS_TEXT
+        ben = _not_let_in()
+        _draft(ben, "only a dictation", session_id=str(uuid.uuid4()),
+               streaming_status="completed")
+        text = _client(app, ben).get("/api/export/threads").get_data(
+            as_text=True)
+        assert text.startswith(NO_THREADS_TEXT)
+        assert "# Drafts" in text and "only a dictation" in text
+
+    def test_without_drafts_the_download_is_as_before(self, app):
+        u = _user("plain", subscription_status="active",
+                  subscription_level="standard")
+        _entry(u)
+        text = _client(app, u).get("/api/export/threads").get_data(
+            as_text=True)
+        assert "# Drafts" not in text
+        assert text.rstrip().endswith("*End of Export*")
+
+    def test_another_accounts_drafts_are_not_in_it(self, app):
+        ben = _not_let_in()
+        _entry(ben)
+        anna = _user("anna", subscription_status="active",
+                     subscription_level="standard")
+        _draft(anna, "anna's draft")
+        text = _client(app, ben).get("/api/export/threads").get_data(
+            as_text=True)
+        assert "anna's draft" not in text and "# Drafts" not in text
+
+    def test_drafts_never_go_to_a_model(self, app):
+        # {user_export} (the archive a reply may quote) has no drafts.
+        from backend.routes.export_data import build_user_export_content
+        u = _user("plain", subscription_status="active",
+                  subscription_level="standard")
+        _entry(u)
+        _draft(u, "private draft text")
+        content = build_user_export_content(u, filter_ai_usage=False)
+        assert content and "private draft text" not in content
+        assert "# Drafts" not in content

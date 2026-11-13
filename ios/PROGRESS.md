@@ -1189,3 +1189,8 @@ transcribed by the server, which skips only the reply.
   More menu's export, now `DataExport.download`, then the share sheet.
 - Tests: `SubscriptionTests.testARecordingInProgressKeepsItsScreenUntilItIsDone`; the nothing-to-buy test
   covers the new label. Not tried on a device.
+- Review of #682: a Voice pause longer than 45 s sends nothing (no chunk, no transcription stream), so the
+  server's liveness check refused the chunks after it for an account no longer let in, and Stop then
+  finalized nothing. The server no longer asks for liveness there; `VoiceTurnTests.
+  testALongPauseThenStopFinalizesTheWholeRecording` pins that the app finalizes the whole recording after
+  a pause.
