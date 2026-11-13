@@ -12,6 +12,8 @@ struct NodeTarget: Identifiable, Equatable {
     var hasChildren: Bool
     var hasTTS: Bool
     var hasPromptArtifact: Bool
+    /// Fetched through the X API: the editor offers no Train (#689).
+    var trainRefused = false
 }
 
 /// State and behaviour of one thread screen (web `NodeDetail`, map D §1, §4.7–4.8, §5).
@@ -933,19 +935,20 @@ final class ThreadModel {
     func target(focal node: NodeDetail) -> NodeTarget {
         NodeTarget(id: node.id, content: node.content, privacy: node.privacyLevel, aiUsage: node.aiUsage,
                    childCount: node.childCount, hasChildren: node.childCount > 0 || !node.children.isEmpty,
-                   hasTTS: node.hasTTS, hasPromptArtifact: node.systemPrompt.contextArtifacts?.prompt != nil)
+                   hasTTS: node.hasTTS, hasPromptArtifact: node.systemPrompt.contextArtifacts?.prompt != nil,
+                   trainRefused: node.trainRefused)
     }
 
     func target(_ n: AncestorNode) -> NodeTarget {
         NodeTarget(id: n.id, content: n.content ?? "", privacy: n.privacyLevel, aiUsage: n.aiUsage,
                    childCount: n.childCount, hasChildren: n.childCount > 0, hasTTS: false,
-                   hasPromptArtifact: n.systemPrompt.contextArtifacts?.prompt != nil)
+                   hasPromptArtifact: n.systemPrompt.contextArtifacts?.prompt != nil, trainRefused: n.trainRefused)
     }
 
     func target(_ n: TreeNode) -> NodeTarget {
         NodeTarget(id: n.id, content: n.content ?? "", privacy: n.privacyLevel, aiUsage: n.aiUsage,
                    childCount: n.childCount, hasChildren: n.childCount > 0 || !n.children.isEmpty, hasTTS: n.hasTTS,
-                   hasPromptArtifact: n.systemPrompt.contextArtifacts?.prompt != nil)
+                   hasPromptArtifact: n.systemPrompt.contextArtifacts?.prompt != nil, trainRefused: n.trainRefused)
     }
 
     func beginEdit(_ target: NodeTarget) {

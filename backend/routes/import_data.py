@@ -3,7 +3,7 @@ from flask_login import login_required, current_user
 from backend.utils.error_privacy import describe_exception
 from backend.models import Node, User, UserProfile
 from backend.extensions import db
-from backend.utils.privacy import AI_ALLOWED
+from backend.utils.privacy import AI_ALLOWED, cap_ai_usage
 from backend.utils import docx_import, pdf_import
 from backend.utils.pdf_extract_worker import MAX_CHAPTERS as MAX_PDF_CHAPTERS
 from datetime import datetime, timedelta
@@ -148,6 +148,8 @@ def _add_imported_message_nodes(user_id, human_owner_id, parent_id,
     """
     if provenance not in PROVENANCES:
         raise ValueError(f"Unknown provenance {provenance!r}")
+    # Content fetched through the X API is never at Train (#689).
+    ai_usage = cap_ai_usage(ai_usage, provenance)
     from backend.utils.node_split import PART_STEP, split_text_at_cap
     segments = split_text_at_cap(node_content)
     # Parts are PART_STEP apart, also for a message without a usable
@@ -211,7 +213,8 @@ def _restore_node(node_id, content, privacy_level, ai_usage,
     re-upload after a CA pre-fill drops the public vouch, which errs on
     the private side; the reverse regains it). Required, as on
     create_twitter_nodes, so no importer can bring back a row nobody
-    can classify.
+    can classify. A copy fetched through the X API comes back at Chat at
+    most (#689); the user's own upload restores an X API copy as theirs.
     """
     if provenance not in PROVENANCES:
         raise ValueError(f"Unknown provenance {provenance!r}")
@@ -223,7 +226,7 @@ def _restore_node(node_id, content, privacy_level, ai_usage,
         token_count if token_count is not None
         else approximate_token_count(content)
     )
-    node.ai_usage = ai_usage
+    node.ai_usage = cap_ai_usage(ai_usage, provenance)
     node.provenance = provenance
     node.deleted_at = None
     return node
@@ -320,7 +323,7 @@ def _requested_ai_usage(data):
 
 
 def _apply_settings_to_skipped(node_ids, privacy_level, ai_usage, dek=None,
-                               changes=None):
+                               changes=None, kept_from_train=None):
     """Apply this import's privacy/ai_usage to already-imported nodes.
 
     Re-importing an archive is also how users change their mind about
@@ -330,29 +333,37 @@ def _apply_settings_to_skipped(node_ids, privacy_level, ai_usage, dek=None,
     as ``updated`` and keep it disjoint from ``skipped``. Provenance is
     NOT touched: how a node first arrived is a fact, not a setting.
 
+    An import at Train leaves the entries fetched through the X API at
+    Chat at most (#689), also one stored at Train before that rule; their
+    ids are appended to ``kept_from_train`` (a list) for the result.
+
     ``changes`` (a _ProfileChanges) records the nodes whose new AI usage
     moves them into or out of what the profile reads (#625).
     """
     from sqlalchemy import or_
+    from backend.utils.privacy import X_API_PROVENANCES
     ids = [i for i in node_ids if i is not None]
     updated = 0
+    differs = [Node.privacy_level != privacy_level, Node.ai_usage != ai_usage]
+    if ai_usage == "train":
+        differs.append(Node.provenance.in_(X_API_PROVENANCES))
     # Chunked so a huge archive doesn't produce an unbounded IN clause.
     # Goes through the ORM (not a bulk UPDATE) because a privacy change
     # moves content across the encryption boundary (#257) — only the
     # rows whose settings actually differ are loaded.
     for start in range(0, len(ids), 1000):
         chunk = ids[start:start + 1000]
-        for node in Node.query.filter(
-            Node.id.in_(chunk),
-            or_(
-                Node.privacy_level != privacy_level,
-                Node.ai_usage != ai_usage,
-            ),
-        ).all():
+        for node in Node.query.filter(Node.id.in_(chunk), or_(*differs)).all():
+            target = cap_ai_usage(ai_usage, node.provenance)
+            if target != ai_usage and kept_from_train is not None:
+                kept_from_train.append(node.id)
+            if (node.privacy_level == privacy_level
+                    and node.ai_usage == target):
+                continue
             if changes is not None:
                 changes.setting_changed(node)
             node.set_privacy_level(privacy_level, dek=dek)
-            node.ai_usage = ai_usage
+            node.ai_usage = target
             updated += 1
         db.session.flush()
     return updated
@@ -1541,6 +1552,11 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
     changes = _ProfileChanges(ai_usage)
     since_commit = 0
     done = 0
+    # Tweets fetched through the X API are created and restored at Chat at
+    # most (#689); kept_from_train collects every tweet of this import that
+    # asked for Train and stays off it, for the result.
+    new_ai_usage = cap_ai_usage(ai_usage, provenance)
+    kept_from_train = []
 
     for tweet_data in rows:
         done += 1
@@ -1574,6 +1590,8 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
                 changes.entry_added(restored.created_at, token_count)
                 deleted_keys.discard(source_key)
                 nodes_restored += 1
+                if new_ai_usage != ai_usage:
+                    kept_from_train.append(restored.id)
             else:
                 nodes_skipped += 1
                 if source_key not in deleted_keys:
@@ -1591,7 +1609,7 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
             node_type="user",
             token_count=token_count,
             privacy_level=privacy_level,
-            ai_usage=ai_usage,
+            ai_usage=new_ai_usage,
             source_key=source_key,
             origin="twitter",
             provenance=provenance,
@@ -1601,6 +1619,8 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
             node.created_at = tweet_created_at
         db.session.add(node)
         changes.entry_added(tweet_created_at, token_count)
+        if new_ai_usage != ai_usage:
+            kept_from_train.append(None)  # a new row: no id before flush
 
         if import_type == 'single_thread':
             db.session.flush()
@@ -1618,7 +1638,8 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
                 on_progress(done)
 
     nodes_updated = _apply_settings_to_skipped(
-        skipped_alive_ids, privacy_level, ai_usage, changes=changes
+        skipped_alive_ids, privacy_level, ai_usage, changes=changes,
+        kept_from_train=kept_from_train,
     )
     nodes_skipped -= nodes_updated
     db.session.commit()
@@ -1644,6 +1665,10 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
         "empty": nodes_empty,
         "restored": nodes_restored,
         "updated": nodes_updated,
+        # Tweets of this import fetched through the X API that stay at
+        # Chat although the import asked for Train (#689): the result
+        # screen says why.
+        "kept_from_train": len(kept_from_train),
     }
 
 

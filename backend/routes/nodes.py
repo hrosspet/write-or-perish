@@ -587,6 +587,18 @@ def _parent_user_id_of(node):
     return parent.user_id
 
 
+def _ai_usage_fields(node):
+    """A node's AI usage as the editor shows it: the value the training
+    licence reads (an entry fetched through the X API reads as Chat even
+    if Train was stored before #689), plus ``train_refused`` on those
+    entries, so the web and the iPhone don't offer Train for them."""
+    from backend.utils.privacy import effective_ai_usage, train_refused
+    fields = {"ai_usage": effective_ai_usage(node)}
+    if train_refused(node):
+        fields["train_refused"] = True
+    return fields
+
+
 def serialize_node_recursive(n, user_id=None, parent_user_id=None):
     """Recursively serialize a node and its accessible children.
 
@@ -684,7 +696,7 @@ def serialize_node_recursive(n, user_id=None, parent_user_id=None):
         # AND persist those defaults on save, silently rewriting the
         # node's real settings.
         "privacy_level": n.privacy_level,
-        "ai_usage": n.ai_usage,
+        **_ai_usage_fields(n),
     }
     data.update(_system_prompt_fields(n, user_id))
     return data
@@ -1019,6 +1031,20 @@ def update_node(node_id):
         ai_usage = data["ai_usage"]
         if not validate_ai_usage(ai_usage):
             return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
+        # An entry fetched through the X API is never at Train (#689). A
+        # form opened on an entry stored at Train before that rule sends
+        # the stored value back with a text edit: the edit is saved and
+        # the entry takes Chat, what the training licence reads anyway.
+        from backend.utils.privacy import (
+            TRAIN_REFUSED_CODE, TRAIN_REFUSED_MESSAGE, train_refused,
+        )
+        if ai_usage == "train" and train_refused(node):
+            if node.ai_usage != "train":
+                return jsonify({
+                    "error": TRAIN_REFUSED_MESSAGE,
+                    "code": TRAIN_REFUSED_CODE,
+                }), 400
+            ai_usage = "chat"
         # A read's nodes quote other people's public tweets, which Loore
         # has no licence to train on (see ca_feed.FEED_AI_USAGE).
         if ai_usage == "train":
@@ -1096,12 +1122,14 @@ def update_node(node_id):
     # it that the user may edit (own nodes, LLM nodes they are the human
     # owner of). Other users' replies are untouched.
     cascaded = []
+    kept_from_train = []
     if data.get("apply_to_descendants") and (privacy_changed or ai_usage_changed):
         from backend.utils.node_settings import apply_settings_to_descendants
         cascaded = apply_settings_to_descendants(
             node, current_user.id,
             privacy_level=node.privacy_level if privacy_changed else None,
             ai_usage=node.ai_usage if ai_usage_changed else None,
+            kept_from_train=kept_from_train,
         )
 
     # A public node quotes only public nodes (Peter, 2026-11-12): a node
@@ -1153,11 +1181,18 @@ def update_node(node_id):
     # (or refetches the focal node when it edited an ancestor/child), so
     # re-serializing the whole thread here was pure waste: one full
     # subtree walk and a KMS unwrap per descendant on every save.
-    return jsonify({
+    body = {
         "message": "Node updated",
         "node": _focal_own_fields(node, current_user.id),
         "descendants_updated": len(cascaded),
-    }), 200
+    }
+    if kept_from_train:
+        # Replies fetched through the X API stayed off Train (#689); the
+        # clients say so with this text.
+        from backend.utils.privacy import TRAIN_REFUSED_MESSAGE
+        body["kept_from_train"] = len(kept_from_train)
+        body["kept_from_train_message"] = TRAIN_REFUSED_MESSAGE
+    return jsonify(body), 200
 
 # Retrieve a node with its full content (the highlighted node) plus previews of its children.
 _ARTIFACT_MODELS = {
@@ -1227,7 +1262,7 @@ def _focal_own_fields(node, viewer_id):
         "parent_user_id": _parent_user_id_of(node),
         # Privacy settings
         "privacy_level": node.privacy_level,
-        "ai_usage": node.ai_usage,
+        **_ai_usage_fields(node),
         # Pin-to-profile
         "pinned_at": iso_utc(node.pinned_at),
         "llm_model": node.llm_model,
@@ -1534,7 +1569,7 @@ def get_node(node_id):
                 # checks ai_usage across [node, ...ancestors] before
                 # firing an LLM reply. Without it ancestors look like
                 # ai_usage=undefined and the guard silently fails.
-                "ai_usage": current.ai_usage,
+                **_ai_usage_fields(current),
                 # Same undefined trap for Edit-from-ancestor: NodeForm
                 # would fall back to the user's default privacy AND
                 # persist it on save.

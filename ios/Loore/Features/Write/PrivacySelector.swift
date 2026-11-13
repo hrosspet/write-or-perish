@@ -7,6 +7,19 @@ struct PrivacySelectorView: View {
     var disabled = false
     /// Replying under a public node: privacy is fixed and shown as text.
     var lockPrivacy = false
+    /// An entry Loore fetched through the X API (`train_refused`, #689): Train
+    /// is not offered, and the note under the select says why.
+    var trainRefused = false
+
+    /// The server's words when it refuses Train (backend `TRAIN_REFUSED_MESSAGE`,
+    /// web `utils/aiUsage.js`).
+    static let trainRefusedMessage =
+        "Posts fetched from X can't be used for training, under X's rules for developers."
+
+    /// The AI usage options offered: all three, or None and Chat for an X API entry.
+    static func offeredAIOptions(trainRefused: Bool) -> [(AIUsage, String)] {
+        trainRefused ? aiOptions.filter { $0.0 != .train } : aiOptions
+    }
 
     static let privacyOptions: [(PrivacyLevel, String)] = [
         (.private, "🔒 Private · Only I can see this"),
@@ -50,8 +63,12 @@ struct PrivacySelectorView: View {
             }
             VStack(alignment: .leading, spacing: 6) {
                 FieldLabel(text: "AI Usage")
-                SelectField(options: Self.aiOptions, selection: $aiUsage, disabled: disabled)
+                SelectField(options: Self.offeredAIOptions(trainRefused: trainRefused), selection: $aiUsage,
+                            disabled: disabled)
                 FieldDescription(text: Self.aiDescription(aiUsage))
+                if trainRefused {
+                    FieldDescription(text: Self.trainRefusedMessage)
+                }
             }
         }
         .padding(.vertical, 12)

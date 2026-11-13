@@ -2115,6 +2115,8 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
             initialContent: editTarget.content,
             initialPrivacyLevel: editTarget.privacy_level,
             initialAiUsage: editTarget.ai_usage,
+            // Fetched through the X API: no Train (#689).
+            trainRefused: !!editTarget.train_refused,
             detachPrompt: !!editTarget.context_artifacts?.prompt,
             hasGeneratedTts: !!editTarget.has_tts,
             // Drives the "apply to replies too?" choice on a privacy /

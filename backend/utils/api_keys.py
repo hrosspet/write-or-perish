@@ -4,7 +4,10 @@ API key utilities for Write or Perish.
 This module provides functions to select the appropriate API keys based on
 privacy/ai_usage settings. Separated from tasks to avoid circular imports.
 """
-from backend.utils.privacy import AIUsage
+from backend.utils.privacy import (
+    AIUsage, effective_ai_usage, node_train_licence_clause, train_refused,
+    train_refused_for,
+)
 
 
 def determine_api_key_type(node_chain: list, logger=None) -> str:
@@ -14,6 +17,10 @@ def determine_api_key_type(node_chain: list, logger=None) -> str:
     The most restrictive setting wins:
     - If ANY user node has ai_usage='chat', use 'chat' keys
     - If ALL user nodes have ai_usage='train', use 'train' keys
+
+    Each node is read by its effective ai_usage (privacy.effective_ai_usage):
+    an entry fetched through the X API counts as 'chat' whatever is stored
+    (#689).
 
     Args:
         node_chain: List of nodes in the conversation chain
@@ -32,7 +39,7 @@ def determine_api_key_type(node_chain: list, logger=None) -> str:
     # Check if any node has ai_usage='chat' (but not 'train')
     # If so, we must use chat keys
     for node in user_nodes:
-        ai_usage = getattr(node, 'ai_usage', AIUsage.NONE)
+        ai_usage = effective_ai_usage(node)
         if ai_usage == AIUsage.CHAT:
             return 'chat'
 
@@ -182,26 +189,36 @@ class PayloadLicence:
     def note_usage(self, ai_usage, what: str, row=None) -> None:
         """One row resolved into the payload, judged by its own setting:
         an artifact, the todo list, a search preview's node. *row* (the
-        model instance) is recorded when tracking."""
+        model instance) is recorded when tracking, and an entry fetched
+        through the X API counts as 'chat' whatever *ai_usage* says
+        (#689)."""
         if row is not None:
             self.track_row(row.__tablename__, (row.id,))
+            if train_refused(row):
+                ai_usage = AIUsage.CHAT.value
         if ai_usage != AIUsage.TRAIN.value:
             self.to_chat(f"{what} is {ai_usage!r}")
 
     def note_nodes(self, node_ids, what: str = "quoted node") -> None:
         """Nodes resolved into the payload by id — a ``{quote:ID}``, a
-        read_full — whoever wrote them. Each node's own ai_usage decides,
-        the same rule the chain's nodes are held to."""
+        read_full — whoever wrote them. Each node's own effective
+        ai_usage decides, the same rule the chain's nodes are held to
+        (an entry fetched through the X API is never licensed, #689)."""
         self.track_row("node", node_ids)
         if self._key_type == AIUsage.CHAT.value or not node_ids:
             return
+        from sqlalchemy import not_
         from backend.models import Node
-        row = Node.query.with_entities(Node.id, Node.ai_usage).filter(
+        row = Node.query.with_entities(
+            Node.id, Node.ai_usage, Node.provenance).filter(
             Node.id.in_(set(node_ids)),
-            Node.ai_usage != AIUsage.TRAIN.value,
+            not_(node_train_licence_clause(Node)),
         ).first()
         if row is not None:
-            self.to_chat(f"{what} {row[0]} is {row[1]!r}")
+            if train_refused_for(row[2]):
+                self.to_chat(f"{what} {row[0]} was fetched through the X API")
+            else:
+                self.to_chat(f"{what} {row[0]} is {row[1]!r}")
 
     def note_external(self, item_ids, what: str = "saved reference") -> None:
         """Saved references resolved into the payload — other people's
@@ -285,16 +302,22 @@ def rows_lost_licence(rows):
     )
     models = {m.__tablename__: m for m in (
         Node, UserArtifact, UserProfile, UserRecentContext, UserTodo)}
+    from sqlalchemy import not_
     for table, ids in (rows or {}).items():
         if not ids:
             continue
         model = models.get(table)
         if model is None:
             return f"unknown table {table!r} in the cached verdict"
+        # An entry fetched through the X API is never licensed, whatever
+        # is stored (#689): a render cached before the cap is rebuilt.
+        unlicensed = (not_(node_train_licence_clause(Node)) if model is Node
+                      else model.ai_usage != AIUsage.TRAIN.value)
         hit = model.query.with_entities(model.id, model.ai_usage).filter(
-            model.id.in_(list(ids)),
-            model.ai_usage != AIUsage.TRAIN.value,
+            model.id.in_(list(ids)), unlicensed,
         ).first()
         if hit is not None:
+            if hit[1] == AIUsage.TRAIN.value:
+                return f"{table} {hit[0]} was fetched through the X API"
             return f"{table} {hit[0]} is now {hit[1]!r}"
     return None

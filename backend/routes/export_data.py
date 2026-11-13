@@ -18,6 +18,7 @@ from backend.utils.quotes import (
     quotes_inside, hold_quotes, release_quotes, reference_title_lines,
 )
 from backend.utils.timefmt import iso_utc
+from backend.utils.privacy import effective_ai_usage
 from backend.utils.encryption import dek_cached, prefetch_deks
 from backend.utils.task_owner import failure_text, task_owned_by
 from backend.utils.thread_tree import ancestor_chains
@@ -347,12 +348,13 @@ def _note_entry(licence, node):
     """Report an entry whose text the export renders to *licence* (a
     PayloadLicence, #326): an export going to a model carries every
     rendered entry, the user's own and other people's replies alike, and
-    each is licensed for training by its own ai_usage. None = no report
-    (the user's own data download). A licensed entry is only recorded, in
-    case the licence tracks rows for a cached render."""
+    each is licensed for training by its own ai_usage (as the licence
+    reads it: an entry fetched through the X API never is, #689). None =
+    no report (the user's own data download). A licensed entry is only
+    recorded, in case the licence tracks rows for a cached render."""
     if licence is None:
         return
-    if node.ai_usage == AIUsage.TRAIN.value:
+    if effective_ai_usage(node) == AIUsage.TRAIN.value:
         licence.track_row(node.__tablename__, (node.id,))
     else:
         licence.note_usage(node.ai_usage, f"archive entry {node.id}",

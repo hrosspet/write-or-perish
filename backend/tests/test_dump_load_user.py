@@ -297,3 +297,24 @@ def test_a_bundles_intentions_never_replace_the_accounts_own(app, tmp_path):
     load_user._run(str(out), "edited", merge=True, create_approved=False)
     assert intentions("edited") == ["my own"]
     assert UserArtifact.latest_for(edited.id, "memory").get_content() == "facts"
+
+
+def test_an_x_api_tweet_keeps_its_provenance_and_never_loads_at_train(app, tmp_path):
+    """A tweet fetched through the X API keeps provenance 'prefill_x'
+    through a dump and load and comes in at Chat even if it was stored
+    at Train (#689). Other provenances are not copied (#662 leaves that
+    to the lab hand-off), and their Train stays."""
+    alice, root, child, cont, _, _ = _seed_source()
+    root.provenance, root.ai_usage = "prefill_x", "train"
+    cont.provenance, cont.ai_usage = "archive_upload", "train"
+    db.session.commit()
+    out = tmp_path / "alice.jsonl"
+    dump_user._run("alice", str(out))
+
+    load_user._run(str(out), "bob", merge=False, create_approved=False)
+
+    bob = User.query.filter_by(username="bob").one()
+    loaded = {n.source_key: (n.provenance, n.ai_usage) for n in
+              Node.query.filter_by(human_owner_id=bob.id)}
+    assert loaded["twitter:1"] == ("prefill_x", "chat")
+    assert loaded["twitter:2"] == (None, "train")

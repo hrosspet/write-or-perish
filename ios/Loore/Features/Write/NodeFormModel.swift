@@ -12,6 +12,8 @@ struct NodeFormConfig {
         var detachPrompt = false
         var hasGeneratedTTS = false
         var hasChildren = false
+        /// Fetched through the X API: the AI usage select offers no Train (#689).
+        var trainRefused = false
     }
 
     var parentId: Int?

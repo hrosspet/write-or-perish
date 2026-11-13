@@ -1493,7 +1493,9 @@ def _retrieval_injection_text(tr, user_id, with_labels=False, licence=None):
         # meta); re-check ai_usage, soft-delete and the user's access at
         # injection time. These are PREVIEWS for triage — to read one in
         # full, the model quotes it (resolved by the loop's quote step).
-        from backend.utils.privacy import can_user_access_node
+        from backend.utils.privacy import (
+            can_user_access_node, effective_ai_usage,
+        )
         matches = tr.get("matches") or []
         lines = []
         for m in matches:
@@ -1514,7 +1516,8 @@ def _retrieval_injection_text(tr, user_id, with_labels=False, licence=None):
             tag = (f"[{m['label']}] " if with_labels and m.get("label")
                    else "")
             if licence is not None:
-                licence.note_usage(node.ai_usage, f"entry {node.id} preview")
+                licence.note_usage(effective_ai_usage(node),
+                                   f"entry {node.id} preview")
             lines.append(
                 f"- {tag}entry {node.id} · {stamp}{pct}: {snippet}")
         # Saved external references (imported tweets/bookmarks), with their

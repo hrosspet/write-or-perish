@@ -1,4 +1,5 @@
 import React from 'react';
+import { TRAIN_REFUSED_MESSAGE } from '../utils/aiUsage';
 
 /**
  * PrivacySelector component for selecting privacy level and AI usage permissions.
@@ -12,6 +13,9 @@ const PrivacySelector = ({
   // Replies in public threads inherit the thread's privacy (#228) —
   // render a quiet static note instead of the dropdown.
   lockPrivacy = false,
+  // An entry Loore fetched through the X API (node.train_refused, #689):
+  // Train is not offered, and the note says why.
+  trainRefused = false,
 }) => {
   const labelStyle = {
     display: 'block',
@@ -98,13 +102,18 @@ const PrivacySelector = ({
         >
           <option value="none">🚫 None · No AI access</option>
           <option value="chat">💬 Chat · AI can use for responses</option>
-          <option value="train">🧠 Train · AI can use for training</option>
+          {!trainRefused && (
+            <option value="train">🧠 Train · AI can use for training</option>
+          )}
         </select>
         <div style={descStyle}>
           {aiUsage === 'none' && 'AI will not access this note.'}
           {aiUsage === 'chat' && 'AI can read this note to generate responses, but won\'t use it for training.'}
           {aiUsage === 'train' && 'AI can use this note for training data to improve the model.'}
         </div>
+        {trainRefused && (
+          <div style={descStyle}>{TRAIN_REFUSED_MESSAGE}</div>
+        )}
       </div>
     </div>
   );

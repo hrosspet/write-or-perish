@@ -38,3 +38,16 @@ export function aiUsageRefusalScope(err) {
     && err.response.data.scope;
   return scope === 'thread' ? 'thread' : 'account';
 }
+
+// An entry Loore fetched through the X API is never at Train (#689): the
+// node JSON carries `train_refused`, the editor offers no Train, and the
+// server refuses it with this text (backend/utils/privacy.py
+// TRAIN_REFUSED_MESSAGE; the iPhone app has the same words).
+export const TRAIN_REFUSED_MESSAGE =
+  "Posts fetched from X can't be used for training, under X's rules for developers.";
+
+/** The import result's line for the X posts it kept at Chat (#689). */
+export function keptFromTrainNote(count) {
+  if (!count) return null;
+  return `${count.toLocaleString()} ${count === 1 ? 'post' : 'posts'} that Loore fetched from X ${count === 1 ? 'stays' : 'stay'} at Chat. ${TRAIN_REFUSED_MESSAGE}`;
+}

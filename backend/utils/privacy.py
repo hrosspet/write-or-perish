@@ -379,8 +379,59 @@ def can_ai_use_node_for_training(node) -> bool:
     Returns:
         True if AI can use for training, False otherwise
     """
-    ai_usage = getattr(node, 'ai_usage', AIUsage.NONE)
-    return ai_usage == AIUsage.TRAIN
+    return effective_ai_usage(node) == AIUsage.TRAIN.value
+
+
+# Node.provenance of the entries Loore fetched through the X API
+# (routes/import_data.PROVENANCE_PREFILL_X). X's Developer Agreement
+# forbids using the X API or X Content to train a foundation or frontier
+# model, so these entries are never at Train (#689): they are created at
+# Chat at most, no route raises them to Train, and the training licence
+# reads them as Chat whatever is stored. The Community Archive and the
+# user's own archive upload are not the X API: their entries may be Train.
+X_API_PROVENANCES = ("prefill_x",)
+TRAIN_REFUSED_MESSAGE = (
+    "Posts fetched from X can't be used for training, under X's rules "
+    "for developers.")
+TRAIN_REFUSED_CODE = "x_api_no_train"
+
+
+def train_refused_for(provenance) -> bool:
+    """Whether an entry with this Node.provenance may never be at Train."""
+    return provenance in X_API_PROVENANCES
+
+
+def train_refused(node) -> bool:
+    """Whether *node* may never be at Train (fetched through the X API).
+    Rows without a provenance (profiles, artifacts) never are."""
+    return train_refused_for(getattr(node, 'provenance', None))
+
+
+def cap_ai_usage(ai_usage, provenance):
+    """*ai_usage* as an entry with *provenance* may hold it: Train becomes
+    Chat for content fetched through the X API; None and Chat stay."""
+    if ai_usage == AIUsage.TRAIN.value and train_refused_for(provenance):
+        return AIUsage.CHAT.value
+    return ai_usage
+
+
+def effective_ai_usage(row):
+    """The AI usage the training licence and the screens read for *row*:
+    its stored ai_usage, capped for content fetched through the X API
+    (#689), so an entry stored at Train before the cap existed never
+    reaches the training key. Rows without a provenance column read as
+    stored."""
+    return cap_ai_usage(getattr(row, 'ai_usage', AIUsage.NONE.value),
+                        getattr(row, 'provenance', None))
+
+
+def node_train_licence_clause(node_model):
+    """SQL for "this node is licensed for training": at Train and not
+    fetched through the X API. The query form of effective_ai_usage."""
+    return and_(
+        node_model.ai_usage == AIUsage.TRAIN.value,
+        func.coalesce(node_model.provenance, "").notin_(X_API_PROVENANCES),
+    )
 
 
 def speech_allowed(entity) -> bool:
