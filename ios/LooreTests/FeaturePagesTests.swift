@@ -83,6 +83,19 @@ final class AccountModelTests: StubbedAppTestCase {
         XCTAssertEqual(model.emailMessage?.text, "New link sent. The earlier one no longer works.")
     }
 
+    /// Control: a request over the account's or the client's limit is a 429
+    /// with a calm message (backend/utils/send_limits.py), shown as any error is.
+    func testARequestOverTheLimitShowsTheServersCalmMessage() async throws {
+        try signIn(["email": "a@example.com"])
+        let wait = "If you asked a moment ago, the email is on its way. Please check your inbox, or try again in a few minutes."
+        let body = #"{"error":"\#(wait)"}"#
+        StubURLProtocol.install { _ in .json(429, body) }
+        let model = AccountModel(app: app)
+        await model.sendEmailLink("b@example.com")
+        XCTAssertEqual(model.emailMessage?.text, wait)
+        XCTAssertNil(app.user?.pendingEmail)
+    }
+
     func testRemoveEmailOnlyWithXLogin() async throws {
         try signIn(["email": "a@example.com"])
         XCTAssertFalse(AccountModel(app: app).showsRemoveEmail)

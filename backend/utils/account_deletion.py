@@ -292,6 +292,8 @@ def _hide(user, now):
     user.deleted_at = user.deleted_at or now
     user.magic_link_token_hash = None
     user.magic_link_expires_at = None
+    from backend.utils.sign_in_links import withdraw_links
+    withdraw_links(user.email)
     user.pending_email = None
     user.email_change_token_hash = None
     user.email_change_expires_at = None
