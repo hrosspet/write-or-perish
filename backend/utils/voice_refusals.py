@@ -19,11 +19,21 @@ The refusals, by the code the clients get (the HTTP answer's ``code`` or
 - AI usage None for the account or the thread (403 ``ai_usage_none``),
 - a change the AI proposed waiting for the user's approval (409
   ``approval_pending``),
-- a thread too long for another reply (409 ``thread_too_long``, #648).
+- a thread too long for another reply (409 ``thread_too_long``, #648),
+- payments on and the account's access ended while the turn was recorded
+  (#438; Peter, 2026-11-13): the recording is kept and transcribed, only
+  the reply is skipped. One code per reason (``subscription_required_``
+  + subscriptions.PAUSED_REASONS), whose sentence is the text the entry
+  and the screen show (subscriptions.paused_message, "recording"): it
+  names the state, as that text does, never where or how to pay. A Voice
+  turn refused at its start for the subscription (402
+  ``subscription_required``, nothing recorded) has no code and says
+  nothing, as before.
 
 Plain words: no numbers, no prices, nothing about buying. The web and the
 iPhone app keep the same sentences for their fallback.
 """
+from backend.utils.subscriptions import PAUSED_REASONS, paused_message
 
 SPEND_CAP_CODE = "monthly_spend_limit_reached"   # utils/spend
 AI_USAGE_NONE_CODE = "ai_usage_none"              # utils/llm_nodes
@@ -42,6 +52,23 @@ SPOKEN_REFUSALS = {
                            "Start a new thread to keep talking."),
 }
 
+# A recording kept without its reply because the account's access ended
+# meanwhile (#438), by subscriptions.PAUSED_REASONS. The sentence is the
+# entry's own text, so it is said in the words the screen shows.
+SUBSCRIPTION_CODE_PREFIX = "subscription_required_"
+SUBSCRIPTION_CODES = {reason: SUBSCRIPTION_CODE_PREFIX + reason
+                      for reason in PAUSED_REASONS}
+SUBSCRIPTION_SENTENCES = {code: paused_message(reason, "recording")
+                          for reason, code in SUBSCRIPTION_CODES.items()}
+SPOKEN_REFUSALS.update(SUBSCRIPTION_SENTENCES)
+
+
+def recording_kept_code(reason):
+    """The code of a recording kept without its reply for *reason*
+    (subscriptions.PAUSED_REASONS; SubscriptionRequired.reason)."""
+    return SUBSCRIPTION_CODES.get(reason, SUBSCRIPTION_CODES["none"])
+
+
 # The warnings the finalize task leaves on a Voice recording whose reply it
 # skipped (tasks/streaming_transcription VOICE_REPLY_SKIPPED_*; copied here
 # so the routes need not import the task module, and
@@ -58,6 +85,9 @@ _SKIPPED_REPLY_CODES = {
      "data waits for your approval. Approve or reject it, then continue."):
         APPROVAL_PENDING_CODE,
 }
+# The access-ended texts are the sentences themselves.
+_SKIPPED_REPLY_CODES.update(
+    {text: code for code, text in SUBSCRIPTION_SENTENCES.items()})
 
 
 def skipped_reply_code(warning):

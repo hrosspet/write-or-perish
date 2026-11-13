@@ -24,7 +24,8 @@ from backend.extensions import db as _db
 from backend.models import Draft
 from backend.utils.voice_refusals import (
     AI_USAGE_NONE_CODE, APPROVAL_PENDING_CODE, SPEND_CAP_CODE,
-    SPOKEN_REFUSALS, THREAD_TOO_LONG_CODE, skipped_reply_code,
+    SPOKEN_REFUSALS, SUBSCRIPTION_CODES, SUBSCRIPTION_SENTENCES,
+    THREAD_TOO_LONG_CODE, skipped_reply_code,
 )
 
 CODES = [SPEND_CAP_CODE, AI_USAGE_NONE_CODE, APPROVAL_PENDING_CODE,
@@ -39,12 +40,17 @@ def _refusal(client, code):
 
 def test_one_sentence_per_refusal_in_plain_words():
     """No numbers, no prices, nothing about buying (the iPhone app may not
-    point to purchasing)."""
-    assert sorted(SPOKEN_REFUSALS) == sorted(CODES)
-    for text in SPOKEN_REFUSALS.values():
+    point to purchasing). A recording kept after the account's access
+    ended (#438) names the state in the words the screen shows
+    (subscriptions.paused_message), never where or how to pay."""
+    assert sorted(SPOKEN_REFUSALS) == sorted(
+        CODES + list(SUBSCRIPTION_CODES.values()))
+    for code, text in SPOKEN_REFUSALS.items():
         assert not re.search(r"[0-9$€£%]", text), text
-        assert not re.search(r"\b(buy|pay|price|subscri|upgrade|plan)",
+        assert not re.search(r"\b(buy|price|upgrade|plan|subscribe)",
                              text, re.I), text
+        if code not in SUBSCRIPTION_SENTENCES:
+            assert not re.search(r"\b(pay|subscri)", text, re.I), text
 
 
 def test_the_codes_are_the_ones_the_routes_answer_with():
@@ -240,3 +246,34 @@ def test_a_capped_account_gets_the_usage_limit_sentence(app, thread, clips):
     ben.spend_blocked_month = current_month()
     _db.session.commit()
     assert _refusal(_client(app, ben), SPEND_CAP_CODE).status_code == 200
+
+
+# ── A recording kept after the access ended (#438) ───────────────────────
+
+def test_a_lapsed_account_gets_the_sentences_of_a_kept_recording(
+        app, thread, clips):
+    """The account that loses its access while it records has neither
+    Voice mode nor the paid set by then; it still gets its sentence (fixed
+    text, made once per voice for every account). Its other refusals
+    keep the Voice mode check."""
+    ben = thread[0]
+    app.config["PAYMENTS_ENABLED"] = True
+    ben.plan = "free"
+    ben.subscription_level = "standard"
+    ben.subscription_status = "ended"
+    ben.subscription_ever_paid = True
+    _db.session.commit()
+    client = _client(app, ben)
+    for code in SUBSCRIPTION_CODES.values():
+        resp = _refusal(client, code)
+        assert resp.status_code == 200, resp.get_data(as_text=True)
+        assert resp.data == b"ID3" + SPOKEN_REFUSALS[code].encode()
+    assert clips["calls"] == list(SUBSCRIPTION_SENTENCES.values())
+    # Made once: a second account plays the stored clip.
+    anna = thread[1]
+    assert _refusal(_client(app, anna),
+                    SUBSCRIPTION_CODES["ended"]).status_code == 200
+    assert len(clips["calls"]) == len(SUBSCRIPTION_CODES)
+    client = _client(app, ben)
+    for code in CODES:
+        assert _refusal(client, code).status_code == 403

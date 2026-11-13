@@ -44,6 +44,9 @@ EXPECTED_OPEN = {
     ("POST", "/api/account/restore"),
     ("POST", "/api/account/restore/decline"),
     ("GET", "/api/account/restore"),
+    # Its own data as a file (Peter, 2026-11-13: "yes, Ben should be able
+    # to export"): test_not_let_in_recording_and_export.
+    ("GET", "/api/export/threads"),
 }
 OPEN_PREFIXES = ("/api/billing", "/api/terms", "/api/webhooks",
                  "/api/health", "/api/ready", "/api/live")

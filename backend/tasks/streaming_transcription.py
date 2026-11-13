@@ -1708,7 +1708,10 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     # (an app whose picker does not filter on "chat"); the recording is
     # kept and the reply is not moved to another model.
     # SubscriptionRequired the same way (#438): payments are on and the
-    # account has no AI replies; the recording is kept. Raised before
+    # account's access ended while this recording was made (streaming
+    # init refuses an account without it); the recording is kept with its
+    # transcript, and its text names the reason, which the Voice screen
+    # says aloud (voice_refusals.SUBSCRIPTION_CODES). Raised before
     # ThreadTooLong (create_llm_placeholder checks the plan first).
     # ThreadTooLong the same way (#648): the thread grew past the limit
     # with this recording; it is kept, and the Voice screen says aloud why
@@ -1731,7 +1734,7 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
         if isinstance(e, SpendCapExceeded):
             message = VOICE_REPLY_SKIPPED_SPEND_CAP
         elif isinstance(e, SubscriptionRequired):
-            message = e.message
+            message = e.recording_message
         elif isinstance(e, AIUsageRefused):
             message = VOICE_REPLY_SKIPPED_AI_USAGE
         elif isinstance(e, ReadOnlyModelRefused):
