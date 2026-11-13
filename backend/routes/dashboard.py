@@ -152,7 +152,31 @@ def _serialize_current_user():
         # "Delete my account" (#269): the numbers the Account page
         # states, and why the account cannot be deleted, if it can't.
         "account_deletion": account_deletion_info(current_user),
+        # A pre-fill bundle load into this account (#698): "preparing"
+        # while it runs, so the screens say "Preparing your starting
+        # point…" until it is ready. Null when bundles are off or there
+        # is none.
+        "starting_point": _starting_point(current_user.id),
     }
+
+
+def _starting_point(user_id):
+    from backend.utils.prefill_bundles import bundles_enabled
+    if not bundles_enabled():
+        return None
+    from backend.utils.prefill_bundle_load import starting_point
+    return starting_point(user_id)
+
+
+@dashboard_bp.route("/starting-point", methods=["GET"])
+@login_required
+def get_starting_point():
+    """The state of the pre-fill bundle load into the signed-in account
+    (#698), polled by "Preparing your starting point…": {"starting_point":
+    null | {"status": "preparing" | "ready" | "failed", "done", "total"},
+    "approved"}. Counts only."""
+    return jsonify({"starting_point": _starting_point(current_user.id),
+                    "approved": bool(current_user.approved)}), 200
 
 
 # The signed-in user's own dashboard: who they are, and their newest profile
@@ -530,12 +554,14 @@ def update_user():
             return jsonify({"error": f"Invalid AI usage value: {val}"}), 400
         current_user.default_ai_usage = val
 
+    said_yes = False
     if "prefill_consent" in data:
         val = data["prefill_consent"]
         if val not in ("yes", "no"):
             return jsonify({"error": f"Invalid prefill_consent value: {val}"}), 400
         current_user.prefill_consent = val
         current_user.prefill_consent_at = datetime.now(timezone.utc)
+        said_yes = val == "yes"
 
     if renamed_from:
         # #253: the old handle keeps resolving (a redirect to the new one)
@@ -557,6 +583,12 @@ def update_user():
         if sharing_flipped or renamed_from:
             from backend.utils.public_cache import invalidate_for_user
             invalidate_for_user(current_user, former_handle=renamed_from)
+        if said_yes:
+            # A Yes loads the person's prepared material when the lab
+            # made some for their X id (#698); otherwise nothing changes.
+            # Never fails the request: the answer is saved either way.
+            from backend.utils.prefill_bundle_load import maybe_start_self_load
+            maybe_start_self_load(current_user)
         # Include voice mode feature flag and user plan in the response
         return jsonify({
             "message": "Profile updated successfully.",

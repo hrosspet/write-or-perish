@@ -194,6 +194,84 @@ final class AccountModelTests: StubbedAppTestCase {
     }
 }
 
+/// StartingPointProgress.test.js (#698): after a Yes the app follows the load of
+/// the material Loore prepared for the person's X account, and when it is ready
+/// reloads who the person is (now let in) and opens their profile.
+@MainActor
+final class StartingPointTests: StubbedAppTestCase {
+    private func signIn(_ fields: [String: Any]) throws {
+        var user: [String: Any] = ["id": 5, "username": "seowriter", "approved": false,
+                                   "terms_up_to_date": true, "twitter_login": true]
+        user.merge(fields) { _, new in new }
+        app.useForTesting(api: app.api, user: try decode(CurrentUser.self, json(user)))
+    }
+
+    func testTheUserCarriesTheStartingPoint() throws {
+        try signIn(["starting_point": ["status": "preparing", "done": 3, "total": 7]])
+        XCTAssertEqual(app.user?.startingPoint, StartingPoint(status: "preparing", done: 3, total: 7))
+        XCTAssertTrue(app.user?.startingPoint?.isUnderWay == true)
+        try signIn(["starting_point": NSNull()])
+        XCTAssertNil(app.user?.startingPoint)
+        try signIn(["starting_point": ["status": "ready"]])
+        XCTAssertFalse(app.user?.startingPoint?.isUnderWay == true)
+    }
+
+    func testWhenReadyThePersonIsLetInAndTheProfileOpens() async throws {
+        try signIn(["starting_point": ["status": "preparing"]])
+        StubURLProtocol.install { request in
+            switch request.url?.path ?? "" {
+            case "/api/dashboard/starting-point":
+                return .json(200, #"{"starting_point":{"status":"ready","done":7,"total":7},"approved":true}"#)
+            default:
+                return .json(200, #"{"user":{"id":5,"username":"seowriter","approved":true,"terms_up_to_date":true,"twitter_login":true}}"#)
+            }
+        }
+        app.router.selectedTab = .reflect
+        app.router.workspace = .todo
+        let model = StartingPointModel(app: app, initial: "preparing")
+        let more = await model.checkOnce()
+        XCTAssertFalse(more)
+        XCTAssertEqual(model.status, "ready")
+        XCTAssertTrue(app.isApproved, "who-am-I reloaded: the app leaves the waitlist")
+        XCTAssertTrue(calls.contains("GET /api/dashboard/"))
+        XCTAssertEqual(app.router.selectedTab, .artifacts)
+        XCTAssertEqual(app.router.workspace, .profile, "their profile opens")
+    }
+
+    func testWhileLoadingItKeepsAskingAndANothingStops() async throws {
+        try signIn(["starting_point": ["status": "checking"]])
+        StubURLProtocol.install { _ in .json(200, #"{"starting_point":{"status":"preparing"},"approved":false}"#) }
+        let model = StartingPointModel(app: app, initial: "checking")
+        var more = await model.checkOnce()
+        XCTAssertTrue(more)
+        XCTAssertEqual(model.status, "preparing")
+        StubURLProtocol.install { _ in .json(200, #"{"starting_point":null,"approved":false}"#) }
+        more = await model.checkOnce()
+        XCTAssertFalse(more, "no material: nothing more to wait for")
+        XCTAssertEqual(model.status, "none")
+        StubURLProtocol.install { _ in .json(500, #"{"error":"down"}"#) }
+        let retried = StartingPointModel(app: app, initial: "preparing")
+        let again = await retried.checkOnce()
+        XCTAssertTrue(again, "a missed check is retried")
+        XCTAssertEqual(retried.status, "preparing")
+        StubURLProtocol.install { _ in .json(200, #"{"starting_point":{"status":"failed"},"approved":false}"#) }
+        let failed = StartingPointModel(app: app, initial: "preparing")
+        let more2 = await failed.checkOnce()
+        XCTAssertFalse(more2)
+        XCTAssertEqual(StartingPointModel.title(failed.status), "Your starting point isn't ready yet.")
+        XCTAssertFalse(app.isApproved)
+    }
+
+    func testTheTextIsTheWebsText() {
+        XCTAssertEqual(StartingPointModel.title("preparing"), "Preparing your starting point…")
+        XCTAssertEqual(StartingPointModel.text("preparing"),
+                       "Your public tweets and the profile drafted from them are on their way into your Loore. "
+                       + "This can take a few minutes; your profile opens here when it's ready.")
+        XCTAssertEqual(StartingPointModel.text("failed"),
+                       "Something went wrong while bringing it in. We've been alerted and will set it up for you.")
+    }
+}
+
 /// ConfirmEmailPage.test.js (the app is always signed in here).
 @MainActor
 final class ConfirmEmailModelTests: StubbedAppTestCase {

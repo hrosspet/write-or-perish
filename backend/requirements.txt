@@ -22,6 +22,9 @@ celery==5.3.4
 redis==5.0.1
 ffmpeg-python==0.2.0
 google-cloud-kms>=2.0.0
+# Pre-fill bundles in a private bucket (#698, backend/utils/bundle_storage.py);
+# imported only when a gs:// location is set.
+google-cloud-storage>=2.10,<4
 cryptography>=41.0.0
 sentry-sdk[flask]>=2.0.0
 # Server-side markdown for the public pages (escape=True: raw HTML in

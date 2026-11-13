@@ -2359,6 +2359,119 @@ class UserDataPurgeHidden(db.Model):
     )
 
 
+class PrefillBundleLoad(db.Model):
+    """One load of a pre-fill bundle from the lab into an account (#698,
+    backend/utils/prefill_bundle_load.py; docs/PREFILL-BUNDLES.md).
+
+    A bundle is the lab's prepared material for one Community Archive
+    member, keyed by their X id: their public tweets and the profile (and
+    intentions, where built) drafted from them. The load writes it into
+    the account whose X id is the bundle's, in committed chunks, and
+    records here where it got to, so a run that stops (a deploy, a crash)
+    is continued by the next one from the same place.
+
+    origin: "admin" (the admin's "Make ready from prepared material") or
+    "self" (the person's Yes on "Start from your tweets").
+    status: queued -> running -> done | failed | stopped (a "no" given
+    while it ran: what was loaded stays, linked); "refused" records an
+    automatic load that found a bundle but did not start (``error`` says
+    why), so the admin sees it.
+    stage: check (a Yes: is there a bundle?) -> header -> nodes -> links
+    -> finish -> (merge ->) done.
+
+    Nothing here is content: counts, the bundle's checksum and dates, the
+    X id and the handle the bundle was made under, and ``error`` (a code
+    or an exception class, never a message that could quote content).
+    A loaded account is recognisable without this table too: the load
+    sets ``User.prefilled_handle``, as every pre-fill does.
+    """
+    __tablename__ = "prefill_bundle_load"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=False, index=True)
+    x_id = db.Column(db.String(64), nullable=False, index=True)
+    # The handle the bundle was made under (the manifest's), for the admin.
+    handle = db.Column(db.String(64), nullable=True)
+    origin = db.Column(db.String(8), nullable=False)
+    requested_by_id = db.Column(db.Integer, nullable=True)
+    # The admin loaded over an owner's sign-in or own writing.
+    forced = db.Column(db.Boolean, nullable=False, default=False,
+                       server_default=db.text("false"))
+    # Let the person in (approve the account) when the load is done.
+    approve_when_done = db.Column(db.Boolean, nullable=False, default=False,
+                                  server_default=db.text("false"))
+    status = db.Column(db.String(16), nullable=False, default="queued")
+    stage = db.Column(db.String(16), nullable=False, default="check")
+    error = db.Column(db.String(255), nullable=True)
+    # The bundle object's sha256 from its manifest, checked after every
+    # download; the formats and dates the manifest gave.
+    bundle_sha256 = db.Column(db.String(64), nullable=False)
+    bundle_format = db.Column(db.Integer, nullable=True)
+    dump_format = db.Column(db.Integer, nullable=True)
+    exported_at = db.Column(db.DateTime, nullable=True)
+    newest_entry_at = db.Column(db.DateTime, nullable=True)
+    # The bundle's parts as the manifest gave them ([{offset, length,
+    # lines, sha256}], the header first): a run reads the next part by its
+    # byte range and checks its sha256.
+    members = db.Column(db.JSON, nullable=True)
+    # Progress: entries in the bundle, entries read by the first pass
+    # (created or found already there) and by the link pass.
+    nodes_total = db.Column(db.Integer, nullable=False, default=0)
+    nodes_done = db.Column(db.Integer, nullable=False, default=0)
+    links_done = db.Column(db.Integer, nullable=False, default=0)
+    created_count = db.Column(db.Integer, nullable=False, default=0)
+    skipped_count = db.Column(db.Integer, nullable=False, default=0)
+    relinked_count = db.Column(db.Integer, nullable=False, default=0)
+    profiles_count = db.Column(db.Integer, nullable=False, default=0)
+    artifacts_count = db.Column(db.Integer, nullable=False, default=0)
+    # The run that holds the load (claim token) and its last sign of life.
+    run_token = db.Column(db.String(32), nullable=True)
+    heartbeat_at = db.Column(db.DateTime, nullable=True)
+    # Runs started since the last committed chunk: a run that is killed
+    # again and again by the same chunk stops the load.
+    stalled_runs = db.Column(db.Integer, nullable=False, default=0)
+    # The final merge run again on production (Peter, 2026-11-13): when the
+    # bundle's final profile was written by another model than this
+    # account's merge model, one live call merges the loaded windows again
+    # (backend/utils/prefill_bundle_merge.py). merge_wanted: the load asks
+    # for it (the person's Yes; the admin's option, on by default).
+    # merge_status: None (not asked) | due | running | retry | done |
+    # skipped | superseded | failed; merge_error a code. The person waits
+    # for it ("Preparing your starting point…") at most MERGE_WAIT from
+    # merge_started_at; the attempts are bounded.
+    merge_wanted = db.Column(db.Boolean, nullable=False, default=False,
+                             server_default=db.text("false"))
+    merge_status = db.Column(db.String(16), nullable=True)
+    merge_attempts = db.Column(db.Integer, nullable=False, default=0)
+    merge_started_at = db.Column(db.DateTime, nullable=True)
+    merge_heartbeat_at = db.Column(db.DateTime, nullable=True)
+    merge_model = db.Column(db.String(64), nullable=True)
+    merge_error = db.Column(db.String(64), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    started_at = db.Column(db.DateTime, nullable=True)
+    finished_at = db.Column(db.DateTime, nullable=True)
+
+
+class PrefillBundleNodeMap(db.Model):
+    """Which entry a load created (or found) for each entry id of the
+    bundle (#698): the link pass reads it to point replies and
+    continuations at the new rows, and a resumed run reads it instead of
+    holding the map in memory. Deleted when the load is done. Ids only;
+    ``new_id`` is a plain id (the purge deletes nodes before these
+    rows)."""
+    __tablename__ = "prefill_bundle_node_map"
+
+    load_id = db.Column(db.Integer, primary_key=True, autoincrement=False)
+    old_id = db.Column(db.BigInteger, primary_key=True, autoincrement=False)
+    new_id = db.Column(db.Integer, nullable=False)
+    # False when the entry was already in the account (dedup on its key):
+    # the link pass leaves such rows as they are.
+    created = db.Column(db.Boolean, nullable=False, default=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=False, index=True)
+
+
 # The per-user tables whose rows a waiting "Delete all my content" hides
 # (UserDataPurgeHidden): every ORM query leaves them out until a restore
 # or the purge. Nodes are hidden by deleted_at instead, so a thread keeps

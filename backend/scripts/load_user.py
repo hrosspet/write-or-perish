@@ -51,24 +51,13 @@ Everything is one transaction per batch of 500 nodes; a failure rolls
 back the current batch and stops.
 """
 import argparse
-import base64
 import json
 import os
 import sys
-from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 NODE_BATCH = 500
-
-
-def _dt(s):
-    if not s:
-        return None
-    try:
-        return datetime.fromisoformat(s)
-    except ValueError:
-        return None
 
 
 def _check_schema(db):
@@ -136,11 +125,7 @@ def _author_id(username, owner_id, cache, db, User):
 def _run(path, as_username, merge, create_approved, twitter_id=None):
     from sqlalchemy import or_
     from backend.extensions import db
-    from backend.models import (
-        Node, NodeEmbedding, User, UserProfile, UserRecentContext,
-        UserTodo, UserArtifact,
-    )
-    from backend.routes.import_data import PROVENANCES
+    from backend.models import Node, User
 
     dump, node_iter, node_total = _open_dump(path)
 
@@ -205,56 +190,22 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
     cache = {dump["user"]["username"]: user_id, username: user_id}
 
     # Profile chain (ids remapped so parent_profile_id stays coherent).
+    from backend.utils import dump_rows
+    from backend.utils.dump_rows import LINK_COLUMNS, remap_profile_links
     profile_map = {}
     for pf in dump.get("profiles", []):
-        row = UserProfile(
-            user_id=user_id, generated_by=pf.get("generated_by") or "import",
-            tokens_used=pf.get("tokens_used") or 0,
-            privacy_level=pf.get("privacy_level") or "private",
-            ai_usage=pf.get("ai_usage") or "chat",
-            source_tokens_used=pf.get("source_tokens_used") or 0,
-            source_data_cutoff=_dt(pf.get("source_data_cutoff")),
-            source_origin_stats=pf.get("source_origin_stats"),
-            generation_type=pf.get("generation_type") or "initial",
-        )
-        row.set_content(pf.get("content") or "")
-        if _dt(pf.get("created_at")):
-            row.created_at = _dt(pf["created_at"])
+        row = dump_rows.new_profile(pf, user_id)
         db.session.add(row)
         db.session.flush()
         profile_map[pf["id"]] = row.id
-    for pf in dump.get("profiles", []):
-        parent = pf.get("parent_profile_id")
-        if parent in profile_map:
-            db.session.query(UserProfile).filter(
-                UserProfile.id == profile_map[pf["id"]]).update(
-                {"parent_profile_id": profile_map[parent]}, synchronize_session=False)
+    remap_profile_links(dump.get("profiles", []), profile_map)
     db.session.commit()
 
     for rc in dump.get("recent_contexts", []):
-        row = UserRecentContext(
-            user_id=user_id, generated_by=rc.get("generated_by") or "import",
-            tokens_used=rc.get("tokens_used") or 0,
-            source_data_cutoff=_dt(rc.get("source_data_cutoff")),
-            source_tokens_covered=rc.get("source_tokens_covered") or 0,
-            profile_id=profile_map.get(rc.get("profile_id")),
-            ai_usage=rc.get("ai_usage") or "chat",
-        )
-        row.set_content(rc.get("content") or "")
-        if _dt(rc.get("created_at")):
-            row.created_at = _dt(rc["created_at"])
-        db.session.add(row)
+        db.session.add(dump_rows.new_recent_context(
+            rc, user_id, profile_map.get(rc.get("profile_id"))))
     for td in dump.get("todos", []):
-        row = UserTodo(
-            user_id=user_id, generated_by=td.get("generated_by") or "import",
-            tokens_used=td.get("tokens_used") or 0,
-            privacy_level=td.get("privacy_level") or "private",
-            ai_usage=td.get("ai_usage") or "chat",
-        )
-        row.set_content(td.get("content") or "")
-        if _dt(td.get("created_at")):
-            row.created_at = _dt(td["created_at"])
-        db.session.add(row)
+        db.session.add(dump_rows.new_todo(td, user_id))
     # The user's edit wins (#412): on an account whose current intentions
     # are a version the user wrote, restored or had updated in a
     # conversation, the dump's intentions are left out (a prefill bundle's
@@ -266,50 +217,15 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
         if a["kind"] == INTENTIONS and kept_intentions is not None:
             skipped_intentions += 1
             continue
-        row = UserArtifact(
-            user_id=user_id, kind=a["kind"], title=a.get("title") or a["kind"],
-            description=a.get("description"),
-            generated_by=a.get("generated_by") or "import",
-            tokens_used=a.get("tokens_used") or 0,
-            privacy_level=a.get("privacy_level") or "private",
-            ai_usage=a.get("ai_usage") or "chat",
-        )
-        row.set_content(a.get("content") or "")
-        if _dt(a.get("created_at")):
-            row.created_at = _dt(a["created_at"])
-        db.session.add(row)
+        db.session.add(dump_rows.new_artifact(a, user_id))
     db.session.commit()
     if skipped_intentions:
         print(f"kept the account's own intentions: skipped {skipped_intentions} "
               f"intentions version(s) from the dump", file=sys.stderr)
 
     # Nodes last, so context pins on system nodes resolve to the rows above.
-    from backend.models import NodeContextArtifact, UserPrompt
-    from backend.utils.context_artifacts import sync_context_artifacts
     prompt_cache = {}
     pinned = 0
-
-    def _prompt_row(ref):
-        key = (ref["prompt_key"], ref.get("content") or "")
-        if key in prompt_cache:
-            return prompt_cache[key]
-        row = None
-        for cand in UserPrompt.query.filter_by(user_id=user_id, prompt_key=ref["prompt_key"]) \
-                                    .order_by(UserPrompt.created_at.desc()).all():
-            if (cand.get_content() or "") == key[1]:
-                row = cand
-                break
-        if row is None:
-            row = UserPrompt(user_id=user_id, prompt_key=ref["prompt_key"],
-                             title=ref.get("title") or ref["prompt_key"],
-                             generated_by=ref.get("generated_by") or "import")
-            row.set_content(key[1])
-            if _dt(ref.get("created_at")):
-                row.created_at = _dt(ref["created_at"])
-            db.session.add(row)
-            db.session.flush()
-        prompt_cache[key] = row.id
-        return row.id
 
     nodes = node_iter
     id_map = {}
@@ -325,49 +241,21 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
             id_map[nd["id"]] = existing_keys[key]
             skipped += 1
             continue
-        new = Node(
-            user_id=_author_id(nd.get("author_username"), user_id, cache, db, User),
-            human_owner_id=user_id if nd.get("owner_is_user", True) else None,
-            node_type=nd.get("node_type", "user"),
-            llm_model=nd.get("llm_model"),
-            token_count=nd.get("token_count") or 0,
-            distributed_tokens=nd.get("distributed_tokens") or 0,
-            privacy_level=nd.get("privacy_level", "private"),
-            ai_usage=nd.get("ai_usage", "none"),
-            source_key=key,
-            origin=nd.get("origin"),
-            provenance=(nd.get("provenance")
-                        if nd.get("provenance") in PROVENANCES else None),
-            tool_calls_meta=nd.get("tool_calls_meta"),
-            prompt_key=nd.get("prompt_key"),
-        )
-        new.set_content(nd.get("content") or "")
-        if _dt(nd.get("created_at")):
-            new.created_at = _dt(nd["created_at"])
-        if _dt(nd.get("updated_at")):
-            new.updated_at = _dt(nd["updated_at"])
+        new = dump_rows.new_node(
+            nd, user_id, _author_id(nd.get("author_username"), user_id, cache, db, User))
         db.session.add(new)
         db.session.flush()
         id_map[nd["id"]] = new.id
         created += 1
         if nd.get("prompt"):
-            db.session.add(NodeContextArtifact(
-                node_id=new.id, artifact_type="prompt",
-                artifact_id=_prompt_row(nd["prompt"])))
-            if not new.prompt_key:
-                new.prompt_key = nd["prompt"].get("prompt_key")
-            sync_context_artifacts(new.id, user_id, nd["prompt"].get("content") or "")
+            dump_rows.pin_prompt(new, nd["prompt"], user_id, prompt_cache)
             pinned += 1
         if nd.get("parent_id") or nd.get("continuation_node_id") or nd.get("linked_node_id"):
-            pending_links.append((new.id, nd))
+            # Only the link fields: the entry itself (its text) is not
+            # kept in memory for the second pass.
+            pending_links.append((new.id, {c: nd.get(c) for c in LINK_COLUMNS}))
         if nd.get("embedding"):
-            e = nd["embedding"]
-            db.session.add(NodeEmbedding(
-                node_id=new.id, user_id=user_id, model=e["model"],
-                content_hash=e.get("content_hash") or "",
-                vector=base64.b64decode(e["vector"]),
-                node_updated_at=_dt(e.get("node_updated_at")),
-            ))
+            db.session.add(dump_rows.new_embedding(nd["embedding"], new.id, user_id))
         if created % NODE_BATCH == 0:
             db.session.commit()
             db.session.expunge_all()
@@ -379,7 +267,7 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
     relinked = 0
     for new_id, nd in pending_links:
         values = {}
-        for col in ("parent_id", "continuation_node_id", "linked_node_id"):
+        for col in LINK_COLUMNS:
             old = nd.get(col)
             if old in id_map:
                 values[col] = id_map[old]

@@ -420,6 +420,11 @@ def create_app():
     from backend.routes.admin import admin_bp
     app.register_blueprint(admin_bp, url_prefix="/api/admin")
 
+    # Admin: pre-fill bundles from the lab (#698).
+    from backend.routes.prefill_bundles import prefill_bundles_bp
+    app.register_blueprint(prefill_bundles_bp,
+                           url_prefix="/api/admin/prefill-bundles")
+
     from backend.routes.profile import profile_bp
     app.register_blueprint(profile_bp, url_prefix="/api/profile")
 

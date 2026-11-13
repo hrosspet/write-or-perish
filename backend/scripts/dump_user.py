@@ -28,7 +28,9 @@ What it carries (all of it, not "latest N"):
     tool_calls_meta; LLM authors are referenced by username
   - node embeddings (vectors, so no re-embedding on load)
   - user_profile: the FULL iterative chain with every column, incl.
-    parent_profile_id, generation_type, source_data_cutoff, origin stats
+    parent_profile_id, generation_type, source_data_cutoff, origin stats,
+    and a window set's columns (window_set, covers_start,
+    source_rendered_at, merged_profile_id)
   - user_recent_context (linked to its profile), user_todo, user_artifact
   - the prompt pinned on each system node (by value), so agentic threads
     load as prompt references, not as copies of the prompt text
@@ -68,8 +70,8 @@ def _run(username, out_path, include_private=False):
     from sqlalchemy import or_
     from backend.extensions import db
     from backend.models import (
-        Node, NodeEmbedding, User, UserProfile, UserRecentContext,
-        UserTodo, UserArtifact,
+        Node, NodeContextArtifact, NodeEmbedding, User, UserProfile,
+        UserRecentContext, UserTodo, UserArtifact,
     )
     from backend.utils.encryption import is_encrypted, decrypt_content
 
@@ -79,24 +81,36 @@ def _run(username, out_path, include_private=False):
 
     authors = {u.id: u.username for u in User.query.all()}
 
-    node_q = Node.query.filter(
-        or_(Node.user_id == user.id, Node.human_owner_id == user.id),
-        Node.deleted_at.is_(None),
-    )
+    alive = [Node.deleted_at.is_(None)]
     if not include_private:
-        node_q = node_q.filter(Node.privacy_level == "public")
-    node_q = node_q.order_by(Node.id)
-    total = node_q.count()
+        alive.append(Node.privacy_level == "public")
+    node_q = Node.query.filter(
+        or_(Node.user_id == user.id, Node.human_owner_id == user.id), *alive)
+    # The ids first, one read per column, then the entries in batches by
+    # id (#698). A keyset over the OR of the two columns (id > last ORDER
+    # BY id LIMIT n) made Postgres walk the primary key with a filter, so
+    # a sparse account's batches read far into the table and its last
+    # one read to the end of it. A few MB of ids for the largest account.
+    ids = set()
+    for column in (Node.user_id, Node.human_owner_id):
+        ids.update(i for (i,) in db.session.query(Node.id).filter(
+            column == user.id, *alive))
+    ids = sorted(ids)
+    total = len(ids)
     print(f"@{user.username} (id {user.id}): {total} nodes "
           f"({'all' if include_private else 'public only'})", file=sys.stderr)
 
-    embeddings = {}
-    for e in NodeEmbedding.query.filter_by(user_id=user.id).all():
-        embeddings[e.node_id] = {
+    def _embeddings(node_ids):
+        """The batch's embeddings only (#698): an account's vectors are
+        about 14 KB per entry, so they are read with the entries they
+        belong to, not all at once."""
+        return {e.node_id: {
             "model": e.model, "content_hash": e.content_hash,
             "vector": base64.b64encode(e.vector).decode("ascii"),
             "node_updated_at": _iso(e.node_updated_at),
-        }
+        } for e in NodeEmbedding.query.filter(
+            NodeEmbedding.user_id == user.id,
+            NodeEmbedding.node_id.in_(node_ids))} if node_ids else {}
 
     # Everything small goes in the header line; nodes stream one per line
     # so neither this script nor load_user.py ever holds the corpus in
@@ -124,12 +138,22 @@ def _run(username, out_path, include_private=False):
 
     n_nodes = 0
     n_emb = 0
-    last_id = 0
     done = 0
-    while True:
-        batch = (node_q.filter(Node.id > last_id).limit(NODE_BATCH).all())
+    for start in range(0, total, NODE_BATCH):
+        # The filters again: an entry deleted since the ids were read is
+        # left out, as before.
+        batch = node_q.filter(Node.id.in_(ids[start:start + NODE_BATCH])) \
+            .order_by(Node.id).all()
         if not batch:
-            break
+            continue
+        batch_ids = [n.id for n in batch]
+        embeddings = _embeddings(batch_ids)
+        # The batch's prompt pins in one query, not one per entry (#698: a
+        # lab account can hold hundreds of thousands of entries).
+        pinned = {node_id for (node_id,) in db.session.query(
+            NodeContextArtifact.node_id).filter(
+            NodeContextArtifact.node_id.in_(batch_ids),
+            NodeContextArtifact.artifact_type == "prompt")}
         for n in batch:
             row = {
                 "id": n.id,
@@ -146,7 +170,7 @@ def _run(username, out_path, include_private=False):
                 # are plaintext under #257 (no KMS round-trip).
                 "content": (n.content if not is_encrypted(n.content)
                             else decrypt_content(n.content)),
-                "prompt": _prompt_ref(n),
+                "prompt": _prompt_ref(n) if n.id in pinned else None,
                 "prompt_key": n.prompt_key,
                 "token_count": n.token_count,
                 "distributed_tokens": n.distributed_tokens,
@@ -165,7 +189,6 @@ def _run(username, out_path, include_private=False):
             out.write(json.dumps(row, ensure_ascii=False) + "\n")
             n_nodes += 1
             n_emb += 1 if row["embedding"] else 0
-            last_id = n.id
         done += len(batch)
         db.session.expunge_all()  # keep memory flat
         print(f"  nodes {done}/{total}", file=sys.stderr)
@@ -200,6 +223,13 @@ def _profiles(user, UserProfile):
         "source_origin_stats": p.source_origin_stats,
         "generation_type": p.generation_type,
         "parent_profile_id": p.parent_profile_id,
+        # A large build's window set (#545) and the version a merge took
+        # in (#183): the target's profile pipeline reads a set by them (a
+        # later update adds windows to the current set, #698).
+        "merged_profile_id": p.merged_profile_id,
+        "window_set": p.window_set,
+        "covers_start": _iso(p.covers_start),
+        "source_rendered_at": _iso(p.source_rendered_at),
     } for p in UserProfile.query.filter_by(user_id=user.id).order_by(UserProfile.id).all()]
 
 

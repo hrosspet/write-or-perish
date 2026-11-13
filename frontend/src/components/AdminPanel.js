@@ -5,6 +5,7 @@ import AdminDeleteAccountDialog from "./AdminDeleteAccountDialog";
 import ProfileBuildConfirmDialog from "./ProfileBuildConfirmDialog";
 import IntentionsReplaceDialog from "./IntentionsReplaceDialog";
 import AdminRefusalDialog, { REFUSAL_TITLES } from "./AdminRefusalDialog";
+import AdminPrefillBundles from "./AdminPrefillBundles";
 import { offeredModels } from "./ModelSelector";
 import { FaTimesCircle, FaFilter, FaCaretDown, FaCaretUp, FaEye, FaEyeSlash } from "react-icons/fa";
 import api from "../api";
@@ -1230,6 +1231,7 @@ function AdminPanel() {
         {newHandleError && <div style={{ color: "var(--error)" }}>{newHandleError}</div>}
         {newHandleNotice && <div style={{ color: "var(--text-secondary)" }}>{newHandleNotice}</div>}
       </div>
+      <AdminPrefillBundles onLoaded={fetchUsers} />
       <XLookupConfirmDialog
         open={!!xLookupAsk}
         handle={xLookupAsk?.handle}
