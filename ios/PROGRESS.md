@@ -1161,3 +1161,21 @@ announcement ("TTSed as a separate chunk ... when it's not pending, it's not voi
 - Review fix (PR #675): a finished reply being replayed leaves the turn `.done`, so `announce` (the usage
   limit, and the length said from the lock screen) now stops a queue that plays whatever the state; the
   reply stays loaded. Three tests.
+
+## A Voice turn whose access ends while it is recorded (#438, Peter 2026-11-13)
+
+Peter: "Voice mode shouldn't start with a subscription expired. I was talking about the edge case when
+subscription expires during user's voice recording." A turn refused at its start stays as it was (the
+banner, nothing said). A turn that started with access and loses it before its reply is kept and
+transcribed by the server, which skips only the reply.
+
+- `SpokenRefusal`: four more codes, one per reason (`subscription_required_ended`, `_past_due`,
+  `_free_month`, `_none`), whose sentence is the server's on-screen text ("Your subscription has ended, so
+  Loore doesn't reply. Your recording is saved."): it names the state, never where or how to pay.
+  `isAccessEnded`, and `init?(keptRecordingMessage:)` for a 402 whose message is one of them.
+- `VoiceTurnController`: the recording's `warning_code` is said as the other refusals are; the legacy
+  request's 402 for a kept turn marks the entry saved and says its sentence (any other 402
+  `subscription_required` there ends the turn quietly instead of with the error sound); a queued reply the
+  server refused for the same reason (`error_code`) is said instead of the error sound.
+- Tests: four more in `VoiceRefusalSpeechTurnTests`, and the sentences test. Unit tests only: nothing
+  heard on a phone.

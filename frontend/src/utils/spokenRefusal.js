@@ -9,6 +9,13 @@
 // only inside a tap, as Safari does) the browser's own speech says the same
 // sentence. The sentences are backend/utils/voice_refusals.py's, and the
 // iPhone app's: plain words, no numbers, no prices.
+//
+// Payments on (#438): a recording accepted while the account had AI
+// replies, whose access ended before its reply, is kept and transcribed;
+// only the reply is skipped. Its sentence, one per reason, is the text
+// the entry and the screen show (it names the state, never where or how
+// to pay): the finalize's warning_code, the fallback request's 402
+// `code`, or a queued reply's llm-status `error_code`.
 
 export const SPEND_CAP_REFUSAL = 'monthly_spend_limit_reached';
 export const AI_USAGE_REFUSAL = 'ai_usage_none';
@@ -19,6 +26,22 @@ export const LENGTH_REFUSAL = 'thread_too_long';
 export const THREAD_LIMIT_SPOKEN = 'This thread is too long for another '
   + 'reply. Start a new thread to keep talking.';
 
+// A recording kept after the account's access ended, by reason
+// (backend subscriptions.paused_message(reason, "recording")).
+export const ACCESS_ENDED_SENTENCES = {
+  subscription_required_ended: 'Your subscription has ended, so Loore '
+    + "doesn't reply. Your recording is saved.",
+  subscription_required_past_due: "Your last payment didn't go through, so "
+    + "Loore doesn't reply. Your recording is saved.",
+  subscription_required_free_month: 'Your free month has ended, so Loore '
+    + "doesn't reply. Your recording is saved.",
+  subscription_required_none: "Loore doesn't reply on an account without a "
+    + 'subscription. Your recording is saved.',
+};
+
+export const isAccessEndedRefusal = (code) => (
+  Object.prototype.hasOwnProperty.call(ACCESS_ENDED_SENTENCES, code || ''));
+
 export const REFUSAL_SENTENCES = {
   [SPEND_CAP_REFUSAL]: "You've reached your monthly usage limit, so Loore "
     + "can't reply until it resets.",
@@ -26,6 +49,7 @@ export const REFUSAL_SENTENCES = {
   [APPROVAL_REFUSAL]: 'A change to your data is waiting for your approval. '
     + 'Approve or reject it on the screen to continue.',
   [LENGTH_REFUSAL]: THREAD_LIMIT_SPOKEN,
+  ...ACCESS_ENDED_SENTENCES,
 };
 
 // The refusal a sentence belongs to, or null.

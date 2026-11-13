@@ -1,8 +1,9 @@
 // #651: a refused Voice turn's sentence is said in Loore's voice from its
 // cached clip, or, where that can't play, with the browser's own speech.
 import {
-  APPROVAL_REFUSAL, CLIP_START_TIMEOUT_MS, LENGTH_REFUSAL, REFUSAL_SENTENCES,
-  SENTENCE_AFTER_SOUND_MS, SPEND_CAP_REFUSAL, THREAD_LIMIT_SPOKEN,
+  ACCESS_ENDED_SENTENCES, APPROVAL_REFUSAL, CLIP_START_TIMEOUT_MS,
+  LENGTH_REFUSAL, REFUSAL_SENTENCES, SENTENCE_AFTER_SOUND_MS,
+  SPEND_CAP_REFUSAL, THREAD_LIMIT_SPOKEN, isAccessEndedRefusal,
   refusalClipUrl, resetSpeechForTests, sayRefusal, soundThenSay, stopSpeaking,
 } from './spokenRefusal';
 
@@ -63,11 +64,32 @@ afterEach(() => {
 });
 
 test('plain words: no numbers, no prices, nothing about buying', () => {
-  Object.values(REFUSAL_SENTENCES).forEach((text) => {
+  Object.entries(REFUSAL_SENTENCES).forEach(([code, text]) => {
     expect(text).not.toMatch(/[0-9$€£%]/);
-    expect(text).not.toMatch(/\b(buy|pay|price|subscri|upgrade|plan)/i);
+    expect(text).not.toMatch(/\b(buy|price|upgrade|plan|subscribe)/i);
+    // A recording kept after the access ended (#438) names the state, as
+    // the server's on-screen text does; no other sentence mentions it.
+    if (!isAccessEndedRefusal(code)) {
+      expect(text).not.toMatch(/\b(pay|subscri)/i);
+    }
   });
   expect(REFUSAL_SENTENCES[LENGTH_REFUSAL]).toBe(THREAD_LIMIT_SPOKEN);
+});
+
+test('a recording kept after the access ended: one sentence per reason, the server\'s', () => {
+  // backend/utils/subscriptions.py paused_message(reason, "recording").
+  expect(ACCESS_ENDED_SENTENCES).toEqual({
+    subscription_required_ended: "Your subscription has ended, so Loore doesn't reply. Your recording is saved.",
+    subscription_required_past_due: "Your last payment didn't go through, so Loore doesn't reply. Your recording is saved.",
+    subscription_required_free_month: "Your free month has ended, so Loore doesn't reply. Your recording is saved.",
+    subscription_required_none: "Loore doesn't reply on an account without a subscription. Your recording is saved.",
+  });
+  // The refusal at the start has no sentence (nothing was recorded).
+  expect(isAccessEndedRefusal('subscription_required')).toBe(false);
+  expect(isAccessEndedRefusal(undefined)).toBe(false);
+  sayRefusal('subscription_required_ended', playSound);
+  afterSound();
+  expect(clips.map((c) => c.src)).toEqual([refusalClipUrl('subscription_required_ended')]);
 });
 
 test('the sound, then the refusal in Loore\'s voice from its clip', () => {
