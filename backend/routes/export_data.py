@@ -3043,7 +3043,8 @@ def iter_user_export(user):
     """The user's own data download (/export/threads), piece by piece,
     built while it is sent (#591). The pieces join to the text of
     ``build_user_export_content(user, filter_ai_usage=False)``, or to
-    NO_THREADS_TEXT where that returns None.
+    NO_THREADS_TEXT where that returns None, with the account's unsaved
+    drafts before the end (iter_drafts_part; the download only).
 
     A piece is yielded once it is due (_Pieces). Every
     EXPORT_PAUSE_EVERY_SECONDS of work the generator sleeps briefly
@@ -3056,6 +3057,7 @@ def iter_user_export(user):
     kept = [r for r in roots if r.deleted_at is None or r.id in alive]
     if not kept:
         yield NO_THREADS_TEXT
+        yield from iter_drafts_part(user)
         return
 
     out = _Pieces()
@@ -3128,8 +3130,76 @@ def iter_user_export(user):
         # after the header went out. Fail loudly rather than send a
         # different file.
         raise RuntimeError(f"export of user {user.id}: no thread rendered")
-    out.add("*End of Export*")
     yield out.take()
+    yield from iter_drafts_part(user)
+    yield "*End of Export*"
+
+
+# ── The account's unsaved drafts, in its own download only ──────────────
+# Decided under Peter's rules (2026-11-13: "User's recorded message should
+# be stored on Loore's servers …"; "yes, Ben should be able to export"): a
+# dictation finished while the account could not open Loore stays a draft,
+# and a person who stays out reaches it only through the download. So the
+# download ends with every draft of the account that holds text: what the
+# writing forms kept but never saved as an entry, typed or recorded. Never
+# in {user_export} (build_user_export_content), which goes to a model.
+# Proposal drafts (the AI's own) and recordings already saved as an entry
+# are left out, as the writing form leaves them out (routes/drafts.py
+# _input_drafts). Text only, as for entries; nothing calls a model.
+
+DRAFTS_HEADING = "# Drafts"
+DRAFTS_INTRO = ("Writing kept in Loore's writing forms that was never saved "
+                "as an entry: typed text and the transcripts of recordings.")
+
+
+def _export_drafts(user_id):
+    from backend.models import Draft
+    from backend.routes.drafts import _PROPOSAL_DRAFT_LABELS
+    return (Draft.query
+            .filter(Draft.user_id == user_id,
+                    db.or_(Draft.label.is_(None),
+                           Draft.label.notin_(_PROPOSAL_DRAFT_LABELS)),
+                    Draft.llm_node_id.is_(None),
+                    Draft.streaming_warning.is_(None),
+                    Draft.content != "")
+            .order_by(Draft.created_at, Draft.id)
+            .all())
+
+
+def _draft_kind(draft):
+    if not draft.session_id:
+        return "typed"
+    if draft.label == "Voice":
+        return "a Voice mode recording's transcript"
+    return "a dictation's transcript"
+
+
+def _draft_place(draft):
+    if draft.node_id:
+        return "an edit of an entry"
+    if draft.parent_id:
+        return "a reply in a thread"
+    return "a new entry"
+
+
+def iter_drafts_part(user):
+    """The download's "Drafts" part: one section per draft of *user* that
+    holds text, oldest first; nothing when there is none."""
+    number = 0
+    for draft in _export_drafts(user.id):
+        text = (draft.get_content() or "").strip()
+        if not text:
+            continue
+        number += 1
+        if number == 1:
+            yield f"{DRAFTS_HEADING}\n\n{DRAFTS_INTRO}\n\n"
+        changed = (draft.updated_at or draft.created_at)
+        when = (changed.strftime('%Y-%m-%d %H:%M:%S UTC')
+                if changed else "unknown")
+        yield (f"## Draft {number}\n"
+               f"**Last changed:** {when}\n"
+               f"**Kind:** {_draft_kind(draft)}, for {_draft_place(draft)}"
+               f"\n\n{text}\n\n---\n\n")
 
 
 def _send_user_export(user):

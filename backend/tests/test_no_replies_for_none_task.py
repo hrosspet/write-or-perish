@@ -54,6 +54,45 @@ def test_a_queued_reply_is_refused_when_the_subscription_lapsed(app):  # noqa: F
     node = _fresh(llm_node.id)
     assert node.llm_task_status == "failed"
     assert "subscription has ended" in node.llm_task_error
+    # A text reply carries no code: only the Voice screen says one aloud.
+    assert "_refused" not in (node.tool_calls_meta or "")
+
+
+def test_a_voice_reply_queued_when_access_ended_names_its_sentence(app):  # noqa: F811
+    # Payments (#438): the access ends after a Voice turn's recording was
+    # saved and its reply queued. The reply is refused before any call,
+    # its text says the recording is saved, and its code (llm-status
+    # ``error_code``) lets the Voice screen say it aloud instead of
+    # sounding a failure.
+    import json
+    from backend.utils.voice_refusals import SUBSCRIPTION_CODES
+    alice, system, user_node, llm_node = _build_chain("voice")
+    alice.plan = "free"
+    alice.subscription_status = "past_due"
+    alice.subscription_level = "standard"
+    alice.subscription_ever_paid = True
+    _db.session.commit()
+    _ScriptedProvider.reset([_resp("must not be sent")])
+    app.config["PAYMENTS_ENABLED"] = True
+    try:
+        result = generate_llm_response(
+            _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+            source_mode="voice")
+    finally:
+        app.config["PAYMENTS_ENABLED"] = False
+    assert result["reason"] == "subscription_required"
+    assert _ScriptedProvider.calls == []
+    node = _fresh(llm_node.id)
+    assert node.llm_task_status == "failed"
+    assert node.llm_task_error == (
+        "Your last payment didn't go through, so Loore doesn't reply. "
+        "Your recording is saved.")
+    refused = [e for e in json.loads(node.tool_calls_meta)
+               if e.get("name") == "_refused"]
+    assert refused == [{"name": "_refused",
+                        "code": SUBSCRIPTION_CODES["past_due"]}]
+    # The recording itself stays as it was.
+    assert _fresh(user_node.id).get_content() == "what's on my reading list?"
 
 
 @pytest.mark.parametrize("which", ["system", "user_node", "llm_node"])

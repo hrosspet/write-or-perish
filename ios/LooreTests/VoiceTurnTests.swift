@@ -656,6 +656,30 @@ final class VoiceTurnTests: XCTestCase {
         await wait("thinking") { turn.state == .awaitingAudio }
     }
 
+    /// Review of #682: a pause longer than the server's 45 s liveness window
+    /// (nothing is sent while paused). Nothing here depends on how long the pause
+    /// was: after Resume and Stop the turn is finalized with every chunk, so what
+    /// was recorded before and after the pause is transcribed. The server now
+    /// takes those chunks also from an account that stopped being let in during
+    /// the pause (test_not_let_in_recording_and_export, TestALongGap).
+    func testALongPauseThenStopFinalizesTheWholeRecording() async throws {
+        recorder.outcome = ChunkUploader.Outcome(produced: 4, stored: 4, failed: [], fatalMessage: nil)
+        backend.statuses = [try status("completed", llm: 101)]
+        backend.llmStatuses[101] = [try llm(101, "processing")]
+        turn.start()
+        await wait("recording") { turn.state == .recording }
+        turn.pauseRecording()
+        XCTAssertTrue(turn.isPaused)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        turn.resumeRecording()
+        XCTAssertFalse(turn.isPaused)
+        turn.stop()
+        await wait("finalized") { backend.log.contains { $0.hasPrefix("finalize total=4") } }
+        await wait("thinking") { turn.state == .awaitingAudio }
+        XCTAssertFalse(turn.hasError)
+        XCTAssertEqual(recorder.calls.filter { $0 == "pause" }.count, 1)
+    }
+
     func testLeavingDuringStopDoesNotReactivateTheSession() async throws {
         recorder.stopDelay = 0.1
         await recordAndStop()

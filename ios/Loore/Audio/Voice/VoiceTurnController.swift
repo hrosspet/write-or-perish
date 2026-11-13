@@ -846,6 +846,16 @@ final class VoiceTurnController {
                 // A change waits for approval in this thread: its dialog, and said.
                 Task { [weak self] in await self?.refreshApprovals(openDialog: true) }
                 refused(.approvalWaiting)
+            } else if case APIError.subscriptionRequired(let message) = error {
+                // Payments on, no AI replies (#438; the banner says why). When the
+                // access ended while this turn was recorded, the server kept the
+                // turn and its message is the sentence said here. Not a failure.
+                if let refusal = SpokenRefusal(keptRecordingMessage: message) {
+                    entrySaved()
+                    refused(refusal)
+                } else {
+                    finishQuietly()
+                }
             } else if let apiError = error as? APIError, apiError.status == 400 {
                 endTurnWithError(apiError.userMessage(fallback: "Could not start the reply."), sound: true)
             } else {
@@ -985,6 +995,16 @@ final class VoiceTurnController {
                 nodes[nodeId]?.failureHandled = true
                 closeStream()
                 threadTooLong(.threadTooLong(message: status.error))
+                return true
+            }
+            if let refusal = SpokenRefusal(code: status.errorCode), refusal.isAccessEnded,
+               !track.failureHandled {
+                // Refused before any model call: the account's access ended after
+                // this turn's recording was saved (#438). The toast above says so;
+                // the sentence is said instead of the error sound.
+                nodes[nodeId]?.failureHandled = true
+                closeStream()
+                refused(refusal)
                 return true
             }
             replyFailed(nodeId, gen)

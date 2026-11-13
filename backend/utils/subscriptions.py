@@ -11,6 +11,12 @@ can do. On:
   export; create_llm_placeholder refuses its replies with
   SubscriptionRequired, which the routes answer as a 402 (or, where the
   writing was saved, as the ``subscription_required`` fields of a 2xx).
+  Such an account starts no recording, dictation or upload (402 before
+  anything is stored). One accepted while it had AI replies, whose
+  access ends before it is finalized, transcribed or replied to (Peter,
+  2026-11-13), is stored and transcribed to the end; only its reply is
+  skipped, with the "recording" text, said aloud in Voice
+  (utils/voice_refusals).
 * Voice mode and profile updates follow User.on_paid_plan whatever the
   switch: a subscription that exists always counts, so turning payments
   off does not take what people paid for.
@@ -20,6 +26,7 @@ can do. On:
 A Stripe event never writes ``User.plan``: an account set by hand stays
 as it is (utils/stripe_billing.apply_subscription).
 """
+import re
 from datetime import datetime, timedelta
 
 from flask import current_app, has_app_context
@@ -39,6 +46,10 @@ class SubscriptionRequired(Exception):
     def __init__(self, user=None):
         super().__init__("subscription_required")
         self.message = subscription_required_message(user)
+        # Why, for a recording kept without its reply (access ended while
+        # it was recorded): the text it carries, said aloud in Voice.
+        self.reason = paused_reason(user)
+        self.recording_message = paused_message(self.reason, "recording")
 
 
 def _config(config=None):
@@ -114,6 +125,12 @@ _OPEN_EXACT = {
     ("POST", "/api/account/restore"),
     ("POST", "/api/account/restore/decline"),
     ("GET", "/api/account/restore"),
+    # The account's own data, as one file (Peter, 2026-11-13, of an account
+    # whose trial ended and whose first payment failed: "yes, Ben should
+    # be able to export"). Built from what is stored, no model call; HEAD
+    # is the web's check before the download, which builds nothing.
+    ("GET", "/api/export/threads"),
+    ("HEAD", "/api/export/threads"),
 }
 _OPEN_PREFIXES = ("/api/billing", "/api/terms", "/api/webhooks",
                   "/api/health", "/api/ready", "/api/live")
@@ -141,10 +158,11 @@ def no_subscription_response():
 def block_accounts_without_subscription():
     """The app's before_request (#438). Payments on: an approved account
     that never had a subscription (and whose plan was not set by hand) is
-    not let in. It reaches only who-am-I, its subscription, the terms and
-    deleting itself; every other /api and /media route answers 402
-    {"error": "no_subscription"} before the view runs. No-op while
-    payments are off."""
+    not let in. It reaches only who-am-I, its subscription, the terms,
+    deleting itself, the download of its data, and the calls that finish
+    a recording it had under way (finishes_recording_in_progress); every
+    other /api and /media route answers 402 {"error": "no_subscription"}
+    before the view runs. No-op while payments are off."""
     from flask_login import current_user
     if not current_user.is_authenticated:
         return None
@@ -155,7 +173,9 @@ def refuse_not_let_in(user):
     """402 no_subscription when *user* (the session's, or the account an
     API token belongs to: utils/api_tokens) is not let in and this
     request is not one it may make; None otherwise. The same rule for
-    every way a request is authenticated."""
+    every way a request is authenticated. The calls that finish a
+    recording it had under way when it stopped being let in pass
+    (finishes_recording_in_progress)."""
     if not payments_enabled():
         return None
     from flask import request
@@ -165,7 +185,171 @@ def refuse_not_let_in(user):
         return None
     if access_state(user) != "none":
         return None
+    if finishes_recording_in_progress(user, request):
+        return None
     return no_subscription_response()
+
+
+# ── A recording in progress when the account stops being let in ─────────
+# Peter, 2026-11-13, on a subscription that ends during a recording: "User's
+# recorded message should be stored on Loore's servers, possibly even
+# transcribed (transcription is cheap). Just further AI use should be
+# blocked." An account that falls into state "none" while it records (a
+# trial whose first payment fails, say) keeps the calls of that recording
+# only: its remaining chunks, its finalize, and the status and stream that
+# report its transcript; for an upload, its chunks, its finalize and its
+# transcription status. Nothing else opens: no new session or upload (every
+# init is refused in this state, so each session or upload these calls
+# name was started while the account was let in, or before payments were
+# on), no claim of a session from another device, no reply (the account
+# has no AI replies), nothing else to read. A session still recording takes
+# its chunks whatever the gap since the last one (a pause, the app killed
+# and opened again, a network gap: the audio recorded before and after it
+# is kept); and none of it older than RECORDING_IN_PROGRESS_MAX_AGE
+# (Draft.created_at, the upload's Node.created_at). The saved entry then
+# waits in the account; a dictation's text waits as a draft, which the
+# data download includes (routes/export_data.iter_drafts_part).
+
+# INTRODUCED HEURISTIC: how long after it started a recording or upload may
+# still be finished under this exception, and so what an account that is
+# not let in can still have transcribed (one recording's audio). Three
+# hours is far longer than recordings run in practice, but neither app
+# limits a recording's length (the web's ~60-minute cliff is the open bug
+# #127; the iPhone has none) and Draft.created_at counts pauses: a
+# recording still running three hours after it started loses what is
+# recorded after that (its chunks are refused; what came before is kept).
+RECORDING_IN_PROGRESS_MAX_AGE = timedelta(hours=3)
+
+_DRAFT_SESSION_CALL = re.compile(
+    r"^/api/drafts/streaming/([^/]+)/(audio-chunk|finalize|release|status)$")
+_DRAFT_SESSION_STREAM = re.compile(
+    r"^/api/sse/drafts/([^/]+)/transcription-stream$")
+_UPLOAD_CALLS = ("/api/nodes/upload/chunk", "/api/nodes/upload/finalize")
+_UPLOAD_STATUS = re.compile(r"^/api/nodes/(\d+)/transcription-status$")
+
+
+def finishes_recording_in_progress(user, req, now=None):
+    """Whether *req* (a Flask request) only finishes a recording or upload
+    of *user* that was under way when it stopped being let in (the
+    comment above). Asked by the gate for an account in state "none".
+    Every id the request names is checked against the others and against
+    the account: the session in the path is the account's; the thread a
+    finalize names is the one the session started in; an upload's folder
+    (upload_id) is the account's and was made by the init of the entry it
+    names (node_id), and a chunk is one of those its init announced."""
+    from backend.extensions import db
+    from backend.models import Draft, Node
+    now = now or datetime.utcnow()
+    since = now - RECORDING_IN_PROGRESS_MAX_AGE
+    path = req.path.rstrip("/")
+    method = req.method
+
+    call = _DRAFT_SESSION_CALL.match(path)
+    stream = _DRAFT_SESSION_STREAM.match(path)
+    if call or stream:
+        session_id = (call or stream).group(1)
+        action = call.group(2) if call else "stream"
+        if method != ("GET" if action in ("status", "stream") else "POST"):
+            return False
+        draft = Draft.query.filter_by(session_id=session_id,
+                                      user_id=user.id).first()
+        if draft is None or draft.created_at is None \
+                or draft.created_at < since:
+            return False
+        status = draft.streaming_status
+        if action in ("audio-chunk", "release"):
+            # Whatever the gap since its last sign of life: a long pause or
+            # a relaunch must not lose the rest (the route still refuses a
+            # device the session was taken over from).
+            return status == "recording"
+        if action == "finalize":
+            # A Voice turn joins the thread its session started in; a
+            # dictation's finalize names none (its entry is saved later,
+            # under the session's own parent).
+            named = _body(req).get("parent_id")
+            return (status == "recording"
+                    and (named in (None, "")
+                         or _same_id(named, draft.parent_id)))
+        return status in ("recording", "finalizing", "completed")
+
+    if method == "POST" and path in _UPLOAD_CALLS:
+        is_chunk = path.endswith("/chunk")
+        values = req.form if is_chunk else _body(req)
+        metadata = _upload_metadata(user, values.get("upload_id"))
+        if metadata is None or not _same_id(values.get("node_id"),
+                                            metadata.get("node_id")):
+            return False
+        node = _own_recent_upload_node(db, Node, user, metadata.get("node_id"),
+                                       since)
+        # Chunks and finalize: an upload whose init was accepted and whose
+        # file is not assembled yet.
+        if (node is None or node.audio_original_url is not None
+                or node.transcription_status != "pending"):
+            return False
+        if is_chunk:
+            try:
+                index = int(values.get("chunk_index"))
+                total = int(metadata.get("total_chunks"))
+            except (TypeError, ValueError):
+                return False
+            return 0 <= index < total
+        return True
+
+    status_call = _UPLOAD_STATUS.match(path)
+    if method == "GET" and status_call:
+        node = _own_recent_upload_node(db, Node, user, status_call.group(1),
+                                       since)
+        return node is not None
+    return False
+
+
+def _body(req):
+    body = req.get_json(silent=True)
+    return body if isinstance(body, dict) else {}
+
+
+def _same_id(raw, stored):
+    """*raw* (from a request: an int, a digit string, or nothing) names the
+    same id as *stored* (an int or None)."""
+    if raw in (None, ""):
+        return stored is None
+    try:
+        return stored is not None and int(raw) == int(stored)
+    except (TypeError, ValueError):
+        return False
+
+
+def _upload_metadata(user, upload_id):
+    """The metadata its init wrote for *user*'s chunked upload *upload_id*
+    (routes/nodes.init_chunked_upload), or None: a malformed id, a folder
+    outside the account's, or no such upload."""
+    import json
+    from backend.routes import nodes as nodes_routes
+    if not isinstance(upload_id, str) \
+            or not nodes_routes._UPLOAD_ID_RE.fullmatch(upload_id):
+        return None
+    own = (nodes_routes.AUDIO_STORAGE_ROOT / "chunks" / str(user.id)).resolve()
+    folder = (own / upload_id).resolve()
+    if folder.parent != own:
+        return None
+    try:
+        metadata = json.loads((folder / "metadata.json").read_text())
+    except (OSError, ValueError):
+        return None
+    return metadata if isinstance(metadata, dict) else None
+
+
+def _own_recent_upload_node(db, node_model, user, node_id, since):
+    """*user*'s audio entry *node_id*, made since *since*, or None."""
+    try:
+        node = db.session.get(node_model, int(node_id))
+    except (TypeError, ValueError):
+        return None
+    if (node is None or node.user_id != user.id
+            or node.created_at is None or node.created_at < since
+            or node.transcription_status is None):
+        return None
+    return node
 
 
 def ai_replies_allowed(user, config=None):
@@ -184,7 +368,10 @@ def ai_replies_allowed(user, config=None):
 # sentence without a subscription, what still works). Without the paid
 # set an account makes no billed call at all (decided under Peter's "no
 # AI replies and background jobs", 2026-11-12): replies, transcription,
-# search by meaning, todo merges and poll drafts alike.
+# search by meaning, todo merges and poll drafts alike. The one exception
+# is a recording accepted while it had the paid set: it is transcribed
+# to the end (Peter, 2026-11-13: "User's recorded message should be
+# stored on Loore's servers, possibly even transcribed").
 _PAUSED = {
     "reply": ("Loore doesn't reply",
               "Loore doesn't reply on an account without a subscription.",
@@ -204,22 +391,51 @@ _PAUSED = {
              "Loore doesn't sync bookmarks from X on an account without a "
              "subscription.",
              "Your saved references stay."),
+    # A recording accepted while the account had AI replies, whose access
+    # ended before its reply (Peter, 2026-11-13): it is kept and
+    # transcribed, only the reply is skipped. Said aloud in Voice
+    # (utils/voice_refusals).
+    "recording": ("Loore doesn't reply",
+                  "Loore doesn't reply on an account without a "
+                  "subscription.",
+                  "Your recording is saved."),
 }
+
+# Why an account has no AI replies, as the texts name it: its
+# subscription ended, its last payment failed, its free month (an alpha
+# tester's) ended, or none of these.
+PAUSED_REASONS = ("ended", "past_due", "free_month", "none")
+_REASON_CLAUSES = {
+    "ended": "Your subscription has ended",
+    "past_due": "Your last payment didn't go through",
+    "free_month": "Your free month has ended",
+}
+
+
+def paused_reason(user):
+    """PAUSED_REASONS for *user* (None: "none")."""
+    status = getattr(user, "subscription_status", None) if user else None
+    if status in ("ended", "past_due"):
+        return status
+    if user is not None and getattr(user, "is_alpha_tester", False):
+        return "free_month"
+    return "none"
+
+
+def paused_message(reason, kind="reply"):
+    """The text for *reason* (PAUSED_REASONS) and *kind* (_PAUSED)."""
+    so, alone, works = _PAUSED.get(kind, _PAUSED["reply"])
+    clause = _REASON_CLAUSES.get(reason)
+    if clause is None:
+        return f"{alone} {works}"
+    return f"{clause}, so {so}. {works}"
 
 
 def subscription_required_message(user=None, kind="reply"):
     """Why the call is refused, for the web and the iPhone alike: it
     names the state, never where or how to pay (the iPhone app shows it
     as it is). The web adds its link to Settings."""
-    so, alone, works = _PAUSED.get(kind, _PAUSED["reply"])
-    status = getattr(user, "subscription_status", None) if user else None
-    if status == "ended":
-        return f"Your subscription has ended, so {so}. {works}"
-    if status == "past_due":
-        return f"Your last payment didn't go through, so {so}. {works}"
-    if user is not None and getattr(user, "is_alpha_tester", False):
-        return f"Your free month has ended, so {so}. {works}"
-    return f"{alone} {works}"
+    return paused_message(paused_reason(user), kind)
 
 
 def subscription_required_payload(user=None, kind="reply"):

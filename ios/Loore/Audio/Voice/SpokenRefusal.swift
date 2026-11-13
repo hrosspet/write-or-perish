@@ -20,11 +20,36 @@ enum SpokenRefusal: String, CaseIterable, Equatable, Sendable {
     case approvalWaiting = "approval_pending"
     /// The thread is too long for another reply (409 `thread_too_long`).
     case threadTooLong = "thread_too_long"
+    /// Payments on (#438): the account's access ended while the turn was recorded.
+    /// The recording is kept and transcribed, only the reply is skipped. One per
+    /// reason; the sentence is the text the entry and the screen show (it names
+    /// the state, never where or how to pay).
+    case subscriptionEnded = "subscription_required_ended"
+    case paymentFailed = "subscription_required_past_due"
+    case freeMonthEnded = "subscription_required_free_month"
+    case noSubscription = "subscription_required_none"
 
     /// The refusal a server code names (a recording's `warning_code`), or nil.
     init?(code: String?) {
         guard let code, let refusal = SpokenRefusal(rawValue: code) else { return nil }
         self = refusal
+    }
+
+    /// The access-ended refusal whose text is *message* (a 402 for a kept turn
+    /// carries it as its message), or nil.
+    init?(keptRecordingMessage message: String?) {
+        guard let message,
+              let refusal = Self.allCases.first(where: { $0.isAccessEnded && $0.text == message })
+        else { return nil }
+        self = refusal
+    }
+
+    /// A recording kept after the account's access ended (#438).
+    var isAccessEnded: Bool {
+        switch self {
+        case .subscriptionEnded, .paymentFailed, .freeMonthEnded, .noSubscription: return true
+        default: return false
+        }
     }
 
     /// What the clip says, and what the device says when there is no clip.
@@ -38,6 +63,14 @@ enum SpokenRefusal: String, CaseIterable, Equatable, Sendable {
             return "A change to your data is waiting for your approval. Approve or reject it on the screen to continue."
         case .threadTooLong:
             return ThreadLength.spokenText
+        case .subscriptionEnded:
+            return "Your subscription has ended, so Loore doesn't reply. Your recording is saved."
+        case .paymentFailed:
+            return "Your last payment didn't go through, so Loore doesn't reply. Your recording is saved."
+        case .freeMonthEnded:
+            return "Your free month has ended, so Loore doesn't reply. Your recording is saved."
+        case .noSubscription:
+            return "Loore doesn't reply on an account without a subscription. Your recording is saved."
         }
     }
 

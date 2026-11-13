@@ -93,3 +93,48 @@ test('no banner while payments are off', () => {
   render(<MemoryRouter><SubscriptionBanner /></MemoryRouter>);
   expect(screen.queryByText('Settings')).toBeNull();
 });
+
+// Peter, 2026-11-13: "yes, Ben should be able to export". The page offers
+// the download of the account's data beside signing out and deletion; the
+// rest of the app stays closed.
+describe('download your data', () => {
+  const api = require('../api').default;
+  let clicked;
+  beforeEach(() => {
+    clicked = [];
+    api.head = jest.fn(() => Promise.resolve({}));
+    api.defaults = { baseURL: '/api' };
+    jest.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function click() {
+      clicked.push(this.getAttribute('href'));
+    });
+  });
+  afterEach(() => {
+    HTMLAnchorElement.prototype.click.mockRestore();
+    delete api.head;
+    delete api.defaults;
+  });
+
+  const renderPage = () => {
+    mockUserCtx = { user: user(), setUser: jest.fn() };
+    mockGet.mockResolvedValue({ data: { subscription: sub(), levels: LEVELS } });
+    render(<MemoryRouter><SubscribePage /></MemoryRouter>);
+  };
+
+  test('the button downloads the export', async () => {
+    const { fireEvent, waitFor } = require('@testing-library/react');
+    renderPage();
+    fireEvent.click(screen.getByText('Download your data'));
+    await waitFor(() => expect(clicked).toEqual(['/api/export/threads']));
+    expect(api.head).toHaveBeenCalledWith('/export/threads');
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  test('a download that cannot start says so', async () => {
+    const { fireEvent } = require('@testing-library/react');
+    api.head = jest.fn(() => Promise.reject(new Error('offline')));
+    renderPage();
+    fireEvent.click(screen.getByText('Download your data'));
+    expect(await screen.findByRole('alert')).toHaveTextContent("The export couldn't start");
+    expect(clicked).toEqual([]);
+  });
+});

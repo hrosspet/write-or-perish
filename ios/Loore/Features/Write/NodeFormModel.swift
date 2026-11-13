@@ -611,6 +611,10 @@ final class NodeFormModel {
             initBody["parent_id"] = .optional(config.parentId)
             struct InitAnswer: Decodable { var node_id: Int }
             let started: InitAnswer = try await app.api.post(APIPath.uploadInit, json: .object(initBody))
+            // From the accepted init to the finalize, a recording in progress: the
+            // app does not switch to the not-let-in screen meanwhile (#438).
+            app.audio.beginUpload()
+            defer { app.audio.endUpload() }
             let handle = try FileHandle(forReadingFrom: file.url)
             defer { try? handle.close() }
             for index in 0..<total {

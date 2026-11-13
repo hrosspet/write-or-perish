@@ -22,6 +22,9 @@ final class AudioCenter {
 
     /// The Voice screen is on screen (the mini-player hides there).
     var voiceScreenVisible = false
+    /// Chunked audio uploads between their accepted init and their finalize
+    /// (`NodeFormModel.uploadInChunks`).
+    private(set) var uploadsInProgress = 0
     /// Listen-aloud: the node/profile/item whose audio is loading (spinner).
     private(set) var loadingSource: ChunkQueuePlayer.Source?
 
@@ -107,6 +110,38 @@ final class AudioCenter {
             return app?.environment.url(path: raw)
         }
     }
+
+    // MARK: A recording in progress (#438)
+
+    /// A Voice turn from its recording to its transcript, a dictation from its
+    /// recording to its transcript, or a chunked upload until its finalize. While
+    /// one is, the app does not switch to the not-let-in screen (`RootView`): the
+    /// server still takes that recording's chunks and finalize when the account
+    /// stops being let in, and the screen's going away would stop it.
+    var recordingInProgress: Bool {
+        if let voice = voiceController,
+           [.recording, .stopping, .transcribing].contains(voice.state) { return true }
+        // Read through the controllers (observed), and a form closed meanwhile
+        // (its controller gone) holds nothing.
+        if dictations.values.contains(where: {
+            [.recording, .finalizing].contains($0.ref?.state ?? .idle) }) { return true }
+        return uploadsInProgress > 0
+    }
+
+    private final class WeakDictation {
+        weak var ref: DictationController?
+        init(_ ref: DictationController) { self.ref = ref }
+    }
+    /// Dictations between their first chunk and their transcript.
+    @ObservationIgnored private var dictations: [ObjectIdentifier: WeakDictation] = [:]
+
+    func dictation(_ controller: DictationController, inProgress: Bool) {
+        let id = ObjectIdentifier(controller)
+        dictations[id] = inProgress ? WeakDictation(controller) : nil
+    }
+
+    func beginUpload() { uploadsInProgress += 1 }
+    func endUpload() { uploadsInProgress = max(0, uploadsInProgress - 1) }
 
     // MARK: Voice conversation
 
