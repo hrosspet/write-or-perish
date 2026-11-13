@@ -588,6 +588,31 @@ def test_a_chunked_load_resumes_after_a_killed_run(world, monkeypatch):
         assert _snapshot(User.query.filter_by(twitter_id="1001").one().id) == got
 
 
+def test_two_loads_into_one_account_run_one_after_the_other(world, monkeypatch):
+    """Two loads started at once (a double click, or the admin and the
+    person's Yes): the later one waits for the earlier, then finds every
+    entry there and adds nothing twice."""
+    _bundle(world, monkeypatch)
+    prod = world.prod()
+    with prod.app_context():
+        first, _ = _start("alice", admin_id=None)
+        earlier = db.session.get(PrefillBundleLoad, first.id)
+        second = PrefillBundleLoad(
+            user_id=earlier.user_id, x_id="1001", handle="alice", origin="self",
+            bundle_sha256=earlier.bundle_sha256, nodes_total=earlier.nodes_total,
+            heartbeat_at=datetime.utcnow())
+        db.session.add(second)
+        db.session.commit()
+        second_id = second.id
+        assert pbl.run_load(second_id) == "busy"
+        assert _run_until_done(first.id) == "done"
+        assert _run_until_done(second_id) == "done"
+        later = db.session.get(PrefillBundleLoad, second_id)
+        assert (later.created_count, later.skipped_count, later.profiles_count) == (0, 8, 0)
+        assert Node.query.filter_by(human_owner_id=first.user_id).count() == 8
+        assert UserProfile.query.filter_by(user_id=first.user_id).count() == 2
+
+
 def test_runs_killed_again_and_again_stop_the_load(world, monkeypatch):
     _bundle(world, monkeypatch)
     prod = world.prod()

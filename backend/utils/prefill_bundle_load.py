@@ -28,8 +28,10 @@ entries in chunks (each chunk with the map of dumped id -> new id, so a
 resumed run needs nothing in memory), then the links between entries in
 chunks. A run stops after RUN_SECONDS and sends the next; a run that
 dies is resumed by the beat (``stalled_load_ids``) once its heartbeat is
-STALE_AFTER old. Entries already in the account (same source key) are
-not written again, so loading a bundle twice adds nothing twice.
+STALE_AFTER old. Entries already in the account (same source key, or
+for an entry without one the same author, type and time) are not
+written again, so loading a bundle twice adds nothing twice; two loads
+into one account run one after the other.
 
 Content is encrypted on write with this server's key, one data key per
 chunk, as imports do (backend/utils/dump_rows.py). Nothing here
@@ -466,8 +468,22 @@ def _remove_quietly(path):
 
 
 def _claim(load_id):
-    """Take the load for this run, or None when another run holds it."""
+    """Take the load for this run, or None when another run holds it or
+    an earlier load into the same account is still under way (two loads
+    started at once, by a double click or the admin and the person's
+    Yes, run one after the other; the second then finds the entries
+    there and adds nothing twice)."""
     now = _now()
+    user_id = db.session.query(PrefillBundleLoad.user_id).filter(
+        PrefillBundleLoad.id == load_id).scalar()
+    if user_id is None:
+        return None
+    earlier = db.session.query(PrefillBundleLoad.id).filter(
+        PrefillBundleLoad.user_id == user_id,
+        PrefillBundleLoad.id < load_id,
+        PrefillBundleLoad.status.in_(ACTIVE)).first()
+    if earlier is not None:
+        return None
     token = uuid4().hex
     taken = db.session.execute(
         update(PrefillBundleLoad).where(
@@ -633,6 +649,26 @@ def _load_header(load, user, header, token):
     db.session.commit()
 
 
+def _existing_in_account(uid, batch):
+    """The account's entries a chunk may already hold (a load run again,
+    or a pre-fill made here before): {source key: id} for keyed entries,
+    {(author id, type, time): id} for the others. Metadata only, bounded
+    by the chunk."""
+    keys = [nd["source_key"] for nd in batch if nd.get("source_key")]
+    existing = dict(db.session.query(Node.source_key, Node.id).filter(
+        Node.human_owner_id == uid, Node.source_key.in_(keys))) if keys else {}
+    times = {dump_rows.dt(nd.get("created_at")) for nd in batch
+             if not nd.get("source_key")} - {None}
+    unkeyed = {}
+    if times:
+        for nid, author, ntype, at in db.session.query(
+                Node.id, Node.user_id, Node.node_type, Node.created_at).filter(
+                Node.human_owner_id == uid, Node.source_key.is_(None),
+                Node.created_at.in_(times)):
+            unkeyed.setdefault((author, ntype, at), nid)
+    return existing, unkeyed
+
+
 def _node_chunk(load, uid, path, token, chunk, author_cache, prompt_cache):
     """Pass 1: write the next chunk of entries. False when none are left."""
     from backend.utils.encryption import new_dek
@@ -646,28 +682,31 @@ def _node_chunk(load, uid, path, token, chunk, author_cache, prompt_cache):
         db.session.commit()
         return False
     dump_username = (header.get("user") or {}).get("username")
-    keys = [nd["source_key"] for nd in batch if nd.get("source_key")]
-    existing = dict(db.session.query(Node.source_key, Node.id).filter(
-        Node.human_owner_id == uid, Node.source_key.in_(keys))) if keys else {}
+    existing, unkeyed = _existing_in_account(uid, batch)
     dek = None
     created = skipped = 0
     for nd in batch:
         key = nd.get("source_key")
-        if key and key in existing:
+        author = _author_id(nd, dump_username, uid, author_cache)
+        # An entry without a key (a model's reply) is the same entry when
+        # its author, type and time are: metadata, no content.
+        same = (author, nd.get("node_type", "user"), dump_rows.dt(nd.get("created_at")))
+        found = existing.get(key) if key else unkeyed.get(same)
+        if found is not None:
             db.session.add(PrefillBundleNodeMap(
-                load_id=load.id, old_id=nd["id"], new_id=existing[key],
+                load_id=load.id, old_id=nd["id"], new_id=found,
                 created=False, user_id=uid))
             skipped += 1
             continue
         if dek is None and nd.get("privacy_level", "private") != "public":
             dek = new_dek() or False   # False: encryption is off here
-        node = dump_rows.new_node(
-            nd, uid, _author_id(nd, dump_username, uid, author_cache),
-            dek=dek or None)
+        node = dump_rows.new_node(nd, uid, author, dek=dek or None)
         db.session.add(node)
         db.session.flush()
         if key:
             existing[key] = node.id
+        elif same[2] is not None:
+            unkeyed[same] = node.id
         db.session.add(PrefillBundleNodeMap(
             load_id=load.id, old_id=nd["id"], new_id=node.id, created=True,
             user_id=uid))
