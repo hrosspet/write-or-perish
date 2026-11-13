@@ -8,6 +8,9 @@ enum MagicLink {
         "link_already_used": "This sign-in link has already been used. Please request a new one.",
         "confirm_needs_account": "No Loore account signs in that way yet. Sign in to the account you asked from, not with the address you are confirming.",
         "x_try_again": "Sign in with X did not finish in this browser. Please try again.",
+        // Back from X without a sign-in (#704): Cancel on X's page, or an error.
+        "x_cancelled": "Sign in with X was cancelled.",
+        "x_failed": "Sign in with X did not finish. Please try again.",
     ]
 
     static let genericFailure = "That link didn't sign you in. Please request a new one."

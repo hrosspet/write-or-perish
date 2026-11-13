@@ -248,7 +248,7 @@ Common page chrome for app pages: centered column, `max-width` 720px (Log, Refer
 - Log card fields: `id, preview, node_type, child_count, created_at, pinned_at, username, human_owner_username, llm_model, origin, has_original_audio, prompt_key, thread_name, thread_root_id, newest_node_id, can_rename`.
 
 #### Thread `/node/:id` (member) — `components/NodeDetail.js` via `NodeDetailWrapper` (keyed by id → full remount per node)
-- Fetch: `GET /nodes/{id}`; 404/403 → "This node doesn't exist, was deleted, or isn't shared with you."; other → "Error fetching node details."; `GET /nodes/{id}/resolve-quotes` when content has `{quote:ID}`/`{quote_ext:ID}`. Scrolls to the focal node once.
+- Fetch: `GET /nodes/{id}`; 404/403 → "This entry isn't shared with you. It may be private, or it may have been deleted."; other → "Error fetching node details."; `GET /nodes/{id}/resolve-quotes` when content has `{quote:ID}`/`{quote_ext:ID}`. Scrolls to the focal node once.
 - Layout top→bottom:
   1. Row: H2 **"Thread"** + top-right controls column (owner, `ai_usage ≠ none`, not a public thread): **Voice Mode** (mic icon; `POST /voice/from-node/{id} {model}` → `/voice?resume=…&parent=…` or `/voice?parent=…`), **Relevant tweets / Read / Read further** (admin; `POST /read/from-node/{id}`), **Auto-generate** pill (craft only; `localStorage.loore_auto_generate`).
   2. `SemanticNeighbors` (admin-only, fixed right panel on ≥1200px).

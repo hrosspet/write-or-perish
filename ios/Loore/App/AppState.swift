@@ -215,6 +215,9 @@ final class AppState {
     func didLoad(_ newUser: CurrentUser) {
         user = newUser
         phase = .signedIn
+        // Waiting for approval, the account cannot open the page its
+        // sign-in link pointed to: dropped, as on the web (#704).
+        if !newUser.approved { pendingLandingPath = nil }
         if let craft = newUser.craftMode {
             defaults.set(craft, forKey: DefaultsKey.craftMode)
         }
