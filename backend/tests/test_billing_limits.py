@@ -135,6 +135,36 @@ def test_syncs_an_hour_are_limited(app, gateway):
     assert c.get("/api/billing").status_code == 200
 
 
+def test_requests_arriving_together_are_counted_one_after_the_other(
+        app, monkeypatch):
+    """Two requests of one account at the same moment: the count and the
+    new row are one step under the account's row lock, so the second is
+    counted after the first's row. Simulated here: while this request
+    waits for the lock, the other one (holding it) adds its row and
+    commits. sqlite ignores the lock itself; test_billing_limits_postgres
+    runs real threads against Postgres."""
+    from backend.utils import billing_limits
+    u = _user()
+    for _ in range(2):   # the limit is 3 here
+        _db.session.add(BillingRequest(user_id=u.id, kind="checkout"))
+    _db.session.commit()
+    real_lock = billing_limits._lock_account
+    order = []
+
+    def other_request_first(user):
+        order.append("lock asked")
+        _db.session.add(BillingRequest(user_id=user.id, kind="checkout"))
+        _db.session.commit()   # the other request's row, then its lock ends
+        real_lock(user)
+        order.append("lock held")
+    monkeypatch.setattr(billing_limits, "_lock_account", other_request_first)
+
+    with pytest.raises(billing_limits.TooManyBillingRequests):
+        billing_limits.check_and_count(u, "checkout")
+    assert order == ["lock asked", "lock held"]
+    assert BillingRequest.query.filter_by(user_id=u.id).count() == 3
+
+
 def test_the_counts_go_with_the_account(app, gateway):
     from backend.utils.account_deletion import references_to_user
     u = _user()

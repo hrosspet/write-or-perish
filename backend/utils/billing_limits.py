@@ -41,18 +41,32 @@ def limit_for(kind, config=None):
     return _DEFAULTS[kind] if value is None else int(value)
 
 
+def _lock_account(user):
+    """Lock the account's row until this transaction ends (the idiom of
+    stripe_billing.create_checkout and settle_subscription), so two
+    requests of one account count and add one after the other. sqlite
+    ignores it; Postgres waits."""
+    from backend.models import User
+    db.session.query(User).filter(User.id == user.id).with_for_update().one()
+
+
 def check_and_count(user, kind, config=None, now=None):
     """Raise TooManyBillingRequests when *user* made the hour's *kind*
-    requests already; otherwise count this one. Commits the count, so a
-    request that then fails at Stripe counts too."""
+    requests already; otherwise count this one. One step under the
+    account's row lock: requests of one account that arrive together are
+    counted one after the other, never all against the same count.
+    Commits the count (which ends the lock), so a request that then fails
+    at Stripe counts too."""
     from backend.models import BillingRequest
     now = now or datetime.utcnow()
     since = now - timedelta(hours=1)
+    _lock_account(user)
     made = db.session.query(func.count(BillingRequest.id)).filter(
         BillingRequest.user_id == user.id,
         BillingRequest.kind == kind,
         BillingRequest.created_at >= since).scalar() or 0
     if made >= limit_for(kind, config):
+        db.session.rollback()   # ends the lock at once
         raise TooManyBillingRequests(kind)
     db.session.add(BillingRequest(user_id=user.id, kind=kind,
                                   created_at=now))
