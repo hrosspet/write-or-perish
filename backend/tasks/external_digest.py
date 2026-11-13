@@ -40,9 +40,9 @@ from backend.utils.refusal_backoff import REFUSED_REF
 from backend.utils.privacy import account_allows_ai
 from backend.utils.llm_batch import (
     BATCH_JOB_MAX_AGE, apply_batch_key_override, batch_check_and_collect,
-    batch_submit, blocked_items, delete_collected_batch_files,
-    drop_openai_batch,
+    batch_submit, blocked_items, drop_openai_batch,
 )
+from backend.utils import anthropic_batch_deletion
 from backend.utils.timefmt import user_local_hour
 
 from backend.utils.activity import in_use_user_ids
@@ -350,6 +350,9 @@ def _submit_digest_batch(users):
         ]
         db.session.add(ExternalDigestBatchJob(
             provider_key=provider_key, batch_id=batch_id, items=items))
+        # Deleted at Anthropic once the job is no longer pending (#693).
+        anthropic_batch_deletion.register(
+            provider_key, batch_id, ExternalDigestBatchJob.__tablename__)
         submitted += len(items)
     db.session.commit()
     # batch_submit logs (not raises) a provider's failure; those users
@@ -476,8 +479,10 @@ def _collect_digest_batches():
         job.status = "collected"
         job.collected_at = now
         db.session.commit()
-        # Saved: the batch's files at OpenAI can go (#667).
-        delete_collected_batch_files(results, keys)
+        # Saved: the batch's files at OpenAI (#667) and the batch at
+        # Anthropic (#693) can go.
+        anthropic_batch_deletion.delete_collected_batches(
+            results, keys, ExternalDigestBatchJob.__tablename__)
         collected += 1
     return {"collected": collected, "abandoned": abandoned}
 
