@@ -208,6 +208,14 @@ class User(db.Model, UserMixin):
     # A yes clears it in the same UPDATE that checks it, so one question
     # starts at most one rebuild; a newer question replaces it.
     profile_rebuild_offer_id = db.Column(db.String(32), nullable=True)
+    # The date of the oldest entry an import changed while the user's
+    # profile window work was in the Batch queue or being rendered (#639).
+    # A set in flight cannot take the import's re-tip (#625), so it waits
+    # here and is applied once nothing of the user's is in flight
+    # (tasks/exports.apply_waiting_import_date): the next advance, the
+    # seeder's gate, or the synchronous check. Several imports keep the
+    # oldest date. Only applying it clears it; a collected window never does.
+    profile_import_retip_from = db.Column(db.DateTime, nullable=True)
     # The user agreed that their writing may reach both providers' models
     # for a large profile build (Peter, 2026-11-05). Set only by the user's
     # own answer to the question of #599 (the dialog, or Account), through

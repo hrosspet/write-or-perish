@@ -1828,12 +1828,21 @@ def test_an_import_inside_a_sets_first_window_retips_its_base(world):
     assert ex.profile_update_base(u.id).id == copy.id
 
 
-def test_an_import_while_an_advance_renders_is_read_by_a_rebuild(
+def _covering(items, when):
+    """The window items whose range holds ``when``."""
+    return [i for i in items
+            if (i["start"] is None or pw._dt(i["start"]) < when)
+            and pw._dt(i["cutoff"]) >= when]
+
+
+def test_an_import_while_an_advance_renders_waits_and_retips_the_set(
         world, redis, monkeypatch):
     """Review of #637: an advance renders its windows into the set it chose
-    for minutes before anything is in the batch. An import that arrives
-    then is not re-tipped into a new set the advance would leave behind:
-    the rebuild from scratch, as before, and it reads the import."""
+    for minutes before anything is in the batch, so an import that arrives
+    then is not re-tipped into a new set the advance would leave behind.
+    Since #639 its date waits until the advance's windows are collected,
+    and the set is then re-tipped from it: a window reads the import, and
+    nothing is rebuilt from scratch."""
     u = _user()
     base = _profile(u, gen_type="update", cutoff=T0, units=WINDOW_UNITS)
     rows = _set_of(u, 6, base=base)
@@ -1853,17 +1862,22 @@ def test_an_import_while_an_advance_renders_is_read_by_a_rebuild(
     monkeypatch.setattr(pw, "_render_windows", import_while_rendering)
     before = len(_items("window"))
     _build(world, u, rounds=10)
-    assert race["action"] == "full"
     inside = race["inside"]
-    covering = [i for i in _items("window")[before:]
-                if (i["start"] is None or pw._dt(i["start"]) < inside)
-                and pw._dt(i["cutoff"]) >= inside]
-    assert covering                     # a window read the imported entry
-    assert db.session.get(User, u.id).profile_needs_full_regen is False
+    later = _items("window")[before:]
+    assert _covering(later, inside)      # a window read the imported entry
+    assert all(i["start"] is not None for i in later)   # not from scratch
+    assert race["action"] == "deferred"
+    u = db.session.get(User, u.id)
+    assert u.profile_needs_full_regen is False
+    assert u.profile_import_retip_from is None
 
 
-def test_an_import_while_a_profile_task_runs_rebuilds_from_scratch(
+def test_a_synchronous_tasks_guard_alone_does_not_hold_the_retip(
         world, monkeypatch):
+    """A profile task that holds the user's guard without having claimed
+    a window build (a synchronous task chooses its base when it starts,
+    and claims the build before it renders any window): the set is
+    re-tipped at once (#639; before, a rebuild from scratch)."""
     u = _user()
     rows = _set_of(u, 6)
     _corpus_for(world, rows)
@@ -1877,17 +1891,462 @@ def test_an_import_while_a_profile_task_runs_rebuilds_from_scratch(
         monkeypatch.setattr(module, "_is_task_stale", lambda user: False)
     action, _v = ex.revert_profile_for_import(
         u.id, rows[3].source_data_cutoff - timedelta(hours=2))
-    assert action == "full" and u.profile_needs_full_regen is True
+    assert action == "revert" and u.profile_needs_full_regen is False
 
 
-def test_an_import_while_the_set_is_in_flight_rebuilds_from_scratch(world):
+def test_an_import_while_an_advance_has_claimed_the_build_waits(
+        world, monkeypatch):
+    """An advance dispatched and not yet run (its guard, and the claim's
+    pending flag): the date waits, and that advance applies it before it
+    chooses its set (#639)."""
+    u = _user()
+    rows = _set_of(u, 6)
+    _corpus_for(world, rows)
+    _finish(world, u)
+    u.profile_generation_task_id = "t-claimed"
+    u.profile_batch_pending = True
+    db.session.commit()
+    for module in (ex, pw._exports):
+        monkeypatch.setattr(module, "_is_task_stale", lambda user: False)
+    inside = _import_inside(world, rows, 3)
+    action, _v = ex.revert_profile_for_import(u.id, inside)
+    db.session.commit()
+    assert pw.advance(u.id, "t-claimed") == "submitted"
+    windows = [i for i in _items("window") if i["set"] != "set1"]
+    assert windows and _covering(windows, inside)
+    # Read from the last window that ends before the import, not from
+    # scratch.
+    assert {i["start"] for i in windows} == {
+        rows[2].source_data_cutoff.isoformat()}
+    assert action == "deferred"
+    u = db.session.get(User, u.id)
+    assert u.profile_import_retip_from is None
+    assert u.profile_needs_full_regen is False
+
+
+def test_an_import_while_the_set_is_in_flight_waits_for_it(world):
     """A set with work in the batch does not see an import (a known limit
-    of #545): the rebuild from scratch, as before #625."""
+    of #545): the date waits on the user instead of flagging a rebuild
+    from scratch (#639), and the oldest of several imports' dates is
+    kept."""
     u = _user()
     rows, _final = _update_in_flight(world, u)
-    action, _v = ex.revert_profile_for_import(
-        u.id, rows[2].source_data_cutoff - timedelta(hours=2))
-    assert action == "full" and u.profile_needs_full_regen is True
+    later = rows[3].source_data_cutoff - timedelta(hours=2)
+    older = rows[2].source_data_cutoff - timedelta(hours=2)
+    assert ex.revert_profile_for_import(u.id, later)[0] == "deferred"
+    assert ex.revert_profile_for_import(u.id, older)[0] == "deferred"
+    assert ex.revert_profile_for_import(u.id, later)[0] == "deferred"
+    db.session.commit()
+    u = db.session.get(User, u.id)
+    assert u.profile_needs_full_regen is False
+    assert u.profile_import_retip_from == older
+
+
+# ── 15b. an import while the set is in flight (#639) ─────────────────────
+
+def _import_hand_off(monkeypatch, user, earliest):
+    """The import's profile hand-off (routes/import_data), as every
+    importer calls it. The seed it schedules is not run, and the import's
+    quiet period (#598) is over at once."""
+    from backend.routes import import_data
+    monkeypatch.setattr(pb.seed_profile_batch_for_user, "apply_async",
+                        MagicMock(), raising=False)
+    import_data._hand_off_profile_update_after_import(user, earliest, 1000)
+    user = db.session.get(User, user.id)
+    user.profile_import_quiet_from = None
+    db.session.commit()
+    return user
+
+
+def test_an_import_during_a_first_build_in_flight_is_read_after_it(
+        world, monkeypatch):
+    """#639: a first build's windows are in the batch when an import adds
+    an entry inside the range they cover. They were rendered before it, so
+    none of them reads it. Once they are collected, the set is re-tipped
+    from the entry's date: a window reads it, the windows that end before
+    it are kept, and nothing is rebuilt from scratch."""
+    world.corpus = _windows_corpus(4)
+    u = _user()
+    _advance(u)                               # the first build goes out
+    first = _items("window")
+    assert len(first) >= 3 and not _rows(u, "window")
+    inside = pw._dt(first[2]["cutoff"]) - timedelta(minutes=30)
+    world.corpus.rows = sorted(world.corpus.rows + [(inside, 1000)])
+    u = _import_hand_off(monkeypatch, u, inside)
+    _build(world, u, rounds=8)
+    later = _items("window")[len(first):]
+    assert _covering(later, inside)           # a window read the import
+    assert all(i["start"] is not None for i in later)   # not from scratch
+    assert {i["start"] for i in later if i.get("outcome") == "saved"} == {
+        first[1]["cutoff"]}                   # windows 1-2 are kept
+    final = _items("final")[-1]
+    assert final["set"] != first[0]["set"]
+    assert pw._visible_profile(u.id).window_set == final["set"]
+    u = db.session.get(User, u.id)
+    assert u.profile_import_retip_from is None
+    assert u.profile_needs_full_regen is False
+
+
+def test_the_import_result_says_the_profile_waits_for_the_imports(
+        world, monkeypatch):
+    """A control (passes on main, where the rebuild flag said it): the
+    import's result still tells the user that the profile is built from
+    the import once the imports stop, when its date waits for the update
+    window in flight (#598, #639)."""
+    from backend.routes import import_data
+    u = _user()
+    rows, _final = _update_in_flight(world, u)
+    monkeypatch.setattr(pb.seed_profile_batch_for_user, "apply_async",
+                        MagicMock(), raising=False)
+    import_data._hand_off_profile_update_after_import(
+        u, rows[2].source_data_cutoff - timedelta(hours=2), 1000)
+    assert import_data._profile_waits_for_imports(u.id) is True
+
+
+def test_a_first_builds_window_collected_after_an_import_leaves_it_read(
+        world, monkeypatch):
+    """#639, the issue's second half: a first build whose last window is
+    sent again (its first result was missing) when an import adds an entry
+    inside an earlier window. Before, the import flagged a rebuild from
+    scratch and the window collected next, a window of the first build,
+    cleared the flag: the set's final merged windows that never read the
+    entry, and nothing told the user."""
+    world.corpus = _windows_corpus(4)
+    u = _user()
+    _advance(u)
+    first = _items("window")
+    lost = first[-1]["custom_id"]
+    good = world.provider.respond
+    world.provider.respond = lambda cid, req: (
+        None if cid == lost else good(cid, req))
+    _poll()
+    assert len(_rows(u, "window")) == len(first) - 1
+    _advance(u)                               # the last window again
+    assert [i for i in _items("window") if "outcome" not in i]
+    inside = pw._dt(first[1]["cutoff"]) - timedelta(minutes=30)
+    world.corpus.rows = sorted(world.corpus.rows + [(inside, 1000)])
+    u = _import_hand_off(monkeypatch, u, inside)
+    before = len(_items("window"))
+    _build(world, u, rounds=8)
+    later = _items("window")[before:]
+    assert _covering(later, inside)           # a window read the import
+    assert all(i["start"] is not None for i in later)   # not from scratch
+    finals = [f for f in _finals(u) if f.window_set]
+    assert finals
+    final_set = finals[-1].window_set
+    # The final in use merges windows that read the import.
+    assert final_set == pw._visible_profile(u.id).window_set
+    assert _covering([i for i in later if i["set"] == final_set], inside)
+    assert db.session.get(User, u.id).profile_needs_full_regen is False
+
+
+def _many_rows(world, rows, units=30_000):
+    """A corpus of one row of ``units`` per window of ``rows``: re-read,
+    each row is about a window of its own."""
+    world.corpus = Corpus(0)
+    world.corpus.rows = [(r.source_data_cutoff, units) for r in rows]
+
+
+def test_a_second_import_during_a_partial_rebuild_retips_after_it(world):
+    """#639, the issue's first half: an import re-tips a set (#625), and
+    while the re-tipped set's windows are in the batch a second import
+    lands later in the writing. Its date waits; once the windows are
+    collected the set is re-tipped from it, keeping the windows the first
+    re-tip read before it. Nothing is rebuilt from scratch. Before, the
+    import was compared with the set's saved windows only, which end
+    before it: "nothing to invalidate", and the windows in flight, rendered
+    before it, never read it."""
+    u = _user()
+    base = _profile(u, gen_type="update", cutoff=T0, units=WINDOW_UNITS)
+    rows = _set_of(u, 8, base=base)
+    _many_rows(world, rows)
+    _finish(world, u)
+    first = rows[2].source_data_cutoff - timedelta(hours=12)
+    world.corpus.rows = sorted(world.corpus.rows + [(first, 1000)])
+    action, tip = ex.revert_profile_for_import(u.id, first)
+    db.session.commit()
+    assert action == "revert"
+    before = len(_items("window"))
+    _advance(u)                           # the re-tipped set's windows
+    retip_windows = _items("window")[before:]
+    assert len(retip_windows) >= 3
+    assert {i["set"] for i in retip_windows} == {tip.window_set}
+    second = rows[5].source_data_cutoff - timedelta(hours=12)
+    world.corpus.rows = sorted(world.corpus.rows + [(second, 1000)])
+    action, _v = ex.revert_profile_for_import(u.id, second)
+    db.session.commit()
+    before = len(_items("window"))
+    _build(world, u, rounds=8)
+    later = _items("window")[before:]
+    assert _covering(later, second)       # a window read the second import
+    assert all(i["start"] is not None
+               and pw._dt(i["start"]) >= rows[2].source_data_cutoff
+               for i in later)            # what the first re-tip read stays
+    assert action == "deferred"
+    final_set = pw._visible_profile(u.id).window_set
+    assert final_set not in ("set1", tip.window_set)
+    kept = pw.set_windows(u.id, final_set)
+    # The windows before the second import: the first re-tip's copies and
+    # the windows it read again, kept as they are.
+    assert [w.source_data_cutoff for w in kept[:2]] == [
+        r.source_data_cutoff for r in rows[:2]]
+    assert any(w.source_data_cutoff > first
+               and w.source_data_cutoff < second for w in kept)
+    u = db.session.get(User, u.id)
+    assert u.profile_needs_full_regen is False
+    assert u.profile_import_retip_from is None
+
+
+def test_the_seeders_gate_applies_an_import_date_that_waited(world):
+    """The advance that would apply the date may not run (it waited for
+    the imports to stop, or for the spend cap): the seeder's gate applies
+    it, and opens for the re-tipped set's unread range."""
+    u = _user()
+    rows = _set_of(u, 6)
+    _corpus_for(world, rows)
+    _finish(world, u)
+    inside = _import_inside(world, rows, 3)
+    u.profile_import_retip_from = inside   # waited for windows since collected
+    db.session.commit()
+    assert pb._should_seed(u, ignore_backoff=True)
+    u = db.session.get(User, u.id)
+    assert u.profile_import_retip_from is None
+    tip = ex.profile_update_base(u.id)
+    assert tip.window_set != "set1"
+    assert tip.source_data_cutoff == rows[2].source_data_cutoff
+
+
+def test_the_synchronous_check_applies_an_import_date_that_waited(
+        app, world, monkeypatch):
+    """An account off the batch path: the hourly synchronous check applies
+    the date and starts the update, as the import's hand-off would have."""
+    app.config["PROFILE_USE_BATCH"] = False
+    u = _user()
+    rows = _set_of(u, 6)
+    _corpus_for(world, rows)
+    _finish(world, u)
+    inside = _import_inside(world, rows, 3)
+    u.profile_import_retip_from = inside
+    u.profile_force_batch = False         # the advance pinned it
+    db.session.commit()
+    trigger = MagicMock(return_value="t-sync")
+    monkeypatch.setattr(ex, "maybe_trigger_profile_update", trigger)
+    assert ex.maybe_trigger_incremental_profile_update(u) == "t-sync"
+    assert trigger.call_args.kwargs == {"force_full_regen": False}
+    assert db.session.get(User, u.id).profile_import_retip_from is None
+    assert ex.profile_update_base(u.id).window_set != "set1"
+
+
+def test_an_import_date_without_a_profile_version_is_dropped(world):
+    """Nothing was saved of the build the date waited for (every window
+    failed): the next build is from scratch and reads everything anyway,
+    so the date flags nothing."""
+    u = _user()
+    u.profile_import_retip_from = T0
+    db.session.commit()
+    assert ex.apply_waiting_import_date(u) == "none"
+    assert u.profile_import_retip_from is None
+    assert u.profile_needs_full_regen is False
+
+
+def test_an_import_date_under_a_flagged_rebuild_is_dropped(world):
+    """A rebuild from scratch is already flagged (Build profile, the
+    ladder): it reads everything, so the date re-tips nothing."""
+    u = _user()
+    rows = _set_of(u, 6)
+    _corpus_for(world, rows)
+    _finish(world, u)
+    u.profile_import_retip_from = _import_inside(world, rows, 3)
+    u.profile_needs_full_regen = True
+    db.session.commit()
+    assert ex.apply_waiting_import_date(u) == "none"
+    assert u.profile_import_retip_from is None
+    assert ex.profile_update_base(u.id).window_set == "set1"
+
+
+# Review of #673.
+
+def _failing_retip(monkeypatch, user):
+    """The re-tip of ``user``'s set raises (a version that cannot be
+    decrypted, say); every other user's runs. Patched in every copy of
+    the exports module the pipeline may call (``ex`` can be another
+    object than ``pb._exports`` after other test files reloaded the
+    package)."""
+    for module in {id(m): m for m in (ex, pb._exports, pw._exports)}.values():
+        real = module._retip_window_set
+
+        def retip(user_id, set_id, earliest, real=real):
+            if user_id == user.id:
+                raise RuntimeError("synthetic decrypt failure")
+            return real(user_id, set_id, earliest)
+
+        monkeypatch.setattr(module, "_retip_window_set", retip)
+
+
+def test_a_failing_retip_does_not_stop_the_seeder_for_the_others(
+        world, monkeypatch):
+    """User A's waiting re-tip raises in the hourly seeder: A's date stays
+    (rolled back), the failure is recorded on A, and the users after A are
+    still seeded, while the requests built for the users before A still
+    go out."""
+    world.corpus = Corpus(50)                    # 50k units: one chunk
+    monkeypatch.setattr(pb._exports, "count_remaining_units",
+                        lambda uid, created_after=None, created_before=None:
+                        world.corpus.count(uid, created_after,
+                                           created_before))
+    before = _user(profile_needs_full_regen=True)
+    a = _user()
+    rows = _set_of(a, 3)
+    inside = rows[1].source_data_cutoff - timedelta(hours=12)
+    a.profile_import_retip_from = inside
+    db.session.commit()
+    after = _user(profile_needs_full_regen=True)
+    _failing_retip(monkeypatch, a)
+    pb._seed_profile_batches(users=[before, a, after], ignore_backoff=True)
+    assert {i["user_id"] for i in _items()} == {before.id, after.id}
+    a = db.session.get(User, a.id)
+    assert a.profile_import_retip_from == inside
+    assert a.profile_seed_error.startswith(pb._exports.RETIP_FAILED_NOTE)
+    assert {r.window_set for r in _rows(a, "window")} == {"set1"}
+
+
+def test_a_failing_retip_keeps_the_date_in_the_advance_and_the_sync_check(
+        app, world, monkeypatch):
+    u = _user()
+    rows = _set_of(u, 6)
+    _corpus_for(world, rows)
+    _finish(world, u)
+    inside = _import_inside(world, rows, 3)
+    u.profile_import_retip_from = inside
+    db.session.commit()
+    _failing_retip(monkeypatch, u)
+    n = len(world.provider.submits)
+    assert _advance(u) == "error"
+    assert len(world.provider.submits) == n      # nothing over the old set
+    app.config["PROFILE_USE_BATCH"] = False
+    u = db.session.get(User, u.id)
+    u.profile_force_batch = False
+    db.session.commit()
+    assert ex.maybe_trigger_incremental_profile_update(u) is None
+    u = db.session.get(User, u.id)
+    assert u.profile_import_retip_from == inside
+    assert u.profile_seed_error.startswith(pb._exports.RETIP_FAILED_NOTE)
+
+
+def test_a_waiting_date_written_meanwhile_is_kept_when_older(world):
+    """Two hand-offs at once: the other one committed an older date after
+    this one loaded the user. The date is read again under the row lock,
+    so the older one stays."""
+    u = _user()
+    rows, _final = _update_in_flight(world, u)
+    older = rows[1].source_data_cutoff - timedelta(hours=2)
+    newer = rows[3].source_data_cutoff - timedelta(hours=2)
+    u = db.session.get(User, u.id)
+    assert u.profile_import_retip_from is None          # loaded: None
+    db.session.execute(User.__table__.update()
+                       .where(User.__table__.c.id == u.id)
+                       .values(profile_import_retip_from=older))
+    assert ex.revert_profile_for_import(u.id, newer)[0] == "deferred"
+    db.session.commit()
+    db.session.expire_all()
+    assert db.session.get(User, u.id).profile_import_retip_from == older
+
+
+def test_the_applier_reads_the_date_again_under_the_lock(world):
+    """Another pass applied the date after this one loaded the user: no
+    second re-tip."""
+    u = _user()
+    rows = _set_of(u, 6)
+    _corpus_for(world, rows)
+    _finish(world, u)
+    u.profile_import_retip_from = _import_inside(world, rows, 3)
+    db.session.commit()
+    assert u.profile_import_retip_from is not None       # loaded: set
+    db.session.execute(User.__table__.update()
+                       .where(User.__table__.c.id == u.id)
+                       .values(profile_import_retip_from=None))
+    assert ex.apply_waiting_import_date(u) is None
+    assert {r.window_set for r in _rows(u, "window")} == {"set1"}
+
+
+def test_the_deferred_seed_after_the_quiet_period_applies_the_date(
+        world, monkeypatch):
+    """The realistic order: the first build's windows come back while the
+    import's quiet period runs, so the advance waits; the import's
+    deferred seed, after the quiet period, applies the date and starts the
+    build that reads the import."""
+    world.corpus = _windows_corpus(4)
+    u = _user()
+    _advance(u)
+    first = _items("window")
+    inside = pw._dt(first[2]["cutoff"]) - timedelta(minutes=30)
+    world.corpus.rows = sorted(world.corpus.rows + [(inside, 1000)])
+    from backend.routes import import_data
+    monkeypatch.setattr(pb.seed_profile_batch_for_user, "apply_async",
+                        MagicMock(), raising=False)
+    import_data._hand_off_profile_update_after_import(u, inside, 1000)
+    _poll()                                     # collected; advance due
+    u = db.session.get(User, u.id)
+    assert pw.advance(u.id, u.profile_generation_task_id) == "waiting"
+    u = db.session.get(User, u.id)
+    assert u.profile_import_retip_from == inside
+    u.profile_import_quiet_from = datetime.utcnow() - timedelta(minutes=31)
+    db.session.commit()
+    pb._seed_profile_batches(users=[u], ignore_backoff=True,
+                             after_import=True)
+    u = db.session.get(User, u.id)
+    assert u.profile_import_retip_from is None
+    assert u.profile_import_quiet_from is None
+    n = len(first)
+    assert pw.advance(u.id, u.profile_generation_task_id) == "submitted"
+    later = _items("window")[n:]
+    assert _covering(later, inside)
+    assert all(i["start"] is not None for i in later)
+
+
+@pytest.mark.parametrize("stop", ["policy", "backoff"])
+def test_a_policy_block_or_a_backoff_keeps_the_waiting_date(
+        world, monkeypatch, stop):
+    u = _user()
+    rows = _set_of(u, 6)
+    _corpus_for(world, rows)
+    _finish(world, u)
+    inside = _import_inside(world, rows, 3)
+    u.profile_import_retip_from = inside
+    db.session.commit()
+    from backend.utils import refusal_backoff
+    if stop == "policy":
+        monkeypatch.setattr(refusal_backoff, "policy_block_for",
+                            lambda *a, **k: "bio_policy")
+        assert _advance(u) == pw.POLICY_BLOCKED
+    else:
+        monkeypatch.setattr(refusal_backoff, "profile_in_backoff",
+                            lambda *a, **k: True)
+    assert pb._should_seed(db.session.get(User, u.id)) is False
+    u = db.session.get(User, u.id)
+    assert u.profile_import_retip_from == inside
+    assert {r.window_set for r in _rows(u, "window")} == {"set1"}
+
+
+def test_an_edit_while_the_date_waits_is_merged_by_the_new_final(world):
+    """The user edits the final while the import's date waits for the
+    update window in flight: that window is discarded when it comes back
+    (the edit supersedes its set), the re-tipped set reads the import, and
+    its final merges the edit."""
+    u = _user()
+    rows, final = _update_in_flight(world, u)
+    inside = rows[2].source_data_cutoff - timedelta(hours=2)
+    world.corpus.rows = sorted(world.corpus.rows + [(inside, 1000)])
+    assert ex.revert_profile_for_import(u.id, inside)[0] == "deferred"
+    db.session.commit()
+    edit = _edit(u, final)
+    before = len(_items("window"))
+    _build(world, u, rounds=8)
+    later = _items("window")[before:]
+    assert _covering(later, inside)
+    in_use = pw._visible_profile(u.id)
+    assert in_use.window_set not in (None, "set1")
+    assert in_use.merged_profile_id == edit.id
 
 
 # ── 16. restarts ──────────────────────────────────────────────────────────
@@ -4587,8 +5046,8 @@ def test_the_byte_and_render_defaults_without_config(app, world,
     assert pw._Submission({}, {"anthropic"}).max_bytes == 15_000_000
     deadlines = []
     monkeypatch.setattr(pw.time, "monotonic", lambda: 1000.0)
-    monkeypatch.setattr(pw, "next_work", lambda user, keys, deadline, w: (
-        deadlines.append(deadline) or "idle"))
+    monkeypatch.setattr(pw, "next_work", lambda user, keys, deadline, w,
+                        task_id=None: (deadlines.append(deadline) or "idle"))
     u = _user(profile_needs_full_regen=True)
     _advance(u)
     assert deadlines == [1600.0]

@@ -859,6 +859,7 @@ def _strip_batch_jobs(model, belongs, dry_run, now, counts, key):
 PIPELINE_FLAG_RESETS = {
     "profile_batch_pending": False,
     "profile_needs_full_regen": False,
+    "profile_import_retip_from": None,
     "profile_batch_attempts": 0,
     "profile_force_batch": False,
     "profile_cap_held": False,

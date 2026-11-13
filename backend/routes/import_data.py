@@ -1875,6 +1875,13 @@ def _hand_off_profile_update_after_import(user_obj, earliest_ts, imported_tokens
       invalidated; the import is new data like any other, and the
       account's seeding gate decides — the provisional ladder for a first
       or provisional profile, the 80k incremental gate for a full one.
+    - While window work of the user's is in the Batch queue or being
+      rendered (a first build included), the date waits on the user and
+      is applied once that work is collected (#639,
+      ``exports.import_retip_waits``): the set in flight never sees the
+      import, so it is re-tipped from the date afterwards instead of
+      rebuilt from scratch, and a first build's windows cannot leave the
+      import unread.
 
     Batch users (all of prod with ``PROFILE_USE_BATCH``) are never sent to
     the synchronous full-price task, and their build does not start at
@@ -1889,8 +1896,8 @@ def _hand_off_profile_update_after_import(user_obj, earliest_ts, imported_tokens
     stopped after cut-off outputs (#368). An import that triggers no build
     leaves the backoff as it is."""
     from backend.tasks.exports import (
-        revert_profile_for_import, maybe_trigger_profile_update,
-        maybe_trigger_incremental_profile_update)
+        import_retip_waits, revert_profile_for_import,
+        maybe_trigger_profile_update, maybe_trigger_incremental_profile_update)
     from backend.tasks.profile_batch import (
         use_batch_for_user, seed_after_import)
 
@@ -1899,7 +1906,10 @@ def _hand_off_profile_update_after_import(user_obj, earliest_ts, imported_tokens
         UserProfile.generation_type != 'integration'
     ).order_by(UserProfile.created_at.desc()).first()
     action = "none"
-    if tip is not None:
+    # A first build in flight has no version yet, and its windows are
+    # still read before the import (#639): the date waits for them too.
+    if tip is not None or (earliest_ts is not None
+                           and import_retip_waits(user_obj)):
         action, _version = revert_profile_for_import(user_obj.id, earliest_ts)
         db.session.commit()
 
@@ -1912,6 +1922,9 @@ def _hand_off_profile_update_after_import(user_obj, earliest_ts, imported_tokens
         # input, so a build it triggers runs (voice review, 2026-10-01).
         # The seed's own gates still decide whether it does.
         seed_after_import(user_obj)
+        return None
+    if action == "deferred":
+        # The run in flight is collected first; the date is applied then.
         return None
     if action == "none":
         return maybe_trigger_incremental_profile_update(
@@ -1936,8 +1949,10 @@ def _profile_waits_for_imports(user_id):
     """Whether the import's result tells the user that their profile is
     built once their imports stop (#598): the batch hand-off marked this
     import, and the seeder's other gates would build. Evaluating them sets
-    the regen flag for a due ladder build, as the seed would. Best-effort:
-    False on any error."""
+    the regen flag for a due ladder build, as the seed would. An import
+    whose date waits for the profile work in flight (#639) is built from
+    once that work is in and the imports have stopped, so it says so too.
+    Best-effort: False on any error."""
     from backend.tasks.profile_batch import _should_seed, use_batch_for_user
     try:
         user = db.session.get(User, user_id)
@@ -1945,6 +1960,8 @@ def _profile_waits_for_imports(user_id):
                 or (user.plan or "free") not in User.VOICE_MODE_PLANS
                 or not use_batch_for_user(user, current_app.config)):
             return False
+        if user.profile_import_retip_from is not None:
+            return True
         return bool(_should_seed(user, ignore_backoff=True))
     except Exception as e:
         db.session.rollback()

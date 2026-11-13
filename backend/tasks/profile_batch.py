@@ -269,6 +269,11 @@ def _work_waits(user):
     n, until, _stopped = refusal_backoff.profile_backoff_state(user.id)
     if n and until is not None and until > datetime.utcnow():
         return True
+    # An import's date waits to be applied (#639): a later pass applies it
+    # (after the work in flight, the imports' quiet period, a backoff, or a
+    # re-tip that failed), also for an account outside the cohort.
+    if user.profile_import_retip_from is not None:
+        return True
     from backend.tasks import profile_windows
     return profile_windows.provider_stop_waits(user)
 
@@ -332,6 +337,13 @@ def _should_seed(user, ignore_backoff=False):
     # holds the admin "Build profile" button, which seeds through here,
     # unless the admin confirmed the override (force).
     if not ignore_backoff and refusal_backoff.profile_in_backoff(user.id):
+        return False
+    # An import whose re-tip waited for the user's window work in flight
+    # (#639) is applied first: the gates below then see the re-tipped set
+    # (its unread range) or the rebuild flag. A re-tip that failed (rolled
+    # back and recorded) keeps its date, and nothing is built over the set
+    # it was to replace; the seeder goes on with the next user.
+    if _exports.apply_waiting_import_date(user) == "error":
         return False
     # A pending full rebuild overrides the volume/interval gates: the
     # rebuild was explicitly requested (regen button, failure recovery,
