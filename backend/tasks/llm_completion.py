@@ -4093,8 +4093,26 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     logger.warning("Node %s: reply refused, no paid set "
                                    "(#438)", llm_node_id)
                     llm_node.llm_task_status = 'failed'
-                    llm_node.llm_task_error = subscription_required_message(
-                        owner)
+                    if source_mode == "voice":
+                        # A Voice turn whose access ended after its
+                        # recording was saved: the text says so, and its
+                        # code (llm-status ``error_code``) lets the Voice
+                        # screen say it aloud instead of the error sound.
+                        from backend.utils.subscriptions import (
+                            paused_reason)
+                        from backend.utils.voice_refusals import (
+                            recording_kept_code)
+                        reason = paused_reason(owner)
+                        llm_node.llm_task_error = (
+                            subscription_required_message(
+                                owner, "recording"))
+                        update_tool_meta(
+                            llm_node, REFUSED_MARKER,
+                            {"code": recording_kept_code(reason)},
+                            append_if_missing=True)
+                    else:
+                        llm_node.llm_task_error = (
+                            subscription_required_message(owner))
                     db.session.commit()
                     return {
                         'parent_node_id': parent_node_id,

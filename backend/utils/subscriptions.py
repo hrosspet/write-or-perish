@@ -11,6 +11,12 @@ can do. On:
   export; create_llm_placeholder refuses its replies with
   SubscriptionRequired, which the routes answer as a 402 (or, where the
   writing was saved, as the ``subscription_required`` fields of a 2xx).
+  Such an account starts no recording, dictation or upload (402 before
+  anything is stored). One accepted while it had AI replies, whose
+  access ends before it is finalized, transcribed or replied to (Peter,
+  2026-11-13), is stored and transcribed to the end; only its reply is
+  skipped, with the "recording" text, said aloud in Voice
+  (utils/voice_refusals).
 * Voice mode and profile updates follow User.on_paid_plan whatever the
   switch: a subscription that exists always counts, so turning payments
   off does not take what people paid for.
@@ -39,6 +45,10 @@ class SubscriptionRequired(Exception):
     def __init__(self, user=None):
         super().__init__("subscription_required")
         self.message = subscription_required_message(user)
+        # Why, for a recording kept without its reply (access ended while
+        # it was recorded): the text it carries, said aloud in Voice.
+        self.reason = paused_reason(user)
+        self.recording_message = paused_message(self.reason, "recording")
 
 
 def _config(config=None):
@@ -184,7 +194,10 @@ def ai_replies_allowed(user, config=None):
 # sentence without a subscription, what still works). Without the paid
 # set an account makes no billed call at all (decided under Peter's "no
 # AI replies and background jobs", 2026-11-12): replies, transcription,
-# search by meaning, todo merges and poll drafts alike.
+# search by meaning, todo merges and poll drafts alike. The one exception
+# is a recording accepted while it had the paid set: it is transcribed
+# to the end (Peter, 2026-11-13: "User's recorded message should be
+# stored on Loore's servers, possibly even transcribed").
 _PAUSED = {
     "reply": ("Loore doesn't reply",
               "Loore doesn't reply on an account without a subscription.",
@@ -204,22 +217,51 @@ _PAUSED = {
              "Loore doesn't sync bookmarks from X on an account without a "
              "subscription.",
              "Your saved references stay."),
+    # A recording accepted while the account had AI replies, whose access
+    # ended before its reply (Peter, 2026-11-13): it is kept and
+    # transcribed, only the reply is skipped. Said aloud in Voice
+    # (utils/voice_refusals).
+    "recording": ("Loore doesn't reply",
+                  "Loore doesn't reply on an account without a "
+                  "subscription.",
+                  "Your recording is saved."),
 }
+
+# Why an account has no AI replies, as the texts name it: its
+# subscription ended, its last payment failed, its free month (an alpha
+# tester's) ended, or none of these.
+PAUSED_REASONS = ("ended", "past_due", "free_month", "none")
+_REASON_CLAUSES = {
+    "ended": "Your subscription has ended",
+    "past_due": "Your last payment didn't go through",
+    "free_month": "Your free month has ended",
+}
+
+
+def paused_reason(user):
+    """PAUSED_REASONS for *user* (None: "none")."""
+    status = getattr(user, "subscription_status", None) if user else None
+    if status in ("ended", "past_due"):
+        return status
+    if user is not None and getattr(user, "is_alpha_tester", False):
+        return "free_month"
+    return "none"
+
+
+def paused_message(reason, kind="reply"):
+    """The text for *reason* (PAUSED_REASONS) and *kind* (_PAUSED)."""
+    so, alone, works = _PAUSED.get(kind, _PAUSED["reply"])
+    clause = _REASON_CLAUSES.get(reason)
+    if clause is None:
+        return f"{alone} {works}"
+    return f"{clause}, so {so}. {works}"
 
 
 def subscription_required_message(user=None, kind="reply"):
     """Why the call is refused, for the web and the iPhone alike: it
     names the state, never where or how to pay (the iPhone app shows it
     as it is). The web adds its link to Settings."""
-    so, alone, works = _PAUSED.get(kind, _PAUSED["reply"])
-    status = getattr(user, "subscription_status", None) if user else None
-    if status == "ended":
-        return f"Your subscription has ended, so {so}. {works}"
-    if status == "past_due":
-        return f"Your last payment didn't go through, so {so}. {works}"
-    if user is not None and getattr(user, "is_alpha_tester", False):
-        return f"Your free month has ended, so {so}. {works}"
-    return f"{alone} {works}"
+    return paused_message(paused_reason(user), kind)
 
 
 def subscription_required_payload(user=None, kind="reply"):
