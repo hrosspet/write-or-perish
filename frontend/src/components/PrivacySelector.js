@@ -16,6 +16,9 @@ const PrivacySelector = ({
   // An entry Loore fetched through the X API (node.train_refused, #689):
   // Train is not offered, and the note says why.
   trainRefused = false,
+  // Imports are always private (#677): no choice, one line in its place.
+  hidePrivacy = false,
+  privacyNote = null,
 }) => {
   const labelStyle = {
     display: 'block',
@@ -58,7 +61,11 @@ const PrivacySelector = ({
       marginTop: '12px',
       marginBottom: '12px',
     }}>
-      {lockPrivacy ? (
+      {hidePrivacy ? (
+        <div style={{ marginBottom: '12px' }}>
+          <div style={descStyle}>{privacyNote}</div>
+        </div>
+      ) : lockPrivacy ? (
         <div style={{ marginBottom: '12px' }}>
           <label style={labelStyle}>
             Privacy Level

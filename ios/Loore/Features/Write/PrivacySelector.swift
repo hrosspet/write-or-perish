@@ -27,6 +27,8 @@ struct PrivacySelectorView: View {
     static func offeredAIOptions(trainRefused: Bool) -> [(AIUsage, String)] {
         trainRefused ? aiOptions.filter { $0.0 != .train } : aiOptions
     }
+    /// Imports are always private (#677): no choice, this line in its place.
+    var privacyNote: String?
 
     static let privacyOptions: [(PrivacyLevel, String)] = [
         (.private, "🔒 Private · Only I can see this"),
@@ -60,8 +62,10 @@ struct PrivacySelectorView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 6) {
-                FieldLabel(text: "Privacy Level")
-                if lockPrivacy {
+                if privacyNote == nil { FieldLabel(text: "Privacy Level") }
+                if let privacyNote {
+                    FieldDescription(text: privacyNote)
+                } else if lockPrivacy {
                     FieldDescription(text: "Public — inherited from the thread.")
                 } else {
                     SelectField(options: Self.privacyOptions, selection: $privacy, disabled: disabled)

@@ -505,45 +505,25 @@ def test_legacy_parts_without_an_origin_are_reported(app):
     assert count() == (1, 1, 1)
 
 
-# ── cached public pages ──────────────────────────────────────────────────
-
-class _FakeCache:
-    """The Redis calls public_cache makes."""
-
-    def __init__(self):
-        self.store = {}
-
-    def get(self, key):
-        return self.store.get(key)
-
-    def setex(self, key, ttl, value):
-        self.store[key] = value
-
-    def delete(self, *keys):
-        for k in keys:
-            self.store.pop(k, None)
-
+# ── privacy is never touched (#677) ──────────────────────────────────────
 
 @pytest.mark.parametrize("legacy", LEGACY)
-def test_chapters_made_private_leave_the_page_cache(app, monkeypatch,
-                                                    legacy):
-    from backend.utils import public_cache
-    cache = _FakeCache()
-    monkeypatch.setattr(public_cache, "_redis", lambda: cache)
+def test_a_reimport_leaves_chapters_published_by_hand_public(app, legacy):
+    """Imports are always private and a re-import applies no privacy, so
+    chapters the user published after importing stay public (the AI usage
+    still follows the dialog)."""
     u, client = _user(app, f"public_doc_{legacy}")
     doc = _analyze(client, "Thesis.docx", _thesis(3))
-    _confirm(client, [doc], "chat", privacy_level="public")
-    nodes = _entries(u)
+    _confirm(client, [doc], "none")
     _imported(u, legacy)
-    pages = [f"/node/{n.id}" for n in nodes] + [f"/@{u.username}"]
-    for path in pages:
-        public_cache.put(path, 200, "text/html", "synthetic page")
-    assert all(public_cache.get(p) for p in pages)
+    for n in _entries(u):
+        n.set_privacy_level("public")
+    _db.session.commit()
 
     _confirm(client, [doc], "chat", privacy_level="private")
     _db.session.expire_all()
-    assert {n.privacy_level for n in _entries(u)} == {"private"}
-    assert [p for p in pages if public_cache.get(p)] == []
+    assert {n.privacy_level for n in _entries(u)} == {"public"}
+    assert _usages(_entries(u)) == ["chat"] * 4
 
 
 # ── the user's own change of one chapter ─────────────────────────────────
@@ -584,19 +564,29 @@ BAD_SETTINGS = [
     pytest.param({"ai_usage": "everything"}, "ai_usage", id="ai_usage"),
     pytest.param({"ai_usage": ["chat"]}, "ai_usage", id="ai_usage-list"),
     pytest.param({"privacy_level": "world"}, "privacy_level", id="privacy"),
+    pytest.param({"privacy_level": "circles"}, "privacy_level",
+                 id="privacy-circles"),
+    pytest.param({"privacy_level": "public"}, "privacy_level",
+                 id="privacy-public"),
 ]
+PRIVATE_ONLY = ("Imported entries are private. You can share or publish the "
+                "ones you choose afterwards.")
+
+
+def _expected_error(field):
+    return PRIVATE_ONLY if field == "privacy_level" else f"Invalid {field}"
 
 
 @pytest.mark.parametrize("bad,field", BAD_SETTINGS)
 def test_file_import_refuses_unknown_settings(app, bad, field):
-    u, client = _user(app, f"bad_files_{field}_{len(str(bad))}")
+    u, client = _user(app, f"bad_files_{field}_{len(str(bad))}_{str(bad)[-6:]}")
     doc = _analyze(client, "Thesis.docx", _thesis(3))
     _confirm(client, [doc], "none")
     r = client.post("/api/import/confirm", json={
         "files": [doc], "import_type": "separate_nodes",
         "privacy_level": "private", "ai_usage": "chat", **bad})
     assert r.status_code == 400
-    assert r.get_json()["error"] == f"Invalid {field}"
+    assert r.get_json()["error"] == _expected_error(field)
     _db.session.expire_all()
     assert {(n.ai_usage, n.privacy_level) for n in _entries(u)} == {
         ("none", "private")}
@@ -605,9 +595,9 @@ def test_file_import_refuses_unknown_settings(app, bad, field):
 @pytest.mark.parametrize("route", ["twitter", "chatgpt", "claude"])
 @pytest.mark.parametrize("bad,field", BAD_SETTINGS)
 def test_archive_imports_refuse_unknown_settings(app, route, bad, field):
-    _u, client = _user(app, f"bad_{route}_{field}_{len(str(bad))}")
+    _u, client = _user(app, f"bad_{route}_{field}_{len(str(bad))}_{str(bad)[-6:]}")
     r = client.post(f"/api/import/{route}/confirm", json={
         "import_token": "synthetic-token", "import_type": "separate_nodes",
         "privacy_level": "private", "ai_usage": "chat", **bad})
     assert r.status_code == 400
-    assert r.get_json()["error"] == f"Invalid {field}"
+    assert r.get_json()["error"] == _expected_error(field)

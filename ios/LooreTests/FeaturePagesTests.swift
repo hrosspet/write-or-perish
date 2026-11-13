@@ -812,7 +812,7 @@ final class ImportTests: StubbedAppTestCase {
         XCTAssertNotNil(model.analysis)
         XCTAssertEqual(model.aiUsage, .chat)
         XCTAssertEqual(model.confirmBody(model.analysis!, onDeleted: nil)["ai_usage"] as? String, "chat")
-        XCTAssertEqual(model.privacy, .private)
+        XCTAssertEqual(model.confirmBody(model.analysis!, onDeleted: nil)["privacy_level"] as? String, "private")
 
         app.useForTesting(api: app.api, user: try decode(CurrentUser.self,
             #"{"id":5,"username":"seowriter","approved":true,"default_ai_usage":"none"}"#))
