@@ -3155,10 +3155,14 @@ def finalize_chunked_upload():
     # Measured before it is encrypted: its seconds count toward the
     # account's usage at a start until its cost is recorded
     # (utils/recording_limits.pending_audio_seconds).
-    # Committed below with the file's URL, before the transcription is
-    # queued.
+    # Written in this transaction (an UPDATE, so a re-read of the entry
+    # keeps it) and committed below with the file's URL, before the
+    # transcription is queued; `updated_at` stays (not an edit).
     from backend.utils.recording_limits import finalized_upload_seconds
-    node.audio_pending_seconds = finalized_upload_seconds(target_path)
+    Node.query.filter(Node.id == node.id).update(
+        {Node.audio_pending_seconds: finalized_upload_seconds(target_path),
+         Node.updated_at: Node.updated_at},
+        synchronize_session=False)
 
     # Encrypt the assembled audio file at rest (URL stored without .enc)
     encrypt_file(str(target_path))
