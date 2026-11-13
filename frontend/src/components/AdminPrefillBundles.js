@@ -18,6 +18,7 @@ const ERRORS = {
   ai_opt_out: "the account is set to no AI",
   x_id_mismatch: "the account's X id is not the bundle's",
   deleted: "the account is deleted or being deleted",
+  blocked: "an admin deactivated the account",
   no_account: "the account no longer exists",
   stalled: "stopped: three runs in a row ended without progress",
   format: "a bundle format this server does not load",

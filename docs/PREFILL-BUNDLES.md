@@ -153,13 +153,17 @@ A deletion request also covers the lab's own copy (the lab account); remove it t
 Decision (Peter, 2026-11-13): when the bundle's final profile was written by another model than the account's merge model, production merges the loaded window versions again once, live, with the merge model a normal build would use for this account. For a new person that is Opus 5.5. The model that wrote the final is in each manifest (`final_generated_by`, and `intentions_generated_by` for the intentions).
 
 - **What runs.** The final merge only. Nothing reads the tweets again, and no window is written again. The windows travel in the bundle, so the merge reads those.
-- **No call is made** when the lab already merged the final with that model (the outreach accounts), for an account set to no AI, after a "no", when the person's current profile is a version they wrote, or when the account was merged this way before (a second Yes, a re-load).
+- **No call is made** when the lab already merged the final with that model (the outreach accounts), for an account set to no AI, after a "no", when the person's current profile is a version they wrote, or when the account was merged this way before (a second Yes, a re-load). There is also no call while another load's merge for the account is under way: the merge is claimed under a lock on the account's row, and a claim counts until its last sign of life is 65 minutes old (past the worker's 1-hour task limit).
+- **Deactivated, deleted or held accounts.** An account an admin deactivated, a deleted account, and an account whose deletion waits get no load and no merge. This is checked at the Yes, at every run of a load before it reads storage, and by the merge before its model call.
 - **The person's Yes** asks for the merge. The admin's "Make ready" asks for it with its option, which is on by default.
+- **The request** is a normal final merge's: the same output bound (32,000 tokens), and for an OpenAI merge model the configured reasoning effort (`PROFILE_MERGE_REASONING_EFFORT_OPENAI`). An account that chose an OpenAI chat model merges on that provider's model.
 - **Cost:** one paid call, on the account's cost log, before the person has a trial or a subscription. Measured on window sets of the lab's size (about 2,000 tokens per window), with output about 3,900 tokens:
   - one window: about 4,000 tokens in, about $0.09;
   - three windows: about 8,000 tokens in, about $0.11;
   - ten windows: about 22,000 tokens in, about $0.17.
-- **Waiting.** The person sees "Preparing your starting point…" until the merge is done, at most 3 minutes. After that they are let in with the loaded profile, and the merge continues in the background, 3 attempts at most. A final failure is logged as an error, and the admin panel shows it.
+  - Worst case: a call that uses the whole output allowance costs about $0.70 on Opus 5.5, so three failed attempts cost about $2.
+- **Waiting.** The person sees "Preparing your starting point…" until the merge is done, at most 3 minutes. After that they are let in with the loaded profile, and the merge continues in the background, 3 attempts at most. A final failure is logged once as an error, and the admin panel shows it.
+- **A failed merge stays with the load.** An output that is cut off, refused or not a profile is not saved. Its cost row has the request type `prefill_merge`, which the profile build's backoff does not read, so the failure never delays or stops the account's ordinary profile updates. The person keeps the loaded profile.
 - **The person's edit wins.** A merge that lands after the person saved a version of their own is not saved.
 
 ## After a load: how current the account is

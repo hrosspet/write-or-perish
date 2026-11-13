@@ -93,7 +93,7 @@ ACTIVE = ("queued", "running")
 # Outcomes that are a person's or an admin's choice, not a fault: logged
 # as information, not as errors.
 EXPECTED_STOPS = ("prefill_declined", "ai_opt_out", "excluded", "deleted",
-                  "no_account")
+                  "no_account", "blocked")
 
 # What a person's own action makes (an edit, a revert): a bundle holds
 # none of it (PERSON_VERSIONS of the unclaimed-account deletion, #685).
@@ -259,16 +259,40 @@ REFUSAL_MESSAGES = {
 }
 
 
+ACCOUNT_STOP_MESSAGES = {
+    "no_account": "The account no longer exists.",
+    "deleted": "The account is deleted or being deleted.",
+    "blocked": "An admin deactivated the account.",
+}
+
+
+def account_stop(user):
+    """Why nothing may be loaded into this account and no merge made for
+    it, whatever else holds: "no_account", "deleted" (deleted, or its
+    deletion or a purge of everything waits or runs: account_on_hold) or
+    "blocked" (an admin deactivated it: Deactivate sets deactivated_at
+    and clears approved, Activate sets approved again and keeps
+    deactivated_at, routes/admin.py); else None. Checked at the Yes,
+    at every run of a load before it reads storage, and by the merge
+    before its model call."""
+    from backend.utils.hidden_rows import account_on_hold
+    if user is None:
+        return "no_account"
+    if user.deleted_at is not None or account_on_hold(user.id):
+        return "deleted"
+    if user.deactivated_at is not None and not user.approved:
+        return "blocked"
+    return None
+
+
 def hard_refusal(user, x_id):
     """(code, message) when no bundle may be loaded into ``user`` at all,
     forced or not; else None. Checked when a load starts and at every
     run, since these can change while it runs."""
-    from backend.utils.hidden_rows import account_on_hold
     from backend.utils.privacy import prefill_refusal
-    if user is None:
-        return "no_account", "The account no longer exists."
-    if user.deleted_at is not None or account_on_hold(user.id):
-        return "deleted", "The account is deleted or being deleted."
+    stop = account_stop(user)
+    if stop is not None:
+        return stop, ACCOUNT_STOP_MESSAGES[stop]
     if str(user.twitter_id or "") != str(x_id):
         return ("x_id_mismatch",
                 "The account's X id is not the bundle's X id.")
@@ -430,6 +454,10 @@ def maybe_start_self_load(user, dispatch=None):
         if not pb.bundles_enabled():
             return None
         if user.prefill_consent != "yes":
+            return None
+        # A deactivated, deleted or held account can still send its Yes
+        # (the approval gate lets the account update through): no load.
+        if account_stop(user) is not None:
             return None
         # The X id an X sign-in proved: twitter_handle is written only by
         # an X sign-in or Connect X (routes/auth.py), never by an admin.
@@ -644,8 +672,17 @@ def _check_self_load(load, token, storage):
     """A Yes's check: is there a bundle for the person's X id that may be
     loaded? No bundle: the check is removed and nothing changes. A bundle
     that may not be loaded: the check is kept as "refused" (once per
-    bundle and reason) for the admin to see. Else the load goes on."""
+    bundle and reason) for the admin to see. Else the load goes on. An
+    account deactivated, deleted or held since its Yes: the check is
+    removed before anything is read from storage."""
     user = db.session.get(User, load.user_id)
+    stop = account_stop(user)
+    if stop is not None:
+        db.session.delete(load)
+        db.session.commit()
+        logger.info("Pre-fill bundle check for user %s not run: %s",
+                    load.user_id, stop)
+        return "refused"
     manifest = pb.read_manifest(storage, load.x_id)
     if manifest is None:
         db.session.delete(load)

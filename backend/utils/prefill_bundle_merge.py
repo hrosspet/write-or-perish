@@ -16,15 +16,25 @@ row of the set). The model is the one a normal build's merge step would
 use for this account (``profile_windows.pass_models``): the merge model of
 the provider of the person's chat model, Opus 5.5 for a new person; the
 cross-provider merge model only where that code already allows it. One
-live call (not Batch).
+live call (not Batch), with a normal final merge's output bound and, for
+an OpenAI merge, its reasoning effort.
+
+A merge that fails is the load's own matter: an output that cannot be
+saved writes its cost row outside the profile build's backoff
+(UNUSED_OUTPUT_REQUEST_TYPE) and touches nothing on the account, so the
+account's ordinary profile updates run as for any other; the person keeps
+the loaded profile, and the last failure is logged once at ERROR.
 
 When: only when the loaded final was written by another model than that
 merge model. Never for an account set to AI usage None (no AI means no
 AI: it keeps the loaded profile), never after a "no" to starting from
-the tweets, never for an account whose current profile is a version the
-person wrote, and at most once per account: a merge done for any load of
-the account is never made again (a second Yes, a re-load). The admin's
-"Make ready" asks for it only with its option (on by default).
+the tweets, never for an account an admin deactivated, deleted or held,
+never for an account whose current profile is a version the person
+wrote, and at most once per account: a merge done for any load of the
+account is never made again (a second Yes, a re-load), and while one
+load's merge is in flight no other load of the account starts one
+(``_claim``). The admin's "Make ready" asks for it only with its option
+(on by default).
 
 The person waits for it ("Preparing your starting point…") at most
 MERGE_WAIT; then the load lets them in with the loaded profile and the
@@ -54,11 +64,26 @@ MERGE_POLL_SECONDS = 10
 MAX_MERGE_ATTEMPTS = 3
 # Seconds before a retry, by attempt.
 RETRY_COUNTDOWNS = (60, 300)
-# A merge "running" with no sign of life for this long died with its
-# worker: the beat retries it (a live merge call takes minutes, not this).
-MERGE_STALE = timedelta(minutes=20)
+# A merge "running" for this long since its last sign of life is over:
+# the worker's hard task limit (celery_app.TASK_TIME_LIMIT, 1 h) has
+# ended its call by then. Until then it counts as in flight, so no other
+# merge of the account starts and the beat does not send it again. A live
+# merge call takes one to two minutes; the margin is for the task limit.
+MERGE_STALE = timedelta(minutes=65)
 
 TERMINAL = ("done", "skipped", "superseded", "failed")
+
+# The cost row of a merge whose output cannot be saved (cut off, refused,
+# or not a profile): a request type outside refusal_backoff's
+# PROFILE_REQUEST_TYPES, as profile_windows.WINDOW_BLOCK_REQUEST_TYPE, so
+# a failed merge after a load never counts toward, or stops, the
+# account's ordinary profile builds. A saved merge's row is a "profile"
+# row like any build's.
+UNUSED_OUTPUT_REQUEST_TYPE = "prefill_merge"
+
+
+class MergeOutputUnusable(RuntimeError):
+    """The merge's output is not a profile: retried, then reported."""
 
 
 class MergeStop(Exception):
@@ -90,15 +115,48 @@ def merge_waiting_over(load, now=None):
 
 
 def _claim(load_id):
-    taken = db.session.execute(
-        update(PrefillBundleLoad).where(
-            PrefillBundleLoad.id == load_id,
-            PrefillBundleLoad.merge_status.in_(("due", "retry")),
-        ).values(merge_status="running", merge_heartbeat_at=_now(),
-                 merge_attempts=PrefillBundleLoad.merge_attempts + 1)
-    ).rowcount
+    """Take this load's merge attempt: "running" (the call may be made),
+    "skipped" (another load of the account merged, or is merging) or None
+    (not due: another run has it, or it ended). One merge call per
+    account under any overlap: the claim is decided under a lock on the
+    account's row, so two loads of one account claim one after the
+    other, and the second sees the first's "running" (taken while its
+    heartbeat is younger than MERGE_STALE) or "done"."""
+    from sqlalchemy import and_, or_
+    row = db.session.query(PrefillBundleLoad.user_id).filter(
+        PrefillBundleLoad.id == load_id,
+        PrefillBundleLoad.merge_status.in_(("due", "retry"))).first()
+    if row is None:
+        db.session.commit()
+        return None
+    user_id = row[0]
+    db.session.query(User.id).filter(User.id == user_id) \
+        .with_for_update().first()
+    now = _now()
+    other = db.session.query(PrefillBundleLoad.merge_status).filter(
+        PrefillBundleLoad.user_id == user_id,
+        PrefillBundleLoad.id != load_id,
+        or_(PrefillBundleLoad.merge_status == "done",
+            and_(PrefillBundleLoad.merge_status == "running",
+                 PrefillBundleLoad.merge_heartbeat_at > now - MERGE_STALE)),
+    ).order_by(PrefillBundleLoad.merge_status.asc()).first()
+    due = and_(PrefillBundleLoad.id == load_id,
+               PrefillBundleLoad.merge_status.in_(("due", "retry")))
+    if other is not None:
+        # "done" sorts before "running": a merge made is the reason given.
+        code = "already_merged" if other[0] == "done" else "merging_elsewhere"
+        taken = db.session.execute(update(PrefillBundleLoad).where(due).values(
+            merge_status="skipped", merge_error=code)).rowcount
+        db.session.commit()
+        if taken:
+            logger.info("Pre-fill bundle load %s: final merge skipped (%s)",
+                        load_id, code)
+        return "skipped" if taken else None
+    taken = db.session.execute(update(PrefillBundleLoad).where(due).values(
+        merge_status="running", merge_heartbeat_at=now,
+        merge_attempts=PrefillBundleLoad.merge_attempts + 1)).rowcount
     db.session.commit()
-    return bool(taken)
+    return "running" if taken else None
 
 
 def _set(load_id, **values):
@@ -107,12 +165,35 @@ def _set(load_id, **values):
     db.session.commit()
 
 
-def _merged_before(user_id, load_id):
-    """A merge done for another load of this account: never a second."""
-    return PrefillBundleLoad.query.filter(
-        PrefillBundleLoad.user_id == user_id,
-        PrefillBundleLoad.id != load_id,
-        PrefillBundleLoad.merge_status == "done").first() is not None
+def _account_gates(user):
+    """MergeStop when no merge may be made for this account now: it is
+    deactivated, deleted or held (prefill_bundle_load.account_stop), set
+    to AI usage None (no AI means no AI), or the person said no. Checked
+    when the attempt starts and again just before the model call."""
+    from backend.utils.prefill_bundle_load import account_stop
+    from backend.utils.privacy import account_allows_ai
+    stop = account_stop(user)
+    if stop is not None:
+        raise MergeStop("deleted" if stop == "no_account" else stop)
+    if not account_allows_ai(user):
+        raise MergeStop("ai_none")
+    if user.prefill_consent == "no":
+        raise MergeStop("declined")
+
+
+def _output_problem(response, template):
+    """Why the merge's output cannot be saved as the profile, or None:
+    the checks a normal final merge's output gets (cut off, refused by
+    the model, profile_output_problem), without the profile-build backoff
+    that exports.refuse_truncated_profile feeds."""
+    from backend.llm_providers import is_refused
+    from backend.tasks import exports as ex
+    if response.get("truncated"):
+        return "output cut off"
+    if is_refused(response):
+        return "refused by the model"
+    return ex.profile_output_problem(response.get("content"), template,
+                                     final=True)
 
 
 def _current_final(user_id):
@@ -132,23 +213,16 @@ def _current_final(user_id):
 def _merge_once(load):
     """The merge itself. Returns "done" or "superseded"; MergeStop when
     no call is made or none can succeed; any other error is retried."""
-    from backend.llm_providers import LLMProvider, EmptyTruncatedOutputError
+    from backend.llm_providers import DEFAULT_MAX_OUTPUT_TOKENS, LLMProvider
+    from backend.models import APICostLog
     from backend.tasks import exports as ex
     from backend.tasks import profile_windows as pw
     from backend.utils.api_keys import get_api_keys_for_usage
-    from backend.utils.hidden_rows import account_on_hold
-    from backend.utils.privacy import account_allows_ai
+    from backend.utils.cost import llm_cost_log_fields
     from flask import current_app
 
     user = db.session.get(User, load.user_id)
-    if user is None or user.deleted_at is not None or account_on_hold(user.id):
-        raise MergeStop("deleted")
-    if not account_allows_ai(user):
-        raise MergeStop("ai_none")       # no AI means no AI
-    if user.prefill_consent == "no":
-        raise MergeStop("declined")
-    if _merged_before(user.id, load.id):
-        raise MergeStop("already_merged")
+    _account_gates(user)
     current = _current_final(user.id)
     set_id = current.window_set
     windows = pw.set_windows(user.id, set_id)
@@ -170,17 +244,32 @@ def _merge_once(load):
     over, tokens = pw.merge_over_cap(models.merge, messages, keys)
     if over:
         raise MergeStop("over_cap", status="failed")
-    _set(load.id, merge_model=models.merge, merge_heartbeat_at=_now())
-    response = LLMProvider.get_completion(models.merge, messages, keys,
-                                          user_id=user.id)
     gen_template = ex._load_prompt("profile_generation.txt", user_id=user.id)
-    try:
-        ex.refuse_truncated_profile(
-            user, models.merge, response, "pre-fill final merge",
-            problem=ex.profile_output_problem(
-                response.get("content"), gen_template, final=True))
-    except EmptyTruncatedOutputError:
-        raise RuntimeError("the merge's output is not a profile")
+    # Asked again just before the call: the account may have been
+    # deactivated, deleted or set to None while the inputs were read.
+    db.session.refresh(user)
+    _account_gates(user)
+    _set(load.id, merge_model=models.merge, merge_heartbeat_at=_now())
+    # A normal final merge's request (profile_windows._request): the same
+    # output bound, and an OpenAI merge's configured reasoning effort.
+    response = LLMProvider.get_completion(
+        models.merge, messages, keys, user_id=user.id,
+        max_tokens=DEFAULT_MAX_OUTPUT_TOKENS,
+        reasoning_effort=models.merge_effort)
+    problem = _output_problem(response, gen_template)
+    if problem:
+        # Billed, so its cost row is written, outside the profile build's
+        # backoff (UNUSED_OUTPUT_REQUEST_TYPE); nothing is saved and
+        # nothing on the account changes. The attempt is retried.
+        db.session.add(APICostLog(
+            user_id=user.id, model_id=models.merge,
+            request_type=UNUSED_OUTPUT_REQUEST_TYPE,
+            **llm_cost_log_fields(models.merge, response)))
+        db.session.commit()
+        logger.warning("Pre-fill bundle load %s: the final merge's output "
+                       "for user %s (model %s) is not saved: %s", load.id,
+                       user.id, models.merge, problem)
+        raise MergeOutputUnusable(problem)
     # The user's edit wins: a version they saved since the load began is
     # newer than anything this merge read.
     if pw._user_version_after(user, load.created_at) is not None:
@@ -209,8 +298,11 @@ def run_merge(load_id, dispatch=None):
     from backend.utils import prefill_bundles as pb
     if not pb.bundles_enabled():
         return "disabled"   # the beat resumes it once switched on again
-    if not _claim(load_id):
+    claim = _claim(load_id)
+    if claim is None:
         return "busy"
+    if claim != "running":
+        return claim
     load = db.session.get(PrefillBundleLoad, load_id)
     try:
         outcome = _merge_once(load)
@@ -227,7 +319,8 @@ def run_merge(load_id, dispatch=None):
         db.session.rollback()
         attempts = db.session.query(PrefillBundleLoad.merge_attempts).filter(
             PrefillBundleLoad.id == load_id).scalar() or 0
-        code = type(e).__name__[:64]
+        code = (f"output: {e}" if isinstance(e, MergeOutputUnusable)
+                else type(e).__name__)[:64]
         if attempts >= MAX_MERGE_ATTEMPTS:
             _set(load_id, merge_status="failed", merge_error=code)
             # Problems show: the person was let in with the loaded profile.

@@ -127,15 +127,17 @@ def world(tmp_path, monkeypatch):
     calls = []
 
     def fake_completion(model_id, messages, api_keys_, **kw):
-        calls.append({"model": model_id, "messages": messages})
+        calls.append({"model": model_id, "messages": messages, "kw": kw})
         if world_state.get("during"):
             world_state.pop("during")()
         if world_state.get("fail"):
             world_state["fail"] -= 1
             raise RuntimeError("provider down")
-        return {"content": MERGED_PROFILE, "total_tokens": 5000,
-                "input_tokens": 1000, "output_tokens": 4000,
-                "model": model_id}
+        reply = {"content": MERGED_PROFILE, "total_tokens": 5000,
+                 "input_tokens": 1000, "output_tokens": 4000,
+                 "model": model_id}
+        reply.update(world_state.get("reply") or {})
+        return reply
     world_state = {}
     monkeypatch.setattr(lp.LLMProvider, "get_completion",
                         staticmethod(fake_completion))
@@ -1532,6 +1534,7 @@ def test_a_failed_merge_lets_the_person_in_and_is_retried_and_their_edit_wins(wo
         assert pbl.starting_point(user_id)["status"] == "ready"
         # The person edits their profile while the retry runs: the merge
         # lands after the edit and is not saved (its cost row is).
+
         def edit_now():
             edit = UserProfile(user_id=user_id, generated_by="user", generation_type="user")
             edit.set_content("my own words")
@@ -1619,6 +1622,243 @@ def test_a_reload_makes_no_second_merge(world, monkeypatch):
         assert _run_until_done(again.id) == "done"
         assert len(world.calls) == 1
         assert db.session.get(PrefillBundleLoad, again.id).merge_error in ("already_merged", "current")
+
+
+def _to_the_merge(load_id):
+    """Run a load until it waits for its final merge."""
+    for _ in range(10):
+        if pbl.run_load(load_id, dispatch=lambda *a, **k: None) == "merging":
+            return
+    raise AssertionError("the load did not reach its merge")
+
+
+@pytest.mark.parametrize("reply", [
+    {"content": "# Surface Map\nmerged surf", "truncated": True},
+    {"content": "", "truncated": True},
+    {"content": "I can't help with that.", "refused": True},
+    {"content": "Here is what the windows say."},
+])
+def test_a_merge_whose_output_is_never_a_profile_leaves_the_account_alone(world, monkeypatch, caplog, reply):
+    """Every attempt's output is cut off, refused or not a profile: the
+    calls are billed and each has its cost row, but none counts toward the
+    account's profile-build backoff, nothing on the account says stopped,
+    the person keeps the loaded profile, and the failure is one ERROR."""
+    import logging
+    from backend.llm_providers import DEFAULT_MAX_OUTPUT_TOKENS
+    from backend.models import APICostLog
+    from backend.utils import refusal_backoff as rb
+    _bundle(world, monkeypatch)
+    prod = world.prod()
+    with prod.app_context():
+        load, _ = _start("alice", merge=True)
+        world.state["reply"] = reply
+        _to_the_merge(load.id)
+        with caplog.at_level(logging.WARNING):
+            outcomes = [pbm.run_merge(load.id, dispatch=lambda *a, **k: None)
+                        for _ in range(pbm.MAX_MERGE_ATTEMPTS)]
+        assert outcomes == ["retry", "retry", "failed"]
+        assert len(world.calls) == pbm.MAX_MERGE_ATTEMPTS
+        # A normal final merge's output bound (profile_windows._request).
+        assert {c["kw"]["max_tokens"] for c in world.calls} == {DEFAULT_MAX_OUTPUT_TOKENS}
+        errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert len(errors) == 1 and "final merge failed" in errors[0].getMessage()
+        user = db.session.get(User, load.user_id)
+        assert user.profile_seed_error is None
+        assert rb.profile_backoff_state(user.id) == (0, None, False)
+        assert rb.profile_in_backoff(user.id) is False
+        rows = APICostLog.query.filter_by(user_id=user.id).all()
+        assert len(rows) == pbm.MAX_MERGE_ATTEMPTS
+        assert {(r.request_type, r.request_ref) for r in rows} == {(pbm.UNUSED_OUTPUT_REQUEST_TYPE, None)}
+        assert pbm.UNUSED_OUTPUT_REQUEST_TYPE not in rb.PROFILE_REQUEST_TYPES
+        assert _current_profile(user.id).generated_by == "gpt-6.1-sol"
+        done = db.session.get(PrefillBundleLoad, load.id)
+        assert done.merge_status == "failed" and done.merge_error.startswith("output: ")
+
+
+def test_an_openai_merge_sends_its_batch_requests_reasoning_effort(world, monkeypatch):
+    """A set of more than one window is merged by the provider's merge
+    model; for OpenAI the live call sends the reasoning effort its batch
+    request would, and the same output bound."""
+    from backend.llm_providers import DEFAULT_MAX_OUTPUT_TOKENS
+    from backend.tasks import profile_windows as pw
+    with world.lab.app_context():
+        u = _seed_lab_member()
+        final = UserProfile.query.filter_by(user_id=u.id, generation_type="integration").one()
+        final.generated_by = "gpt-6-luna"
+        db.session.commit()
+    _export(world, monkeypatch)
+    _prod_mode(monkeypatch)
+    # The models of a pass over more than one window (pass_models).
+    monkeypatch.setattr(pw, "pass_models",
+                        lambda user, state, base, cross: pw.profile_models_for(user, cross=cross))
+    prod = world.prod()
+    prod.config["PROFILE_MERGE_REASONING_EFFORT_OPENAI"] = "high"
+    with prod.app_context():
+        load, _ = _start("alice", merge=True)
+        _to_the_merge(load.id)
+        user = db.session.get(User, load.user_id)
+        user.preferred_model = "gpt-6-astra"
+        db.session.commit()
+        assert pbm.run_merge(load.id, dispatch=lambda *a, **k: None) == "done"
+        (call,) = world.calls
+        assert call["model"] == "gpt-6.1-sol"
+        assert call["kw"]["reasoning_effort"] == "high"
+        assert call["kw"]["max_tokens"] == DEFAULT_MAX_OUTPUT_TOKENS
+
+
+def _stop_account(user_id, how):
+    """The account deactivated by an admin (routes/admin.toggle_user_status),
+    deleted, or held by a waiting account deletion."""
+    from backend.models import UserDataPurge
+    user = db.session.get(User, user_id)
+    now = datetime.utcnow()
+    if how == "blocked":
+        user.approved = False
+        user.deactivated_at = now
+    elif how == "deleted":
+        user.deleted_at = now
+    else:
+        db.session.add(UserDataPurge(
+            user_id=user_id, source="self", scope="all", delete_account=True,
+            status="scheduled", requested_at=now,
+            scheduled_for=now + timedelta(days=30)))
+    db.session.commit()
+
+
+def _watch_storage(monkeypatch):
+    touched = []
+    for name in ("read_bytes", "read_range", "exists", "list"):
+        real = getattr(LocalDirStorage, name)
+        monkeypatch.setattr(LocalDirStorage, name,
+                            lambda self, *a, _r=real, _n=name: touched.append(_n) or _r(self, *a))
+    return touched
+
+
+def test_a_deactivated_accounts_yes_loads_nothing(world, monkeypatch):
+    """The approval gate lets a deactivated account's Yes through: the
+    answer is saved, and nothing is queued or read."""
+    _bundle(world, monkeypatch)
+    prod = world.prod()
+    with prod.app_context():
+        user_id = _x_user().id
+        _stop_account(user_id, "blocked")
+        client = prod.test_client()
+        _login(client, user_id)
+        touched = _watch_storage(monkeypatch)
+        resp = _yes(client)
+        assert resp.status_code == 200
+        assert db.session.get(User, user_id).prefill_consent == "yes"
+        assert world.dispatched == [] and PrefillBundleLoad.query.count() == 0
+        assert touched == [] and world.calls == []
+
+
+@pytest.mark.parametrize("how", ["blocked", "deleted", "held"])
+def test_no_load_for_an_account_deactivated_deleted_or_held(world, monkeypatch, how):
+    """Deactivated, deleted or in its deletion grace: nothing is queued at
+    the Yes; a check queued before the account was stopped is removed
+    before it reads storage."""
+    _bundle(world, monkeypatch)
+    prod = world.prod()
+    with prod.app_context():
+        user_id = _x_user(prefill_consent="yes").id
+        _stop_account(user_id, how)
+        assert pbl.maybe_start_self_load(db.session.get(User, user_id)) is None
+        assert PrefillBundleLoad.query.count() == 0
+        # Stopped after the Yes, before the check ran.
+        other_id = _x_user(username="bob", twitter_id="2002", twitter_handle="bob",
+                           prefill_consent="yes").id
+        check_id = pbl.maybe_start_self_load(db.session.get(User, other_id)).id
+        _stop_account(other_id, how)
+        touched = _watch_storage(monkeypatch)
+        assert pbl.run_load(check_id, dispatch=lambda *a, **k: None) == "refused"
+        assert touched == [] and PrefillBundleLoad.query.count() == 0
+
+
+def test_a_load_or_merge_stops_when_the_account_is_deactivated(world, monkeypatch):
+    """A load under way stops before its next storage read; a merge stops
+    before its model call, also when the account is deactivated while the
+    merge reads its inputs."""
+    from backend.tasks import profile_windows as pw
+    _bundle(world, monkeypatch)
+    prod = world.prod()
+    with prod.app_context():
+        user_id = _x_user(prefill_consent="yes").id
+        check_id = pbl.maybe_start_self_load(db.session.get(User, user_id)).id
+        assert pbl.run_load(check_id, dispatch=lambda *a, **k: None, max_chunks=1) == "continuing"
+        _stop_account(user_id, "blocked")
+        touched = _watch_storage(monkeypatch)
+        assert pbl.run_load(check_id, dispatch=lambda *a, **k: None) == "failed"
+        assert touched == []
+        assert db.session.get(PrefillBundleLoad, check_id).error == "blocked"
+        assert db.session.get(User, user_id).approved is False
+    # A merge: stopped before the attempt, and between its reads and its call.
+    with world.prod("prod2").app_context():
+        load, _ = _start("alice", merge=True)
+        _to_the_merge(load.id)
+        _stop_account(load.user_id, "blocked")
+        assert pbm.run_merge(load.id, dispatch=lambda *a, **k: None) == "skipped"
+        assert db.session.get(PrefillBundleLoad, load.id).merge_error == "blocked"
+        user = db.session.get(User, load.user_id)
+        user.approved = True          # the admin's Activate
+        db.session.query(PrefillBundleLoad).filter_by(id=load.id).update(
+            {PrefillBundleLoad.merge_status: "retry"})
+        db.session.commit()
+        real_cap = pw.merge_over_cap
+
+        def deactivated_meanwhile(*a, **k):
+            _stop_account(load.user_id, "blocked")
+            return real_cap(*a, **k)
+        monkeypatch.setattr(pw, "merge_over_cap", deactivated_meanwhile)
+        assert pbm.run_merge(load.id, dispatch=lambda *a, **k: None) == "skipped"
+        assert db.session.get(PrefillBundleLoad, load.id).merge_error == "blocked"
+        assert world.calls == []
+
+
+def test_overlapping_merges_of_one_account_make_one_call(world, monkeypatch):
+    """Two loads of one account wait for their merge at once: the second
+    merge starts while the first's call is in flight, finds it under the
+    account's lock and makes no call; a retry of the second after the
+    first is done makes none either. A "running" merge older than
+    MERGE_STALE is over (its task was killed) and no longer holds."""
+    _bundle(world, monkeypatch)
+    prod = world.prod()
+    with prod.app_context():
+        first, _ = _start("alice", merge=True)
+        _to_the_merge(first.id)
+        earlier = db.session.get(PrefillBundleLoad, first.id)
+        now = datetime.utcnow()
+        second = PrefillBundleLoad(
+            user_id=earlier.user_id, x_id="1001", handle="alice", origin="self",
+            stage="merge", status="running", bundle_sha256=earlier.bundle_sha256,
+            members=earlier.members, merge_wanted=True, merge_status="due",
+            merge_started_at=now, merge_heartbeat_at=now, heartbeat_at=now,
+            created_at=now)
+        db.session.add(second)
+        db.session.commit()
+        second_id = second.id
+        outcomes = []
+        world.state["during"] = lambda: outcomes.append(
+            pbm.run_merge(second_id, dispatch=lambda *a, **k: None))
+        assert pbm.run_merge(first.id, dispatch=lambda *a, **k: None) == "done"
+        assert outcomes == ["skipped"] and len(world.calls) == 1
+        later = db.session.get(PrefillBundleLoad, second_id)
+        assert (later.merge_status, later.merge_error) == ("skipped", "merging_elsewhere")
+        assert later.merge_attempts == 0
+        db.session.query(PrefillBundleLoad).filter_by(id=second_id).update(
+            {PrefillBundleLoad.merge_status: "retry"})
+        db.session.commit()
+        assert pbm.run_merge(second_id, dispatch=lambda *a, **k: None) == "skipped"
+        assert db.session.get(PrefillBundleLoad, second_id).merge_error == "already_merged"
+        assert len(world.calls) == 1
+        # A claim long dead does not hold the account.
+        db.session.query(PrefillBundleLoad).filter_by(id=first.id).update(
+            {PrefillBundleLoad.merge_status: "running",
+             PrefillBundleLoad.merge_heartbeat_at:
+                 datetime.utcnow() - pbm.MERGE_STALE - timedelta(minutes=1)})
+        db.session.query(PrefillBundleLoad).filter_by(id=second_id).update(
+            {PrefillBundleLoad.merge_status: "due"})
+        db.session.commit()
+        assert pbm._claim(second_id) == "running"
 
 
 def test_let_in_when_ready_leaves_a_blocked_account_out(world, monkeypatch):
