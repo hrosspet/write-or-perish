@@ -336,7 +336,10 @@ def create_app():
         if not current_user.is_authenticated:
             return  # nothing to check
 
-        if current_user.approved:
+        # `approved`, except, payments off, an account the gate let in by
+        # itself while they were on (#697: approval.waiting_again).
+        from backend.utils import approval
+        if approval.counts_as_approved(current_user):
             return  # approved users proceed
 
         # Payments on (#697; Peter, 2026-11-13): nobody waits for approval.
@@ -344,8 +347,7 @@ def create_app():
         # goes on to the trial step (block_accounts_without_subscription
         # below); one the admin blocked is refused here, with its own text.
         # No-op while payments are off.
-        from backend.utils.approval import let_in
-        if let_in(current_user):
+        if approval.let_in(current_user):
             db.session.commit()
             return
 
@@ -359,6 +361,14 @@ def create_app():
         # or the redirect below would loop).
         if request.endpoint and request.endpoint.startswith("public_pages."):
             return
+
+        # Payments on (#697): an account the admin blocked reaches only who
+        # it is, its subscription and Stripe's page to cancel it, its data
+        # download, the terms and deleting itself (approval.BLOCKED_OPEN).
+        if approval.approval_waived() and approval.is_blocked(current_user):
+            if approval.open_while_blocked(request.method, request.path):
+                return
+            return _refuse_unapproved()
 
         # Exempt endpoints that the frontend needs:
         # Allow GET requests to /api/dashboard to fetch current user info.
@@ -389,6 +399,9 @@ def create_app():
            (request.method == "GET" and account_path == "/api/account/restore"):
             return
 
+        return _refuse_unapproved()
+
+    def _refuse_unapproved():
         # For API calls, check if the request expects JSON.
         accept_header = request.headers.get("Accept", "")
         if request.path.startswith("/api") or request.is_json or "application/json" in accept_header:

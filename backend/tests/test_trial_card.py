@@ -255,3 +255,68 @@ def test_the_hash_is_keyed():
     assert a != trial_cards.card_hash("fp_card_2", {"SECRET_KEY": "one"})
     assert trial_cards.card_hash(None, {"SECRET_KEY": "one"}) is None
     assert trial_cards.card_hash("fp", {}) is None
+
+
+# ── Failing open, and saying so ─────────────────────────────────────────
+
+def test_a_trial_without_a_fingerprint_is_logged_once(app, gateway, caplog):
+    """A Link payment method: the trial goes ahead, and one WARNING per
+    subscription names the payment method's type, never card data."""
+    import logging
+    ann = _user("ann", stripe_customer_id="cus_a")
+    gateway.payment_methods["pm_l"] = {
+        "id": "pm_l", "type": "link", "link": {"email": "ann@example.com"}}
+    _trial(gateway, "sub_a", "cus_a", "pm_l")
+    with caplog.at_level(logging.WARNING, logger="backend.utils.trial_cards"):
+        _created(app, "sub_a", "evt_1")
+        _post_event(app, _event("customer.subscription.updated",
+                                {"id": "sub_a"}, "evt_2"))
+    lines = [r for r in caplog.records
+             if r.name == "backend.utils.trial_cards"]
+    assert len(lines) == 1 and lines[0].levelname == "WARNING"
+    assert "no card fingerprint (link)" in lines[0].getMessage()
+    assert "ann@example.com" not in lines[0].getMessage()
+    assert _fresh(ann).subscription_status == "trialing"
+
+
+def test_a_failed_card_read_applies_the_trial(app, gateway, caplog):
+    """Stripe down, or a key without read access to payment methods: the
+    trial is applied, the webhook answers 200 (no retries forever), and
+    the failure is logged at ERROR once."""
+    import logging
+
+    def refuse(pm_id):
+        gateway._call("retrieve_payment_method", pm_id)
+        raise RuntimeError("permission denied")
+    gateway.retrieve_payment_method = refuse
+    ann = _user("ann", stripe_customer_id="cus_a")
+    _trial(gateway, "sub_a", "cus_a", "pm_a")
+    with caplog.at_level(logging.WARNING, logger="backend.utils.trial_cards"):
+        r = _created(app, "sub_a", "evt_1")
+        _post_event(app, _event("customer.subscription.updated",
+                                {"id": "sub_a"}, "evt_2"))
+    assert r.get_json()["status"] == "applied"
+    assert _fresh(ann).subscription_status == "trialing"
+    errors = [rec for rec in caplog.records
+              if rec.name == "backend.utils.trial_cards"
+              and rec.levelname == "ERROR"]
+    assert len(errors) == 1
+    assert "RuntimeError" in errors[0].getMessage()
+    assert TrialCard.query.count() == 0
+
+
+def test_the_dedicated_hash_key_wins(app, gateway):
+    from flask import current_app
+    current_app.config["TRIAL_CARD_HASH_KEY"] = "a dedicated key"
+    try:
+        ann = _user("ann", stripe_customer_id="cus_a")
+        _card(gateway, "pm_a", "fp_card_1")
+        _trial(gateway, "sub_a", "cus_a", "pm_a")
+        _created(app, "sub_a", "evt_1")
+        mark = TrialCard.query.filter_by(user_id=ann.id).one()
+        assert mark.card_hash == trial_cards.card_hash(
+            "fp_card_1", {"TRIAL_CARD_HASH_KEY": "a dedicated key"})
+        assert mark.card_hash != trial_cards.card_hash(
+            "fp_card_1", {"SECRET_KEY": current_app.config["SECRET_KEY"]})
+    finally:
+        current_app.config["TRIAL_CARD_HASH_KEY"] = None

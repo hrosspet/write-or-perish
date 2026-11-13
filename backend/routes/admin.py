@@ -229,7 +229,8 @@ def list_users():
         get_user_spend_limit_usd, month_start, rolled_spend_carry,
         user_is_capped,
     )
-    from backend.utils.approval import approval_waived, is_blocked
+    from backend.utils.approval import (
+        approval_waived, counts_as_approved, is_blocked)
 
     config = current_app.config
     waived = approval_waived(config)
@@ -291,7 +292,9 @@ def list_users():
             "username": user.username,
             "created_at": iso_utc(user.created_at),
             "accepted_terms_at": iso_utc(user.accepted_terms_at),
-            "approved": user.approved,
+            # `approved`; payments off, an account the gate let in by
+            # itself while they were on reads as waiting (#697).
+            "approved": counts_as_approved(user, config),
             # Payments on (#697): the admin blocked it (Inactive otherwise
             # only means it has not come back since payments went on).
             **({"blocked": is_blocked(user)} if waived else {}),
@@ -364,19 +367,28 @@ def list_users():
 @admin_required
 def toggle_user_status(user_id):
     """Activate / Deactivate. While payments are on (#697) the Users tab
-    calls it Block / Unblock for an approved or a blocked account: a
-    deactivated account is a blocked one (utils/approval.is_blocked). An
-    account never approved is let in at its next request anyway; this
-    approves it by hand, as before (an "alpha" account then gets the
-    alpha testers' free month, convert_if_alpha)."""
-    from backend.utils.approval import approval_waived, is_blocked
+    offers Block / Unblock instead (block_user below), and this only for
+    an account never approved: Activate by hand, as before (an "alpha"
+    account then gets the alpha testers' free month, convert_if_alpha).
+    Payments off, an account the gate let in by itself while they were on
+    reads as waiting (approval.waiting_again); Activate approves it by
+    hand."""
+    from backend.utils.approval import (
+        approval_waived, approved_by_hand, is_blocked, waiting_again)
     user = User.query.get_or_404(user_id)
+    if waiting_again(user):
+        approved_by_hand(user)
+        user.approved_at = datetime.utcnow()
+        db.session.commit()
+        return jsonify({"message": "User status updated",
+                        "approved": True}), 200
     user.approved = not user.approved  # Toggle the approved flag
     if not user.approved:
         # Record deactivation time (terms acceptance fields are preserved for audit)
         user.deactivated_at = datetime.utcnow()
     else:
         user.approved_at = datetime.utcnow()
+        approved_by_hand(user)
         # An "alpha" account let in after the alpha free month was given
         # gets the same month (#438).
         from backend.utils.subscriptions import convert_if_alpha
@@ -386,6 +398,36 @@ def toggle_user_status(user_id):
     if approval_waived():
         body["blocked"] = is_blocked(user)
     return jsonify(body), 200
+
+
+@admin_bp.route("/users/<int:user_id>/block", methods=["POST"])
+@login_required
+@admin_required
+def block_user(user_id):
+    """Payments on (#697): Block or Unblock any account. Body
+    {"block": true|false}. Block works on an account never approved too,
+    without Activate (which would give the alpha free month); Unblock puts
+    the account back exactly as it was (utils/approval.block, unblock).
+    Nothing of its subscription is cancelled. 404 while payments are
+    off: the Users tab has Deactivate / Activate then."""
+    from backend.utils.approval import (
+        approval_waived, block, is_blocked, unblock)
+    if not approval_waived():
+        return jsonify({"error": "Not found"}), 404
+    user = User.query.get_or_404(user_id)
+    data = request.get_json(silent=True)
+    want = data.get("block") if isinstance(data, dict) else None
+    if not isinstance(want, bool):
+        return jsonify({"error": "block must be true or false."}), 400
+    if user.id == current_user.id and want:
+        return jsonify({"error": "You can't block your own account."}), 400
+    if want:
+        block(user)
+    else:
+        unblock(user)
+    db.session.commit()
+    return jsonify({"blocked": is_blocked(user),
+                    "approved": bool(user.approved)}), 200
 
 @admin_bp.route("/activity", methods=["GET"])
 @login_required
@@ -404,8 +446,15 @@ def _approve_with_prefill(user):
     as the approval, so the account is ready at its owner's first sign-in
     (at the trial step). Not an account the admin blocked. No welcome
     email: the outreach is the admin's own."""
-    from backend.utils.approval import let_in
-    if let_in(user):
+    from backend.utils.approval import (
+        approval_waived, approved_by_hand, let_in)
+    if not approval_waived():
+        return
+    if let_in(user, automatic=False):
+        db.session.commit()
+    elif user.approved and user.let_in_at is not None:
+        # Let in by the gate earlier: the admin's pre-fill is an approval.
+        approved_by_hand(user)
         db.session.commit()
 
 
@@ -953,7 +1002,8 @@ def whitelist_user():
 
     user = User(twitter_id=resolved.x_id, username=handle, approved=False)
     from backend.utils.approval import let_in
-    let_in(user)   # payments on (#697): approved now, no welcome email
+    # Payments on (#697): approved now, no welcome email.
+    let_in(user, automatic=False)
     db.session.add(user)
     try:
         db.session.commit()
@@ -997,6 +1047,9 @@ def activate_and_welcome(user_id):
     # Approve the user
     user.approved = True
     user.approved_at = datetime.utcnow()
+    # By hand (#697): not let in by the gate, not waiting for Unblock.
+    from backend.utils.approval import approved_by_hand
+    approved_by_hand(user)
     # An "alpha" account let in after the alpha free month was given gets
     # the same month (#438).
     from backend.utils.subscriptions import convert_if_alpha

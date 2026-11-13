@@ -385,6 +385,16 @@ class User(db.Model, UserMixin):
     # for the admin Activity tab. Null for accounts approved before the
     # column existed: fall back to accepted_terms_at, then created_at.
     approved_at = db.Column(db.DateTime, nullable=True)
+    # When the approval gate let this account in by itself, while payments
+    # were on (#697, utils/approval.let_in). Not set by the admin's own
+    # approval or by a whitelist or pre-fill, and cleared when the admin
+    # approves the account by hand. With payments off again, such an
+    # account without the paid set waits for approval like a new one.
+    let_in_at = db.Column(db.DateTime, nullable=True)
+    # Whether the account was approved when the admin blocked it (#697,
+    # utils/approval.block), so Unblock restores exactly that. NULL: not
+    # blocked by Block (an account deactivated before payments, or none).
+    approved_before_block = db.Column(db.Boolean, nullable=True)
     # Last authenticated API request (throttled to one write per
     # ACTIVITY_TOUCH_INTERVAL) and its path, so "checked the profile and
     # left" is distinguishable from "never came". Not engagement — a view
@@ -2718,6 +2728,22 @@ class DiscountCodeAttempt(db.Model):
     created_at = db.Column(db.DateTime, nullable=False,
                            default=datetime.utcnow, index=True)
     ok = db.Column(db.Boolean, nullable=False, default=False)
+
+
+class BillingRequest(db.Model):
+    """A checkout started or a subscription synced by an account (#697),
+    for the hourly limits on both (CHECKOUT_STARTS_PER_HOUR,
+    BILLING_SYNCS_PER_HOUR; utils/billing_limits). Only who, which and
+    when."""
+    __tablename__ = "billing_request"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=False, index=True)
+    # "checkout" or "sync".
+    kind = db.Column(db.String(16), nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False,
+                           default=datetime.utcnow, index=True)
 
 
 class TrialCard(db.Model):

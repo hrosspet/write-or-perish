@@ -608,6 +608,17 @@ export function statusLabel(u, letInWithoutApproval) {
   return "Inactive";
 }
 
+// INTRODUCED HEURISTIC (#697): an account made in the last NEW_ACCOUNT_DAYS
+// is marked "new" in the Users tab while payments are on, where no email
+// announces a sign-up any more. A week covers a weekly look at the list.
+export const NEW_ACCOUNT_DAYS = 7;
+
+export function isNewAccount(u, now = Date.now()) {
+  if (!u.created_at) return false;
+  const made = Date.parse(u.created_at);
+  return !Number.isNaN(made) && now - made < NEW_ACCOUNT_DAYS * 86400 * 1000;
+}
+
 function AdminPanel() {
   const [activeTab, setActiveTab] = useState("users");
   const userCtx = useUser();
@@ -714,6 +725,18 @@ function AdminPanel() {
     } catch (err) {
       console.error(err);
       setError("Error toggling user status.");
+    }
+  };
+
+  // Payments on (#697): Block / Unblock any account. Nothing of its
+  // subscription is cancelled.
+  const blockUser = async (userId, block) => {
+    try {
+      await api.post(`/admin/users/${userId}/block`, { block });
+      fetchUsers();
+    } catch (err) {
+      console.error(err);
+      setError(err.response?.data?.error || "Error blocking the account.");
     }
   };
 
@@ -1369,6 +1392,10 @@ function AdminPanel() {
               <td style={{ border: "1px solid var(--border)", padding: "8px" }}>{u.id}</td>
               <td style={{ border: "1px solid var(--border)", padding: "8px" }}>
                 {u.username}
+                {letInWithoutApproval && isNewAccount(u) && (
+                  <span style={{ marginLeft: "6px", fontSize: "0.75em", color: "var(--accent)" }}
+                        title={`Made in the last ${NEW_ACCOUNT_DAYS} days`}>new</span>
+                )}
                 {u.spam && (
                   <span style={{ marginLeft: "6px", fontSize: "0.75em", color: "var(--error)" }} title="Flagged as spam">spam</span>
                 )}
@@ -1571,13 +1598,31 @@ function AdminPanel() {
                   : `${(u.cache_hit_rate * 100).toFixed(0)}%`}
               </td>
               <td style={{ border: "1px solid var(--border)", padding: "8px" }}>
-                {letInWithoutApproval && (u.approved || u.blocked) ? (
-                  // Payments on (#697): nobody waits for approval; the
-                  // switch blocks and unblocks. An account never approved
-                  // keeps Activate: it approves by hand, as before.
-                  <button onClick={() => toggleApproved(u.id)}>
-                    {u.blocked ? "Unblock" : "Block"}
-                  </button>
+                {letInWithoutApproval ? (
+                  // Payments on (#697): nobody waits for approval. Block /
+                  // Unblock on any account; one never approved also keeps
+                  // Activate, which approves it by hand as before.
+                  <>
+                    <button onClick={() => blockUser(u.id, !u.blocked)}>
+                      {u.blocked ? "Unblock" : "Block"}
+                    </button>
+                    {!u.approved && !u.blocked && (
+                      <>
+                        {u.email && (
+                          <>
+                            {" "}
+                            <button onClick={() => activateAndWelcome(u.id)}>
+                              Activate &amp; Welcome
+                            </button>
+                          </>
+                        )}
+                        {" "}
+                        <button onClick={() => toggleApproved(u.id)}>
+                          Activate
+                        </button>
+                      </>
+                    )}
+                  </>
                 ) : !u.approved && u.email ? (
                   <>
                     <button onClick={() => activateAndWelcome(u.id)}>

@@ -882,8 +882,10 @@ def test_after_the_grace_period_nothing_of_the_account_is_left(
     _add(DiscountCodeAttempt(user_id=a_id, ok=False))
     _add(CheckoutSession(id="cs_hers", user_id=a_id, level="standard"))
     # One trial per card (#697): her trial card's mark.
-    from backend.models import TrialCard
+    from backend.models import BillingRequest, TrialCard
     _add(TrialCard(card_hash="h" * 64, user_id=a_id))
+    # The counts behind the checkout limit (#697): deleted with her.
+    _add(BillingRequest(user_id=a_id, kind="checkout"))
     B3 = _db.session.get(Node, world.ids["B3"])
     B3.pinned_by, B3.pinned_at = a_id, T0
     _db.session.commit()

@@ -18,7 +18,7 @@ what its state is, so events may arrive in any order. It never writes
 """
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from flask import current_app, has_app_context
 
@@ -523,6 +523,14 @@ def create_checkout(gateway, user, level, config=None, code=None):
     db.session.query(User).filter(User.id == user.id).with_for_update().one()
     db.session.refresh(user)
     completed = user.subscription_status in SUBSCRIPTION_GRANTING_STATUSES
+    if not completed:
+        # Back at the same level (and code) while its session is still
+        # open: that session again, not a new one (#697).
+        reused = _reusable_session(gateway, user, level,
+                                   code.id if code is not None else None)
+        if reused is not None:
+            db.session.commit()
+            return reused
     for row in CheckoutSession.query.filter_by(user_id=user.id,
                                                state="open").all():
         expire_session(gateway, row)
@@ -543,6 +551,34 @@ def create_checkout(gateway, user, level, config=None, code=None):
         id=session["id"], user_id=user.id, level=level,
         code_id=code.id if code is not None else None, state="open"))
     db.session.commit()
+    return session
+
+
+# INTRODUCED HEURISTIC (#697): how old the account's open session may be
+# to be given again for the same level, instead of a new one. Its trial
+# and price were set when it was made; an hour keeps them current (Stripe
+# keeps a session open for 24 hours), and covers going back and forth.
+CHECKOUT_REUSE_MAX_AGE = timedelta(hours=1)
+
+
+def _reusable_session(gateway, user, level, code_id, now=None):
+    """The account's open session for *level* and *code_id*, made within
+    CHECKOUT_REUSE_MAX_AGE and still open at Stripe with its address, or
+    None. A session that is not open any more is left to create_checkout,
+    which records what it became."""
+    now = now or datetime.utcnow()
+    row = (CheckoutSession.query
+           .filter(CheckoutSession.user_id == user.id,
+                   CheckoutSession.state == "open",
+                   CheckoutSession.level == level,
+                   CheckoutSession.created_at >= now - CHECKOUT_REUSE_MAX_AGE)
+           .order_by(CheckoutSession.created_at.desc())
+           .first())
+    if row is None or row.code_id != code_id:
+        return None
+    session = gateway.retrieve_checkout_session(row.id) or {}
+    if session.get("status") != "open" or not session.get("url"):
+        return None
     return session
 
 

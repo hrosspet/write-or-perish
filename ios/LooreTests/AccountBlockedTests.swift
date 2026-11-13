@@ -53,9 +53,13 @@ final class AccountBlockedTests: XCTestCase {
 
     func testTheScreenSaysNothingAboutPaying() {
         XCTAssertEqual(AccountNotActiveView.message, "This account is not active. Write to info@loore.org.")
-        let lower = AccountNotActiveView.message.lowercased()
-        for word in ["subscri", "buy", "price", "pay", "$", "trial", "card", "plan"] {
-            XCTAssertFalse(lower.contains(word), "mentions \(word)")
+        // Its data, as one file (Peter, 2026-11-13: "yes, Ben should be able to export").
+        XCTAssertEqual(AccountNotActiveView.downloadLabel, "Download your data")
+        for text in [AccountNotActiveView.message, AccountNotActiveView.downloadLabel] {
+            let lower = text.lowercased()
+            for word in ["subscri", "buy", "price", "pay", "$", "trial", "card", "plan", "cancel", "manage"] {
+                XCTAssertFalse(lower.contains(word), "\(text) mentions \(word)")
+            }
         }
     }
 }

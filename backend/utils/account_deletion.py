@@ -661,6 +661,10 @@ def delete_identity(user_id):
     # (a keyed hash and a date), so the card gets no second trial.
     from backend.utils.trial_cards import detach_for_purge
     counts["trial_card.user_id"] += detach_for_purge(U)
+    # The counts behind the checkout and sync limits (#697) go.
+    from backend.models import BillingRequest
+    counts["billing_request"] += BillingRequest.query.filter(
+        BillingRequest.user_id == U).delete(synchronize_session=False)
     counts["discount_code.created_by_id"] += DiscountCode.query.filter(
         DiscountCode.created_by_id == U).update(
         {DiscountCode.created_by_id: None}, synchronize_session=False)

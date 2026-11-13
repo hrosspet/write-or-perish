@@ -266,22 +266,83 @@ def _blocked(**kw):
     return _add(deactivated_at=datetime.utcnow() - timedelta(days=1), **kw)
 
 
+class _PortalGateway:
+    """Just what the billing page and the portal call."""
+
+    def __init__(self):
+        self.calls = []
+
+    def create_portal_session(self, params):
+        self.calls.append(("create_portal_session", params))
+        return {"url": "https://billing.example/session"}
+
+    def list_portal_configurations(self):
+        return []
+
+    def __getattr__(self, name):
+        raise AssertionError(f"Stripe {name} must not be called")
+
+
 class TestBlocked:
-    def test_sees_not_active_and_reaches_nothing(self, real_app):
+    def test_reaches_only_its_short_list(self, real_app, monkeypatch):
+        """Who it is, its subscription and Stripe's page to cancel it, its
+        data download, the terms, deleting itself; every other /api and
+        /media route answers the not-active 403 before its view runs."""
+        from backend.utils import stripe_billing
+        from backend.utils.approval import open_while_blocked
+        monkeypatch.setattr(stripe_billing, "get_gateway", _no_stripe)
         u = _blocked(username="blocked", email="b@example.com")
         c = _client(real_app, u)
         me = _me(c)
         assert me["approved"] is False
         assert me["account_blocked"] is True
-        for method, url in (("POST", "/api/nodes/"),
-                            ("POST", "/api/billing/checkout"),
-                            ("GET", "/api/billing/"),
-                            ("POST", "/api/billing/portal")):
+        refused = 0
+        for method, url in _routes(real_app):
+            if open_while_blocked(method, url):
+                continue
             r = c.open(url, method=method, json={"level": "standard"})
-            assert r.status_code == 403, (url, r.status_code)
+            assert r.status_code == 403, (method, url, r.status_code)
             assert r.get_json() == {"error": NOT_ACTIVE,
-                                    "code": "account_not_active"}
+                                    "code": "account_not_active"}, url
+            refused += 1
+        assert refused > 150
+        for method, url in (("POST", "/api/billing/checkout"),
+                            ("POST", "/api/billing/sync"),
+                            ("PUT", "/api/dashboard/user"),
+                            ("PATCH", "/api/dashboard/timezone")):
+            assert not open_while_blocked(method, url), url
         assert _fresh(u).approved is False
+
+    def test_its_data_and_its_subscription(self, real_app, monkeypatch):
+        """Ben pays for Supporter and is blocked: he can still download his
+        data, see his subscription and open Stripe's page to cancel it."""
+        from backend.utils import stripe_billing
+        gw = _PortalGateway()
+        monkeypatch.setattr(stripe_billing, "get_gateway", lambda *a, **k: gw)
+        u = _blocked(username="ben", stripe_customer_id="cus_b",
+                     subscription_status="active",
+                     subscription_level="supporter",
+                     subscription_ever_paid=True)
+        c = _client(real_app, u)
+        r = c.get("/api/export/threads")
+        assert r.status_code == 200
+        assert r.headers["Content-Disposition"].startswith("attachment")
+        assert c.head("/api/export/threads").status_code == 200
+        r = c.get("/api/billing/")
+        assert r.status_code == 200
+        assert r.get_json()["subscription"]["status"] == "active"
+        r = c.post("/api/billing/portal")
+        assert r.status_code == 200, r.get_json()
+        assert r.get_json()["url"] == "https://billing.example/session"
+        # Never a new checkout or a sync.
+        for url in ("/api/billing/checkout", "/api/billing/sync"):
+            r = c.post(url, json={"level": "standard", "session_id": "cs_x"})
+            assert r.status_code == 403, url
+            assert r.get_json()["code"] == "account_not_active"
+        # Nothing of the subscription is touched.
+        user = _fresh(u)
+        assert user.subscription_status == "active"
+        assert user.approved is False
 
     @pytest.mark.parametrize("kw", [
         {"subscription_status": "active", "subscription_level": "standard",
@@ -295,12 +356,10 @@ class TestBlocked:
         u = _blocked(username="payer", **kw)
         c = _client(real_app, u)
         assert _me(c)["account_blocked"] is True
-        for url in ("/api/nodes/", "/api/billing/checkout",
-                    "/api/billing/portal"):
+        for url in ("/api/nodes/", "/api/billing/checkout"):
             r = c.post(url, json={"level": "standard"})
             assert r.status_code == 403, (url, r.status_code)
             assert r.get_json()["code"] == "account_not_active"
-        # Nothing of the subscription is touched.
         user = _fresh(u)
         assert user.subscription_status == kw.get("subscription_status",
                                                   "none")
@@ -349,22 +408,85 @@ def _admin(app):
     return admin, _client(app, admin)
 
 
+def _block(admin, user, want):
+    from flask import g
+    g.pop("_login_user", None)   # the admin's request
+    return admin.post(f"/api/admin/users/{user.id}/block",
+                      json={"block": want})
+
+
 class TestTheSwitch:
-    def test_blocks_and_unblocks(self, real_app):
+    def test_blocks_and_unblocks_an_account_let_in(self, real_app):
         _admin_user, admin = _admin(real_app)
-        u = _add(username="someone", approved=True)
-        r = admin.post(f"/api/admin/users/{u.id}/toggle")
-        assert r.get_json() == {"message": "User status updated",
-                                "approved": False, "blocked": True}
-        assert _fresh(u).deactivated_at is not None
-        # The blocked account is not let in by its next request.
+        u = _add(username="someone")
+        assert _me(_client(real_app, u))["approved"] is True   # let in
+        before = _fresh(u)
+        approved_at, let_in_at = before.approved_at, before.let_in_at
+        assert let_in_at is not None
+        r = _block(admin, u, True)
+        assert r.get_json() == {"blocked": True, "approved": False}
         assert _me(_client(real_app, u))["account_blocked"] is True
-        assert _fresh(u).approved is False
-        from flask import g
-        g.pop("_login_user", None)   # the admin's request again
-        r = admin.post(f"/api/admin/users/{u.id}/toggle")
-        assert r.get_json()["blocked"] is False
-        assert _fresh(u).approved is True
+        assert _fresh(u).approved is False   # not let in again
+        r = _block(admin, u, False)
+        assert r.get_json() == {"blocked": False, "approved": True}
+        user = _fresh(u)
+        # Exactly as it was, and nothing left that refuses its tokens or
+        # asks for the terms again.
+        assert user.approved_at == approved_at
+        assert user.let_in_at == let_in_at
+        assert user.deactivated_at is None
+        assert user.approved_before_block is None
+
+    def test_blocks_an_account_never_approved_without_activate(
+            self, real_app):
+        """No Activate first (that gives the alpha free month): the account
+        is blocked as it is, and Unblock leaves it never approved, so it
+        is let in at its next request like any other."""
+        _admin_user, admin = _admin(real_app)
+        u = _add(username="notyet", plan="alpha")
+        assert _block(admin, u, True).get_json()["blocked"] is True
+        user = _fresh(u)
+        assert user.approved is False and user.deactivated_at is not None
+        assert user.plan == "alpha" and user.alpha_free_granted_at is None
+        assert _me(_client(real_app, u))["account_blocked"] is True
+        _block(admin, u, False)
+        user = _fresh(u)
+        assert user.approved is False and user.deactivated_at is None
+        assert _me(_client(real_app, u))["approved"] is True   # let in now
+
+    def test_unblock_makes_its_tokens_work_again(self, real_app):
+        from backend.models import ApiToken
+        from backend.utils.api_tokens import (
+            SCOPE_EXTERNAL_WRITE, generate_api_token, hash_token,
+            resolve_api_token)
+        _admin_user, admin = _admin(real_app)
+        u = _add(username="clipper", approved=True)
+        plain, prefix = generate_api_token()
+        _db.session.add(ApiToken(user_id=u.id, name="clipper", prefix=prefix,
+                                 scope=SCOPE_EXTERNAL_WRITE,
+                                 token_hash=hash_token(plain)))
+        _db.session.commit()
+        assert resolve_api_token(plain, SCOPE_EXTERNAL_WRITE) is not None
+        _block(admin, u, True)
+        assert resolve_api_token(plain, SCOPE_EXTERNAL_WRITE) is None
+        _block(admin, u, False)
+        assert resolve_api_token(plain, SCOPE_EXTERNAL_WRITE) is not None
+
+    def test_an_account_deactivated_before_payments_is_activated(
+            self, real_app):
+        """Deactivated during the alpha (not by Block): Unblock is Activate
+        as it always was."""
+        _admin_user, admin = _admin(real_app)
+        u = _blocked(username="old", approved=False)
+        assert u.approved_before_block is None
+        r = _block(admin, u, False)
+        assert r.get_json() == {"blocked": False, "approved": True}
+        user = _fresh(u)
+        assert user.approved is True and user.approved_at is not None
+
+    def test_not_ones_own_account(self, real_app):
+        admin_user, admin = _admin(real_app)
+        assert _block(admin, admin_user, True).status_code == 400
 
     def test_activate_by_hand_still_approves(self, real_app):
         # An account never approved keeps Activate: it approves by hand,
@@ -377,7 +499,7 @@ class TestTheSwitch:
                                 "approved": True, "blocked": False}
         user = _fresh(u)
         assert user.approved is True and user.deactivated_at is None
-        assert user.plan == "alpha"
+        assert user.plan == "alpha" and user.let_in_at is None
 
     def test_the_users_list_says_blocked(self, real_app):
         _admin_user, admin = _admin(real_app)
@@ -398,6 +520,85 @@ class TestTheSwitch:
         assert _fresh(u).approved is True
         rows = admin.get("/api/admin/users").get_json()["users"]
         assert all("blocked" not in row for row in rows)
+        assert admin.post(f"/api/admin/users/{u.id}/block",
+                          json={"block": True}).status_code == 404
+
+
+# ── Payments off again ───────────────────────────────────────────────────
+
+class TestPaymentsOffAgain:
+    def _let_in(self, app, **kw):
+        u = _add(**kw)
+        assert _me(_client(app, u))["approved"] is True
+        assert _fresh(u).let_in_at is not None
+        return u
+
+    def test_an_account_let_in_without_paying_waits_again(self, real_app):
+        u = self._let_in(real_app, username="stranger", email="s@x.org")
+        real_app.config["PAYMENTS_ENABLED"] = False
+        c = _client(real_app, u)
+        me = _me(c)
+        assert me["approved"] is False   # the waiting screen
+        r = c.post("/api/nodes/", json={"content": "hello"})
+        assert r.status_code == 403 and r.get_json() == {"error": WAITING}
+        assert c.get("/api/log").status_code == 403
+        # Nothing of it changes: on again, it is as it was.
+        user = _fresh(u)
+        assert user.approved is True and user.let_in_at is not None
+        real_app.config["PAYMENTS_ENABLED"] = True
+        assert _me(_client(real_app, u))["approved"] is True
+
+    def test_the_admin_approves_it_by_hand(self, real_app):
+        u = self._let_in(real_app, username="stranger", email="s@x.org")
+        real_app.config["PAYMENTS_ENABLED"] = False
+        _admin_user, admin = _admin(real_app)
+        rows = {r["username"]: r
+                for r in admin.get("/api/admin/users").get_json()["users"]}
+        assert rows["stranger"]["approved"] is False   # Inactive, Activate
+        r = admin.post(f"/api/admin/users/{u.id}/toggle")
+        assert r.get_json() == {"message": "User status updated",
+                                "approved": True}
+        user = _fresh(u)
+        assert user.approved is True and user.let_in_at is None
+        assert _me(_client(real_app, u))["approved"] is True
+
+    @pytest.mark.parametrize("kw", [
+        {"subscription_status": "active", "subscription_level": "standard"},
+        {"subscription_status": "ended", "subscription_level": "standard",
+         "subscription_ever_paid": True},
+    ])
+    def test_what_was_paid_for_stays(self, real_app, kw):
+        u = self._let_in(real_app, username="customer")
+        for k, v in kw.items():
+            setattr(u, k, v)
+        _db.session.commit()
+        real_app.config["PAYMENTS_ENABLED"] = False
+        assert _me(_client(real_app, u))["approved"] is True
+
+    def test_a_plan_set_by_hand_since_stays(self, real_app):
+        u = self._let_in(real_app, username="friend")
+        u.plan = "pro"
+        _db.session.commit()
+        real_app.config["PAYMENTS_ENABLED"] = False
+        assert _me(_client(real_app, u))["approved"] is True
+
+    def test_not_written_by_a_whitelist_or_by_hand(self, real_app,
+                                                    monkeypatch):
+        _resolved(monkeypatch)
+        _admin_user, admin = _admin(real_app)
+        admin.post("/api/admin/whitelist", json={"handle": "alice"})
+        assert User.query.filter_by(username="alice").one().let_in_at is None
+        u = _add(username="byhand", email="b@x.org")
+        from flask import g
+        g.pop("_login_user", None)
+        admin.post(f"/api/admin/users/{u.id}/toggle")
+        assert _fresh(u).let_in_at is None
+
+    def test_control_an_account_approved_by_hand_keeps_access(
+            self, payments_off):
+        u = _add(username="tester", approved=True)
+        assert _me(_client(payments_off, u))["approved"] is True
+        assert _client(payments_off, u).get("/api/log").status_code != 403
 
 
 # ── 2. Whitelist and pre-fill count as the approval ─────────────────────
@@ -498,28 +699,28 @@ def _notices(monkeypatch):
     calls = []
     import backend.routes.terms as terms
     monkeypatch.setattr(terms, "send_admin_signup_notification",
-                        lambda name, email, let_in=False:
-                        calls.append((name, let_in)))
+                        lambda name, email: calls.append(name))
     return calls
 
 
 class TestSignupEmail:
-    def test_first_acceptance_is_information(self, real_app, monkeypatch):
+    def test_none_while_payments_are_on(self, real_app, monkeypatch):
         calls = _notices(monkeypatch)
         u = _add(username="newcomer", email="n@example.com")
-        c = _client(real_app, u)
-        assert c.post("/api/terms/accept").status_code == 200
-        assert calls == [("newcomer", True)]
-        # Accepting a newer version later sends nothing.
-        assert c.post("/api/terms/accept").status_code == 200
-        assert calls == [("newcomer", True)]
-
-    def test_not_for_a_blocked_account(self, real_app, monkeypatch):
-        calls = _notices(monkeypatch)
-        u = _blocked(username="blocked")
         assert _client(real_app, u).post("/api/terms/accept").status_code \
             == 200
+        assert _client(real_app, _blocked(username="blocked")).post(
+            "/api/terms/accept").status_code == 200
         assert calls == []
+
+    def test_new_accounts_head_the_users_list(self, real_app):
+        _admin_user, admin = _admin(real_app)
+        _add(username="older",
+             created_at=datetime.utcnow() - timedelta(days=3))
+        _add(username="newest")
+        rows = admin.get("/api/admin/users").get_json()["users"]
+        assert rows[0]["username"] == "newest"
+        assert rows[0]["created_at"] is not None
 
     def test_control_payments_off_asks_for_approval(self, payments_off,
                                                     monkeypatch):
@@ -528,25 +729,17 @@ class TestSignupEmail:
         c = _client(payments_off, u)
         c.post("/api/terms/accept")
         c.post("/api/terms/accept")
-        assert calls == [("newcomer", False), ("newcomer", False)]
+        assert calls == ["newcomer", "newcomer"]
         ok = _add(username="approved", approved=True)
         _client(payments_off, ok).post("/api/terms/accept")
-        assert len(calls) == 2
+        assert calls == ["newcomer", "newcomer"]
 
-    def test_the_wording(self, real_app, monkeypatch):
+    def test_control_the_email_is_the_base_one(self):
+        import inspect
         from backend.utils import email as email_mod
-        sent = []
-        monkeypatch.setattr(email_mod, "_send",
-                            lambda to, subject, text, html, *a, **k:
-                            sent.append((subject, text, html)))
-        email_mod.send_admin_signup_notification("ann", "a@x.org", let_in=True)
-        email_mod.send_admin_signup_notification("bob", None)
-        (s1, t1, h1), (s2, t2, h2) = sent
-        assert s1 == "New signup: ann"
-        assert "Nothing to approve." in t1 and "Nothing to approve." in h1
-        assert "Review and approve" not in t1
-        assert "Review and approve in the admin dashboard" in t2
-        assert "Nothing to approve" not in t2 + h2
+        params = inspect.signature(
+            email_mod.send_admin_signup_notification).parameters
+        assert list(params) == ["username", "user_email"]
 
 
 # ── 4. One trial per account, also for accounts let in ──────────────────
