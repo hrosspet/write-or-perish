@@ -208,6 +208,57 @@ describe('a start whose microphone fails', () => {
   });
 });
 
+describe('Loore still transcribing earlier audio', () => {
+  const words = 'Loore is still working through your earlier recordings. Try again in a minute.';
+  const catchingUp = () => {
+    const err = new Error('Request failed with status code 503');
+    err.response = { status: 503, data: { error: words, code: 'usage_catching_up' } };
+    return err;
+  };
+
+  test("a start refused shows the server's words, not the usage limit", async () => {
+    const banner = jest.fn();
+    window.addEventListener('loore:spend-capped', banner);
+    try {
+      mockPost.mockImplementation((url) => {
+        if (url === '/drafts/streaming/init') return Promise.reject(catchingUp());
+        return Promise.resolve({ data: {} });
+      });
+      const onError = jest.fn();
+      const { result } = renderHook(() => useStreamingTranscription({ onError }));
+
+      await act(async () => { await result.current.startStreaming(); });
+
+      expect(mockStartRecording).not.toHaveBeenCalled();
+      const err = onError.mock.calls[0][0];
+      expect(err.message).toBe(words);
+      expect(err.spendCapped).toBeFalsy();
+      expect(banner).not.toHaveBeenCalled();
+      expect(mockAddToast).not.toHaveBeenCalled();
+      expect(result.current.errorMessage).toBe(words);
+    } finally {
+      window.removeEventListener('loore:spend-capped', banner);
+    }
+  });
+
+  test("a refused chunk is not retried and stops in the server's words", async () => {
+    const onError = jest.fn();
+    await startRecording({ onError });
+    mockPost.mockImplementation((url) => (
+      url.includes('/audio-chunk') ? Promise.reject(catchingUp())
+        : Promise.resolve({ data: {} })));
+
+    await act(async () => {
+      mockRecorderOpts.onChunkReady(new Blob(['a']), 7);
+      await flush();
+    });
+
+    expect(callsTo('/audio-chunk')).toHaveLength(1);
+    expect(onError.mock.calls[0][0].message).toBe(words);
+    expect(onError.mock.calls[0][0].spendCapped).toBeFalsy();
+  });
+});
+
 describe('a chunk past what one recording may hold', () => {
   test.each(['recording_too_large', 'chunk_index_out_of_range', 'chunk_too_large'])(
     '%s is not retried, and the recording stops with its audio kept',

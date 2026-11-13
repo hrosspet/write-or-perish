@@ -168,12 +168,15 @@ def _upload_reply_options(values, parent_id, ai_usage, privacy_level=None):
     return agentic, model_id, None, auto_off
 
 
-def _save_audio_file(file_storage, user_id: int, node_id: int, variant: str) -> str:
+def _save_audio_file(file_storage, user_id: int, node_id: int, variant: str,
+                     before_encrypt=None) -> str:
     """Save an uploaded (or generated) audio file and return its relative URL
     (under /media) so that the front‑end can stream it.
 
     variant – either "original" or "tts".  The function ensures that the
     directory structure `user/{user_id}/node/{node_id}/` exists before saving.
+    before_encrypt – called with the saved file's path before it is
+    encrypted at rest (an upload is measured there).
     """
     filename = secure_filename(file_storage.filename or f"{variant}")
     ext = filename.rsplit(".", 1)[-1] if "." in filename else "webm"
@@ -181,6 +184,8 @@ def _save_audio_file(file_storage, user_id: int, node_id: int, variant: str) -> 
     target_dir.mkdir(parents=True, exist_ok=True)
     target_path = target_dir / f"{variant}.{ext}"
     file_storage.save(target_path)
+    if before_encrypt is not None:
+        before_encrypt(target_path)
     # Encrypt the audio file at rest (URL stored without .enc)
     encrypt_file(str(target_path))
     # Produce URL to be consumed externally, routed via /media endpoint.
@@ -794,7 +799,6 @@ def create_node():
         placeholder_text = "[Voice note – transcription pending]"
         from backend.utils.tokens import approximate_token_count as _atc2
 
-        from backend.utils.recording_limits import upload_estimate_seconds
         node = Node(
             user_id=current_user.id,
             human_owner_id=current_user.id,
@@ -802,8 +806,6 @@ def create_node():
             node_type=node_type,
             transcription_status='pending',  # Set initial status
             upload_activity_at=datetime.utcnow(),
-            # Its seconds until measured (utils/recording_limits).
-            audio_pending_seconds=upload_estimate_seconds(content_length),
             privacy_level=privacy_level,
             ai_usage=ai_usage,
             token_count=_atc2(placeholder_text),
@@ -818,10 +820,19 @@ def create_node():
         db.session.add(node)
         db.session.commit()  # Need node.id for the file path.
 
-        # Save the audio file now that we know node.id
-        url = _save_audio_file(file, current_user.id, node.id, "original")
+        # Save the audio file now that we know node.id; measured before it
+        # is encrypted: its seconds count toward the account's usage at a
+        # start until its cost is recorded
+        # (utils/recording_limits.pending_audio_seconds).
+        from backend.utils.recording_limits import finalized_upload_seconds
+        waiting = []
+        url = _save_audio_file(
+            file, current_user.id, node.id, "original",
+            before_encrypt=lambda path: waiting.append(
+                finalized_upload_seconds(path)))
         node.audio_original_url = url
         node.audio_mime_type = file.mimetype
+        node.audio_pending_seconds = waiting[0] if waiting else None
         db.session.add(node)
         db.session.commit()
 
@@ -2720,12 +2731,14 @@ def _fail_unfinished_upload(chunk_dir):
     db.session.commit()
 
 
-def _hand_upload_to_transcription(node):
+def _hand_upload_to_transcription(node, waiting_seconds):
     """A finalized upload is handed to transcription: renewed, so it counts
-    until its transcript is in (utils/recording_limits.UPLOAD_COUNTS_FOR).
-    An upload accepted at its start is transcribed, as a recording is
-    (#341)."""
+    until its transcript is in (utils/recording_limits.UPLOAD_COUNTS_FOR),
+    with its measured seconds, which count toward the account's usage at a
+    start until its cost is recorded (pending_audio_seconds). An upload
+    accepted at its start is transcribed, as a recording is (#341)."""
     node.upload_activity_at = datetime.utcnow()
+    node.audio_pending_seconds = waiting_seconds
     db.session.commit()
 
 
@@ -2864,9 +2877,7 @@ def init_chunked_upload():
 
     # Create placeholder node
     placeholder_text = "[Voice note – upload in progress]"
-    from backend.utils.recording_limits import (
-        upload_estimate_seconds, upload_start_refusal,
-    )
+    from backend.utils.recording_limits import upload_start_refusal
     from backend.utils.tokens import approximate_token_count as _atc3
     node = Node(
         user_id=current_user.id,
@@ -2875,8 +2886,6 @@ def init_chunked_upload():
         node_type=node_type,
         transcription_status='pending',
         upload_activity_at=datetime.utcnow(),
-        # Its seconds until measured (utils/recording_limits).
-        audio_pending_seconds=upload_estimate_seconds(filesize),
         privacy_level=privacy_level,
         ai_usage=ai_usage,
         token_count=_atc3(placeholder_text),
@@ -3144,6 +3153,12 @@ def finalize_chunked_upload():
         target_path.unlink(missing_ok=True)
         return _upload_size_mismatch(chunk_dir, node, upload_id)
 
+    # Measured before it is encrypted: its seconds count toward the
+    # account's usage at a start until its cost is recorded
+    # (utils/recording_limits.pending_audio_seconds).
+    from backend.utils.recording_limits import finalized_upload_seconds
+    waiting = finalized_upload_seconds(target_path)
+
     # Encrypt the assembled audio file at rest (URL stored without .enc)
     encrypt_file(str(target_path))
 
@@ -3163,7 +3178,7 @@ def finalize_chunked_upload():
         current_app.logger.warning(
             "Failed to clean up chunks for upload %s: %s",
             upload_id, describe_exception(e))
-    _hand_upload_to_transcription(node)
+    _hand_upload_to_transcription(node, waiting)
 
     # Enqueue transcription task
     api_key = get_openai_chat_key(current_app.config)

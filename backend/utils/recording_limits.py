@@ -60,10 +60,12 @@ Every start (a recording's or an upload's init, and audio of a recording
 that counts as a new start) asks for the usage limit with the audio the
 account has stored or queued but not yet recorded as cost counted in
 (pending_audio_seconds, usage_refusal), so new starts see the account's
-usage before the transcription catches up. A recording that holds audio is
-never refused for it. When the limit is reached, a recording's first audio
-is taken without the limit asked only for the account's most recently
-started recording, the one being spoken into.
+usage before the transcription catches up. A start refused only because of
+that audio is told to try again shortly (CATCHING_UP_TEXT), not that the
+limit is reached; it clears as the transcription catches up. A recording
+that holds audio is never refused for it. When the limit is reached, a
+recording's first audio is taken without the limit asked only for the
+account's most recently started recording, the one being spoken into.
 
 An account has at most MAX_UPLOADS_IN_PROGRESS audio uploads waiting for
 their transcript with activity within UPLOAD_COUNTS_FOR
@@ -184,10 +186,12 @@ MAX_UPLOADS_IN_PROGRESS = 5
 # counting at once.
 UPLOAD_COUNTS_FOR = timedelta(hours=24)
 
-# INTRODUCED HEURISTIC: an uploaded file's seconds are estimated, until the
-# transcription task measures them, from its size at the iPhone app's 64 kbps
-# (8 KB a second), at most MAX_UPLOAD_TRANSCRIBED_SECONDS.
-UPLOAD_ESTIMATE_BYTES_PER_SECOND = 64_000 // 8
+# INTRODUCED HEURISTIC: how long the finalize of an upload may spend measuring
+# the file (utils/audio_processing.quick_audio_seconds): a file it cannot
+# finish in this time counts the larger of what it decoded and what its
+# container states, until the transcription task measures it. An hour of
+# AAC or Opus decodes in 2-5 s on a laptop.
+UPLOAD_MEASURE_SECONDS = 5
 # Audio stored or queued counts toward the usage at a start
 # (pending_audio_seconds) for this long; a chunk or upload whose
 # transcription died then stops counting.
@@ -214,6 +218,12 @@ RECORDINGS_IN_PROGRESS_TEXT = (
 TOO_MANY_STARTS_TEXT = (
     "Many recordings were started without any audio in the last few "
     "minutes. Wait a few minutes, then start a new one.")
+# A start refused only because of audio still waiting for its transcript
+# (usage_refusal): 503 ``usage_catching_up``, not the usage limit's 402, so
+# the apps do not show the account as capped.
+CATCHING_UP_TEXT = ("Loore is still working through your earlier "
+                    "recordings. Try again in a minute.")
+CATCHING_UP_CODE = "usage_catching_up"
 TOO_MANY_UPLOADS_TEXT = (
     "Other audio files of yours are still being uploaded or turned into "
     "text. Wait for one of them to finish, then upload this one.")
@@ -504,12 +514,14 @@ def _refused(text_, code, status):
     return jsonify({"error": text_, "code": code}), status
 
 
-def upload_estimate_seconds(size_bytes):
-    """An uploaded file's seconds before they are measured: its size at
-    UPLOAD_ESTIMATE_BYTES_PER_SECOND, at most MAX_UPLOAD_TRANSCRIBED_SECONDS."""
-    size = max(size_bytes or 0, 0)
-    return min(float(MAX_UPLOAD_TRANSCRIBED_SECONDS),
-               size / UPLOAD_ESTIMATE_BYTES_PER_SECOND)
+def finalized_upload_seconds(file_path):
+    """An uploaded file's seconds once it is handed to transcription, until
+    the transcription task measures it: measured within
+    UPLOAD_MEASURE_SECONDS (utils/audio_processing.quick_audio_seconds), at
+    most MAX_UPLOAD_TRANSCRIBED_SECONDS."""
+    from backend.utils.audio_processing import quick_audio_seconds
+    return quick_audio_seconds(file_path, UPLOAD_MEASURE_SECONDS,
+                               MAX_UPLOAD_TRANSCRIBED_SECONDS)
 
 
 # Chunk statuses that wait for their transcript (and their cost row).
@@ -522,9 +534,10 @@ def pending_audio_seconds(user_id, now=None):
 
     - chunks of its recordings that wait for their transcript: as the
       transcription task measured them (pending_seconds), or, before,
-      MAX_CHUNK_AUDIO_SECONDS each, the most a chunk is sent with;
-    - its uploads that wait for their transcript (audio_pending_seconds:
-      estimated from the file's size, then as measured).
+      STREAMING_CHUNK_SECONDS each, the apps' chunk length;
+    - its uploads handed to transcription that wait for their transcript
+      (audio_pending_seconds: measured at the finalize, then by the task);
+      an upload not finalized counts nothing.
 
     A chunk or an upload leaves the sum in the commit that writes its cost
     row or keeps it without its text (its status changes then), so nothing
@@ -533,7 +546,7 @@ def pending_audio_seconds(user_id, now=None):
     from backend.models import Draft, Node, NodeTranscriptChunk
     since = _since(now, PENDING_COUNTS_FOR)
     per_chunk = db.func.coalesce(NodeTranscriptChunk.pending_seconds,
-                                 float(MAX_CHUNK_AUDIO_SECONDS))
+                                 float(STREAMING_CHUNK_SECONDS))
     waiting = db.and_(NodeTranscriptChunk.status.in_(_WAITING_CHUNK),
                       NodeTranscriptChunk.created_at >= since)
     recordings = db.session.query(db.func.sum(per_chunk)).join(
@@ -557,11 +570,13 @@ def pending_audio_seconds(user_id, now=None):
 
 def usage_refusal(user_id):
     """The usage limit at a start: the 402 (utils/spend) when the account
-    is capped, or when its carry, what it spent this month and the audio it
-    has stored or queued but not yet recorded as cost
-    (pending_audio_seconds, at the transcription price) reach its limit.
-    None otherwise, and for an account without a limit. Asked at every
-    start; never for audio of a recording that holds audio."""
+    is capped, or when its carry and what it spent this month reach its
+    limit; 503 ``usage_catching_up`` (CATCHING_UP_TEXT) when only the audio
+    it has stored or queued but not yet recorded as cost
+    (pending_audio_seconds, at the transcription price) takes it there,
+    which clears as the transcription catches up. None otherwise, and for
+    an account without a limit. Asked at every start; never for audio of a
+    recording that holds audio."""
     from flask import current_app
     from backend.extensions import db
     from backend.models import User
@@ -577,10 +592,14 @@ def usage_refusal(user_id):
             return None
         used = (spend.rolled_spend_carry(user, current_app.config)
                 + spend.get_user_month_spend_microdollars(user_id))
-        pending = calculate_audio_cost_microdollars(
-            TRANSCRIPTION_MODEL, pending_audio_seconds(user_id))
-        if used + pending < limit:
-            return None
+        if used < limit:
+            pending = calculate_audio_cost_microdollars(
+                TRANSCRIPTION_MODEL, pending_audio_seconds(user_id))
+            if used + pending < limit:
+                return None
+            response = _refused(CATCHING_UP_TEXT, CATCHING_UP_CODE, 503)
+            response[0].headers["Retry-After"] = "60"
+            return response
     response = spend.spend_cap_response(user)
     db.session.rollback()
     return response

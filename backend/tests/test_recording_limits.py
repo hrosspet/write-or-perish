@@ -936,24 +936,68 @@ def _transcribed(user, session_id, seconds=15.0):
 
 class TestUsageAtAStart:
     """A start counts the audio the account has stored or queued but not
-    yet recorded as cost; a recording that holds audio is never refused for
-    it."""
+    yet recorded as cost; a refusal that comes only from that audio says to
+    try again shortly, never that the limit is reached; a recording that
+    holds audio is never refused for it."""
+
+    def _catching_up(self, resp):
+        assert resp.status_code == 503, resp.get_data(as_text=True)
+        assert resp.get_json() == {"error": limits.CATCHING_UP_TEXT,
+                                   "code": limits.CATCHING_UP_CODE}
 
     def test_forty_starts_in_a_row_stop_at_the_limit(
             self, app, client, alice, tasks):
-        _limit(app, alice, 0.10)
+        _limit(app, alice, 0.01)
 
         codes = [_voice_turn(client)[0] for _ in range(40)]
 
         accepted = codes.count(201)
-        assert codes == [201] * accepted + [402] * (40 - accepted)
-        # Each turn waits for its transcript, counted at the most a chunk
-        # is sent with until then: the starts stop at the limit, and what
-        # they may send passes it by less than one recording's bound.
-        per_turn = _cost(limits.MAX_CHUNK_AUDIO_SECONDS)
-        assert accepted == -(-100_000 // per_turn)
-        assert accepted * per_turn - 100_000 \
+        assert codes == [201] * accepted + [503] * (40 - accepted)
+        # Each turn waits for its transcript, counted at the apps' chunk
+        # length until then: the starts stop at the limit, and what they
+        # may send passes it by less than one recording's bound.
+        per_turn = _cost(limits.STREAMING_CHUNK_SECONDS)
+        assert accepted == -(-10_000 // per_turn)
+        assert accepted * per_turn - 10_000 \
             < _cost(limits.MAX_TRANSCRIBED_SECONDS)
+        # Not the usage limit: nothing marks the account capped.
+        _db.session.refresh(alice)
+        assert alice.spend_blocked_month is None
+        self._catching_up(_init_recording(client))
+
+    def test_it_clears_as_the_transcription_catches_up(
+            self, app, client, alice, tasks):
+        _limit(app, alice, 0.01)
+        sids = []
+        while True:
+            code, sid = _voice_turn(client)
+            if code != 201:
+                break
+            sids.append(sid)
+        self._catching_up(_init_recording(client))
+
+        for sid in sids:
+            _transcribed(alice, sid, seconds=2.0)   # the turns were short
+
+        assert _init_recording(client).status_code == 201
+
+    def test_a_queued_half_hour_dictation_counts_its_real_length(
+            self, app, client, alice):
+        # $1.00 left; a 30-minute dictation (120 chunks) all still queued.
+        _limit(app, alice, 1.00)
+        _left_behind(app, alice, "dictation", timedelta(minutes=1),
+                     chunks=120)
+
+        assert limits.pending_audio_seconds(alice.id) == 30 * 60
+        assert _init_recording(client).status_code == 201
+
+    def test_the_last_chunks_at_stop_do_not_refuse_a_start(
+            self, app, client, alice):
+        # $0.20 left; the last 20 chunks of a dictation, at its Stop.
+        _limit(app, alice, 1.00, spent_usd=0.80)
+        _left_behind(app, alice, "stop", timedelta(seconds=5), chunks=20)
+
+        assert _init_recording(client).status_code == 201
 
     def test_back_to_back_voice_turns_under_the_limit_are_counted_once(
             self, app, client, alice, tasks):
@@ -966,7 +1010,7 @@ class TestUsageAtAStart:
             code, sid = _voice_turn(client)
             assert code == 201, turn
             assert limits.pending_audio_seconds(alice.id) \
-                == limits.MAX_CHUNK_AUDIO_SECONDS
+                == limits.STREAMING_CHUNK_SECONDS
             _transcribed(alice, sid)
             assert limits.pending_audio_seconds(alice.id) == 0
 
@@ -978,25 +1022,76 @@ class TestUsageAtAStart:
         # The next start, before the transcript: counted at its estimate.
         assert _voice_turn(client)[0] == 201
         assert limits.pending_audio_seconds(alice.id) \
-            == 2 * limits.MAX_CHUNK_AUDIO_SECONDS
+            == 2 * limits.STREAMING_CHUNK_SECONDS
 
-    def test_an_upload_counts_from_its_start(self, app, client, alice):
-        _limit(app, alice, 0.10)
-        # 8 MB: about 1,000 s until measured, the whole limit.
-        node_id = _init_upload(client, 8_000_000, 2).get_json()["node_id"]
+    def test_control_the_usage_limit_itself_is_still_the_usage_limit(
+            self, app, client, alice):
+        _limit(app, alice, 0.10, spent_usd=0.10)
 
-        assert _init_recording(client).status_code == 402
-        assert _init_upload(client, 8, 2, upload_id="up-2").status_code \
-            == 402
-        # Measured shorter by the transcription task.
-        Node.query.get(node_id).audio_pending_seconds = 60.0
+        resp = _init_recording(client)
+
+        assert resp.status_code == 402
+        assert resp.get_json()["error"] == "monthly_spend_limit_reached"
+
+    def test_an_upload_not_finalized_counts_nothing(self, app, client, alice):
+        # $2.00 left; a 190 MB upload that stopped arriving 23 hours ago.
+        _limit(app, alice, 2.00)
+        node_id = _init_upload(client, 190_000_000, 40).get_json()["node_id"]
+        Node.query.get(node_id).upload_activity_at = (
+            datetime.utcnow() - timedelta(hours=23))
         _db.session.commit()
+
+        assert limits.pending_audio_seconds(alice.id) == 0
         assert _init_recording(client).status_code == 201
 
-    def test_audio_with_its_cost_row_is_not_counted(self, app, client, alice):
+    @pytest.mark.skipif(not __import__("shutil").which("ffmpeg"),
+                        reason="needs ffmpeg")
+    def test_a_finalized_upload_counts_its_measured_length(
+            self, app, client, alice, tmp_path):
+        import subprocess
+        _limit(app, alice, 1.00)
+        audio = tmp_path / "talk.wav"
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                        "sine=frequency=440:duration=60", "-ac", "1",
+                        "-c:a", "pcm_s16le", str(audio)], check=True)
+
+        node_id, resp = _upload(client, audio.read_bytes(),
+                                piece=5 * 1024 * 1024)
+        assert resp.status_code == 200, resp.get_data(as_text=True)
+
+        assert Node.query.get(node_id).audio_pending_seconds \
+            == pytest.approx(60, abs=0.2)
+        assert limits.pending_audio_seconds(alice.id) \
+            == pytest.approx(60, abs=0.2)
+
+    @pytest.mark.skipif(not __import__("shutil").which("ffmpeg"),
+                        reason="needs ffmpeg")
+    def test_a_large_file_does_not_count_hours_it_does_not_hold(
+            self, app, client, alice, tmp_path):
+        import subprocess
+        # 20 seconds of 48 kHz stereo 32-bit audio: large, and short.
+        _limit(app, alice, 1.00)
+        audio = tmp_path / "talk.wav"
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                        "sine=frequency=440:duration=20:sample_rate=48000",
+                        "-ac", "2", "-c:a", "pcm_f32le", str(audio)],
+                       check=True)
+        assert audio.stat().st_size > 7_000_000
+
+        node_id, resp = _upload(client, audio.read_bytes(),
+                                piece=5 * 1024 * 1024)
+        assert resp.status_code == 200, resp.get_data(as_text=True)
+
+        assert Node.query.get(node_id).audio_pending_seconds \
+            == pytest.approx(20, abs=0.2)
+
+    def test_control_audio_with_its_cost_row_is_not_counted(
+            self, app, client, alice):
         _limit(app, alice, 0.10)
         node_id = _init_upload(client, 8, 2).get_json()["node_id"]
-        Node.query.get(node_id).transcription_status = "completed"
+        node = Node.query.get(node_id)
+        node.audio_pending_seconds = 60.0
+        node.transcription_status = "completed"
         _db.session.commit()
 
         assert limits.pending_audio_seconds(alice.id) == 0
@@ -1966,7 +2061,7 @@ class TestDecodedLength:
         st._decoded = 75.0
         _recording(st, "sess-pm", range(0, 20))
         assert limits.pending_audio_seconds(st._user.id) \
-            == 20 * limits.MAX_CHUNK_AUDIO_SECONDS
+            == 20 * limits.STREAMING_CHUNK_SECONDS
 
         _batch(st, "sess-pm", range(0, 20))
 
