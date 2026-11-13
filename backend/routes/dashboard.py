@@ -224,6 +224,25 @@ def request_email_change():
         return jsonify({"error": "That is already your email address."}), 400
     taken = User.query.filter(db.func.lower(User.email) == new_email,
                               User.id != current_user.id).first() is not None
+    # Limits (utils/send_limits.py). The account's and the client's say
+    # nothing about the address; over the address's own, nothing is sent
+    # and the answer is the one a sent link gets.
+    from backend.utils import send_limits
+    account = None
+    if send_limits.client_may_ask("email-change", request.remote_addr):
+        account = send_limits.claim_account("email-change", current_user.id)
+    if account is None:
+        logger.info("Email change request of user %s over the account or "
+                    "client limit", current_user.id)
+        return jsonify({"error": send_limits.WAIT_MESSAGE}), 429
+    address = send_limits.claim_address("email-change", new_email)
+    if address is None:
+        # Nothing is sent, so the account's count is given back too.
+        send_limits.release(account)
+        logger.info("Email change link for user %s not sent: the address's "
+                    "limit is reached", current_user.id)
+        _pending_without_link(new_email)
+        return _email_change_sent_answer(new_email)
 
     # Persist first, send second: a delivered link always has its hash on
     # the row. A failed send puts back whatever was pending before, so it
@@ -248,6 +267,8 @@ def request_email_change():
                 new_email, f"{frontend_url}/confirm-email?token={token}",
                 lifetime)
     except Exception:
+        # Nothing went out: the counts are given back.
+        send_limits.release(account, address)
         # Unless another request (a second tab) replaced ours while the
         # send ran: its link is out, and restoring over it would void it.
         ours = (new_email, None if taken else hash_token(token))
@@ -259,6 +280,28 @@ def request_email_change():
             db.session.commit()
         return jsonify({"error": "Could not send the confirmation email. "
                                  "Please try again."}), 502
+    return _email_change_sent_answer(new_email)
+
+
+def _pending_without_link(new_email):
+    """Over the address's limit: *new_email* is pending as a sent one would
+    be, but no link went out. As for a taken address, the pending state
+    has no usable link; a link already out for this address stays as it
+    was."""
+    if (current_user.pending_email == new_email
+            and not _pending_email_expired(current_user)):
+        return
+    current_user.pending_email = new_email
+    current_user.email_change_token_hash = None
+    current_user.email_change_expires_at = datetime.utcnow() + timedelta(
+        seconds=email_change_expiry_seconds())
+    db.session.commit()
+
+
+def _email_change_sent_answer(new_email):
+    """The answer to an email change that is not refused for the account
+    or its client: the address taken or not, the link sent or not (the
+    address's limit)."""
     return jsonify({
         "message": f"Confirmation link sent to {new_email}. The address "
                    "becomes yours once you confirm it.",
@@ -320,6 +363,10 @@ def confirm_email_change():
     old_email = current_user.email
     current_user.email = new_email
     _clear_pending_email(current_user)
+    # Sign-in links sent to either address were sent for another holder
+    # (or none): they stop working (utils/sign_in_links.py).
+    from backend.utils.sign_in_links import withdraw_links
+    withdraw_links(old_email, new_email)
     try:
         db.session.commit()
     except IntegrityError:

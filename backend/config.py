@@ -790,6 +790,13 @@ class Config:
     # Per socket operation, for every mail the app sends. smtplib's default
     # is no timeout: a stalled relay held the request that sent the mail.
     MAIL_TIMEOUT_SECONDS = float(os.environ.get("MAIL_TIMEOUT_SECONDS") or "10")
+    # Requests one client (network address) may make to each route that
+    # emails a typed-in address (sign-in, email change): per 15 minutes and
+    # per day. Unset: the defaults in backend/utils/send_limits.py.
+    SEND_LIMIT_CLIENT_PER_15_MIN = int(
+        os.environ.get("SEND_LIMIT_CLIENT_PER_15_MIN") or "0") or None
+    SEND_LIMIT_CLIENT_PER_DAY = int(
+        os.environ.get("SEND_LIMIT_CLIENT_PER_DAY") or "0") or None
 
     FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
 
