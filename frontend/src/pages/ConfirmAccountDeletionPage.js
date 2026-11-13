@@ -3,6 +3,7 @@ import { Link, useLocation, useSearchParams } from "react-router-dom";
 import { useUser } from "../contexts/UserContext";
 import api from "../api";
 import { formatDeletionDate, writingRestorable } from "../utils/dataDeletion";
+import { here, signInPath } from "../utils/destination";
 import {
   choiceRowStyle, choiceStyle, headingStyle, linkStyle, pageStyle, textStyle,
 } from "./accountPageStyles";
@@ -50,12 +51,11 @@ export default function ConfirmAccountDeletionPage() {
     heading = "This link is incomplete";
     body = "Open the link from the email again, or ask for the deletion again on the Account page.";
   } else if (!user) {
-    const returnUrl = encodeURIComponent(location.pathname + location.search);
     heading = "Sign in to confirm";
     body = "The deletion can only be confirmed from inside the account it "
       + "is for. Sign in the way you usually do, and you will come straight "
       + "back here.";
-    action = <Link to={`/login?returnUrl=${returnUrl}`} style={linkStyle}>Sign in &rarr;</Link>;
+    action = <Link to={signInPath(here(location))} style={linkStyle}>Sign in &rarr;</Link>;
   } else {
     const days = user.account_deletion?.grace_days || 30;
     const date = formatDeletionDate(new Date(Date.now() + days * DAY_MS));

@@ -7,6 +7,7 @@ import CraftIcon from "./CraftIcon";
 import CraftModeDialog from "./CraftModeDialog";
 import { useToast } from "../contexts/ToastContext";
 import api from "../api";
+import { here, signInPath, signInPathFrom } from "../utils/destination";
 
 const backendUrl = process.env.REACT_APP_BACKEND_URL;
 
@@ -82,8 +83,7 @@ function NavBar({ onNewEntryClick }) {
     e.preventDefault();
     setOverflowOpen(false);
     if (!user) {
-      const returnUrl = encodeURIComponent(location.pathname + location.search);
-      window.location.href = `/login?returnUrl=${returnUrl}`;
+      window.location.href = signInPath(here(location));
     } else {
       onNewEntryClick();
     }
@@ -346,9 +346,11 @@ function NavBar({ onNewEntryClick }) {
           </Link>
         )}
 
+        {/* Back to this page after signing in (#704), except from the
+            pages that introduce Loore. */}
         {!user && (
           <Link
-            to="/login?returnUrl=%2F"
+            to={signInPathFrom(location)}
             style={linkStyle("/login")}
           >
             Login

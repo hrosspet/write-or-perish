@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import { useUser } from "../contexts/UserContext";
+import { returnUrlFrom } from "../utils/destination";
 import useSubmitShortcut from "../hooks/useSubmitShortcut";
 
 const backendUrl = process.env.REACT_APP_BACKEND_URL;
@@ -12,6 +13,9 @@ const ERROR_MESSAGES = {
   confirm_needs_account: "No Loore account signs in that way yet. Sign in to the account you asked from, not with the address you are confirming.",
   // An X callback this browser did not start (backend/oauth.py): refused.
   x_try_again: "Sign in with X did not finish in this browser. Please try again.",
+  // Back from X without a sign-in (#704): Cancel on X's page, or an error.
+  x_cancelled: "Sign in with X was cancelled.",
+  x_failed: "Sign in with X did not finish. Please try again.",
 };
 
 const loginStyles = `
@@ -218,7 +222,9 @@ function LoginPage() {
   const navigate = useNavigate();
   const { user, loading } = useUser();
 
-  const returnUrl = searchParams.get("returnUrl") || "/dashboard";
+  // Where the sign-in started (#704): a page inside Loore, or the default.
+  // It goes to X (and back) and into the emailed link.
+  const returnUrl = returnUrlFrom(searchParams);
   const errorCode = searchParams.get("error");
   // On the way to confirming a new sign-in email (#260): that address cannot
   // sign in yet, and typing it here is the natural mistake.
