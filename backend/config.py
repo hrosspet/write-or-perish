@@ -141,6 +141,21 @@ class Config:
         "DISK_ALERT_ENABLED", "false").lower() in ("1", "true", "yes")
     DISK_ALERT_PERCENT = float_from_env("DISK_ALERT_PERCENT", 90.0)
 
+    # Pre-filled accounts nobody claimed (#685, backend/utils/
+    # unclaimed_accounts.py). Decided by Peter (2026-11-13: "90 days makes
+    # sense to remove it from prod Loore"): an account Loore opened and
+    # pre-filled from a person's public posts, that nobody has signed in
+    # to, is deleted with everything in it this many days after it was
+    # opened. The privacy page states the same number.
+    UNCLAIMED_ACCOUNT_DAYS = int(float_from_env("UNCLAIMED_ACCOUNT_DAYS", 90))
+    # Off (the default), the nightly job is a dry run: it only reports what
+    # it would delete (the admin's Users tab, `flask unclaimed-accounts`,
+    # the worker log). The owner turns deletion on after reading the
+    # first dry run.
+    UNCLAIMED_ACCOUNT_DELETION_ENABLED = os.environ.get(
+        "UNCLAIMED_ACCOUNT_DELETION_ENABLED", "false").lower() in (
+        "1", "true", "yes")
+
     # Per-user monthly spend hard cap in USD, summed across ALL providers
     # (issue #85 follow-up; free-alpha guardrail). 0 (default) disables the
     # cap. When a user's month-to-date spend reaches this, they are

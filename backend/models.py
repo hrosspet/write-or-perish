@@ -364,12 +364,29 @@ class User(db.Model, UserMixin):
     # Community Archive handle this account was pre-filled from (admin
     # cold-start bootstrap); null for organically-grown accounts.
     prefilled_handle = db.Column(db.String(64), nullable=True)
+    # When the account was last made ready ahead of its owner, on this
+    # server's clock (UTC): the admin's Community Archive and X API
+    # pre-fills and scripts/load_user.py set it to now, every time, never
+    # to a time carried in a bundle. The 90 days after which an account
+    # nobody claimed is deleted count from it (#685), so preparing an
+    # account again opens it again. NULL on accounts pre-filled before
+    # the column existed (backend/utils/unclaimed_accounts.py falls back
+    # to the creation and the first pre-filled entry).
+    prefilled_at = db.Column(db.DateTime, nullable=True)
     # Opt-in answer to "seed your Loore from your public tweets?" asked on
     # /alpha-thank-you (and once more on /welcome). "yes" | "no" | NULL.
     # NULL = never answered / dismissed: the question is deliberately
     # escapable, so "we don't know" is a real state distinct from "no".
     prefill_consent = db.Column(db.String(8), nullable=True)
     prefill_consent_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    # An admin's "Keep" on a pre-filled account nobody has claimed (#685,
+    # backend/utils/unclaimed_accounts.py): it is not deleted before this
+    # time (UTC), e.g. when someone was promised more time. KEEP_FOREVER
+    # there keeps it for good. NULL: the period from the day the account
+    # was opened applies. Set by the admin's Keep (which may also clear
+    # it) and by Activate & Welcome (the welcome link's 30 days; it never
+    # moves an existing Keep earlier).
+    unclaimed_keep_until = db.Column(db.DateTime, nullable=True)
     # Admin-flagged spam signup. Hidden from the admin Users table by
     # default (eye toggle); nothing else changes — the account keeps
     # whatever approved/plan state it had.
@@ -2493,7 +2510,9 @@ class UserDataPurge(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, nullable=False, index=True)
-    # "self" (the user's own request) | "admin"
+    # "self" (the user's own request) | "admin" | "unclaimed" (a
+    # pre-filled account nobody claimed within the period, #685: due at
+    # once, no email, the handle not held back)
     source = db.Column(db.String(16), nullable=False)
     # What the purge deletes: "hidden" = what the request hid when it was
     # made (UserDataPurgeHidden), the user's own request or an admin's;

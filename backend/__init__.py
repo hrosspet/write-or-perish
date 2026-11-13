@@ -609,6 +609,8 @@ def create_app():
         alpha_free_month_command, stripe_sync_catalog_command)
     app.cli.add_command(stripe_sync_catalog_command)
     app.cli.add_command(alpha_free_month_command)
+    from backend.unclaimed_cli import unclaimed_accounts_command
+    app.cli.add_command(unclaimed_accounts_command)
 
     try:
         from experiments.prompt_rct.run_rct import rct_cli

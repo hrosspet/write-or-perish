@@ -132,6 +132,10 @@ def test_prefill_x_impl_imports_and_pins_batch(app, monkeypatch):  # noqa: F811
     assert all(n.provenance == "prefill_x" for n in nodes)  # Loore fetched it
     fresh = User.query.get(u.id)
     assert fresh.profile_force_batch is True and fresh.prefilled_handle == "Alice"
+    # #685: the 90 days of an unclaimed account count from this pre-fill.
+    from datetime import datetime
+    assert fresh.prefilled_at is not None
+    assert abs((datetime.utcnow() - fresh.prefilled_at).total_seconds()) < 60
     assert sync.call_count == 0
     assert states[0]["stage"] == "fetching" and states[-1]["stage"] == "importing"
     assert result["profile_batch_queued"] is False  # three tiny tweets: under the ladder

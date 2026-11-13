@@ -455,6 +455,10 @@ def _import_prefill_rows(user_id, handle, rows, options, state, seed_now,
     _raise_if_prefill_refused(user)
     user.profile_force_batch = True
     user.prefilled_handle = handle
+    # The account is (made) ready ahead of its owner now: the 90 days
+    # after which it is deleted if nobody claims it count from here, also
+    # when the admin pre-fills it again (#685).
+    user.prefilled_at = datetime.utcnow()
     db.session.commit()
     x_id_result = _stamp_x_id(user, x_id) if x_id else {}
 

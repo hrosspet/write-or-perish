@@ -408,6 +408,11 @@ def magic_link_verify():
     # Who invited this account (#439); approval is untouched.
     referrals.record_invite(user, invite, new_account)
     login_user(user, remember=True)
+    # Record the sign-in itself, as the X sign-in does: whether anyone ever
+    # signed in decides whether a pre-filled account is deleted after its
+    # period (#685), and must not depend on the app loading afterwards.
+    from backend.utils.activity import touch_last_seen
+    touch_last_seen(user, None)
 
     if next_url and is_safe_redirect_url(next_url):
         return redirect(f"{frontend_url}{next_url}")
