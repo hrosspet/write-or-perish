@@ -629,6 +629,18 @@ def test_a_bundle_holds_only_what_a_prefill_makes(world, monkeypatch):
     assert counts.get("exported", 0) == 0 and counts["skipped_other_material"] == 1
 
 
+def test_the_lab_does_not_export_an_unfinished_profile(world, monkeypatch):
+    """A window set whose final merge never came: production would build
+    it, which is a model call. Not exported."""
+    with world.lab.app_context():
+        alice = _seed_lab_member()
+        UserProfile.query.filter_by(user_id=alice.id,
+                                    generation_type="integration").delete()
+        db.session.commit()
+    counts = _export(world, monkeypatch)
+    assert counts.get("exported", 0) == 0 and counts["skipped_unfinished_profile"] == 1
+
+
 @pytest.mark.parametrize("extra", ["todo", "ai_preferences"])
 def test_the_lab_does_not_export_what_production_refuses(world, monkeypatch, extra):
     """A todo list or an artifact kind no pre-fill drafts: production

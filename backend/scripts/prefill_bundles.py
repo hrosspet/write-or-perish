@@ -87,9 +87,16 @@ def skip_reason(user, excluded):
         return "no_x_id"
     if str(user.twitter_id) in excluded:
         return "excluded"
-    if db.session.query(UserProfile.id).filter(
-            UserProfile.user_id == user.id).first() is None:
+    newest = db.session.query(UserProfile.generation_type).filter(
+        UserProfile.user_id == user.id).order_by(
+        UserProfile.created_at.desc(), UserProfile.id.desc()).first()
+    if newest is None:
         return "no_profile"
+    from backend.utils.profile_versions import SET_INTERNAL_TYPES
+    if newest[0] in SET_INTERNAL_TYPES:
+        # A window set without its final merge: production's profile
+        # pipeline would finish it, which is a model call (#698: none).
+        return "unfinished_profile"
     if holds_other_material(user.id):
         return "other_material"
     return None
