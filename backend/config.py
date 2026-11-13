@@ -322,6 +322,18 @@ class Config:
     COMMUNITY_ARCHIVE_SNAPSHOT_DIR = (
         os.environ.get("COMMUNITY_ARCHIVE_SNAPSHOT_DIR") or None)
 
+    # Pre-fill bundles from the lab (#698, docs/PREFILL-BUNDLES.md).
+    # PREFILL_BUNDLE_LOCATION: where they are kept, "gs://<bucket>[/<prefix>]"
+    # or a local directory; the lab's export script writes there and this
+    # server reads. PREFILL_BUNDLES_ENABLED: loading them here (the admin's
+    # "Make ready from prepared material" and a Yes on "Start from your
+    # tweets"). Unset or off, nothing reads the storage and nothing loads.
+    PREFILL_BUNDLE_LOCATION = (
+        os.environ.get("PREFILL_BUNDLE_LOCATION") or "").strip()
+    PREFILL_BUNDLES_ENABLED = (
+        os.environ.get("PREFILL_BUNDLES_ENABLED") or "false"
+    ).lower() in ("1", "true", "yes")
+
     # Safety factor for prompt-too-long retries (0.99 = aim for 99% of the limit)
     RETRY_SAFETY_FACTOR = 0.99
 

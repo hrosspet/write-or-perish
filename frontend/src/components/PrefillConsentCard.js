@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { useUser } from "../contexts/UserContext";
 import api from "../api";
 import { tweetSeedNoted } from "../utils/tweetSeed";
+import StartingPointProgress from "./StartingPointProgress";
 
 /**
  * "Start from your tweets?" — the opt-in for seeding a fresh account from
@@ -28,6 +29,13 @@ export default function PrefillConsentCard({ style, delayHint }) {
   const [busy, setBusy] = useState(null); // "yes" | "no" | null
   const [error, setError] = useState("");
   const [answered, setAnswered] = useState(null);
+
+  // A Yes found material Loore had prepared for this X account (#698):
+  // it is being loaded, and the card says so until it is ready (also
+  // after a reload, while the load runs).
+  if (user && user.starting_point && user.starting_point.status === "preparing") {
+    return <StartingPointProgress style={style} />;
+  }
 
   // Gate on the server state — except right after answering, when the
   // user object already carries the answer but the card still owes the

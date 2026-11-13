@@ -28,7 +28,9 @@ What it carries (all of it, not "latest N"):
     tool_calls_meta; LLM authors are referenced by username
   - node embeddings (vectors, so no re-embedding on load)
   - user_profile: the FULL iterative chain with every column, incl.
-    parent_profile_id, generation_type, source_data_cutoff, origin stats
+    parent_profile_id, generation_type, source_data_cutoff, origin stats,
+    and a window set's columns (window_set, covers_start,
+    source_rendered_at, merged_profile_id)
   - user_recent_context (linked to its profile), user_todo, user_artifact
   - the prompt pinned on each system node (by value), so agentic threads
     load as prompt references, not as copies of the prompt text
@@ -200,6 +202,13 @@ def _profiles(user, UserProfile):
         "source_origin_stats": p.source_origin_stats,
         "generation_type": p.generation_type,
         "parent_profile_id": p.parent_profile_id,
+        # A large build's window set (#545) and the version a merge took
+        # in (#183): the target's profile pipeline reads a set by them (a
+        # later update adds windows to the current set, #698).
+        "merged_profile_id": p.merged_profile_id,
+        "window_set": p.window_set,
+        "covers_start": _iso(p.covers_start),
+        "source_rendered_at": _iso(p.source_rendered_at),
     } for p in UserProfile.query.filter_by(user_id=user.id).order_by(UserProfile.id).all()]
 
 

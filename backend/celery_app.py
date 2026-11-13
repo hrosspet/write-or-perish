@@ -190,6 +190,14 @@ celery.conf.update(
             'task': 'backend.tasks.chat_imports.resume_stalled_imports',
             'schedule': 60.0,  # every minute
         },
+        # A pre-fill bundle load (#698) whose run stopped without a trace
+        # (a killed worker, a lost message) is sent again once its
+        # heartbeat is 5 min old. Nothing while PREFILL_BUNDLES_ENABLED is
+        # off; one indexed query when no load is under way.
+        'resume-stalled-prefill-bundle-loads': {
+            'task': 'backend.tasks.prefill_bundles.resume_stalled_bundle_loads',
+            'schedule': 120.0,  # every 2 min
+        },
     },
 )
 
@@ -247,3 +255,4 @@ from backend.tasks import imports  # noqa: F401
 from backend.tasks import chat_imports  # noqa: F401
 from backend.tasks import intentions  # noqa: F401
 from backend.tasks import user_purge  # noqa: F401
+from backend.tasks import prefill_bundles  # noqa: F401

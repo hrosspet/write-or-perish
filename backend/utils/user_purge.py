@@ -79,7 +79,8 @@ from backend.models import (
     HIDDEN_ROW_TABLES, APICostLog, ArtifactView, Draft, ExternalAccount,
     ExternalDigestBatchJob, ExternalItem, ExternalItemEmbedding, FeedPick,
     FeedRender, Node, NodeContextArtifact, NodeEmbedding, NodeTranscriptChunk,
-    NodeVersion, PollDraftBatchJob, PollResponse, ProfileBatchJob,
+    NodeVersion, PollDraftBatchJob, PollResponse, PrefillBundleLoad,
+    PrefillBundleNodeMap, ProfileBatchJob,
     ProfileBlockedRange, RecentContextBatchJob, ReferenceAction, ShareDraft, TTSChunk, Thread,
     User, UserArtifact, UserDataPurge, UserDataPurgeHidden, UserFeedback,
     UserNotification, UserProfile, UserPrompt, UserRecentContext, UserTodo,
@@ -987,6 +988,11 @@ _USER_TABLES = (
     (UserNotification, "user_notification"),
     (PollResponse, "poll_response"),
     (ProfileBlockedRange, "profile_blocked_range"),
+    # Pre-fill bundle loads (#698): ids, counts, the X id and handle of
+    # the bundle. The bundle itself is the lab's material, outside Loore:
+    # deleting it is a separate command (docs/PREFILL-BUNDLES.md).
+    (PrefillBundleNodeMap, "prefill_bundle_node_map"),
+    (PrefillBundleLoad, "prefill_bundle_load"),
 )
 
 # Columns of other users' rows that point at a deleted node and are set

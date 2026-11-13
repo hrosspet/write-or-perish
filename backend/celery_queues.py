@@ -99,6 +99,10 @@ TASK_QUEUES = {
     "backend.tasks.imports.import_twitter_archive": _B,
     "backend.tasks.imports.prefill_community_archive": _B,
     "backend.tasks.imports.prefill_x_api": _B,
+    # Pre-fill bundles from the lab (#698): a load's runs, and the beat
+    # that re-sends a load whose run stopped.
+    "backend.tasks.prefill_bundles.load_prefill_bundle": _B,
+    "backend.tasks.prefill_bundles.resume_stalled_bundle_loads": _B,
     "backend.tasks.imports.refresh_community_archive_snapshot": _B,
     "backend.tasks.external_sync.fetch_community_archive": _B,
     "backend.tasks.external_sync.sync_twitter_bookmarks": _B,

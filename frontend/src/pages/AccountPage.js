@@ -12,6 +12,7 @@ import DisconnectXDialog from "../components/DisconnectXDialog";
 import BothProvidersDialog, { ownProviderName } from "../components/BothProvidersDialog";
 import { noteBothProvidersLater } from "../hooks/useBothProvidersQuestion";
 import { showsTweetSeed, tweetSeedHelp } from "../utils/tweetSeed";
+import StartingPointProgress from "../components/StartingPointProgress";
 import {
   formatDeletionDate, reloadUser, restoreWriting, writingRestorable,
   X_REMOVE_ACCESS_STEPS,
@@ -925,6 +926,11 @@ export default function AccountPage() {
             </div>
           )}
           <div style={helperStyle}>{tweetSeedHelp(user)}</div>
+          {user.starting_point && user.starting_point.status === "preparing" && (
+            // A Yes found material Loore had prepared for this X account
+            // (#698): it is being loaded; the profile opens when ready.
+            <StartingPointProgress style={{ marginTop: "0.8rem", maxWidth: "none" }} />
+          )}
         </div>
       )}
 
