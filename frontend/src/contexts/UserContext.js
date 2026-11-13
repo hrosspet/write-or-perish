@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from "react";
 import api from "../api";
 import { markSpendBlocked } from "../utils/spendCap";
+import { rememberSubscription } from "../utils/subscription";
 
 // Create a new context
 const UserContext = createContext(null);
@@ -25,6 +26,8 @@ export const UserProvider = ({ children }) => {
         if (fetchedUser?.spend_blocked) {
           markSpendBlocked(fetchedUser.spend_cap_lifts_on);
         }
+        // Payments (#438): inert unless the server sends payments_enabled.
+        rememberSubscription(fetchedUser);
 
         // Persist the browser timezone so the LLM context can render absolute
         // local-time stamps (#130). Only PATCH when it differs from what the
@@ -61,6 +64,24 @@ export const UserProvider = ({ children }) => {
     setUser((prev) => (prev && prev.has_own_entries === false
       ? { ...prev, has_own_entries: true }
       : prev));
+  }, []);
+
+  // Payments on (#438): the server says the account is not let in (its
+  // first payment failed, say): read the user again, so the app shows
+  // the subscribe page. Nothing sends this event while payments are off.
+  useEffect(() => {
+    const onNoSubscription = () => {
+      api.get("/dashboard", { params: { profile: 0 } })
+        .then((res) => {
+          if (res?.data?.user) {
+            rememberSubscription(res.data.user);
+            setUser(res.data.user);
+          }
+        })
+        .catch(() => {});
+    };
+    window.addEventListener("loore:no-subscription", onNoSubscription);
+    return () => window.removeEventListener("loore:no-subscription", onNoSubscription);
   }, []);
 
   return (

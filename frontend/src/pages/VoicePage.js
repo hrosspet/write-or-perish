@@ -13,6 +13,7 @@ import { useToolApprovals } from '../hooks/useToolApprovals';
 import { voiceWaitingLine } from '../utils/toolApprovals';
 import { useToast } from '../contexts/ToastContext';
 import { isSpendBlocked, notifySpendBlocked, spendCapToastMessage } from '../utils/spendCap';
+import { isSubscriptionRequired, notifySubscriptionRequired } from '../utils/subscription';
 import { isAiAllowed } from '../utils/aiUsage';
 import {
   THREAD_LIMIT_TEXT, THREAD_NOTICE_TEXT, THREAD_TOO_LONG_CODE,
@@ -730,6 +731,10 @@ function VoiceSession({
       addToast(spendCapToastMessage('glean'), 8000);
       return;
     }
+    if (isSubscriptionRequired()) {
+      notifySubscriptionRequired();
+      return;
+    }
     // The voice reply stops, its queue too (the player is global, so a
     // paused queue would follow the user to the gleaning's page).
     audio.stop();
@@ -1071,6 +1076,11 @@ function VoiceSession({
                 refuseForUsageLimit();
                 return;
               }
+              // Payments on, no AI replies (#438): Voice mode is paused.
+              if (isSubscriptionRequired()) {
+                notifySubscriptionRequired();
+                return;
+              }
               handleStart();
             }}
             disabled={!canRecord}
@@ -1401,6 +1411,10 @@ function VoiceSession({
             addToast(spendCapToastMessage('record'), 8000);
             // ...and says it (#651), the reply paused first.
             refuseForUsageLimit();
+            return;
+          }
+          if (isSubscriptionRequired()) {
+            notifySubscriptionRequired();
             return;
           }
           handleContinue(voiceReset);

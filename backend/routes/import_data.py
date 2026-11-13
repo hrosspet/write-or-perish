@@ -1868,7 +1868,7 @@ def _maybe_update_profile_after_import(user_id, earliest_ts, imported_tokens):
     by user id. Best-effort."""
     try:
         user_obj = User.query.get(user_id)
-        if not user_obj or (user_obj.plan or "free") not in User.VOICE_MODE_PLANS:
+        if not user_obj or not user_obj.on_paid_plan:
             return None
         return _hand_off_profile_update_after_import(
             user_obj, earliest_ts, imported_tokens)
@@ -1947,7 +1947,7 @@ def _profile_rebuild_question(user_id, changes):
         asked_at = datetime.utcnow()   # before the profile in use is read
         user = db.session.get(User, user_id)
         if (user is None or changes.earliest is None
-                or (user.plan or "free") not in User.VOICE_MODE_PLANS
+                or not user.on_paid_plan
                 or not account_allows_ai(user)):
             return None
         in_use = current_profile_query(user_id).filter(
@@ -2017,7 +2017,7 @@ def rebuild_profile_after_import():
     if payload.get("u") != current_user.id or not question_id:
         return expired
     user = db.session.get(User, current_user.id)
-    if ((user.plan or "free") not in User.VOICE_MODE_PLANS
+    if (not user.on_paid_plan
             or not account_allows_ai(user)):
         return jsonify({"error": "Your account doesn't build a profile "
                                  "right now, so there is nothing to "
@@ -2173,7 +2173,7 @@ def _profile_waits_for_imports(user_id):
     try:
         user = db.session.get(User, user_id)
         if (user is None or user.profile_import_quiet_from is None
-                or (user.plan or "free") not in User.VOICE_MODE_PLANS
+                or not user.on_paid_plan
                 or not use_batch_for_user(user, current_app.config)):
             return False
         if user.profile_import_retip_from is not None:

@@ -60,6 +60,8 @@ struct NodeFormResult {
     var descendantsUpdated = 0
     var spendCapped = false
     var llmError: String?
+    /// Payments on, no AI replies (#438): why the reply was skipped.
+    var subscriptionMessage: String?
     /// Why the reply was skipped, as a code. `thread_too_long` (#648) is not
     /// toasted: the entry's page shows the thread's limit and offers a new thread.
     var llmErrorCode: String?
@@ -469,6 +471,7 @@ final class NodeFormModel {
             await clearAfterSend()
             streamingSessionId = nil
             if result.spendCapped { app.notifySpendBlocked() }
+            if let notice = result.subscriptionMessage { app.notifySubscriptionRequired(notice) }
             if let llmError = result.llmError, !ThreadLength.isRefusal(result.llmErrorCode) {
                 app.toasts.show(llmError, duration: 10)
             }
@@ -486,6 +489,7 @@ final class NodeFormModel {
             let answer: TextmodeStartResponse = try await api.post(APIPath.textmodeStart, json: body)
             await clearAfterSend()
             if answer.spendCapped { app.notifySpendBlocked() }
+            if let notice = answer.subscriptionNotice { app.notifySubscriptionRequired(notice) }
             // A first entry too large for a reply (#648): its page shows the limit.
             if let llmError = answer.llmError, !ThreadLength.isRefusal(answer.llmErrorCode) {
                 app.toasts.show(llmError, duration: 10)
@@ -509,6 +513,7 @@ final class NodeFormModel {
             await clearAfterSend()
             streamingSessionId = nil
             if answer.spendCapped { app.notifySpendBlocked() }
+            if let notice = answer.subscriptionNotice { app.notifySubscriptionRequired(notice) }
             return NodeFormResult(id: answer.id, awaitLLM: answer.llmNodeId, userNodeId: answer.userNodeId,
                                   llmNodeId: answer.llmNodeId, tipId: answer.tipId, spendCapped: answer.spendCapped,
                                   llmError: answer.llmError, llmErrorCode: answer.llmErrorCode)

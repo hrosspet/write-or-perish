@@ -14,6 +14,8 @@
 // unless last month's overflow is larger than a whole month's limit and
 // holds the cap for longer (#594).
 
+import { paymentsEnabled } from './subscription';
+
 let _capped = false;
 let _liftsOn = null;
 
@@ -83,18 +85,26 @@ export function spendCapResetDate(now = new Date()) {
 
 // The banner's text when the 402 sent none (or the banner was raised here):
 // the server's wording, which names the date only when the cap lifts later
-// than the start of next month.
+// than the start of next month. While payments are on (#438) the limit is
+// not the free alpha's, and the wording says so.
 export const SPEND_CAP_DEFAULT_MESSAGE =
   "You've reached your monthly usage limit for the free alpha. " +
   "It resets at the start of next month.";
 
+function capSentence() {
+  return paymentsEnabled()
+    ? "You've reached your monthly usage limit."
+    : "You've reached your monthly usage limit for the free alpha.";
+}
+
 export function spendCapBannerMessage(now = new Date()) {
   const lifts = spendCapLiftDate(now);
   if (lifts.getTime() === nextMonthStart(now).getTime()) {
-    return SPEND_CAP_DEFAULT_MESSAGE;
+    return paymentsEnabled()
+      ? `${capSentence()} It resets at the start of next month.`
+      : SPEND_CAP_DEFAULT_MESSAGE;
   }
-  return "You've reached your monthly usage limit for the free alpha. " +
-    `It resets on ${formatLiftDate(lifts)}.`;
+  return `${capSentence()} It resets on ${formatLiftDate(lifts)}.`;
 }
 
 // Tests only: forget what this session learned.

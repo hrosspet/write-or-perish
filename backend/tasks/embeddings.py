@@ -58,6 +58,14 @@ def _embedding_owner_id(node):
     return node.human_owner_id or node.user_id
 
 
+def _paid_features_filter():
+    """Payments on (#438): no background model call (embedding included)
+    for an account without the paid set. Nothing while payments are off,
+    so the query is the one it was."""
+    from backend.utils.subscriptions import payments_enabled
+    return [User.paid_features_clause()] if payments_enabled() else []
+
+
 def _candidate_nodes(limit):
     """Nodes needing (re-)embedding: AI-readable, alive, with content,
     and either missing an embedding row, embedded with another model, or
@@ -86,6 +94,7 @@ def _candidate_nodes(limit):
             # The nodes a "Delete all my content" hid are soft-deleted,
             # so they are left out above (#590).
             ~User.id.in_(account_on_hold_user_ids()),
+            *_paid_features_filter(),
         )
         .filter(or_(
             NodeEmbedding.id.is_(None),
@@ -135,6 +144,7 @@ def _candidate_external_items(limit):
         .filter(ExternalItemEmbedding.id.is_(None),
                 User.default_ai_usage.in_(AI_ALLOWED),
                 ~User.id.in_(account_on_hold_user_ids()),   # #269
+                *_paid_features_filter(),
                 # A Read pick nobody saved is not a reference (#352).
                 ExternalItem.saved())
         .order_by(ExternalItem.id.desc())

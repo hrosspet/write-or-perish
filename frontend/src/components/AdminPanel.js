@@ -9,6 +9,8 @@ import { offeredModels } from "./ModelSelector";
 import { FaTimesCircle, FaFilter, FaCaretDown, FaCaretUp, FaEye, FaEyeSlash } from "react-icons/fa";
 import api from "../api";
 import { formatDate, formatDateTime } from "../utils/date";
+import { useUser } from "../contexts/UserContext";
+import AdminSubscriptions from "./AdminSubscriptions";
 
 // Small header toggle that hides rows with $0 in its column.
 function ZeroFilterToggle({ active, onToggle, label }) {
@@ -98,6 +100,8 @@ const ADMIN_TABS = [
   { key: "feedback", label: "Feedback" },
   { key: "polls", label: "Polls" },
 ];
+// Payments (#438): shown only while the server has payments on.
+const SUBSCRIPTIONS_TAB = { key: "subscriptions", label: "Subscriptions" };
 
 // Same select treatment as AccountPage's Settings (inputStyle+selectStyle
 // there) so admin controls don't render as bare browser widgets.
@@ -597,6 +601,9 @@ export function purgeLabel(job) {
 
 function AdminPanel() {
   const [activeTab, setActiveTab] = useState("users");
+  const userCtx = useUser();
+  const tabs = userCtx?.user?.payments_enabled
+    ? [...ADMIN_TABS, SUBSCRIPTIONS_TAB] : ADMIN_TABS;
   const [users, setUsers] = useState([]);
   const [allowedPlans, setAllowedPlans] = useState([]);
   // Start of the cache hit-rate window (ISO, from the backend) — the
@@ -1192,7 +1199,7 @@ function AdminPanel() {
   return (
     <div style={{ padding: "20px" }}>
       <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: "20px" }}>
-        {ADMIN_TABS.map((t) => (
+        {tabs.map((t) => (
           <button
             key={t.key}
             onClick={() => setActiveTab(t.key)}
@@ -1206,12 +1213,13 @@ function AdminPanel() {
         fontFamily: "var(--serif)", fontSize: "2rem", fontWeight: 300,
         color: "var(--text-primary)", margin: "0 0 20px",
       }}>
-        {ADMIN_TABS.find((t) => t.key === activeTab).label}
+        {tabs.find((t) => t.key === activeTab).label}
       </h1>
 
       {activeTab === "polls" && <AdminPolls />}
       {activeTab === "activity" && <AdminActivity />}
       {activeTab === "feedback" && <AdminFeedback />}
+      {activeTab === "subscriptions" && <AdminSubscriptions />}
 
       {activeTab === "users" && (<>
       {/* Whitelist New User Section */}

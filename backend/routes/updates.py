@@ -256,6 +256,12 @@ def request_draft(poll_id):
     spend-cap check: draft costs land on the polls system account, not
     the user (they're answering OUR question)."""
     from backend.utils.privacy import AI_ALLOWED
+    # Payments on (#438): a draft is a billed model call, so none without
+    # the paid set. Writing an answer by hand stays.
+    from backend.utils.subscriptions import refuse_billed_call
+    refused = refuse_billed_call(current_user, "ai")
+    if refused is not None:
+        return refused
 
     poll = _get_active_poll(poll_id)
     if poll is None:

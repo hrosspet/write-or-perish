@@ -30,6 +30,32 @@ def _set_ai_usage(node_id, value):
     _db.session.commit()
 
 
+def test_a_queued_reply_is_refused_when_the_subscription_lapsed(app):  # noqa: F811
+    # Payments (#438): a lapsed account makes no billed call. The task
+    # asks again when it runs: a subscription can end while a reply is
+    # queued, and a re-dispatch skips create_llm_placeholder.
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    alice.plan = "free"
+    alice.subscription_status = "ended"
+    alice.subscription_level = "standard"
+    alice.subscription_ever_paid = True
+    _db.session.commit()
+    _ScriptedProvider.reset([_resp("must not be sent")])
+    app.config["PAYMENTS_ENABLED"] = True
+    try:
+        result = generate_llm_response(
+            _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+            source_mode="textmode")
+    finally:
+        app.config["PAYMENTS_ENABLED"] = False
+    assert result["status"] == "refused"
+    assert result["reason"] == "subscription_required"
+    assert _ScriptedProvider.calls == []
+    node = _fresh(llm_node.id)
+    assert node.llm_task_status == "failed"
+    assert "subscription has ended" in node.llm_task_error
+
+
 @pytest.mark.parametrize("which", ["system", "user_node", "llm_node"])
 def test_a_queued_reply_is_refused_when_a_setting_changed(app, which):  # noqa: F811
     alice, system, user_node, llm_node = _build_chain("textmode")

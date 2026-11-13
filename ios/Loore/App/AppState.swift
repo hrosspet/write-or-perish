@@ -92,6 +92,12 @@ final class AppState {
     private(set) var spendCapped = false
     /// The "LIMIT REACHED" banner text while it shows.
     var spendCapBannerMessage: String?
+    /// Payments on and no AI replies on this account (#438): Voice refuses a
+    /// recording up front. Set from the user and from a 402.
+    private(set) var subscriptionRequired = false
+    /// The "REPLIES PAUSED" banner text while it shows. The server's words;
+    /// no link and no way to buy in the app.
+    var subscriptionBannerMessage: String?
     /// Unread dev updates to show in the Updates sheet (fetched once per launch).
     var pendingUpdates: UpdatesPayload?
 
@@ -219,17 +225,44 @@ final class AppState {
             defaults.set(craft, forKey: DefaultsKey.craftMode)
         }
         if newUser.spendBlocked { spendCapped = true }
+        applyPayments(newUser)
         syncTimezoneIfNeeded()
         fetchUpdatesIfNeeded()
         openLaunchRouteIfReady()
         audio.didSignIn()
-        if newUser.approved { profileWatcher.userLoaded(newUser) }
+        if newUser.approved, !newUser.notLetIn { profileWatcher.userLoaded(newUser) }
     }
 
     /// Replaces the user after a `PUT /api/dashboard/user` (the web's `setUser(res.data.user)`).
     func replaceUser(_ newUser: CurrentUser) {
         user = newUser
         if let craft = newUser.craftMode { defaults.set(craft, forKey: DefaultsKey.craftMode) }
+        applyPayments(newUser)
+    }
+
+    /// Payments (#438): the texts and the reply gate follow the server's state.
+    private func applyPayments(_ newUser: CurrentUser) {
+        APIError.paymentsEnabled = newUser.paymentsEnabled
+        subscriptionRequired = newUser.aiRepliesPaused
+        // A failed payment is said on load (Peter, 2026-11-12: "we should
+        // inform the user"). The card is updated on the web; the app does
+        // not say where.
+        if newUser.paymentFailed, subscriptionBannerMessage == nil {
+            subscriptionBannerMessage = Self.paymentFailedMessage
+        }
+    }
+
+    static let paymentFailedMessage = "Your last payment didn't go through, so Loore doesn't reply for now."
+
+    /// Payments (#438): read the user again when the app comes back to the
+    /// foreground or a reply was refused, so a subscription started or ended
+    /// on the web shows without a relaunch. Nothing while payments are off.
+    func refreshPayments() async {
+        guard phase == .signedIn, user?.paymentsEnabled == true else { return }
+        guard let dashboard: DashboardResponse = try? await api.get(
+            APIPath.dashboard, query: [URLQueryItem(name: "profile", value: "0")]) else { return }
+        replaceUser(dashboard.user)
+        if !dashboard.user.aiRepliesPaused { subscriptionBannerMessage = nil }
     }
 
     func applyEmailState(_ state: EmailState) {
@@ -260,7 +293,7 @@ final class AppState {
 
     /// Once per launch, when approved and the terms are current: `GET /api/updates`.
     func fetchUpdatesIfNeeded() {
-        guard let user, user.approved, user.termsUpToDate, !updatesFetched else { return }
+        guard let user, user.approved, !user.notLetIn, user.termsUpToDate, !updatesFetched else { return }
         #if DEBUG
         if launch.skipUpdates { return }
         #endif
@@ -411,6 +444,9 @@ final class AppState {
         phase = newPhase
         spendCapped = false
         spendCapBannerMessage = nil
+        subscriptionRequired = false
+        subscriptionBannerMessage = nil
+        APIError.paymentsEnabled = false
         pendingUpdates = nil
         updatesFetched = false
         pendingLandingPath = nil
@@ -466,6 +502,13 @@ final class AppState {
         case .spendCapped(let message):
             spendCapped = true
             spendCapBannerMessage = message
+        case .subscriptionRequired(let message):
+            notifySubscriptionRequired(message)
+            // The account's state changed since it was loaded: read it again.
+            Task { await refreshPayments() }
+        case .notLetIn:
+            // No subscription (any more): the user, read again, shows NoSubscriptionView.
+            Task { await refreshPayments() }
         case .notApproved:
             // Approval changed under us: re-check, which routes to the waitlist.
             Task { await loadUser() }
@@ -476,6 +519,13 @@ final class AppState {
     /// for cost actions refused before they start.
     func notifySpendBlocked() {
         spendCapped = true
-        if spendCapBannerMessage == nil { spendCapBannerMessage = APIError.defaultSpendCapMessage }
+        if spendCapBannerMessage == nil { spendCapBannerMessage = APIError.spendCapFallbackMessage }
+    }
+
+    /// Payments on, no AI replies on this account (#438): sets the flag and
+    /// shows the banner with the server's message (or the default one).
+    func notifySubscriptionRequired(_ message: String? = nil) {
+        subscriptionRequired = true
+        subscriptionBannerMessage = message ?? subscriptionBannerMessage ?? APIError.defaultSubscriptionMessage
     }
 }

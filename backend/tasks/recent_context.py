@@ -132,8 +132,8 @@ def _should_generate_recent_context(user):
     """
     user_id = user.id
 
-    # Only for Voice-Mode plans
-    if (user.plan or "free") not in User.VOICE_MODE_PLANS:
+    # Only for Voice-Mode plans (set by hand, or a subscription, #438)
+    if not user.on_paid_plan:
         return False, None, None
 
     # User must be inactive for 5+ min

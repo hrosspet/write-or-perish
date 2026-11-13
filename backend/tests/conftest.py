@@ -157,6 +157,23 @@ def _no_provider_cancel_from_a_content_deletion(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_stripe(monkeypatch):
+    """No test reaches Stripe (#438): a developer's .env holds a sandbox
+    key that load_dotenv puts into the config. Tests stub
+    stripe_billing.get_gateway; anything that still builds a real client
+    fails loudly here."""
+    try:
+        import stripe
+    except ImportError:  # the package is not installed: nothing to guard
+        return
+
+    def _refuse(*_a, **_k):
+        raise RuntimeError("A test tried to call Stripe; stub "
+                           "backend.utils.stripe_billing.get_gateway.")
+    monkeypatch.setattr(stripe, "StripeClient", _refuse)
+
+
+@pytest.fixture(autouse=True)
 def _scratch_audio_root(tmp_path_factory, monkeypatch):
     """Point the audio storage root at a new folder of the test's own
     (outside its tmp_path, which some tests list), for every test: the

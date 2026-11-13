@@ -149,16 +149,17 @@ final class APIClientTests: XCTestCase {
             case "/api/a": return .json(401, #"{"error":"Unauthorized"}"#)
             case "/api/b": return .json(402, #"{"error":"monthly_spend_limit_reached","message":"capped"}"#)
             case "/api/c": return .json(403, #"{"error":"Your account is not approved. Please wait for approval."}"#)
+            case "/api/e": return .json(402, #"{"error":"no_subscription","message":"No subscription."}"#)
             default: return .html(404)
             }
         }
-        for path in ["/api/a", "/api/b", "/api/c", "/api/d"] {
+        for path in ["/api/a", "/api/b", "/api/c", "/api/d", "/api/e"] {
             do {
                 let _: EmptyResponse = try await client.get(path)
                 XCTFail("expected an error for \(path)")
             } catch {}
         }
-        XCTAssertEqual(box.events, [.unauthorized, .spendCapped(message: "capped"), .notApproved])
+        XCTAssertEqual(box.events, [.unauthorized, .spendCapped(message: "capped"), .notApproved, .notLetIn])
     }
 
     /// Review M1: the in-memory jar posts no `NSHTTPCookieManagerCookiesChanged`;

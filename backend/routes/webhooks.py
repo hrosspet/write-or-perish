@@ -120,3 +120,89 @@ def github_webhook():
         "GitHub webhook: notified user %s about closed issue #%s (%s)",
         user.id, number, issue.get("state_reason"))
     return jsonify({"status": "notified"})
+
+
+# ── Stripe (#438) ───────────────────────────────────────────────────────
+# Called by Stripe, authenticated by the Stripe-Signature header (keyed by
+# STRIPE_WEBHOOK_SECRET). Each event is applied once: its id goes into
+# stripe_event in the same transaction as what it changed, so a redelivery
+# (or two deliveries at once) is answered "duplicate". An event names the
+# subscription that changed; its state is read from Stripe then
+# (utils/stripe_billing.handle_event), so the order events arrive in does
+# not matter. An event Loore does not handle is acknowledged with 200; a
+# failure worth a retry (Stripe unreachable) answers 503 without
+# recording the event, and Stripe sends it again.
+
+def _verified_stripe_event(config):
+    """(event, None) for a correctly signed event, else (None, the
+    answer: 404 while payments are off and no secret is set, 503 while
+    they are on without one, 400 for a bad signature or body)."""
+    import json
+
+    import stripe
+    secret = config.get("STRIPE_WEBHOOK_SECRET")
+    if not secret:
+        if not config.get("PAYMENTS_ENABLED"):
+            return None, (jsonify({"error": "Not found"}), 404)
+        return None, (jsonify({"error": "webhook not configured"}), 503)
+    try:
+        text = request.get_data().decode("utf-8")
+        stripe.WebhookSignature.verify_header(
+            text, request.headers.get("Stripe-Signature"), secret,
+            stripe.Webhook.DEFAULT_TOLERANCE)
+        event = json.loads(text)
+    except (stripe.SignatureVerificationError, UnicodeDecodeError,
+            ValueError):
+        logger.warning("Stripe webhook: bad or missing signature")
+        return None, (jsonify({"error": "invalid signature"}), 400)
+    if not isinstance(event, dict) or not event.get("id"):
+        return None, (jsonify({"error": "invalid event"}), 400)
+    from backend.utils.subscriptions import is_production
+    if is_production(config) and event.get("livemode") is not True:
+        # Production takes live events only.
+        logger.warning("Stripe webhook: a test-mode event refused")
+        return None, (jsonify({"error": "test-mode event"}), 400)
+    return event, None
+
+
+@webhooks_bp.route("/stripe", methods=["POST"])
+def stripe_webhook():
+    from sqlalchemy.exc import IntegrityError
+
+    from backend.extensions import db
+    from backend.models import StripeEvent
+    from backend.utils import stripe_billing
+
+    config = current_app.config
+    event, refused = _verified_stripe_event(config)
+    if refused is not None:
+        return refused
+    event_id = event["id"]
+    etype = event.get("type") or ""
+
+    if db.session.get(StripeEvent, event_id) is not None:
+        return jsonify({"status": "duplicate"})
+    db.session.add(StripeEvent(id=event_id, type=etype[:128]))
+    try:
+        db.session.flush()
+    except IntegrityError:
+        db.session.rollback()
+        return jsonify({"status": "duplicate"})
+
+    if etype not in stripe_billing.HANDLED_EVENTS:
+        db.session.commit()
+        return jsonify({"status": "ignored"})
+    try:
+        outcome = stripe_billing.handle_event(
+            stripe_billing.get_gateway(config), event, config)
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        return jsonify({"status": "duplicate"})
+    except Exception as e:  # noqa: BLE001 - Stripe retries the event
+        db.session.rollback()
+        logger.error("Stripe webhook: %s %s not applied: %s", etype,
+                     event_id, type(e).__name__)
+        return jsonify({"error": "not applied, retry"}), 503
+    logger.info("Stripe webhook: %s %s %s", etype, event_id, outcome)
+    return jsonify({"status": outcome})

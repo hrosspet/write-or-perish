@@ -119,9 +119,19 @@ private struct AccountForm: View {
             usernameRow
             emailRow.id("email")
             xRow.id("x")
-            AccountRow(label: "Plan") {
-                Text(user.plan.rawString.isEmpty ? "Free" : user.plan.rawString.capitalized)
-                    .modifier(AccountFieldStyle(plain: true))
+            if user.paymentsEnabled, let subscription = user.subscription {
+                // Payments on (#438): the state only. No price, no button and
+                // no link: nothing is sold in the app (Peter, 2026-11-12).
+                AccountRow(label: "Subscription") {
+                    Text(subscription.statusText(plan: user.plan.rawString))
+                        .modifier(AccountFieldStyle(plain: true))
+                        .accessibilityIdentifier("account.subscription")
+                }
+            } else {
+                AccountRow(label: "Plan") {
+                    Text(user.plan.rawString.isEmpty ? "Free" : user.plan.rawString.capitalized)
+                        .modifier(AccountFieldStyle(plain: true))
+                }
             }
 
             Text("Settings")
