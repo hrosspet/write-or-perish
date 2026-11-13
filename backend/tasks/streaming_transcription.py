@@ -131,6 +131,20 @@ REENCODE_SECONDS_PER_CHUNK = 2 * recording_limits.STREAMING_CHUNK_SECONDS
 # A part left for a follow-up run (_LocalBudget ran out before it was done).
 _LATER = "later"
 
+# INTRODUCED HEURISTIC: follow-up runs one batch may have: 3. A batch holds at
+# most BATCH_CHUNKS chunks, at most MAX_CHUNK_AUDIO_SECONDS each (40 minutes
+# of audio at the bound, 5 minutes as the apps record); merging and
+# measuring that takes seconds even on a slow worker (an hour of Chrome's
+# Opus decodes in about 5 s on a laptop), and re-encoding it under a minute,
+# so one run of TASK_AUDIO_BUDGET_SECONDS does it many times over. After the
+# last follow-up, the parts still left are kept without their text
+# (recording_limits.UNREADABLE).
+MAX_FOLLOW_UP_RUNS = 3
+# The most parts (sub-batches, one per resume) one batch is worked on in:
+# its chunks (recording_limits.BATCH_CHUNKS), when every chunk began a
+# resume. Parts past it go to the follow-up run.
+MAX_PARTS_PER_BATCH = recording_limits.BATCH_CHUNKS
+
 
 def _now():
     return time.monotonic()
@@ -258,12 +272,32 @@ def _settled_reason(plan_reason, budget):
     return plan_reason
 
 
-def _queue_follow_up(session_id, chunk_indices):
-    """A follow-up run of transcribe_chunk_batch for the parts this run left
-    (_LATER); its task id."""
+def _queue_follow_up(session_id, chunk_indices, follow_up):
+    """Follow-up run number *follow_up* of transcribe_chunk_batch, for the
+    parts this run left (_LATER); its task id."""
     task = transcribe_chunk_batch.delay(session_id=session_id,
-                                        chunk_indices=list(chunk_indices))
+                                        chunk_indices=list(chunk_indices),
+                                        follow_up=follow_up)
     return task.id
+
+
+def queue_batches(session_id, stored_chunks):
+    """Queue *stored_chunks* (rows, in index order) for transcription in
+    batches of at most recording_limits.BATCH_CHUNKS, marking each chunk
+    'processing' with its batch's task id. The caller commits. Returns the
+    task ids."""
+    task_ids = []
+    size = recording_limits.BATCH_CHUNKS
+    for start in range(0, len(stored_chunks), size):
+        batch = stored_chunks[start:start + size]
+        task = transcribe_chunk_batch.delay(
+            session_id=session_id,
+            chunk_indices=[c.chunk_index for c in batch])
+        for c in batch:
+            c.status = 'processing'
+            c.task_id = task.id
+        task_ids.append(task.id)
+    return task_ids
 
 
 def _transcribe_files(client, files):
@@ -871,10 +905,15 @@ class BatchTranscriptionTask(Task):
 
 
 @celery.task(base=BatchTranscriptionTask, bind=True)
-def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
+def transcribe_chunk_batch(self, session_id: str, chunk_indices: list,
+                           follow_up: int = 0):
     """
     Transcribe a batch of audio chunks by merging them and sending to
     OpenAI's gpt-4o-transcribe.
+
+    *follow_up*: 0 for the batch's first run; a run whose local audio
+    budget runs out leaves the parts it did not reach to run follow_up + 1,
+    up to MAX_FOLLOW_UP_RUNS.
 
     Instead of transcribing each 15s chunk individually, this task:
     1. Decrypts all chunk files in the batch
@@ -1051,10 +1090,12 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
             budget = _LocalBudget()
             transcribed_before = recording_limits.transcribed_seconds(
                 session_id=session_id)
-            for sub_indices in sub_batches:
-                # This run's local budget is spent: the part, and every
-                # part after it, waits for the follow-up run.
-                if later or (budget.ran_out() and not budget.fresh()):
+            for part_number, sub_indices in enumerate(sub_batches):
+                # This run's local budget is spent, or the batch has more
+                # parts than one run works on: the part, and every part
+                # after it, waits for the follow-up run.
+                if (later or part_number >= MAX_PARTS_PER_BATCH
+                        or (budget.ran_out() and not budget.fresh())):
                     later.extend(sub_indices)
                     continue
                 merge_report = {}
@@ -1127,6 +1168,16 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
                             pass
 
             transcript = "\n\n".join(transcripts)
+
+            # After the last follow-up run, the parts still left are kept
+            # without their text.
+            if later and follow_up >= MAX_FOLLOW_UP_RUNS:
+                logger.warning(
+                    f"Session {session_id}: parts {later} not reached in "
+                    f"{follow_up + 1} runs; kept without their text")
+                untranscribed.update({idx: recording_limits.UNREADABLE
+                                      for idx in later})
+                later = []
 
             # Store transcript in the first transcribed chunk of the batch;
             # mark those chunks as completed, and the ones kept without
@@ -1213,11 +1264,12 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
             # The parts this run left: a follow-up run of the task takes
             # them (their chunks stay 'processing').
             if later:
-                follow_up = _queue_follow_up(session_id, later)
+                follow_up_id = _queue_follow_up(session_id, later,
+                                                follow_up + 1)
                 NodeTranscriptChunk.query.filter(
                     NodeTranscriptChunk.session_id == session_id,
                     NodeTranscriptChunk.chunk_index.in_(later),
-                ).update({NodeTranscriptChunk.task_id: follow_up},
+                ).update({NodeTranscriptChunk.task_id: follow_up_id},
                          synchronize_session=False)
                 db.session.commit()
 
@@ -1479,14 +1531,9 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
                 f"{len(remaining_indices)} remaining stored chunks: "
                 f"{remaining_indices}"
             )
-            # Queue async and let the polling loop below wait for completion
-            batch_task = transcribe_chunk_batch.delay(
-                session_id=session_id,
-                chunk_indices=remaining_indices,
-            )
-            for c in stored_chunks:
-                c.status = 'processing'
-                c.task_id = batch_task.id
+            # Queue async (in batches of BATCH_CHUNKS) and let the polling
+            # loop below wait for completion
+            queue_batches(session_id, stored_chunks)
             db.session.commit()
 
         # Wait for all chunks to complete (with timeout)

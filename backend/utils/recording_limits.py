@@ -79,6 +79,13 @@ from sqlalchemy.exc import OperationalError
 # Seconds of audio in one streaming chunk, in both apps.
 STREAMING_CHUNK_SECONDS = 15
 
+# Chunks transcribed together in one batch (20 × 15 s = 5 minutes): the
+# chunk route queues a batch once this many are stored, and the finalize and
+# transcribe-remaining queue a longer backlog as several batches. So a batch
+# holds at most this many parts (a part per resume), the bound the task
+# keeps (MAX_PARTS_PER_BATCH in tasks/streaming_transcription).
+BATCH_CHUNKS = 20
+
 # The rate the byte limits allow for: 192 kbps, 1.5 times the web app's
 # (Chrome's default MediaRecorder target is 128 kbps, measured at 16.2 KB a
 # second with its container), in case a browser records at a higher default.

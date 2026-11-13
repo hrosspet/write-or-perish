@@ -1207,7 +1207,7 @@ def upload_streaming_chunk(session_id):
             return _chunk_already_uploaded(chunk_index, existing_chunk)
 
     # Check if we have enough stored chunks for a batch (20 × 15s = 5min)
-    BATCH_SIZE = 20
+    from backend.utils.recording_limits import BATCH_CHUNKS as BATCH_SIZE
     stored_chunks = NodeTranscriptChunk.query.filter_by(
         session_id=session_id,
         status='stored'
@@ -1435,25 +1435,31 @@ def transcribe_remaining(session_id):
     chunk_indices = [c.chunk_index for c in stored_chunks]
 
     from backend.tasks.streaming_transcription import transcribe_chunk_batch
+    from backend.utils.recording_limits import BATCH_CHUNKS
 
-    task = transcribe_chunk_batch.delay(
-        session_id=session_id,
-        chunk_indices=chunk_indices
-    )
-
-    # Mark as processing
-    for c in stored_chunks:
-        c.status = 'processing'
-        c.task_id = task.id
+    # In batches of BATCH_CHUNKS, as the chunk route queues them; marked
+    # as processing.
+    task_ids = []
+    for start in range(0, len(stored_chunks), BATCH_CHUNKS):
+        batch = stored_chunks[start:start + BATCH_CHUNKS]
+        task = transcribe_chunk_batch.delay(
+            session_id=session_id,
+            chunk_indices=[c.chunk_index for c in batch]
+        )
+        for c in batch:
+            c.status = 'processing'
+            c.task_id = task.id
+        task_ids.append(task.id)
     db.session.commit()
 
     current_app.logger.info(
         f"Triggered transcribe-remaining for session {session_id}, "
-        f"chunks {chunk_indices}, task {task.id}"
+        f"chunks {chunk_indices}, tasks {task_ids}"
     )
 
     return jsonify({
-        "task_id": task.id,
+        "task_id": task_ids[0],
+        "task_ids": task_ids,
         "chunk_count": len(chunk_indices),
         "chunk_indices": chunk_indices
     }), 202

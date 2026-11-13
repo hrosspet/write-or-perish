@@ -3057,7 +3057,8 @@ def finalize_chunked_upload():
     node that is not the upload's entry.
 
     An upload accepted at its start (where the monthly usage limit is
-    asked) is transcribed, as a recording is (#341).
+    asked) is transcribed, as a recording is (#341); one with no activity
+    for UPLOAD_COUNTS_FOR is not finalized (410 ``upload_expired``).
     """
     data = request.get_json() or {}
     upload_id = data.get("upload_id")
@@ -3090,6 +3091,15 @@ def finalize_chunked_upload():
     if metadata.get("node_id") != node_id:
         return jsonify({"error": "This entry belongs to another upload",
                         "code": "upload_mismatch"}), 400
+    # An upload with no activity for a day is not finalized either
+    # (utils/recording_limits.UPLOAD_COUNTS_FOR): its start was checked
+    # against the usage limit a day ago.
+    from backend.utils.recording_limits import (
+        UPLOAD_EXPIRED_TEXT, upload_expired,
+    )
+    if upload_expired(node):
+        return jsonify({"error": UPLOAD_EXPIRED_TEXT,
+                        "code": "upload_expired"}), 410
 
     # Verify all chunks received
     expected_chunks = list(range(metadata["total_chunks"]))

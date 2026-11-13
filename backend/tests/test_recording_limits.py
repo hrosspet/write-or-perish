@@ -819,6 +819,19 @@ class TestTheTranscriptionStreamIsNotActivity:
             minutes=1)
 
 
+class TestBacklogInBatches:
+    def test_transcribe_remaining_queues_batches_of_twenty(
+            self, app, client, alice, tasks):
+        _left_behind(app, alice, "back", None, chunks=45)
+
+        resp = client.post("/api/drafts/streaming/back/transcribe-remaining")
+
+        assert resp.status_code == 202, resp.get_data(as_text=True)
+        sizes = [len(call.kwargs["chunk_indices"]) for call in
+                 tasks.transcribe_chunk_batch.delay.call_args_list]
+        assert sizes == [20, 20, 5]
+
+
 class TestEmptyRecordingCleanup:
     """The daily clean-up (tasks/recording_cleanup) removes recordings that
     never received audio, a week old, and nothing else."""
@@ -1007,6 +1020,37 @@ class TestUploadsInProgress:
         failed = Node.query.filter_by(transcription_status="failed").one()
         assert failed.transcription_error == limits.UPLOAD_FAILED_TEXT
         assert _init_upload(client, 8, 2, upload_id="up-y").status_code == 201
+
+    def test_control_every_upload_start_is_refused_at_the_limit(
+            self, app, client, alice):
+        # Control (as on main): the chunked init, a file in one request,
+        # and the older node path.
+        _cap(alice)
+
+        assert _init_upload(client, 8, 2).status_code == 402
+        assert client.post("/api/nodes/", data={
+            "audio_file": (io.BytesIO(b"fake audio"), "talk.m4a"),
+            "ai_usage": "chat"},
+            content_type="multipart/form-data").status_code == 402
+        assert client.post("/api/nodes/streaming/init",
+                           json={"ai_usage": "chat"}).status_code == 402
+        assert Node.query.count() == 0
+
+    def test_an_upload_idle_for_a_day_is_not_finalized(
+            self, app, client, alice, tasks):
+        node_id = _init_upload(client, 8, 2).get_json()["node_id"]
+        assert _send_piece(client, node_id, 0, b"abcd").status_code == 200
+        assert _send_piece(client, node_id, 1, b"efgh").status_code == 200
+        Node.query.get(node_id).upload_activity_at = (
+            datetime.utcnow() - limits.UPLOAD_COUNTS_FOR
+            - timedelta(minutes=1))
+        _db.session.commit()
+
+        resp = _finalize_upload(client, node_id)
+
+        assert resp.status_code == 410
+        assert resp.get_json()["code"] == "upload_expired"
+        tasks.transcribe_audio.delay.assert_not_called()
 
     def test_an_upload_accepted_at_its_start_is_transcribed(
             self, app, client, alice, tasks, monkeypatch):
@@ -1392,8 +1436,8 @@ def st(monkeypatch, tmp_path):
     # Follow-up runs of a batch (parts left for later): recorded, not queued.
     module._follow_ups = []
 
-    def _follow_up(session_id, chunk_indices):
-        module._follow_ups.append(list(chunk_indices))
+    def _follow_up(session_id, chunk_indices, follow_up=None):
+        module._follow_ups.append((list(chunk_indices), follow_up))
         return f"follow-up-{len(module._follow_ups)}"
     monkeypatch.setattr(module, "_queue_follow_up", _follow_up, raising=False)
 
@@ -1436,8 +1480,12 @@ def _recording(st, session_id, indices, label=None, parent=None):
     return draft, folder
 
 
-def _batch(st, session_id, indices):
-    st.transcribe_chunk_batch(MagicMock(), session_id, list(indices))
+def _batch(st, session_id, indices, follow_up=0):
+    if follow_up:
+        st.transcribe_chunk_batch(MagicMock(), session_id, list(indices),
+                                  follow_up=follow_up)
+    else:
+        st.transcribe_chunk_batch(MagicMock(), session_id, list(indices))
 
 
 def _statuses(session_id):
@@ -1832,15 +1880,15 @@ def _fake_clock(st, monkeypatch):
     return clock
 
 
-def _run_with_follow_ups(st, session_id, indices, most=10):
+def _run_with_follow_ups(st, session_id, indices, most=10, follow_up=0):
     """Run the batch, then each follow-up run it asks for; the runs."""
     runs = [list(indices)]
-    _batch(st, session_id, indices)
+    _batch(st, session_id, indices, follow_up)
     while st._follow_ups:
-        indices = st._follow_ups.pop(0)
+        indices, follow_up = st._follow_ups.pop(0)
         runs.append(indices)
         assert len(runs) <= most
-        _batch(st, session_id, indices)
+        _batch(st, session_id, indices, follow_up)
     return runs
 
 
@@ -1868,7 +1916,8 @@ class TestAudioWorkBudget:
         assert st._provider.call_count == 2
         assert st._follow_ups == []
 
-    def test_parts_not_reached_go_to_a_follow_up_run(self, st, monkeypatch):
+    def test_control_parts_not_reached_go_to_a_follow_up_run(
+            self, st, monkeypatch):
         from backend.models import APICostLog
         clock = _fake_clock(st, monkeypatch)
         budget = getattr(st, "TASK_AUDIO_BUDGET_SECONDS", 20 * 60)
@@ -1935,13 +1984,14 @@ class TestAudioWorkBudget:
                    for step, spent in calls if step == "re-encode")
         assert len(calls) == 3
         assert merges == [5, 5]
-        assert st._follow_ups == [list(range(5, 15))]
+        assert st._follow_ups == [(list(range(5, 15)), 1)]
         statuses = _statuses("sess-slow")
         assert {statuses[i] for i in range(0, 5)} == {"failed"}
         assert {statuses[i] for i in range(5, 15)} == {"stored"}
         # The parts left are each done in a run of their own.
-        runs = 1 + len(_run_with_follow_ups(
-            st, "sess-slow", st._follow_ups.pop(0)))
+        indices, follow_up = st._follow_ups.pop(0)
+        runs = 1 + len(_run_with_follow_ups(st, "sess-slow", indices,
+                                            follow_up=follow_up))
         assert runs == 3
         assert st._provider.call_count == 0
         assert APICostLog.query.count() == 0
@@ -1950,6 +2000,71 @@ class TestAudioWorkBudget:
         assert {limits.untranscribed_code(c.error) for c in kept} \
             == {limits.UNREADABLE}
         assert any(p.name.startswith("batch_") for p in folder.iterdir())
+
+    def test_control_a_long_resumed_batch_on_a_slow_worker_finishes(
+            self, st, monkeypatch):
+        # Control: a batch of 20 chunks, each begun by a resume (20 parts),
+        # on a worker so slow that measuring one part takes an eighth of a
+        # run, finishes within the follow-up runs allowed.
+        clock = _fake_clock(st, monkeypatch)
+        budget = getattr(st, "TASK_AUDIO_BUDGET_SECONDS", 20 * 60)
+
+        def slow_decode(p, timeout_seconds=None, logger=None, **k):
+            spent = budget / 8
+            if timeout_seconds is not None and timeout_seconds < spent:
+                clock["t"] += timeout_seconds
+                return None
+            clock["t"] += spent
+            return 15.0
+        monkeypatch.setattr(st, "decode_timeout_seconds", lambda p: budget,
+                            raising=False)
+        monkeypatch.setattr(st, "decoded_audio_seconds", slow_decode)
+        _parts(st, "sess-r", parts=20, size=1)
+
+        runs = _run_with_follow_ups(st, "sess-r", range(0, 20))
+
+        assert len(runs) <= 1 + getattr(st, "MAX_FOLLOW_UP_RUNS", 3)
+        assert set(_statuses("sess-r").values()) == {"completed"}
+        assert st._provider.call_count == 20
+
+    def test_follow_up_runs_stop_after_their_bound(self, st, monkeypatch):
+        # Every part runs to the end of a whole budget and fails.
+        clock = _fake_clock(st, monkeypatch)
+        budget = getattr(st, "TASK_AUDIO_BUDGET_SECONDS", 20 * 60)
+
+        def endless_decode(p, timeout_seconds=None, logger=None, **k):
+            clock["t"] += budget if timeout_seconds is None \
+                else timeout_seconds
+            return None
+        monkeypatch.setattr(st, "decode_timeout_seconds", lambda p: budget,
+                            raising=False)
+        monkeypatch.setattr(st, "decoded_audio_seconds", endless_decode)
+        monkeypatch.setattr(st, "split_audio_for_transcription",
+                            lambda *a, **k: ([], False))
+        _parts(st, "sess-e", parts=10, size=1)
+
+        runs = _run_with_follow_ups(st, "sess-e", range(0, 10), most=50)
+
+        bound = getattr(st, "MAX_FOLLOW_UP_RUNS", None)
+        assert bound is not None
+        assert len(runs) == 1 + bound
+        kept = NodeTranscriptChunk.query.filter_by(session_id="sess-e").all()
+        assert {c.status for c in kept} == {"failed"}
+        assert {limits.untranscribed_code(c.error) for c in kept} \
+            == {limits.UNREADABLE}
+        assert st._provider.call_count == 0
+
+    def test_a_batch_is_worked_on_in_at_most_its_parts(self, st):
+        # More parts than a batch of the routes can have (an older queued
+        # task, say): the rest goes to the follow-up run.
+        st._decoded = 15.0
+        n = getattr(st, "MAX_PARTS_PER_BATCH", 20)
+        _parts(st, "sess-m", parts=n + 5, size=1)
+
+        _batch(st, "sess-m", range(0, n + 5))
+
+        assert st._provider.call_count == n
+        assert st._follow_ups == [(list(range(n, n + 5)), 1)]
 
     def test_a_merge_gets_only_the_time_left(self, tmp_path):
         import subprocess
