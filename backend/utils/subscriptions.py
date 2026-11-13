@@ -26,6 +26,7 @@ can do. On:
 A Stripe event never writes ``User.plan``: an account set by hand stays
 as it is (utils/stripe_billing.apply_subscription).
 """
+import re
 from datetime import datetime, timedelta
 
 from flask import current_app, has_app_context
@@ -124,6 +125,12 @@ _OPEN_EXACT = {
     ("POST", "/api/account/restore"),
     ("POST", "/api/account/restore/decline"),
     ("GET", "/api/account/restore"),
+    # The account's own data, as one file (Peter, 2026-11-13, of an account
+    # whose trial ended and whose first payment failed: "yes, Ben should
+    # be able to export"). Built from what is stored, no model call; HEAD
+    # is the web's check before the download, which builds nothing.
+    ("GET", "/api/export/threads"),
+    ("HEAD", "/api/export/threads"),
 }
 _OPEN_PREFIXES = ("/api/billing", "/api/terms", "/api/webhooks",
                   "/api/health", "/api/ready", "/api/live")
@@ -151,10 +158,11 @@ def no_subscription_response():
 def block_accounts_without_subscription():
     """The app's before_request (#438). Payments on: an approved account
     that never had a subscription (and whose plan was not set by hand) is
-    not let in. It reaches only who-am-I, its subscription, the terms and
-    deleting itself; every other /api and /media route answers 402
-    {"error": "no_subscription"} before the view runs. No-op while
-    payments are off."""
+    not let in. It reaches only who-am-I, its subscription, the terms,
+    deleting itself, the download of its data, and the calls that finish
+    a recording it had under way (finishes_recording_in_progress); every
+    other /api and /media route answers 402 {"error": "no_subscription"}
+    before the view runs. No-op while payments are off."""
     from flask_login import current_user
     if not current_user.is_authenticated:
         return None
@@ -165,7 +173,9 @@ def refuse_not_let_in(user):
     """402 no_subscription when *user* (the session's, or the account an
     API token belongs to: utils/api_tokens) is not let in and this
     request is not one it may make; None otherwise. The same rule for
-    every way a request is authenticated."""
+    every way a request is authenticated. The calls that finish a
+    recording it had under way when it stopped being let in pass
+    (finishes_recording_in_progress)."""
     if not payments_enabled():
         return None
     from flask import request
@@ -175,7 +185,103 @@ def refuse_not_let_in(user):
         return None
     if access_state(user) != "none":
         return None
+    if finishes_recording_in_progress(user, request):
+        return None
     return no_subscription_response()
+
+
+# ── A recording in progress when the account stops being let in ─────────
+# Peter, 2026-11-13, on a subscription that ends during a recording: "User's
+# recorded message should be stored on Loore's servers, possibly even
+# transcribed (transcription is cheap). Just further AI use should be
+# blocked." An account that falls into state "none" while it records (a
+# trial whose first payment fails, say) keeps the calls of that recording
+# only: its remaining chunks, its finalize, and the status and stream that
+# report its transcript; for an upload, its chunks, its finalize and its
+# transcription status. Nothing else opens: no new session or upload (every
+# init is refused in this state, so each session or upload these calls
+# name was started while the account was let in, or before payments were
+# on), no claim of a session from another device, no reply (the account
+# has no AI replies), nothing else to read. A streaming session must be
+# live to take more audio (utils/streaming_session: a chunk or the
+# transcription stream within the last 45 s), so a recording left behind
+# earlier is not continued; and none of it older than
+# RECORDING_IN_PROGRESS_MAX_AGE (Draft.created_at, the upload's
+# Node.created_at). The saved entry then waits in the account.
+
+# INTRODUCED HEURISTIC: how long after it started a recording or upload may
+# still be finished under this exception. Recordings run into a cliff at
+# about 60 minutes on the web (#127); three hours covers the longest one
+# with its finalize and transcription, and bounds what an account that is
+# not let in can still have transcribed (one recording's audio).
+RECORDING_IN_PROGRESS_MAX_AGE = timedelta(hours=3)
+
+_DRAFT_SESSION_CALL = re.compile(
+    r"^/api/drafts/streaming/([^/]+)/(audio-chunk|finalize|release|status)$")
+_DRAFT_SESSION_STREAM = re.compile(
+    r"^/api/sse/drafts/([^/]+)/transcription-stream$")
+_UPLOAD_CALLS = ("/api/nodes/upload/chunk", "/api/nodes/upload/finalize")
+_UPLOAD_STATUS = re.compile(r"^/api/nodes/(\d+)/transcription-status$")
+
+
+def finishes_recording_in_progress(user, req, now=None):
+    """Whether *req* (a Flask request) only finishes a recording or upload
+    of *user* that was under way when it stopped being let in (the
+    comment above). Asked by the gate for an account in state "none"."""
+    from backend.extensions import db
+    from backend.models import Draft, Node
+    from backend.utils.streaming_session import session_is_live
+    now = now or datetime.utcnow()
+    since = now - RECORDING_IN_PROGRESS_MAX_AGE
+    path = req.path.rstrip("/")
+    method = req.method
+
+    call = _DRAFT_SESSION_CALL.match(path)
+    stream = _DRAFT_SESSION_STREAM.match(path)
+    if call or stream:
+        session_id = (call or stream).group(1)
+        action = call.group(2) if call else "stream"
+        if method != ("GET" if action in ("status", "stream") else "POST"):
+            return False
+        draft = Draft.query.filter_by(session_id=session_id,
+                                      user_id=user.id).first()
+        if draft is None or draft.created_at is None \
+                or draft.created_at < since:
+            return False
+        status = draft.streaming_status
+        if action == "audio-chunk":
+            return session_is_live(draft, now)
+        if action in ("finalize", "release"):
+            return status == "recording"
+        if action == "stream" and status == "recording":
+            # Connecting stamps the session live: only for a live one.
+            return session_is_live(draft, now)
+        return status in ("recording", "finalizing", "completed")
+
+    node_id = None
+    pending_upload = False
+    if method == "POST" and path in _UPLOAD_CALLS:
+        source = (req.form if path.endswith("/chunk")
+                  else (req.get_json(silent=True) or {}))
+        node_id, pending_upload = source.get("node_id"), True
+    elif method == "GET" and _UPLOAD_STATUS.match(path):
+        node_id = _UPLOAD_STATUS.match(path).group(1)
+    if node_id is None:
+        return False
+    try:
+        node = db.session.get(Node, int(node_id))
+    except (TypeError, ValueError):
+        return False
+    if (node is None or node.user_id != user.id
+            or node.created_at is None or node.created_at < since
+            or node.transcription_status is None):
+        return False
+    if pending_upload:
+        # Chunks and finalize: an upload whose init was accepted and whose
+        # file is not assembled yet.
+        return (node.audio_original_url is None
+                and node.transcription_status == "pending")
+    return True
 
 
 def ai_replies_allowed(user, config=None):

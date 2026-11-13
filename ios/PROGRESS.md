@@ -1179,3 +1179,13 @@ transcribed by the server, which skips only the reply.
   server refused for the same reason (`error_code`) is said instead of the error sound.
 - Tests: four more in `VoiceRefusalSpeechTurnTests`, and the sentences test. Unit tests only: nothing
   heard on a phone.
+- An account that stops being let in during a recording (a trial whose first payment fails): the server
+  still takes that recording's chunks, finalize and status (`finishes_recording_in_progress`).
+  `AudioCenter.recordingInProgress` (a Voice turn recording, stopping or transcribing; a dictation
+  recording or finalizing, through `DictationController.state`; a chunked upload between its init and its
+  finalize, `beginUpload`/`endUpload` in `NodeFormModel.uploadInChunks`) keeps `RootView` on the app
+  until it is done (`RootView.showsNoSubscription`); then NoSubscriptionView shows.
+- NoSubscriptionView: "Download your data" (Peter, 2026-11-13: "yes, Ben should be able to export"), the
+  More menu's export, now `DataExport.download`, then the share sheet.
+- Tests: `SubscriptionTests.testARecordingInProgressKeepsItsScreenUntilItIsDone`; the nothing-to-buy test
+  covers the new label. Not tried on a device.

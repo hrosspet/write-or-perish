@@ -34,3 +34,41 @@ test('the app load asks for the user without the profile', async () => {
   expect(mockGet).toHaveBeenCalledTimes(1);
   expect(mockGet).toHaveBeenCalledWith('/dashboard', { params: { profile: 0 } });
 });
+
+// Payments (#438): the server says the account is not let in. The user is
+// read again (the app then shows the subscribe page), but not while a
+// recording is in progress: the server still takes that recording's chunks
+// and finalize, and leaving its screen would stop it.
+describe('an account that stops being let in', () => {
+  const { setRecordingActive } = require('../utils/recordingActivity');
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const recording = {};
+
+  afterEach(() => setRecordingActive(recording, false));
+
+  const loaded = async () => {
+    mockGet.mockResolvedValue({ data: { user: { id: 5, username: 'ben', timezone } } });
+    render(<UserProvider><Username /></UserProvider>);
+    await waitFor(() => expect(screen.getByText('ben')).toBeInTheDocument());
+    mockGet.mockClear();
+  };
+
+  test('the user is read again', async () => {
+    await loaded();
+    window.dispatchEvent(new CustomEvent('loore:no-subscription'));
+    await waitFor(() => expect(mockGet).toHaveBeenCalledTimes(1));
+    expect(mockGet).toHaveBeenCalledWith('/dashboard', { params: { profile: 0 } });
+  });
+
+  test('not while a recording is in progress; the next refusal after it is', async () => {
+    await loaded();
+    setRecordingActive(recording, true);
+    window.dispatchEvent(new CustomEvent('loore:no-subscription'));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(mockGet).not.toHaveBeenCalled();
+
+    setRecordingActive(recording, false);
+    window.dispatchEvent(new CustomEvent('loore:no-subscription'));
+    await waitFor(() => expect(mockGet).toHaveBeenCalledTimes(1));
+  });
+});

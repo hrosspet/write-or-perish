@@ -3,6 +3,7 @@ import api from "../api";
 import { markSpendBlocked } from "../utils/spendCap";
 import { rememberSubscription } from "../utils/subscription";
 import { forgetInvite } from "../utils/invite";
+import { isRecordingActive } from "../utils/recordingActivity";
 
 // Create a new context
 const UserContext = createContext(null);
@@ -73,8 +74,13 @@ export const UserProvider = ({ children }) => {
   // Payments on (#438): the server says the account is not let in (its
   // first payment failed, say): read the user again, so the app shows
   // the subscribe page. Nothing sends this event while payments are off.
+  // Not while a recording is in progress (utils/recordingActivity): the
+  // server still takes that recording's chunks and finalize, and leaving
+  // its screen now would stop it and lose what was not sent yet. The next
+  // refused request after it ends shows the page.
   useEffect(() => {
     const onNoSubscription = () => {
+      if (isRecordingActive()) return;
       api.get("/dashboard", { params: { profile: 0 } })
         .then((res) => {
           if (res?.data?.user) {

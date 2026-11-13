@@ -1,4 +1,5 @@
 import api from "../api";
+import { setRecordingActive } from "./recordingActivity";
 
 /**
  * Uploads a file in chunks with progress tracking
@@ -16,6 +17,10 @@ export async function uploadFileInChunks(
 ) {
   const totalChunks = Math.ceil(file.size / chunkSize);
   const uploadId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+  // From an accepted init to the finalize, the upload is a recording in
+  // progress (utils/recordingActivity): the app stays where it is if the
+  // account stops being let in meanwhile, so the file is sent whole (#438).
+  const activity = {};
 
   try {
     // Step 1: Initialize upload session
@@ -28,6 +33,7 @@ export async function uploadFileInChunks(
     });
 
     const { node_id } = initResponse.data;
+    setRecordingActive(activity, true);
 
     // Step 2: Upload chunks
     for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
@@ -67,6 +73,8 @@ export async function uploadFileInChunks(
       console.error("Cleanup failed:", cleanupError);
     }
     throw error;
+  } finally {
+    setRecordingActive(activity, false);
   }
 }
 

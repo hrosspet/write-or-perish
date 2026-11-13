@@ -162,18 +162,11 @@ struct MoreView: View {
         Task {
             defer { exporting = false }
             do {
-                var request = APIRequest(.get, APIPath.exportThreads)
-                request.accept = "text/plain,*/*"
-                request.timeout = 120
-                let (tempURL, _) = try await app.api.download(request)
-                let day = LooreDateFormat.ymd(Date()).replacingOccurrences(of: "/", with: "-")
-                let target = FileManager.default.temporaryDirectory.appendingPathComponent("loore-export-\(day).txt")
-                try? FileManager.default.removeItem(at: target)
-                try FileManager.default.moveItem(at: tempURL, to: target)
+                let target = try await DataExport.download(app.api)
                 exportFile = ExportFile(url: target)
                 exportOnDisk = target
             } catch {
-                app.toasts.show("Export failed. Please try again.")
+                app.toasts.show(DataExport.failedMessage)
             }
         }
     }
@@ -317,6 +310,27 @@ struct CraftModeDialog: View {
 }
 
 // MARK: - Share sheet
+
+/// The account's data as one file: `GET /api/export/threads` to a temporary
+/// file named as the web names it. The More menu's "Export data", and the
+/// not-let-in screen's "Download your data" (#438; Peter, 2026-11-13: "yes, Ben
+/// should be able to export"). The caller shares it, then removes it.
+enum DataExport {
+    static let failedMessage = "Export failed. Please try again."
+
+    @MainActor
+    static func download(_ api: APIClient) async throws -> URL {
+        var request = APIRequest(.get, APIPath.exportThreads)
+        request.accept = "text/plain,*/*"
+        request.timeout = 120
+        let (tempURL, _) = try await api.download(request)
+        let day = LooreDateFormat.ymd(Date()).replacingOccurrences(of: "/", with: "-")
+        let target = FileManager.default.temporaryDirectory.appendingPathComponent("loore-export-\(day).txt")
+        try? FileManager.default.removeItem(at: target)
+        try FileManager.default.moveItem(at: tempURL, to: target)
+        return target
+    }
+}
 
 struct ExportFile: Identifiable {
     let id = UUID()
