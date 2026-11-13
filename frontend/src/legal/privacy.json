@@ -74,7 +74,7 @@
         ["A draft answer to a poll, only if you ask for one", "Your profile, recent context and intentions, or your recent writing the AI may read, as the poll says", "The model the poll names when you ask, which can be the other provider"],
         ["Turning a recording into text", "The audio", "OpenAI"],
         ["Reading text aloud", "The text", "OpenAI"],
-        ["Search by meaning", "**The words you search for**, entries the AI may read, and saved references", "OpenAI, **the words you search for also when your account is set to None**"],
+        ["Search by meaning", "**The words you search for**, entries the AI may read, and saved references", "OpenAI"],
         ["Glean", "The thread, your profile and intentions, and the day's public tweets from the Community Archive", "OpenAI by default, or the model you pick"],
         ["Training, only for content marked Train", "That content", "The provider of the model you use, with our training key for it where we have one"]
       ]
@@ -82,8 +82,9 @@
     {
       "type": "bullets",
       "items": [
-        "Nothing set to None is sent to AI, with one exception: the words you type into search go to OpenAI to search by meaning, also when your account is set to None.",
+        "Nothing set to None is sent to AI, apart from the recordings in the next point.",
         "Loore's apps offer recording only for entries the AI may read, because OpenAI turns every recording into text. A recording sent to Loore's API in another way is turned into text by OpenAI even if its entry is set to None.",
+        "Search uses AI: the words you search for are sent to OpenAI to search by meaning. So search is not available when your account is set to None.",
         "Under OpenAI's and Anthropic's API terms, they don't train their models on what we send, except content you mark Train. Where we have a separate training key for a provider, content set to Chat is never sent with it.",
         "With each request, OpenAI receives a code that stands for your account, so that it can act on one account's requests if its safety filter flags them. The code is not your name, email or account number, and nobody without our key can tell whose it is.",
         "Background work often goes through the providers' batch services. Loore does not delete the files of a batch from OpenAI afterwards; how long OpenAI keeps them is set by OpenAI's terms."
@@ -118,6 +119,7 @@
       "items": [
         "Nobody can see the account. It holds only posts that were already public. Posts fetched from X's API are also kept as files on our server, unencrypted, until the account's content is deleted.",
         "We do this so that the person can start from their own words instead of a blank page. Our legal basis is our legitimate interest in that, weighed against theirs.",
+        "If nobody signs in to such an account within [PREFILL RETENTION] after we opened it, we delete it, with everything in it.",
         "When you first sign in with X, Loore asks whether to seed your Loore from your public tweets. If you answer **Not now**, we import and build nothing more.",
         "To remove what was already built, use **Delete all my content** on the Account page, or delete your account.",
         "If you haven't signed up and want us to delete such an account, or not to build one, write to [info@loore.org](mailto:info@loore.org) with your X handle. We delete it.",
@@ -130,7 +132,8 @@
       "type": "bullets",
       "items": [
         "**Private entries:** only you.",
-        "**Public entries:** every signed-in Loore member can open them. Once public sharing is on for your account, they are also on the open web: on your public page and in its feed, and a public reply also inside the thread it answers, on that thread's page. Our sitemap lists the public entries that start a thread. Search engines and other crawlers, AI companies' crawlers included, are allowed to read public pages. Public entries are stored unencrypted.",
+        "**Public entries:** every signed-in Loore member can open them. Once public sharing is on for your account, they are also on the open web: on your public page and in its feed, and a public reply also inside the thread it answers, on that thread's page. Our sitemap lists the public entries that start a thread. Public entries are stored unencrypted.",
+        "**Crawlers and AI training:** our robots.txt file lets search engines and all other crawlers read public pages, and asks them to stay out of the API and the app's own pages. It names AI companies' crawlers explicitly, among them crawlers that collect text to train AI models (such as GPTBot, ClaudeBot and CCBot), and it allows Google and Apple to use public pages to train their AI models (Google-Extended, Applebot-Extended). So public entries can become part of the data that AI models are trained on.",
         "**Your username** appears with everything you make public. If you signed up by email, it starts as the part of your address before the @, without characters other than letters, digits and _, and with a number added if that name is taken. If you signed up with X, it is your X handle, and public entry pages carry your numeric X user ID in data meant for search engines. You can change your username on the Account page; links with the old name then lead to the new one, so the two names can be connected."
       ]
     },
@@ -145,7 +148,7 @@
         "**Your account:** if you delete it, you can recover it within 30 days by signing in; after that it is deleted forever, with everything in it.",
         "**Backups:** daily copies are kept for 28 days and server snapshots for 14 days, so what is deleted forever leaves the backups within another 30 days. A weekly copy kept outside Google follows the same limit.",
         "**What stays after an account is deleted:** a record of what your AI use cost, without your name; an empty placeholder where other people replied under your entries; your username, reserved for a year so that nobody else can take it over; bug reports and ideas filed on GitHub through Loore, which stay public with the label loore:<your username>; if you used a reduced-price code, the record of that use with the subscription's Stripe reference number but without your account; and the reference numbers of the payment events Stripe sent us.",
-        "**A prefilled account nobody signed in to:** until we delete it, or until you ask us to.",
+        "**A prefilled account nobody signed in to:** we delete it [PREFILL RETENTION] after we opened it, or sooner if you ask us to.",
         "**Server logs:** [LOG RETENTION].",
         "**Error reports in Sentry:** 30 days.",
         "**Purchases:** Link keeps the records the law requires for sales and tax."
