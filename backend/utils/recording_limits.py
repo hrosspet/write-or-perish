@@ -187,11 +187,13 @@ MAX_UPLOADS_IN_PROGRESS = 5
 UPLOAD_COUNTS_FOR = timedelta(hours=24)
 
 # INTRODUCED HEURISTIC: how long the finalize of an upload may spend measuring
-# the file (utils/audio_processing.quick_audio_seconds): a file it cannot
-# finish in this time counts the larger of what it decoded and what its
-# container states, until the transcription task measures it. An hour of
-# AAC or Opus decodes in 2-5 s on a laptop.
-UPLOAD_MEASURE_SECONDS = 5
+# the file (utils/audio_processing.quick_audio_seconds). An hour of AAC or
+# Opus decodes in 2-5 s on a laptop; a file it cannot measure in this time
+# counts, until the transcription task measures it, the largest of what it
+# decoded, what its container states, and its size at
+# UNMEASURED_UPLOAD_BYTES_PER_SECOND (32 kbps, a low speech bitrate).
+UPLOAD_MEASURE_SECONDS = 15
+UNMEASURED_UPLOAD_BYTES_PER_SECOND = 32_000 // 8
 # Audio stored or queued counts toward the usage at a start
 # (pending_audio_seconds) for this long; a chunk or upload whose
 # transcription died then stops counting.
@@ -521,7 +523,8 @@ def finalized_upload_seconds(file_path):
     most MAX_UPLOAD_TRANSCRIBED_SECONDS."""
     from backend.utils.audio_processing import quick_audio_seconds
     return quick_audio_seconds(file_path, UPLOAD_MEASURE_SECONDS,
-                               MAX_UPLOAD_TRANSCRIBED_SECONDS)
+                               MAX_UPLOAD_TRANSCRIBED_SECONDS,
+                               UNMEASURED_UPLOAD_BYTES_PER_SECOND)
 
 
 # Chunk statuses that wait for their transcript (and their cost row).

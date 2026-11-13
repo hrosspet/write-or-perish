@@ -612,11 +612,14 @@ def container_seconds(file_path, timeout_seconds=10):
         return None
 
 
-def quick_audio_seconds(file_path, budget_seconds, at_most):
-    """A realistic length for *file_path* within *budget_seconds* (for a
-    request that must not wait long): its decoded length when the decode
-    ends in time; else the larger of what it decoded so far and the length
-    its container states. At most *at_most*; 0 when nothing can be read."""
+def quick_audio_seconds(file_path, budget_seconds, at_most,
+                        unmeasured_bytes_per_second):
+    """A length for *file_path* within *budget_seconds* (for a request that
+    must not wait long): its decoded length when the decode ends in time.
+    When it does not (it takes longer, or fails), the largest of what it
+    decoded so far, the length its container states, and its size at
+    *unmeasured_bytes_per_second* (a low bitrate): the container's length
+    is the sender's to write, so it never counts alone. At most *at_most*."""
     total, ended = _count_decoded(file_path, budget_seconds,
                                   stop_after=at_most)
     decoded = total / (2 * DECODE_COUNT_RATE)
@@ -624,8 +627,13 @@ def quick_audio_seconds(file_path, budget_seconds, at_most):
         return min(decoded, at_most)
     if ended == "reached":
         return float(at_most)
-    stated = container_seconds(file_path, timeout_seconds=budget_seconds)
-    return min(max(decoded, stated or 0.0), float(at_most))
+    stated = container_seconds(file_path, timeout_seconds=5) or 0.0
+    try:
+        size = pathlib.Path(file_path).stat().st_size
+    except OSError:
+        size = 0
+    by_size = size / unmeasured_bytes_per_second
+    return min(max(decoded, stated, by_size), float(at_most))
 
 
 # Heuristic: how long the audio work for one uploaded file may take in all

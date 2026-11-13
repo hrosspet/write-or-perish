@@ -2731,14 +2731,13 @@ def _fail_unfinished_upload(chunk_dir):
     db.session.commit()
 
 
-def _hand_upload_to_transcription(node, waiting_seconds):
+def _hand_upload_to_transcription(node):
     """A finalized upload is handed to transcription: renewed, so it counts
-    until its transcript is in (utils/recording_limits.UPLOAD_COUNTS_FOR),
-    with its measured seconds, which count toward the account's usage at a
-    start until its cost is recorded (pending_audio_seconds). An upload
-    accepted at its start is transcribed, as a recording is (#341)."""
+    until its transcript is in (utils/recording_limits.UPLOAD_COUNTS_FOR).
+    Its measured seconds were set with its file (pending_audio_seconds). An
+    upload accepted at its start is transcribed, as a recording is
+    (#341)."""
     node.upload_activity_at = datetime.utcnow()
-    node.audio_pending_seconds = waiting_seconds
     db.session.commit()
 
 
@@ -3162,10 +3161,12 @@ def finalize_chunked_upload():
     # Encrypt the assembled audio file at rest (URL stored without .enc)
     encrypt_file(str(target_path))
 
-    # Update node with audio info
+    # Update node with audio info; its measured seconds count from the
+    # same commit (utils/recording_limits.pending_audio_seconds)
     rel_path = target_path.relative_to(AUDIO_STORAGE_ROOT)
     node.audio_original_url = f"/media/{rel_path.as_posix()}"
     node.audio_mime_type = f"audio/{ext}"
+    node.audio_pending_seconds = waiting
     node.set_content("[Voice note – transcription pending]")
     db.session.commit()
 
@@ -3178,7 +3179,7 @@ def finalize_chunked_upload():
         current_app.logger.warning(
             "Failed to clean up chunks for upload %s: %s",
             upload_id, describe_exception(e))
-    _hand_upload_to_transcription(node, waiting)
+    _hand_upload_to_transcription(node)
 
     # Enqueue transcription task
     api_key = get_openai_chat_key(current_app.config)

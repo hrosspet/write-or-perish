@@ -1085,6 +1085,52 @@ class TestUsageAtAStart:
         assert Node.query.get(node_id).audio_pending_seconds \
             == pytest.approx(20, abs=0.2)
 
+    def test_an_upload_that_cannot_be_measured_counts_its_size(
+            self, app, client, alice):
+        _limit(app, alice, 1.00)
+        data = _payload(400_000)        # bytes no decoder reads
+
+        node_id, resp = _upload(client, data)
+        assert resp.status_code == 200, resp.get_data(as_text=True)
+
+        # Nothing decoded, no container length: its size at a low bitrate.
+        assert Node.query.get(node_id).audio_pending_seconds == pytest.approx(
+            400_000 / limits.UNMEASURED_UPLOAD_BYTES_PER_SECOND)
+
+    def test_a_stated_length_never_counts_alone(self, tmp_path, monkeypatch):
+        import backend.utils.audio_processing as audio_processing
+        path = tmp_path / "long.m4a"
+        path.write_bytes(b"x" * 800_000)
+        # Measuring ran out of time after one second of audio, and the
+        # container says one second.
+        monkeypatch.setattr(audio_processing, "_count_decoded",
+                            lambda *a, **k: (16_000, "timeout"))
+        monkeypatch.setattr(audio_processing, "container_seconds",
+                            lambda *a, **k: 1.0)
+
+        seconds = limits.finalized_upload_seconds(path)
+
+        assert seconds == pytest.approx(
+            800_000 / limits.UNMEASURED_UPLOAD_BYTES_PER_SECOND)
+
+    def test_a_finalized_upload_counts_from_the_commit_with_its_file(
+            self, app, client, alice, monkeypatch):
+        import backend.routes.nodes as nodes_routes
+        _limit(app, alice, 1.00)
+
+        def stops_here(node, *a):
+            raise RuntimeError("stopped before the transcription is queued")
+        monkeypatch.setattr(nodes_routes, "_hand_upload_to_transcription",
+                            stops_here)
+
+        with pytest.raises(RuntimeError):
+            _upload(client, _payload(40_000))
+
+        node = Node.query.filter_by(user_id=alice.id).one()
+        _db.session.refresh(node)
+        assert node.audio_original_url is not None
+        assert node.audio_pending_seconds is not None
+
     def test_control_audio_with_its_cost_row_is_not_counted(
             self, app, client, alice):
         _limit(app, alice, 0.10)
