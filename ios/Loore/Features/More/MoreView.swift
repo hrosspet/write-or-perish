@@ -63,6 +63,11 @@ struct MoreView: View {
                     MenuRow(title: "Why Loore") { app.open(.webPage(path: "/why-loore")) }
                     MenuRow(title: "Vision") { app.open(.webPage(path: "/vision")) }
                     MenuRow(title: "How To") { app.open(.webPage(path: "/how-to")) }
+                    // The public legal pages (#440), as on the web.
+                    MenuRow(title: "Terms of Service") { app.open(.webPage(path: "/terms")) }
+                        .accessibilityIdentifier("more.terms")
+                    MenuRow(title: "Privacy Policy") { app.open(.webPage(path: "/privacy")) }
+                        .accessibilityIdentifier("more.privacy")
                 }
 
                 MenuGroup {
@@ -162,20 +167,32 @@ struct MoreView: View {
         Task {
             defer { exporting = false }
             do {
-                var request = APIRequest(.get, APIPath.exportThreads)
-                request.accept = "text/plain,*/*"
-                request.timeout = 120
-                let (tempURL, _) = try await app.api.download(request)
-                let day = LooreDateFormat.ymd(Date()).replacingOccurrences(of: "/", with: "-")
-                let target = FileManager.default.temporaryDirectory.appendingPathComponent("loore-export-\(day).txt")
-                try? FileManager.default.removeItem(at: target)
-                try FileManager.default.moveItem(at: tempURL, to: target)
+                let target = try await DataExport.download(app: app)
                 exportFile = ExportFile(url: target)
                 exportOnDisk = target
             } catch {
                 app.toasts.show("Export failed. Please try again.")
             }
         }
+    }
+}
+
+/// The export's download, for the craft menu and for the Terms screen, where
+/// a person who doesn't accept new Terms can take their writing with them
+/// (#440): `GET /api/export/threads` to `loore-export-YYYY-MM-DD.txt` in the
+/// temporary folder. The caller shares it and removes it (`PrivateFiles`).
+enum DataExport {
+    @MainActor
+    static func download(app: AppState) async throws -> URL {
+        var request = APIRequest(.get, APIPath.exportThreads)
+        request.accept = "text/plain,*/*"
+        request.timeout = 120
+        let (tempURL, _) = try await app.api.download(request)
+        let day = LooreDateFormat.ymd(Date()).replacingOccurrences(of: "/", with: "-")
+        let target = FileManager.default.temporaryDirectory.appendingPathComponent("loore-export-\(day).txt")
+        try? FileManager.default.removeItem(at: target)
+        try FileManager.default.moveItem(at: tempURL, to: target)
+        return target
     }
 }
 

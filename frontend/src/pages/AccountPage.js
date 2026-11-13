@@ -981,6 +981,16 @@ export default function AccountPage() {
         onConfirm={requestAccountDeletion}
         onClose={closeAccountDialog}
       />
+
+      {/* ─── Terms and privacy (#440). Anchor: /account#legal ─── */}
+      <div id="legal" style={{ scrollMarginTop: "72px" }}>
+        <h3 style={sectionTitleStyle}>Terms and privacy</h3>
+        <p style={{ ...helperStyle, fontSize: "0.85rem", lineHeight: 1.6, marginTop: 0 }}>
+          The <Link to="/terms" style={{ color: "var(--accent)" }}>Terms of Service</Link> and
+          the <Link to="/privacy" style={{ color: "var(--accent)" }}>Privacy Policy</Link> say
+          what Loore keeps, who it shares it with, and how to use your rights.
+        </p>
+      </div>
     </div>
   );
 }

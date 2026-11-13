@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import CtaButton from "./CtaButton";
+import LegalLinks from "../legal/LegalLinks";
 
 function useOnScreen(ref, threshold = 0.15) {
   const [visible, setVisible] = useState(false);
@@ -541,7 +542,8 @@ function LandingPage() {
         </div>
 
         <footer className="loore-footer">
-          © {new Date().getFullYear()} Loore
+          <div>© {new Date().getFullYear()} Loore</div>
+          <LegalLinks style={{ marginTop: "0.6rem" }} />
         </footer>
       </div>
     </>

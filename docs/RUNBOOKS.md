@@ -88,8 +88,8 @@ overwrite a backup for 28 days — not the project owner, not a compromised VM.
 
 **Why 28 days.** The terms say that after an account is deleted for good,
 "Copies in our backups are erased within another 30 days"
-(`frontend/src/components/TermsModal.js`,
-`ios/Loore/Features/Onboarding/TermsText.swift`; the deletion email in
+(`frontend/src/legal/terms.json`, the one source the web and the iPhone
+app show, and the privacy policy in `frontend/src/legal/privacy.json`; the deletion email in
 `backend/utils/email.py` says the same). The lifecycle rule deletes each
 object at age 28, but Cloud Storage runs lifecycle actions asynchronously,
 so a deletion can happen some time after the object reaches that age (in

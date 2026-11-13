@@ -287,10 +287,14 @@ final class AppState {
 
     // MARK: Terms and account
 
-    /// `POST /api/terms/accept`. On success the user's terms are current; an
-    /// unapproved user then sees the waitlist screen.
+    /// `POST /api/terms/accept {"version": <the version shown>}` (#440). On
+    /// success the user's terms are current; an unapproved user then sees the
+    /// waitlist screen. When the server's Terms are newer than the ones this
+    /// build bundles, it records nothing and answers 409
+    /// `terms_version_mismatch` (see `TermsAcceptance.isOutdated`).
     func acceptTerms() async throws {
-        let _: TermsAcceptResponse = try await api.post(APIPath.termsAccept)
+        let _: TermsAcceptResponse = try await api.post(
+            APIPath.termsAccept, json: ["version": .string(TermsText.version)])
         user?.termsUpToDate = true
         fetchUpdatesIfNeeded()
         openLaunchRouteIfReady()

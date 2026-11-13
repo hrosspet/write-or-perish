@@ -56,18 +56,26 @@ struct SignInView: View {
     }
 
     /// The web NavBar's "About" dropdown for signed-out visitors (Why Loore, Vision,
-    /// How To), opened as web pages.
+    /// How To), opened as web pages; under it the login page's "Terms · Privacy" (#440).
     private var aboutLinks: some View {
-        HStack(spacing: 20) {
-            Button("Why Loore") { app.open(.webPage(path: "/why-loore")) }
-            Button("Vision") { app.open(.webPage(path: "/vision")) }
-            Button("How To") { app.open(.webPage(path: "/how-to")) }
+        VStack(spacing: 14) {
+            HStack(spacing: 20) {
+                Button("Why Loore") { app.open(.webPage(path: "/why-loore")) }
+                Button("Vision") { app.open(.webPage(path: "/vision")) }
+                Button("How To") { app.open(.webPage(path: "/how-to")) }
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("signIn.about")
+            HStack(spacing: 20) {
+                Button("Terms") { app.open(.webPage(path: "/terms")) }
+                Button("Privacy") { app.open(.webPage(path: "/privacy")) }
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("signIn.legal")
         }
         .buttonStyle(.plain)
         .font(LooreFont.sans(13.6, .light))
         .foregroundStyle(LooreColor.textMuted)
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("signIn.about")
     }
 
     private var card: some View {

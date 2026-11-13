@@ -1,0 +1,219 @@
+{
+  "version": "3.0",
+  "blocks": [
+    { "type": "title", "text": "Terms of Service" },
+    {
+      "type": "summaryBox",
+      "title": "The short version",
+      "items": [
+        "**Loore is run by [OPERATOR NAME] in the Czech Republic.** Czech law applies, and you keep the consumer protection of the country you live in.",
+        "**Your writing is yours.** We claim no rights to it beyond what we need to run Loore, unless you mark it for training.",
+        "**It is private by default and encrypted at rest.** We can technically decrypt it, so this rests on trust. The [Privacy Policy](https://loore.org/privacy) says what we keep and who receives what.",
+        "**AI reads what you allow, and new entries allow it by default.** You can set any entry, or your whole account, to None. AI requests go to OpenAI and Anthropic. Content you mark for training can't be taken back out of models already trained on it.",
+        "**A subscription renews every month until you cancel.** It starts with a 14-day free trial. Link, Stripe's checkout service, sells it and charges you.",
+        "**You can leave at any time.** Export your writing, or delete your account: you have 30 days to change your mind, then it is deleted forever."
+      ]
+    },
+    { "type": "rule" },
+
+    { "type": "sectionTitle", "text": "1. Who runs Loore" },
+    { "type": "paragraph", "text": "Loore (loore.org and the Loore iPhone app) is run by [OPERATOR NAME], [LEGAL FORM], company ID (IČO) [COMPANY ID], [ADDRESS], Czech Republic. In these terms, \"we\" and \"Loore\" mean the operator." },
+    { "type": "paragraph", "text": "Write to us at [info@loore.org](mailto:info@loore.org)." },
+
+    { "type": "sectionTitle", "text": "2. What Loore is" },
+    { "type": "paragraph", "text": "Loore is a journal you write or speak into, with an AI that reads what you allow and reflects with you. By using Loore, you agree to these terms." },
+    { "type": "paragraph", "text": "Loore is in **Beta**. It changes often, and some things will break:" },
+    {
+      "type": "bullets",
+      "items": [
+        "Features may change or disappear. When a change affects what you pay for, we tell you first.",
+        "We back up the server daily, but data loss is still possible. Export what you can't afford to lose.",
+        "Loore may be unavailable at times, without notice. We don't promise a level of availability."
+      ]
+    },
+
+    { "type": "sectionTitle", "text": "3. Who can use Loore" },
+    {
+      "type": "bullets",
+      "items": [
+        "You must be **18 or older**.",
+        "During the Beta, we choose who can open an account, and we approve each account by hand.",
+        "You sign in with a link sent to your email, or with X. Whoever controls that email or X account can sign in to your Loore, so keep them secure."
+      ]
+    },
+
+    { "type": "sectionTitle", "text": "4. Subscriptions and payment" },
+    { "type": "paragraph", "text": "Using Loore needs a subscription, unless we have given your account access without one (for example, as an alpha tester)." },
+    {
+      "type": "bullets",
+      "items": [
+        "**The seller.** Subscriptions are sold through Link, Stripe's checkout service. Link is the merchant of record: it is the seller on your receipt, charges you, adds and pays the tax, sends receipts and answers payment questions. Link's own terms for the purchase are shown at checkout, and your card statement shows the charge under LINK.COM*.",
+        "**Price.** The prices of the levels are shown on the subscribe page of the Loore website. Every price, including a reduced one that a code opens, is shown at checkout before you pay. Tax is added where it applies. The iPhone app shows no prices.",
+        "**Free trial.** A subscription starts with a 14-day free trial. You enter a card at the start, and the first charge comes when the trial ends. If you cancel before then, you pay nothing. Each account gets one trial.",
+        "**Renewal.** After the trial, the subscription renews every month, counted from the day the trial ended (or from the day you subscribed, if you had no trial). Each renewal is charged on that day, until you cancel. We call each such month a billing period.",
+        "**Cancelling.** Cancel at any time in Settings on the Loore website, or on link.com. The subscription then runs to the end of the billing period you paid for and is not renewed.",
+        "**Changing level.** Moving up is charged at once, for the rest of the billing period. Moving down takes effect when the period you paid for ends.",
+        "**A failed payment** stops the AI features at once. Stripe tries the charge again for some days; if a retry succeeds, they come back. If the retries end without a payment, the subscription ends. A new subscription after that is paid at checkout, without another trial.",
+        "**Usage limit.** Your subscription includes AI use up to a cost limit per calendar month (UTC). When you reach it, Loore tells you, and these pause: AI replies, recording and dictation, uploads, read-aloud, and updates of your profile, recent context and todo list. Typing, reading and search still work, and your writing is saved. The limit lifts on the first day of the next month, or later if the month before went far over it. During the free trial, a separate limit applies to the whole trial; it lifts with your first payment.",
+        "**After a subscription ends,** if you paid for it at least once, or you cancelled it yourself (a trial included), your account stays open: you can read, write by typing, export your writing and delete your account. AI replies, transcription and the other AI features stop.",
+        "**If a subscription ends without ever being paid** and without you cancelling it (for example, because the first payment failed until the retries ran out), Loore stays closed, including what you wrote during the trial, until a new subscription starts. You can still delete your account, and we send you a copy of your writing if you ask."
+      ]
+    },
+
+    { "type": "sectionTitle", "text": "5. Refunds and your right to withdraw" },
+    {
+      "type": "bullets",
+      "items": [
+        "**The free trial** is not charged, so there is nothing to refund for it.",
+        "**Part of a billing period.** We don't refund the rest of a period when you cancel, move down a level or delete your account, unless the law requires it.",
+        "**Your right to withdraw.** If you are a consumer in the EU, the law of your country may let you withdraw from a purchase within 14 days, without giving a reason. Because Link sells the subscription, you withdraw with Link: contact [Link's support](https://support.link.com/topics/sold-through-link), or write to us and we pass it on. If the paid service had already started at your request, the seller may keep an amount for the days you used it.",
+        "**Other refunds.** Link may also refund a payment under its own rules. For anything else about a payment, write to us.",
+        "**Disputes and full refunds.** If you dispute a payment with your bank, or your latest payment is refunded in full (also by Link), the subscription stops at once and is cancelled, and section 4 says what stays open after it ends."
+      ]
+    },
+
+    { "type": "sectionTitle", "text": "6. Your content is yours" },
+    { "type": "paragraph", "text": "You keep full ownership of everything you write, record and upload to Loore." },
+    { "type": "paragraph", "text": "We claim **no ownership and no license** over your content except what we need to run Loore for you: storing it, encrypting it, showing it back to you, and processing it with AI where you have allowed that." },
+    { "type": "paragraph", "text": "**One exception, the training opt-in:** if you mark content for training (see section 9), you grant the AI providers concerned **and Loore** a license to use it for training machine learning models." },
+    { "type": "paragraph", "text": "**Public content.** If you make content public, anyone can read it, and others may keep copies we can't remove. Making it private again stops new readers on Loore." },
+
+    { "type": "sectionTitle", "text": "7. Your privacy choices" },
+    { "type": "paragraph", "text": "New content is **private by default**: only you can see it. Unless you change it, AI may read it, so that Loore can reply to you." },
+    { "type": "paragraph", "text": "**Who can see it:**" },
+    {
+      "type": "plainList",
+      "items": [
+        "Private (default): only you",
+        "Circles: shared with specific groups *(coming soon, not yet available)*",
+        "Public: anyone"
+      ]
+    },
+    { "type": "paragraph", "text": "**What AI may do with it:**" },
+    {
+      "type": "plainList",
+      "items": [
+        "None: no AI reads it",
+        "Chat (default): AI may read it to reply to you, but not train on it (section 8)",
+        "Train: AI providers and Loore may also use it to train models (section 9)"
+      ]
+    },
+    { "type": "paragraph", "text": "You set the defaults for new entries on the Account page. With craft mode on, you can also set both for each entry. You can change them at any time." },
+    { "type": "paragraph", "text": "Everything about how we store, encrypt and share your data, and your rights over it, is in the [Privacy Policy](https://loore.org/privacy)." },
+
+    { "type": "sectionTitle", "text": "8. AI chat" },
+    { "type": "paragraph", "text": "When content is set to **Chat**:" },
+    {
+      "type": "bullets",
+      "items": [
+        "It may be sent to OpenAI or Anthropic so the AI can read it and reply to you, and for the other work listed in the [Privacy Policy](https://loore.org/privacy#ai).",
+        "Under these providers' API terms, content sent through the API is **not used to train** their models.",
+        "Where we have a separate training key for a provider, content set to Chat is never sent with it.",
+        "If you later set it to None, AI no longer reads it from then on. We can't recall what was already sent."
+      ]
+    },
+
+    { "type": "sectionTitle", "text": "9. AI training: read this carefully" },
+    { "type": "paragraph", "text": "When content is set to **Train**, you make a significant choice." },
+    { "type": "subheading", "text": "What happens" },
+    {
+      "type": "bullets",
+      "items": [
+        "Your content is sent to the AI provider of the model you use (OpenAI or Anthropic), with our training key for that provider where we have one, and may be used to **train future AI models**.",
+        "**Loore** may also use it to train its own models in the future.",
+        "In exchange, OpenAI gives Loore free daily API credits that help keep it running."
+      ]
+    },
+    { "type": "subheading", "text": "What you must understand" },
+    {
+      "type": "bullets",
+      "items": [
+        "**For models already trained on your content, this can't be undone.** You can withdraw your consent for the future, and your content is left out of later training. It can't be removed from models that have already learned from it.",
+        "Setting the content back to Chat or None stops future training, but not past training.",
+        "You **must hold the rights** to anything you mark for training. Your own writing is fine. Someone else's copyrighted work, song lyrics or other material you have no rights to is not: **don't mark it for training.** You are responsible for this."
+      ]
+    },
+    { "type": "subheading", "text": "The license you grant" },
+    { "type": "paragraph", "text": "By marking content Train, you grant:" },
+    {
+      "type": "bullets",
+      "items": [
+        "**To the AI provider it is sent to** (OpenAI or Anthropic): a license to use it to develop and improve their services, including model training, research, evaluation and testing.",
+        "**To Loore:** a license to use it for training machine learning models, research, and developing Loore and related products."
+      ]
+    },
+    { "type": "paragraph", "text": "These licenses are:" },
+    {
+      "type": "bullets",
+      "items": [
+        "**Non-exclusive:** you can do anything else you want with your content.",
+        "**Royalty-free:** nobody owes anyone payment for it.",
+        "**Revocable for the future:** turn training off, and your content is left out of later training.",
+        "**Irrevocable for the past:** content already used to train a model can't be taken out of it."
+      ]
+    },
+    { "type": "subheading", "text": "OpenAI Content Sharing Agreement" },
+    { "type": "paragraph", "text": "By using Loore's training option, you also agree to OpenAI's Content Sharing Agreement:" },
+    {
+      "type": "quoteBox",
+      "items": [
+        "This Content Sharing Agreement is between OpenAI, L.L.C. (\"us\" or \"we\") and you (\"Customer\"). This Content Sharing Agreement is incorporated into the terms located at openai.com unless the parties have negotiated a separate agreement for the Services, in which case such agreement will govern (the \"Business Terms\"). Capitalized terms not defined here are defined in the Business Terms or the Data Processing Agreement between the parties in connection with the Services (the \"DPA\"). This Content Sharing Agreement takes precedence in the event of any conflict.",
+        "Notwithstanding anything set forth in the Business Terms, we may use Customer Content to develop and improve the Services, including for training our models and other research, development, evaluation, and testing purposes (\"Development Purposes\"). You expressly agree that use of Customer Data for the Development Purposes is not subject to the provisions of the DPA. OpenAI will process Customer Data for Development Purposes as an independent Data Controller. You are responsible for all Input provided by you and your End Users.",
+        "You also represent and warrant that you have the rights, licenses, and permissions necessary – including as applicable that you have provided any notice to End Users, and collected any relevant consent from End Users (\"Notice\") – to provide the Input to the Services for the Development Purposes. You agree that you and your End Users will not provide any information as Input to the Services that you or your End Users do not want to be used for Development Purposes, such as sensitive, confidential, or proprietary information. You also agree that you will not use the Services to process (a) any data that includes or constitutes \"Protected Health Information,\" as defined under the HIPAA Privacy Rule (45 C.F.R. Section 160.103), or (b) any Personal Data of children under 13 or the applicable age of digital consent. You also agree that you will provide OpenAI a copy of your Notice upon OpenAI's request."
+      ]
+    },
+    { "type": "paragraph", "text": "The full agreement is part of OpenAI's Business Terms at [openai.com](https://openai.com)." },
+
+    { "type": "sectionTitle", "text": "10. What you agree not to do" },
+    {
+      "type": "bullets",
+      "items": [
+        "Don't submit **Protected Health Information** (as defined under HIPAA) or **personal data of children** under 13 or the applicable age of digital consent.",
+        "Don't mark content for training unless you hold the rights to it.",
+        "Don't use Loore for anything illegal, or to harass or harm others.",
+        "Don't try to reach other people's private content, or to break, overload or get around Loore's security and limits.",
+        "Don't share your account or resell access to it."
+      ]
+    },
+
+    { "type": "sectionTitle", "text": "11. Leaving Loore" },
+    {
+      "type": "bullets",
+      "items": [
+        "You can export your threads at any time (with craft mode on, **Export data** in the menu), and ask us for a copy of everything else we hold about you.",
+        "You can delete your account on the Account page. If you change your mind, you can still recover your account within 30 days by signing in; after that it is deleted forever, with everything in it. Copies in our backups are erased within another 30 days. Loore keeps a record of what your AI use cost, without your name.",
+        "Deleting your account asks Stripe to stop your subscription from renewing. If that fails, we try again when the account is deleted forever. If you recover your account, the subscription still ends when the billing period you paid for ends.",
+        "We may suspend or close an account that seriously or repeatedly breaks these terms. If we do, we tell you why."
+      ]
+    },
+
+    { "type": "sectionTitle", "text": "12. Liability" },
+    {
+      "type": "bullets",
+      "items": [
+        "We run Loore with care, but as a Beta, without warranties beyond those the law gives you.",
+        "To the extent the law allows, we are not liable for indirect or consequential damage, for data loss that an export would have prevented, or for the consequences of content being used for training as you chose.",
+        "Nothing in these terms limits liability that the law does not allow to be limited, such as for harm caused on purpose or by gross negligence, or takes away your rights as a consumer."
+      ]
+    },
+
+    { "type": "sectionTitle", "text": "13. Changes to these terms" },
+    { "type": "paragraph", "text": "When we change these terms in a way that matters, we tell you in Loore and ask you to accept the new version before you go on. If you don't want to accept it, the same screen lets you export your writing, delete your account or sign out, without accepting." },
+
+    { "type": "sectionTitle", "text": "14. Law and disputes" },
+    {
+      "type": "bullets",
+      "items": [
+        "These terms are governed by Czech law. If you are a consumer in the EU, you also keep the protection of the mandatory law of the country you live in, and you can bring a dispute before the courts there.",
+        "If you are a consumer and we can't settle a dispute between us, you can turn to the body for out-of-court consumer disputes, the Czech Trade Inspection Authority (Česká obchodní inspekce, [www.coi.cz](https://www.coi.cz))."
+      ]
+    },
+
+    { "type": "sectionTitle", "text": "15. Contact" },
+    { "type": "paragraph", "text": "For questions, requests about your account or your data, or a complaint: [info@loore.org](mailto:info@loore.org)." },
+
+    { "type": "rule" },
+    { "type": "footnote", "text": "*Terms version 3.0. Last updated: [EFFECTIVE DATE].*" }
+  ],
+  "acceptNote": "By pressing \"I Agree\", you confirm that you are 18 or older, that you have read these terms and the [Privacy Policy](https://loore.org/privacy), and that you agree to these terms."
+}

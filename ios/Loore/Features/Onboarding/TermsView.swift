@@ -1,12 +1,60 @@
 import SwiftUI
 
+/// A block of the Terms text. `TermsText` (generated from
+/// `frontend/src/legal/terms.json` by `ios/scripts/check_terms_text.py`) lists
+/// them; the web renders the same JSON (`frontend/src/legal/LegalDocument.js`).
+enum TermsBlock: Hashable {
+    case title(String)
+    /// The summary box: a bold heading and a numbered list.
+    case summaryBox(title: String, items: [String])
+    /// A quoted agreement in a box.
+    case quoteBox([String])
+    case sectionTitle(String)
+    case subheading(String)
+    case paragraph(String)
+    case bullets([String])
+    /// A list without bullets (the web's `listStyle: none`).
+    case plainList([String])
+    case table(header: [String], rows: [[String]])
+    case rule
+    case footnote(String)
+}
+
+/// What "I Agree" can run into (#440). The server records only the version it
+/// considers current; a build that bundles older Terms gets 409
+/// `terms_version_mismatch` and is asked to update.
+enum TermsAcceptance {
+    static let mismatchCode = "terms_version_mismatch"
+
+    static func isOutdated(_ error: Error) -> Bool {
+        if case .server(409, let body)? = error as? APIError {
+            return body?.error == mismatchCode
+        }
+        return false
+    }
+
+    static let outdatedMessage = "These Terms are older than Loore's current ones, so they can't be "
+        + "accepted here. Update Loore from TestFlight or the App Store to read and accept the new Terms. "
+        + "Until then you can still export your data, delete your account or sign out below."
+    static let failedMessage = "Error accepting terms. Please try again."
+    static let notReadyText = "Not ready to agree? You can take your writing with you, delete your "
+        + "account, or sign out, without agreeing."
+}
+
 /// The blocking Terms screen (web `TermsModal`): shown over everything while the
 /// signed-in user's accepted terms are out of date. No close, no swipe-away.
-/// "I Agree" → `POST /api/terms/accept`.
+/// "I Agree" → `POST /api/terms/accept` with the version shown. Below it, a
+/// person who doesn't accept can export their data, delete their account or
+/// sign out (Terms §13; #440).
 struct TermsView: View {
     @Environment(AppState.self) private var app
     @State private var accepting = false
     @State private var error: String?
+    @State private var deleteModel: DeleteAccountModel?
+    @State private var exporting = false
+    @State private var exportError: String?
+    @State private var exportFile: ExportFile?
+    @State private var exportOnDisk: URL?
 
     var body: some View {
         ZStack {
@@ -20,10 +68,12 @@ struct TermsView: View {
                     ForEach(Array(TermsText.blocks.enumerated()), id: \.offset) { _, block in
                         TermsBlockView(block: block)
                     }
+                    TermsBlockView(block: .paragraph(TermsText.acceptNote))
                     if let error {
                         Text(error)
                             .font(LooreFont.body)
                             .foregroundStyle(LooreColor.accent)
+                            .fixedSize(horizontal: false, vertical: true)
                             .padding(.top, 16)
                             .accessibilityIdentifier("terms.error")
                     }
@@ -32,6 +82,7 @@ struct TermsView: View {
                         .disabled(accepting)
                         .padding(.top, 20)
                         .accessibilityIdentifier("terms.agree")
+                    withoutAgreeing
                 }
                 .padding(LooreSpacing.dialog)
             }
@@ -45,6 +96,47 @@ struct TermsView: View {
             .tint(LooreColor.accent)
         }
         .accessibilityAddTraits(.isModal)
+        .onAppear {
+            if deleteModel == nil { deleteModel = DeleteAccountModel(app: app) }
+        }
+        .sheet(item: $exportFile, onDismiss: removeExport) { file in
+            ShareSheet(items: [file.url]) {
+                try? FileManager.default.removeItem(at: file.url)
+            }
+        }
+    }
+
+    /// Export, sign out and delete, without accepting.
+    private var withoutAgreeing: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HairlineDivider().padding(.vertical, 20)
+            Text(TermsAcceptance.notReadyText)
+                .font(LooreFont.sans(13.6, .light))
+                .foregroundStyle(LooreColor.textSecondary)
+                .lineSpacing(4)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 10) {
+                // A waitlisted account can't export (the server answers 403).
+                if app.isApproved {
+                    Button(exporting ? "Exporting…" : "Export my data", action: export)
+                        .buttonStyle(.looreOutline)
+                        .disabled(exporting)
+                        .accessibilityIdentifier("terms.export")
+                }
+                Button("Sign out") { Task { await app.signOut() } }
+                    .buttonStyle(.looreOutline)
+                    .accessibilityIdentifier("terms.signOut")
+            }
+            if let exportError {
+                Text(exportError)
+                    .font(LooreFont.sans(13.6, .light))
+                    .foregroundStyle(LooreColor.accent)
+            }
+            if let deleteModel, deleteModel.isAvailable {
+                DeleteAccountSection(model: deleteModel)
+                    .padding(.top, 12)
+            }
+        }
     }
 
     private func accept() {
@@ -55,10 +147,33 @@ struct TermsView: View {
             do {
                 try await app.acceptTerms()
             } catch {
-                self.error = "Error accepting terms. Please try again."
+                self.error = TermsAcceptance.isOutdated(error)
+                    ? TermsAcceptance.outdatedMessage : TermsAcceptance.failedMessage
             }
             accepting = false
         }
+    }
+
+    private func export() {
+        guard !exporting else { return }
+        exporting = true
+        exportError = nil
+        Task {
+            defer { exporting = false }
+            do {
+                let target = try await DataExport.download(app: app)
+                exportFile = ExportFile(url: target)
+                exportOnDisk = target
+            } catch {
+                exportError = "Export failed. Please try again."
+            }
+        }
+    }
+
+    /// The export is deleted when the share sheet closes, as in More.
+    private func removeExport() {
+        if let exportOnDisk { PrivateFiles.remove(exportOnDisk) }
+        exportOnDisk = nil
     }
 }
 

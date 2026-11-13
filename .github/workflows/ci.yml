@@ -91,6 +91,11 @@ jobs:
         working-directory: frontend
         run: npm run lint || echo "No lint script found - skipping"
 
+      # frontend/src/legal/terms.json is the one source of the Terms (#440);
+      # the iPhone app's TermsText.swift is generated from it and must match.
+      - name: iPhone Terms text matches terms.json
+        run: python3 ios/scripts/check_terms_text.py
+
       - name: Run frontend tests
         working-directory: frontend
         run: npm test -- --watchAll=false --passWithNoTests
