@@ -23,7 +23,7 @@ handles/<handle>.json            {"x_id"}: lets the admin type a handle
 excluded/<x_id>.json             {"x_id", "reason", "excluded_at"}
 ```
 
-The bundle is a series of gzip members: the header line alone, then 500 entries per member. `gzip -d` reads it as one file. A load reads one member at a time by its byte range and never downloads the whole object. The manifest lists each member's offset, length, line count and sha256. Before writing anything, a load checks every part and the whole object against the manifest. It checks each part again when it reads it, and refuses a format it does not know. The manifest is written after the bundle; a bundle without a manifest is never read.
+The bundle is a series of gzip members: the header line alone, then 500 entries per member. `gzip -d` reads it as one file. A load reads one member at a time by its byte range and never downloads the whole object. The manifest lists each member's offset, length, line count and sha256. Before writing anything, a load checks every part and the whole object against the manifest. It checks each part again when it reads it, and refuses a format it does not know. A part is split into entries on newlines only (an entry may hold characters such as U+2028 unescaped), and must hold as many entries as its line count. The manifest is written after the bundle; a bundle without a manifest is never read.
 
 ## How the bucket's contents are protected
 
@@ -105,7 +105,7 @@ python backend/scripts/prefill_bundles.py status --x-id <X_ID>                  
 
 Look at any reason you did not expect before the real run. The manifests' `counts.embeddings` say whether the lab's entries carry embeddings (the lab ran without the embedding sweep, so expect 0).
 
-**How long:** an estimate of one to two hours for ~2,000 accounts and ~14 million entries (dump, gzip, upload); not measured on the lab. The `--limit 20` run gives the rate. Memory stays flat: one account at a time, its entries, embeddings and prompt pins read in batches, written to a temporary file and uploaded in chunks.
+**How long:** the first full run took about 85 minutes for ~2,000 accounts and ~14.7 million entries (dump, gzip, upload). The `--limit 20` run gives the rate. Memory stays flat: one account at a time; its entry ids are read once (a few MB for the largest account), then its entries, embeddings and prompt pins in batches, written to a temporary file and uploaded in chunks. No query over an account's entries carries a LIMIT: with one, Postgres picked plans that read the whole node table for every account.
 
 **A deletion during an export holds.** The export checks the exclusion list just before it writes an account and again after. If the X id was excluded meanwhile, it removes what it wrote. A `delete` run while an export is going is therefore never undone by that export.
 

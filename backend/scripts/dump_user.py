@@ -81,14 +81,22 @@ def _run(username, out_path, include_private=False):
 
     authors = {u.id: u.username for u in User.query.all()}
 
-    node_q = Node.query.filter(
-        or_(Node.user_id == user.id, Node.human_owner_id == user.id),
-        Node.deleted_at.is_(None),
-    )
+    alive = [Node.deleted_at.is_(None)]
     if not include_private:
-        node_q = node_q.filter(Node.privacy_level == "public")
-    node_q = node_q.order_by(Node.id)
-    total = node_q.count()
+        alive.append(Node.privacy_level == "public")
+    node_q = Node.query.filter(
+        or_(Node.user_id == user.id, Node.human_owner_id == user.id), *alive)
+    # The ids first, one read per column, then the entries in batches by
+    # id (#698). A keyset over the OR of the two columns (id > last ORDER
+    # BY id LIMIT n) made Postgres walk the primary key with a filter, so
+    # a sparse account's batches read far into the table and its last
+    # one read to the end of it. A few MB of ids for the largest account.
+    ids = set()
+    for column in (Node.user_id, Node.human_owner_id):
+        ids.update(i for (i,) in db.session.query(Node.id).filter(
+            column == user.id, *alive))
+    ids = sorted(ids)
+    total = len(ids)
     print(f"@{user.username} (id {user.id}): {total} nodes "
           f"({'all' if include_private else 'public only'})", file=sys.stderr)
 
@@ -130,19 +138,21 @@ def _run(username, out_path, include_private=False):
 
     n_nodes = 0
     n_emb = 0
-    last_id = 0
     done = 0
-    while True:
-        batch = (node_q.filter(Node.id > last_id).limit(NODE_BATCH).all())
+    for start in range(0, total, NODE_BATCH):
+        # The filters again: an entry deleted since the ids were read is
+        # left out, as before.
+        batch = node_q.filter(Node.id.in_(ids[start:start + NODE_BATCH])) \
+            .order_by(Node.id).all()
         if not batch:
-            break
-        ids = [n.id for n in batch]
-        embeddings = _embeddings(ids)
+            continue
+        batch_ids = [n.id for n in batch]
+        embeddings = _embeddings(batch_ids)
         # The batch's prompt pins in one query, not one per entry (#698: a
         # lab account can hold hundreds of thousands of entries).
         pinned = {node_id for (node_id,) in db.session.query(
             NodeContextArtifact.node_id).filter(
-            NodeContextArtifact.node_id.in_(ids),
+            NodeContextArtifact.node_id.in_(batch_ids),
             NodeContextArtifact.artifact_type == "prompt")}
         for n in batch:
             row = {
@@ -179,7 +189,6 @@ def _run(username, out_path, include_private=False):
             out.write(json.dumps(row, ensure_ascii=False) + "\n")
             n_nodes += 1
             n_emb += 1 if row["embedding"] else 0
-            last_id = n.id
         done += len(batch)
         db.session.expunge_all()  # keep memory flat
         print(f"  nodes {done}/{total}", file=sys.stderr)

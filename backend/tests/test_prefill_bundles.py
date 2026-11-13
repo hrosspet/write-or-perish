@@ -779,6 +779,165 @@ def test_the_lab_does_not_export_what_production_refuses(world, monkeypatch, ext
     assert counts.get("exported", 0) == 0 and counts["skipped_other_material"] == 1
 
 
+def _node(user_id, owner_id, content, **kw):
+    fields = dict(node_type="user", privacy_level="private", ai_usage="chat",
+                  origin="twitter", provenance="prefill_ca", token_count=1,
+                  source_key=f"twitter:x{content}")
+    fields.update(kw)
+    node = Node(user_id=user_id, human_owner_id=owner_id, **fields)
+    node.set_content(content)
+    db.session.add(node)
+    db.session.flush()
+    return node
+
+
+def _account_queries_population():
+    """Accounts whose entries sit on either column, interleaved by id: a
+    clean pre-fill, entries one account wrote in another's thread, a
+    model's reply in an account's thread, one entry per kind of material
+    no pre-fill makes, deleted ones, a public one."""
+    alice = _seed_lab_member(n=3)
+    bob = _seed_lab_member("ca_bob", "bob", "1002", n=3)
+    carol = _seed_lab_member("ca_carol", "carol", "1003", n=3)
+    dave = _seed_lab_member("ca_dave", "dave", "1004", n=3)
+    _seed_lab_member("ca_clean", "clean", "1005", n=3)
+    llm = User(username="claude-opus-5", twitter_id="llm-claude-opus-5")
+    db.session.add(llm)
+    db.session.flush()
+    # Alice wrote in Bob's thread: hers by user_id, Bob's by owner.
+    _node(alice.id, bob.id, "alice in bob's thread", origin=None,
+          provenance=None, source_key=None)
+    _node(alice.id, alice.id, "alice public", privacy_level="public")
+    _node(alice.id, alice.id, "alice deleted", origin="upload",
+          deleted_at=datetime(2026, 1, 1))
+    # A model's reply in Carol's thread: hers by owner only.
+    _node(llm.id, carol.id, "reply to carol", node_type="llm", origin=None,
+          provenance=None, source_key=None)
+    # Dave: one entry per branch of "not a fetched tweet", each deleted
+    # but one, so only that one counts.
+    _node(dave.id, dave.id, "dave upload", origin="upload",
+          deleted_at=datetime(2026, 1, 1))
+    _node(dave.id, dave.id, "dave import", provenance="import",
+          deleted_at=datetime(2026, 1, 1))
+    _node(dave.id, dave.id, "dave no key", source_key=None)
+    _seed_lab_member("ca_late", "late", "1006", n=2)   # ids after the others
+    db.session.commit()
+
+
+def test_account_queries_select_what_one_or_query_selects(world, monkeypatch):
+    """The checks ask each column on its own (account_node_exists): the
+    same accounts as the one query over both columns they replace, for
+    every condition they are asked with (the lab's material check, the
+    load's own-writing checks)."""
+    from sqlalchemy import func, or_
+    from backend.utils.privacy import PREFILL_PROVENANCES
+    with world.lab.app_context():
+        _account_queries_population()
+        alive = Node.deleted_at.is_(None)
+        condition_sets = {
+            "other_material": (alive, or_(
+                func.coalesce(Node.origin, "") != "twitter",
+                func.coalesce(Node.provenance, "").notin_(PREFILL_PROVENANCES),
+                Node.source_key.is_(None), Node.node_type != "user")),
+            "own_writing": (alive, Node.node_type != "llm",
+                            func.coalesce(Node.provenance, "").notin_(
+                                PREFILL_PROVENANCES)),
+            "unlabelled": (alive, Node.node_type != "llm",
+                           Node.origin == "twitter", Node.provenance.is_(None)),
+            "public": (alive, Node.privacy_level == "public"),
+            "any": (alive,),
+        }
+        found = {}
+        for name, conds in condition_sets.items():
+            for user in User.query.order_by(User.id):
+                one_query = db.session.query(Node.id).filter(
+                    or_(Node.user_id == user.id, Node.human_owner_id == user.id),
+                    *conds).first() is not None
+                assert pbl.account_node_exists(user.id, *conds) == one_query, \
+                    (name, user.username)
+                found[(name, user.username)] = one_query
+        names = lambda cond: sorted(u for (c, u), hit in found.items()  # noqa: E731
+                                    if c == cond and hit)
+        # The model wrote its reply: user_id is its own.
+        assert names("other_material") == ["ca_alice", "ca_bob", "ca_carol",
+                                           "ca_dave", "claude-opus-5"]
+        assert names("public") == ["ca_alice"]
+        # The material check as a whole: the same accounts.
+        assert sorted(u.username for u in User.query.filter(
+            User.prefilled_handle.isnot(None))
+            if cli.holds_other_material(u.id)) == names("other_material")[:-1]
+
+
+def test_a_dump_holds_the_same_entries_in_the_same_order(world, monkeypatch):
+    """dump_user reads the account's ids per column and then the entries
+    in batches by id: the entries and the order of the one query over
+    both columns ordered by id, private ones or public only. (A control:
+    the keyset it replaces passes it too.)"""
+    from sqlalchemy import or_
+    from backend.scripts import dump_user
+    monkeypatch.setattr(dump_user, "NODE_BATCH", 2)
+    with world.lab.app_context():
+        _account_queries_population()
+        for username in ("ca_alice", "ca_bob", "ca_carol", "ca_clean"):
+            user = User.query.filter_by(username=username).one()
+            for include_private in (True, False):
+                expected = Node.query.filter(
+                    or_(Node.user_id == user.id, Node.human_owner_id == user.id),
+                    Node.deleted_at.is_(None))
+                if not include_private:
+                    expected = expected.filter(Node.privacy_level == "public")
+                expected = [n.id for n in expected.order_by(Node.id)]
+                out = world.tmp / f"{username}-{include_private}.jsonl"
+                dump_user._run(username, str(out), include_private=include_private)
+                with open(out, encoding="utf-8") as f:
+                    rows = [json.loads(line) for line in f][1:]
+                assert [r["id"] for r in rows] == expected, (username, include_private)
+        # Not a trivial match: the cross-column entries are in.
+        alice = User.query.filter_by(username="ca_alice").one()
+        bob = User.query.filter_by(username="ca_bob").one()
+        with open(world.tmp / "ca_bob-True.jsonl", encoding="utf-8") as f:
+            bob_rows = [json.loads(line) for line in f][1:]
+        assert [r["content"] for r in bob_rows
+                if r["author_username"] == "ca_alice"] == ["alice in bob's thread"]
+        assert len(bob_rows) == 4 and alice.id != bob.id
+
+
+def test_no_account_query_over_entries_has_a_limit(world, monkeypatch):
+    """A LIMIT on a query over an account's entries made Postgres scan
+    the whole node table per account: it expects an early match, picks
+    a scan that can stop at the first one, and with nothing to find that
+    scan reads every row (or, for an ORDER BY id, walks the primary key
+    to the end of the table). The export, the material check and the
+    load's checks send no such query."""
+    import re
+    from sqlalchemy import event
+    from backend.scripts import dump_user
+    monkeypatch.setattr(dump_user, "NODE_BATCH", 2)
+    with world.lab.app_context():
+        _account_queries_population()
+    statements = []
+
+    def spy(conn, cursor, statement, params, context, many):
+        if re.search(r"\bFROM node\b", statement):
+            statements.append(" ".join(statement.split()))
+    with world.lab.app_context():
+        event.listen(db.engine, "before_cursor_execute", spy)
+        try:
+            counts = _export(world, monkeypatch)
+            for user in User.query.filter(User.prefilled_handle.isnot(None)):
+                pbl.own_writing_reason(user.id)
+        finally:
+            event.remove(db.engine, "before_cursor_execute", spy)
+    assert counts["exported"] == 2 and counts["skipped_other_material"] == 4
+    account = re.compile(r"node\.(user_id|human_owner_id) = \?")
+    limited = [s for s in statements if account.search(s) and " LIMIT " in s]
+    assert limited == []
+    # The checks did run, one column at a time.
+    for column in ("user_id", "human_owner_id"):
+        assert any(s.startswith("SELECT count(node.id)")
+                   and f"WHERE node.{column} = ?" in s for s in statements)
+
+
 # ── Load on production ────────────────────────────────────────────────────
 
 def test_round_trip_equals_a_direct_dump_and_load(world, monkeypatch):
@@ -812,6 +971,77 @@ def test_round_trip_equals_a_direct_dump_and_load(world, monkeypatch):
         assert final.window_set == "set-1"
         assert final.parent_profile_id == UserProfile.query.filter_by(
             user_id=user.id, generation_type="window").one().id
+
+
+# Characters str.splitlines() breaks a line at besides "\n" and "\r":
+# json.dumps(ensure_ascii=False) leaves the last three raw in an entry and
+# escapes the others; "\r\n", "\r" and "\n" inside a text are escaped too.
+LINE_BREAKERS = ["\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", " ",
+                 " ", "\r\n", "\r", "\n"]
+
+
+def test_entries_with_line_separators_load_unchanged(world, monkeypatch):
+    """An entry holding a character str.splitlines() splits at (U+2028 in
+    a tweet, say) loads byte for byte: a part is split on "\\n" only, as
+    the export ends its lines, and holds as many entries as its manifest
+    counts. The header (a profile) too."""
+    texts = [f"tweet {i}: a{ch}b{ch}" for i, ch in enumerate(LINE_BREAKERS)]
+    profile = "final profile second line \x85end"
+    with world.lab.app_context():
+        alice = _seed_lab_member(n=len(texts))
+        nodes = Node.query.filter_by(human_owner_id=alice.id).order_by(Node.id).all()
+        for node, text in zip(nodes, texts):
+            node.set_content(text)
+        final = UserProfile.query.filter_by(user_id=alice.id,
+                                            generation_type="integration").one()
+        final.set_content(profile)
+        db.session.commit()
+    _export(world, monkeypatch)
+    _prod_mode(monkeypatch)
+    m = pb.read_manifest(world.storage, "1001")
+    members = m["object"]["members"]
+    raw = world.storage.read_bytes(pb.bundle_name("1001"))
+    for member in members:
+        part = gzip.decompress(raw[member["offset"]:member["offset"] + member["length"]])
+        assert part.count(b"\n") == member["lines"]
+        assert len(pb.read_member(world.storage, "1001", member)) == member["lines"]
+    read = [e for member in members[1:]
+            for e in pb.read_member(world.storage, "1001", member)]
+    assert len(read) + 1 == m["object"]["lines"] == len(texts) + 1
+    assert [e["content"] for e in read] == texts
+    header = pb.read_member(world.storage, "1001", members[0])[0]
+    assert header["profiles"][-1]["content"] == profile
+
+    prod = world.prod()
+    with prod.app_context():
+        load, refusal = _start("alice")
+        assert refusal is None
+        assert _run_until_done(load.id) == "done"
+        user = User.query.filter_by(twitter_id="1001").one()
+        loaded = Node.query.filter_by(human_owner_id=user.id).order_by(Node.created_at)
+        assert [n.get_content() for n in loaded] == texts
+        assert [n.get_content().encode("utf-8") for n in loaded] == \
+            [t.encode("utf-8") for t in texts]
+        assert UserProfile.query.filter_by(
+            user_id=user.id, generation_type="integration").one().get_content() == profile
+
+
+def test_a_part_is_split_on_newlines_only(world, monkeypatch):
+    """A part whose lines end in "\\r\\n", or with a blank line, reads as
+    its entries; one that holds fewer or more entries than its manifest
+    counts is refused, since a load counts its progress by them."""
+    entries = [_entry(0, content="one two"), _entry(1), _entry(2)]
+    path = world.tmp / "crlf.jsonl.gz"
+    lines = [json.dumps({"format": 2}) + "\r\n"] + \
+        [json.dumps(e, ensure_ascii=False) + "\r\n" for e in entries]
+    obj = pb.write_members(iter(lines), str(path))
+    world.storage.upload(pb.bundle_name("1001"), str(path))
+    assert [p["lines"] for p in obj["members"]] == [1, 3]
+    assert pb.read_member(world.storage, "1001", obj["members"][1]) == entries
+    assert pb.split_lines("a b\n\nc\r\n \n") == ["a b", "c"]
+    with pytest.raises(pb.BundleError) as err:
+        pb.read_member(world.storage, "1001", dict(obj["members"][1], lines=2))
+    assert err.value.code == "format"
 
 
 def test_admin_load_makes_an_account_its_owner_x_sign_in_finds(world, monkeypatch):

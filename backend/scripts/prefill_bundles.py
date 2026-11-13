@@ -188,16 +188,14 @@ def holds_other_material(user_id):
     from sqlalchemy import func, or_
     from backend.extensions import db
     from backend.models import Node, UserArtifact, UserProfile, UserTodo
-    from backend.utils.prefill_bundle_load import ARTIFACT_KINDS, PERSON_MADE
+    from backend.utils.prefill_bundle_load import (
+        ARTIFACT_KINDS, PERSON_MADE, account_node_exists)
     from backend.utils.privacy import PREFILL_PROVENANCES
-    other = db.session.query(Node.id).filter(
-        or_(Node.user_id == user_id, Node.human_owner_id == user_id),
-        Node.deleted_at.is_(None),
-        or_(func.coalesce(Node.origin, "") != "twitter",
-            func.coalesce(Node.provenance, "").notin_(PREFILL_PROVENANCES),
-            Node.source_key.is_(None), Node.node_type != "user"),
-    ).first()
-    if other is not None:
+    if account_node_exists(
+            user_id, Node.deleted_at.is_(None),
+            or_(func.coalesce(Node.origin, "") != "twitter",
+                func.coalesce(Node.provenance, "").notin_(PREFILL_PROVENANCES),
+                Node.source_key.is_(None), Node.node_type != "user")):
         return True
     for model in (UserProfile, UserTodo, UserArtifact):
         if db.session.query(model.id).filter(

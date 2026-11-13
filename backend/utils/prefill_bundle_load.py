@@ -218,6 +218,19 @@ def account_signed_in(user):
     return sign_in_status(user) != "never"
 
 
+def account_node_exists(user_id, *conditions):
+    """Whether an entry the account wrote or owns meets ``conditions``.
+    Counted per column, with no LIMIT, so Postgres reads the account's
+    entries through that column's index. ``.first()`` over an OR of the
+    two columns made it scan the whole node table instead: under a LIMIT
+    it expects an early match among the many rows it estimates, so it
+    picks a scan that can stop at the first one, and for an account with
+    no match (the usual case) that scan reads every row. Metadata only."""
+    return any(db.session.query(func.count(Node.id)).filter(
+        column == user_id, *conditions).scalar()
+        for column in (Node.user_id, Node.human_owner_id))
+
+
 def own_writing_reason(user_id):
     """Why the account counts as holding writing of its own, or None:
     "own_writing" for an entry or upload no pre-fill brought in, or a
@@ -226,24 +239,23 @@ def own_writing_reason(user_id):
     Those cannot be told apart from an upload without guessing: PR
     #691's labelling settles them. Metadata only."""
     from backend.utils.privacy import PREFILL_PROVENANCES
-    own = db.session.query(Node.id).filter(
-        or_(Node.user_id == user_id, Node.human_owner_id == user_id),
-        Node.deleted_at.is_(None), Node.node_type != "llm")
+    own = (Node.deleted_at.is_(None), Node.node_type != "llm")
     unlabelled = (Node.origin == "twitter") & Node.provenance.is_(None)
     # Spelled out, not ~unlabelled: NOT of a NULL comparison (no origin)
     # would drop the row.
     labelled_or_not_a_tweet = or_(Node.origin.is_(None),
                                   Node.origin != "twitter",
                                   Node.provenance.isnot(None))
-    if own.filter(
+    if account_node_exists(
+            user_id, *own,
             func.coalesce(Node.provenance, "").notin_(PREFILL_PROVENANCES),
-            labelled_or_not_a_tweet).first() is not None:
+            labelled_or_not_a_tweet):
         return "own_writing"
     if db.session.query(UserProfile.id).filter(
             UserProfile.user_id == user_id,
             UserProfile.generated_by.in_(PERSON_MADE)).first() is not None:
         return "own_writing"
-    if own.filter(unlabelled).first() is not None:
+    if account_node_exists(user_id, *own, unlabelled):
         return "unlabelled_tweets"
     return None
 

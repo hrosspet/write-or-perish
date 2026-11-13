@@ -363,9 +363,26 @@ def verify_bundle(storage, x_id, members, sha256):
         raise BundleError("checksum", "The bundle does not match its manifest.")
 
 
+def split_lines(text):
+    """The lines of a decompressed member, split on "\\n" only, as
+    write_members ends them; a "\\r" before the "\\n" is dropped and blank
+    lines are skipped, as write_members skips them. Not str.splitlines:
+    that also splits at characters an entry holds unescaped (json.dumps
+    leaves U+2028, U+2029 and U+0085 as they are), which cuts the entry
+    in two."""
+    out = []
+    for line in text.split("\n"):
+        if line.endswith("\r"):
+            line = line[:-1]
+        if line.strip():
+            out.append(line)
+    return out
+
+
 def read_member(storage, x_id, member):
     """The parsed lines of one member, read by its byte range and checked
-    against its sha256 before anything is parsed."""
+    against its sha256 before anything is parsed. As many as the manifest
+    says the member holds: a load counts its progress by them."""
     data = storage.read_range(bundle_name(x_id), member["offset"],
                               member["length"])
     if data is None:
@@ -376,9 +393,13 @@ def read_member(storage, x_id, member):
                                       "its manifest.")
     try:
         text = zlib.decompress(data, 31).decode("utf-8")
-        return [json.loads(line) for line in text.splitlines() if line.strip()]
+        entries = [json.loads(line) for line in split_lines(text)]
     except (zlib.error, UnicodeDecodeError, ValueError):
         raise BundleError("format", "A part of the bundle cannot be read.")
+    if len(entries) != member["lines"]:
+        raise BundleError("format", "A part of the bundle does not hold the "
+                                    "entries its manifest counts.")
+    return entries
 
 
 def open_bundle(path, skip=0):
