@@ -49,7 +49,17 @@ gcloud storage buckets add-iam-policy-binding gs://<BUCKET> \
   --member=serviceAccount:<LAB_SA> --role=roles/storage.objectAdmin
 gcloud storage buckets add-iam-policy-binding gs://<BUCKET> \
   --member=serviceAccount:<PROD_SA> --role=roles/storage.objectViewer
-# Check: no public access, uniform access on, soft delete off, two grants.
+```
+
+**Remove the default project bindings.** A new bucket comes with bindings for the project's editors and viewers: `projectEditor` holds the legacy bucket-owner and object-owner roles, and `projectViewer` holds the legacy bucket-reader and object-reader roles. These give everyone with a broad project role access to the bundles. Remove the editor and viewer members from those four legacy roles. Project owners may keep theirs, since they control the project anyway. The members are named by the project's number, so editing the policy file is the reliable way:
+
+```bash
+gcloud storage buckets get-iam-policy gs://<BUCKET> --format=json > bucket-policy.json
+# Edit bucket-policy.json: delete every "projectEditor:…" and "projectViewer:…"
+# member; drop a binding that is left with no members.
+gcloud storage buckets set-iam-policy gs://<BUCKET> bucket-policy.json
+# Check: no public access, uniform access on, soft delete off, and only the
+# lab's grant, production's grant and the project owners' legacy roles.
 gcloud storage buckets describe gs://<BUCKET> \
   --format="yaml(public_access_prevention,uniform_bucket_level_access,soft_delete_policy)"
 gcloud storage buckets get-iam-policy gs://<BUCKET>
@@ -72,15 +82,28 @@ Both unset or off: nothing reads the storage and nothing loads. Switching `PREFI
 
 Run with the app's virtualenv and the lab's env file loaded, as its systemd units run the app, from the checkout's root. The export refuses to run where content is encrypted (any server but the lab).
 
+**Before the export, every prepared account must carry its X id.** Bundles are keyed by the account's numeric X id (`User.twitter_id`), the identity an X sign-in proves. An account without one is skipped as `skipped_no_x_id`. Write the ids first, from the archive's own account records, never from a handle alone.
+
+**Name the archive snapshot.** `--archive-snapshot` names the Community Archive export the accounts were imported from, as the import's log names it. It goes into every manifest. A real export refuses to run without it. It is never taken from the server's settings, which point at whatever snapshot the server used last.
+
 ```bash
-python backend/scripts/prefill_bundles.py export --dry-run       # counts only, writes nothing
-python backend/scripts/prefill_bundles.py export --limit 20      # a first batch; time it
-python backend/scripts/prefill_bundles.py export                 # the rest, in tmux
-python backend/scripts/prefill_bundles.py status                 # bundles and exclusions
-python backend/scripts/prefill_bundles.py status --x-id <X_ID>   # one manifest
+python backend/scripts/prefill_bundles.py export --dry-run                                  # counts only, writes nothing
+python backend/scripts/prefill_bundles.py export --archive-snapshot <EXPORT_ID> --limit 20  # a first batch; time it
+python backend/scripts/prefill_bundles.py export --archive-snapshot <EXPORT_ID>             # the rest, in tmux
+python backend/scripts/prefill_bundles.py status                                            # bundles and exclusions
+python backend/scripts/prefill_bundles.py status --x-id <X_ID>                              # one manifest
 ```
 
-**Expected counts:** about one bundle per account with a profile (roughly 2,000). The summary line counts the skips by reason: `skipped_ai_none` (accounts set to no AI), `skipped_no_profile`, `skipped_unfinished_profile` (a window set without its final merge: production would finish it with a model call), `skipped_no_x_id`, `skipped_signed_in` (any account someone signed in to on the lab, or with an email login), `skipped_admin`, `skipped_excluded`, `skipped_declined`, `skipped_other_material` (an entry that is not a fetched tweet, a todo list, an artifact other than intentions, or a version a person saved: a bundle holds a pre-fill's material only, and production refuses anything else). Look at any reason you did not expect before the real run. The manifests' `counts.embeddings` say whether the lab's entries carry embeddings (the lab ran without the embedding sweep, so expect 0).
+**Expected counts:** about one bundle per account with a profile (roughly 2,000). Under the summary, one line per skip reason says what it means and what would change it. The reasons:
+- `skipped_ai_none`: accounts set to no AI.
+- `skipped_no_profile`.
+- `skipped_unfinished_profile`: a window set without its final merge; production would finish it with a model call.
+- `skipped_no_x_id`: no X id stored; see above.
+- `skipped_signed_in`: the account shows a sign that a person used it, such as a sign-in or terms on record, an X sign-in, a setting or answer, or a draft or token. An address on the account is not such a sign; the lab's placeholder addresses in the reserved `.invalid` domain are no address at all.
+- `skipped_admin`, `skipped_excluded`, `skipped_declined`.
+- `skipped_other_material`: an entry that is not a fetched tweet, a todo list, an artifact other than intentions, or a version a person saved. A bundle holds a pre-fill's material only, and production refuses anything else.
+
+Look at any reason you did not expect before the real run. The manifests' `counts.embeddings` say whether the lab's entries carry embeddings (the lab ran without the embedding sweep, so expect 0).
 
 **How long:** an estimate of one to two hours for ~2,000 accounts and ~14 million entries (dump, gzip, upload); not measured on the lab. The `--limit 20` run gives the rate. Memory stays flat: one account at a time, its entries, embeddings and prompt pins read in batches, written to a temporary file and uploaded in chunks.
 

@@ -187,8 +187,13 @@ def _seed_lab_member(username="ca_alice", handle="alice", x_id="1001", n=7,
     return user
 
 
+SNAPSHOT = "ca-export-test-1"
+
+
 def _export(world, monkeypatch, storage=None, **kw):
     _lab_mode(monkeypatch)
+    if not kw.get("dry_run"):
+        kw.setdefault("archive_snapshot", SNAPSHOT)
     with world.lab.app_context():
         return cli.run_export(storage or world.storage, out=lambda *_: None, **kw)
 
@@ -455,7 +460,8 @@ def _seed_lab_population():
     _seed_lab_member("ca_admin", "boss", "1003", n=2, is_admin=True)
     _seed_lab_member("ca_seen", "seen", "1004", n=2,
                      last_seen_at=datetime.utcnow())
-    _seed_lab_member("ca_mail", "mail", "1005", n=2, email="x@example.com")
+    _seed_lab_member("ca_terms", "terms", "1005", n=2,
+                     accepted_terms_at=datetime.utcnow())
     _seed_lab_member("ca_none", "none", "1006", n=2, default_ai_usage="none")
     _seed_lab_member("ca_no", "no", "1007", n=2, prefill_consent="no")
     _seed_lab_member("ca_noid", "noid", None, n=2)
@@ -471,14 +477,72 @@ def test_export_dry_run_writes_nothing_and_counts_every_skip(world, monkeypatch)
     with world.lab.app_context():
         _seed_lab_population()
     pb.write_exclusion(world.storage, "1009", "protected")
-    counts = _export(world, monkeypatch, dry_run=True)
+    lines = []
+    _lab_mode(monkeypatch)
+    with world.lab.app_context():
+        counts = cli.run_export(world.storage, dry_run=True, out=lines.append)
     assert counts["would_export"] == 2
     assert counts["would_export_nodes"] == 7 + 3
     for reason in ("admin", "signed_in", "ai_none", "declined", "no_x_id",
                    "excluded", "no_profile"):
         assert counts.get(f"skipped_{reason}") >= 1, reason
-    assert counts["skipped_signed_in"] == 2      # a sign-in, an email login
+    assert counts["skipped_signed_in"] == 2      # a sign-in, the terms
     assert not list(world.storage.list("bundles"))
+    # The summary says, per outcome, what it means and what would change it.
+    assert "  skipped_no_x_id=1: no X id stored for this account; store its numeric X id " \
+           "(User.twitter_id) before export: bundles are keyed by it" in lines
+
+
+def test_an_address_is_no_sign_of_a_person(world, monkeypatch):
+    """The lab's prepared accounts carry a placeholder address in the
+    reserved ".invalid" domain; an address, placeholder or not, is no sign
+    that a person used the account. Real signs are."""
+    with world.lab.app_context():
+        _seed_lab_member(email="alice@placeholder.invalid")
+        _seed_lab_member("ca_bob", "bob", "1002", n=3, email="bob@example.com")
+    counts = _export(world, monkeypatch)
+    assert counts["exported"] == 2 and "skipped_signed_in" not in counts
+
+
+@pytest.mark.parametrize("sign", [
+    {"last_seen_at": datetime(2026, 11, 1)},
+    {"accepted_terms_at": datetime(2026, 11, 1)},
+    {"twitter_handle": "alice"},
+    {"prefill_consent": "yes"},
+    {"timezone": "Europe/Prague"},
+    {"craft_mode": True},
+    {"glean_enabled": False},
+    {"pending_email": "alice@example.com"},
+    "draft",
+    "api_token",
+])
+def test_a_real_sign_of_a_person_keeps_the_account_on_the_lab(world, monkeypatch, sign):
+    from backend.models import ApiToken, Draft
+    with world.lab.app_context():
+        user = _seed_lab_member(email="alice@placeholder.invalid",
+                                **(sign if isinstance(sign, dict) else {}))
+        if sign == "draft":
+            db.session.add(Draft(user_id=user.id, content=""))
+        elif sign == "api_token":
+            db.session.add(ApiToken(user_id=user.id, token_hash="h" * 64,
+                                    name="t", prefix="lt_"))
+        db.session.commit()
+    counts = _export(world, monkeypatch)
+    assert counts.get("exported", 0) == 0 and counts["skipped_signed_in"] == 1
+
+
+def test_a_real_export_names_its_archive_snapshot(world, monkeypatch):
+    """The manifest records the Community Archive export the operator
+    names; a real run without one stops before writing anything."""
+    with world.lab.app_context():
+        _seed_lab_member()
+    _lab_mode(monkeypatch)
+    with world.lab.app_context(), pytest.raises(SystemExit):
+        cli.run_export(world.storage, out=lambda *_: None)
+    assert not list(world.storage.list("bundles"))
+    _export(world, monkeypatch)
+    m = json.loads(world.storage.read_bytes("bundles/1001/manifest.json"))
+    assert m["archive_snapshot"] == SNAPSHOT
 
 
 def test_export_writes_the_layout_with_a_contentless_manifest(world, monkeypatch):
@@ -770,23 +834,28 @@ def _person_signs(user):
 def test_an_account_made_ready_stays_recognisably_unclaimed(world, monkeypatch):
     """An account the admin made ready that nobody signed in to must still
     look unclaimed to the deletion after 90 days (#685): the load sets
-    prefilled_handle and nothing a person's own action sets, not even the
-    lab account's time zone, and its entries' updated_at is when this
-    server stored them (the deletion counts from the first)."""
-    _bundle(world, monkeypatch, timezone="Europe/Prague")
+    prefilled_handle and nothing a person's own action sets, not even a
+    time zone or other account fields a bundle's header names, and its
+    entries' updated_at is when this server stored them (the deletion
+    counts from the first)."""
+    _bundle(world, monkeypatch)
+    _put_bundle(world, [_entry(0), _entry(1)], x_id="2001",
+                user={"username": "ca_hand", "timezone": "Europe/Prague",
+                      "preferred_model": "gpt-6-sol", "plan": "pro"})
     prod = world.prod()
     with prod.app_context():
         before = datetime.utcnow()
-        load, _ = _start("alice")
-        assert _run_until_done(load.id) == "done"
-        user = db.session.get(User, load.user_id)
-        from backend.utils.activity import sign_in_status
-        assert user.prefilled_handle == "alice" and sign_in_status(user) == "never"
-        assert _person_signs(user) == []
-        assert user.timezone == "UTC"
-        first_stored = db.session.query(db.func.min(Node.updated_at)).filter(
-            Node.human_owner_id == user.id).scalar()
-        assert first_stored >= before
+        for query in ("alice", "2001"):
+            load, _ = _start(query)
+            assert _run_until_done(load.id) == "done"
+            user = db.session.get(User, load.user_id)
+            from backend.utils.activity import sign_in_status
+            assert user.prefilled_handle and sign_in_status(user) == "never"
+            assert _person_signs(user) == []
+            assert (user.timezone, user.preferred_model, user.plan) == ("UTC", None, "alpha")
+            first_stored = db.session.query(db.func.min(Node.updated_at)).filter(
+                Node.human_owner_id == user.id).scalar()
+            assert first_stored >= before
 
 
 def test_a_chunked_load_resumes_after_a_killed_run(world, monkeypatch):

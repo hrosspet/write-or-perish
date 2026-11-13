@@ -9,7 +9,7 @@ plus a manifest with no content in it. The other commands manage what is
 in the storage and run wherever the storage's write access is.
 
     python backend/scripts/prefill_bundles.py export --dry-run
-    python backend/scripts/prefill_bundles.py export [--only HANDLE|X_ID] [--limit N] [--force]
+    python backend/scripts/prefill_bundles.py export --archive-snapshot EXPORT_ID [--only HANDLE|X_ID] [--limit N] [--force]
     python backend/scripts/prefill_bundles.py delete --x-id ID --reason deletion_request
     python backend/scripts/prefill_bundles.py delete --handle HANDLE --reason declined
     python backend/scripts/prefill_bundles.py unexclude --x-id ID
@@ -19,12 +19,17 @@ The location is PREFILL_BUNDLE_LOCATION (or --location): gs://<bucket>[/<prefix>
 or a local directory.
 
 export: skips an account that must not leave the lab (the reason is
-counted): an admin, one without a pre-filled handle, one someone signed
-in to or that has an email login, a deleted one, AI usage None, a "no" to
-the tweet seed, a spam flag, no numeric X id, an X id on the exclusion
-list, no profile, or material no pre-fill makes (an entry that is not a
-fetched tweet, a version a person saved: production refuses those). It
-is idempotent and resumable: an account whose
+counted, and the summary says what each reason means and what would
+change it): an admin, one without a pre-filled handle, one a person
+used (a sign-in, the terms, a setting: person_signals; an address on the
+account is not such a sign), a deleted one, AI usage None, a "no" to the
+tweet seed, a spam flag, no numeric X id stored, an X id on the
+exclusion list, no finished profile, or material no pre-fill makes (an
+entry that is not a fetched tweet, a version a person saved: production
+refuses those). --archive-snapshot names the Community Archive export
+the accounts were imported from; it goes into every manifest and is
+never guessed from the server's settings. It is idempotent and
+resumable: an account whose
 metadata fingerprint matches its manifest is skipped as unchanged, so a
 stopped run is simply run again. Memory stays flat: dump_user streams
 the entries to a local file, which is gzipped line by line and uploaded
@@ -61,26 +66,98 @@ def _storage(location):
 
 # ── Export ────────────────────────────────────────────────────────────────
 
+# What each skip means and what, if anything, would change it: printed
+# under the summary of every run, dry or not.
+SKIP_HINTS = {
+    "admin": "an admin account; never exported",
+    "not_prefilled": "no pre-filled handle; not a prepared account",
+    "signed_in": "a person used the account (a sign-in, the terms, an X "
+                 "sign-in, a setting or answer, a draft or token); it is "
+                 "theirs, never exported",
+    "deleted": "deleted or being deleted",
+    "ai_none": "AI usage set to None; never exported",
+    "declined": "the person said no to starting from their tweets",
+    "spam": "flagged as spam",
+    "no_x_id": "no X id stored for this account; store its numeric X id "
+               "(User.twitter_id) before export: bundles are keyed by it",
+    "excluded": "on the exclusion list (a deletion request, a no, an "
+                "account gone protected); unexclude only on the person's "
+                "own new opt-in",
+    "no_profile": "no profile built yet",
+    "unfinished_profile": "a window set without its final merge; finish "
+                          "the build on the lab first (production would "
+                          "finish it with a model call)",
+    "other_material": "holds material no pre-fill makes (an entry it did "
+                      "not fetch, a todo list, an artifact other than "
+                      "intentions, a version a person saved)",
+}
+
+
+def person_signals(user):
+    """What says that a person used the account, as short labels; empty
+    when nothing does. The same kind of signals the deletion of
+    unclaimed pre-filled accounts reads (#685): a sign-in or the terms on
+    record (or an account older than that record), an X sign-in, an
+    answer or a setting only a signed-in person gives, a request only
+    they make, and rows only they leave (drafts, tokens, feedback, poll
+    answers, a connected X). An entry the person wrote is "other
+    material" (holds_other_material). An address on the account is not a
+    signal at all: an import or an admin sets one, and the lab's prepared
+    accounts carry a placeholder in the reserved ".invalid" domain, which
+    is no address."""
+    from backend.extensions import db
+    from backend.models import (
+        ApiToken, Draft, ExternalAccount, PollResponse, UserFeedback)
+    from backend.utils.activity import sign_in_status
+    checks = (
+        ("signed in", sign_in_status(user) != "never"),
+        ("signed in with X", bool(user.twitter_handle)
+         or user.x_connected_at is not None),
+        ("answered the tweet-seed question", user.prefill_consent is not None
+         or user.prefill_consent_at is not None),
+        ("asked to change the email", bool(user.pending_email)
+         or bool(user.email_change_token_hash)),
+        ("asked to delete the account", bool(user.account_deletion_token_hash)),
+        ("answered the profile-models question",
+         bool(user.profile_both_providers)
+         or user.profile_both_providers_answered_at is not None),
+        ("chose a Glean setting", user.glean_enabled is not None),
+        ("turned a setting on", bool(user.craft_mode or user.public_sharing_enabled
+                                     or user.external_content_enabled)),
+        ("the browser reported a time zone", (user.timezone or "UTC") != "UTC"),
+    )
+    out = [label for label, found in checks if found]
+    if out:
+        return out
+    for label, model in (("a draft", Draft), ("an API token", ApiToken),
+                         ("sent feedback", UserFeedback),
+                         ("answered a poll", PollResponse),
+                         ("connected X", ExternalAccount)):
+        if db.session.query(model.id).filter(
+                model.user_id == user.id).first() is not None:
+            return [label]
+    return []
+
+
 def skip_reason(user, excluded):
     """Why ``user`` is not exported, or None. Metadata only."""
     from backend.extensions import db
     from backend.models import UserProfile
     from backend.utils import prefill_bundles as pb
-    from backend.utils.activity import sign_in_status
     from backend.utils.hidden_rows import account_on_hold
     from backend.utils.privacy import account_allows_ai
     if user.is_admin:
         return "admin"
     if not user.prefilled_handle:
         return "not_prefilled"
-    if user.email or sign_in_status(user) != "never":
+    if user.prefill_consent == "no":
+        return "declined"
+    if person_signals(user):
         return "signed_in"
     if user.deleted_at is not None or account_on_hold(user.id):
         return "deleted"
     if not account_allows_ai(user):
         return "ai_none"
-    if user.prefill_consent == "no":
-        return "declined"
     if user.spam:
         return "spam"
     if not pb.valid_x_id(user.twitter_id):
@@ -211,15 +288,22 @@ def _iso_z(value):
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ") if dt else None
 
 
-def _archive_snapshot():
-    """The Community Archive export the lab imported from, if known."""
-    try:
-        from flask import current_app
-        from backend.tasks.imports import snapshot_dir_for
-        from backend.utils.community_archive import snapshot_export_id
-        return snapshot_export_id(snapshot_dir_for(current_app.config))
-    except Exception:  # noqa: BLE001 - optional metadata
-        return None
+_SNAPSHOT_RE = r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}"
+
+
+def check_archive_snapshot(value):
+    """The Community Archive export the material was imported from, as
+    the operator names it (--archive-snapshot). Never taken from the
+    server's own settings: those point at whatever snapshot the server
+    last used, not necessarily the one the material came from. SystemExit
+    when missing or malformed."""
+    import re
+    value = (value or "").strip()
+    if not re.fullmatch(_SNAPSHOT_RE, value):
+        sys.exit("Pass --archive-snapshot <export id>: the Community Archive "
+                 "export the prepared accounts were imported from (as named "
+                 "in the import's log). The manifest records it.")
+    return value
 
 
 def export_one(user, storage, workdir, fp, snapshot=None):
@@ -295,9 +379,21 @@ def _candidates(only):
     return [i for (i,) in q.order_by(User.id)]
 
 
+def summary_lines(counts):
+    """The run's counts, then one line per skip reason saying what it
+    means and what, if anything, would change it."""
+    lines = ["summary: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))]
+    for key in sorted(k for k in counts if k.startswith("skipped_")):
+        reason = key[len("skipped_"):]
+        lines.append(f"  {key}={counts[key]}: {SKIP_HINTS.get(reason, reason)}")
+    return lines
+
+
 def run_export(storage, *, dry_run=False, only=None, limit=None, force=False,
-               out=print):
-    """Export every account that may leave the lab; returns the counts."""
+               archive_snapshot=None, out=print):
+    """Export every account that may leave the lab; returns the counts.
+    A real run needs ``archive_snapshot``, the Community Archive export
+    the material came from; a dry run does not."""
     from collections import Counter
     from backend.extensions import db
     from backend.models import User
@@ -307,8 +403,9 @@ def run_export(storage, *, dry_run=False, only=None, limit=None, force=False,
         sys.exit("Content is encrypted here: export runs only on the lab, "
                  "where the pre-filled material is stored unencrypted. "
                  "Exporting here would decrypt users' writing.")
+    snapshot = (check_archive_snapshot(archive_snapshot)
+                if not dry_run or archive_snapshot else None)
     excluded = pb.excluded_x_ids(storage)
-    snapshot = _archive_snapshot()
     counts = Counter()
     workdir = tempfile.mkdtemp(prefix="prefill-bundles-")
     try:
@@ -350,7 +447,8 @@ def run_export(storage, *, dry_run=False, only=None, limit=None, force=False,
             db.session.expunge_all()
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
-    out("summary: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
+    for line in summary_lines(counts):
+        out(line)
     return dict(counts)
 
 
@@ -402,6 +500,10 @@ def main(argv=None):
                     help="stop after this many accounts exported")
     ex.add_argument("--force", action="store_true",
                     help="export even when the manifest's fingerprint matches")
+    ex.add_argument("--archive-snapshot", default=None,
+                    help="the Community Archive export the accounts were "
+                         "imported from (required except with --dry-run); "
+                         "recorded in each manifest")
     de = sub.add_parser("delete", help="delete a bundle and exclude its X id")
     who = de.add_mutually_exclusive_group(required=True)
     who.add_argument("--x-id")
@@ -420,7 +522,8 @@ def main(argv=None):
         storage = _storage(args.location)
         if args.cmd == "export":
             run_export(storage, dry_run=args.dry_run, only=args.only,
-                       limit=args.limit, force=args.force)
+                       limit=args.limit, force=args.force,
+                       archive_snapshot=args.archive_snapshot)
         elif args.cmd == "delete":
             x_id = _x_id_arg(storage, args)
             if args.reason not in pb.EXCLUSION_REASONS:
