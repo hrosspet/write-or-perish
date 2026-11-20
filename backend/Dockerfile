@@ -1,7 +1,11 @@
 # Backend Dockerfile for Write or Perish
 # Supports both Flask API server and Celery worker
 
-FROM python:3.9-slim
+# The image's Python. backend/requirements.txt also installs on 3.9, which
+# the server's environment runs until it is switched (deploy.sh
+# PYTHON_VERSION): `--build-arg PYTHON_VERSION=3.9` builds that.
+ARG PYTHON_VERSION=3.12
+FROM python:${PYTHON_VERSION}-slim
 
 # Install system dependencies including ffmpeg for audio processing
 RUN apt-get update && apt-get install -y --no-install-recommends \

@@ -29,7 +29,20 @@ jobs:
   test-backend:
     needs: changes
     if: needs.changes.outputs.backend == 'true'
-    runs-on: ubuntu-24.04  # Python 3.9 is not available on ubuntu-latest (26.04)
+    name: test-backend (Python ${{ matrix.python }})
+    # One run per Python version the backend must work on.
+    strategy:
+      fail-fast: false  # one version failing does not cancel the other's run
+      matrix:
+        include:
+          # What the server's environment runs (deploy.sh PYTHON_VERSION).
+          # Remove this entry once that environment is on 3.12.
+          - python: '3.9'
+            os: ubuntu-24.04  # Python 3.9 is not available on ubuntu-latest (26.04)
+          # What the Docker images run (local dev, staging).
+          - python: '3.12'
+            os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 40
 
     steps:
@@ -39,7 +52,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
+          python-version: ${{ matrix.python }}
           cache: 'pip'
           cache-dependency-path: backend/requirements.txt
 
@@ -54,7 +67,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt
-          pip install pytest pytest-cov flake8
+          # pytest<9: pytest 9 (Python 3.10+) undoes monkeypatch.setattr on
+          # a MagicMock by deleting the attribute, and the tests' shared
+          # sys.modules mocks then fail every later test that uses it.
+          pip install "pytest<9" pytest-cov flake8
 
       - name: Lint with flake8
         run: |
@@ -112,7 +128,7 @@ jobs:
   security-check:
     needs: changes
     if: needs.changes.outputs.backend == 'true'
-    runs-on: ubuntu-24.04  # Python 3.9 is not available on ubuntu-latest (26.04)
+    runs-on: ubuntu-latest
     timeout-minutes: 15
 
     steps:
@@ -122,7 +138,9 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
+          # The scanners only read the code and the requirements file, so
+          # they need not run on the server's Python.
+          python-version: '3.12'
 
       - name: Install security tools
         run: |
