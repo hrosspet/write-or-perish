@@ -257,31 +257,70 @@ def test_a_deleted_authors_shared_entry_is_not_served(real_app):
 
 # ── A recorded reply saved with the form's settings ─────────────────────
 
-def _recorded_reply(parent_id, who="ben"):
+def _recorded_reply(parent_id, who="ben", stored="circles"):
+    """A finished recording under *parent_id*, its level as the session
+    started with (*stored*); the URL that saves it as an entry."""
     d = Draft(user_id=_user(who).id, node_id=None, parent_id=parent_id,
               session_id=str(uuid.uuid4()), streaming_status="completed",
               streaming_total_chunks=1, streaming_completed_chunks=1,
-              privacy_level="circles", ai_usage="chat")
+              privacy_level=stored, ai_usage="chat")
     d.set_content("recorded words")
     _db.session.add(d)
     _db.session.commit()
     return f"/api/drafts/streaming/{d.session_id}/save-as-node"
 
 
-def test_a_recorded_reply_in_a_shared_thread_stays_circles(real_app):
+@pytest.mark.parametrize("who,stored,form", [
+    # The form's level (main's save with the form's settings).
+    ("ben", "circles", {"privacy_level": "private", "ai_usage": "chat"}),
+    ("ben", "circles", {"privacy_level": "public", "ai_usage": "chat"}),
+    ("anna", "circles", {"privacy_level": "public", "ai_usage": "chat"}),
+    # No form settings (an older iPhone build): the level the recording
+    # started with, the entry having been shared since.
+    ("ben", "private", {}),
+    ("ben", "public", {}),
+    ("anna", "public", {}),
+])
+def test_a_recorded_reply_under_a_shared_node_is_only_saved_as_circles(
+        real_app, who, stored, form):
     nid = _share(real_app)
-    url = _recorded_reply(nid)
-    r = _client(real_app, "ben").post(url, json={
-        "content": "recorded words", "privacy_level": "private",
-        "ai_usage": "chat"})
-    assert r.status_code == 400
+    url = _recorded_reply(nid, who=who, stored=stored)
+    r = _client(real_app, who).post(
+        url, json={"content": "recorded words", **form})
+    assert r.status_code == 400, r.get_json()
     assert r.get_json()["code"] == "circle_reply_required"
     assert Node.query.filter_by(parent_id=nid).count() == 0
-    r = _client(real_app, "ben").post(url, json={
-        "content": "recorded words", "privacy_level": "circles",
-        "ai_usage": "chat"})
+    # The session stays: the recording can be saved again.
+    assert Draft.query.count() == 1
+
+
+@pytest.mark.parametrize("form", [
+    {"privacy_level": "circles", "ai_usage": "chat"},
+    {},   # no form settings: the level the recording started with
+])
+def test_control_a_recorded_reply_saved_as_circles_joins_the_thread(
+        real_app, form):
+    nid = _share(real_app)
+    url = _recorded_reply(nid, stored="circles")
+    r = _client(real_app, "ben").post(
+        url, json={"content": "recorded words", **form})
     assert r.status_code == 201, r.get_json()
     node = _db.session.get(Node, r.get_json()["id"])
     assert node.privacy_level == "circles"
     assert node.audience_root_id == nid
     assert _status(real_app, "chidi", f"/api/nodes/{node.id}") == 200
+
+
+def test_control_a_recorded_reply_under_an_unshared_node_keeps_its_level(
+        real_app):
+    r = _client(real_app, "anna").post("/api/nodes/", json={
+        "content": "a private note", "privacy_level": "private",
+        "ai_usage": "chat"})
+    assert r.status_code == 201, r.get_json()
+    parent = r.get_json()["id"]
+    url = _recorded_reply(parent, who="anna", stored="private")
+    r = _client(real_app, "anna").post(url, json={"content": "words"})
+    assert r.status_code == 201, r.get_json()
+    node = _db.session.get(Node, r.get_json()["id"])
+    assert node.privacy_level == "private"
+    assert node.audience_root_id is None

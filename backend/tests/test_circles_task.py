@@ -393,9 +393,10 @@ def test_a_shared_prompt_is_filled_with_the_requesters_artifacts(
     monkeypatch.setattr(
         pc, "store_render",
         lambda config, node, text, variant, unlicensed=None, rows=None,
-        references=(): stored.__setitem__(
+        references=(), inputs=(): stored.__setitem__(
             (node.id, variant), pc.CachedRender(text, unlicensed,
-                                                tuple(references))))
+                                                tuple(references),
+                                                tuple(inputs))))
     # anna first, so that her render is in the cache.
     hers = _run(w, w["anna"])
     assert "profile=[ANNAS-PROFILE]" in hers

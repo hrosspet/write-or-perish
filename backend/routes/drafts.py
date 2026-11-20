@@ -1606,13 +1606,18 @@ def save_streaming_as_node(session_id):
                 "error": "Replies under public posts are public.",
                 "code": "public_reply_required",
             }), 400
-        # A shared thread has one audience (Circles), as for a typed
-        # reply: the form's level for a recorded reply under a shared
-        # node is "circles", or nothing is saved.
+    # A shared thread has one audience (Circles), as for a typed reply
+    # (routes/nodes.py): a recorded reply under a shared node is saved
+    # only as "circles", whichever level would be stored, the form's (any
+    # level, Everyone included) or the one the recording started with
+    # (the node may have been shared since). Nothing is saved otherwise;
+    # the session stays.
+    if draft.parent_id:
         from backend.utils import circles as cz
         if (cz.circles_enabled(current_user)
                 and cz.reply_requires_circles(
-                    parent, privacy_level, current_user.id)):
+                    Node.query.get(draft.parent_id), privacy_level,
+                    current_user.id)):
             return cz.circle_reply_required_response()
 
     # A public entry quotes only public nodes (Peter, 2026-11-12); the
