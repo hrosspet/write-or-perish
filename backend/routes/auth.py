@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from flask import Blueprint, redirect, url_for, flash, current_app, request, jsonify
 from flask_login import login_user, logout_user, login_required, current_user
@@ -11,6 +11,7 @@ from backend.utils.magic_link import (
     generate_magic_link_token, verify_magic_link_token,
     hash_token, generate_unique_username,
 )
+from backend.utils import send_limits, sign_in_links
 from backend.utils.email import (
     send_magic_link_email, send_x_connected_notice, is_valid_email)
 from backend.utils.reserved_usernames import derive_available_username
@@ -229,7 +230,8 @@ def login():
 
     connecting = _pop_connect_intent()
     # An invite code (#439) waits in the session through the round trip
-    # to X; it is read when the X account comes back.
+    # to X (OAuth comes back to the browser that started it); it counts
+    # when the X account that comes back is the one the invite names.
     invite = referrals.clean_code(request.args.get('invite'))
     if invite and not connecting:
         session[referrals.SESSION_KEY] = invite
@@ -272,20 +274,69 @@ def login():
             session.pop('next_url', None)
             _drop_x_token()
             return refused
+    if _counts_as_new(user):
+        # An invite made for someone else (#439): ask first; no account
+        # is made until they choose to go on without it.
+        kind = referrals.invite_mismatch(invite, x_handle=username,
+                                         x_id=twitter_id)
+        if kind:
+            return _ask_about_invite(kind, {
+                "method": "x", "twitter_id": twitter_id,
+                "username": username})
+    if not user:
         user = _create_x_user(twitter_id, username)
+    return redirect(_finish_x_sign_in(user, new_account, invite, username))
+
+
+def _counts_as_new(user):
+    """A sign-in that makes the account, or the first one into an account
+    set up ahead of its owner (admin whitelist, pre-fill): the sign-ups an
+    invite applies to."""
+    if user is None:
+        return True
+    if user.deleted_at is not None:
+        return False
+    from backend.utils.activity import sign_in_status
+    return sign_in_status(user) == "never"
+
+
+# An invite followed, then a sign-in as someone it was not made for
+# (#439; Peter, 2026-11-13: "They should know the invitation was for
+# somebody else. They should still have the option to sign up without the
+# invitation, thus also without reward"). The proven identity waits in
+# this browser's session, for as long as a sign-in link lasts, until the
+# person chooses: sign in differently (nothing was made) or continue
+# without the invitation (the account is made then, with no inviter).
+INVITE_CHOICE_KEY = "invite_choice"
+
+
+def _ask_about_invite(kind, pending):
+    pending["next_url"] = session.pop('next_url', None)
+    pending["at"] = datetime.utcnow().timestamp()
+    session[INVITE_CHOICE_KEY] = pending
+    frontend_url = current_app.config.get("FRONTEND_URL", "")
+    return redirect(f"{frontend_url}/invite-mismatch?for={kind}")
+
+
+def _finish_x_sign_in(user, new_account, invite, username):
+    """The rest of an X sign-in, once the account exists: the URL to send
+    the browser to."""
     if user.deleted_at is not None:
         # A deleted account in its grace period (#269): no sign-in; the
         # browser is asked whether to restore it.
         from backend.routes.account_deletion import offer_restore
-        return redirect(offer_restore(user, session.pop('next_url', None)))
+        return offer_restore(user, session.pop('next_url', None))
     # Handles change on X; keep the one the Account page shows current
     # (an unchanged value writes nothing).
     user.twitter_handle = username
     db.session.commit()
 
     # Who invited this account (#439), before the sign-in is recorded: an
-    # account set up ahead of its owner counts as new until then.
-    referrals.record_invite(user, invite, new_account)
+    # account set up ahead of its owner counts as new until then. Only an
+    # invite made for this X account counts (its id; its handle when the
+    # invite's lookup was down).
+    referrals.redeem_invite(user, invite, new_account, x_handle=username,
+                            x_id=user.twitter_id)
     login_user(user, remember=True)
     # Record the sign-in itself, not only the app requests that follow:
     # "has anyone ever signed into this account" (a placeholder has not)
@@ -301,41 +352,50 @@ def login():
     frontend_url = current_app.config.get('FRONTEND_URL')
     next_url = session.pop('next_url', None)
     if next_url and is_safe_redirect_url(next_url):
-        redirect_url = f"{frontend_url}{next_url}"
-    else:
-        redirect_url = f"{frontend_url}/dashboard"
-    return redirect(redirect_url)
+        return f"{frontend_url}{next_url}"
+    return f"{frontend_url}/dashboard"
+
 
 @auth_bp.route("/magic-link/send", methods=["POST"])
 def magic_link_send():
     data = request.get_json() or {}
     email = (data.get("email") or "").strip().lower()
     next_url = data.get("next_url")
-    # An invite code (#439) rides in the signed link, and waits in this
-    # browser's session: the link records it only when opened in the
-    # browser that asked for it. Nothing in the answer depends on it.
+    # An invite code (#439) rides in the signed link. It counts only for
+    # an invite made for this address, so it does whichever browser or
+    # device opens the link. Nothing in the answer depends on it.
     invite = referrals.clean_code(data.get("invite"))
-    if invite:
-        session[referrals.SESSION_KEY] = invite
 
     if not is_valid_email(email):
         return jsonify({"error": "Please enter a valid email address."}), 400
 
     if next_url and not is_safe_redirect_url(next_url):
         next_url = None
+    if not send_limits.client_may_ask("sign-in", request.remote_addr):
+        # About this client only (utils/send_limits.py), never about the
+        # address.
+        logger.info("Sign-in email request over the client limit")
+        return jsonify({"error": send_limits.WAIT_MESSAGE}), 429
+    issued = None
 
     try:
         token = generate_magic_link_token(email, next_url, invite=invite)
         token_h = hash_token(token)
-        expiry = datetime.utcnow() + timedelta(
-            seconds=current_app.config.get("MAGIC_LINK_EXPIRY_SECONDS", 900)
-        )
-
+        # A link of its own, for the account that holds the address now
+        # (or none): the links already sent keep working until they expire
+        # (utils/sign_in_links.py).
         user = User.query.filter_by(email=email).first()
-        if user:
-            user.magic_link_token_hash = token_h
-            user.magic_link_expires_at = expiry
-            db.session.commit()
+        issued = sign_in_links.issue_for_sending(
+            email, token_h,
+            current_app.config.get("MAGIC_LINK_EXPIRY_SECONDS", 900),
+            user.id if user else None)
+        if issued is None:
+            # Over the address's limit: nothing is sent, and the answer is
+            # the one a sent link gets.
+            logger.info("Sign-in email not sent: the address's limit is "
+                        "reached (%s)",
+                        f"user {user.id}" if user else "no account")
+            return _link_sent_answer()
 
         backend_url = request.host_url.rstrip("/")
         magic_link_url = f"{backend_url}/auth/magic-link/verify?token={token}"
@@ -344,7 +404,16 @@ def magic_link_send():
     except Exception:
         logger.exception("Error in magic link send")
         # Fall through — always return the same message to prevent enumeration
+        # A link whose email did not go out neither works nor counts.
+        sign_in_links.give_back(issued)
 
+    return _link_sent_answer()
+
+
+def _link_sent_answer():
+    """The answer to every sign-in email request that is not refused for
+    its client: an address with or without an account, a link sent or
+    not (the address's limit, a failed send)."""
     return jsonify({
         "message": "If that email is associated with an account, "
                    "you'll receive a sign-in link shortly. "
@@ -367,22 +436,18 @@ def magic_link_verify():
         return redirect(f"{frontend_url}/login?error=invalid_or_expired")
 
     token_h = hash_token(token)
-    # The invite in the link counts only when this browser holds the same
-    # code (it asked for the link, or followed the invite link): a link
-    # someone else asked for with their code records nothing.
-    held = session.pop(referrals.SESSION_KEY, None)
+    # The invite in the link (#439) counts only when it was made for this
+    # address (utils/referrals.redeem_invite), in any browser.
     invite = payload.get("invite")
-    if not invite or invite != held:
-        invite = None
 
+    # Valid until it expires, however often it is opened (mail apps open
+    # links first), for the account it was sent for, unless withdrawn
+    # (utils/sign_in_links.py).
+    refused = sign_in_links.redeem(token_h, payload)
+    if refused is not None:
+        return redirect(f"{frontend_url}/login?error={refused}")
     user = User.query.filter_by(email=email).first()
-    new_account = user is None
     if user:
-        # Check token hash matches (but don't clear it — let the token
-        # remain valid until its natural expiry so that email-client
-        # prefetch doesn't consume it before the user clicks)
-        if user.magic_link_token_hash != token_h:
-            return redirect(f"{frontend_url}/login?error=link_already_used")
         if user.deleted_at is not None:
             # A deleted account in its grace period (#269): no sign-in;
             # the browser is asked whether to restore it.
@@ -394,6 +459,23 @@ def magic_link_verify():
         refused = _confirm_email_flow_redirect(next_url)
         if refused is not None:
             return refused
+    if _counts_as_new(user):
+        # An invite made for someone else (#439): ask first; no account
+        # is made until they choose to go on without it.
+        kind = referrals.invite_mismatch(invite, email=email)
+        if kind:
+            session['next_url'] = next_url
+            return _ask_about_invite(kind, {"method": "email",
+                                            "email": email})
+    return redirect(_finish_email_sign_in(user, email, next_url, invite))
+
+
+def _finish_email_sign_in(user, email, next_url, invite):
+    """The rest of an email sign-in: the account made if there is none,
+    the invite recorded, the session started. The URL to go to."""
+    frontend_url = current_app.config.get("FRONTEND_URL", "http://localhost:3000")
+    new_account = user is None
+    if user is None:
         # New user — create account
         username = generate_unique_username(email)
         user = User(
@@ -406,12 +488,74 @@ def magic_link_verify():
         db.session.commit()
 
     # Who invited this account (#439); approval is untouched.
-    referrals.record_invite(user, invite, new_account)
+    referrals.redeem_invite(user, invite, new_account, email=email)
     login_user(user, remember=True)
+    # Record the sign-in itself, as the X sign-in does: whether anyone ever
+    # signed in decides whether a pre-filled account is deleted after its
+    # period (#685), and must not depend on the app loading afterwards.
+    from backend.utils.activity import touch_last_seen
+    touch_last_seen(user, None)
 
     if next_url and is_safe_redirect_url(next_url):
-        return redirect(f"{frontend_url}{next_url}")
-    return redirect(f"{frontend_url}/dashboard")
+        return f"{frontend_url}{next_url}"
+    return f"{frontend_url}/dashboard"
+
+
+@auth_bp.route("/invite-choice/continue", methods=["POST"])
+def invite_choice_continue():
+    """Go on without the invitation (#439): finish the sign-in that was
+    held, with no inviter; the invite stays open for the person it names.
+    410 when there is nothing held, or it waited longer than a sign-in
+    link lasts. {"redirect": url}. 404 while referrals are off."""
+    if not referrals.referrals_enabled():
+        return jsonify({"error": "Not found"}), 404
+    pending = session.pop(INVITE_CHOICE_KEY, None)
+    max_age = current_app.config.get("MAGIC_LINK_EXPIRY_SECONDS", 900)
+    if (not isinstance(pending, dict)
+            or datetime.utcnow().timestamp() - (pending.get("at") or 0)
+            > max_age):
+        if isinstance(pending, dict) and pending.get("method") == "x":
+            _drop_x_token()
+        return jsonify({"error": "This sign-in has expired. Please sign "
+                                 "in again."}), 410
+    next_url = pending.get("next_url")
+    if pending.get("method") == "email":
+        email = pending.get("email")
+        user = User.query.filter_by(email=email).first()
+        if user is not None and user.deleted_at is not None:
+            from backend.routes.account_deletion import offer_restore
+            return jsonify({"redirect": offer_restore(
+                user, next_url if is_safe_redirect_url(next_url) else None)})
+        redirect_to = _finish_email_sign_in(user, email, next_url, None)
+        if user is None:
+            # The account is made now, not when the link was opened: the
+            # address's links sent before it existed become its own, so the
+            # same link signs in again until it expires (sign_in_links).
+            sign_in_links.bind_new_account(email)
+        return jsonify({"redirect": redirect_to})
+    twitter_id = pending.get("twitter_id")
+    username = pending.get("username")
+    user = User.query.filter_by(twitter_id=twitter_id).first()
+    new_account = user is None
+    if user is None:
+        user = _create_x_user(twitter_id, username)
+    session['next_url'] = next_url
+    return jsonify({"redirect": _finish_x_sign_in(
+        user, new_account, None, username)})
+
+
+@auth_bp.route("/invite-choice/cancel", methods=["POST"])
+def invite_choice_cancel():
+    """Sign in differently (#439): forget the held sign-in. No account was
+    made; the X sign-in's token is dropped so the next one asks X which
+    account. The invite code stays in the browser for the right one. 404
+    while referrals are off."""
+    if not referrals.referrals_enabled():
+        return jsonify({"error": "Not found"}), 404
+    pending = session.pop(INVITE_CHOICE_KEY, None)
+    if isinstance(pending, dict) and pending.get("method") == "x":
+        _drop_x_token()
+    return jsonify({"ok": True})
 
 
 @auth_bp.route("/logout")

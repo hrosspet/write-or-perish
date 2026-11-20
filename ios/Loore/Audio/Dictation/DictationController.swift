@@ -16,7 +16,14 @@ import os
 final class DictationController {
     enum State: Equatable { case idle, initializing, recording, finalizing, error }
 
-    private(set) var state: State = .idle
+    private(set) var state: State = .idle {
+        // From its first chunk to its transcript the dictation is a recording in
+        // progress (`AudioCenter.recordingInProgress`, #438).
+        didSet {
+            guard state != oldValue else { return }
+            app?.audio.dictation(self, inProgress: state == .recording || state == .finalizing)
+        }
+    }
     private(set) var isInterrupted = false
     private(set) var elapsed: Double = 0
     /// A recording exists for "Save audio" (kept in memory; a file is written

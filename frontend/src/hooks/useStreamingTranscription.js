@@ -11,6 +11,7 @@ import { isApprovalPendingError } from '../utils/toolApprovals';
 import { onPageReturn } from '../utils/pageReturn';
 import { playErrorSound } from '../utils/errorSound';
 import { RECORDING_DEVICE_KEY, TAKEN_OVER_CODE } from '../utils/recordingDevice';
+import { setRecordingActive } from '../utils/recordingActivity';
 
 /**
  * Play an urgent mic-interruption alert: the descending error motif once,
@@ -146,6 +147,20 @@ export function useStreamingTranscription(options = {}) {
 
   // State
   const [sessionState, setSessionState] = useState('idle'); // idle, initializing, recording, finalizing, complete, error
+  // A session counts as a recording in progress until its transcript is in
+  // (utils/recordingActivity): the app does not leave for the subscribe
+  // page meanwhile (#438), so its last chunks and its finalize go out. Not
+  // while initializing: a refused start must show that page at once.
+  const sessionActivityRef = useRef(null);
+  if (sessionActivityRef.current === null) sessionActivityRef.current = {};
+  useEffect(() => {
+    setRecordingActive(sessionActivityRef.current,
+      sessionState === 'recording' || sessionState === 'finalizing');
+  }, [sessionState]);
+  useEffect(() => {
+    const id = sessionActivityRef.current;
+    return () => setRecordingActive(id, false);
+  }, []);
   const [draftId, setDraftId] = useState(null);
   const [sessionId, setSessionId] = useState(null);
   const [transcript, setTranscript] = useState('');

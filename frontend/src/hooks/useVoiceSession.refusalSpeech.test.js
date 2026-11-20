@@ -337,5 +337,90 @@ test('the sentences are the server\'s', () => {
     ai_usage_none: "AI usage is set to None, so Loore can't reply here.",
     approval_pending: 'A change to your data is waiting for your approval. Approve or reject it on the screen to continue.',
     thread_too_long: 'This thread is too long for another reply. Start a new thread to keep talking.',
+    subscription_required_ended: "Your subscription has ended, so Loore doesn't reply. Your recording is saved.",
+    subscription_required_past_due: "Your last payment didn't go through, so Loore doesn't reply. Your recording is saved.",
+    subscription_required_free_month: "Your free month has ended, so Loore doesn't reply. Your recording is saved.",
+    subscription_required_none: "Loore doesn't reply on an account without a subscription. Your recording is saved.",
   });
+});
+
+// ── Payments (#438): the access ends while the turn is recorded ─────────
+// The recording is kept and transcribed, only the reply is skipped, and
+// the reason is said aloud in the words of the screen, never as a failure.
+
+const ENDED = 'subscription_required_ended';
+const ENDED_TEXT = "Your subscription has ended, so Loore doesn't reply. Your recording is saved.";
+
+test('a recording kept without its reply after the access ended: toasted and said', async () => {
+  const onEntrySaved = jest.fn();
+  const { result } = renderHook(() => useVoiceSession({
+    apiEndpoint: '/voice', aiUsage: 'chat', onAiUsageRefused, onApprovalPending, onEntrySaved,
+  }));
+
+  await finishRecording({ llmNodeId: null, warning: ENDED_TEXT, warningCode: ENDED });
+
+  expect(mockAddToast).toHaveBeenCalledWith(ENDED_TEXT, 8000);
+  expect(onEntrySaved).toHaveBeenCalledTimes(1);
+  afterSound();
+  expect(played()).toEqual([refusalClipUrl(ENDED)]);
+  expect(mockPlayErrorSound).not.toHaveBeenCalled();
+  expect(result.current.phase).toBe('ready');
+  expect(result.current.hasError).toBe(false);
+});
+
+test('the fallback POST answered with a kept turn: the entry is known, the sentence said, no failure', async () => {
+  mockPost.mockRejectedValue({
+    response: {
+      status: 402,
+      data: { error: 'subscription_required', message: ENDED_TEXT, code: ENDED, user_node_id: 8 },
+    },
+  });
+  const onEntrySaved = jest.fn();
+  const { result } = renderHook(() => useVoiceSession({
+    apiEndpoint: '/voice', aiUsage: 'chat', onAiUsageRefused, onApprovalPending, onEntrySaved,
+  }));
+
+  await finishRecording({ llmNodeId: null });
+
+  expect(onEntrySaved).toHaveBeenCalledTimes(1);
+  afterSound();
+  expect(played()).toEqual([refusalClipUrl(ENDED)]);
+  expect(mockPlayErrorSound).not.toHaveBeenCalled();
+  expect(result.current.phase).toBe('ready');
+  expect(result.current.hasError).toBe(false);
+});
+
+test('the fallback POST refused at the start (no code): no sentence, as before', async () => {
+  mockPost.mockRejectedValue({
+    response: { status: 402, data: { error: 'subscription_required', message: 'x' } },
+  });
+  const onEntrySaved = jest.fn();
+  const { result } = renderHook(() => useVoiceSession({
+    apiEndpoint: '/voice', aiUsage: 'chat', onAiUsageRefused, onApprovalPending, onEntrySaved,
+  }));
+
+  await finishRecording({ llmNodeId: null });
+  afterSound();
+
+  expect(played()).toEqual([]);
+  expect(onEntrySaved).not.toHaveBeenCalled();
+  expect(mockPlayErrorSound).not.toHaveBeenCalled();
+  expect(result.current.phase).toBe('ready');
+});
+
+test('a queued reply refused because the access ended: said instead of the error sound', async () => {
+  mockPolling = {
+    data: { node_id: 7, content: '', error_code: ENDED },
+    status: 'failed', error: ENDED_TEXT,
+  };
+  const { result } = renderSession();
+
+  await finishRecording({ llmNodeId: 7 });
+
+  expect(mockAddToast).toHaveBeenCalledWith(ENDED_TEXT, 8000);
+  afterSound();
+  expect(played()).toEqual([refusalClipUrl(ENDED)]);
+  expect(mockPlayErrorSound).not.toHaveBeenCalled();
+  expect(result.current.phase).toBe('ready');
+  expect(result.current.hasError).toBe(false);
 });

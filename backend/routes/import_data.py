@@ -4,7 +4,7 @@ from backend.utils.error_privacy import describe_exception
 from backend.models import Node, User, UserProfile
 from backend.extensions import db
 from backend.utils.privacy import (
-    AI_ALLOWED, validate_ai_usage, validate_privacy_level,
+    AI_ALLOWED, cap_ai_usage, validate_ai_usage,
 )
 from backend.utils import docx_import, pdf_import
 from backend.utils.pdf_extract_worker import MAX_CHAPTERS as MAX_PDF_CHAPTERS
@@ -158,6 +158,8 @@ def _add_imported_message_nodes(user_id, human_owner_id, parent_id,
     """
     if provenance not in PROVENANCES:
         raise ValueError(f"Unknown provenance {provenance!r}")
+    # Content fetched through the X API is never at Train (#689).
+    ai_usage = cap_ai_usage(ai_usage, provenance)
     from backend.utils.node_split import PART_STEP, split_text_at_cap
     segments = split_text_at_cap(node_content)
     if split_item is None and len(segments) > 1:
@@ -224,7 +226,8 @@ def _restore_node(node_id, content, privacy_level, ai_usage,
     re-upload after a CA pre-fill drops the public vouch, which errs on
     the private side; the reverse regains it). Required, as on
     create_twitter_nodes, so no importer can bring back a row nobody
-    can classify.
+    can classify. A copy fetched through the X API comes back at Chat at
+    most (#689); the user's own upload restores an X API copy as theirs.
     """
     if provenance not in PROVENANCES:
         raise ValueError(f"Unknown provenance {provenance!r}")
@@ -236,7 +239,7 @@ def _restore_node(node_id, content, privacy_level, ai_usage,
         token_count if token_count is not None
         else approximate_token_count(content)
     )
-    node.ai_usage = ai_usage
+    node.ai_usage = cap_ai_usage(ai_usage, provenance)
     node.provenance = provenance
     node.deleted_at = None
     return node
@@ -324,6 +327,41 @@ class _ProfileChanges:
         })
 
 
+IMPORT_PRIVATE_ONLY = ("Imported entries are private. You can share or "
+                       "publish the ones you choose afterwards.")
+
+
+def _import_privacy(data):
+    """(privacy_level, error_response) for an import request. Imports are
+    always private (#677, Peter 2026-11-13): an entry is shared or
+    published afterwards, one at a time, where every check runs. The field
+    may be absent or "private" (older app builds send it); any other value
+    (Public, Circles, unknown) is refused with a 400 before anything is
+    written."""
+    level = data.get('privacy_level', 'private')
+    if level != 'private':
+        return None, (jsonify({"error": IMPORT_PRIVATE_ONLY}), 400)
+    return level, None
+
+
+def _require_importable_privacy(privacy_level):
+    """Backstop under the routes' 400: the functions that create the
+    entries stop before writing anything for a level other than private."""
+    if privacy_level != 'private':
+        raise ValueError(IMPORT_PRIVATE_ONLY)
+
+
+def _queued_privacy(options):
+    """(privacy_level, note) for an import task. A job queued by code from
+    before imports were always private may carry Public or Circles; it is
+    imported as private and its result says so, so a queued job (and the
+    upload behind it) is not lost. New requests never get this far: the
+    routes answer them with a 400."""
+    if options.get("privacy_level", "private") == "private":
+        return "private", None
+    return "private", IMPORT_PRIVATE_ONLY
+
+
 def _requested_ai_usage(data):
     """The AI usage an import applies: the value the request names, else
     the account's AI usage setting, the default every new entry gets
@@ -332,13 +370,10 @@ def _requested_ai_usage(data):
     return data.get('ai_usage') or current_user.default_ai_usage or 'none'
 
 
-def _invalid_settings(privacy_level, ai_usage):
-    """A 400 response when an import request names a privacy level or
-    AI usage Loore does not know; else None. A re-import applies both to
-    entries already in Loore, so neither is stored unchecked."""
-    if not (isinstance(privacy_level, str)
-            and validate_privacy_level(privacy_level)):
-        return jsonify({"error": "Invalid privacy_level"}), 400
+def _invalid_settings(ai_usage):
+    """A 400 response when an import request names an AI usage Loore does
+    not know; else None. A re-import applies it to entries already in
+    Loore, so it is not stored unchecked."""
     if not (isinstance(ai_usage, str) and validate_ai_usage(ai_usage)):
         return jsonify({"error": "Invalid ai_usage"}), 400
     return None
@@ -452,55 +487,71 @@ def _split_item_nodes(tip_ids, shapes=None):
     return item_of, partial
 
 
-def _apply_settings_to_skipped(node_ids, privacy_level, ai_usage, dek=None,
-                               changes=None, shapes=None, partial=None,
-                               privacy_changed=None):
-    """Apply this import's privacy/ai_usage to already-imported items.
+def _x_api_skipped(node_ids, ai_usage):
+    """How many of the already-imported entries *node_ids* an import at
+    *ai_usage* left off Train because Loore fetched them through the X API
+    (#689): 0 unless the import asked for Train. Counted after the import
+    applied its settings, as the entries then are."""
+    from backend.utils.privacy import X_API_PROVENANCES
+    if ai_usage != "train":
+        return 0
+    ids = [i for i in node_ids if i is not None]
+    return sum(
+        Node.query.filter(Node.id.in_(ids[start:start + 1000]),
+                          Node.provenance.in_(X_API_PROVENANCES)).count()
+        for start in range(0, len(ids), 1000))
 
-    Re-importing an archive is also how users change their mind about
-    import settings, so the entries a re-import matches adopt the values
-    chosen for this import instead of being a pure no-op. ``node_ids``
-    are the matched (keyed) nodes; every alive entry of their items
-    (_split_item_nodes, with ``shapes``) takes the settings, all
-    chapters of a document and all parts of a long message (#638), also
-    when the keyed node itself was deleted.
+
+def _apply_settings_to_skipped(node_ids, ai_usage, changes=None,
+                               shapes=None, partial=None):
+    """Apply this import's AI usage to already-imported items.
+
+    Re-importing an archive is also how users change their mind about the
+    AI usage, so the entries a re-import matches adopt the value chosen
+    for this import instead of being a pure no-op. ``node_ids`` are the
+    matched (keyed) nodes; every alive entry of their items
+    (_split_item_nodes, with ``shapes``) takes it, all chapters of a
+    document and all parts of a long message (#638), also when the keyed
+    node itself was deleted. Privacy is never touched (#677): imports are
+    always private, so an entry the user shared or published by hand
+    after importing is not changed by a re-import.
     Returns the number of items in which an entry actually changed;
     callers report it as ``updated`` and keep it disjoint from
     ``skipped``. Provenance is NOT touched: how a node first arrived is
     a fact, not a setting.
 
+    An import at Train leaves the entries fetched through the X API at
+    Chat at most (#689), also one stored at Train before that rule
+    (``_x_api_skipped`` counts them for the result).
+
     ``changes`` (a _ProfileChanges) records the nodes whose new AI usage
     moves them into or out of what the profile reads (#625). ``partial``
-    (a set) gets the items only partly updated, and ``privacy_changed``
-    (a list) the ids of the nodes whose privacy level changed.
+    (a set) gets the items only partly updated.
     """
     from sqlalchemy import or_
+    from backend.utils.privacy import X_API_PROVENANCES
     item_of, unproven = _split_item_nodes(node_ids, shapes)
     if partial is not None:
         partial.update(unproven)
     ids = list(item_of)
     updated_items = set()
+    differs = [Node.ai_usage != ai_usage]
+    if ai_usage == "train":
+        differs.append(Node.provenance.in_(X_API_PROVENANCES))
     # Chunked so a huge archive doesn't produce an unbounded IN clause.
-    # Goes through the ORM (not a bulk UPDATE) because a privacy change
-    # moves content across the encryption boundary (#257) — only the
-    # rows whose settings actually differ are loaded.
     for start in range(0, len(ids), 1000):
         chunk = ids[start:start + 1000]
         for node in Node.query.filter(
             Node.id.in_(chunk),
             Node.deleted_at.is_(None),
-            or_(
-                Node.privacy_level != privacy_level,
-                Node.ai_usage != ai_usage,
-            ),
+            or_(*differs),
         ).all():
+            target = cap_ai_usage(ai_usage, node.provenance)
+            if node.ai_usage == target:
+                continue
             if changes is not None:
                 changes.setting_changed(node)
-            if (privacy_changed is not None
-                    and node.privacy_level != privacy_level):
-                privacy_changed.append(node.id)
-            node.set_privacy_level(privacy_level, dek=dek)
-            node.ai_usage = ai_usage
+            node.ai_usage = target
             updated_items.add(item_of[node.id])
         db.session.flush()
     return len(updated_items)
@@ -512,16 +563,13 @@ class _Matched:
     and, for a file or message, the parts of the re-imported text, from
     which an item imported before split_item existed is checked
     (_item_shape). ``apply`` runs before the commit and returns
-    ``updated``; ``partial`` keeps the items only partly updated;
-    ``after_commit`` drops the cached public pages of the entries whose
-    privacy level changed, as an edit does (routes/nodes.py)."""
+    ``updated``; ``partial`` keeps the items only partly updated."""
 
     def __init__(self):
         self.skipped = []
         self.restored = []
         self.shapes = {}
         self.partial = set()
-        self.privacy_changed = []
 
     def _shape(self, node_id, parts):
         if node_id is not None and parts is not None:
@@ -537,27 +585,69 @@ class _Matched:
         self.restored.append(node_id)
         self._shape(node_id, parts)
 
-    def apply(self, privacy_level, ai_usage, dek=None, changes=None):
-        kw = dict(dek=dek, changes=changes, shapes=self.shapes,
-                  partial=self.partial,
-                  privacy_changed=self.privacy_changed)
-        updated = _apply_settings_to_skipped(
-            self.skipped, privacy_level, ai_usage, **kw)
-        # A restored item's other entries take the settings too; it is
+    def apply(self, ai_usage, changes=None):
+        kw = dict(changes=changes, shapes=self.shapes, partial=self.partial)
+        updated = _apply_settings_to_skipped(self.skipped, ai_usage, **kw)
+        # A restored item's other entries take the AI usage too; it is
         # counted as restored, not updated.
-        _apply_settings_to_skipped(
-            self.restored, privacy_level, ai_usage, **kw)
+        _apply_settings_to_skipped(self.restored, ai_usage, **kw)
         self.skipped, self.restored, self.shapes = [], [], {}
         return updated
 
     def any(self):
         return bool(self.skipped or self.restored)
 
-    def after_commit(self):
-        ids, self.privacy_changed = self.privacy_changed, []
-        if ids:
-            from backend.utils.public_cache import invalidate_for_nodes
-            invalidate_for_nodes(ids)
+
+def _claim_prefilled_tweets(user_id, uploaded, changes):
+    """The person's own archive upload holds tweets a pre-fill already
+    brought in (#662): skipped as duplicates, they become the upload's
+    (provenance archive_upload), since the person gave them to Loore
+    themselves; the user's own input wins over the pre-fill's. After a
+    no to the tweet seed this is what brings them back into what AI reads
+    (utils/privacy.withheld_prefill_clauses), so each such tweet counts
+    as an entry this import added when the import lets AI read it, and
+    takes the import's settings without being counted again. On any other
+    account nothing that is read changes: an upload needs a signed-in
+    account, which is never public-only (utils/profile_providers).
+
+    *uploaded*: ``{node_id: (text, token_count)}``, the upload's own copy
+    of each skipped tweet. A claimed tweet takes that text, so what Loore
+    keeps under the upload's provenance is the person's own words (#689:
+    a pre-fill's copy may be the X API's, which never trains, and a tweet
+    id alone proves nothing — ids are public). A tweet the person edited
+    in Loore (an edit writes a NodeVersion) is not claimed: their edit
+    wins, and it stays the pre-fill's.
+
+    Returns the ids that were left out before (empty without a no)."""
+    from backend.models import NodeVersion
+    from backend.utils.encryption import new_dek
+    from backend.utils.privacy import (
+        PREFILL_PROVENANCES, withheld_prefill_clauses)
+    withheld = bool(withheld_prefill_clauses(user_id))
+    ids = [i for i in uploaded if i is not None]
+    was_withheld = set()
+    for start in range(0, len(ids), 1000):
+        chunk = ids[start:start + 1000]
+        edited = {node_id for (node_id,) in db.session.query(
+            NodeVersion.node_id).filter(NodeVersion.node_id.in_(chunk))}
+        dek = None
+        for node in Node.query.filter(
+                Node.id.in_(chunk),
+                Node.provenance.in_(PREFILL_PROVENANCES)).all():
+            if node.id in edited:
+                continue
+            text, token_count = uploaded[node.id]
+            if node.privacy_level != "public" and dek is None:
+                dek = new_dek()  # one KMS call per chunk; None when off
+            node.set_content(text, dek=dek)
+            node.token_count = (token_count if token_count is not None
+                                else approximate_token_count(text))
+            node.provenance = PROVENANCE_ARCHIVE_UPLOAD
+            if withheld:
+                was_withheld.add(node.id)
+                changes.entry_added(node.created_at, node.token_count)
+        db.session.flush()
+    return was_withheld
 
 
 def _release_deleted_docx_key(file_data, source_key, key_index,
@@ -1071,10 +1161,12 @@ def confirm_import():
     files = data.get('files', [])
     import_type = data.get('import_type', 'separate_nodes')
     date_ordering = data.get('date_ordering', 'modified')
-    privacy_level = data.get('privacy_level', 'private')
+    privacy_level, refusal = _import_privacy(data)
+    if refusal:
+        return refusal
     ai_usage = _requested_ai_usage(data)
     on_deleted = data.get('on_deleted')
-    invalid = _invalid_settings(privacy_level, ai_usage)
+    invalid = _invalid_settings(ai_usage)
     if invalid:
         return invalid
 
@@ -1245,13 +1337,11 @@ def confirm_import():
 
             thread_count = threads_created
 
-        nodes_updated = matched.apply(privacy_level, ai_usage,
-                                      changes=changes)
+        nodes_updated = matched.apply(ai_usage, changes=changes)
         nodes_skipped -= nodes_updated
 
         # Commit all nodes
         db.session.commit()
-        matched.after_commit()
 
         profile_update_task_id, profile_waits, rebuild_question = (
             _profile_after_import(current_user.id, changes))
@@ -1743,6 +1833,7 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
 
     Returns the dict the frontend renders as the import result.
     """
+    _require_importable_privacy(privacy_level)
     if import_type not in ('single_thread', 'separate_nodes'):
         raise ValueError("Invalid import_type")
     if provenance not in PROVENANCES:
@@ -1758,6 +1849,15 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
     changes = _ProfileChanges(ai_usage)
     since_commit = 0
     done = 0
+    # Tweets fetched through the X API are created and restored at Chat at
+    # most (#689); kept_from_train counts the tweets this import created or
+    # restored that asked for Train and stay off it, for the result.
+    new_ai_usage = cap_ai_usage(ai_usage, provenance)
+    kept_from_train = 0
+    # {node_id: (text, token_count)} of the skipped tweets, from the
+    # person's own upload: a pre-fill's copy it claims takes this text.
+    uploaded_texts = {}
+    skipped_alive_ids = []  # for the result's kept_from_train (#689)
 
     for tweet_data in rows:
         done += 1
@@ -1792,9 +1892,17 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
                 deleted_keys.discard(source_key)
                 nodes_restored += 1
                 matched.restore(restored.id)
+                if new_ai_usage != ai_usage:
+                    kept_from_train += 1
             else:
                 nodes_skipped += 1
                 matched.skip(key_index[source_key])
+                if source_key not in deleted_keys:
+                    skipped_alive_ids.append(key_index[source_key])
+                    if provenance == PROVENANCE_ARCHIVE_UPLOAD:
+                        # The upload's own copy, for a claim (#689).
+                        uploaded_texts[key_index[source_key]] = (
+                            content, token_count)
             if import_type == 'single_thread':
                 # Chain the next new tweet onto the existing copy so
                 # partially-skipped imports don't orphan new nodes.
@@ -1808,7 +1916,7 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
             node_type="user",
             token_count=token_count,
             privacy_level=privacy_level,
-            ai_usage=ai_usage,
+            ai_usage=new_ai_usage,
             source_key=source_key,
             origin="twitter",
             provenance=provenance,
@@ -1818,6 +1926,8 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
             node.created_at = tweet_created_at
         db.session.add(node)
         changes.entry_added(tweet_created_at, token_count)
+        if new_ai_usage != ai_usage:
+            kept_from_train += 1
 
         if import_type == 'single_thread':
             db.session.flush()
@@ -1834,10 +1944,21 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
             if on_progress:
                 on_progress(done)
 
-    nodes_updated = matched.apply(privacy_level, ai_usage, changes=changes)
+    withheld_claimed = set()
+    if provenance == PROVENANCE_ARCHIVE_UPLOAD:
+        withheld_claimed = _claim_prefilled_tweets(
+            user_id, uploaded_texts, changes)
+    claimed_updated = 0
+    if withheld_claimed:
+        # Counted as added by the claim (#662): they take this import's
+        # AI usage without being counted again.
+        matched.skipped = [i for i in matched.skipped
+                           if i not in withheld_claimed]
+        claimed_updated = _apply_settings_to_skipped(
+            sorted(withheld_claimed), ai_usage)
+    nodes_updated = claimed_updated + matched.apply(ai_usage, changes=changes)
     nodes_skipped -= nodes_updated
     db.session.commit()
-    matched.after_commit()
     if on_progress:
         on_progress(total)
 
@@ -1860,6 +1981,11 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
         "empty": nodes_empty,
         "restored": nodes_restored,
         "updated": nodes_updated,
+        # Tweets of this import fetched through the X API that stay at
+        # Chat although the import asked for Train (#689): the result
+        # screen says why.
+        "kept_from_train": kept_from_train + _x_api_skipped(
+            skipped_alive_ids, ai_usage),
     }
 
 
@@ -2229,10 +2355,12 @@ def confirm_twitter_import():
 
     import_type = data.get('import_type', 'separate_nodes')
     include_replies = bool(data.get('include_replies', False))
-    privacy_level = data.get('privacy_level', 'private')
+    privacy_level, refusal = _import_privacy(data)
+    if refusal:
+        return refusal
     ai_usage = _requested_ai_usage(data)
     on_deleted = data.get('on_deleted')
-    invalid = _invalid_settings(privacy_level, ai_usage)
+    invalid = _invalid_settings(ai_usage)
     if invalid:
         return invalid
 
@@ -2731,10 +2859,12 @@ def _confirm_conversation_import(source):
         # conversations themselves.
         return jsonify({"error": IMPORT_OUTDATED_CLIENT_MESSAGE}), 400
 
-    privacy_level = data.get('privacy_level', 'private')
+    privacy_level, refusal = _import_privacy(data)
+    if refusal:
+        return refusal
     ai_usage = _requested_ai_usage(data)
     on_deleted = data.get('on_deleted')
-    invalid = _invalid_settings(privacy_level, ai_usage)
+    invalid = _invalid_settings(ai_usage)
     if invalid:
         return invalid
 
@@ -2854,6 +2984,7 @@ def create_conversation_nodes(user_id, source, conversations, privacy_level,
     be continued from it. Calls ``on_progress(messages_done)`` at most
     every ``progress_interval`` seconds. Returns the final state.
     """
+    _require_importable_privacy(privacy_level)
     import time
     spec = _CONVERSATION_SOURCES[source]
     state = dict(state) if state else _new_conversation_state(None)
@@ -2876,15 +3007,12 @@ def create_conversation_nodes(user_id, source, conversations, privacy_level,
     last_progress = time.monotonic()
 
     def commit():
-        dek = data_key.get() if matched.any() else None
-        state["updated"] += matched.apply(privacy_level, ai_usage, dek=dek,
-                                          changes=changes)
+        state["updated"] += matched.apply(ai_usage, changes=changes)
         state["partly_updated"] = (state.get("partly_updated", 0)
                                    + len(matched.partial))
         matched.partial.clear()
         changes.to_state(state)
         db.session.commit()
-        matched.after_commit()
         data_key.rotate()
         if on_commit:
             on_commit(state)
@@ -3092,11 +3220,12 @@ def _run_conversation_import(user_id, token, task_id, options, *,
             on_progress(done, total)
 
     progress(state["done"])
+    privacy_level, private_note = _queued_privacy(options)
     try:
         state = create_conversation_nodes(
             user_id, source,
             cs.iter_conversations(path, start=state["next_conv"]),
-            options.get("privacy_level", "private"),
+            privacy_level,
             options.get("ai_usage", "none"),
             options.get("on_deleted"),
             state=state, batch_size=batch_size,
@@ -3130,6 +3259,8 @@ def _run_conversation_import(user_id, token, task_id, options, *,
         "partly_updated": state.get("partly_updated", 0),
         "total": total,
     }
+    if private_note:
+        result["private_note"] = private_note
     roles = header.get("roles") or {}
     current_app.logger.info(
         "%s import job done: user_msgs=%s assistant_msgs=%s user_tokens=%s "

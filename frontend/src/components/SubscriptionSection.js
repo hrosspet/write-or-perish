@@ -22,6 +22,12 @@ const LEVEL_NOTES = {
   discounted: "The same Loore, at the price for alpha testers.",
 };
 
+// One trial per card (#697): a trial whose card had one on another
+// account was cancelled before anything was charged.
+export const TRIAL_CARD_REFUSED_TEXT = "This card has already been used for a "
+  + "free trial, so there is no trial here. You can still subscribe "
+  + "without one: the first payment is due at checkout.";
+
 const RETURN_NOTICES = {
   success: { type: "success", text: "Thank you. Your subscription is starting; this page shows it in a moment." },
   cancelled: { type: "info", text: "Checkout was closed. Nothing was charged." },
@@ -246,6 +252,8 @@ export default function SubscriptionSection({ user, setUser }) {
               <div style={{ ...textStyle, color: "var(--text-secondary)", marginBottom: "10px" }}>
                 {sub.trial_available && sub.trial_days
                   ? `The first ${sub.trial_days} days are free. Your card is charged when they end, unless you cancel before.`
+                  : sub.state === "none" && sub.trial_card_refused
+                    ? TRIAL_CARD_REFUSED_TEXT
                   : sub.state === "none"
                     ? "This account's free trial was used, so the first payment is due at checkout."
                     : "Subscribe to keep AI replies, Voice mode and profile updates."}

@@ -14,7 +14,7 @@ from backend.utils.ca_feed import (
     FEED_AI_USAGE, READ_FURTHER_MARKER, READ_PROMPT_KEYS, ca_turn,
     read_reply_ids,
 )
-from backend.utils.privacy import AI_ALLOWED
+from backend.utils.privacy import AI_ALLOWED, X_API_INPUT
 from backend.utils.client_platform import CLIENT_MARKER, request_client
 
 
@@ -520,6 +520,12 @@ def reply_ai_usage(parent_node, user, chain=None, parent_content=None):
         prompts = {0}
     for i, n in enumerate(nodes):
         if i in prompts or n.id in chain.reads:
+            continue
+        if (n.node_type == "llm"
+                and getattr(n, "unlicensed_input", None) == X_API_INPUT):
+            # An AI reply written from posts fetched from X is Chat by
+            # construction (#689): that describes it, not the thread, so
+            # what is written under it takes the setting above it.
             continue
         return n.ai_usage or default
     return default

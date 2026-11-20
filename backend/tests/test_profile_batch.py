@@ -1052,6 +1052,77 @@ def test_a_stale_openai_batch_is_dropped_with_its_files(
     assert dropped == ([job.batch_id] if provider_key != "anthropic" else [])
 
 
+def test_submit_registers_the_anthropic_batch(app, monkeypatch):
+    """#693: an Anthropic batch is recorded in its job's commit, so it is
+    deleted at Anthropic once the job is no longer pending; an OpenAI
+    batch is not (its files are #667's)."""
+    from backend.models import AnthropicBatchDeletion
+    a = _user(profile_force_batch=True)
+    b = _user(profile_force_batch=True)
+    db.session.commit()
+    monkeypatch.setattr(pb, "batch_submit", lambda reqs, keys, kind: {
+        "anthropic": "b-ant", "openai:gpt-x": "b-oai"})
+
+    def req(user, provider, model, cid):
+        return {"provider": provider,
+                "request": {"custom_id": cid, "model_id": "test-model",
+                            "api_model": model, "messages": [],
+                            "max_tokens": 10},
+                "meta": {"custom_id": cid, "user_id": user.id,
+                         "kind": "chunk", "prev_profile_id": None,
+                         "model_id": "test-model"}}
+    pb._submit_requests([req(a, "anthropic", "claude-x", "c_a"),
+                         req(b, "openai", "gpt-x", "c_b")],
+                        {"anthropic": "k", "openai": "k"})
+
+    row = AnthropicBatchDeletion.query.one()
+    assert (row.batch_id, row.source) == ("b-ant", "profile_batch_job")
+
+
+@pytest.mark.parametrize("delete_fails", [False, True])
+def test_poll_deletes_the_anthropic_batch_once_saved(
+        app, monkeypatch, delete_fails):
+    """#693: the ended batch is deleted at Anthropic after the profile and
+    the job are saved, never before; a failed delete leaves the job
+    collected and is counted for the hourly sweep."""
+    from backend.models import AnthropicBatchDeletion
+    from backend.tests import anthropic_batch_fake as fake
+    from backend.utils import llm_batch
+    monkeypatch.setitem(app.config, "ANTHROPIC_API_KEY", "k")
+    monkeypatch.setattr(pb._exports, "build_user_export_content",
+                        MagicMock(return_value=None))
+    monkeypatch.setattr(pb._exports, "build_integration_messages",
+                        lambda uid, pid: (None, None))
+    monkeypatch.setattr(pb, "batch_submit", MagicMock(return_value={}))
+    monkeypatch.setattr(pb, "batch_check_and_collect",
+                        llm_batch.batch_check_and_collect)
+    u = _user()
+    prev = _prev_profile(u, datetime(2026, 5, 1))
+    job, item = _chunk_job(u, prev)
+    batches = fake.install(monkeypatch)
+    batches.add("b1", results=[fake.succeeded(
+        item["custom_id"], "NEW PROFILE", 2000, 500)])
+    seen = []
+
+    def on_delete(batch_id):
+        db.session.expire_all()
+        seen.append((ProfileBatchJob.query.get(job.id).status,
+                     UserProfile.query.filter_by(
+                         user_id=u.id, parent_profile_id=prev.id).count()))
+    batches.on_delete = on_delete
+    if delete_fails:
+        batches.delete_error = RuntimeError("503")
+
+    pb._poll_profile_batches()
+
+    assert seen == [("collected", 1)]
+    db.session.expire_all()
+    row = AnthropicBatchDeletion.query.filter_by(batch_id="b1").one()
+    assert (row.deleted_at is None, row.attempts) == (
+        (True, 1) if delete_fails else (False, 0))
+    assert ProfileBatchJob.query.get(job.id).status == "collected"
+
+
 # ── tokenizer-aware budgets (Community Archive pre-fill cost fixes) ───────
 
 def test_use_batch_for_user_force_flag(app):

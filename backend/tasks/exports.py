@@ -53,7 +53,7 @@ def content_class(user):
     AI-readable units, else "threads" — picks the prior row. One SQL sum."""
     from sqlalchemy import case, func, or_
     from backend.models import Node
-    from backend.utils.privacy import AI_ALLOWED
+    from backend.utils.privacy import AI_ALLOWED, withheld_prefill_clauses
     tweets, total = db.session.query(
         func.coalesce(func.sum(case(
             (Node.origin == "twitter", Node.token_count), else_=0)), 0),
@@ -62,6 +62,7 @@ def content_class(user):
         or_(Node.user_id == user.id, Node.human_owner_id == user.id),
         Node.ai_usage.in_(AI_ALLOWED),
         Node.deleted_at.is_(None),
+        *withheld_prefill_clauses(user.id),
     ).one()
     return "tweets" if total and tweets * 2 > total else "threads"
 
@@ -175,10 +176,12 @@ def _estimate_source_tokens(user):
     loading, no decryption — so it is safe for any corpus size."""
     from sqlalchemy import func, or_
     from backend.models import Node
+    from backend.utils.privacy import withheld_prefill_clauses
     total = db.session.query(func.coalesce(func.sum(Node.token_count), 0)).filter(
         or_(Node.user_id == user.id, Node.human_owner_id == user.id),
         Node.ai_usage.in_(['chat', 'train']),
         Node.deleted_at.is_(None),
+        *withheld_prefill_clauses(user.id),
     ).scalar()
     return int(total or 0)
 
@@ -266,13 +269,14 @@ def should_continue_chain(user, latest_profile):
         return False
     from sqlalchemy import or_
     from backend.models import Node
-    from backend.utils.privacy import AI_ALLOWED
+    from backend.utils.privacy import AI_ALLOWED, withheld_prefill_clauses
     return db.session.query(Node.id).filter(
         or_(Node.user_id == user.id, Node.human_owner_id == user.id),
         Node.ai_usage.in_(AI_ALLOWED),
         Node.deleted_at.is_(None),
         Node.created_at > cutoff,
         Node.created_at < boundary,
+        *withheld_prefill_clauses(user.id),
     ).first() is not None
 
 
@@ -1674,9 +1678,11 @@ def _do_incremental_update(self, user, model_id, previous_profile_id,
     # crashing on `Node.created_at > None` or discarding the profile via a
     # full regen.
     from backend.models import Node
+    from backend.utils.privacy import withheld_prefill_clauses
     q = Node.query.filter(
         Node.user_id == user.id,
-        Node.ai_usage.in_(['chat', 'train'])
+        Node.ai_usage.in_(['chat', 'train']),
+        *withheld_prefill_clauses(user.id),
     )
     if cutoff is not None:
         q = q.filter(Node.created_at > cutoff)
@@ -1843,10 +1849,12 @@ def _first_writing_date(user_id, until):
     created_at only; nothing is decrypted. None when there is none."""
     from sqlalchemy import func, or_
     from backend.models import Node
+    from backend.utils.privacy import withheld_prefill_clauses
     query = db.session.query(func.min(Node.created_at)).filter(
         or_(Node.user_id == user_id, Node.human_owner_id == user_id),
         Node.ai_usage.in_(AI_ALLOWED),
         Node.deleted_at.is_(None),
+        *withheld_prefill_clauses(user_id),
     )
     if until is not None:
         query = query.filter(Node.created_at <= until)
@@ -2826,13 +2834,17 @@ def new_units_since_cutoff(user, cutoff):
     time) as new, so the first entry after a large import triggered a tiny
     update and a re-integration (R11, #545). No cutoff (a legacy version
     saved before cutoffs were recorded, or a hand-written first profile,
-    which the ladder decides for): all the user's data counts."""
+    which the ladder decides for): all the user's data counts. After a no
+    to the tweet seed, the tweets a pre-fill brought in are left out
+    (#662, utils/privacy.withheld_prefill_clauses)."""
     from sqlalchemy import func, or_
     from backend.models import Node
+    from backend.utils.privacy import withheld_prefill_clauses
     q = db.session.query(func.coalesce(func.sum(Node.token_count), 0)).filter(
         or_(Node.user_id == user.id, Node.human_owner_id == user.id),
         Node.ai_usage.in_(['chat', 'train']),
         Node.deleted_at.is_(None),
+        *withheld_prefill_clauses(user.id),
     )
     if cutoff is not None:
         q = q.filter(Node.created_at > cutoff)

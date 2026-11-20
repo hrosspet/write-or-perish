@@ -27,7 +27,7 @@ import useSubmitShortcut from "../hooks/useSubmitShortcut";
 
 const NodeForm = forwardRef(
   (
-    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt, hidePowerFeatures = false, placeholder, onSubmitOverride, uploadReplyOptions, compact = false, hideAudioUpload = false, allowAgenticPrompt = false, hasGeneratedTts = false, aiUsageFromGlobalDefault = false, hasChildren = false, parentPrivacyLevel },
+    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt, hidePowerFeatures = false, placeholder, onSubmitOverride, uploadReplyOptions, compact = false, hideAudioUpload = false, allowAgenticPrompt = false, hasGeneratedTts = false, aiUsageFromGlobalDefault = false, hasChildren = false, parentPrivacyLevel, trainRefused = false },
     ref
   ) => {
     const { user } = useUser();
@@ -545,7 +545,9 @@ const NodeForm = forwardRef(
           setStreamingSessionId(null);
           // Spend cap: backend kept the system + user nodes but skipped the
           // LLM placeholder (e.g. /textmode/start). Surface the banner.
-          if (data && data.spend_capped) notifySpendBlocked(data.spend_cap_lifts_on);
+          if (data && data.spend_capped) {
+            notifySpendBlocked(data.spend_cap_lifts_on, data.spend_cap_lifts_with_payment);
+          }
           noteSkippedReply(data);
           // The entry was saved but the reply was refused (e.g. an
           // uncapped {user_export} on a non-Pro plan): say why. A thread
@@ -581,7 +583,9 @@ const NodeForm = forwardRef(
           // Spend cap: backend kept the system + user nodes but skipped the
           // LLM placeholder. Surface the banner; the no-llm_node_id branch
           // below lands the user on their new thread without a placeholder.
-          if (res.data.spend_capped) notifySpendBlocked(res.data.spend_cap_lifts_on);
+          if (res.data.spend_capped) {
+            notifySpendBlocked(res.data.spend_cap_lifts_on, res.data.spend_cap_lifts_with_payment);
+          }
           noteSkippedReply(res.data);
           if (res.data.llm_error && !replySkippedForLength(res.data)) {
             addToast(res.data.llm_error, 10000);
@@ -628,7 +632,8 @@ const NodeForm = forwardRef(
           setHasDraft(false);
           setStreamingSessionId(null);
           if (response.data.spend_capped) {
-            notifySpendBlocked(response.data.spend_cap_lifts_on);
+            notifySpendBlocked(response.data.spend_cap_lifts_on,
+              response.data.spend_cap_lifts_with_payment);
           }
           noteSkippedReply(response.data);
           // Land on the entry; ?awaitLlm hands a pending reply to NodeDetail.
@@ -915,6 +920,7 @@ const NodeForm = forwardRef(
             onAIUsageChange={setAiUsage}
             disabled={loading}
             lockPrivacy={parentPrivacy === "public" && !editMode}
+            trainRefused={trainRefused}
           />
         )}
 

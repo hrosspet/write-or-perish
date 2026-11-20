@@ -29,13 +29,36 @@ def payments_required(fn):
     def wrapper(*args, **kwargs):
         if not payments_enabled():
             return jsonify({"error": "Not found"}), 404
-        if not current_user.approved:
+        if not current_user.approved and not _blocked_may(current_user):
             # Waitlisted accounts subscribe once they are let in.
             return jsonify({"error": "not_approved",
                             "message": "Your account is not approved "
                                        "yet."}), 403
         return fn(*args, **kwargs)
     return wrapper
+
+
+def _blocked_may(user):
+    """An account the admin blocked may still read its subscription and
+    open Stripe's page to cancel it or change the card (#697,
+    utils/approval.BLOCKED_OPEN); never start a checkout or a sync."""
+    from backend.utils.approval import is_blocked, open_while_blocked
+    return is_blocked(user) and open_while_blocked(request.method,
+                                                   request.path)
+
+
+def _too_many(kind):
+    """None, or the 429 once the account used the hour's checkouts or
+    syncs (#697, utils/billing_limits). Counts this request otherwise."""
+    from backend.utils import billing_limits
+    try:
+        billing_limits.check_and_count(current_user, kind)
+    except billing_limits.TooManyBillingRequests:
+        message = (billing_limits.TOO_MANY_CHECKOUTS_MESSAGE
+                   if kind == "checkout" else "Please try again later.")
+        return jsonify({"error": "too_many_requests",
+                        "message": message}), 429
+    return None
 
 
 def _text(data, key):
@@ -125,6 +148,9 @@ def start_checkout():
     level, code, refused = _checkout_level(user, data)
     if refused is not None:
         return refused
+    too_many = _too_many("checkout")
+    if too_many is not None:
+        return too_many
     try:
         gateway = stripe_billing.get_gateway()
         session = stripe_billing.create_checkout(
@@ -170,6 +196,9 @@ def sync():
     session_id = _text(data, "session_id")
     if session_id is None:
         return jsonify({"error": "invalid_session"}), 400
+    too_many = _too_many("sync")
+    if too_many is not None:
+        return too_many
     user = current_user
     try:
         gateway = stripe_billing.get_gateway()

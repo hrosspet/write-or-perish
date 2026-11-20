@@ -194,8 +194,47 @@ final class SubscriptionTests: XCTestCase {
         XCTAssertFalse(try decode(CurrentUser.self, #"{"id": 1, "plan": "free", "approved": true}"#).notLetIn)
     }
 
+    /// Peter, 2026-11-13: a recording in progress when the account stops being
+    /// let in is kept. The server takes its chunks and finalize; the app stays on
+    /// the screen it is made on until it is done, then shows NoSubscriptionView.
+    @MainActor
+    func testARecordingInProgressKeepsItsScreenUntilItIsDone() throws {
+        let notLetIn = try decode(CurrentUser.self, #"""
+        {"id": 1, "plan": "free", "approved": true, "payments_enabled": true,
+         "subscription": {"state": "none", "status": "past_due", "ai_replies": false}}
+        """#)
+        let lapsed = try decode(CurrentUser.self, #"""
+        {"id": 1, "plan": "free", "approved": true, "payments_enabled": true,
+         "subscription": {"state": "lapsed", "status": "ended", "ai_replies": false}}
+        """#)
+        XCTAssertTrue(RootView.showsNoSubscription(user: notLetIn, recordingInProgress: false))
+        XCTAssertFalse(RootView.showsNoSubscription(user: notLetIn, recordingInProgress: true))
+        XCTAssertFalse(RootView.showsNoSubscription(user: lapsed, recordingInProgress: false))
+        XCTAssertFalse(RootView.showsNoSubscription(user: nil, recordingInProgress: false))
+
+        // An upload counts from its accepted init to its finalize.
+        let center = AudioCenter()
+        XCTAssertFalse(center.recordingInProgress)
+        center.beginUpload()
+        XCTAssertTrue(center.recordingInProgress)
+        center.endUpload()
+        XCTAssertFalse(center.recordingInProgress)
+        center.endUpload()
+        XCTAssertFalse(center.recordingInProgress, "never below zero")
+
+        // A dictation counts only while it records or finalizes; one whose form
+        // closed (its controller gone) holds nothing.
+        let app = AppState(launch: LaunchOptions(), secureStore: InMemorySecureStore(),
+                           defaults: UserDefaults(suiteName: "loore-tests-\(UUID().uuidString)")!)
+        var dictation: DictationController? = DictationController(app: app)
+        center.dictation(dictation!, inProgress: true)
+        XCTAssertFalse(center.recordingInProgress, "idle: not recording")
+        dictation = nil
+        XCTAssertFalse(center.recordingInProgress)
+    }
+
     func testTheScreenWithoutASubscriptionOffersNothingToBuy() {
-        let texts = [NoSubscriptionView.message, AppState.paymentFailedMessage,
+        let texts = [NoSubscriptionView.message, NoSubscriptionView.downloadLabel, AppState.paymentFailedMessage,
                      SubscriptionState(level: "standard", status: "past_due").statusText(plan: "free")]
         for text in texts {
             let lower = text.lowercased()

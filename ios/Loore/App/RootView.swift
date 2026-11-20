@@ -56,15 +56,29 @@ struct RootView: View {
         case .accountDeleted(let deleteOn):
             AccountDeletedView(deleteOn: deleteOn)
         case .signedIn:
-            if app.isApproved, app.user?.notLetIn == true {
+            if app.isApproved, Self.showsNoSubscription(user: app.user,
+                                                        recordingInProgress: app.audio.recordingInProgress) {
                 // Payments on, no subscription yet (#438).
                 NoSubscriptionView()
             } else if app.isApproved {
                 MainTabView()
+            } else if app.user?.accountBlocked == true {
+                // Payments on: the admin blocked it (#697); nobody else waits.
+                AccountNotActiveView()
             } else {
                 WaitlistView()
             }
         }
+    }
+
+    /// Payments on (#438): the not-let-in screen, except while a recording is in
+    /// progress. When the account stops being let in during a recording (a trial
+    /// whose first payment fails), the server still takes that recording's chunks
+    /// and finalize; the screen it is made on stays until its transcript is in
+    /// (or the upload is finalized), so nothing recorded is lost. Then the
+    /// not-let-in screen shows.
+    static func showsNoSubscription(user: CurrentUser?, recordingInProgress: Bool) -> Bool {
+        user?.notLetIn == true && !recordingInProgress
     }
 
     /// The Updates sheet shows only when nothing blocks it (never over Terms).

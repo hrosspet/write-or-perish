@@ -60,10 +60,10 @@ def _embedding_owner_id(node):
 
 def _paid_features_filter():
     """Payments on (#438): no background model call (embedding included)
-    for an account without the paid set. Nothing while payments are off,
-    so the query is the one it was."""
-    from backend.utils.subscriptions import payments_enabled
-    return [User.paid_features_clause()] if payments_enabled() else []
+    for an account without the paid set, or one the admin blocked (#697).
+    Nothing while payments are off, so the query is the one it was."""
+    from backend.utils.approval import background_work_clause
+    return background_work_clause()
 
 
 def _candidate_nodes(limit):

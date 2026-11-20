@@ -19,8 +19,11 @@ from backend.tests import network_guard
 # test module is imported, so it covers collection too.
 network_guard.install()
 
+# The Community Archive's API key (#688) is one too: with a key from a
+# developer's .env, the archive code takes the API v1 path in tests that
+# expect the keyless one.
 _PROVIDER_KEY_PREFIXES = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
-                          "OPENAI_API_KEY")
+                          "OPENAI_API_KEY", "COMMUNITY_ARCHIVE_API_KEY")
 # Variables that send a request somewhere else than the host it names:
 # the SDKs' base URLs and the proxies the HTTP clients read.
 _REROUTING_VARIABLES = ("ANTHROPIC_BASE_URL", "OPENAI_BASE_URL") + tuple(

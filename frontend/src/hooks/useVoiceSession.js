@@ -19,7 +19,7 @@ import {
 import { isApprovalPendingError } from '../utils/toolApprovals';
 import {
   AI_USAGE_REFUSAL, APPROVAL_REFUSAL, LENGTH_REFUSAL, REFUSAL_SENTENCES,
-  SPEND_CAP_REFUSAL,
+  SPEND_CAP_REFUSAL, isAccessEndedRefusal,
 } from '../utils/spokenRefusal';
 import { isSpendCapError } from '../utils/spendCap';
 import { onPageReturn } from '../utils/pageReturn';
@@ -549,8 +549,9 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
         setPhase('ready');
         // The thread grew past the limit with this recording (#648).
         if (data.warningCode === THREAD_TOO_LONG_CODE) refuseForThreadLength();
-        // Any other refusal (the usage limit, AI usage, a waiting change)
-        // is said too (#651); a warning that is not one has no code.
+        // Any other refusal (the usage limit, AI usage, a waiting change,
+        // access that ended while it was recorded, #438) is said too
+        // (#651); a warning that is not one has no code.
         else sayTurnRefusal(data.warningCode);
         return;
       }
@@ -613,8 +614,14 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
         }
         // Payments on, no AI replies (#438): the banner (raised by the api
         // interceptor) says why and links to Settings; no failure toast
-        // with the raw code.
+        // with the raw code. When the access ended while this turn was
+        // recorded, the server kept the turn (`user_node_id`) and its
+        // `code` was said above.
         if (isSubscriptionRequiredError(err)) {
+          if (err.response.data.user_node_id) {
+            lastUserNodeIdRef.current = err.response.data.user_node_id;
+            if (onEntrySavedRef.current) onEntrySavedRef.current();
+          }
           setPhase('ready');
           return;
         }
@@ -1029,6 +1036,18 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
         refuseForThreadLength(llmError);
         return;
       }
+      // Refused before any call because the account's access ended after
+      // this turn's recording was saved (#438): the server's text says so,
+      // and its sentence is said instead of the error sound (a refusal,
+      // not a failure: no red dot).
+      if (isAccessEndedRefusal(llmData.error_code)) {
+        addToast(llmError || REFUSAL_SENTENCES[llmData.error_code], 8000);
+        if (onLLMFailedRef.current) onLLMFailedRef.current(llmNodeId);
+        finishGenerating();
+        setPhase('ready');
+        sayTurnRefusal(llmData.error_code);
+        return;
+      }
       // The red dot alone didn't say why; the server's error is written
       // for the user (e.g. "break the request into smaller steps").
       addToast(llmError || 'Response generation failed', 8000);
@@ -1048,7 +1067,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     // (llm-status polling already stopped on 'completed', so no other dep
     // changes).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [llmStatus, llmData, llmNodeId, audio, ttsTitle, stopSilentAudio, advanceChain, deliverFullTts, ttsRetriggerNonce, soundReplyFailure, finishGenerating, refuseForThreadLength, askAnnouncement, endTurnAudio]);
+  }, [llmStatus, llmData, llmNodeId, audio, ttsTitle, stopSilentAudio, advanceChain, deliverFullTts, ttsRetriggerNonce, soundReplyFailure, finishGenerating, refuseForThreadLength, sayTurnRefusal, askAnnouncement, endTurnAudio]);
 
   // Safety net: TTS is being generated (POST /tts returned 202) but no
   // chunk arrived within 60s — SSE is probably dead; transition to

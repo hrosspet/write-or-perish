@@ -180,10 +180,12 @@ def user_spend_since_microdollars(user_id, since):
 # A trialing subscription may use SUBSCRIPTION_TRIAL_SPEND_LIMIT_USD of model
 # cost in all, counted from the trial's start: nothing has been paid yet. The
 # block is a flag on the account (User.subscription_trial_capped), not a
-# month, so it holds across a month boundary inside the trial; it ends with
-# the first payment (stripe_billing.handle_event), or with the trial when
-# none follows. An admin's per-user limit replaces it, as it replaces the
-# level's ceiling.
+# month, so it holds across a month boundary inside the trial and past its
+# end until the first payment, which lifts it (stripe_billing.handle_event).
+# A trial that ends without a payment lifts nothing: the account is then
+# not let in (a failed first payment) or lapsed (cancelled), with no AI
+# replies either way. An admin's per-user limit replaces it, as it
+# replaces the level's ceiling.
 
 def alpha_unpaid_since(user):
     """An alpha tester (#438) from the free month's start to their first
@@ -623,34 +625,47 @@ def spend_cap_message(lifts_on=None, now=None):
             f"{lifts_on.strftime('%B')} {lifts_on.day}.")
 
 
+# The ceilings that only a first payment lifts (#438): the trial's, and an
+# alpha tester's free month's. Not a date: the trial's end lifts nothing
+# (a trial that ends without a payment leaves the account not let in, or
+# lapsed), so no date is named and ``lifts_on`` is null. They name the
+# state and never where or how to pay (the iPhone app shows them too).
+TRIAL_CAP_MESSAGE = ("You've reached the usage limit of your trial. It "
+                     "lifts with your first payment.")
+FREE_MONTH_CAP_MESSAGE = ("You've reached the usage limit of your free "
+                          "month. It lifts with your first payment.")
+
+
+def cap_lifts_with_payment(user, now=None):
+    """Capped by the trial's or the free month's ceiling, and not (also)
+    by this month's: only the first payment lifts it. *user* is a User or
+    an id."""
+    from backend.models import User
+    if user is not None and not isinstance(user, User):
+        user = db.session.get(User, user)
+    return (isinstance(user, User) and trial_capped(user)
+            and not (user.spend_blocked_month
+                     and user.spend_blocked_month == current_month(now)))
+
+
 def spend_cap_payload(user=None, now=None):
     """The standard 402 body for a capped user: the error code the
     frontend's api.js interceptor keys the spend-cap banner on, the text,
     and ``lifts_on``, the date (UTC, ISO) the cap lifts, when the user is
-    known."""
+    known. A cap only the first payment lifts (the trial's, the free
+    month's) has no date and says so: ``lifts_with_payment``, a key sent
+    only then (so nothing differs while payments are off), for the
+    clients' own texts."""
     from flask import current_app
     from backend.models import User
     lifts_on = None
-    if isinstance(user, User) and trial_capped(user) and \
-            not (user.spend_blocked_month
-                 and user.spend_blocked_month == current_month(now)):
-        if alpha_unpaid_since(user) is not None:
-            # An alpha tester's free month (#438): one ceiling until the
-            # first payment.
-            return {
-                "error": "monthly_spend_limit_reached",
-                "message": ("You've reached the usage limit of your free "
-                            "month. It lifts with your first payment."),
-                "lifts_on": None,
-            }
-        # The trial's own ceiling (#438): it lifts when the trial ends.
-        end = user.subscription_trial_end
-        when = f" on {end.strftime('%B')} {end.day}" if end else ""
+    if isinstance(user, User) and cap_lifts_with_payment(user, now):
+        alpha = alpha_unpaid_since(user) is not None
         return {
             "error": "monthly_spend_limit_reached",
-            "message": ("You've reached the usage limit of your trial. "
-                        f"It lifts when the trial ends{when}."),
-            "lifts_on": end.date().isoformat() if end else None,
+            "message": FREE_MONTH_CAP_MESSAGE if alpha else TRIAL_CAP_MESSAGE,
+            "lifts_on": None,
+            "lifts_with_payment": True,
         }
     if user is not None and isinstance(user, User):
         try:
@@ -675,9 +690,14 @@ def spend_cap_response(user=None):
 def spend_capped_fields(user):
     """For a 2xx that saved the writing but skipped the reply because the
     user is capped: the flag the clients key the banner on, and the date
-    the cap lifts (as the 402's ``lifts_on``)."""
-    return {"spend_capped": True,
-            "spend_cap_lifts_on": spend_cap_payload(user)["lifts_on"]}
+    the cap lifts (as the 402's ``lifts_on``), or, for a cap only the
+    first payment lifts, ``spend_cap_lifts_with_payment``."""
+    payload = spend_cap_payload(user)
+    fields = {"spend_capped": True,
+              "spend_cap_lifts_on": payload["lifts_on"]}
+    if payload.get("lifts_with_payment"):
+        fields["spend_cap_lifts_with_payment"] = True
+    return fields
 
 
 def require_spend_headroom(fn):

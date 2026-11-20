@@ -237,6 +237,9 @@ struct SaveAsNodeResponse: Decodable, Sendable {
     var llmNodeId: Int?
     var taskId: String?
     var spendCapped: Bool
+    /// The cap is one only the first payment lifts (#438: the trial's, the
+    /// free month's), not the month's.
+    var spendCapLiftsWithPayment: Bool
     var llmError: String?
     /// Payments on, no AI replies (#438): the entry is saved, the reply skipped.
     var subscriptionRequired: Bool
@@ -258,6 +261,7 @@ struct SaveAsNodeResponse: Decodable, Sendable {
         case llmNodeId = "llm_node_id"
         case taskId = "task_id"
         case spendCapped = "spend_capped"
+        case spendCapLiftsWithPayment = "spend_cap_lifts_with_payment"
         case llmError = "llm_error"
         case subscriptionRequired = "subscription_required"
         case subscriptionMessage = "subscription_message"
@@ -277,6 +281,7 @@ struct SaveAsNodeResponse: Decodable, Sendable {
         llmNodeId = c.tolerant(.llmNodeId)
         taskId = c.tolerant(.taskId)
         spendCapped = c.tolerant(.spendCapped, default: false)
+        spendCapLiftsWithPayment = c.tolerant(.spendCapLiftsWithPayment, default: false)
         llmError = c.tolerant(.llmError)
         subscriptionRequired = c.tolerant(.subscriptionRequired, default: false)
         subscriptionMessage = c.tolerant(.subscriptionMessage)
@@ -296,6 +301,9 @@ struct TextmodeStartResponse: Decodable, Sendable {
     var llmNodeId: Int?
     var taskId: String?
     var spendCapped: Bool
+    /// The cap is one only the first payment lifts (#438: the trial's, the
+    /// free month's), not the month's.
+    var spendCapLiftsWithPayment: Bool
     var llmError: String?
     /// Payments on, no AI replies (#438): the entry is saved, the reply skipped.
     var subscriptionRequired: Bool
@@ -313,6 +321,7 @@ struct TextmodeStartResponse: Decodable, Sendable {
         case llmNodeId = "llm_node_id"
         case taskId = "task_id"
         case spendCapped = "spend_capped"
+        case spendCapLiftsWithPayment = "spend_cap_lifts_with_payment"
         case llmError = "llm_error"
         case subscriptionRequired = "subscription_required"
         case subscriptionMessage = "subscription_message"
@@ -327,6 +336,7 @@ struct TextmodeStartResponse: Decodable, Sendable {
         llmNodeId = c.tolerant(.llmNodeId)
         taskId = c.tolerant(.taskId)
         spendCapped = c.tolerant(.spendCapped, default: false)
+        spendCapLiftsWithPayment = c.tolerant(.spendCapLiftsWithPayment, default: false)
         llmError = c.tolerant(.llmError)
         subscriptionRequired = c.tolerant(.subscriptionRequired, default: false)
         subscriptionMessage = c.tolerant(.subscriptionMessage)

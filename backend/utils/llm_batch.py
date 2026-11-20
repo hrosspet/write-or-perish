@@ -63,6 +63,13 @@ class BatchItemFailed(RuntimeError):
     bad key) is not a verdict and the caller polls again."""
 
 
+class BatchItemGone(BatchItemFailed):
+    """A verdict like its parent: the ended batch (Anthropic) or its files
+    (OpenAI) are no longer at the provider. Loore deletes them once an
+    outcome is saved (#667, #693), so a collect that overlapped the one
+    that saved it finds nothing left to read."""
+
+
 class BatchItemCancelled(BatchItemFailed):
     """The batch was cancelled before the item was sent to the model, so
     the item never ran and is not billed (Anthropic: the item's result
@@ -189,7 +196,10 @@ class CollectedResults(dict):
 
     And ``batch_files``: the OpenAI file ids (input, output, error) of
     the ended batches read here, for delete_collected_batch_files once
-    the caller has saved what it needs (#667)."""
+    the caller has saved what it needs (#667); ``anthropic_batches``: the
+    ids of the ended Anthropic batches read here, deleted at Anthropic
+    once the caller has saved (anthropic_batch_deletion
+    .delete_collected_batches, #693)."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -197,6 +207,7 @@ class CollectedResults(dict):
         self.blocked = {}
         self.transient_failures = set()
         self.batch_files = []
+        self.anthropic_batches = []
 
 
 # ── OpenAI batch files are deleted after use (#667) ─────────────────────
@@ -204,7 +215,9 @@ class CollectedResults(dict):
 # adds an output file and, for failed requests, an error file. The prompts
 # hold users' writing, so once a batch has ended and its results have
 # been read and saved, the three files are deleted. Anthropic's Message
-# Batches API takes the requests inline: there is no file to delete.
+# Batches API takes the requests inline: there is no file to delete, and
+# the ended batch itself is deleted instead, with a retry that survives
+# a crash (utils/anthropic_batch_deletion.py, #693).
 # A delete that fails is logged (ids and the error's type) and left: it
 # never fails the batch or its job. The SDK itself retries a delete that
 # meets a connection error, a 429 or a 5xx (max_retries, 2 by default).
@@ -222,6 +235,20 @@ def _openai_not_found():
     except ImportError:  # pragma: no cover - the SDK is a dependency
         return _NeverRaised
     return getattr(openai, "NotFoundError", _NeverRaised)
+
+
+def anthropic_not_found():
+    """anthropic.NotFoundError (a 404: the batch is gone, or was never in
+    this key's workspace)."""
+    try:
+        import anthropic
+    except ImportError:  # pragma: no cover - the SDK is a dependency
+        return _NeverRaised
+    found = getattr(anthropic, "NotFoundError", _NeverRaised)
+    # A stand-in SDK (a test's MagicMock) has no exception class there.
+    if isinstance(found, type) and issubclass(found, BaseException):
+        return found
+    return _NeverRaised
 
 
 def openai_batch_file_ids(batch):
@@ -934,6 +961,9 @@ def batch_check_and_collect(batch_ids, api_keys, known=None):
                 log.error(f"Anthropic batch {batch_id} ended: {collected} "
                           f"result(s) collected, not collected: "
                           f"{not_collected}")
+            # Read in full: the batch goes once the caller has saved
+            # (#693).
+            results.anthropic_batches.append(batch_id)
 
         elif key.startswith("openai:"):
             client = OpenAI(api_key=api_keys["openai"])
@@ -1120,7 +1150,8 @@ def anthropic_batch_cancel_one(api_key, batch_id, delete_files=False):
     batch that already ended cannot be cancelled and the API says so;
     the caller only needs the item not to be collected any more.
     *delete_files* is the OpenAI twin's; an Anthropic batch has no
-    uploaded files."""
+    uploaded files, and the batch itself is deleted by the hourly sweep
+    once it has ended (utils/anthropic_batch_deletion.py, #693)."""
     from anthropic import Anthropic
     client = Anthropic(api_key=api_key)
     batch = client.messages.batches.cancel(batch_id)
@@ -1137,7 +1168,18 @@ def anthropic_batch_collect_one(api_key, batch_id, custom_id):
     a cancel request is pending like "in_progress"; once it has ended,
     an item processed before the cancel took effect is returned (it was
     billed), one canceled before it ran raises BatchItemCancelled (not
-    billed), and an errored / expired item raises BatchItemFailed."""
+    billed), and an errored / expired item raises BatchItemFailed. A
+    batch no longer at Anthropic raises BatchItemGone: it is deleted
+    once an outcome is saved (#693)."""
+    try:
+        return _anthropic_collect_one(api_key, batch_id, custom_id)
+    except anthropic_not_found():
+        raise BatchItemGone(
+            f"Anthropic batch {batch_id} is no longer available")
+
+
+def _anthropic_collect_one(api_key, batch_id, custom_id):
+    """anthropic_batch_collect_one, without the 404 handling."""
     from anthropic import Anthropic
     from backend.llm_providers import TRUNCATED_STOP_REASONS
     client = Anthropic(api_key=api_key)
@@ -1293,7 +1335,7 @@ def openai_batch_collect_one(api_key, batch_id, custom_id):
         # The files are deleted once an outcome is saved (#667): a second
         # collect of the same batch (an overlapping poll) gets a verdict,
         # not a poll that can never succeed.
-        raise BatchItemFailed(
+        raise BatchItemGone(
             f"OpenAI batch {batch_id}: its files are no longer available")
 
 

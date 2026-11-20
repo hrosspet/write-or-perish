@@ -60,14 +60,30 @@ def _ca_headers():
 
 
 def ca_lookup_account(username):
-    """Resolve a Community Archive username to its account_id, or None."""
-    resp = requests.get(
-        f"{CA_BASE_URL}/rest/v1/account",
-        params={"username": f"ilike.{username}", "select": "account_id,username"},
-        headers=_ca_headers(), timeout=CA_TIMEOUT,
-    )
-    resp.raise_for_status()
-    rows = resp.json()
+    """Resolve a Community Archive username to its account_id, or None.
+    With COMMUNITY_ARCHIVE_API_KEY set, through API v1's exact username
+    lookup (community_archive.fetch_account, #688)."""
+    from backend.utils import community_archive as ca
+    if ca.v1_enabled():
+        account = ca.fetch_account(username)
+        return account["account_id"] if account else None
+    ca._warn_if_rest_retired()
+    retired = ca.rest_retired()
+    try:
+        resp = requests.get(
+            f"{CA_BASE_URL}/rest/v1/account",
+            params={"username": f"ilike.{username}", "select": "account_id,username"},
+            headers=_ca_headers(), timeout=CA_TIMEOUT,
+        )
+        resp.raise_for_status()
+        rows = resp.json()
+    except Exception as e:
+        if retired:
+            raise ca.CommunityArchiveRetired() from e
+        raise
+    if not rows and retired:
+        # A retired API's empty answer says nothing about the handle.
+        raise ca.CommunityArchiveRetired()
     return rows[0]["account_id"] if rows else None
 
 
@@ -108,8 +124,15 @@ def normalize_ca_tweet(row, username):
 def ca_fetch_tweets(account_id, username, max_items=2000):
     """Fetch up to *max_items* tweets for a CA account, newest first.
 
-    Yields normalized item dicts; paginates via PostgREST offset.
+    Yields normalized item dicts; paginates via PostgREST offset, or with
+    COMMUNITY_ARCHIVE_API_KEY set through API v1's account timeline
+    (newest first, cursor pages of up to 200, #688).
     """
+    from backend.utils import community_archive as ca
+    if ca.v1_enabled():
+        yield from _ca_fetch_tweets_v1(account_id, username, max_items)
+        return
+    ca._warn_if_rest_retired()
     fetched = 0
     offset = 0
     while fetched < max_items:
@@ -139,6 +162,27 @@ def ca_fetch_tweets(account_id, username, max_items=2000):
         offset += len(rows)
         if len(rows) < page_size:
             break
+
+
+def _ca_fetch_tweets_v1(account_id, username, max_items):
+    """The same ``limit`` on every page (whether a cursor accepts another
+    limit is not documented); the last page is cut here instead."""
+    from backend.utils import community_archive as ca
+    limit = max(1, min(ca.V1_TWEET_PAGE_LIMIT, int(max_items)))
+    fetched = 0
+    cursor = None
+    while fetched < max_items:
+        rows, cursor = ca.v1_account_tweets_page(
+            account_id, cursor=cursor, order="desc", limit=limit)
+        for row in rows:
+            item = normalize_ca_tweet(row, username)
+            if item is not None:
+                yield item
+                fetched += 1
+                if fetched >= max_items:
+                    return
+        if not cursor:
+            return
 
 
 def normalize_x_bookmark(tweet, authors_by_id):

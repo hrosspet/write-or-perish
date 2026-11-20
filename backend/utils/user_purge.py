@@ -51,7 +51,9 @@ how AI-reply audio stored under the model account's folder is found),
 then the user's own folders (``user/``, ``nodes/``, ``drafts/``,
 ``chunks/``, ``streaming/`` under AUDIO_STORAGE_PATH and the import stash
 ``imports/<id>/``) and the X API dumps of the handle the account was
-pre-filled from. Every stored audio URL points inside these folders.
+pre-filled from; a purge of everything also the account's Community
+Archive pre-fill stashes (``ca-prefill/<id>-*``). Every stored audio URL
+points inside these folders.
 
 Re-running is safe: each step selects what is still there. A purge that
 crashed half way continues where it stopped.
@@ -494,6 +496,20 @@ def _x_api_root():
     return _stash_root().parent / "x-api"
 
 
+def _ca_prefill_stashes(user_id):
+    """The Community Archive pre-fill's resumable stashes of the account
+    (``ca-prefill/<user id>-<archive account id>`` next to the import
+    stash, #688): the public posts a pre-fill paged in before it imported
+    them. Folders only, never followed through a link."""
+    folder = _stash_root().parent / "ca-prefill"
+    if not folder.is_dir() or folder.is_symlink():
+        return []
+    prefix = f"{int(user_id)}-"
+    return [p for p in folder.iterdir()
+            if p.name.startswith(prefix) and p.is_dir()
+            and not p.is_symlink()]
+
+
 def _x_dump_files(handle):
     """X API dumps (backend.tasks.imports.x_api_dump_path) of the handle
     the account was pre-filled from: that account's public posts."""
@@ -625,7 +641,8 @@ def _scope_files(scope, user):
     dumps, or, for a "Delete all my content" request, what existed when
     it was made."""
     if scope.everything:
-        return (_user_dirs(scope.user_id),
+        return (_user_dirs(scope.user_id)
+                + _ca_prefill_stashes(scope.user_id),
                 _x_dump_files(user.prefilled_handle if user else None))
     dirs, files = [], []
     for recorded in _recorded_paths(scope):
@@ -833,7 +850,11 @@ def _strip_batch_jobs(model, belongs, dry_run, now, counts, key):
     """Take the user's items out of a batch job table (``belongs(item,
     job)``). A pending job that carried only theirs is cancelled at the
     provider and marked cancelled; a finished job that carried only
-    theirs is deleted; any other job keeps the other items."""
+    theirs is deleted; any other job keeps the other items. The batch of
+    a job cancelled or deleted here is deleted at Anthropic by the hourly
+    sweep (#693): registered here too, for a batch from before its
+    registration existed."""
+    from backend.utils import anthropic_batch_deletion
     for job in model.query.order_by(model.id).all():
         items = list(job.items or [])
 
@@ -848,12 +869,16 @@ def _strip_batch_jobs(model, belongs, dry_run, now, counts, key):
             counts["provider_batches_cancelled"] += 1
             if not dry_run:
                 _cancel_provider_batch(job.provider_key, job.batch_id)
+                anthropic_batch_deletion.register(
+                    job.provider_key, job.batch_id, model.__tablename__)
                 job.status = "cancelled"
                 job.collected_at = now
                 job.items = []
         elif dry_run:
             continue
         elif job.status != "pending" and not others:
+            anthropic_batch_deletion.register(
+                job.provider_key, job.batch_id, model.__tablename__)
             db.session.delete(job)
         else:
             job.items = others
@@ -921,10 +946,17 @@ def _stop_in_flight(user_id, dry_run, plan, scope):
         logger.warning("user purge: revoke failed (%s); waiting to revoke "
                        "again", type(e).__name__)
         revoke_failed = True
+    from backend.utils import anthropic_batch_deletion
     for entry in node_batches:
         _cancel_provider_batch(entry.get("provider") or "anthropic",
                                entry["batch_id"],
                                entry.get("key_type") or "chat")
+        # Deleted at Anthropic once it has ended (#693); committed with
+        # the batch tables below.
+        anthropic_batch_deletion.register(
+            entry.get("provider") or "anthropic", entry["batch_id"],
+            anthropic_batch_deletion.PURGE_SOURCE,
+            key_type=entry.get("key_type") or "chat")
 
     lock_busy = False
     # The pipelines whose collectors save per-user results under a lock.
@@ -2106,15 +2138,22 @@ def _heartbeat_for(job_id, token):
 def run_purge_job(job_id, token):
     """Run the claimed job. Returns "done", "wait" (call again after
     PURGE_WAIT_RETRY_SECONDS: the user's tasks are still running),
-    "superseded", "refused" or "error".
+    "superseded", "refused", "kept" (an unclaimed account someone signed
+    in to meanwhile, #685) or "error".
 
     A job with ``delete_account`` (#269) deletes the account after the
     purge (backend/utils/account_deletion.py), in the same commit as the
     job's "done"."""
+    from backend.utils.unclaimed_accounts import (
+        UNCLAIMED_SOURCE, recheck_before_purge,
+    )
     if not start_runner(job_id, token):
         return "superseded"
     job = db.session.get(UserDataPurge, job_id)
     delete_account = bool(job.delete_account)
+    # A pre-filled account nobody claimed (#685): no email, no handle held
+    # back (account_deletion.delete_identity), and a last check first.
+    unclaimed = job.source == UNCLAIMED_SOURCE
     user = db.session.get(User, job.user_id)
     if user is None:
         job.status = "done"
@@ -2137,6 +2176,11 @@ def run_purge_job(job_id, token):
     heartbeat = _heartbeat_for(job_id, token)
     scope = scope_of(job)
     try:
+        # Checked once more under the user row lock, held until the first
+        # commit below: a sign-in that landed after the account was hidden
+        # wins (the job is cancelled, the account shown again).
+        if unclaimed and not recheck_before_purge(job):
+            return "kept"
         inflight = stop_in_flight(user.id, scope=scope)
         job = db.session.get(UserDataPurge, job_id)
         now = _now()
@@ -2169,7 +2213,8 @@ def run_purge_job(job_id, token):
         after_commit = None
         if delete_account:
             from backend.utils.account_deletion import delete_identity
-            identity, after_commit = delete_identity(user_id)
+            identity, after_commit = delete_identity(
+                user_id, notify=not unclaimed, reserve_handles=not unclaimed)
             for key, value in identity.items():
                 counts[key] = counts.get(key, 0) + value
         job = db.session.get(UserDataPurge, job_id)

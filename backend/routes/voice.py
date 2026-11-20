@@ -225,6 +225,12 @@ def create_voice_session():
             session_id?: string }
     Without parent_id: creates system node (prompt) -> user node -> LLM node
     With parent_id: continues thread
+
+    Payments on and no AI replies for the account (#438): 402
+    ``subscription_required`` and nothing written, unless the turn names
+    its recording (session_id), which streaming init accepted while the
+    account had them: that turn is saved with its audio and the 402
+    carries ``user_node_id`` and the ``code`` of its spoken sentence.
     """
     data = request.get_json() or {}
     content = data.get("content")
@@ -270,16 +276,26 @@ def create_voice_session():
     if refused is not None:
         return read_only_model_response(refused)
     # Nor while payments are on for an account without AI replies (#438):
-    # Voice mode stops with the subscription.
+    # Voice mode stops with the subscription. A turn whose recording was
+    # accepted while the account had them (*session_id*: streaming init
+    # let it start) is kept, as the finalize task keeps it, and only its
+    # reply is skipped (below): the access ended while it was recorded.
     from backend.utils.subscriptions import (
-        ai_replies_allowed, subscription_required_response)
-    if not ai_replies_allowed(current_user):
-        return subscription_required_response(current_user)
+        SubscriptionRequired, ai_replies_allowed,
+        subscription_required_response,
+    )
+    replies = ai_replies_allowed(current_user)
+    if not replies:
+        from backend.models import Draft
+        recorded = bool(session_id) and Draft.query.filter_by(
+            session_id=session_id, user_id=current_user.id).first()
+        if not recorded:
+            return subscription_required_response(current_user)
     # Nor while a change the AI proposed in this thread waits for the
     # user's approval (Peter, 2026-11-12): 409, nothing written. Asked
     # before the thread's length, as at streaming init: the change needs a
-    # decision first.
-    if parent_node is not None:
+    # decision first. (Neither applies to a turn that gets no reply.)
+    if parent_node is not None and replies:
         from backend.utils.tool_approvals import (
             approval_pending_response, waiting_in_thread,
         )
@@ -288,7 +304,7 @@ def create_voice_session():
             return approval_pending_response(waiting)
     # Nor in a thread already too long for another reply (#648), as at
     # streaming init.
-    if parent_node is not None:
+    if parent_node is not None and replies:
         too_long = thread_length_refusal(parent_node, current_user.id,
                                          model_id, user=current_user)
         if too_long is not None:
@@ -355,6 +371,21 @@ def create_voice_session():
         body = response.get_json()
         body["user_node_id"] = user_node.id
         return jsonify(body), status
+    except SubscriptionRequired as e:
+        # The account's access ended while this turn was recorded (#438):
+        # what was said is kept, as for the length, and the 402 says why
+        # in the entry's words (``code``: the sentence the Voice screen
+        # says aloud, utils/voice_refusals).
+        from backend.utils.task_warnings import record_task_warning
+        from backend.utils.voice_refusals import recording_kept_code
+        record_task_warning(user_node, e.recording_message)
+        db.session.commit()
+        return jsonify({
+            "error": "subscription_required",
+            "message": e.recording_message,
+            "code": recording_kept_code(e.reason),
+            "user_node_id": user_node.id,
+        }), 402
 
     current_app.logger.info(
         f"Voice session: parent={user_parent_id}, "
@@ -494,13 +525,23 @@ def refusal_audio(code):
     code, 503 when the clip can't be made (the clients then say the
     sentence with the device's speech). Not cached by the browser beyond
     a revalidation: the address names no voice, and a new voice makes a
-    new clip."""
-    refused = _announcement_access_refusal()
-    if refused is not None:
-        return refused
+    new clip.
+
+    A recording kept without its reply because the account's access ended
+    while it was made (#438) has its sentence for that account too, which
+    has neither Voice mode nor the paid set by then: the clip is fixed
+    text, no one's content, and made once per voice for the whole server
+    (one speech call per sentence, billed to the account whose request
+    made it), not once per turn."""
     from flask import send_file
     from backend.utils.announcement_audio import ensure_refusal_clip
-    from backend.utils.voice_refusals import SPOKEN_REFUSALS
+    from backend.utils.voice_refusals import (
+        SPOKEN_REFUSALS, SUBSCRIPTION_SENTENCES,
+    )
+    if code not in SUBSCRIPTION_SENTENCES:
+        refused = _announcement_access_refusal()
+        if refused is not None:
+            return refused
     if code not in SPOKEN_REFUSALS:
         return jsonify({"error": "Not found"}), 404
     clip = ensure_refusal_clip(code, current_user.id)

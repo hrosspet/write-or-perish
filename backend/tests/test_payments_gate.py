@@ -38,12 +38,17 @@ import backend.models as _real_backend_models  # noqa: E402
 # What an account in state "none" may still call (method, rule).
 EXPECTED_OPEN = {
     ("GET", "/api/dashboard/"),
+    # The subscribe page's "Start from your tweets?" (#697).
+    ("PUT", "/api/dashboard/user"),
     ("PATCH", "/api/dashboard/timezone"),
     ("POST", "/api/account/delete"),
     ("POST", "/api/account/delete/confirm"),
     ("POST", "/api/account/restore"),
     ("POST", "/api/account/restore/decline"),
     ("GET", "/api/account/restore"),
+    # Its own data as a file (Peter, 2026-11-13: "yes, Ben should be able
+    # to export"): test_not_let_in_recording_and_export.
+    ("GET", "/api/export/threads"),
 }
 OPEN_PREFIXES = ("/api/billing", "/api/terms", "/api/webhooks",
                  "/api/health", "/api/ready", "/api/live")
@@ -288,6 +293,10 @@ EXPECTED_OTHER_RULES = {
     ("GET", "/auth/magic-link/verify"), ("POST", "/auth/magic-link/send"),
     ("GET", "/auth/twitter"), ("GET", "/auth/twitter/authorized"),
     ("GET", "/auth/x/connect"), ("GET", "/health"), ("GET", "/how-to"),
+    # A sign-in held because its invite named someone else (#439): it is
+    # finished or forgotten here, before any account exists.
+    ("POST", "/auth/invite-choice/continue"),
+    ("POST", "/auth/invite-choice/cancel"),
     ("GET", "/landing"), ("GET", "/login"), ("GET", "/node/<int:node_id>"),
     ("GET", "/ready"), ("GET", "/sitemap.xml"),
     ("GET", "/static/<path:filename>"), ("GET", "/vision"),

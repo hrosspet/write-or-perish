@@ -10,14 +10,18 @@ them — the same promise soft_delete_node makes.
 from backend.models import Node
 from backend.utils.ca_feed import is_feed_node
 from backend.utils.encryption import prefetch_deks
-from backend.utils.privacy import can_user_edit_node
+from backend.utils.privacy import can_user_edit_node, train_refused
 
 
 def apply_settings_to_descendants(root, user_id, *, privacy_level=None,
-                                  ai_usage=None):
+                                  ai_usage=None, kept_from_train=None):
     """Set *privacy_level* and/or *ai_usage* (None = leave as is) on every
     alive descendant of *root* the user may edit. Returns the nodes that
     actually changed; the caller commits.
+
+    A change to 'train' leaves out the entries that may never be at Train
+    (fetched through the X API, #689) and appends them to
+    *kept_from_train* (a list), so the caller can say so.
 
     Level-batched walk (one query per depth), no row locks: a reply that
     races in during the walk simply keeps the settings it was created
@@ -63,10 +67,14 @@ def apply_settings_to_descendants(root, user_id, *, privacy_level=None,
                 n.pinned_by = None
             touched = True
         if ai_usage is not None and n.ai_usage != ai_usage:
-            # A read's nodes never take 'train' (ca_feed.FEED_AI_USAGE):
-            # the cascade leaves them as they are, like the editor
-            # refuses the same change on the node itself.
-            if not (ai_usage == "train" and is_feed_node(n)):
+            # A read's nodes never take 'train' (ca_feed.FEED_AI_USAGE),
+            # nor do entries fetched through the X API (#689): the cascade
+            # leaves them as they are, like the editor refuses the same
+            # change on the node itself.
+            if ai_usage == "train" and train_refused(n):
+                if kept_from_train is not None:
+                    kept_from_train.append(n)
+            elif not (ai_usage == "train" and is_feed_node(n)):
                 n.ai_usage = ai_usage
                 touched = True
         if touched:

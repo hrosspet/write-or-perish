@@ -3,7 +3,7 @@
 // setting"), for every importer that shares the dialog. The value shown is
 // the value sent, also when the user never touched it, and a re-import
 // sends it for the entries already in Loore like a value picked by hand.
-// Privacy still starts at Private.
+// Imports are always private (#677): no privacy choice.
 const mockPost = jest.fn();
 const mockGet = jest.fn();
 jest.mock('../api', () => ({
@@ -96,7 +96,7 @@ test.each(['none', 'chat', 'train'])(
     await openMarkdown();
     expect(aiSelect().value).toBe(setting);
     expect(screen.getByDisplayValue(AI_LABELS[setting])).toBeTruthy();
-    expect(screen.getByDisplayValue(/Private · Only I can see this/)).toBeTruthy();
+    expect(screen.queryByDisplayValue(/Private · Only I can see this/)).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: 'Confirm Import' }));
     await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(2));
@@ -153,7 +153,7 @@ test('a Twitter re-import sends the shown value, and the result says the entries
   fireEvent.click(screen.getByRole('button', { name: 'Confirm Import' }));
   expect(await screen.findByText('Import Finished', {}, { timeout: 4000 })).toBeTruthy();
   expect(confirmBody('/import/twitter/confirm').ai_usage).toBe('chat');
-  expect(screen.getByText(/their privacy and\s+AI-usage settings now match this import/)).toBeTruthy();
+  expect(screen.getByText(/their AI-usage\s+setting now matches this import/)).toBeTruthy();
 });
 
 test('a pick holds for its dialog; the next dialog opens at the account setting again', async () => {

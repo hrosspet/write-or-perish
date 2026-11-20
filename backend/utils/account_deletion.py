@@ -56,7 +56,7 @@ from backend.extensions import db
 from backend.models import (
     ApiToken, ChangelogReadState, CheckoutSession, DiscountCode,
     DiscountCodeAttempt,
-    DiscountRedemption, Node, Poll, Referral, ReleasedUsername, User,
+    DiscountRedemption, Invite, Node, Poll, Referral, ReleasedUsername, User,
     UserDataPurge, UsernameHistory,
 )
 from backend.utils import user_purge
@@ -292,6 +292,8 @@ def _hide(user, now):
     user.deleted_at = user.deleted_at or now
     user.magic_link_token_hash = None
     user.magic_link_expires_at = None
+    from backend.utils.sign_in_links import withdraw_links
+    withdraw_links(user.email)
     user.pending_email = None
     user.email_change_token_hash = None
     user.email_change_expires_at = None
@@ -593,13 +595,18 @@ def _reserve_usernames(handles, now):
             row.reserved_until = max(row.reserved_until, until)
 
 
-def delete_identity(user_id):
+def delete_identity(user_id, *, notify=True, reserve_handles=True):
     """Delete the account after its data has been purged. Flushes but
     does not commit: the caller commits it together with the job's
     "done", then calls the returned function for what happens outside
     the database (cache, email). Returns (counts, after_commit). Raises
     PurgeRefused, or PurgeIncomplete when anything of the user's is left
-    that the purge should have deleted."""
+    that the purge should have deleted.
+
+    A pre-filled account nobody claimed (#685) passes both False: nobody
+    ever had the account, so no email goes to an address the admin added,
+    and its handle is not held back from the person it belongs to, who
+    may sign up later (the account never had a public page to protect)."""
     from backend.utils.system_accounts import get_erased_system_user
 
     user = db.session.get(User, user_id)
@@ -657,6 +664,14 @@ def delete_identity(user_id):
     counts["discount_redemption.user_id"] += DiscountRedemption.query.filter(
         DiscountRedemption.user_id == U).update(
         {DiscountRedemption.user_id: None}, synchronize_session=False)
+    # One trial per card (#697): the card's mark stays without the account
+    # (a keyed hash and a date), so the card gets no second trial.
+    from backend.utils.trial_cards import detach_for_purge
+    counts["trial_card.user_id"] += detach_for_purge(U)
+    # The counts behind the checkout and sync limits (#697) go.
+    from backend.models import BillingRequest
+    counts["billing_request"] += BillingRequest.query.filter(
+        BillingRequest.user_id == U).delete(synchronize_session=False)
     counts["discount_code.created_by_id"] += DiscountCode.query.filter(
         DiscountCode.created_by_id == U).update(
         {DiscountCode.created_by_id: None}, synchronize_session=False)
@@ -672,6 +687,19 @@ def delete_identity(user_id):
     counts["referral.friend_id"] += Referral.query.filter(
         Referral.friend_id == U).update(
         {Referral.friend_id: None}, synchronize_session=False)
+    # Invites (#439): the account's own. An open one is withdrawn, and the
+    # handle or address of every one is deleted (the people it named may
+    # never have signed up); the row and its state stay, without the
+    # account, for a referral that points to it.
+    counts["invite.withdrawn"] += Invite.query.filter(
+        Invite.inviter_id == U, Invite.state == "open").update(
+        {Invite.state: "withdrawn", Invite.ended_at: datetime.utcnow()},
+        synchronize_session=False)
+    counts["invite.inviter_id"] += Invite.query.filter(
+        Invite.inviter_id == U).update(
+        {Invite.inviter_id: None, Invite.target: None,
+         Invite.target_x_id: None},
+        synchronize_session=False)
 
     handles = {(user.username or "").lower()}
     handles.update(h for (h,) in db.session.query(
@@ -689,9 +717,10 @@ def delete_identity(user_id):
                               + ", ".join(f"{k}={v}"
                                           for k, v in sorted(left.items())))
 
-    email = user.email
-    _reserve_usernames(handles, now)
-    counts["released_username"] += len([h for h in handles if h])
+    email = user.email if notify else None
+    if reserve_handles:
+        _reserve_usernames(handles, now)
+        counts["released_username"] += len([h for h in handles if h])
     db.session.expunge(user)
     counts["user"] += User.query.filter(User.id == U).delete(
         synchronize_session=False)

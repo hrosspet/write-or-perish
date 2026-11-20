@@ -127,6 +127,34 @@ enum SearchSnippet {
     }
 }
 
+/// What search the account gets (#684). Search by meaning sends the search words
+/// to an embedding model, so an account whose Default AI usage is None has none
+/// (Peter, 2026-11-13); the server refuses it with `ai_usage_none`. Admins keep
+/// their keyword search. Web `SearchModal`.
+enum SearchAccess: Equatable {
+    /// Search by meaning (and an admin's Keyword switch).
+    case semantic
+    /// An admin whose account is set to None: keyword search only.
+    case keywordOnly
+    /// The sheet says why there is no search.
+    case needsAI
+
+    static let title = "Search needs AI"
+    static let body = "Search needs AI to find things by meaning. Your Default AI usage is set to None, "
+        + "so Loore keeps your entries away from AI. You can change it in Account settings."
+
+    /// No user loaded yet: search by meaning, which the server refuses if it must.
+    static func decide(accountAIUsage: AIUsage?, isAdmin: Bool) -> SearchAccess {
+        guard let accountAIUsage, !accountAIUsage.allowsAI else { return .semantic }
+        return isAdmin ? .keywordOnly : .needsAI
+    }
+
+    /// The server's refusal (403 `ai_usage_none`): the setting changed elsewhere.
+    static func isRefusal(_ error: Error) -> Bool {
+        (error as? APIError)?.code == VoiceAIBlock.code
+    }
+}
+
 /// The search sheet (web `SearchModal`): a 300 ms debounce (every semantic
 /// search is billed), an admin-only Semantic/Keyword switch, a date range.
 struct SearchView: View {
@@ -136,7 +164,8 @@ struct SearchView: View {
     @Environment(AppState.self) private var app
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
-    @State private var semantic = true
+    @State private var chosenSemantic = true
+    @State private var refused = false
     @State private var showDates = false
     @State private var from: Date?
     @State private var to: Date?
@@ -150,7 +179,55 @@ struct SearchView: View {
 
     private var external: Bool { scope == .external }
 
+    private var access: SearchAccess {
+        SearchAccess.decide(accountAIUsage: app.user?.defaultAIUsage, isAdmin: app.capabilities.isAdmin)
+    }
+
+    private var searchOff: Bool { refused || access == .needsAI }
+
+    /// Search by meaning: the admin's choice, never for an account set to None.
+    private var semantic: Bool { chosenSemantic && access == .semantic }
+
     var body: some View {
+        if searchOff {
+            needsAIView
+        } else {
+            searchSheet
+        }
+    }
+
+    /// In place of the search box and its results (web `SearchNeedsAi`).
+    private var needsAIView: some View {
+        VStack(spacing: 0) {
+            Text(SearchAccess.title)
+                .font(LooreFont.serif(19.2, .light, italic: true, relativeTo: .title2))
+                .foregroundStyle(LooreColor.textMuted)
+                .padding(.bottom, 16)
+                .accessibilityAddTraits(.isHeader)
+            Text(SearchAccess.body)
+                .font(LooreFont.sans(14.4, .light))
+                .foregroundStyle(LooreColor.textSecondary)
+                .lineSpacing(5)
+                .frame(maxWidth: 340)
+                .padding(.bottom, 24)
+                .accessibilityIdentifier("search.needsAI")
+            Button("Account settings") {
+                dismiss()
+                app.open(.account(anchor: VoiceAIBlock.accountAnchor))
+            }
+            .buttonStyle(LooreButtonStyle(kind: .link))
+            .accessibilityIdentifier("search.needsAI.account")
+            Spacer(minLength: 0)
+        }
+        .multilineTextAlignment(.center)
+        .padding(.top, 40)
+        .padding(.horizontal, 24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(LooreColor.bgCard.ignoresSafeArea())
+        .presentationDragIndicator(.visible)
+    }
+
+    private var searchSheet: some View {
         VStack(spacing: 0) {
             inputRow
             HairlineDivider()
@@ -209,8 +286,8 @@ struct SearchView: View {
                 .submitLabel(.search)
                 .autocorrectionDisabled()
                 .accessibilityIdentifier("search.field")
-            if app.capabilities.isAdmin {
-                chip(semantic ? "Semantic" : "Keyword", on: semantic) { semantic.toggle() }
+            if app.capabilities.isAdmin && access == .semantic {
+                chip(semantic ? "Semantic" : "Keyword", on: semantic) { chosenSemantic.toggle() }
             }
             chip("Dates", on: showDates) { showDates.toggle() }
         }
@@ -340,6 +417,7 @@ struct SearchView: View {
             total = answer.total
         } catch {
             if (error as? APIError)?.isCancelled == true { return }
+            if SearchAccess.isRefusal(error) { refused = true }
             results = []
             total = 0
         }
