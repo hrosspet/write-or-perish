@@ -33,7 +33,7 @@ from backend.tests.test_retrieval_loop import (  # noqa: F401 (fixture)
     _ScriptedProvider, _build_chain, _mk_artifact, _mk_user, _resp, _fresh,
 )
 from backend.extensions import db as _db
-from backend.models import APICostLog, Node, User
+from backend.models import APICostLog, FeedRender, Node, User
 from backend.utils.thread_size import (
     CONTENT_TOO_LARGE_MESSAGE, REFUSED_MARKER, THREAD_LIMIT_REQUEST_TYPE,
     THREAD_TOO_LONG_MESSAGE, prompt_chars, thread_length,
@@ -286,13 +286,19 @@ def test_glean_again_counts_the_days_tweets(limited, monkeypatch, tmp_path):
     """A Glean thread with one chat turn measured, then Glean again on a
     day with many tweets: the day sits in the read prompt (the base's
     part, as a stub then), so base plus what was written since missed it.
-    The whole prompt is measured and the read is refused, no call."""
+    The whole prompt is measured. Until #717 the read was refused; now it
+    keeps the newest tweets that fit, and the prompt it sends is under
+    the limit (counted here at the "real" o200k ratio)."""
+    from backend.llm_providers import message_text
     from backend.tests.test_glean_again_new_day import (
         _gleaned_yesterday, _placeholder as _glean_placeholder, _corpus,
     )
     from backend.tests.test_read_context import _CapturingProvider
     from backend.utils import community_archive as ca
+    from backend.utils import tokens
     from backend.utils.ca_feed import READ_FURTHER_MARKER
+    monkeypatch.setattr(tokens, "local_token_counter", lambda model_id: (
+        lambda text: int(len(text or "") * REAL["gpt-5"])))
     limited.config["THREAD_PROMPT_TOKEN_LIMIT"] = 0
     state, alice, llm_user, read, gleaning, pick = _gleaned_yesterday(
         monkeypatch, tmp_path)
@@ -325,14 +331,26 @@ def test_glean_again_counts_the_days_tweets(limited, monkeypatch, tmp_path):
     again = _glean_placeholder(llm_user, alice, chat_reply.id,
                                meta=[{"name": READ_FURTHER_MARKER}])
     _CapturingProvider.kwargs = []
-    _CapturingProvider.reset([_resp("must not be sent")])
+    _CapturingProvider.reset([_resp(json.dumps(
+        {"verdict": "Nothing today.", "picks": []}))])
     monkeypatch.setattr(_llm_task_mod, "LLMProvider", _CapturingProvider)
     result = generate_llm_response(
         _FakeSelf(), chat_reply.id, again.id, "gpt-5", alice.id,
         source_mode=None, ca_live=True)
 
-    assert result["reason"] == "thread_too_long"
-    assert _CapturingProvider.calls == []
+    assert result.get("reason") != "thread_too_long"
+    assert len(_CapturingProvider.calls) == 1
+    raw = _CapturingProvider.calls[0]["raw"]
+    sent = sum(int(len(message_text(m)) * REAL["gpt-5"]) + 4 for m in raw)
+    assert sent <= LIMIT * 0.98
+    text = "".join(message_text(m) for m in raw)
+    # The newest tweets went (ids grow with time when the times tie), the
+    # oldest did not.
+    assert "# Tweets by u399 " in text and "# Tweets by u1 " not in text
+    row = FeedRender.query.filter_by(node_id=again.id).one()
+    assert 0 < row.tweet_count < len(big)
+    assert APICostLog.query.filter_by(
+        request_type=THREAD_LIMIT_REQUEST_TYPE).count() == 0
 
 
 # ── Review item 3: estimates never refuse or cut under the limit ────────

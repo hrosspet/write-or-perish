@@ -2,7 +2,8 @@
 // cached clip, or, where that can't play, with the browser's own speech.
 import {
   ACCESS_ENDED_SENTENCES, APPROVAL_REFUSAL, CLIP_START_TIMEOUT_MS,
-  LENGTH_REFUSAL, REFUSAL_SENTENCES, SENTENCE_AFTER_SOUND_MS,
+  GLEAN_DAY_DONE_REFUSAL, LENGTH_REFUSAL, REFUSAL_SENTENCES,
+  SENTENCE_AFTER_SOUND_MS,
   SENTENCE_HOLD_MAX_MS, SPEND_CAP_REFUSAL, THREAD_LIMIT_SPOKEN,
   isAccessEndedRefusal, refusalClipUrl, resetSpeechForTests, sayRefusal,
   soundThenSay, stopSpeaking,
@@ -76,6 +77,17 @@ test('plain words: no numbers, no prices, nothing about buying', () => {
     }
   });
   expect(REFUSAL_SENTENCES[LENGTH_REFUSAL]).toBe(THREAD_LIMIT_SPOKEN);
+});
+
+test('a Glean with nothing of the day left: the server\'s sentence, from its clip (#717)', () => {
+  // backend/utils/ca_feed.py GLEAN_DAY_DONE_MESSAGE.
+  expect(REFUSAL_SENTENCES[GLEAN_DAY_DONE_REFUSAL]).toBe(
+    "You've gleaned through all of today's tweets. New ones come in once a day.",
+  );
+  sayRefusal(GLEAN_DAY_DONE_REFUSAL);
+  jest.advanceTimersByTime(0);
+  expect(clips.map((c) => c.src)).toEqual([refusalClipUrl(GLEAN_DAY_DONE_REFUSAL)]);
+  expect(sounds).toBe(0);
 });
 
 test('a recording kept after the access ended: one sentence per reason, the server\'s', () => {

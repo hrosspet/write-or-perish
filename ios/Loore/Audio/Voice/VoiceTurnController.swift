@@ -1551,12 +1551,14 @@ final class VoiceTurnController {
         gleanTask = Task { [weak self] in
             guard let self else { return }
             var outcome: TaskStatus?
+            var answer: LLMStatus?
             while !Task.isCancelled, self.gleanPhase == .waiting(nodeId: id) {
                 do {
                     let status = try await self.backend.llmStatus(nodeId: id)
                     self.gleanLastAnswer = Date()
                     if let s = status.status, s.isTerminal {
                         outcome = s
+                        answer = status
                         break
                     }
                 } catch {
@@ -1571,10 +1573,30 @@ final class VoiceTurnController {
                let s = last.status, s.isTerminal {
                 // One more question before giving up: the gleaning may be in.
                 outcome = s
+                answer = last
             }
             guard !Task.isCancelled, self.gleanPhase == .waiting(nodeId: id) else { return }
+            if outcome == .failed, let refusal = SpokenRefusal(code: answer?.errorCode),
+               refusal == .gleanedThrough {
+                self.gleanRefused(refusal, message: answer?.error)
+                return
+            }
             self.gleaningLanded(id, outcome)
         }
+    }
+
+    /// The thread has gleaned all of today's tweets (#717): the server refused the
+    /// Glean before any model call. Said aloud and shown, as the other refusals
+    /// are (web: VoicePage); the Voice screen stays, as there is no gleaning to
+    /// open, and the conversation stays where it was, Glean under the same message.
+    private func gleanRefused(_ refusal: SpokenRefusal, message: String?) {
+        gleanPhase = .idle
+        gleanTask = nil
+        gleanInactiveSince = nil
+        gleaningDone = false
+        audio.refreshNowPlaying()
+        notices.toast(message ?? refusal.text, duration: 8)
+        speakThenDeactivate(refusal)
     }
 
     /// The wait's limits (`llmGiveUp` in all, `llmErrorGiveUp` without an

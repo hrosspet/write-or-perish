@@ -2455,23 +2455,30 @@ class FeedRender(db.Model):
     # UTC bounds of the window the tweets were taken from.
     window_start = db.Column(db.DateTime, nullable=True)
     window_end = db.Column(db.DateTime, nullable=True)
+    # A read of part of the window (#717: the newest tweets that fit the
+    # prompt, or the next older ones after the thread's earlier reads):
+    # when its oldest and newest tweet were posted (UTC). Null when the
+    # read had the whole window (every read before #717).
+    page_start = db.Column(db.DateTime, nullable=True)
+    page_end = db.Column(db.DateTime, nullable=True)
     tweet_count = db.Column(db.Integer, nullable=False, default=0)
     account_count = db.Column(db.Integer, nullable=False, default=0)
     # Tweets in the window the reader had already marked read (any row
-    # of the tweet, #352) and that therefore never reached the model. A
-    # read again that keeps the list of the read before it (#511) leaves
-    # out the same tweets; the ones read since stay in its list, and a
-    # note tells the model they are not candidates.
+    # of the tweet, #352) and that therefore never reached the model.
+    # (From #511 until #717 a read again on the same export kept the list
+    # of the read before it; its rows count that list's exclusions.)
     excluded_count = db.Column(db.Integer, nullable=False, default=0)
     # Comma-joined tweet ids in render order: index i (0-based) is the
-    # tweet the model saw as #i+1. ~100 KB for a day of the archive.
+    # tweet the model saw as #i+1. ~100 KB for a day of the archive. The
+    # next read in the thread leaves these out (#717,
+    # ca_feed.gleaned_tweet_ids).
     tweet_ids = db.Column(db.Text, nullable=False, default="")
     # How many of the model's picks the collect could not show
     # (ca_feed.count_dropped_picks, on the batch collect and the admin's
     # live rerun alike; 2026-10-02): the tweet behind the number is no
     # longer in the archive snapshot, or the number is outside the render,
-    # or (a live read again that kept the earlier list, #511) the reader
-    # has read the tweet since that list was made. Each number once; a
+    # or (a live read again that kept the earlier list, #511 until #717)
+    # the reader had read the tweet since that list was made. Each number once; a
     # number cited only in the verdict is no pick. With no FeedPick row on the reply, a positive count means
     # every pick was dropped, and 0 means the model picked nothing.
     # Replies collected before the column existed read 0 either way.

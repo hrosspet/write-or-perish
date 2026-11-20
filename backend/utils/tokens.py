@@ -1,6 +1,11 @@
 """
 Token estimation utilities for LLM context management.
 """
+import logging
+import os
+import pathlib
+import threading
+
 from flask import current_app
 
 
@@ -40,6 +45,102 @@ def tokenizer_family(model_id):
     if family in TOKENIZER_FAMILIES:
         return family
     return _FAMILY_BY_PROVIDER.get(cfg.get("provider"), "claude_new")
+
+
+# The o200k_base encoding, loaded once per process at its first use
+# (local_token_counter): "enc" once loaded; "failed" when that load did
+# not finish in time, after which the process estimates instead and never
+# tries again; "error" the failure's type, for the one log line.
+_O200K = {}
+_O200K_LOCK = threading.Lock()
+
+# Heuristic (#717): how long the first count in a process waits for
+# tiktoken to load o200k_base. From its cache folder that takes well under
+# a second; the first use on a machine downloads the file (about 3.6 MB)
+# into the folder, and tiktoken's download has no timeout of its own.
+O200K_LOAD_TIMEOUT_SECONDS = 10
+
+
+def tiktoken_cache_dir(config=None):
+    """Where tiktoken keeps its encoding files: TIKTOKEN_CACHE_DIR (the
+    variable tiktoken reads itself), else ``<data>/tiktoken`` beside the
+    audio, import and Community Archive folders (the
+    tasks.imports.snapshot_dir_for pattern). tiktoken's own default is the
+    temp folder, which a restart or a clean-up may empty, and then the next
+    count downloads the file again."""
+    cfg = config if config is not None else current_app.config
+    configured = cfg.get("TIKTOKEN_CACHE_DIR")
+    if configured:
+        return pathlib.Path(configured)
+    from backend.utils.twitter_archive import STASH_ROOT
+    return STASH_ROOT.parent / "tiktoken"
+
+
+def _load_o200k(timeout):
+    """o200k_base, or None when it did not load within *timeout* seconds
+    (tiktoken missing, the file not cached and its host not reachable, a
+    download that hangs). The load runs in its own thread, so the count
+    waits at most *timeout*; a load that finishes later still leaves the
+    encoding for the process's next count."""
+    try:
+        folder = tiktoken_cache_dir()
+        folder.mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault("TIKTOKEN_CACHE_DIR", str(folder))
+    except Exception as e:  # noqa: BLE001 - tiktoken then uses its own default
+        _O200K["error"] = f"cache folder: {type(e).__name__}"
+    done = threading.Event()
+
+    def load():
+        try:
+            import tiktoken
+            _O200K["enc"] = tiktoken.get_encoding("o200k_base")
+        except Exception as e:  # noqa: BLE001 - reported by the caller
+            _O200K["error"] = type(e).__name__
+        finally:
+            done.set()
+
+    threading.Thread(target=load, name="tiktoken-o200k", daemon=True).start()
+    if not done.wait(timeout):
+        _O200K.setdefault("error", f"not loaded within {timeout} s")
+    return _O200K.get("enc")
+
+
+def _o200k_encoding():
+    """The process's o200k_base, loaded at the first call (_load_o200k),
+    or None for good after a load that failed: one WARNING line per
+    process, and no new attempt on every Glean."""
+    enc = _O200K.get("enc")
+    if enc is not None or _O200K.get("failed"):
+        return enc
+    with _O200K_LOCK:
+        enc = _O200K.get("enc")
+        if enc is None and not _O200K.get("failed"):
+            enc = _load_o200k(O200K_LOAD_TIMEOUT_SECONDS)
+            if enc is None:
+                _O200K["failed"] = True
+                logging.getLogger(__name__).warning(
+                    "tiktoken's o200k_base is not available (%s); this "
+                    "process fits Glean lists by the estimate",
+                    _O200K.get("error") or "unknown")
+    return enc
+
+
+def local_token_counter(model_id):
+    """A function text -> tokens that counts on this machine, for a model
+    whose tokenizer is o200k (OpenAI's GPT-5.x and later, which bill
+    with it: tiktoken's o200k_base, no request), or None: another
+    tokenizer family (Anthropic counts only through its endpoint), or
+    the encoding not available in this process (_o200k_encoding). Used to
+    fit a Glean's tweets to its prompt (#717)."""
+    if tokenizer_family(model_id) != "o200k":
+        return None
+    enc = _o200k_encoding()
+    if enc is None:
+        return None
+
+    def count(text):
+        return len(enc.encode(text or "", disallowed_special=()))
+    return count
 
 
 def approximate_token_count(text: str) -> int:

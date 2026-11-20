@@ -8,8 +8,14 @@ let mockUserCtx;
 jest.mock('../contexts/UserContext', () => ({
   useUser: () => mockUserCtx,
 }));
+const mockAddToast = jest.fn();
 jest.mock('../contexts/ToastContext', () => ({
-  useToast: () => ({ addToast: jest.fn(), removeToast: jest.fn() }),
+  useToast: () => ({ addToast: mockAddToast, removeToast: jest.fn() }),
+}));
+const mockSayRefusal = jest.fn();
+jest.mock('../utils/spokenRefusal', () => ({
+  ...jest.requireActual('../utils/spokenRefusal'),
+  sayRefusal: (...args) => mockSayRefusal(...args),
 }));
 const mockGet = jest.fn();
 const mockPost = jest.fn();
@@ -48,11 +54,16 @@ let mockThreadParent = null;
 // The glean's own poll: what the provider has done so far.
 let mockGleanStatus = null;
 let mockGleanError = null;
+let mockGleanData = null;
 const mockPoll = jest.fn();
 jest.mock('../hooks/useAsyncTaskPolling', () => ({
   useAsyncTaskPolling: (endpoint, options) => {
     mockPoll(endpoint, options);
-    return { status: endpoint ? mockGleanStatus : null, data: null, error: endpoint ? mockGleanError : null };
+    return {
+      status: endpoint ? mockGleanStatus : null,
+      data: endpoint ? mockGleanData : null,
+      error: endpoint ? mockGleanError : null,
+    };
   },
 }));
 jest.mock('../components/OfflineBanner', () => () => null);
@@ -92,6 +103,9 @@ beforeEach(() => {
   mockThreadParent = null;
   mockGleanStatus = null;
   mockGleanError = null;
+  mockGleanData = null;
+  mockAddToast.mockReset();
+  mockSayRefusal.mockReset();
   mockPhase = 'ready';
   mockGet.mockImplementation((url) => {
     if (url === '/drafts/interrupted') return Promise.resolve({ data: [] });
@@ -185,6 +199,38 @@ test('a poll that gives up opens the thread page instead of staying on "Gleaning
   mockGleanError = 'Polling timeout - task took too long';
   act(() => { mockSessionOptions.onLLMComplete(42, ''); });
   await waitFor(() => expect(screen.getByText('Thread page 57')).toBeInTheDocument());
+});
+
+test('a thread that has gleaned all of today\'s tweets: said aloud, and the Voice screen stays (#717)', async () => {
+  renderAt('/voice?parent=42&glean=1');
+  await screen.findByText("What's on your mind?");
+  mockPost.mockResolvedValue({ data: { llm_node_id: 57 } });
+  await act(async () => { fireEvent.click(glean()); });
+
+  const text = "You've gleaned through all of today's tweets. New ones come in once a day.";
+  mockGleanStatus = 'failed';
+  mockGleanError = text;
+  mockGleanData = { status: 'failed', error: text, error_code: 'glean_day_done' };
+  act(() => { mockSessionOptions.onLLMComplete(42, ''); });
+
+  await waitFor(() => expect(mockSayRefusal).toHaveBeenCalledWith('glean_day_done'));
+  expect(mockAddToast).toHaveBeenCalledWith(text, 8000);
+  expect(screen.queryByText('Thread page 57')).toBeNull();
+  // Back to Glean, no longer waiting.
+  await waitFor(() => expect(glean()).toHaveTextContent(/^Glean$/));
+});
+
+test('another failed gleaning still opens in text mode, unsaid', async () => {
+  renderAt('/voice?parent=42&glean=1');
+  await screen.findByText("What's on your mind?");
+  mockPost.mockResolvedValue({ data: { llm_node_id: 57 } });
+  await act(async () => { fireEvent.click(glean()); });
+  mockGleanStatus = 'failed';
+  mockGleanError = 'The model refused this Glean.';
+  mockGleanData = { status: 'failed', error: 'The model refused this Glean.' };
+  act(() => { mockSessionOptions.onLLMComplete(42, ''); });
+  await waitFor(() => expect(screen.getByText('Thread page 57')).toBeInTheDocument());
+  expect(mockSayRefusal).not.toHaveBeenCalled();
 });
 
 test('a session continuing a Glean-card thread shows Glean at once', async () => {

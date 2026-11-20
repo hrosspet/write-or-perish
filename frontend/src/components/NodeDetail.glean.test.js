@@ -146,6 +146,26 @@ const gleanButton = () => Array.from(
 // have no children.
 const openMenu = () => fireEvent.click(screen.getAllByRole('button', { name: 'More actions' }).at(-1));
 
+describe('the thread length the server answers (#717)', () => {
+  // The server no longer counts a refused Glean's own prompt (a day of
+  // tweets) as the thread's length, so a thread where a Glean was refused
+  // answers no limit, and the page offers Glean again (LLM Response:
+  // NodeDetail.threadLength.test.js).
+  test('no limit: Glean is offered', async () => {
+    routes['/nodes/30'] = reply({ glean_thread: true, thread_length: null });
+    renderAt('/node/30');
+    await screen.findByText(/fork in the road/);
+    expect(gleanButton()).toBeInTheDocument();
+  });
+
+  test('at the limit: no Glean', async () => {
+    routes['/nodes/30'] = reply({ glean_thread: true, thread_length: 'limit' });
+    renderAt('/node/30');
+    await screen.findByText(/fork in the road/);
+    expect(gleanButton()).toBeNull();
+  });
+});
+
 describe('a thread started from the Glean card', () => {
   test('offers the Glean button with its model picker, and no menu entry', async () => {
     routes['/nodes/30'] = reply({ glean_thread: true });
