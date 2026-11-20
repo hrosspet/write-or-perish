@@ -19,6 +19,7 @@ from backend.utils.privacy import VALID_PRIVACY_LEVELS, VALID_AI_USAGE
 from backend.routes.terms import CURRENT_TERMS_VERSION
 from backend.utils.reserved_usernames import validate_username
 from backend.utils.spend import spend_cap_payload, user_is_capped
+from backend.utils.subscriptions import user_payload_fields
 from backend.utils.llm_nodes import effective_preferred_model, is_chat_model
 from backend.utils.own_entries import has_own_entries
 from backend.utils.user_purge import deletion_status
@@ -152,6 +153,10 @@ def _serialize_current_user():
         # "Delete my account" (#269): the numbers the Account page
         # states, and why the account cannot be deleted, if it can't.
         "account_deletion": account_deletion_info(current_user),
+        # Payments (#438), only while PAYMENTS_ENABLED is on:
+        # payments_enabled and the subscription's state (level, status,
+        # dates, whether AI replies are on). Off: no key at all.
+        **user_payload_fields(current_user),
     }
 
 
@@ -169,7 +174,11 @@ def get_dashboard():
     dashboard = {
         "user": _serialize_current_user(),
     }
-    if request.args.get("profile") != "0":
+    # Payments on (#438): an account not let in yet reads nothing, its
+    # profile included.
+    from backend.utils.subscriptions import access_state
+    if request.args.get("profile") != "0" and \
+            access_state(current_user) != "none":
         dashboard["latest_profile"] = get_latest_profile(current_user)
     return jsonify(dashboard), 200
 

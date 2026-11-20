@@ -279,6 +279,11 @@ def create_app():
     app = Flask(__name__)
     app.config.from_object(Config)
     validate_default_model(app.config)
+    # Payments (#438): never on in production with a sandbox key.
+    from backend.utils.subscriptions import check_payments_config
+    _payments_off = check_payments_config(app.config)
+    if _payments_off:
+        app.logger.error(_payments_off)
 
     # Fix for running behind nginx reverse proxy - handles X-Forwarded-* headers
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
@@ -379,6 +384,14 @@ def create_app():
 
         # For HTML (or non-JSON) requests, redirect to the landing page with an alpha flag.
         return redirect("/landing?alpha=1")
+
+    # Payments on (#438): an approved account that never had a subscription
+    # (and whose plan was not set by hand) reaches only who-am-I, its
+    # subscription, the terms and deleting itself; every other /api and
+    # /media route answers 402 {"error": "no_subscription"}. No-op while
+    # payments are off.
+    from backend.utils.subscriptions import block_accounts_without_subscription
+    app.before_request(block_accounts_without_subscription)
     # --------------------------------------------------------------------
 
     # Initialize Twitter blueprint.
@@ -463,9 +476,18 @@ def create_app():
     from backend.routes.updates import updates_bp
     app.register_blueprint(updates_bp, url_prefix="/api/updates")
 
-    # Inbound webhooks (GitHub issue-close → fix_ready notification).
+    # Inbound webhooks (GitHub issue-close → fix_ready notification;
+    # Stripe subscription events, #438).
     from backend.routes.webhooks import webhooks_bp
     app.register_blueprint(webhooks_bp, url_prefix="/api/webhooks")
+
+    # The signed-in user's subscription (#438): 404 unless PAYMENTS_ENABLED.
+    from backend.routes.billing import billing_bp
+    app.register_blueprint(billing_bp, url_prefix="/api/billing")
+
+    # The invite link (#439): 404 unless payments and referrals are on.
+    from backend.routes.referrals import referrals_bp
+    app.register_blueprint(referrals_bp, url_prefix="/api/referrals")
 
     # AI preferences folded into the artifact model (#158 Slice 5): managed via
     # the generic /api/artifacts CRUD (kind="ai_preferences"); the dedicated
@@ -507,6 +529,21 @@ def create_app():
         from flask_login import current_user
         from backend.utils.spend import spend_cap_response
         return spend_cap_response(current_user)
+
+    # Payments on (#438): a reply for an account without AI replies (no
+    # subscription, or one that ended) raises SubscriptionRequired in
+    # create_llm_placeholder before any write; any route that lets it
+    # escape answers 402 {"error": "subscription_required", "message"}.
+    # Whatever the route flushed before the call is not kept.
+    from backend.utils.subscriptions import SubscriptionRequired
+
+    @app.errorhandler(SubscriptionRequired)
+    def _handle_subscription_required(exc):
+        from flask import jsonify as _jsonify
+        from backend.extensions import db
+        db.session.rollback()
+        return _jsonify({"error": "subscription_required",
+                         "message": exc.message}), 402
 
     # A reply (or a Voice turn) where AI may not read: create_llm_placeholder
     # raises AIUsageRefused before any write. Routes answer it themselves
@@ -568,6 +605,10 @@ def create_app():
     )
     app.cli.add_command(pgvector_enable_command)
     app.cli.add_command(pgvector_compare_command)
+    from backend.billing_cli import (
+        alpha_free_month_command, stripe_sync_catalog_command)
+    app.cli.add_command(stripe_sync_catalog_command)
+    app.cli.add_command(alpha_free_month_command)
 
     try:
         from experiments.prompt_rct.run_rct import rct_cli

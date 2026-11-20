@@ -7,13 +7,18 @@ def _get_serializer():
     return URLSafeTimedSerializer(current_app.config["SECRET_KEY"])
 
 
-def generate_magic_link_token(email, next_url=None, max_age=None):
+def generate_magic_link_token(email, next_url=None, max_age=None,
+                              invite=None):
+    """*invite*: the invite code the sign-in came with (#439), carried in
+    the signed token so it survives opening the link in another browser."""
     s = _get_serializer()
     payload = {"email": email}
     if next_url:
         payload["next_url"] = next_url
     if max_age:
         payload["max_age"] = max_age
+    if invite:
+        payload["invite"] = invite
     return s.dumps(payload, salt="magic-link")
 
 

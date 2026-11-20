@@ -54,7 +54,9 @@ from sqlalchemy import func, null, or_
 
 from backend.extensions import db
 from backend.models import (
-    ApiToken, ChangelogReadState, Node, Poll, ReleasedUsername, User,
+    ApiToken, ChangelogReadState, CheckoutSession, DiscountCode,
+    DiscountCodeAttempt,
+    DiscountRedemption, Node, Poll, Referral, ReleasedUsername, User,
     UserDataPurge, UsernameHistory,
 )
 from backend.utils import user_purge
@@ -382,6 +384,11 @@ def schedule_account_deletion(user, *, requested_by_id, source, at=None):
     _hide(user, now)
     db.session.commit()
     _drop_public_pages(user)
+    # A running subscription (#438) does not renew during the grace
+    # period: it ends with the period already paid. Best effort; the
+    # purge cancels whatever still runs.
+    from backend.utils.stripe_billing import stop_renewal_for_deletion
+    stop_renewal_for_deletion(user)
     logger.warning("Account deletion of user %s scheduled for %s (job %s, "
                    "%s by %s)", user.id, due, job.id, source, requested_by_id)
     return job
@@ -407,6 +414,10 @@ def restore_account(user):
         db.session.rollback()
         return False
     user.deleted_at = None
+    # An "alpha" account that was waiting to be deleted when the alpha free
+    # month was given gets the same month now (#438).
+    from backend.utils.subscriptions import convert_if_alpha
+    convert_if_alpha(user)
     db.session.commit()
     user_purge.settle_restore(cancelled)
     _drop_public_pages(user)
@@ -462,6 +473,10 @@ def undo_admin_deletion(job_id, admin_id):
         db.session.rollback()
         return False
     user.deleted_at = None
+    # An "alpha" account that was waiting to be deleted when the alpha free
+    # month was given gets the same month now (#438).
+    from backend.utils.subscriptions import convert_if_alpha
+    convert_if_alpha(user)
     db.session.commit()
     if not replaced:
         user_purge.settle_restore(cancelled)
@@ -613,6 +628,50 @@ def delete_identity(user_id):
         synchronize_session=False)
     counts["poll.created_by"] += Poll.query.filter(Poll.created_by == U).update(
         {Poll.created_by: None}, synchronize_session=False)
+    # Payments (#438). A subscription that still runs is cancelled at
+    # Stripe first; while Stripe can't be reached the deletion waits and
+    # is tried again. Stripe keeps its own records of the purchase (it is
+    # the merchant of record). A code's uses stay counted without the
+    # account; the codes the account tried and its checkouts go.
+    from backend.utils.stripe_billing import (
+        BillingNotConfigured, cancel_for_purge, delete_customer_for_purge)
+    try:
+        if cancel_for_purge(user):
+            counts["stripe_subscription_cancelled"] += 1
+        # The Stripe customer goes too: the name, email and address
+        # Checkout asked for do not outlive the account.
+        if delete_customer_for_purge(user):
+            counts["stripe_customer_deleted"] += 1
+    except BillingNotConfigured:
+        # No Stripe key on this server (payments taken down): waiting
+        # would never end. The deletion goes on; the job's counts and the
+        # log say what is left at Stripe, for an admin to remove there.
+        counts["stripe_not_removed_no_key"] += 1
+        logger.error("Account of user %s deleted with its Stripe customer "
+                     "%s (subscription %s) left at Stripe: no Stripe key "
+                     "configured", U, user.stripe_customer_id,
+                     user.stripe_subscription_id)
+    except Exception as e:  # noqa: BLE001 - retried with the purge
+        raise PurgeIncomplete("the subscription or the customer could not "
+                              f"be removed at Stripe ({type(e).__name__})")
+    counts["discount_redemption.user_id"] += DiscountRedemption.query.filter(
+        DiscountRedemption.user_id == U).update(
+        {DiscountRedemption.user_id: None}, synchronize_session=False)
+    counts["discount_code.created_by_id"] += DiscountCode.query.filter(
+        DiscountCode.created_by_id == U).update(
+        {DiscountCode.created_by_id: None}, synchronize_session=False)
+    counts["discount_code_attempt"] += DiscountCodeAttempt.query.filter(
+        DiscountCodeAttempt.user_id == U).delete(synchronize_session=False)
+    counts["checkout_session"] += CheckoutSession.query.filter(
+        CheckoutSession.user_id == U).delete(synchronize_session=False)
+    # Referrals (#439): the row stays for the other account's history,
+    # without the deleted one.
+    counts["referral.inviter_id"] += Referral.query.filter(
+        Referral.inviter_id == U).update(
+        {Referral.inviter_id: None}, synchronize_session=False)
+    counts["referral.friend_id"] += Referral.query.filter(
+        Referral.friend_id == U).update(
+        {Referral.friend_id: None}, synchronize_session=False)
 
     handles = {(user.username or "").lower()}
     handles.update(h for (h,) in db.session.query(

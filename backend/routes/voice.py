@@ -110,6 +110,13 @@ def create_voice_from_node(node_id):
     # thread's length, as at streaming init: the change needs a decision
     # first, and the length is asked at the next Record press.
     if not is_llm:
+        # Payments on and no AI replies for this account (#438): refused
+        # before the waiting change and the length, as in the other Voice
+        # entry points, so nothing is written.
+        from backend.utils.subscriptions import (
+            ai_replies_allowed, subscription_required_response)
+        if not ai_replies_allowed(current_user):
+            return subscription_required_response(current_user)
         from backend.utils.tool_approvals import waiting_in_thread
         if waiting_in_thread(current_user.id, node):
             return _ready_under(node, has_prompt, ai_usage)
@@ -262,6 +269,12 @@ def create_voice_session():
     refused = read_only_model_refusal(model_id, parent_node, new_entry=True)
     if refused is not None:
         return read_only_model_response(refused)
+    # Nor while payments are on for an account without AI replies (#438):
+    # Voice mode stops with the subscription.
+    from backend.utils.subscriptions import (
+        ai_replies_allowed, subscription_required_response)
+    if not ai_replies_allowed(current_user):
+        return subscription_required_response(current_user)
     # Nor while a change the AI proposed in this thread waits for the
     # user's approval (Peter, 2026-11-12): 409, nothing written. Asked
     # before the thread's length, as at streaming init: the change needs a
@@ -401,16 +414,19 @@ def voice_availability():
 # queue. So that when it's not pending, it's not voiced out anymore"
 
 def _announcement_access_refusal():
-    """The access check of the other routes that serve speech (POST
+    """The access checks of the other routes that serve speech (POST
     /nodes/<id>/tts): Voice mode on the account (403, the shape of
-    nodes.voice_mode_required), so no clip is made, or billed, for an
-    account that may not use Voice. None when the account may have the
-    clip. The players take a refusal quietly: the reply plays alone, and
-    a refusal's sentence is said with the device's speech (#651)."""
+    nodes.voice_mode_required), then, while payments are on, the paid
+    feature set (402), so no clip is made, or billed, for an account that
+    may not use Voice or has no paid features. None when the account may
+    have the clip. The players take a refusal quietly: the reply plays
+    alone, and a refusal's sentence is said with the device's speech
+    (#651)."""
     if not current_user.has_voice_mode:
         return jsonify(
             {"error": "Voice mode not enabled for this account"}), 403
-    return None
+    from backend.utils.subscriptions import refuse_without_paid_features
+    return refuse_without_paid_features(current_user)
 
 
 @voice_bp.route("/approval-announcement", methods=["GET"])

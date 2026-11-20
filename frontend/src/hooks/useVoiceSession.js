@@ -11,6 +11,7 @@ import { useToast } from '../contexts/ToastContext';
 import api from '../api';
 import * as voiceTiming from '../utils/voiceTiming';
 import { isAiUsageRefusedError, aiUsageRefusalScope } from '../utils/aiUsage';
+import { isSubscriptionRequiredError } from '../utils/subscription';
 import {
   THREAD_TOO_LONG_CODE, isThreadTooLong, primeSpeech,
   soundThenSay, stopSpeaking,
@@ -450,7 +451,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
 
       // Refused by the monthly spend cap before the mic opened (#341). The
       // recorder already showed a toast; return to ready, not an error.
-      if (err?.spendCapped) {
+      if (err?.spendCapped || err?.subscriptionRequired) {
         stopSilentAudio();
         setIsStopping(false);
         setPhase('ready');
@@ -608,6 +609,13 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
         if (isAiUsageRefusedError(err) && onAiUsageRefusedRef.current) {
           setPhase('ready');
           onAiUsageRefusedRef.current(aiUsageRefusalScope(err));
+          return;
+        }
+        // Payments on, no AI replies (#438): the banner (raised by the api
+        // interceptor) says why and links to Settings; no failure toast
+        // with the raw code.
+        if (isSubscriptionRequiredError(err)) {
+          setPhase('ready');
           return;
         }
         // A change waits for the user's approval in this thread: the page

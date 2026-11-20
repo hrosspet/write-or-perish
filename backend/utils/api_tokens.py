@@ -76,6 +76,9 @@ def token_or_login_required(scope):
     silent fallback would hide a revoked token behind a logged-in tab.
     """
     def decorator(fn):
+        # Marks the view, so a test can list every token-accepting route.
+        fn.accepts_api_token = scope
+
         @wraps(fn)
         def wrapper(*args, **kwargs):
             bearer = _bearer_from_request()
@@ -83,6 +86,13 @@ def token_or_login_required(scope):
                 row = resolve_api_token(bearer, scope)
                 if row is None:
                     return jsonify({"error": "invalid_token"}), 401
+                # The session's before_request gate (#438) sees only
+                # flask-login users: the same access rule for the
+                # token's account.
+                from backend.utils.subscriptions import refuse_not_let_in
+                refused = refuse_not_let_in(row.user)
+                if refused is not None:
+                    return refused
                 g.api_user = row.user
                 g.api_token = row
                 return fn(*args, **kwargs)
