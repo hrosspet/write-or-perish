@@ -636,9 +636,11 @@ def create_app():
     app.cli.add_command(pgvector_enable_command)
     app.cli.add_command(pgvector_compare_command)
     from backend.billing_cli import (
-        alpha_free_month_command, stripe_sync_catalog_command)
+        alpha_free_month_command, stripe_forget_customer_command,
+        stripe_sync_catalog_command)
     app.cli.add_command(stripe_sync_catalog_command)
     app.cli.add_command(alpha_free_month_command)
+    app.cli.add_command(stripe_forget_customer_command)
     from backend.unclaimed_cli import unclaimed_accounts_command
     app.cli.add_command(unclaimed_accounts_command)
 

@@ -162,6 +162,12 @@ class User(db.Model, UserMixin):
     # keeps the ids and the state, no payment details.
     stripe_customer_id = db.Column(db.String(255), nullable=True,
                                    unique=True)
+    # How many times the admin cleared stripe_customer_id because Stripe
+    # no longer had that customer (#718, `flask stripe-forget-customer`).
+    # Part of the create-customer idempotency key: Stripe answers a key's
+    # first request again for 24 hours, which would give back the deleted
+    # customer. NULL: never cleared.
+    stripe_customer_cleared_count = db.Column(db.Integer, nullable=True)
     stripe_subscription_id = db.Column(db.String(255), nullable=True,
                                        index=True)
     # SUBSCRIPTION_LEVELS, from the subscription's price; NULL: none.
