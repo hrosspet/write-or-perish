@@ -9,6 +9,7 @@ import SwiftUI
 /// shown after the user's own deletion.
 struct RootView: View {
     @Environment(AppState.self) private var app
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         @Bindable var router = app.router
@@ -35,6 +36,11 @@ struct RootView: View {
         .animation(LooreMotion.quick, value: app.phase)
         .animation(LooreMotion.quick, value: app.needsTerms)
         .task { await app.start() }
+        // Payments (#438): a subscription started or ended on the web shows
+        // when the app comes back, not only at the next launch.
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { Task { await app.refreshPayments() } }
+        }
     }
 
     @ViewBuilder private var content: some View {
@@ -50,12 +56,29 @@ struct RootView: View {
         case .accountDeleted(let deleteOn):
             AccountDeletedView(deleteOn: deleteOn)
         case .signedIn:
-            if app.isApproved {
+            if app.isApproved, Self.showsNoSubscription(user: app.user,
+                                                        recordingInProgress: app.audio.recordingInProgress) {
+                // Payments on, no subscription yet (#438).
+                NoSubscriptionView()
+            } else if app.isApproved {
                 MainTabView()
+            } else if app.user?.accountBlocked == true {
+                // Payments on: the admin blocked it (#697); nobody else waits.
+                AccountNotActiveView()
             } else {
                 WaitlistView()
             }
         }
+    }
+
+    /// Payments on (#438): the not-let-in screen, except while a recording is in
+    /// progress. When the account stops being let in during a recording (a trial
+    /// whose first payment fails), the server still takes that recording's chunks
+    /// and finalize; the screen it is made on stays until its transcript is in
+    /// (or the upload is finalized), so nothing recorded is lost. Then the
+    /// not-let-in screen shows.
+    static func showsNoSubscription(user: CurrentUser?, recordingInProgress: Bool) -> Bool {
+        user?.notLetIn == true && !recordingInProgress
     }
 
     /// The Updates sheet shows only when nothing blocks it (never over Terms).
@@ -83,9 +106,14 @@ private struct BottomNotices: View {
             if let message = app.spendCapBannerMessage {
                 SpendCapBanner(message: message) { app.spendCapBannerMessage = nil }
             }
+            // Payments on, no AI replies (#438): the server's message, no link.
+            if let message = app.subscriptionBannerMessage {
+                SpendCapBanner(message: message, eyebrow: "REPLIES PAUSED") { app.subscriptionBannerMessage = nil }
+            }
         }
         .padding(.bottom, bottomOffset)
         .animation(LooreMotion.quick, value: app.spendCapBannerMessage)
+        .animation(LooreMotion.quick, value: app.subscriptionBannerMessage)
     }
 }
 

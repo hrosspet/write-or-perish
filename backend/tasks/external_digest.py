@@ -38,12 +38,15 @@ from backend.utils.cost import llm_cost_log_fields
 from backend.utils import refusal_backoff
 from backend.utils.refusal_backoff import REFUSED_REF
 from backend.utils.privacy import account_allows_ai
+from backend.utils.approval import background_work_allowed, is_blocked
 from backend.utils.llm_batch import (
     BATCH_JOB_MAX_AGE, apply_batch_key_override, batch_check_and_collect,
-    batch_submit, blocked_items,
+    batch_submit, blocked_items, drop_openai_batch,
 )
+from backend.utils import anthropic_batch_deletion
 from backend.utils.timefmt import user_local_hour
 
+from backend.utils.activity import in_use_user_ids
 from backend.utils.hidden_rows import account_on_hold, corpus_changed
 
 logger = get_task_logger(__name__)
@@ -348,6 +351,9 @@ def _submit_digest_batch(users):
         ]
         db.session.add(ExternalDigestBatchJob(
             provider_key=provider_key, batch_id=batch_id, items=items))
+        # Deleted at Anthropic once the job is no longer pending (#693).
+        anthropic_batch_deletion.register(
+            provider_key, batch_id, ExternalDigestBatchJob.__tablename__)
         submitted += len(items)
     db.session.commit()
     # batch_submit logs (not raises) a provider's failure; those users
@@ -364,15 +370,26 @@ def sweep_external_digests():
     This is the ONLY scheduled dispatcher. Saving a reference (clipper,
     import, bookmark sync) deliberately does not rebuild — a burst of
     clips would otherwise pay for one whole-corpus LLM call each.
+
+    Accounts nobody uses (#647): no digest while the owner has not used
+    Loore for UNUSED_ACCOUNT_PAUSE_DAYS (utils/activity.in_use_user_ids).
+    The digest stays stale meanwhile, so it is rebuilt once, from the whole
+    corpus, in the owner's first night after they are back.
     """
     with flask_app.app_context():
         stale_ids = set(_stale_user_ids()) - _users_in_pending_batches()
         if not stale_ids:
             return {"status": "ok", "submitted": 0}
+        in_use = in_use_user_ids(stale_ids, flask_app.config)
         due = [
             user for user in User.query.filter(User.id.in_(stale_ids)).all()
             if user_local_hour(user) == NIGHTLY_DIGEST_LOCAL_HOUR
+            and user.id in in_use   # #647: paused while nobody uses it
             and account_allows_ai(user)   # #346
+            # Payments on: no background model call for an account
+            # without the paid set (#438), or one the admin blocked
+            # (#697); always True while off.
+            and background_work_allowed(user)
             and user.deleted_at is None   # hidden: account deleted (#269)
             # Account being deleted (#269). A waiting "Delete all my
             # content" does not hold the digest of what is saved since
@@ -422,6 +439,10 @@ def _collect_digest_batches():
                 job.status = "abandoned"
                 job.collected_at = now
                 db.session.commit()
+                # Nothing reads the batch again: cancelled if it still
+                # runs, and its files go (#667).
+                if (job.provider_key or "").startswith("openai:"):
+                    drop_openai_batch(keys.get("openai"), job.batch_id)
                 abandoned += 1
             continue
 
@@ -463,6 +484,10 @@ def _collect_digest_batches():
         job.status = "collected"
         job.collected_at = now
         db.session.commit()
+        # Saved: the batch's files at OpenAI (#667) and the batch at
+        # Anthropic (#693) can go.
+        anthropic_batch_deletion.delete_collected_batches(
+            results, keys, ExternalDigestBatchJob.__tablename__)
         collected += 1
     return {"collected": collected, "abandoned": abandoned}
 
@@ -491,6 +516,10 @@ def rebuild_external_digest(self, user_id, force=False):
             return {"status": "no_user"}
         if not account_allows_ai(user):   # #346
             return {"status": "ai_opt_out"}
+        # Payments on: no paid set (#438), or blocked by the admin (#697).
+        if not background_work_allowed(user):
+            return {"status": "blocked" if is_blocked(user)
+                    else "no_subscription"}
         if account_on_hold(user_id):   # account being deleted (#269)
             return {"status": "on_hold"}
         if not force and not digest_is_stale(user_id):

@@ -328,6 +328,29 @@ def test_voice_turn_marks_where_the_wait_goes(voice, monkeypatch):
     assert {"b1", "b2", "c", "c1", "c2", "d", "e", "f"} <= set(rec["stages"])
 
 
+def test_voice_reply_speaks_a_code_block_as_one_phrase(voice):
+    """#646: a code block in a reply spoken while it is written is one
+    short phrase, and a ``# comment`` in it starts no chapter, however
+    the stream is cut."""
+    from backend.utils.spoken_links import CODE_BLOCK_SPOKEN
+    alice, _, user_node, llm_node = _build_chain("voice")
+    answer = ("## Setup\nRead the file:\n\n```python\n# load it\n"
+              "import json\n## parse\ndata = json.loads(raw)\n```\n\n"
+              "Then use `data` below.\n\n## Done\nThat is all.")
+    cuts = [5, 30, 41, 60, 75, 90, 120]
+    pieces = [answer[a:b] for a, b in zip([0] + cuts, cuts + [len(answer)])]
+    _LiveProvider.reset([(pieces, _resp(answer))])
+    _run(user_node, llm_node, alice, mode="voice")
+
+    texts = [t for t, _ in _FakeAudio.spoken]
+    assert texts == [
+        f"Setup.\n\nRead the file:\n\n{CODE_BLOCK_SPOKEN}\n\n"
+        "Then use `data` below.",
+        "Done.\n\nThat is all."]
+    assert [(r.section_title, r.section_index)
+            for r in _chunks(llm_node.id)] == [("Setup", 0), ("Done", 1)]
+
+
 def test_textless_tool_round_speaks_its_fallback_line(voice):
     alice, _, user_node, llm_node = _build_chain("voice")
     _LiveProvider.reset([

@@ -571,12 +571,16 @@ class TestStreamingInit:
         resp = self._init(app, alice, label="Voice", ai_usage="chat")
         assert resp.status_code == 201, resp.get_json()
 
-    def test_dictation_is_not_affected(self, app):
-        # A recording that is not a Voice turn asks for no reply.
+    def test_dictation_follows_its_entry_setting(self, app):
+        # A recording that is not a Voice turn asks for no reply, so the
+        # account's default does not decide; its own entry's setting does
+        # (#665): Chat starts, None is refused (its audio would be sent to
+        # be transcribed).
         alice = _user(default_ai_usage="none")
         _db.session.commit()
-        resp = self._init(app, alice, ai_usage="none")
+        resp = self._init(app, alice, ai_usage="chat")
         assert resp.status_code == 201, resp.get_json()
+        _refused(self._init(app, alice, ai_usage="none"), scope="entry")
 
 
 class TestSaveAsNode:

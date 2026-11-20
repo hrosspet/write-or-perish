@@ -4,6 +4,7 @@ import { useDraftTranscriptionSSE } from './useSSE';
 import { useToast } from '../contexts/ToastContext';
 import api from '../api';
 import { isSpendCapError, spendCapToastMessage } from '../utils/spendCap';
+import { isSubscriptionRequiredError } from '../utils/subscription';
 import { isAiUsageRefusedError, aiUsageRefusalScope } from '../utils/aiUsage';
 import { isThreadTooLong } from '../utils/threadLength';
 import { isApprovalPendingError } from '../utils/toolApprovals';
@@ -14,6 +15,7 @@ import {
 import { onPageReturn } from '../utils/pageReturn';
 import { playErrorSound } from '../utils/errorSound';
 import { RECORDING_DEVICE_KEY, TAKEN_OVER_CODE } from '../utils/recordingDevice';
+import { setRecordingActive } from '../utils/recordingActivity';
 
 /**
  * Play an urgent mic-interruption alert: the descending error motif once,
@@ -152,6 +154,20 @@ export function useStreamingTranscription(options = {}) {
 
   // State
   const [sessionState, setSessionState] = useState('idle'); // idle, initializing, recording, finalizing, complete, error
+  // A session counts as a recording in progress until its transcript is in
+  // (utils/recordingActivity): the app does not leave for the subscribe
+  // page meanwhile (#438), so its last chunks and its finalize go out. Not
+  // while initializing: a refused start must show that page at once.
+  const sessionActivityRef = useRef(null);
+  if (sessionActivityRef.current === null) sessionActivityRef.current = {};
+  useEffect(() => {
+    setRecordingActive(sessionActivityRef.current,
+      sessionState === 'recording' || sessionState === 'finalizing');
+  }, [sessionState]);
+  useEffect(() => {
+    const id = sessionActivityRef.current;
+    return () => setRecordingActive(id, false);
+  }, []);
   const [draftId, setDraftId] = useState(null);
   const [sessionId, setSessionId] = useState(null);
   const [transcript, setTranscript] = useState('');
@@ -805,6 +821,18 @@ export function useStreamingTranscription(options = {}) {
         if (onError) onError(err);
         throw err;
       }
+      if (isSubscriptionRequiredError(err)) {
+        // Payments on (#438): no transcription without a subscription,
+        // dictation included. Refused before any draft and before the mic
+        // opened; the api.js interceptor raised the banner that says why.
+        setSessionState('idle');
+        try {
+          err.subscriptionRequired = true;
+          err.startup = true;
+        } catch (_) { /* sealed error object */ }
+        if (onError) onError(err);
+        throw err;
+      }
       if (isAiUsageRefusedError(err)) {
         // A Voice recording where AI may not read (AI usage 'none' on the
         // account or the thread): the server refused before any draft
@@ -884,11 +912,11 @@ export function useStreamingTranscription(options = {}) {
 
     } catch (err) {
       console.error('Failed to start streaming:', err);
-      // Refused by the spend cap, by AI usage, by a waiting change or for
-      // the thread's length: initSession already returned to idle and told
-      // the parent. The mic was never requested.
-      if (err?.spendCapped || err?.aiUsageRefused || err?.approvalPending
-          || err?.threadTooLong) return;
+      // Refused by the spend cap, by AI usage, by the plan (#438), by a
+      // waiting change or for the thread's length: initSession already
+      // returned to idle and told the parent. The mic was never requested.
+      if (err?.spendCapped || err?.aiUsageRefused || err?.subscriptionRequired
+          || err?.approvalPending || err?.threadTooLong) return;
       // Always land in a terminal state. The error path here means recording
       // never started, so the session must not be left in 'recording' or
       // 'initializing' (which would strand the parent UI). 'error' is set

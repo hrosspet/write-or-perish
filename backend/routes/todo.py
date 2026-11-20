@@ -4,7 +4,9 @@ from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
 from backend.models import Node, Draft, UserTodo
 from backend.extensions import db
-from backend.utils.privacy import AI_ALLOWED, can_user_access_node
+from backend.utils.privacy import (
+    AI_ALLOWED, can_user_access_node, shown_ai_usage,
+)
 from backend.utils.proposals import find_own_pending_proposal
 from backend.utils.timefmt import iso_utc
 from backend.utils.todo_lock import (
@@ -39,7 +41,8 @@ def _todo_json(todo, version_number):
         "tokens_used": todo.tokens_used,
         "created_at": iso_utc(todo.created_at),
         "privacy_level": todo.privacy_level,
-        "ai_usage": todo.ai_usage,
+        # Chat at most where Train is refused (#689).
+        "ai_usage": shown_ai_usage(todo),
         "version_number": version_number,
         "revision": todo_revision(todo),
     }
@@ -176,6 +179,9 @@ def update_todo():
         if latest is None or base_revision != todo_revision(latest):
             return _todo_changed_response(latest, current_user.id)
 
+    # An edit keeps what the list it edits was written from (#689): the
+    # list's items stay in the text.
+    edited = newest_todo(current_user.id)
     todo = UserTodo(
         user_id=current_user.id,
         generated_by=generated_by,
@@ -183,6 +189,7 @@ def update_todo():
         # ai_usage follows the user's global default, not a hardcoded
         # 'chat' (#191); live-gated out of prompts if the user opts out.
         ai_usage=current_user.default_ai_usage,
+        unlicensed_input=edited.unlicensed_input if edited else None,
     )
     todo.set_content(content)
     db.session.add(todo)
@@ -257,8 +264,10 @@ def revert_todo(version_id):
         user_id=current_user.id,
         generated_by="revert",
         tokens_used=0,
-        # A revert reproduces a prior version, so copy its ai_usage (#191).
+        # A revert reproduces a prior version, so copy its ai_usage (#191)
+        # and what it was written from (#689).
         ai_usage=old_todo.ai_usage,
+        unlicensed_input=old_todo.unlicensed_input,
     )
     # Copy the encrypted content directly
     new_todo.content = old_todo.content
@@ -289,7 +298,15 @@ def todo_merge_refusal(user_id, proposal_node):
     """Why a todo merge may not send its inputs to a model (a message for
     the user), or None: the proposal node whose text the merge applies, or
     the newest todo list, has an ai_usage AI may not read. No todo list
-    yet does not refuse: the merge then starts one from the proposal."""
+    yet does not refuse: the merge then starts one from the proposal.
+    Payments on (#438): no merge without the paid set (it is a billed
+    model call), also for a proposal left from when the account had it."""
+    from backend.models import User
+    from backend.utils.subscriptions import (
+        ai_replies_allowed, subscription_required_message)
+    user = db.session.get(User, user_id)
+    if not ai_replies_allowed(user):
+        return subscription_required_message(user, "ai")
     if (proposal_node is not None
             and proposal_node.ai_usage not in AI_ALLOWED):
         return TODO_PROPOSAL_REFUSED_MESSAGE
@@ -476,6 +493,14 @@ def apply_todo_draft():
     403 ``{"error", "code": "ai_usage_none"}`` when AI may not read the
     todo list or the proposal (todo_merge_refusal); nothing is started.
     """
+    # Payments on (#438): the merge is a billed model call, so none
+    # without the paid set, also for a proposal left from when the account
+    # had it. The proposal stays pending.
+    from backend.utils.subscriptions import refuse_billed_call
+    refused = refuse_billed_call(current_user, "ai")
+    if refused is not None:
+        return refused
+
     data = request.get_json() or {}
     llm_node_id = data.get("llm_node_id")
 

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from "react";
 import XLookupConfirmDialog from "./XLookupConfirmDialog";
 import PurgeDataDialog from "./PurgeDataDialog";
 import AdminDeleteAccountDialog from "./AdminDeleteAccountDialog";
+import AdminUnclaimedAccounts from "./AdminUnclaimedAccounts";
 import ProfileBuildConfirmDialog from "./ProfileBuildConfirmDialog";
 import IntentionsReplaceDialog from "./IntentionsReplaceDialog";
 import AdminRefusalDialog, { REFUSAL_TITLES } from "./AdminRefusalDialog";
@@ -9,6 +10,8 @@ import { offeredModels } from "./ModelSelector";
 import { FaTimesCircle, FaFilter, FaCaretDown, FaCaretUp, FaEye, FaEyeSlash } from "react-icons/fa";
 import api from "../api";
 import { formatDate, formatDateTime } from "../utils/date";
+import { useUser } from "../contexts/UserContext";
+import AdminSubscriptions from "./AdminSubscriptions";
 
 // Small header toggle that hides rows with $0 in its column.
 function ZeroFilterToggle({ active, onToggle, label }) {
@@ -98,6 +101,8 @@ const ADMIN_TABS = [
   { key: "feedback", label: "Feedback" },
   { key: "polls", label: "Polls" },
 ];
+// Payments (#438): shown only while the server has payments on.
+const SUBSCRIPTIONS_TAB = { key: "subscriptions", label: "Subscriptions" };
 
 // Same select treatment as AccountPage's Settings (inputStyle+selectStyle
 // there) so admin controls don't render as bare browser widgets.
@@ -564,6 +569,20 @@ const smallActionStyle = {
 export function purgeLabel(job) {
   if (!job) return "";
   const who = job.source === "admin" ? "an admin" : "the user";
+  if (job.delete_account && job.source === "unclaimed") {
+    // A pre-filled account nobody claimed within the period (#685): due
+    // at once, so this shows only for the minute before the purge runs,
+    // or after a failure.
+    switch (job.status) {
+      case "scheduled":
+      case "running":
+        return "Deleting: pre-filled, nobody signed in within the period";
+      case "failed":
+        return `Deletion of the unclaimed account failed: ${job.error || "unknown error"}`;
+      default:
+        return `Unclaimed account deletion: ${job.status}`;
+    }
+  }
   if (job.delete_account) {
     switch (job.status) {
       case "scheduled":
@@ -595,8 +614,34 @@ export function purgeLabel(job) {
   }
 }
 
+// The Users tab's Status cell. Payments on (#697): "Blocked" for an
+// account the admin blocked; "Inactive" is then one that has not come back
+// since payments went on (it is let in at its next visit).
+export function statusLabel(u, letInWithoutApproval) {
+  if (u.approved) return "Active";
+  if (letInWithoutApproval && u.blocked) return "Blocked";
+  return "Inactive";
+}
+
+// INTRODUCED HEURISTIC (#697): an account made in the last NEW_ACCOUNT_DAYS
+// is marked "new" in the Users tab while payments are on, where no email
+// announces a sign-up any more. A week covers a weekly look at the list.
+export const NEW_ACCOUNT_DAYS = 7;
+
+export function isNewAccount(u, now = Date.now()) {
+  if (!u.created_at) return false;
+  const made = Date.parse(u.created_at);
+  return !Number.isNaN(made) && now - made < NEW_ACCOUNT_DAYS * 86400 * 1000;
+}
+
 function AdminPanel() {
   const [activeTab, setActiveTab] = useState("users");
+  const userCtx = useUser();
+  const tabs = userCtx?.user?.payments_enabled
+    ? [...ADMIN_TABS, SUBSCRIPTIONS_TAB] : ADMIN_TABS;
+  // Payments on (#697): nobody waits for approval, and the Users tab's
+  // switch blocks and unblocks.
+  const letInWithoutApproval = !!userCtx?.user?.payments_enabled;
   const [users, setUsers] = useState([]);
   const [allowedPlans, setAllowedPlans] = useState([]);
   // Start of the cache hit-rate window (ISO, from the backend) — the
@@ -695,6 +740,18 @@ function AdminPanel() {
     } catch (err) {
       console.error(err);
       setError("Error toggling user status.");
+    }
+  };
+
+  // Payments on (#697): Block / Unblock any account. Nothing of its
+  // subscription is cancelled.
+  const blockUser = async (userId, block) => {
+    try {
+      await api.post(`/admin/users/${userId}/block`, { block });
+      fetchUsers();
+    } catch (err) {
+      console.error(err);
+      setError(err.response?.data?.error || "Error blocking the account.");
     }
   };
 
@@ -1144,7 +1201,11 @@ function AdminPanel() {
       setNewHandle("");
       setNewHandleError("");
       setNewHandleNotice(
-        `Whitelisted @${u.username} as ${who}, X id ${u.twitter_id} (${source}); unapproved until you approve them.`
+        `Whitelisted @${u.username} as ${who}, X id ${u.twitter_id} (${source}); `
+        + (u.approved
+          // Payments on (#697): whitelisting is the approval.
+          ? "ready at their first sign-in, at the trial step."
+          : "unapproved until you approve them.")
       );
       fetchUsers();
     } catch (err) {
@@ -1192,7 +1253,7 @@ function AdminPanel() {
   return (
     <div style={{ padding: "20px" }}>
       <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: "20px" }}>
-        {ADMIN_TABS.map((t) => (
+        {tabs.map((t) => (
           <button
             key={t.key}
             onClick={() => setActiveTab(t.key)}
@@ -1206,12 +1267,13 @@ function AdminPanel() {
         fontFamily: "var(--serif)", fontSize: "2rem", fontWeight: 300,
         color: "var(--text-primary)", margin: "0 0 20px",
       }}>
-        {ADMIN_TABS.find((t) => t.key === activeTab).label}
+        {tabs.find((t) => t.key === activeTab).label}
       </h1>
 
       {activeTab === "polls" && <AdminPolls />}
       {activeTab === "activity" && <AdminActivity />}
       {activeTab === "feedback" && <AdminFeedback />}
+      {activeTab === "subscriptions" && <AdminSubscriptions />}
 
       {activeTab === "users" && (<>
       {/* Whitelist New User Section */}
@@ -1230,6 +1292,7 @@ function AdminPanel() {
         {newHandleError && <div style={{ color: "var(--error)" }}>{newHandleError}</div>}
         {newHandleNotice && <div style={{ color: "var(--text-secondary)" }}>{newHandleNotice}</div>}
       </div>
+      <AdminUnclaimedAccounts />
       <XLookupConfirmDialog
         open={!!xLookupAsk}
         handle={xLookupAsk?.handle}
@@ -1345,12 +1408,16 @@ function AdminPanel() {
               <td style={{ border: "1px solid var(--border)", padding: "8px" }}>{u.id}</td>
               <td style={{ border: "1px solid var(--border)", padding: "8px" }}>
                 {u.username}
+                {letInWithoutApproval && isNewAccount(u) && (
+                  <span style={{ marginLeft: "6px", fontSize: "0.75em", color: "var(--accent)" }}
+                        title={`Made in the last ${NEW_ACCOUNT_DAYS} days`}>new</span>
+                )}
                 {u.spam && (
                   <span style={{ marginLeft: "6px", fontSize: "0.75em", color: "var(--error)" }} title="Flagged as spam">spam</span>
                 )}
               </td>
               <td style={{ border: "1px solid var(--border)", padding: "8px" }}>
-                {u.approved ? "Active" : "Inactive"}
+                {statusLabel(u, letInWithoutApproval)}
               </td>
               <td style={{ border: "1px solid var(--border)", padding: "8px" }}>
                 <select
@@ -1547,7 +1614,32 @@ function AdminPanel() {
                   : `${(u.cache_hit_rate * 100).toFixed(0)}%`}
               </td>
               <td style={{ border: "1px solid var(--border)", padding: "8px" }}>
-                {!u.approved && u.email ? (
+                {letInWithoutApproval ? (
+                  // Payments on (#697): nobody waits for approval. Block /
+                  // Unblock on any account; one never approved also keeps
+                  // Activate, which approves it by hand as before.
+                  <>
+                    <button onClick={() => blockUser(u.id, !u.blocked)}>
+                      {u.blocked ? "Unblock" : "Block"}
+                    </button>
+                    {!u.approved && !u.blocked && (
+                      <>
+                        {u.email && (
+                          <>
+                            {" "}
+                            <button onClick={() => activateAndWelcome(u.id)}>
+                              Activate &amp; Welcome
+                            </button>
+                          </>
+                        )}
+                        {" "}
+                        <button onClick={() => toggleApproved(u.id)}>
+                          Activate
+                        </button>
+                      </>
+                    )}
+                  </>
+                ) : !u.approved && u.email ? (
                   <>
                     <button onClick={() => activateAndWelcome(u.id)}>
                       Activate &amp; Welcome

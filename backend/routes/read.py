@@ -317,7 +317,8 @@ def _cancel_submitted_batch(entry):
         entry["cancel_error"] = f"unknown provider {provider}"
         return
     try:
-        cancel(keys[provider], entry["batch_id"])
+        # The rerun never reads this batch again: its files go (#667).
+        cancel(keys[provider], entry["batch_id"], delete_files=True)
     except Exception as e:  # noqa: BLE001 - reported, not fatal
         current_app.logger.warning(
             "Batch %s cancel failed: %s", entry.get("batch_id"),

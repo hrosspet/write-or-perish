@@ -110,7 +110,8 @@ def app():
     _digest.flask_app = _app
     with _app.app_context():
         _db.create_all()
-        user = User(username="tester")
+        # In use: an account nobody used for a month is paused (#647).
+        user = User(username="tester", last_seen_at=datetime.utcnow())
         _db.session.add(user)
         _db.session.commit()
         yield _app
@@ -291,12 +292,16 @@ def test_nightly_sweep_submits_one_batch_request_per_stale_user_in_their_night(
 
     night_user = User.query.first()
     night_user.timezone = night_tz
-    day_user = User(username="daytime", timezone=day_tz)
-    current_user_ = User(username="unchanged", timezone=night_tz)
-    quiet_user = User(username="no-references", timezone=night_tz)
-    in_flight_user = User(username="already-submitted", timezone=night_tz)
+    seen = datetime.utcnow()
+    day_user = User(username="daytime", timezone=day_tz, last_seen_at=seen)
+    current_user_ = User(username="unchanged", timezone=night_tz,
+                         last_seen_at=seen)
+    quiet_user = User(username="no-references", timezone=night_tz,
+                      last_seen_at=seen)
+    in_flight_user = User(username="already-submitted", timezone=night_tz,
+                          last_seen_at=seen)
     oai_user = User(username="openai-user", timezone=night_tz,
-                    preferred_model="gpt-6-astra")
+                    preferred_model="gpt-6-astra", last_seen_at=seen)
     _db.session.add_all([day_user, current_user_, quiet_user,
                          in_flight_user, oai_user])
     _db.session.commit()
@@ -367,6 +372,59 @@ def test_account_opted_out_of_ai_gets_no_digest(app, monkeypatch):
     assert _digest.rebuild_external_digest(
         _FakeSelf(), user.id, force=True) == {"status": "ai_opt_out"}
     assert calls == []
+
+
+def test_payments_on_an_account_without_the_paid_set_gets_no_digest(
+        app, monkeypatch):
+    """#438: while payments are on, an account with no subscription (or
+    one that ended) starts no background model call: no nightly digest,
+    no manual rebuild. An account on a paid plan still gets it."""
+    user = User.query.first()
+    user.timezone = _tz_at_hour(_digest.NIGHTLY_DIGEST_LOCAL_HOUR)
+    user.plan = "free"
+    _db.session.commit()
+    _mk_item(user.id, "clip")
+    submitted = _stub_batch_submit(monkeypatch)
+    calls = _stub_llm(monkeypatch)
+    monkeypatch.setitem(_digest.flask_app.config, "PAYMENTS_ENABLED", True)
+
+    assert _digest.sweep_external_digests() == {"status": "ok",
+                                                "submitted": 0}
+    assert submitted == []
+    assert _digest.rebuild_external_digest(
+        _FakeSelf(), user.id, force=True) == {"status": "no_subscription"}
+    assert calls == []
+
+    user.plan = "alpha"
+    _db.session.commit()
+    assert _digest.sweep_external_digests()["submitted"] == 1
+
+
+def test_payments_on_a_blocked_account_gets_no_digest(app, monkeypatch):
+    """#697: an account the admin blocked (deactivated) starts no
+    background model call while payments are on, whatever its paid set:
+    no nightly digest, no manual rebuild. Control: payments off, the
+    sweep is what it was."""
+    from datetime import datetime
+    user = User.query.first()
+    user.timezone = _tz_at_hour(_digest.NIGHTLY_DIGEST_LOCAL_HOUR)
+    user.plan = "alpha"   # the paid set, by hand
+    user.approved = False
+    user.deactivated_at = datetime.utcnow()
+    _db.session.commit()
+    _mk_item(user.id, "clip")
+    submitted = _stub_batch_submit(monkeypatch)
+    calls = _stub_llm(monkeypatch)
+    monkeypatch.setitem(_digest.flask_app.config, "PAYMENTS_ENABLED", True)
+
+    assert _digest.sweep_external_digests() == {"status": "ok",
+                                                "submitted": 0}
+    assert _digest.rebuild_external_digest(
+        _FakeSelf(), user.id, force=True) == {"status": "blocked"}
+    assert submitted == [] and calls == []
+
+    monkeypatch.setitem(_digest.flask_app.config, "PAYMENTS_ENABLED", False)
+    assert _digest.sweep_external_digests()["submitted"] == 1
 
 
 def _hold_writing(user, account=False, at=None):
@@ -646,6 +704,105 @@ def test_collector_saves_and_costs_an_expired_batchs_finished_items(
     assert _digest.digest_is_stale(late.id) is True
 
 
+@pytest.mark.parametrize("delete_fails", [False, True])
+def test_collector_deletes_the_batch_files_once_saved(
+        app, monkeypatch, delete_fails):
+    """#667: the batch's input, output and error files at OpenAI are
+    deleted after the digest and the job are saved, never before; a
+    delete that fails leaves the job collected."""
+    user = User.query.first()
+    _mk_item(user.id, "a")
+    job = _pending_job(user, datetime.utcnow(),
+                       provider_key="openai:gpt-6-astra",
+                       batch_id="batch_files", model_id="gpt-6-astra")
+    client = _fake_openai_batch(
+        monkeypatch, {
+            "file-out": [{
+                "custom_id": f"external-digest-{user.id}", "response": {
+                    "status_code": 200, "body": {
+                        "choices": [{"message": {"content": "# Topics\n- x"},
+                                     "finish_reason": "stop"}],
+                        "usage": {"prompt_tokens": 10,
+                                  "completion_tokens": 1}}}}],
+            "file-err": []},
+        status="completed", completed_at=1060, input_file_id="file-in",
+        output_file_id="file-out", error_file_id="file-err",
+        request_counts=_counts(1, 0))
+    seen = []
+
+    def delete(file_id):
+        _db.session.expire_all()
+        seen.append((file_id,
+                     ExternalDigestBatchJob.query.get(job.id).status,
+                     UserArtifact.latest_for(
+                         user.id, _digest.DIGEST_KIND) is not None))
+        if delete_fails:
+            raise RuntimeError("503")
+    client.files.delete.side_effect = delete
+
+    assert _digest._collect_digest_batches() == {"collected": 1,
+                                                 "abandoned": 0}
+    assert seen == [(f, "collected", True)
+                    for f in ("file-in", "file-out", "file-err")]
+    _db.session.expire_all()
+    assert ExternalDigestBatchJob.query.get(job.id).status == "collected"
+
+
+def test_an_anthropic_batch_is_registered_with_its_job(app, monkeypatch):
+    """#693: the batch is recorded in the job's own commit, so it is
+    deleted at Anthropic once the job is no longer pending, also after a
+    crash between the save and the delete."""
+    from backend.models import AnthropicBatchDeletion
+    user = User.query.first()
+    user.timezone = _tz_at_hour(_digest.NIGHTLY_DIGEST_LOCAL_HOUR)
+    _db.session.commit()
+    _mk_item(user.id, "a")
+    _stub_batch_submit(monkeypatch)
+
+    assert _digest.sweep_external_digests() == {"status": "ok",
+                                                "submitted": 1}
+    job = ExternalDigestBatchJob.query.one()
+    row = AnthropicBatchDeletion.query.one()
+    assert (row.batch_id, row.source, row.deleted_at) == (
+        job.batch_id, "external_digest_batch_job", None)
+
+
+@pytest.mark.parametrize("delete_fails", [False, True])
+def test_collector_deletes_the_anthropic_batch_once_saved(
+        app, monkeypatch, delete_fails):
+    """#693: the ended batch is deleted at Anthropic after the digest and
+    the job are saved, never before; a delete that fails leaves the job
+    collected and is counted for the hourly sweep."""
+    from backend.models import AnthropicBatchDeletion
+    from backend.tests import anthropic_batch_fake as fake
+    user = User.query.first()
+    _mk_item(user.id, "a")
+    job = _pending_job(user, datetime.utcnow(), batch_id="msgbatch_d")
+    batches = fake.install(monkeypatch)
+    batches.add("msgbatch_d", results=[fake.succeeded(
+        f"external-digest-{user.id}", "# Topics\n- x")])
+    seen = []
+
+    def on_delete(batch_id):
+        _db.session.expire_all()
+        seen.append((batch_id,
+                     ExternalDigestBatchJob.query.get(job.id).status,
+                     UserArtifact.latest_for(
+                         user.id, _digest.DIGEST_KIND) is not None))
+    batches.on_delete = on_delete
+    if delete_fails:
+        batches.delete_error = RuntimeError("503")
+
+    assert _digest._collect_digest_batches() == {"collected": 1,
+                                                 "abandoned": 0}
+    assert seen == [("msgbatch_d", "collected", True)]
+    _db.session.expire_all()
+    row = AnthropicBatchDeletion.query.filter_by(batch_id="msgbatch_d").one()
+    assert (row.deleted_at is None, row.attempts) == (
+        (True, 1) if delete_fails else (False, 0))
+    assert ExternalDigestBatchJob.query.get(job.id).status == "collected"
+
+
 def _raise_not_found(ids, keys):
     raise RuntimeError("404: no such batch")
 
@@ -674,6 +831,27 @@ def test_collector_abandons_a_batch_it_cannot_close_past_max_age(
     # ...which frees the user for the next nightly sweep.
     assert user.id not in _digest._users_in_pending_batches()
     assert _digest.digest_is_stale(user.id) is True
+
+
+def test_an_abandoned_openai_batch_is_dropped_with_its_files(
+        app, monkeypatch):
+    """#667: nothing reads an abandoned batch again, so it is cancelled
+    if it still runs and its files are deleted."""
+    user = User.query.first()
+    _mk_item(user.id, "a")
+    _pending_job(
+        user, datetime.utcnow(), provider_key="openai:gpt-6-astra",
+        batch_id="stuck-oai", model_id="gpt-6-astra",
+        submitted_at=datetime.utcnow() - _digest.BATCH_JOB_MAX_AGE
+        - timedelta(minutes=1))
+    monkeypatch.setattr(_digest, "batch_check_and_collect", _raise_not_found)
+    dropped = []
+    monkeypatch.setattr(_digest, "drop_openai_batch",
+                        lambda key, batch_id: dropped.append(batch_id))
+
+    assert _digest._collect_digest_batches() == {"collected": 0,
+                                                 "abandoned": 1}
+    assert dropped == ["stuck-oai"]
 
 
 def test_collector_keeps_a_young_unreadable_batch_pending(app, monkeypatch):
@@ -890,3 +1068,81 @@ def test_rebuild_does_not_retry_a_policy_block(app, monkeypatch):
         _digest.rebuild_external_digest(_RecordingSelf(), uid)
     assert retried == []
     assert APICostLog.query.one().request_ref == "policy_block:bio_policy"
+
+
+def test_no_digest_for_an_account_nobody_used_for_a_month(app, monkeypatch):
+    """#647 (Peter, 2026-11-12: a month): references keep arriving for an
+    account its owner last opened 40 days ago, and for a pre-filled
+    account nobody has signed into. The nightly sweep builds no digest for
+    either. When the owner is back, their next night rebuilds it once,
+    from the whole corpus the pause left stale."""
+    now = datetime.utcnow()
+    night_tz = _tz_at_hour(_digest.NIGHTLY_DIGEST_LOCAL_HOUR)
+    away = User.query.first()
+    away.timezone = night_tz
+    away.last_seen_at = now - timedelta(days=40)
+    never = User(username="prefilled", timezone=night_tz,
+                 prefilled_handle="prefilled")
+    _db.session.add(never)
+    _db.session.commit()
+    _mk_item(away.id, "before", fetched_at=now - timedelta(days=41))
+    _mk_digest(away.id, created_at=now - timedelta(days=41) + timedelta(
+        hours=1))
+    for i in range(12):   # what the sync brought while nobody looked
+        _mk_item(away.id, f"paused-{i}",
+                 fetched_at=now - timedelta(days=i + 1))
+    _mk_item(never.id, "n1")
+    submitted = _stub_batch_submit(monkeypatch)
+
+    for _ in range(2):
+        assert _digest.sweep_external_digests() == {"status": "ok",
+                                                    "submitted": 0}
+    assert submitted == []
+    assert APICostLog.query.count() == 0
+
+    away.last_seen_at = datetime.utcnow()
+    _db.session.commit()
+    assert _digest.sweep_external_digests() == {"status": "ok",
+                                                "submitted": 1}
+    requests_ = submitted[0]["anthropic"]
+    assert [r["custom_id"] for r in requests_] == [
+        f"external-digest-{away.id}"]
+    assert ("The corpus holds 13 saved items"
+            in requests_[0]["messages"][0]["content"])
+
+
+def test_payments_on_the_sweep_needs_both_use_and_the_paid_set(
+        app, monkeypatch):
+    """The payments train (PR #680) merged this sweep without a conflict;
+    both filters must hold together. Four accounts with new references in
+    their night: in use with a subscription, in use with one that ended,
+    away 40 days with a subscription, away with one that ended. Only the
+    first gets a digest. Guards ``and user.id in in_use`` (#659) and
+    ``and ai_replies_allowed(user)`` (#649): without either, a second
+    account is submitted."""
+    now = datetime.utcnow()
+    night_tz = _tz_at_hour(_digest.NIGHTLY_DIGEST_LOCAL_HOUR)
+    monkeypatch.setitem(_digest.flask_app.config, "PAYMENTS_ENABLED", True)
+    users = {}
+    for name, seen, paid in (
+            ("tester", now, True), ("lapsed", now, False),
+            ("away", now - timedelta(days=40), True),
+            ("away_lapsed", now - timedelta(days=40), False)):
+        user = User.query.filter_by(username=name).first() or User(
+            username=name)
+        user.timezone = night_tz
+        user.last_seen_at = seen
+        user.plan = "free"
+        user.subscription_level = "standard"
+        user.subscription_status = "active" if paid else "ended"
+        user.subscription_ever_paid = True
+        _db.session.add(user)
+        _db.session.commit()
+        _mk_item(user.id, f"clip_{name}")
+        users[name] = user
+    submitted = _stub_batch_submit(monkeypatch)
+
+    assert _digest.sweep_external_digests() == {"status": "ok",
+                                                "submitted": 1}
+    assert [r["custom_id"] for r in submitted[0]["anthropic"]] == [
+        f"external-digest-{users['tester'].id}"]
