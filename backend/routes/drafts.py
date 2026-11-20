@@ -897,21 +897,43 @@ def _limit_response(answer):
     return jsonify(body), status
 
 
-def _stored_chunk_size_error(upload_path, chunk_dir, chunk_index):
-    """The answer for a stored upload that is larger than a chunk may be,
-    or that would take its recording past the bytes one recording may
-    store; None when it fits. A re-sent chunk replaces its earlier copy,
-    which is not counted (utils/recording_limits)."""
+def _recording_size_error(chunk_dir, chunk_index, size):
+    """The answer when *size* more bytes would take a recording past the
+    bytes one recording may store, else None. A re-sent chunk replaces its
+    earlier copy, which is not counted (utils/recording_limits)."""
     from backend.utils import recording_limits as limits
-    size = upload_path.stat().st_size
-    if size > limits.MAX_STREAMING_CHUNK_BYTES:
-        return _limit_response(_CHUNK_TOO_LARGE)
     replaced = {f"chunk_{chunk_index:04d}{ext}{enc}"
                 for ext in (".webm", ".mp4") for enc in ("", ".enc")}
     if (limits.stored_bytes(chunk_dir, replaced) + size
             > limits.MAX_STREAMING_SESSION_BYTES):
         return _limit_response(_RECORDING_TOO_LARGE)
     return None
+
+
+def _stored_chunk_size_error(upload_path, chunk_dir, chunk_index):
+    """The answer for a stored upload that is larger than a chunk may be,
+    or that would take its recording past the bytes one recording may
+    store; None when it fits. The quick check before the chunk is
+    encrypted; the recording's bytes are checked again under the draft
+    row's lock, right before its files are moved into place
+    (_staged_size_error)."""
+    from backend.utils import recording_limits as limits
+    size = upload_path.stat().st_size
+    if size > limits.MAX_STREAMING_CHUNK_BYTES:
+        return _limit_response(_CHUNK_TOO_LARGE)
+    return _recording_size_error(chunk_dir, chunk_index, size)
+
+
+def _staged_size_error(staged, chunk_dir, chunk_index):
+    """_recording_size_error for the files an upload staged (the chunk, and
+    its init segment when it carries one). Asked under the draft row's
+    lock, which every chunk of the recording takes before its files are
+    moved into place, so the chunks of one recording are counted one after
+    the other."""
+    size = 0
+    for encrypted, _final in staged:
+        size += pathlib.Path(encrypted).stat().st_size
+    return _recording_size_error(chunk_dir, chunk_index, size)
 
 
 @drafts_bp.route("/streaming/<session_id>/audio-chunk", methods=["POST"])
@@ -1175,9 +1197,13 @@ def upload_streaming_chunk(session_id):
     # chunk's commit the draft row stays locked, so this chunk is stored
     # before a claim counts the chunks, or refused here, its files never
     # put in place (#388). Only quick steps until the commit: no KMS call
-    # or other network wait (recording_device.lock_writer_key).
+    # or other network wait (recording_device.lock_writer_key). A chunk
+    # without a device key takes the lock too: the recording's bytes are
+    # checked under it (below).
     try:
         taken_over = is_taken_over_locked(draft_id, device_key)
+        if device_key is None:
+            lock_writer_key(draft_id)
     except SessionBusy:
         _discard_staged(staged)
         return session_busy_response()
@@ -1197,6 +1223,13 @@ def upload_streaming_chunk(session_id):
         # stays, files included.
         _discard_staged(staged)
         return _chunk_already_uploaded(chunk_index, existing_chunk)
+
+    # The recording's bytes, counted again under the lock with the chunks
+    # moved into place since the check before encrypting.
+    too_large = _staged_size_error(staged, chunk_dir, chunk_index)
+    if too_large is not None:
+        _discard_staged(staged)
+        return too_large
 
     encrypted_path = _move_staged(staged)
     if session_mime:
