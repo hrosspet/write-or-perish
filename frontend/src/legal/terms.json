@@ -19,7 +19,7 @@
 
     { "type": "sectionTitle", "text": "What Loore is for" },
     { "type": "paragraph", "text": "**What Loore is for.** Loore exists to help you find and use your own potential: what you could do and become that you have not yet seen or acted on. Reflection, your profile and your intentions are tools for that. They are not goals in themselves." },
-    { "type": "paragraph", "text": "**What it costs you.** Every tool gives something and takes something. What a tool does for you, you practise less yourself; that is how learning works, not a fault of one tool. Loore is no exception. It is meant to help you find and fulfil your potential sooner, or more fully, than you would alone. The things it helps you with are things you will have less chance to learn to do, or to do better, on your own. We want you to choose that trade-off knowingly, and Loore is built to help you with it: it asks before it answers, and it leaves to you the work you say you want to do yourself." },
+    { "type": "paragraph", "text": "**What it costs you.** Every tool takes something for what it gives: what Loore does for you, you practise less yourself. It can bring you to your potential sooner or more fully, at the price of some skills you would otherwise have built alone. We want you to make that trade knowingly. That is why Loore asks before it answers." },
     { "type": "paragraph", "text": "**What Loore will not do.**" },
     {
       "type": "bullets",

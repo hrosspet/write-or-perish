@@ -199,8 +199,12 @@ final class TermsTextTests: XCTestCase {
             return nil
         }
         XCTAssertEqual(TermsText.blocks.first, .title("Terms of Service"))
-        XCTAssertEqual(sections.first, "1. Who runs Loore")
-        XCTAssertEqual(sections.last, "\(sections.count). Contact")
+        // "What Loore is for" (Peter, 2026-11-20) comes before section 1,
+        // unnumbered; the numbered sections follow it.
+        XCTAssertEqual(sections.first, "What Loore is for")
+        let numbered = Array(sections.dropFirst())
+        XCTAssertEqual(numbered.first, "1. Who runs Loore")
+        XCTAssertEqual(numbered.last, "\(numbered.count). Contact")
         XCTAssertEqual(TermsText.version, "3.0")
         XCTAssertTrue(TermsText.blocks.contains { block in
             if case .footnote(let t) = block { return t.contains("Terms version 3.0") }
