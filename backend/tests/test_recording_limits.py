@@ -297,6 +297,41 @@ class TestStreamingChunkLimits:
             "chunk_0001.webm", "chunk_0002.webm", "chunk_0003.webm"]
         assert _rows("sess-1") == 3
 
+    def test_chunks_arriving_together_are_held_to_the_bytes_of_one_recording(
+            self, app, client, alice, monkeypatch):
+        # Two chunks of one recording at once: the second is stored while
+        # the first is encrypted, after its first size check and before it
+        # is moved into place. The check under the draft row's lock, right
+        # before the move, counts it.
+        import backend.routes.drafts as drafts_routes
+        monkeypatch.setattr(limits, "MAX_STREAMING_SESSION_BYTES",
+                            3 * WEB_CHUNK_BYTES)
+        _draft, folder = _session(app, alice)
+        for index in (1, 2):
+            assert _chunk(client, "sess-1", index,
+                          _payload(WEB_CHUNK_BYTES)).status_code == 202
+        stage = drafts_routes.stage_encrypted_file
+        meanwhile = []
+
+        def staged_while_another_arrives(src, dest):
+            if not meanwhile:
+                meanwhile.append(None)      # the other chunk stages as usual
+                meanwhile[0] = _chunk(client, "sess-1", 4,
+                                      _payload(WEB_CHUNK_BYTES))
+            return stage(src, dest)
+        monkeypatch.setattr(drafts_routes, "stage_encrypted_file",
+                            staged_while_another_arrives)
+
+        resp = _chunk(client, "sess-1", 3, _payload(WEB_CHUNK_BYTES))
+
+        assert meanwhile[0].status_code == 202
+        assert resp.status_code == 413
+        assert resp.get_json()["code"] == "recording_too_large"
+        # Nothing of the refused chunk, staged files included.
+        assert sorted(p.name for p in folder.iterdir()) == [
+            "chunk_0001.webm", "chunk_0002.webm", "chunk_0004.webm"]
+        assert _rows("sess-1") == 3
+
     def test_a_copy_of_a_stored_chunk_is_answered_and_not_counted(
             self, app, client, alice, monkeypatch):
         # Control (passes on main too): retries and the hidden page's
