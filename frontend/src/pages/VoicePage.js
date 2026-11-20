@@ -19,7 +19,7 @@ import {
   THREAD_LIMIT_TEXT, THREAD_NOTICE_TEXT, THREAD_TOO_LONG_CODE,
 } from '../utils/threadLength';
 import {
-  GLEAN_DAY_DONE_REFUSAL, REFUSAL_SENTENCES, sayRefusal,
+  GLEAN_DAY_DONE_REFUSAL, REFUSAL_SENTENCES, primeSpeech, sayRefusal,
 } from '../utils/spokenRefusal';
 import api from '../api';
 import { entryQuestion, EVERYDAY_QUESTION } from '../utils/entryPrompt';
@@ -755,6 +755,8 @@ function VoiceSession({
     // The voice reply stops, its queue too (the player is global, so a
     // paused queue would follow the user to the gleaning's page).
     audio.stop();
+    // Inside the tap, so a refusal can be said when it comes (#717).
+    primeSpeech();
     setGleanStarting(true);
     api.post(`/read/from-node/${gleanAnchor}`, {})
       .then((res) => {
