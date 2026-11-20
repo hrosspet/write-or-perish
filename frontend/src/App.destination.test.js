@@ -5,12 +5,28 @@
 // error. A step that leaves Loore and comes back elsewhere (with payments
 // on, the subscribe page's checkout returns to the Account page) is followed
 // by the page, once the app itself shows.
+
+// The signed-in account, as UserContext keeps it: setUser re-renders
+// whoever reads it (the subscription section lets an account in that way).
 let mockUser = null;
-jest.mock('./contexts/UserContext', () => ({
-  useUser: () => ({
-    user: mockUser, loading: false, setUser: () => {}, markHasOwnEntries: () => {},
-  }),
-}));
+const mockUserReaders = new Set();
+jest.mock('./contexts/UserContext', () => {
+  const { useSyncExternalStore } = jest.requireActual('react');
+  const subscribe = (reader) => {
+    mockUserReaders.add(reader);
+    return () => mockUserReaders.delete(reader);
+  };
+  const setUser = (next) => {
+    mockUser = typeof next === 'function' ? next(mockUser) : next;
+    mockUserReaders.forEach((reader) => reader());
+  };
+  return {
+    useUser: () => ({
+      user: useSyncExternalStore(subscribe, () => mockUser),
+      loading: false, setUser, markHasOwnEntries: () => {},
+    }),
+  };
+});
 jest.mock('./contexts/AudioContext', () => ({
   AudioProvider: ({ children }) => children,
   useAudio: () => ({}),
@@ -23,16 +39,33 @@ jest.mock('./hooks/useBothProvidersQuestion', () => ({
   useBothProvidersQuestion: () => [false, () => {}],
 }));
 jest.mock('./hooks/useNodePrefetch', () => () => ({ pending: null, openNode: () => {}, cancel: () => {} }));
+// What Stripe's state looks like to /billing/sync, back from a checkout;
+// null: no answer yet. Every other request is still waiting.
+let mockSyncAnswer = null;
 jest.mock('./api', () => ({
   __esModule: true,
   // Plain functions: the test setup resets jest.fn implementations.
-  default: { get: () => new Promise(() => {}), post: () => new Promise(() => {}) },
+  default: {
+    get: () => new Promise(() => {}),
+    post: (path) => (path === '/billing/sync' && mockSyncAnswer
+      ? Promise.resolve({ data: mockSyncAnswer })
+      : new Promise(() => {})),
+  },
 }));
 jest.mock('./components/MarkdownBody', () => () => null);
 jest.mock('./components/NodeDetailWrapper', () => () => <div>thread-page</div>);
 jest.mock('./pages/AlphaThankYouPage', () => () => <div>waiting-page</div>);
-jest.mock('./pages/SubscribePage', () => () => <div>subscribe-page</div>);
-jest.mock('./pages/AccountPage', () => () => <div>account-page</div>);
+// The subscribe page in miniature, around the real subscription section:
+// back from a checkout, the section drops the checkout's query and lets the
+// account in once /billing/sync answers.
+jest.mock('./pages/SubscribePage', () => function SubscribePage() {
+  const { useUser } = jest.requireMock('./contexts/UserContext');
+  const SubscriptionSection = jest.requireActual('./components/SubscriptionSection').default;
+  const { user, setUser } = useUser();
+  return <div>subscribe-page<SubscriptionSection user={user} setUser={setUser} /></div>;
+});
+// The Account page is the real one: with payments on, its subscription
+// section drops a checkout's query when the page opens.
 jest.mock('./pages/HomePage', () => () => <div>home-page</div>);
 jest.mock('./components/TermsModal', () => ({ onAccepted }) => (
   <button type="button" onClick={onAccepted}>accept-terms</button>
@@ -45,9 +78,9 @@ jest.mock('./components/SearchModal', () => () => null);
 jest.mock('./components/NodeFormModal', () => () => null);
 jest.mock('./components/ProfileGenerationWatcher', () => () => null);
 
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 import { render, screen, fireEvent, act } from '@testing-library/react';
-import { MemoryRouter, useLocation } from 'react-router-dom';
+import { MemoryRouter, useLocation, useNavigate } from 'react-router-dom';
 import App from './App';
 import { PAGE_LOAD } from './utils/destination';
 
@@ -69,7 +102,16 @@ const kept = () => JSON.parse(window.sessionStorage.getItem(KEY) || 'null');
 
 beforeEach(() => {
   window.sessionStorage.clear();
+  mockSyncAnswer = null;
+  // The Account page scrolls to its #subscription; jsdom has no layout.
+  Element.prototype.scrollIntoView = () => {};
 });
+
+// A page kept by the load before the checkout (Stripe's page in between).
+const keepFromEarlierLoad = (path) => window.sessionStorage.setItem(KEY, JSON.stringify({
+  path, load: 'the-load-before-checkout', at: Date.now(),
+}));
+const CHECKOUT_RETURN = '/account?subscription=success&session_id=cs_test_1#subscription';
 
 test('a new account waiting for approval: the terms, then the waiting screen; the entry is dropped', () => {
   mockUser = { id: 9, approved: false, terms_up_to_date: false };
@@ -104,10 +146,11 @@ test('control: an account let in, new terms: the terms over the entry, then the 
 });
 
 test('a step that left Loore: back on the Account page, the entry opens', () => {
-  window.sessionStorage.setItem(KEY, JSON.stringify({
-    path: '/@ana/a-first-entry#reply-7', load: 'the-load-before-checkout', at: Date.now(),
-  }));
-  mockUser = { id: 9, approved: true, terms_up_to_date: true };
+  keepFromEarlierLoad('/@ana/a-first-entry#reply-7');
+  mockUser = {
+    id: 9, approved: true, terms_up_to_date: true,
+    payments_enabled: true, subscription: { state: 'active' },
+  };
   renderAt('/account?subscription=success#subscription');
 
   expect(where()).toBe('/@ana/a-first-entry#reply-7');
@@ -176,6 +219,60 @@ describe('a step page shown in place of the app', () => {
   });
 });
 
+// A page that sends the person on as it opens (the Account page drops a
+// Connect X answer's ?x_login= that way) runs its effect after
+// <PendingDestination />'s, so its navigation replaces the one to the kept
+// page: the kept page is forgotten only once the person is on it.
+describe('the kept page is forgotten once the person is there', () => {
+  // eslint-disable-next-line global-require
+  const { default: PendingDestination } = require('./components/PendingDestination');
+
+  // Sends the person on at its first `times` addresses.
+  function SendsOn({ times }) {
+    const navigate = useNavigate();
+    const { key } = useLocation();
+    const sent = useRef(0);
+    useEffect(() => {
+      if (sent.current >= times) return;
+      sent.current += 1;
+      navigate(`/elsewhere-${sent.current}`, { replace: true });
+    }, [key, navigate, times]);
+    return null;
+  }
+
+  const renderWith = (times) => render(
+    <MemoryRouter initialEntries={['/account']}>
+      <PendingDestination />
+      <SendsOn times={times} />
+      <Where />
+    </MemoryRouter>,
+  );
+
+  test('replaced by another navigation of the same moment: opened again', () => {
+    keepFromEarlierLoad('/node/5#reply-2');
+    mockUser = { id: 9, approved: true };
+    renderWith(1);
+    expect(where()).toBe('/node/5#reply-2');
+    expect(kept()).toBeNull();
+  });
+
+  test('replaced again: the second try forgets it, so nothing can loop', () => {
+    keepFromEarlierLoad('/node/5#reply-2');
+    mockUser = { id: 9, approved: true };
+    renderWith(2);
+    expect(where()).toBe('/elsewhere-2');
+    expect(kept()).toBeNull();
+  });
+
+  test('control: nothing else navigates: opened at once', () => {
+    keepFromEarlierLoad('/node/5#reply-2');
+    mockUser = { id: 9, approved: true };
+    renderWith(0);
+    expect(where()).toBe('/node/5#reply-2');
+    expect(kept()).toBeNull();
+  });
+});
+
 // The real App, payments on (#700): a new account sees the terms, then the
 // subscribe page, at the entry's address; the entry opens only after the
 // checkout's return, never in place of a step.
@@ -200,11 +297,45 @@ describe('payments on: terms, then the subscribe page, then the entry', () => {
   });
 
   test('the checkout returns to the Account page: the entry opens', () => {
-    window.sessionStorage.setItem(KEY, JSON.stringify({
-      path: '/node/5#reply-2', load: 'the-load-before-checkout', at: Date.now(),
-    }));
+    keepFromEarlierLoad('/node/5#reply-2');
     mockUser = onNoSub({ terms_up_to_date: true, subscription: { state: 'active' } });
     renderAt('/account?subscription=success');
+    expect(where()).toBe('/node/5#reply-2');
+    expect(kept()).toBeNull();
+  });
+
+  // The two orders of Stripe's webhook and the return page. The Account
+  // page's subscription section drops the checkout's query when it opens,
+  // a navigation of its own: the entry opens after it, not under it.
+  test('let in before the return page loads: the query is dropped, then the entry opens', () => {
+    keepFromEarlierLoad('/node/5#reply-2');
+    mockUser = onNoSub({ terms_up_to_date: true, subscription: { state: 'trialing' } });
+    renderAt(CHECKOUT_RETURN);
+    expect(where()).toBe('/node/5#reply-2');
+    expect(screen.getByText('thread-page')).toBeInTheDocument();
+    expect(kept()).toBeNull();
+  });
+
+  test('let in by the sync after the return page loads: then the entry opens', async () => {
+    keepFromEarlierLoad('/node/5#reply-2');
+    mockUser = onNoSub({ terms_up_to_date: true });
+    mockSyncAnswer = { subscription: { state: 'trialing', status: 'trialing' } };
+    renderAt(CHECKOUT_RETURN);
+    // Not let in yet: the subscribe page, which drops the checkout's query.
+    expect(screen.getByText('subscribe-page')).toBeInTheDocument();
+    expect(where()).toBe('/account#subscription');
+    expect(kept()).not.toBeNull();
+
+    await act(async () => {}); // /billing/sync answers: let in
+    expect(where()).toBe('/node/5#reply-2');
+    expect(screen.getByText('thread-page')).toBeInTheDocument();
+    expect(kept()).toBeNull();
+  });
+
+  test('control: back from a cancelled checkout, the same', () => {
+    keepFromEarlierLoad('/node/5#reply-2');
+    mockUser = onNoSub({ terms_up_to_date: true, subscription: { state: 'active' } });
+    renderAt('/account?subscription=cancelled#subscription');
     expect(where()).toBe('/node/5#reply-2');
     expect(kept()).toBeNull();
   });

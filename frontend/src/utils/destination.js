@@ -221,13 +221,44 @@ export function rememberArrival(destination, { load = PAGE_LOAD, now = Date.now(
   }
 }
 
-// The kept arrival, taken (forgotten) at once: { path, earlierLoad } or null.
-export function takePending({ load = PAGE_LOAD, now = Date.now() } = {}) {
+// The kept arrival, left kept: { path, earlierLoad } or null. One too old
+// to open, or not a page, is forgotten here.
+export function peekPending({ load = PAGE_LOAD, now = Date.now() } = {}) {
   const saved = readPending();
-  forgetPending();
-  if (!saved || typeof saved.at !== 'number' || !(now - saved.at <= PENDING_MAX_AGE_MS)) {
+  if (!saved) return null;
+  const fresh = typeof saved.at === 'number' && now - saved.at <= PENDING_MAX_AGE_MS;
+  const path = fresh ? safeDestination(saved.path) : null;
+  if (!path) {
+    forgetPending();
     return null;
   }
-  const path = safeDestination(saved.path);
-  return path ? { path, earlierLoad: saved.load !== load } : null;
+  return { path, earlierLoad: saved.load !== load };
+}
+
+// The kept arrival, taken (forgotten) at once: { path, earlierLoad } or null.
+export function takePending(options) {
+  const pending = peekPending(options);
+  forgetPending();
+  return pending;
+}
+
+// Whether the address in front of the person is `destination`. The
+// browser writes some characters a kept address may hold as typed
+// percent-encoded (`"`, `<`, `{`), so both are compared decoded.
+export function isAt(current, destination) {
+  const plain = (value) => {
+    try {
+      return decodeURI(value);
+    } catch (e) {
+      return value;
+    }
+  };
+  return plain(current) === plain(destination);
+}
+
+// Back from a checkout (a query that names `subscription` or `session_id`),
+// before the Account page has dropped that query (SubscriptionSection).
+export function isCheckoutReturn(search) {
+  const query = (search || '').replace(/^\?/, '');
+  return query !== '' && namesExcludedParameter(query);
 }

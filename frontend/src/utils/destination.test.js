@@ -3,8 +3,9 @@
 // Both read destinationCases.json, so the two agree on every row.
 import cases from './destinationCases.json';
 import {
-  MAX_DESTINATION_LENGTH, PENDING_MAX_AGE_MS, forgetPending, rememberArrival,
-  returnUrlFrom, safeDestination, signInPath, signInPathFrom, takePending,
+  MAX_DESTINATION_LENGTH, PENDING_MAX_AGE_MS, forgetPending, isAt,
+  isCheckoutReturn, peekPending, rememberArrival, returnUrlFrom,
+  safeDestination, signInPath, signInPathFrom, takePending,
 } from './destination';
 
 describe('safeDestination', () => {
@@ -98,4 +99,38 @@ describe('the arrival kept across a step that leaves the page', () => {
       JSON.stringify({ path: '/%2F%2Fevil.example', load: 'A', at: 0 }));
     expect(takePending({ load: 'B', now: 1 })).toBeNull();
   });
+
+  test('peeking leaves it kept; one too old is forgotten', () => {
+    rememberArrival('/node/5#r', { load: 'A', now: 0 });
+    expect(peekPending({ load: 'B', now: 1 })).toEqual({ path: '/node/5#r', earlierLoad: true });
+    expect(peekPending({ load: 'B', now: 1 })).not.toBeNull();
+    expect(peekPending({ load: 'B', now: PENDING_MAX_AGE_MS + 1 })).toBeNull();
+    expect(peekPending({ load: 'B', now: 1 })).toBeNull(); // forgotten
+  });
+});
+
+describe('isAt', () => {
+  test('the same page, also as the browser writes it', () => {
+    expect(isAt('/node/5#reply-2', '/node/5#reply-2')).toBe(true);
+    expect(isAt('/@ana/an-entry?q=%22x%22#a%7Bb%7D', '/@ana/an-entry?q="x"#a{b}')).toBe(true);
+    expect(isAt('/node/5', '/node/5#reply-2')).toBe(false);
+    expect(isAt('/account#subscription', '/node/5')).toBe(false);
+    expect(isAt('/node/%E0', '/node/%E0')).toBe(true); // malformed: compared as written
+  });
+});
+
+describe('isCheckoutReturn', () => {
+  test.each([
+    '?subscription=success&session_id=cs_test_1', '?subscription=cancelled',
+    '?session_id=cs_test_1', '?x=1&Subscription=success', '?%73ession_id=cs',
+  ])('%s is a checkout\'s return', (search) => {
+    expect(isCheckoutReturn(search)).toBe(true);
+  });
+
+  test.each(['', '?', '?x=1', '?subscriptions=1', '?x_login=linked'])(
+    '%j is not',
+    (search) => {
+      expect(isCheckoutReturn(search)).toBe(false);
+    },
+  );
 });
