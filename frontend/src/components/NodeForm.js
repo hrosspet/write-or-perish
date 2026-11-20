@@ -22,11 +22,12 @@ import { uploadFileInChunks } from "../utils/chunkedUpload";
 import {
   isSpendBlocked, notifySpendBlocked, isSpendCapError, spendCapToastMessage,
 } from "../utils/spendCap";
+import { noteSkippedReply } from "../utils/subscription";
 import useSubmitShortcut from "../hooks/useSubmitShortcut";
 
 const NodeForm = forwardRef(
   (
-    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt, hidePowerFeatures = false, placeholder, onSubmitOverride, uploadReplyOptions, compact = false, hideAudioUpload = false, allowAgenticPrompt = false, hasGeneratedTts = false, aiUsageFromGlobalDefault = false, hasChildren = false, parentPrivacyLevel },
+    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt, hidePowerFeatures = false, placeholder, onSubmitOverride, uploadReplyOptions, compact = false, hideAudioUpload = false, allowAgenticPrompt = false, hasGeneratedTts = false, aiUsageFromGlobalDefault = false, hasChildren = false, parentPrivacyLevel, trainRefused = false },
     ref
   ) => {
     const { user } = useUser();
@@ -544,7 +545,10 @@ const NodeForm = forwardRef(
           setStreamingSessionId(null);
           // Spend cap: backend kept the system + user nodes but skipped the
           // LLM placeholder (e.g. /textmode/start). Surface the banner.
-          if (data && data.spend_capped) notifySpendBlocked(data.spend_cap_lifts_on);
+          if (data && data.spend_capped) {
+            notifySpendBlocked(data.spend_cap_lifts_on, data.spend_cap_lifts_with_payment);
+          }
+          noteSkippedReply(data);
           // The entry was saved but the reply was refused (e.g. an
           // uncapped {user_export} on a non-Pro plan): say why. A thread
           // too long for another reply (#648) says so above the reply form
@@ -579,7 +583,10 @@ const NodeForm = forwardRef(
           // Spend cap: backend kept the system + user nodes but skipped the
           // LLM placeholder. Surface the banner; the no-llm_node_id branch
           // below lands the user on their new thread without a placeholder.
-          if (res.data.spend_capped) notifySpendBlocked(res.data.spend_cap_lifts_on);
+          if (res.data.spend_capped) {
+            notifySpendBlocked(res.data.spend_cap_lifts_on, res.data.spend_cap_lifts_with_payment);
+          }
+          noteSkippedReply(res.data);
           if (res.data.llm_error && !replySkippedForLength(res.data)) {
             addToast(res.data.llm_error, 10000);
           }
@@ -613,6 +620,10 @@ const NodeForm = forwardRef(
           const topLevelWithAi = !parentId && aiUsage !== 'none';
           const response = await api.post(`/drafts/streaming/${streamingSessionId}/save-as-node`, {
             content,
+            // The settings the form shows now, which can differ from the
+            // ones the recording started with.
+            privacy_level: privacyLevel,
+            ai_usage: aiUsage,
             ...(topLevelWithAi && useAgenticPrompt && { agentic: true }),
             ...(topLevelWithAi && autoGenerateOn && allowAgenticPrompt
               && { auto_generate: true }),
@@ -621,8 +632,10 @@ const NodeForm = forwardRef(
           setHasDraft(false);
           setStreamingSessionId(null);
           if (response.data.spend_capped) {
-            notifySpendBlocked(response.data.spend_cap_lifts_on);
+            notifySpendBlocked(response.data.spend_cap_lifts_on,
+              response.data.spend_cap_lifts_with_payment);
           }
+          noteSkippedReply(response.data);
           // Land on the entry; ?awaitLlm hands a pending reply to NodeDetail.
           succeed({
             ...response.data,
@@ -907,6 +920,7 @@ const NodeForm = forwardRef(
             onAIUsageChange={setAiUsage}
             disabled={loading}
             lockPrivacy={parentPrivacy === "public" && !editMode}
+            trainRefused={trainRefused}
           />
         )}
 
@@ -1215,7 +1229,9 @@ const NodeForm = forwardRef(
                   onError={(err) => {
                     // A start refused by the monthly spend cap is not a
                     // failure; the recorder already showed a toast (#341).
-                    if (!err?.spendCapped) {
+                    // Nor is one refused without a subscription (#438):
+                    // the banner says why.
+                    if (!err?.spendCapped && !err?.subscriptionRequired) {
                       setError(err.message || 'Streaming transcription failed');
                     }
                     setLoading(false);

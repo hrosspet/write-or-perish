@@ -111,8 +111,9 @@ def _node_spoken_text(content, tool_calls_meta=None):
     removed; for a Voice tool-use reply with a proposal card, only its
     prose (``_strip_heading_sections``: otherwise the heading words get
     read aloud); then links spoken as their text and addresses short
-    (#461). The stored text is unchanged. A streamed reply's TTS does the
-    same in tts_stream_text.SpokenTextProjector."""
+    (#461), and each fenced code block as one short phrase (#646). The
+    stored text is unchanged. A streamed reply's TTS does the same in
+    tts_stream_text.SpokenTextProjector."""
     text = _strip_share_blocks(_strip_quote_markers(content or ""))
     if text and tool_calls_meta:
         try:
@@ -526,8 +527,9 @@ def _run_entity_tts(task, entity_cls, entity_id, text_of, subdir,
                 db.session.commit()
                 return {'status': 'completed', 'tts_url': entity.audio_tts_url}
 
-            # Links spoken as their text, addresses short (#461): the same
-            # step as for nodes. The stored text is unchanged.
+            # Links spoken as their text, addresses short (#461), a code
+            # block as one short phrase (#646): the same step as for
+            # nodes. The stored text is unchanged.
             text = speak_links(text_of(entity) or "").strip()
             if not text:
                 raise ValueError("No content to generate TTS for")

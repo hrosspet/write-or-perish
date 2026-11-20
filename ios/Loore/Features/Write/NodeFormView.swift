@@ -60,7 +60,8 @@ private struct NodeFormBody: View {
             editor
             if !config.hidePowerFeatures {
                 PrivacySelectorView(privacy: $model.privacy, aiUsage: $model.aiUsage, disabled: model.loading,
-                                    lockPrivacy: model.lockPrivacy)
+                                    lockPrivacy: model.lockPrivacy,
+                                    trainRefused: config.edit?.trainRefused ?? false)
             }
             if model.showsAgenticToggles {
                 LabeledPillToggle(label: "Agentic Reply", isOn: $model.useAgenticPrompt,

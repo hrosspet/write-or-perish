@@ -20,7 +20,9 @@ import {
   isSharedPrivacy, onlyYouSeeReply,
 } from "../utils/sharedThread";
 import { useCheckboxToggle, useTaskInsert } from "../utils/markdown";
-import { contextAllowsAi, isAiUsageRefusedError } from "../utils/aiUsage";
+import {
+  contextAllowsAi, isAiUsageRefusedError, keptFromTrainRepliesNote,
+} from "../utils/aiUsage";
 import { THREAD_TOO_LONG_CODE, isThreadTooLong } from "../utils/threadLength";
 import ThreadLengthNotice from "./ThreadLengthNotice";
 import NodeFormModal from "./NodeFormModal";
@@ -999,9 +1001,16 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // it defaults to the thread's, not the read reply's 'chat' (#362).
   const submitReadReplyMessage = async ({ content, privacy_level, ai_usage, streaming_session_id }) => {
     if (streaming_session_id) {
+      // The form's settings as they are now; with AI usage None the
+      // recording is a plain note, as a typed one is below.
       const res = await api.post(
         `/drafts/streaming/${streaming_session_id}/save-as-node`,
-        { content, agentic: true, auto_generate: autoGenerateActive, model: selectedModel },
+        ai_usage === 'none'
+          ? { content, privacy_level, ai_usage }
+          : {
+            content, privacy_level, ai_usage, agentic: true,
+            auto_generate: autoGenerateActive, model: selectedModel,
+          },
       );
       return res.data;
     }
@@ -1044,6 +1053,9 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
         3000,
       );
     }
+    // Replies written from posts fetched from X stay off Train (#689).
+    const keptNote = keptFromTrainRepliesNote(data?.kept_from_train);
+    if (keptNote) addToast(keptNote, 8000);
 
     if (!wasFocal) {
       // Non-focal edit: refetch the focal node so the edited
@@ -1546,6 +1558,10 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     </span>
   );
   const nodeAllowsAi = node.ai_usage !== 'none';
+  // Payments on (#438): an account without Voice mode (free, or its
+  // subscription ended) still plays its own recordings; no new speech.
+  const ownRecording = !!(currentUser?.payments_enabled && node.has_original_audio
+    && node.user && node.user.id === currentUser.id);
   const topRightControls = isOwner && !isPublicThread && (
     <div style={{
       display: 'flex',
@@ -1898,14 +1914,16 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
           >
             <FaThumbtack />
           </button>
-          {/* A reply in a thread where a change waits: its audio may be
+          {/* Payments on (#438): the owner always plays their own recording.
+              A reply in a thread where a change waits: its audio may be
               followed by the spoken announcement (asked when it plays). */}
           <SpeakerIcon
             nodeId={node.id} content={node.content} isPublic={node.privacy_level === 'public'} aiUsage={node.ai_usage}
             onTtsGenerated={() => setNode(prev => prev ? { ...prev, has_tts: true } : prev)}
+            ownRecording={ownRecording}
             announce={pendingApprovals.length > 0 && (node.node_type === 'llm' || !!node.llm_model)}
           />
-          <DownloadAudioIcon nodeId={node.id} isPublic={node.privacy_level === 'public'} aiUsage={node.ai_usage} />
+          <DownloadAudioIcon nodeId={node.id} isPublic={node.privacy_level === 'public'} aiUsage={node.ai_usage} ownRecording={ownRecording} />
         </NodeFooter>
         {(showLlmResponse || showTryAgain || readActions) && (
           <div
@@ -2120,6 +2138,8 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
             initialContent: editTarget.content,
             initialPrivacyLevel: editTarget.privacy_level,
             initialAiUsage: editTarget.ai_usage,
+            // Fetched through the X API: no Train (#689).
+            trainRefused: !!editTarget.train_refused,
             detachPrompt: !!editTarget.context_artifacts?.prompt,
             hasGeneratedTts: !!editTarget.has_tts,
             // Drives the "apply to replies too?" choice on a privacy /

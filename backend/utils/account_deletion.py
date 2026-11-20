@@ -54,7 +54,9 @@ from sqlalchemy import func, null, or_
 
 from backend.extensions import db
 from backend.models import (
-    ApiToken, ChangelogReadState, Node, Poll, ReleasedUsername, User,
+    ApiToken, ChangelogReadState, CheckoutSession, DiscountCode,
+    DiscountCodeAttempt,
+    DiscountRedemption, Invite, Node, Poll, Referral, ReleasedUsername, User,
     UserDataPurge, UsernameHistory,
 )
 from backend.utils import user_purge
@@ -384,6 +386,11 @@ def schedule_account_deletion(user, *, requested_by_id, source, at=None):
     _hide(user, now)
     db.session.commit()
     _drop_public_pages(user)
+    # A running subscription (#438) does not renew during the grace
+    # period: it ends with the period already paid. Best effort; the
+    # purge cancels whatever still runs.
+    from backend.utils.stripe_billing import stop_renewal_for_deletion
+    stop_renewal_for_deletion(user)
     logger.warning("Account deletion of user %s scheduled for %s (job %s, "
                    "%s by %s)", user.id, due, job.id, source, requested_by_id)
     return job
@@ -409,6 +416,10 @@ def restore_account(user):
         db.session.rollback()
         return False
     user.deleted_at = None
+    # An "alpha" account that was waiting to be deleted when the alpha free
+    # month was given gets the same month now (#438).
+    from backend.utils.subscriptions import convert_if_alpha
+    convert_if_alpha(user)
     db.session.commit()
     user_purge.settle_restore(cancelled)
     _drop_public_pages(user)
@@ -464,6 +475,10 @@ def undo_admin_deletion(job_id, admin_id):
         db.session.rollback()
         return False
     user.deleted_at = None
+    # An "alpha" account that was waiting to be deleted when the alpha free
+    # month was given gets the same month now (#438).
+    from backend.utils.subscriptions import convert_if_alpha
+    convert_if_alpha(user)
     db.session.commit()
     if not replaced:
         user_purge.settle_restore(cancelled)
@@ -580,13 +595,18 @@ def _reserve_usernames(handles, now):
             row.reserved_until = max(row.reserved_until, until)
 
 
-def delete_identity(user_id):
+def delete_identity(user_id, *, notify=True, reserve_handles=True):
     """Delete the account after its data has been purged. Flushes but
     does not commit: the caller commits it together with the job's
     "done", then calls the returned function for what happens outside
     the database (cache, email). Returns (counts, after_commit). Raises
     PurgeRefused, or PurgeIncomplete when anything of the user's is left
-    that the purge should have deleted."""
+    that the purge should have deleted.
+
+    A pre-filled account nobody claimed (#685) passes both False: nobody
+    ever had the account, so no email goes to an address the admin added,
+    and its handle is not held back from the person it belongs to, who
+    may sign up later (the account never had a public page to protect)."""
     from backend.utils.system_accounts import get_erased_system_user
 
     user = db.session.get(User, user_id)
@@ -615,6 +635,71 @@ def delete_identity(user_id):
         synchronize_session=False)
     counts["poll.created_by"] += Poll.query.filter(Poll.created_by == U).update(
         {Poll.created_by: None}, synchronize_session=False)
+    # Payments (#438). A subscription that still runs is cancelled at
+    # Stripe first; while Stripe can't be reached the deletion waits and
+    # is tried again. Stripe keeps its own records of the purchase (it is
+    # the merchant of record). A code's uses stay counted without the
+    # account; the codes the account tried and its checkouts go.
+    from backend.utils.stripe_billing import (
+        BillingNotConfigured, cancel_for_purge, delete_customer_for_purge)
+    try:
+        if cancel_for_purge(user):
+            counts["stripe_subscription_cancelled"] += 1
+        # The Stripe customer goes too: the name, email and address
+        # Checkout asked for do not outlive the account.
+        if delete_customer_for_purge(user):
+            counts["stripe_customer_deleted"] += 1
+    except BillingNotConfigured:
+        # No Stripe key on this server (payments taken down): waiting
+        # would never end. The deletion goes on; the job's counts and the
+        # log say what is left at Stripe, for an admin to remove there.
+        counts["stripe_not_removed_no_key"] += 1
+        logger.error("Account of user %s deleted with its Stripe customer "
+                     "%s (subscription %s) left at Stripe: no Stripe key "
+                     "configured", U, user.stripe_customer_id,
+                     user.stripe_subscription_id)
+    except Exception as e:  # noqa: BLE001 - retried with the purge
+        raise PurgeIncomplete("the subscription or the customer could not "
+                              f"be removed at Stripe ({type(e).__name__})")
+    counts["discount_redemption.user_id"] += DiscountRedemption.query.filter(
+        DiscountRedemption.user_id == U).update(
+        {DiscountRedemption.user_id: None}, synchronize_session=False)
+    # One trial per card (#697): the card's mark stays without the account
+    # (a keyed hash and a date), so the card gets no second trial.
+    from backend.utils.trial_cards import detach_for_purge
+    counts["trial_card.user_id"] += detach_for_purge(U)
+    # The counts behind the checkout and sync limits (#697) go.
+    from backend.models import BillingRequest
+    counts["billing_request"] += BillingRequest.query.filter(
+        BillingRequest.user_id == U).delete(synchronize_session=False)
+    counts["discount_code.created_by_id"] += DiscountCode.query.filter(
+        DiscountCode.created_by_id == U).update(
+        {DiscountCode.created_by_id: None}, synchronize_session=False)
+    counts["discount_code_attempt"] += DiscountCodeAttempt.query.filter(
+        DiscountCodeAttempt.user_id == U).delete(synchronize_session=False)
+    counts["checkout_session"] += CheckoutSession.query.filter(
+        CheckoutSession.user_id == U).delete(synchronize_session=False)
+    # Referrals (#439): the row stays for the other account's history,
+    # without the deleted one.
+    counts["referral.inviter_id"] += Referral.query.filter(
+        Referral.inviter_id == U).update(
+        {Referral.inviter_id: None}, synchronize_session=False)
+    counts["referral.friend_id"] += Referral.query.filter(
+        Referral.friend_id == U).update(
+        {Referral.friend_id: None}, synchronize_session=False)
+    # Invites (#439): the account's own. An open one is withdrawn, and the
+    # handle or address of every one is deleted (the people it named may
+    # never have signed up); the row and its state stay, without the
+    # account, for a referral that points to it.
+    counts["invite.withdrawn"] += Invite.query.filter(
+        Invite.inviter_id == U, Invite.state == "open").update(
+        {Invite.state: "withdrawn", Invite.ended_at: datetime.utcnow()},
+        synchronize_session=False)
+    counts["invite.inviter_id"] += Invite.query.filter(
+        Invite.inviter_id == U).update(
+        {Invite.inviter_id: None, Invite.target: None,
+         Invite.target_x_id: None},
+        synchronize_session=False)
 
     handles = {(user.username or "").lower()}
     handles.update(h for (h,) in db.session.query(
@@ -632,9 +717,10 @@ def delete_identity(user_id):
                               + ", ".join(f"{k}={v}"
                                           for k, v in sorted(left.items())))
 
-    email = user.email
-    _reserve_usernames(handles, now)
-    counts["released_username"] += len([h for h in handles if h])
+    email = user.email if notify else None
+    if reserve_handles:
+        _reserve_usernames(handles, now)
+        counts["released_username"] += len([h for h in handles if h])
     db.session.expunge(user)
     counts["user"] += User.query.filter(User.id == U).delete(
         synchronize_session=False)

@@ -15,10 +15,16 @@ from backend.utils.magic_link import (
     verify_email_change_token, hash_token,
 )
 from backend.utils.timefmt import iso_utc, is_valid_timezone
-from backend.utils.privacy import VALID_PRIVACY_LEVELS, VALID_AI_USAGE
+from backend.utils.privacy import (
+    VALID_PRIVACY_LEVELS, VALID_AI_USAGE, shown_ai_usage,
+)
 from backend.routes.terms import CURRENT_TERMS_VERSION
 from backend.utils.reserved_usernames import validate_username
 from backend.utils.spend import spend_cap_payload, user_is_capped
+from backend.utils.subscriptions import user_payload_fields
+from backend.utils.approval import (
+    counts_as_approved as approval_counts_as_approved,
+    user_payload_fields as approval_payload_fields)
 from backend.utils.llm_nodes import effective_preferred_model, is_chat_model
 from backend.utils.own_entries import has_own_entries
 from backend.utils.user_purge import deletion_status
@@ -65,7 +71,7 @@ def get_latest_profile(user):
             "has_tts": bool(profile.audio_tts_url),
             # The speaker icon is off where AI may not read the version
             # (POST /profile/<id>/tts refuses it: speech_allowed).
-            "ai_usage": profile.ai_usage,
+            "ai_usage": shown_ai_usage(profile),  # #689
         }
     return None
 
@@ -78,12 +84,15 @@ def _serialize_current_user():
     its deletion state after any settings change)."""
     voice_mode_enabled = current_user.has_voice_mode
     spend_blocked = user_is_capped(current_user)
+    cap = spend_cap_payload(current_user) if spend_blocked else {}
     return {
         "id": current_user.id,
         "username": current_user.username,
         "accepted_terms_at": iso_utc(current_user.accepted_terms_at),
         "terms_up_to_date": _terms_up_to_date(current_user),
-        "approved": current_user.approved,
+        # `approved`; payments off, an account the gate let in by itself
+        # while they were on reads as waiting (#697).
+        "approved": approval_counts_as_approved(current_user),
         "email": current_user.email,
         "is_admin": current_user.is_admin,
         "plan": current_user.plan,
@@ -112,10 +121,13 @@ def _serialize_current_user():
         "spend_blocked": spend_blocked,
         # The date (UTC) a capped user's limit lifts: the first of next
         # month, or later while a carry over a whole month's limit holds
-        # the cap (#594). Null when not capped.
-        "spend_cap_lifts_on": (
-            spend_cap_payload(current_user)["lifts_on"]
-            if spend_blocked else None),
+        # the cap (#594). Null when not capped, and for a cap only the
+        # first payment lifts (#438: the trial's, the free month's), which
+        # alone adds spend_cap_lifts_with_payment: true (payments off: the
+        # key never appears).
+        "spend_cap_lifts_on": cap.get("lifts_on"),
+        **({"spend_cap_lifts_with_payment": True}
+           if cap.get("lifts_with_payment") else {}),
         # Public side (#228): enabled = deployed (env) AND the user's
         # own opt-in — every frontend surface keys off this. available
         # = deployed only; it decides whether Account shows the toggle.
@@ -152,6 +164,13 @@ def _serialize_current_user():
         # "Delete my account" (#269): the numbers the Account page
         # states, and why the account cannot be deleted, if it can't.
         "account_deletion": account_deletion_info(current_user),
+        # Payments (#438), only while PAYMENTS_ENABLED is on:
+        # payments_enabled and the subscription's state (level, status,
+        # dates, whether AI replies are on). Off: no key at all.
+        **user_payload_fields(current_user),
+        # Payments on (#697): account_blocked, whether the admin blocked
+        # it. Off: no key.
+        **approval_payload_fields(current_user),
     }
 
 
@@ -169,7 +188,11 @@ def get_dashboard():
     dashboard = {
         "user": _serialize_current_user(),
     }
-    if request.args.get("profile") != "0":
+    # Payments on (#438): an account not let in yet reads nothing, its
+    # profile included.
+    from backend.utils.subscriptions import access_state
+    if request.args.get("profile") != "0" and \
+            access_state(current_user) != "none":
         dashboard["latest_profile"] = get_latest_profile(current_user)
     return jsonify(dashboard), 200
 

@@ -39,6 +39,11 @@ pypdf==6.19.0
 Pillow>=10.0.0
 # Community Archive parquet snapshot reads (admin pre-fill of large accounts)
 duckdb>=1.0
+# Payments (#438): Stripe Checkout with Managed Payments, the customer
+# portal and webhook signatures. 17.0.0 pins API version 2026-10-28.endive
+# (current_period_end is on subscription items, an invoice's subscription
+# under parent.subscription_details).
+stripe==17.0.0
 # Chunked cosine scan for semantic search (backend/utils/embeddings.py):
 # bounds a 62k-node archive to ~0.2 s / ~40 MB peak instead of ~8.6 s / 382 MB.
 # <3 keeps the Python 3.9 line (numpy 2.1+ needs 3.10).

@@ -169,6 +169,12 @@ def test_log_and_http_breadcrumbs_carry_no_query_strings(monkeypatch):
                         before_send=lambda e, h: events.append(
                             before_send(e, h)),
                         **SENTRY_PRIVACY_OPTIONS)
+        # Only this test's breadcrumbs: an HTTP call an earlier test made
+        # (an SDK call the network guard refused) stays in the scopes.
+        for scope in (sentry_sdk.get_global_scope(),
+                      sentry_sdk.get_isolation_scope(),
+                      sentry_sdk.get_current_scope()):
+            scope.clear_breadcrumbs()
         app.test_client().get("/api/stream")
     finally:
         sentry_sdk.init(dsn=None)

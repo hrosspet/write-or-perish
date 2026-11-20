@@ -123,6 +123,61 @@ final class AccountModelTests: StubbedAppTestCase {
         XCTAssertFalse(AccountModel(app: app).showsDisconnectX, "an X-only account cannot disconnect")
     }
 
+    // #662: "Start from your tweets" (AccountPage.tweetSeed.test.js).
+
+    func testTweetSeedRowShowsWhereTheQuestionApplies() throws {
+        try signIn(["email": "a@example.com"])
+        XCTAssertFalse(AccountModel(app: app).showsTweetSeed, "an email account Loore never pre-filled")
+        try signIn(["twitter_login": true, "twitter_handle": "sw"])
+        XCTAssertTrue(AccountModel(app: app).showsTweetSeed, "an X sign-in: the card asks it")
+        try signIn(["email": "a@example.com", "prefilled_handle": "sw_tw"])
+        XCTAssertTrue(AccountModel(app: app).showsTweetSeed, "an account Loore pre-filled")
+        try signIn(["email": "a@example.com", "prefill_consent": "no"])
+        XCTAssertTrue(AccountModel(app: app).showsTweetSeed, "an answer can always be changed")
+    }
+
+    func testTweetSeedTextIsTheWebsText() throws {
+        try signIn(["twitter_login": true, "twitter_handle": "sw", "prefilled_handle": "sw_tw"])
+        XCTAssertEqual(AccountModel.tweetSeedHelp(app.user!),
+                       "With Yes, Loore brings in your public tweets as @sw_tw, keeps them private in your Loore, "
+                       + "and drafts your profile and intentions from them. With No, it brings in no more of them "
+                       + "and leaves the ones it brought in out whenever it reads through your writing. What it "
+                       + "already made stays: those tweets, which you can delete, and your profile and intentions, "
+                       + "which Loore keeps using in replies and Glean until you edit them. Until you answer, Loore "
+                       + "may still bring them in.")
+        try signIn(["twitter_login": true, "twitter_handle": "sw", "prefill_consent": "yes"])
+        let answered = AccountModel.tweetSeedHelp(app.user!)
+        XCTAssertTrue(answered.hasPrefix("With Yes, Loore brings in your public tweets as @sw, "))
+        XCTAssertFalse(answered.contains("Until you answer"))
+    }
+
+    func testTweetSeedSavesBothWaysAndSaysWhenItDidNotSave() async throws {
+        try signIn(["twitter_login": true, "prefill_consent": "yes"])
+        let model = AccountModel(app: app)
+        StubURLProtocol.install { _ in
+            .json(200, #"{"user":{"id":5,"username":"seowriter","approved":true,"terms_up_to_date":true,"twitter_login":true,"prefill_consent":"no"}}"#)
+        }
+        await model.saveTweetSeed(.no)
+        XCTAssertEqual(body(of: "PUT /api/dashboard/user")?["prefill_consent"] as? String, "no")
+        XCTAssertEqual(app.user?.prefillConsent, .no)
+        XCTAssertNil(model.tweetSeedError)
+        StubURLProtocol.install { _ in .json(500, #"{"error":"down"}"#) }
+        await model.saveTweetSeed(.yes)
+        XCTAssertEqual(model.tweetSeedError, "Couldn't save your answer. Please try again.")
+        XCTAssertEqual(app.user?.prefillConsent, .no, "the answer shown is the one saved")
+        XCTAssertFalse(model.isSaving("prefill_consent"))
+    }
+
+    func testTheCardsNoOnAPrefilledAccountPromisesNoBlankPage() throws {
+        try signIn(["twitter_login": true, "prefilled_handle": "sw_tw"])
+        let noted = AccountModel.tweetSeedNoted(app.user!, answer: .no)
+        XCTAssertFalse(noted.contains("blank page"))
+        XCTAssertTrue(noted.contains("Your profile and intentions stay, and Loore keeps using them until you edit them."))
+        try signIn(["twitter_login": true])
+        XCTAssertEqual(AccountModel.tweetSeedNoted(app.user!, answer: .no),
+                       "Noted. You'll start from a blank page — you can always seed from your tweets later, from Settings.")
+    }
+
     func testXLoginOutcomeMessages() async throws {
         try signIn(["email": "a@example.com"])
         let model = AccountModel(app: app)
@@ -298,6 +353,22 @@ final class ReadReplyTests: StubbedAppTestCase {
                        "Tweets from \(from) to \(to) (your time): 1,234 by 56 accounts. 7 you had already read were left out.")
         XCTAssertFalse(ReadWindowLine.text(try window(excluded: 0))!.contains("left out"))
         XCTAssertNil(ReadWindowLine.text(try decode(ReadWindow.self, #"{"tweets":3}"#)), "no line without a window")
+    }
+
+    func testWindowLineSaysWhenTheArchiveWasStale() throws {
+        // #688: the server sets export_stale when the newest tweet was over 36 hours old.
+        let utc = TimeZone(identifier: "UTC")!
+        let stale = try decode(ReadWindow.self, """
+        {"window_start":"2026-11-02T12:00:00Z","window_end":"2026-11-03T12:00:00Z","tweets":900,"accounts":120,"excluded":0,"export_stale":true}
+        """)
+        XCTAssertEqual(stale.exportStale, true)
+        XCTAssertTrue(ReadWindowLine.text(stale, timeZone: utc)!.hasSuffix(
+            " The newest tweets available are from 3 November; the archive's daily export has not updated since."))
+        let fresh = try decode(ReadWindow.self, """
+        {"window_start":"2026-11-02T12:00:00Z","window_end":"2026-11-03T12:00:00Z","tweets":900,"accounts":120,"excluded":0,"export_stale":false}
+        """)
+        XCTAssertFalse(ReadWindowLine.text(fresh, timeZone: utc)!.contains("newest tweets available"))
+        XCTAssertNil(ReadWindowLine.staleExportNote(try window(excluded: 0)), "older servers send no flag")
     }
 
     func testCancelledLineSaysWhyToTheOwnerOnly() throws {
@@ -741,7 +812,7 @@ final class ImportTests: StubbedAppTestCase {
         XCTAssertNotNil(model.analysis)
         XCTAssertEqual(model.aiUsage, .chat)
         XCTAssertEqual(model.confirmBody(model.analysis!, onDeleted: nil)["ai_usage"] as? String, "chat")
-        XCTAssertEqual(model.privacy, .private)
+        XCTAssertEqual(model.confirmBody(model.analysis!, onDeleted: nil)["privacy_level"] as? String, "private")
 
         app.useForTesting(api: app.api, user: try decode(CurrentUser.self,
             #"{"id":5,"username":"seowriter","approved":true,"default_ai_usage":"none"}"#))
@@ -923,6 +994,20 @@ final class ImportTests: StubbedAppTestCase {
         conversations.archiveSummary = "These numbers count messages. Your archive has 2 conversations with 8 messages."
         XCTAssertEqual(conversations.stats.map(\.label), ["Messages imported", "Messages skipped"])
         XCTAssertEqual(conversations.notes.first, conversations.archiveSummary)
+    }
+
+    /// #638: a re-import that could set its settings only on the last entry
+    /// of some older items says so, in the web app's words.
+    func testPartlyUpdatedNote() {
+        let one = ImportResult(["created": 0, "updated": 1, "partly_updated": 1])
+        XCTAssertEqual(one.partlyUpdated, 1)
+        XCTAssertEqual(one.notes.last,
+                       "1 item could be updated only in part: its last entry now has these settings, but Loore could "
+                       + "not confirm which entries before it belong to the same document or message, so those kept "
+                       + "their own. You can change them on each entry.")
+        let many = ImportResult(["created": 0, "updated": 3, "partly_updated": 2])
+        XCTAssertTrue(many.notes.last?.hasPrefix("2 items could be updated only in part: the last entry of each") ?? false)
+        XCTAssertFalse(ImportResult(["created": 0, "updated": 1]).notes.contains { $0.contains("only in part") })
     }
 }
 

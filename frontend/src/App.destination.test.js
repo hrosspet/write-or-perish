@@ -31,6 +31,7 @@ jest.mock('./api', () => ({
 jest.mock('./components/MarkdownBody', () => () => null);
 jest.mock('./components/NodeDetailWrapper', () => () => <div>thread-page</div>);
 jest.mock('./pages/AlphaThankYouPage', () => () => <div>waiting-page</div>);
+jest.mock('./pages/SubscribePage', () => () => <div>subscribe-page</div>);
 jest.mock('./pages/AccountPage', () => () => <div>account-page</div>);
 jest.mock('./pages/HomePage', () => () => <div>home-page</div>);
 jest.mock('./components/TermsModal', () => ({ onAccepted }) => (
@@ -172,5 +173,46 @@ describe('a step page shown in place of the app', () => {
     });
     expect(where()).toBe('/node/5');
     expect(kept()).toBeNull();
+  });
+});
+
+// The real App, payments on (#700): a new account sees the terms, then the
+// subscribe page, at the entry's address; the entry opens only after the
+// checkout's return, never in place of a step.
+describe('payments on: terms, then the subscribe page, then the entry', () => {
+  const onNoSub = (over = {}) => ({
+    id: 9, approved: true, payments_enabled: true,
+    subscription: { state: 'none' }, terms_up_to_date: false, ...over,
+  });
+
+  test('the steps show at the entry address, and it is kept', () => {
+    mockUser = onNoSub();
+    renderAt('/@ana/a-first-entry?x=1#reply-7');
+    expect(screen.getByText('accept-terms')).toBeInTheDocument();
+    expect(screen.getByText('subscribe-page')).toBeInTheDocument();
+    expect(screen.queryByText('thread-page')).toBeNull();
+    expect(kept()).toEqual({
+      path: '/@ana/a-first-entry?x=1#reply-7', load: PAGE_LOAD, at: expect.any(Number),
+    });
+    fireEvent.click(screen.getByText('accept-terms'));
+    expect(screen.getByText('subscribe-page')).toBeInTheDocument();
+    expect(screen.queryByText('thread-page')).toBeNull();
+  });
+
+  test('the checkout returns to the Account page: the entry opens', () => {
+    window.sessionStorage.setItem(KEY, JSON.stringify({
+      path: '/node/5#reply-2', load: 'the-load-before-checkout', at: Date.now(),
+    }));
+    mockUser = onNoSub({ terms_up_to_date: true, subscription: { state: 'active' } });
+    renderAt('/account?subscription=success');
+    expect(where()).toBe('/node/5#reply-2');
+    expect(kept()).toBeNull();
+  });
+
+  test('control: payments off, a new account: the terms over the entry, no subscribe page', () => {
+    mockUser = { id: 9, approved: true, terms_up_to_date: false };
+    renderAt('/node/5');
+    expect(screen.getByText('thread-page')).toBeInTheDocument();
+    expect(screen.queryByText('subscribe-page')).toBeNull();
   });
 });
