@@ -492,14 +492,15 @@ def read_window_fields(row):
     from backend.utils.timefmt import iso_utc
     if row is None:
         return None
-    paged = row.page_start is not None and row.page_end is not None
+    page_start = getattr(row, "page_start", None)
+    page_end = getattr(row, "page_end", None)
+    paged = page_start is not None and page_end is not None
     return {
         "export_id": row.export_id,
         "days": row.days,
         "scope": row.scope,
-        "window_start": iso_utc(row.page_start if paged
-                                else row.window_start),
-        "window_end": iso_utc(row.page_end if paged else row.window_end),
+        "window_start": iso_utc(page_start if paged else row.window_start),
+        "window_end": iso_utc(page_end if paged else row.window_end),
         "newest_at": iso_utc(row.window_end),
         "tweets": row.tweet_count,
         "accounts": row.account_count,
