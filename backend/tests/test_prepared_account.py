@@ -170,6 +170,9 @@ def _x_token(client, x_id):
         sess["twitter_oauth_token"] = {
             "oauth_token": "t", "oauth_token_secret": "s",
             "user_id": str(x_id), "screen_name": HANDLE}
+        # The mark of a return from X that #705 sets (its /auth/login signs
+        # in from a stored token only then); unused without #705.
+        sess["x_sign_in_authorized"] = True
 
 
 def _callback(client, x_id, handle=HANDLE):
