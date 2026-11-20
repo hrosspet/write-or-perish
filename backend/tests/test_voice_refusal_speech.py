@@ -23,13 +23,13 @@ from backend.tests.test_no_replies_for_none import st  # noqa: F401
 from backend.extensions import db as _db
 from backend.models import Draft
 from backend.utils.voice_refusals import (
-    AI_USAGE_NONE_CODE, APPROVAL_PENDING_CODE, SPEND_CAP_CODE,
-    SPOKEN_REFUSALS, SUBSCRIPTION_CODES, SUBSCRIPTION_SENTENCES,
-    THREAD_TOO_LONG_CODE, skipped_reply_code,
+    AI_USAGE_NONE_CODE, APPROVAL_PENDING_CODE, GLEAN_DAY_DONE_CODE,
+    SPEND_CAP_CODE, SPOKEN_REFUSALS, SUBSCRIPTION_CODES,
+    SUBSCRIPTION_SENTENCES, THREAD_TOO_LONG_CODE, skipped_reply_code,
 )
 
 CODES = [SPEND_CAP_CODE, AI_USAGE_NONE_CODE, APPROVAL_PENDING_CODE,
-         THREAD_TOO_LONG_CODE]
+         THREAD_TOO_LONG_CODE, GLEAN_DAY_DONE_CODE]
 
 
 def _refusal(client, code):

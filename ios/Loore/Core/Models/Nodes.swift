@@ -158,8 +158,11 @@ struct ReadWindow: Decodable, Hashable, Sendable {
     var tweets: Int?
     var accounts: Int?
     var excluded: Int?
-    /// The archive had nothing newer than `windowEnd` when the read was made (#688).
+    /// The archive had nothing newer than `newestAt` when the read was made (#688).
     var exportStale: Bool?
+    /// The newest tweet the archive had (the day's end). A read of part of the
+    /// day (#717) has its own, older, `windowEnd`; absent on older servers.
+    var newestAt: Date?
 
     enum CodingKeys: String, CodingKey {
         case days, scope, tweets, accounts, excluded
@@ -167,6 +170,7 @@ struct ReadWindow: Decodable, Hashable, Sendable {
         case windowStart = "window_start"
         case windowEnd = "window_end"
         case exportStale = "export_stale"
+        case newestAt = "newest_at"
     }
 
     init(from decoder: Decoder) throws {
@@ -180,6 +184,7 @@ struct ReadWindow: Decodable, Hashable, Sendable {
         accounts = c.flexibleInt(.accounts)
         excluded = c.flexibleInt(.excluded)
         exportStale = c.tolerant(.exportStale)
+        newestAt = c.tolerant(.newestAt)
     }
 }
 

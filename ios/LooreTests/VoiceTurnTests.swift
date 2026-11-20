@@ -1804,6 +1804,27 @@ final class VoiceTurnTests: XCTestCase {
         XCTAssertFalse(turn.gleaningDone, "the lock screen does not call a failed one ready")
     }
 
+    // #717: the thread has gleaned all of today's tweets. The server refuses the
+    // Glean before any model call; the Voice screen says so, as the other
+    // refusals, and stays: no gleaning opens, the conversation stays put.
+    func testAGleanWithNothingOfTheDayLeftIsSaidAndTheScreenStays() async throws {
+        gleanSession(parentId: 7)
+        var opened: [Int] = []
+        turn.onGleaningReady = { opened.append($0) }
+        let text = SpokenRefusal.gleanedThrough.text
+        backend.llmStatuses[900] = [try llm(900, "failed", tts: nil, error: text,
+                                            errorCode: "glean_day_done")]
+        _ = await turn.glean()
+        await wait("said") { audio.events.contains("speak: \(text)") }
+        XCTAssertTrue(opened.isEmpty, "no gleaning to open")
+        XCTAssertEqual(notices.toasts, [text])
+        XCTAssertFalse(turn.isGleaning)
+        XCTAssertEqual(turn.gleanAnchor, 7, "Glean stays under the same message")
+        XCTAssertTrue(turn.canGlean)
+        XCTAssertFalse(turn.gleaningDone)
+        XCTAssertFalse(audio.events.contains("sound.error"), "a refusal, not a failure")
+    }
+
     // Review of #493: a Glean from the lock screen, Loore opened much later. The
     // suspended time must not end the wait without asking the server again.
     func testALongSuspensionDoesNotEndTheGleanWait() async throws {

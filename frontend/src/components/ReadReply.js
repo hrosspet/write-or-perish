@@ -34,10 +34,15 @@ const dayMonth = (iso) => parseTimestamp(iso)
  * The sentence a stale read adds (#688): the archive had nothing newer
  * than the window's end when the read was made (read_window.export_stale,
  * set by the server when the newest tweet was more than 36 hours old).
+ * The newest tweet is `newest_at`: a read of part of the day (#717) has
+ * its own, older, `window_end`.
  */
-export const staleExportNote = (w) => (w && w.export_stale && w.window_end
-  ? `The newest tweets available are from ${dayMonth(w.window_end)}; the archive's daily export has not updated since.`
-  : null);
+export const staleExportNote = (w) => {
+  const newest = w && (w.newest_at || w.window_end);
+  return (w && w.export_stale && newest
+    ? `The newest tweets available are from ${dayMonth(newest)}; the archive's daily export has not updated since.`
+    : null);
+};
 
 export const ReadWindowLine = ({ window: w }) => {
   if (!w || !w.window_end) return null;

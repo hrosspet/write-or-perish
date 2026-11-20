@@ -42,6 +42,37 @@ def tokenizer_family(model_id):
     return _FAMILY_BY_PROVIDER.get(cfg.get("provider"), "claude_new")
 
 
+# The o200k_base encoding, loaded once per process (local_token_counter).
+_O200K = {}
+
+
+def local_token_counter(model_id):
+    """A function text -> tokens that counts on this machine, for a model
+    whose tokenizer is o200k (OpenAI's GPT-5.x and later, which bill
+    with it: tiktoken's o200k_base, no request), or None: another
+    tokenizer family (Anthropic counts only through its endpoint), or
+    tiktoken unavailable. Used to fit a Glean's tweets to its prompt
+    (#717)."""
+    if tokenizer_family(model_id) != "o200k":
+        return None
+    enc = _O200K.get("enc")
+    if enc is None:
+        try:
+            import tiktoken
+            enc = tiktoken.get_encoding("o200k_base")
+        except Exception:  # noqa: BLE001 - the caller falls back to its estimate
+            import logging
+            logging.getLogger(__name__).warning(
+                "tiktoken o200k_base unavailable; estimating instead",
+                exc_info=True)
+            return None
+        _O200K["enc"] = enc
+
+    def count(text):
+        return len(enc.encode(text or "", disallowed_special=()))
+    return count
+
+
 def approximate_token_count(text: str) -> int:
     """
     Approximate token count for a text string.

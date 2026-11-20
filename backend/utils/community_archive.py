@@ -886,7 +886,8 @@ def snapshot_newest_tweet_at(snapshot_dir):
 
 
 def render_recent_tweets(snapshot_dir, days=1, exclude_usernames=(),
-                         include_usernames=None, exclude_tweet_ids=()):
+                         include_usernames=None, exclude_tweet_ids=(),
+                         skip_tweet_ids=()):
     """The last ``days`` days of the whole Community Archive corpus as
     prompt text: one ``# Tweets by <user>`` section per account, one
     ``[#n] text`` line per tweet in time order, retweets dropped like
@@ -910,15 +911,21 @@ def render_recent_tweets(snapshot_dir, days=1, exclude_usernames=(),
     reader has already read (any tweet they marked read, #352), which
     must never reach the model as candidates again; how many fell in the
     window is reported as ``excluded`` in stats and named in the header.
+    ``skip_tweet_ids`` drops those tweets too: what earlier gleanings in
+    the same thread already read of this window (#717), so a Glean again
+    reads the older tweets that remain. Counted apart (``skipped``) and
+    named in the header; a tweet in both sets counts as read.
 
-    Returns (text, stats, refs) — stats: {export_id, window_start,
+    Returns (text, stats, refs) — stats: {export_id, days, window_start,
     window_end (UTC 'YYYY-MM-DD HH:MM'), window_start_at, window_end_at
-    (datetimes), tweets, accounts, excluded, scope}; refs: {n: {username,
-    tweet_id, text, posted_at}} — everything a pick needs to become a
-    saved reference. The render is deterministic for a snapshot and an
-    exclusion set (ordered by username, time, id); neither is stable over
-    a batch's lifetime, which is why the submit pins the numbering (see
-    FeedRender) instead of re-rendering on collect.
+    (datetimes), tweets, accounts, excluded, skipped, scope}; refs: {n:
+    {username, tweet_id, text, posted_at}} — everything a pick needs to
+    become a saved reference. The render is deterministic for a snapshot
+    and an exclusion set (ordered by username, time, id); neither is
+    stable over a batch's lifetime, which is why the submit pins the
+    numbering (see FeedRender) instead of re-rendering on collect. A
+    Glean sends only the newest of these tweets that fit its prompt
+    (newest_that_fit).
     Raises CommunityArchiveError when no snapshot is cached (this PoC
     never downloads one in the request path — a day's render must not
     wait on a 900 MB download)."""
@@ -934,13 +941,15 @@ def render_recent_tweets(snapshot_dir, days=1, exclude_usernames=(),
         included = sorted({(u or "").strip().lstrip("@").lower()
                            for u in include_usernames if u}) or ["\0"]
     seen = {str(i) for i in exclude_tweet_ids if i}
+    skip = {str(i) for i in skip_tweet_ids if i} - seen
     with _snapshot_lock(snapshot_dir, shared=True):
         return _render_recent_tweets(
-            snapshot_dir, export_id, newest, days, excluded, included, seen)
+            snapshot_dir, export_id, newest, days, excluded, included, seen,
+            skip)
 
 
 def _render_recent_tweets(snapshot_dir, export_id, newest, days, excluded,
-                          included, seen):
+                          included, seen, skip=frozenset()):
     con, tweets, profiles = _duckdb(snapshot_dir)
     # Window bound computed in Python: duckdb can't correlate a subquery
     # through the outer join, and a naive-UTC comparison keeps the
@@ -970,11 +979,59 @@ def _render_recent_tweets(snapshot_dir, export_id, newest, days, excluded,
         + "order by lower(coalesce(p.username, t.account_id)), t.created_at, "
         "t.tweet_id",
         params)
+    skipped_tweets = 0
+    entries = []
+    while True:
+        rows = cur.fetchmany(2000)
+        if not rows:
+            break
+        for username, tweet_id, text, posted, display_name in rows:
+            if str(tweet_id) in seen:
+                excluded_tweets += 1
+                continue
+            if str(tweet_id) in skip:
+                skipped_tweets += 1
+                continue
+            entries.append({
+                "username": username, "tweet_id": str(tweet_id),
+                "text": (text or "").strip(),
+                "posted_at": datetime.strptime(posted, "%Y-%m-%d %H:%M:%S")
+                if posted else None,
+                "display_name": _clean_display_name(display_name),
+            })
+    end = datetime.strptime(newest, "%Y-%m-%d %H:%M:%S")
+    start = end - timedelta(days=int(days))
+    meta = {"export_id": export_id, "days": int(days),
+            "window_start": start.strftime("%Y-%m-%d %H:%M"),
+            "window_end": end.strftime("%Y-%m-%d %H:%M"),
+            "window_start_at": start, "window_end_at": end,
+            "excluded": excluded_tweets, "skipped": skipped_tweets,
+            "scope": "follows" if included is not None else "all"}
+    return _format_render(entries, meta)
+
+
+# What the header of a part of a render adds (#717): the list is the
+# newest of the window's tweets that fit a Glean's prompt.
+_PART_NOTE = ("This list holds the newest {tweets} of them, by {accounts} "
+              "accounts, posted from {start} to {end} UTC; the older ones "
+              "are left for a later read.")
+
+
+def _format_render(entries, meta, whole=None):
+    """The render's text, stats and refs for *entries* (dicts with
+    username, tweet_id, text, posted_at, display_name), in render order:
+    by username, then time. *meta*: the window (export_id, days,
+    window_start / window_end as 'YYYY-MM-DD HH:MM' and their datetimes
+    window_start_at / window_end_at), the tweets left out (excluded: read
+    by the reader; skipped: read by earlier gleanings in the thread) and
+    the scope. *whole* (newest_that_fit): {"tweets", "accounts"} of the
+    whole render this list is a part of; the header then names both, and
+    stats carry the part's posting times. Without it the text is byte for
+    byte what the render made before #717."""
     sections = []
     body = []
     current = None
     count = 0
-    total = 0
     refs = {}
 
     def flush():
@@ -987,55 +1044,157 @@ def _render_recent_tweets(snapshot_dir, export_id, newest, days, excluded,
         sections.append("---")
         sections.append("")
 
-    while True:
-        rows = cur.fetchmany(2000)
-        if not rows:
-            break
-        for username, tweet_id, text, posted, display_name in rows:
-            if str(tweet_id) in seen:
-                excluded_tweets += 1
-                continue
-            if username != current:
-                flush()
-                current, count, body = username, 0, []
-            count += 1
-            total += 1
-            text = (text or "").strip()
-            refs[total] = {
-                "username": username, "tweet_id": str(tweet_id),
-                "text": text,
-                "posted_at": datetime.strptime(posted, "%Y-%m-%d %H:%M:%S")
-                if posted else None,
-                "display_name": _clean_display_name(display_name),
-            }
-            body.append(f"[#{total}] {text}")
-            body.append("")
+    for entry in entries:
+        username = entry.get("username")
+        if username != current:
+            flush()
+            current, count, body = username, 0, []
+        count += 1
+        n = len(refs) + 1
+        refs[n] = dict(entry)
+        body.append(f"[#{n}] {entry.get('text') or ''}")
+        body.append("")
     flush()
+    total = len(refs)
     accounts = sum(1 for line in sections if line.startswith("# Tweets by "))
-    end = datetime.strptime(newest, "%Y-%m-%d %H:%M:%S")
-    start = end - timedelta(days=int(days))
-    newest = end.strftime("%Y-%m-%d %H:%M")
-    window_start = start.strftime("%Y-%m-%d %H:%M")
-    scope_note = (" Only accounts the reader follows." if included is not None
+    days = int(meta.get("days") or 1)
+    excluded = int(meta.get("excluded") or 0)
+    skipped = int(meta.get("skipped") or 0)
+    scope = meta.get("scope") or "all"
+    scope_note = (" Only accounts the reader follows." if scope == "follows"
                   else "")
-    seen_note = (f" {excluded_tweets} tweets the reader had already read "
+    seen_note = (f" {excluded} tweets the reader had already read "
                  "are left out."
-                 if excluded_tweets else "")
+                 if excluded else "")
+    skip_note = (f" {skipped} tweets of this window were in the earlier "
+                 "reads of this conversation and are left out."
+                 if skipped else "")
+    shown_total, shown_accounts = total, accounts
+    part_note = ""
+    posted = [e["posted_at"] for e in entries if e.get("posted_at")]
+    if whole:
+        shown_total = whole.get("tweets", total)
+        shown_accounts = whole.get("accounts", accounts)
+        part_note = " " + _PART_NOTE.format(
+            tweets=total, accounts=accounts,
+            start=min(posted).strftime("%Y-%m-%d %H:%M") if posted else "?",
+            end=max(posted).strftime("%Y-%m-%d %H:%M") if posted else "?")
     header = (
-        f"# Community Archive — tweets from {window_start} to {newest} UTC "
-        f"(last {int(days)} day(s) of export {export_id}): {total} tweets "
-        f"by {accounts} accounts, retweets omitted.{scope_note}{seen_note} "
+        f"# Community Archive — tweets from {meta.get('window_start')} to "
+        f"{meta.get('window_end')} UTC (last {days} day(s) of export "
+        f"{meta.get('export_id')}): {shown_total} tweets by {shown_accounts} "
+        f"accounts, retweets omitted.{scope_note}{seen_note}{skip_note}"
+        f"{part_note} "
         "Each tweet is numbered, and a pick names its tweet by that "
         "number. The numbers belong to this list alone and the reader "
         "never sees them: in the verdict and the quote-tweets, name a "
         "tweet by its author, never by its number.")
     text = "\n".join([header, ""] + sections).rstrip() + "\n"
-    stats = {"export_id": export_id, "window_start": window_start,
-             "window_end": newest, "window_start_at": start,
-             "window_end_at": end, "tweets": total, "accounts": accounts,
-             "excluded": excluded_tweets,
-             "scope": "follows" if included is not None else "all"}
+    stats = {"export_id": meta.get("export_id"), "days": days,
+             "window_start": meta.get("window_start"),
+             "window_end": meta.get("window_end"),
+             "window_start_at": meta.get("window_start_at"),
+             "window_end_at": meta.get("window_end_at"),
+             "tweets": total, "accounts": accounts,
+             "excluded": excluded, "skipped": skipped, "scope": scope}
+    if whole:
+        stats["window_tweets"] = shown_total
+    if whole or skipped:
+        # A part of the window: the newest that fit, or what the earlier
+        # reads in the thread left. When its tweets were posted.
+        stats["page_start_at"] = min(posted) if posted else None
+        stats["page_end_at"] = max(posted) if posted else None
     return text, stats, refs
+
+
+def _newest_first_key(ref):
+    """Sort key putting the newest tweet first (with reverse=True): its
+    time, then its id as a number (ids grow with time), then as text."""
+    tweet_id = str(ref.get("tweet_id") or "")
+    return (ref.get("posted_at") or datetime.min,
+            int(tweet_id) if tweet_id.isdigit() else -1, tweet_id)
+
+
+def newest_that_fit(text, stats, refs, room, count):
+    """The newest tweets of a render (render_recent_tweets' *text*,
+    *stats*, *refs*) whose list fits *room* tokens as *count* (a function
+    text -> tokens) counts them (#717): a Glean takes as many of the
+    window's tweets as its prompt has room for, newest first, instead of
+    the whole day. Returns:
+
+    - the render itself, unchanged, when all of it fits;
+    - else a render of its own of the newest tweets that fit (numbered
+      afresh, grouped as the render groups them), its header naming how
+      many of the window's tweets it holds and when they were posted;
+      its stats add window_tweets (the whole render's count) and
+      page_start_at / page_end_at (the oldest and newest tweet in it);
+    - None when not even the newest tweet fits.
+
+    The newest tweets are taken in order and the list stops at the first
+    one that does not fit, so the next Glean reads on from there. Each
+    tweet's cost is estimated (its text, its number, a section header
+    for a new account; the estimate errs high), then the list is counted
+    as rendered: when it has room left, more tweets are taken at the
+    estimate scaled by what the count found, and the list is counted
+    again and cut until it fits."""
+    if room is None or room <= 0:
+        return None
+    if not refs:
+        return (text, stats, refs) if count(text) <= room else None
+    width = len(str(len(refs)))
+    line_cost = count("[#" + "9" * width + "] ") + 1
+    order = sorted(refs, key=lambda n: _newest_first_key(refs[n]),
+                   reverse=True)
+    meta = dict(stats or {})
+    whole = {"tweets": len(refs),
+             "accounts": int(meta.get("accounts") or 0)}
+    header_cost = count(_format_render([], meta, whole={
+        "tweets": 10 ** width, "accounts": 10 ** width})[0]) + 4 * width
+    accounts = set()
+    chosen = []
+
+    def take(used, scale=1.0):
+        """Take tweets in order after those chosen while the estimate,
+        from *used* on, stays within room. Returns the estimate."""
+        for n in order[len(chosen):]:
+            ref = refs[n]
+            cost = count(ref.get("text") or "") + line_cost
+            username = ref.get("username")
+            if username not in accounts:
+                cost += count(f"# Tweets by {username} (Community Archive) "
+                              f"— {'9' * width} tweets") + 3
+            if used + cost * scale > room:
+                break
+            used += cost * scale
+            chosen.append(n)
+            accounts.add(username)
+        return used
+
+    estimated = take(header_cost)
+    if len(chosen) == len(order) and count(text) <= room:
+        return text, stats, refs
+
+    def render():
+        entries = [refs[n] for n in sorted(chosen)]
+        rendered = _format_render(entries, meta, whole=whole)
+        return rendered, count(rendered[0])
+
+    if not chosen:
+        return None
+    rendered, tokens = render()
+    if len(chosen) < len(order) and tokens < room and estimated > 0:
+        taken = len(chosen)
+        take(tokens, scale=min(1.0, tokens / estimated))
+        if len(chosen) > taken:
+            rendered, tokens = render()
+    while tokens > room:
+        per_tweet = tokens / len(chosen)
+        cut = max(1, int((tokens - room) / per_tweet) + 1)
+        del chosen[-cut:]
+        if not chosen:
+            return None
+        rendered, tokens = render()
+    return rendered
 
 
 def fetch_tweets_by_id(snapshot_dir, tweet_ids):

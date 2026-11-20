@@ -371,6 +371,17 @@ final class ReadReplyTests: StubbedAppTestCase {
         XCTAssertNil(ReadWindowLine.staleExportNote(try window(excluded: 0)), "older servers send no flag")
     }
 
+    func testAReadOfPartOfAStaleDayNamesTheArchivesNewestTweet() throws {
+        // #717: the bounds are the part's own; newest_at is the day's end.
+        let utc = TimeZone(identifier: "UTC")!
+        let part = try decode(ReadWindow.self, """
+        {"window_start":"2026-11-01T20:00:00Z","window_end":"2026-11-02T06:00:00Z","newest_at":"2026-11-03T12:00:00Z",\
+        "tweets":6000,"accounts":900,"excluded":0,"export_stale":true}
+        """)
+        XCTAssertTrue(ReadWindowLine.text(part, timeZone: utc)!.hasSuffix(
+            ": 6,000 by 900 accounts. The newest tweets available are from 3 November; the archive's daily export has not updated since."))
+    }
+
     func testCancelledLineSaysWhyToTheOwnerOnly() throws {
         // The server sends llm_task_error to the reply's owner only.
         let owners = try decode(NodeDetail.self, """

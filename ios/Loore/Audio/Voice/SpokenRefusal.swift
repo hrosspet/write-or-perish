@@ -20,6 +20,10 @@ enum SpokenRefusal: String, CaseIterable, Equatable, Sendable {
     case approvalWaiting = "approval_pending"
     /// The thread is too long for another reply (409 `thread_too_long`).
     case threadTooLong = "thread_too_long"
+    /// A Glean in a thread that has gleaned all of today's tweets (#717): the
+    /// refused gleaning's llm-status `error_code`. The Voice screen says it and
+    /// stays, instead of opening the gleaning.
+    case gleanedThrough = "glean_day_done"
     /// Payments on (#438): the account's access ended while the turn was recorded.
     /// The recording is kept and transcribed, only the reply is skipped. One per
     /// reason; the sentence is the text the entry and the screen show (it names
@@ -63,6 +67,8 @@ enum SpokenRefusal: String, CaseIterable, Equatable, Sendable {
             return "A change to your data is waiting for your approval. Approve or reject it on the screen to continue."
         case .threadTooLong:
             return ThreadLength.spokenText
+        case .gleanedThrough:
+            return "You've gleaned through all of today's tweets. New ones come in once a day."
         case .subscriptionEnded:
             return "Your subscription has ended, so Loore doesn't reply. Your recording is saved."
         case .paymentFailed:

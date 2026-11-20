@@ -25,10 +25,7 @@ search see. For the model a later turn resolves each marker to the tweet
 by its author and text, with no number (render_read_reply_for_model), and
 the user's marks on it come in a note of their own, so the next read knows
 what was already surfaced, read and rated. The numbers of a read's list
-belong to that read alone: the next one, a day later or after the reader
-marked something read, may number its tweets afresh (a live read again
-on the same export keeps the list, see below, but the model is told the
-same either way).
+belong to that read alone: the next one numbers its tweets afresh.
 
 Turns of a read thread (2026-09-19, after the second feedback round):
 the day of tweets is fed to the model only for a READ — the reply that
@@ -42,13 +39,28 @@ read — any tweet row marked read, a pick, a bookmark or a clip — is
 dropped from the render before the model sees it (seen_tweet_ids); a
 bookmark or clip not marked read stays in, and each render's
 numbering is pinned on the reply (FeedRender) so a batch collected hours
-later resolves its numbers against what was actually sent. A live read
-again on the export of the read before it renders that read's list
-unchanged (list_to_keep, #511): the list is the large part of the
-request, and a byte-identical one is read from the provider's prompt
-cache. The tweets in it the reader has read since are named by number
-in a note at the end of the prompt (read_since_note), and a pick of one
-is dropped on collect.
+later resolves its numbers against what was actually sent.
+
+A read takes the newest tweets of its window that fit its prompt, and
+repeated reads in a thread page through the window (#717; Peter,
+2026-11-20). A day of the archive grew past what one prompt may hold
+(about 46,000 tweets on 2026-11-20, about 35 tokens each), and since
+#648 a prompt over THREAD_PROMPT_TOKEN_LIMIT is refused. So the
+completion task measures the rest of the prompt (thread, instructions,
+profile, intentions) and keeps, newest first, as many of the window's
+tweets as fit glean_prompt_budget (community_archive.newest_that_fit).
+The next read in the same thread leaves out what the thread's earlier
+reads of that window read (gleaned_tweet_ids, from their pinned
+renders), so it reads the next older tweets; another thread, or a new
+window (another export), starts again at the newest. When nothing of
+the window is left, the read is refused with GLEAN_DAY_DONE_MESSAGE
+before any model call. The seen filter, the reader's own handle, the
+follows scope and the retweets are left out first: the budget counts
+what remains. The admin's batch experiments follow the same rule. This
+replaced #511's kept list (a read again on the same export re-sent the
+earlier read's list for the prompt cache): a read again now reads other
+tweets, so only the part before the list (the thread, the instructions,
+the profile and the intentions) can come from the cache.
 """
 import json
 import logging
@@ -81,13 +93,32 @@ _READ_AGAIN_TAIL = (
 CA_READ_AGAIN_TURN = (
     _READ_AGAIN_HEAD + "Tweets I have read are out of that list; "
     + _READ_AGAIN_TAIL)
-# The same request after read_since_note (#511): a kept list still holds
-# the tweets read since it was made, so that sentence alone says so. Only
-# in the closing turn, after the cached prefix.
-CA_READ_AGAIN_TURN_KEPT = (
-    _READ_AGAIN_HEAD + "Tweets I had read before that list was made are "
-    "out of it, and the ones named above are in it but are not "
-    "candidates; " + _READ_AGAIN_TAIL)
+# The request of a read again that reads on in the same window (#717):
+# the list holds the next, older tweets, none of which an earlier read in
+# the thread had, so no earlier pick is in it.
+CA_READ_OLDER_TURN = (
+    "Read further: the Community Archive list above now holds the next, "
+    "older tweets of today; none of them was in your earlier lists in "
+    "this conversation. Go through them against everything above — your "
+    "earlier picks, my marks on them, and whatever I have written since. "
+    "Your earlier picks are quoted above by author and text; they carry "
+    "no numbers and are not in this list. Tweets I have read are out of "
+    "it. Find what is worth my time. Answer in the same shape, a verdict "
+    "and the picks.")
+
+# A read again with nothing of its window left to read (#717): refused
+# before any model call, with this text (the reply's error, a toast, and
+# in Voice mode said aloud, utils/voice_refusals) and this code (the
+# reply's REFUSED_MARKER entry; llm-status ``error_code``).
+GLEAN_DAY_DONE_CODE = "glean_day_done"
+GLEAN_DAY_DONE_MESSAGE = ("You've gleaned through all of today's tweets. "
+                          "New ones come in once a day.")
+
+# Heuristic (#717): the share of a Glean's token budget kept free for
+# what its count can miss: the provider's own tokenizer drifting from
+# tiktoken's o200k_base, and the message framing. 2 % of the 250k limit
+# is 5,000 tokens.
+GLEAN_BUDGET_MARGIN = 0.02
 
 # tool_calls_meta entry name on a placeholder the Read button created
 # inside a read thread: the task reads it as "this turn is a read", not
@@ -315,68 +346,57 @@ def seen_tweet_ids(user_id):
     return {r[0] for r in rows if r[0]}
 
 
-def list_to_keep(node_chain, ca_node, reply_ids, user_id, export_id, days,
-                 scope):
-    """The tweet ids of the list a read again keeps (#511): the list
-    pinned on the newest earlier read reply of *user_id*'s in this
-    thread (after *ca_node*, the newest read prompt; *reply_ids* from
-    read_reply_ids) that was rendered from the same export, window and
-    scope. Empty when there is none: the day is rendered afresh, minus
-    everything the reader has read.
-
-    The list sits in the read prompt's message, before every later turn,
-    and is most of the request. Rendering it again minus the tweets the
-    reader read in between (a verdict on a pick marks it read) renumbers
-    every tweet after the first one dropped, so a Glean again after a
-    rating missed the prompt cache from the list on. Kept, it is
-    byte-identical: the render is deterministic for an export and an
-    exclusion set, and with the kept ids taken out of the exclusions the
-    same tweets are left out as before (unless the reader has cleared a
-    read mark since: then that tweet comes back, as it should). The tweets
-    of the list read since go in a note instead (read_since_note)."""
+def gleaned_tweet_ids(node_chain, reply_ids, user_id, export_id, days,
+                      scope):
+    """The tweets that the earlier reads of *user_id* in this thread read
+    from this window (#717): the lists pinned on their read replies in
+    *node_chain* (*reply_ids* from read_reply_ids) that were rendered from
+    the same export, days and scope. The next read leaves them out, so it
+    reads the window's next older tweets (the earlier reads took the
+    newest), and two threads page through a day each on their own. A
+    reply that was deleted or did not complete read nothing the user
+    saw, and another user's reply in a shared thread is theirs: neither
+    counts. Empty without an export id (a new window starts again at its
+    newest tweets). One query."""
     from backend.models import FeedRender
     if not export_id:
         return frozenset()
-    candidates = []
-    after_prompt = False
-    for n in node_chain:
-        if n is ca_node:
-            after_prompt = True
-            continue
-        if (after_prompt and n.deleted_at is None and n.id in reply_ids
-                and (n.human_owner_id or n.user_id) == user_id):
-            candidates.append(n.id)
+    candidates = [n.id for n in node_chain
+                  if n.id in reply_ids and n.deleted_at is None
+                  and n.llm_task_status == "completed"
+                  and (n.human_owner_id or n.user_id) == user_id]
     if not candidates:
         return frozenset()
-    rows = {r.node_id: r for r in FeedRender.query.filter(
-        FeedRender.node_id.in_(candidates)).all()}
-    for node_id in reversed(candidates):
-        row = rows.get(node_id)
-        if (row is not None and row.export_id == export_id
-                and row.days == int(days) and row.scope == (scope or "all")):
-            return frozenset(i for i in (row.tweet_ids or "").split(",") if i)
-    return frozenset()
+    ids = set()
+    for row in FeedRender.query.filter(
+            FeedRender.node_id.in_(candidates)).all():
+        if (row.export_id == export_id and row.days == int(days)
+                and row.scope == (scope or "all")):
+            ids.update(i for i in (row.tweet_ids or "").split(",") if i)
+    return frozenset(ids)
 
 
-def read_numbers(refs, seen):
-    """The numbers in a render (*refs*) whose tweet the reader has read
-    (*seen*, seen_tweet_ids): only a kept list (list_to_keep) has any.
-    Never a pick: they go in read_since_note, and the collect drops a
-    pick of one."""
-    return sorted(n for n, ref in refs.items()
-                  if str(ref.get("tweet_id")) in seen)
-
-
-def read_since_note(numbers):
-    """The closing note's line for the tweets of a kept list the reader
-    has read since it was made (#511), or None. They are named by their
-    number in the list, which is how the model names a pick."""
-    if not numbers:
+def glean_prompt_budget(model_id, config):
+    """The most tokens a read's prompt may hold (#717): the thread limit
+    (THREAD_PROMPT_TOKEN_LIMIT, 250k; Peter, 2026-11-12), or the model's
+    own input ceiling when that is lower (its window minus the answer's
+    room, or OpenAI's max_input_tokens), less GLEAN_BUDGET_MARGIN. The
+    tweets fill what the rest of the prompt leaves of it. A model's price
+    tier is not applied: GPT Luna's (272k) is above the limit, and
+    keeping Haiku 5.5 under its 100k tier is a cost-for-quality choice
+    left to Peter. None when neither is known."""
+    from backend.llm_providers import model_input_cap
+    from backend.utils.thread_size import prompt_limit
+    limits = []
+    limit = prompt_limit(config)
+    if limit:
+        limits.append(limit)
+    cfg = (config.get("SUPPORTED_MODELS") or {}).get(model_id)
+    if cfg:
+        limits.append(model_input_cap(cfg, price_tier=False))
+    if not limits:
         return None
-    listed = ", ".join(f"#{n}" for n in numbers)
-    return ("[The user has read these tweets of today's list since it was "
-            f"made: {listed}. Like every tweet the user has read, they are "
-            "not candidates: do not pick them.]")
+    return int(min(limits) * (1 - GLEAN_BUDGET_MARGIN))
 
 
 def record_feed_render(node, stats, refs, days=1, scope="all"):
@@ -404,6 +424,10 @@ def record_feed_render(node, stats, refs, days=1, scope="all"):
     row.scope = scope or "all"
     row.window_start = stats.get("window_start_at")
     row.window_end = stats.get("window_end_at")
+    # A part of the window (#717): when its tweets were posted. None for
+    # a render of the whole window, as before.
+    row.page_start = stats.get("page_start_at")
+    row.page_end = stats.get("page_end_at")
     row.tweet_count = int(stats.get("tweets") or 0)
     row.account_count = int(stats.get("accounts") or 0)
     row.excluded_count = int(stats.get("excluded") or 0)
@@ -458,17 +482,25 @@ def render_was_stale(row):
 def read_window_fields(row):
     """The reply page's record of what a read covered, from its pinned
     render (None for replies from before renders were pinned).
-    ``export_stale`` tells the window line to say that the archive had
-    nothing newer (render_was_stale)."""
+    ``window_start`` / ``window_end`` are the bounds of the tweets the
+    read had: the window's, or, for a read of part of it (#717), when its
+    oldest and newest tweet were posted, so "Tweets from … to …: N by M
+    accounts" stays true. ``newest_at`` is the newest tweet the archive
+    had (the window's end), which the stale note names. ``export_stale``
+    tells the window line to say that the archive had nothing newer
+    (render_was_stale)."""
     from backend.utils.timefmt import iso_utc
     if row is None:
         return None
+    paged = row.page_start is not None and row.page_end is not None
     return {
         "export_id": row.export_id,
         "days": row.days,
         "scope": row.scope,
-        "window_start": iso_utc(row.window_start),
-        "window_end": iso_utc(row.window_end),
+        "window_start": iso_utc(row.page_start if paged
+                                else row.window_start),
+        "window_end": iso_utc(row.page_end if paged else row.window_end),
+        "newest_at": iso_utc(row.window_end),
         "tweets": row.tweet_count,
         "accounts": row.account_count,
         "excluded": row.excluded_count,

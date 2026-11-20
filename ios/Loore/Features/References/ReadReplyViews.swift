@@ -20,9 +20,10 @@ struct ReadWindowLine: View {
     }
 
     /// Web `staleExportNote` (#688): the archive had nothing newer than the window's end
-    /// when the read was made (`export_stale`, set by the server past 36 hours).
+    /// when the read was made (`export_stale`, set by the server past 36 hours). The
+    /// newest tweet is `newestAt`: a read of part of the day (#717) ends earlier.
     static func staleExportNote(_ w: ReadWindow, timeZone: TimeZone = .current) -> String? {
-        guard w.exportStale == true, let end = w.windowEnd else { return nil }
+        guard w.exportStale == true, let end = w.newestAt ?? w.windowEnd else { return nil }
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_GB")
         formatter.timeZone = timeZone
