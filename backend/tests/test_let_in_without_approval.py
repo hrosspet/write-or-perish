@@ -223,8 +223,11 @@ class TestNewAccountGoesToTheTrialStep:
         x.authorized = True
         x.get.return_value = MagicMock(
             ok=True, json=lambda: {"id": 779, "screen_name": "birdy2"})
+        x.authorized = False   # the start: X is asked
         with patch("backend.routes.auth.twitter", x):
             c.get("/auth/login?next=/node/5%23reply-2")
+        x.authorized = True    # the return from X
+        with patch("backend.routes.auth.twitter", x):
             r = c.get("/auth/login")
         assert r.status_code == 302
         assert r.headers["Location"] == f"{FRONTEND_URL}/node/5#reply-2"
