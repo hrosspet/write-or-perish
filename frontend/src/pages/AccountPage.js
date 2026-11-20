@@ -9,8 +9,11 @@ import { emailState } from "../utils/emailState";
 import DeleteWritingDialog from "../components/DeleteWritingDialog";
 import DeleteAccountDialog from "../components/DeleteAccountDialog";
 import DisconnectXDialog from "../components/DisconnectXDialog";
+import SubscriptionSection from "../components/SubscriptionSection";
+import InviteSection from "../components/InviteSection";
 import BothProvidersDialog, { ownProviderName } from "../components/BothProvidersDialog";
 import { noteBothProvidersLater } from "../hooks/useBothProvidersQuestion";
+import { showsTweetSeed, tweetSeedHelp } from "../utils/tweetSeed";
 import {
   formatDeletionDate, reloadUser, restoreWriting, writingRestorable,
   X_REMOVE_ACCESS_STEPS,
@@ -295,6 +298,8 @@ export default function AccountPage() {
   const [craftSaving, setCraftSaving] = useState(false);
   const [providersSaving, setProvidersSaving] = useState(false);
   const [providersError, setProvidersError] = useState("");
+  const [tweetSeedSaving, setTweetSeedSaving] = useState(false);
+  const [tweetSeedError, setTweetSeedError] = useState("");
   // The both-providers question (#599) after a preferred-model change,
   // while the user has never answered it (user.ask_both_providers.model).
   const [askProviders, setAskProviders] = useState(false);
@@ -370,6 +375,22 @@ export default function AccountPage() {
       setProvidersError("Couldn't save your answer. Please try again.");
     } finally {
       setProvidersSaving(false);
+    }
+  };
+
+  // The answer to "Start from your tweets?" (#662). Like the
+  // both-providers answer, a failed save says so: a no that did not
+  // reach the server must not look given.
+  const saveTweetSeed = async (value) => {
+    setTweetSeedSaving(true);
+    setTweetSeedError("");
+    try {
+      const res = await api.put("/dashboard/user", { prefill_consent: value });
+      if (res.data.user) setUser(res.data.user);
+    } catch (e) {
+      setTweetSeedError("Couldn't save your answer. Please try again.");
+    } finally {
+      setTweetSeedSaving(false);
     }
   };
 
@@ -679,6 +700,11 @@ export default function AccountPage() {
         />
       </div>
 
+      {/* Payments (#438): the Subscription section takes the Plan row's
+          place only while the server has payments on. */}
+      {user.payments_enabled ? (
+        <SubscriptionSection user={user} setUser={setUser} />
+      ) : (
       <div style={rowStyle}>
         <div style={labelStyle}>Plan</div>
         <div
@@ -693,6 +719,11 @@ export default function AccountPage() {
           {user.plan || "free"}
         </div>
       </div>
+      )}
+
+      {/* Referrals (#439): one personal invite a month, only while the
+          server has them on. No counts, no reminders. */}
+      {user.referrals_enabled && <InviteSection />}
 
       {/* ─── Settings ─── */}
 
@@ -879,6 +910,35 @@ export default function AccountPage() {
           Controls how AI can use your new entries by default.
         </div>
       </div>
+
+      {/* Start from your tweets (#662): the card's question
+          (PrefillConsentCard), changed here both ways. Until the user
+          answers, no option is selected: no answer is not a no. Anchor
+          for deep links: /account#tweets */}
+      {showsTweetSeed(user) && (
+        <div id="tweets" style={{ ...rowStyle, scrollMarginTop: "72px" }}>
+          <div style={labelStyle}>Start from your tweets</div>
+          <select
+            aria-label="Start from your tweets"
+            value={user.prefill_consent || ""}
+            disabled={tweetSeedSaving}
+            onChange={(e) => saveTweetSeed(e.target.value)}
+            style={selectStyle}
+          >
+            {!user.prefill_consent && (
+              <option value="" disabled>Not answered yet</option>
+            )}
+            <option value="yes">Yes</option>
+            <option value="no">No</option>
+          </select>
+          {tweetSeedError && (
+            <div role="alert" style={{ ...helperStyle, color: "var(--accent)" }}>
+              {tweetSeedError}
+            </div>
+          )}
+          <div style={helperStyle}>{tweetSeedHelp(user)}</div>
+        </div>
+      )}
 
       {/* The craft-mode switch also lives in the ⋮ menu; this row is the
           place a user who turned it on and forgot can find out what it

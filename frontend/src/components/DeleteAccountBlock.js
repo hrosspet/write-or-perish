@@ -4,10 +4,10 @@ import api from "../api";
 import DeleteAccountDialog from "./DeleteAccountDialog";
 
 // "Delete my account" as a short text, a button and the dialog (#269), for
-// the pages where the Account page can't be reached: the waitlist page
-// (every account can delete itself) and the Terms dialog, where a person
-// who doesn't accept new Terms can leave (#440). The same dialog and
-// request as the Account page.
+// the pages where the Account page can't be reached: the waitlist page and
+// the page of an account the admin blocked (every account can delete
+// itself), and the Terms dialog, where a person who doesn't accept new
+// Terms can leave (#440). The same dialog and request as the Account page.
 //
 // dialogZIndex: the dialog opens above another dialog (the Terms dialog's
 // z-index is 10000). It is then rendered into <body>, outside that

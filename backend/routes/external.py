@@ -285,6 +285,12 @@ def generate_item_tts(item_id):
         return jsonify({"message": "TTS generation already in progress",
                         "task_id": item.tts_task_id,
                         "status": item.tts_task_status}), 202
+    # Payments on and no AI replies for this account (#438): no new
+    # speech; speech already made stays playable above.
+    from backend.utils.subscriptions import refuse_without_paid_features
+    refused = refuse_without_paid_features(current_user)
+    if refused is not None:
+        return refused
     if not get_openai_chat_key(current_app.config):
         return jsonify({"error": "TTS not configured (missing API key)"}), 500
 
@@ -590,6 +596,11 @@ def twitter_connect():
         return jsonify({"error": (
             "X API is not configured (set X_CLIENT_ID / X_REDIRECT_URI)."
         )}), 503
+    # Payments on (#438): connecting reads the account from X (billed),
+    # and the bookmarks it is for are not synced without the paid set.
+    from backend.utils.subscriptions import ai_replies_allowed
+    if not ai_replies_allowed(current_user):
+        return redirect(_frontend_url("/import?x_connect=failed"))
 
     verifier = secrets.token_urlsafe(64)
     challenge = base64.urlsafe_b64encode(
@@ -682,6 +693,12 @@ def twitter_callback():
 @external_bp.route("/twitter/sync", methods=["POST"])
 @login_required
 def twitter_sync():
+    # Payments on (#438): reading bookmarks from X is billed, so no sync
+    # without the paid set (the nightly sync skips such accounts too).
+    from backend.utils.subscriptions import refuse_billed_call
+    refused = refuse_billed_call(current_user, "sync")
+    if refused is not None:
+        return refused
     account = ExternalAccount.query.filter_by(
         user_id=current_user.id, provider="twitter").first()
     if account is None or not account.get_access_token():

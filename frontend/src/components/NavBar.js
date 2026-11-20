@@ -7,7 +7,7 @@ import CraftIcon from "./CraftIcon";
 import CraftModeDialog from "./CraftModeDialog";
 import { useToast } from "../contexts/ToastContext";
 import api from "../api";
-import { startExportDownload } from "../utils/exportData";
+import { downloadAccountData, EXPORT_FAILED_MESSAGE } from "../utils/dataExport";
 
 const backendUrl = process.env.REACT_APP_BACKEND_URL;
 
@@ -90,11 +90,11 @@ function NavBar({ onNewEntryClick }) {
     }
   };
 
-  // Export data (#591): the browser's own download, see utils/exportData.
+  // Export data: the browser's own download of the file (utils/dataExport).
   const handleExportData = async () => {
     setOverflowOpen(false);
-    if (!(await startExportDownload())) {
-      addToast("The export couldn't start. Please try again.", 5000);
+    if (!(await downloadAccountData())) {
+      addToast(EXPORT_FAILED_MESSAGE, 5000);
     }
   };
 

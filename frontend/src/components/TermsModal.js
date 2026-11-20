@@ -3,7 +3,7 @@ import api from '../api';
 import LegalDocument, { renderInline } from '../legal/LegalDocument';
 import terms from '../legal/terms.json';
 import { useUser } from '../contexts/UserContext';
-import { startExportDownload } from '../utils/exportData';
+import { downloadAccountData, EXPORT_FAILED_MESSAGE } from '../utils/dataExport';
 import DeleteAccountBlock from './DeleteAccountBlock';
 
 const backendUrl = process.env.REACT_APP_BACKEND_URL;
@@ -46,10 +46,8 @@ function TermsModal({ onAccepted, onOutdated = () => window.location.reload() })
 
   const handleExport = async () => {
     setExportNote("");
-    const started = await startExportDownload();
-    setExportNote(started
-      ? "Your export is downloading."
-      : "The export couldn't start. Please try again.");
+    const started = await downloadAccountData();
+    setExportNote(started ? "Your export is downloading." : EXPORT_FAILED_MESSAGE);
   };
 
   const modalStyle = {

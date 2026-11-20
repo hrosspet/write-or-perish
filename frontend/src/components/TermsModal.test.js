@@ -6,17 +6,20 @@ import { MemoryRouter } from 'react-router-dom';
 import TermsModal from './TermsModal';
 import api from '../api';
 import terms from '../legal/terms.json';
-import { startExportDownload } from '../utils/exportData';
+import { downloadAccountData } from '../utils/dataExport';
 
 jest.mock('../api', () => ({ __esModule: true, default: { post: jest.fn() } }));
-jest.mock('../utils/exportData', () => ({ startExportDownload: jest.fn() }));
+jest.mock('../utils/dataExport', () => ({
+  ...jest.requireActual('../utils/dataExport'),
+  downloadAccountData: jest.fn(),
+}));
 
 let mockUser;
 jest.mock('../contexts/UserContext', () => ({ useUser: () => ({ user: mockUser }) }));
 
 beforeEach(() => {
   api.post.mockReset();
-  startExportDownload.mockReset();
+  downloadAccountData.mockReset();
   mockUser = {
     id: 7, username: 'mia', email: 'mia@example.com', approved: true,
     account_deletion: { grace_days: 30, confirm_by_email: true, link_expires_in: 3600 },
@@ -97,7 +100,7 @@ test('another failure leaves the dialog with a retry message', async () => {
 
 // Terms §13: a person who doesn't accept can export and delete (#440).
 test('without agreeing: export my data, sign out, delete my account', async () => {
-  startExportDownload.mockResolvedValueOnce(true);
+  downloadAccountData.mockResolvedValueOnce(true);
   renderModal();
   fireEvent.click(screen.getByRole('button', { name: 'Export my data' }));
   await waitFor(() => expect(screen.getByRole('status').textContent)
@@ -123,7 +126,7 @@ test('without agreeing: export my data, sign out, delete my account', async () =
 });
 
 test('an export that cannot start says so', async () => {
-  startExportDownload.mockResolvedValueOnce(false);
+  downloadAccountData.mockResolvedValueOnce(false);
   renderModal();
   fireEvent.click(screen.getByRole('button', { name: 'Export my data' }));
   await waitFor(() => expect(screen.getByRole('status').textContent)

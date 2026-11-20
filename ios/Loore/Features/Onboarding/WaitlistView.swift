@@ -279,9 +279,7 @@ struct PrefillConsentCard: View {
             VStack(alignment: .leading, spacing: 0) {
                 Eyebrow(text: eyebrow).padding(.bottom, 16)
                 if let answered {
-                    Text(answered == .yes
-                         ? "Noted. We'll seed your Loore from your public tweets and have first drafts of your artifacts — like your profile and intentions — waiting when you come in."
-                         : "Noted. You'll start from a blank page — you can always seed from your tweets later, from Settings.")
+                    Text(AccountModel.tweetSeedNoted(user, answer: answered))
                         .font(LooreFont.body)
                         .foregroundStyle(LooreColor.textSecondary)
                         .lineSpacing(5)

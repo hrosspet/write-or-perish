@@ -41,19 +41,15 @@ EOF
   magic-link)
     NEXT_PATH="${2:-}"
     run_py <<EOF
-from datetime import datetime, timedelta
 from backend import create_app
 app = create_app()
 with app.app_context():
     from backend.extensions import db
     from backend.models import User
-    from backend.utils.magic_link import generate_magic_link_token, hash_token
+    from backend.utils.sign_in_links import make_link_token
     u = db.session.get(User, $TEST_USER_ID)
     assert u.username == "$TEST_USERNAME"
-    token = generate_magic_link_token(u.email, "$NEXT_PATH" or None)
-    u.magic_link_token_hash = hash_token(token)
-    u.magic_link_expires_at = datetime.utcnow() + timedelta(minutes=15)
-    db.session.commit()
+    token = make_link_token(u.email, "$NEXT_PATH" or None)
     print("http://localhost:5010/auth/magic-link/verify?token=" + token)
 EOF
     ;;

@@ -38,7 +38,9 @@ from backend.utils.privacy import account_allows_ai
 from backend.utils import refusal_backoff, soft_limit
 from backend.utils.llm_batch import (
     BATCH_JOB_MAX_AGE, batch_submit, batch_check_and_collect,
-    apply_batch_key_override, batch_ended, blocked_items, list_batches)
+    apply_batch_key_override, batch_ended, blocked_items,
+    drop_openai_batch, list_batches)
+from backend.utils import anthropic_batch_deletion
 # Module reference, not `from ... import names`: exports imports
 # celery_app, which imports this module to register its tasks. When a
 # web request touches backend.tasks.exports FIRST (e.g. POST
@@ -217,11 +219,16 @@ def _cap_held_users(exclude_ids):
 
 
 def _held_users(flag, exclude_ids):
+    # Payments on (#438): an account whose subscription lapsed gets no
+    # background model work, a held build included. A pre-fill for an
+    # account that never had a subscription goes on: it is Loore's service
+    # to them (Peter, 2026-11-12: "Prefill is a very different case").
+    from backend.utils.subscriptions import access_state
     return [u for u in User.query.filter(
         flag.is_(True),
         User.deleted_at.is_(None),
         or_(User.approved.is_(True), User.deactivated_at.is_(None)),
-    ).all() if u.id not in exclude_ids]
+    ).all() if u.id not in exclude_ids and access_state(u) != "lapsed"]
 
 
 # ── batch profile work waiting for a later pass (Peter, 2026-11-03) ─────
@@ -269,6 +276,11 @@ def _work_waits(user):
     n, until, _stopped = refusal_backoff.profile_backoff_state(user.id)
     if n and until is not None and until > datetime.utcnow():
         return True
+    # An import's date waits to be applied (#639): a later pass applies it
+    # (after the work in flight, the imports' quiet period, a backoff, or a
+    # re-tip that failed), also for an account outside the cohort.
+    if user.profile_import_retip_from is not None:
+        return True
     from backend.tasks import profile_windows
     return profile_windows.provider_stop_waits(user)
 
@@ -306,16 +318,7 @@ def _latest_non_integration_profile(user_id):
 
 
 def _new_token_count(user, cutoff):
-    q = db.session.query(func.coalesce(func.sum(Node.token_count), 0)).filter(
-        or_(Node.user_id == user.id, Node.human_owner_id == user.id),
-        Node.ai_usage.in_(['chat', 'train']),
-    )
-    if cutoff is not None:
-        # Writing created after the cutoff, as the window reads it: an
-        # import's nodes carry the import time as updated_at, which made
-        # the first entry after a large import trigger an update (R11).
-        q = q.filter(Node.created_at > cutoff)
-    return q.scalar()
+    return _exports.new_units_since_cutoff(user, cutoff)
 
 
 def _should_seed(user, ignore_backoff=False):
@@ -341,6 +344,13 @@ def _should_seed(user, ignore_backoff=False):
     # holds the admin "Build profile" button, which seeds through here,
     # unless the admin confirmed the override (force).
     if not ignore_backoff and refusal_backoff.profile_in_backoff(user.id):
+        return False
+    # An import whose re-tip waited for the user's window work in flight
+    # (#639) is applied first: the gates below then see the re-tipped set
+    # (its unread range) or the rebuild flag. A re-tip that failed (rolled
+    # back and recorded) keeps its date, and nothing is built over the set
+    # it was to replace; the seeder goes on with the next user.
+    if _exports.apply_waiting_import_date(user) == "error":
         return False
     # A pending full rebuild overrides the volume/interval gates: the
     # rebuild was explicitly requested (regen button, failure recovery,
@@ -944,6 +954,9 @@ def _submit_requests(built, keys):
         db.session.add(ProfileBatchJob(
             provider_key=provider_key, batch_id=batch_id, status="pending",
             items=items, submitted_at=now))
+        # Deleted at Anthropic once the job is no longer pending (#693).
+        anthropic_batch_deletion.register(
+            provider_key, batch_id, ProfileBatchJob.__tablename__)
         for item in items:
             u = User.query.get(item["user_id"])
             if u:
@@ -1366,6 +1379,10 @@ def _poll_profile_batches():
     for job in jobs:
         if datetime.utcnow() - job.submitted_at > BATCH_STALE_AFTER:
             _fail_job(job, "stale")
+            # Given up: nothing reads the batch again, so it is cancelled
+            # if it still runs and its files go (#667).
+            if (job.provider_key or "").startswith("openai:"):
+                drop_openai_batch(keys.get("openai"), job.batch_id)
             continue
         batch = listed.get(job.batch_id)
         try:
@@ -1403,9 +1420,12 @@ def _poll_profile_batches():
                 f"count as failed")
         # An admin "Cancel batch" may have landed while the provider call
         # above was in flight: re-read the row, and never collect (or
-        # overflow-resubmit) a job that is no longer pending.
+        # overflow-resubmit) a job that is no longer pending. Nothing
+        # reads its ended batch again, so its files go (#667).
         db.session.refresh(job)
         if job.status != "pending":
+            anthropic_batch_deletion.delete_collected_batches(
+                results, keys, ProfileBatchJob.__tablename__)
             continue
 
         set_items = []
@@ -1464,6 +1484,14 @@ def _poll_profile_batches():
                 except Exception as e:
                     logger.error(f"Apply intentions result failed for user "
                                  f"{user.id}: {e}", exc_info=True)
+                    if result is not None:
+                        # A paid result that was not saved: shown as
+                        # failed, and its batch is kept while the provider
+                        # keeps results, for `backfill_intentions.py
+                        # --collect <batch id>` (#693 review).
+                        db.session.rollback()
+                        intentions_mod.mark_intentions_item_unsaved(
+                            item, job)
                 continue
             if item["custom_id"] in blocked:
                 _stop_for_policy_block(user, item, blocked[item["custom_id"]])
@@ -1564,6 +1592,18 @@ def _poll_profile_batches():
         job.status = "failed" if queue_full else "collected"
         job.collected_at = datetime.utcnow()
         db.session.commit()
+        if anthropic_batch_deletion.holds_unsaved_result(job.items):
+            # A result a save failed on stays at the provider for a
+            # --collect; the sweep deletes the batch once the provider no
+            # longer keeps results.
+            logger.warning(f"Profile batch {job.batch_id} kept at the "
+                           f"provider: it holds a result that was not "
+                           f"saved")
+        else:
+            # Saved: the batch's files at OpenAI (#667) and the batch at
+            # Anthropic (#693) can go.
+            anthropic_batch_deletion.delete_collected_batches(
+                results, keys, ProfileBatchJob.__tablename__)
         if queue_full and set_items:
             # Nothing of these window sets is in flight any more (unless a
             # user has another job pending): clear the flag as the chained

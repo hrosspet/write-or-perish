@@ -10,9 +10,13 @@ jest.mock('./pages/ArtifactsPage', () => () => <div>artifacts-page</div>);
 jest.mock('./pages/ConfirmAccountDeletionPage', () => () => <div>confirm-deletion-page</div>);
 jest.mock('./pages/AccountDeletedPage', () => () => <div>account-deleted-page</div>);
 jest.mock('./pages/AccountRestorePage', () => () => <div>account-restore-page</div>);
+jest.mock('./pages/SubscribePage', () => () => <div>subscribe-page</div>);
+const APPROVED = { id: 1, approved: true, username: 'u' };
+let mockUser = APPROVED;
 jest.mock('./contexts/UserContext', () => ({
-  useUser: () => ({ user: { id: 1, approved: true, username: 'u' }, loading: false }),
+  useUser: () => ({ user: mockUser, loading: false }),
 }));
+afterEach(() => { mockUser = APPROVED; });
 jest.mock('./contexts/AudioContext', () => ({
   AudioProvider: ({ children }) => children,
   useAudio: () => ({}),
@@ -96,5 +100,21 @@ test('the account deletion pages have no terms dialog over them', () => {
 
 test('elsewhere the terms dialog shows while the terms are not accepted', () => {
   renderAt('/profile');
+  expect(screen.getByText('terms-modal')).toBeTruthy();
+});
+
+// Payments on, an account not let in sees only the subscribe page (#438);
+// the legal pages still open, without the terms dialog over them (#440).
+test('an account not let in reaches the legal pages, without the terms dialog', () => {
+  window.scrollTo = () => {};
+  mockUser = {
+    ...APPROVED, payments_enabled: true, subscription: { state: 'none' },
+  };
+  const { unmount } = renderAt('/terms');
+  expect(screen.getByRole('heading', { level: 1, name: 'Terms of Service' })).toBeTruthy();
+  expect(screen.queryByText('terms-modal')).toBeNull();
+  unmount();
+  renderAt('/profile');
+  expect(screen.getByText('subscribe-page')).toBeTruthy();
   expect(screen.getByText('terms-modal')).toBeTruthy();
 });

@@ -362,3 +362,101 @@ class TestSaveAsNodeValidation:
         resp = client.post(_url(draft), json={"agentic": True})
         assert resp.status_code == 404
         assert Node.query.count() == 0
+
+
+class TestSaveAsNodeTakesTheFormsSettings:
+    """The entry is saved with the privacy and AI usage the form shows
+    when it is saved, which can differ from the ones the recording
+    started with. A client that sends neither (an installed iPhone build)
+    gets the recording's, as before."""
+
+    def _started(self, app, privacy_level="private", ai_usage="chat",
+                 parent_id=None):
+        client, alice, draft = _setup(app, ai_usage=ai_usage,
+                                      parent_id=parent_id)
+        draft.privacy_level = privacy_level
+        _db.session.commit()
+        return client, alice, draft
+
+    def test_ai_usage_set_to_none_before_saving(self, app):
+        client, alice, draft = self._started(app, ai_usage="chat")
+
+        resp = client.post(_url(draft), json={
+            "content": "words", "privacy_level": "private",
+            "ai_usage": "none"})
+
+        assert resp.status_code == 201, resp.get_json()
+        assert resp.get_json()["ai_usage"] == "none"
+        assert Node.query.get(resp.get_json()["id"]).ai_usage == "none"
+
+    def test_privacy_set_to_private_before_saving(self, app):
+        client, alice, draft = self._started(app, privacy_level="public")
+
+        resp = client.post(_url(draft), json={
+            "content": "words", "privacy_level": "private",
+            "ai_usage": "chat"})
+
+        assert resp.status_code == 201, resp.get_json()
+        node = Node.query.get(resp.get_json()["id"])
+        assert node.privacy_level == "private"
+        assert node.public_slug is None
+
+    def test_privacy_set_to_public_gets_the_public_root_slug(self, app):
+        client, alice, draft = self._started(app, privacy_level="private")
+
+        resp = client.post(_url(draft), json={
+            "content": "Morning pages", "privacy_level": "public",
+            "ai_usage": "chat"})
+
+        assert resp.status_code == 201, resp.get_json()
+        node = Node.query.get(resp.get_json()["id"])
+        assert node.privacy_level == "public"
+        assert node.public_slug
+
+    def test_an_older_client_gets_the_recordings_settings(self, app):
+        client, alice, draft = self._started(
+            app, privacy_level="public", ai_usage="train")
+
+        resp = client.post(_url(draft), json={"content": "words"})
+
+        assert resp.status_code == 201, resp.get_json()
+        node = Node.query.get(resp.get_json()["id"])
+        assert (node.privacy_level, node.ai_usage) == ("public", "train")
+
+    @pytest.mark.parametrize("body", [
+        {"privacy_level": "everyone"}, {"ai_usage": "sometimes"}])
+    def test_values_outside_the_allowed_set_are_refused(self, app, body):
+        client, alice, draft = self._started(app)
+
+        resp = client.post(_url(draft), json={"content": "words", **body})
+
+        assert resp.status_code == 400
+        assert Node.query.count() == 0
+        assert Draft.query.count() == 1
+
+    def test_a_reply_under_a_public_post_stays_public(self, app):
+        client = app.test_client()
+        alice = _make_user("alice")
+        parent = _make_node(alice)
+        parent.privacy_level = "public"
+        draft = _make_completed_draft(alice, parent_id=parent.id)
+        draft.privacy_level = "public"
+        _db.session.commit()
+        _login(client, alice.id)
+
+        resp = client.post(_url(draft), json={
+            "content": "words", "privacy_level": "private",
+            "ai_usage": "chat"})
+
+        assert resp.status_code == 400
+        assert resp.get_json()["code"] == "public_reply_required"
+        assert Node.query.count() == 1
+
+    def test_a_reply_asked_with_none_is_refused_as_before(self, app):
+        client, alice, draft = self._started(app, ai_usage="chat")
+
+        resp = client.post(_url(draft), json={
+            "content": "words", "ai_usage": "none", "auto_generate": True})
+
+        assert resp.status_code == 403
+        assert Node.query.count() == 0

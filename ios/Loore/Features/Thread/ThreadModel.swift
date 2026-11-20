@@ -12,6 +12,8 @@ struct NodeTarget: Identifiable, Equatable {
     var hasChildren: Bool
     var hasTTS: Bool
     var hasPromptArtifact: Bool
+    /// Fetched through the X API: the editor offers no Train (#689).
+    var trainRefused = false
 }
 
 /// State and behaviour of one thread screen (web `NodeDetail`, map D §1, §4.7–4.8, §5).
@@ -658,12 +660,22 @@ final class ThreadModel {
         guard let app else { throw CancellationError() }
         let auto = autoGenerateActive(autoGenerate) && !submission.privacy.isSharedWithOthers
         if let sid = submission.streamingSessionId {
-            let answer: SaveAsNodeResponse = try await app.api.post(APIPath.streamingSaveAsNode(sid), json: .object([
-                "content": .string(submission.content), "agentic": .bool(true), "auto_generate": .bool(auto),
-                "model": .optional(selectedModel),
-            ]))
+            // The form's settings as they are now; with AI usage None the recording is a
+            // plain note, as a typed one is below.
+            var body: [String: JSONValue] = [
+                "content": .string(submission.content), "privacy_level": .string(submission.privacy.rawString),
+                "ai_usage": .string(submission.aiUsage.rawString),
+            ]
+            if submission.aiUsage != .off {
+                body["agentic"] = .bool(true)
+                body["auto_generate"] = .bool(auto)
+                body["model"] = .optional(selectedModel)
+            }
+            let answer: SaveAsNodeResponse = try await app.api.post(APIPath.streamingSaveAsNode(sid), json: .object(body))
             return NodeFormResult(id: answer.id, userNodeId: answer.userNodeId, llmNodeId: answer.llmNodeId,
-                                  spendCapped: answer.spendCapped, llmError: answer.llmError,
+                                  spendCapped: answer.spendCapped,
+                                  spendCapLiftsWithPayment: answer.spendCapLiftsWithPayment, llmError: answer.llmError,
+                                  subscriptionMessage: answer.subscriptionNotice,
                                   llmErrorCode: answer.llmErrorCode)
         }
         if submission.aiUsage == .off {
@@ -678,7 +690,9 @@ final class ThreadModel {
             "model": .optional(selectedModel), "auto_generate": .bool(auto),
         ]))
         return NodeFormResult(id: answer.userNodeId, userNodeId: answer.userNodeId, llmNodeId: answer.llmNodeId,
-                              promptNodeId: answer.promptNodeId, spendCapped: answer.spendCapped, llmError: answer.llmError,
+                              promptNodeId: answer.promptNodeId, spendCapped: answer.spendCapped,
+                                  spendCapLiftsWithPayment: answer.spendCapLiftsWithPayment, llmError: answer.llmError,
+                              subscriptionMessage: answer.subscriptionNotice,
                               llmErrorCode: answer.llmErrorCode)
     }
 
@@ -933,19 +947,20 @@ final class ThreadModel {
     func target(focal node: NodeDetail) -> NodeTarget {
         NodeTarget(id: node.id, content: node.content, privacy: node.privacyLevel, aiUsage: node.aiUsage,
                    childCount: node.childCount, hasChildren: node.childCount > 0 || !node.children.isEmpty,
-                   hasTTS: node.hasTTS, hasPromptArtifact: node.systemPrompt.contextArtifacts?.prompt != nil)
+                   hasTTS: node.hasTTS, hasPromptArtifact: node.systemPrompt.contextArtifacts?.prompt != nil,
+                   trainRefused: node.trainRefused)
     }
 
     func target(_ n: AncestorNode) -> NodeTarget {
         NodeTarget(id: n.id, content: n.content ?? "", privacy: n.privacyLevel, aiUsage: n.aiUsage,
                    childCount: n.childCount, hasChildren: n.childCount > 0, hasTTS: false,
-                   hasPromptArtifact: n.systemPrompt.contextArtifacts?.prompt != nil)
+                   hasPromptArtifact: n.systemPrompt.contextArtifacts?.prompt != nil, trainRefused: n.trainRefused)
     }
 
     func target(_ n: TreeNode) -> NodeTarget {
         NodeTarget(id: n.id, content: n.content ?? "", privacy: n.privacyLevel, aiUsage: n.aiUsage,
                    childCount: n.childCount, hasChildren: n.childCount > 0 || !n.children.isEmpty, hasTTS: n.hasTTS,
-                   hasPromptArtifact: n.systemPrompt.contextArtifacts?.prompt != nil)
+                   hasPromptArtifact: n.systemPrompt.contextArtifacts?.prompt != nil, trainRefused: n.trainRefused)
     }
 
     func beginEdit(_ target: NodeTarget) {
@@ -981,6 +996,9 @@ final class ThreadModel {
         if result.descendantsUpdated > 0 {
             let n = result.descendantsUpdated
             app.toasts.show("Applied to \(n) repl\(n == 1 ? "y" : "ies") too")
+        }
+        if let kept = PrivacySelectorView.keptFromTrainRepliesNote(result.keptFromTrain) {
+            app.toasts.show(kept)
         }
         if !wasFocal {
             await reload()

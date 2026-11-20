@@ -13,6 +13,7 @@ from backend.utils.privacy import (
     validate_privacy_level,
     PrivacyLevel,
     AI_ALLOWED,
+    shown_ai_usage,
     account_allows_ai,
     speech_allowed,
     SPEECH_REFUSED_MESSAGE,
@@ -122,7 +123,7 @@ def revert_profile(version_id):
             "tokens_used": new_profile.tokens_used,
             "created_at": iso_utc(new_profile.created_at),
             "privacy_level": new_profile.privacy_level,
-            "ai_usage": new_profile.ai_usage,
+            "ai_usage": shown_ai_usage(new_profile),  # #689
         }
     }), 200
 
@@ -186,6 +187,13 @@ def generate_tts(profile_id):
 
     if profile.audio_tts_url:
         return jsonify({"message": "TTS already available", "tts_url": profile.audio_tts_url}), 200
+
+    # Payments on and no AI replies for this account (#438): no new
+    # speech; speech already made stays playable above.
+    from backend.utils.subscriptions import refuse_without_paid_features
+    refused = refuse_without_paid_features(current_user)
+    if refused is not None:
+        return refused
 
     # A profile version saved while the account's AI usage was 'none' is
     # not sent to the speech model.
@@ -319,7 +327,7 @@ def create_profile():
                 "tokens_used": profile.tokens_used,
                 "created_at": iso_utc(profile.created_at),
                 "privacy_level": profile.privacy_level,
-                "ai_usage": profile.ai_usage
+                "ai_usage": shown_ai_usage(profile)  # #689
             }
         }), 201
     except Exception as e:
@@ -526,7 +534,7 @@ def update_profile(profile_id):
                 "tokens_used": profile.tokens_used,
                 "created_at": iso_utc(profile.created_at),
                 "privacy_level": profile.privacy_level,
-                "ai_usage": profile.ai_usage
+                "ai_usage": shown_ai_usage(profile)  # #689
             }
         }), 200
     except Exception as e:

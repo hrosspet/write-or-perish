@@ -161,11 +161,11 @@ struct TermsView: View {
         Task {
             defer { exporting = false }
             do {
-                let target = try await DataExport.download(app: app)
+                let target = try await DataExport.download(app.api)
                 exportFile = ExportFile(url: target)
                 exportOnDisk = target
             } catch {
-                exportError = "Export failed. Please try again."
+                exportError = DataExport.failedMessage
             }
         }
     }
