@@ -910,6 +910,28 @@ def unclaimed_keep_many():
     return jsonify({"user_ids": changed}), 200
 
 
+@admin_bp.route("/signup_email", methods=["GET"])
+@login_required
+@admin_required
+def get_signup_email_setting():
+    """This admin's "Email me about new signups" setting (#715)."""
+    return jsonify({"enabled": bool(current_user.notify_new_signups)}), 200
+
+
+@admin_bp.route("/signup_email", methods=["PUT"])
+@login_required
+@admin_required
+def set_signup_email_setting():
+    """Turn this admin's "Email me about new signups" on or off (#715).
+    Takes effect from the next signup; nothing else changes."""
+    enabled = (request.get_json(silent=True) or {}).get("enabled")
+    if not isinstance(enabled, bool):
+        return jsonify({"error": "enabled must be true or false."}), 400
+    current_user.notify_new_signups = enabled
+    db.session.commit()
+    return jsonify({"enabled": enabled}), 200
+
+
 @admin_bp.route("/users/<int:user_id>/toggle_spam", methods=["POST"])
 @login_required
 @admin_required

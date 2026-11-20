@@ -61,6 +61,15 @@ class User(db.Model, UserMixin):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     accepted_terms_at = db.Column(db.DateTime, nullable=True)
     accepted_terms_version = db.Column(db.String(16), nullable=True)
+    # Admin accounts only (#715): whether this admin wants the "New signup"
+    # email. On by default, so existing admin accounts keep getting it.
+    notify_new_signups = db.Column(
+        db.Boolean, nullable=False, default=True,
+        server_default=db.text("true"))
+    # When the admin was told about this account's sign-up (#715): the
+    # claim that keeps it to one email per account across a terms update
+    # and a retried request. Null until then.
+    signup_notice_sent_at = db.Column(db.DateTime, nullable=True)
     # NEW: Approval status for our alpha (whitelisting) and optional email.
     approved = db.Column(db.Boolean, default=False, nullable=False)
     email = db.Column(db.String(128), nullable=True, unique=True)

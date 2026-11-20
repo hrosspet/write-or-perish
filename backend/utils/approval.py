@@ -223,14 +223,51 @@ def refusal_body(user, config=None):
     return {"error": WAITING_MESSAGE}
 
 
+SIGNUP_NOTICE_APPROVAL = "approval"
+SIGNUP_NOTICE_INFO = "info"
+
+
+def signup_notice_wanted():
+    """Whether at least one admin account has "Email me about new signups"
+    on. The email goes to the one admin mailbox, so it is sent once for
+    all admins."""
+    from backend.extensions import db
+    from backend.models import User
+    return db.session.query(User.id).filter(
+        User.is_admin.is_(True),
+        User.notify_new_signups.is_(True)).first() is not None
+
+
 def signup_notice_due(user, config=None):
-    """Whether the admin gets the "New signup" email when *user* accepts
-    the terms. Payments off: an account waiting for approval, as always.
-    Payments on: never; nobody waits, and new accounts are at the top of
-    the admin's Users list."""
+    """Which "New signup" email the admin gets when *user* accepts the
+    terms for the first time (#715): None, SIGNUP_NOTICE_APPROVAL (payments
+    off, an account waiting for approval, as always) or SIGNUP_NOTICE_INFO
+    (payments on: nobody waits, so an information email, no approval
+    request). None when no admin has the setting on, and for an account
+    that accepted terms before (a terms update is not a signup)."""
+    if user.accepted_terms_at is not None:
+        return None
+    if not signup_notice_wanted():
+        return None
     if approval_waived(config):
-        return False
-    return not counts_as_approved(user, config)
+        return SIGNUP_NOTICE_INFO
+    if counts_as_approved(user, config):
+        return None
+    return SIGNUP_NOTICE_APPROVAL
+
+
+def claim_signup_notice(user):
+    """Atomically mark the sign-up of *user* as announced; True for the one
+    caller that got it. The condition is in the UPDATE, so two requests at
+    once and a retry cannot both send."""
+    from backend.extensions import db
+    from backend.models import User
+    claimed = User.query.filter(
+        User.id == user.id, User.signup_notice_sent_at.is_(None)
+    ).update({"signup_notice_sent_at": datetime.utcnow()},
+             synchronize_session=False)
+    db.session.commit()
+    return claimed == 1
 
 
 def user_payload_fields(user, config=None):
