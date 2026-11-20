@@ -468,12 +468,19 @@ def read_metadata(reader):
 
 # --- Extraction ------------------------------------------------------------
 
-# Past the address-space limit, Python can fail to load an extension
-# module ("failed to map segment from shared object": an ImportError)
-# before any allocation raises MemoryError; which comes first varies with
-# the build and the limit. Both mean the limit was reached. main() keeps a
-# module that is not installed (ModuleNotFoundError) apart.
-_OUT_OF_MEMORY = (MemoryError, ImportError)
+def _loader_out_of_memory(exc):
+    """Whether an ImportError is the loader failing to map a module past
+    the address-space limit, which can happen before any allocation
+    raises MemoryError (which comes first varies with the build and the
+    limit). glibc says "...so: failed to map segment from shared object"
+    (seen on Python 3.9 and 3.12 on Linux); where the loader adds the
+    errno text, the message ends in ": Cannot allocate memory". Any other
+    ImportError (a library missing, packages that do not match, "cannot
+    allocate memory in static TLS block") is a broken install, not the
+    file's size."""
+    msg = str(exc).strip().lower()
+    return ("failed to map segment" in msg
+            or msg.endswith("cannot allocate memory"))
 
 
 def _open(path):
@@ -484,7 +491,7 @@ def _open(path):
     try:
         reader = PdfReader(path, strict=False)
         encrypted = reader.is_encrypted
-    except _OUT_OF_MEMORY:
+    except MemoryError:
         raise
     except Exception:
         raise Fail("damaged")
@@ -495,7 +502,7 @@ def _open(path):
             opened = reader.decrypt("")
         except DependencyError:
             raise Fail("encryption_unsupported")
-        except _OUT_OF_MEMORY:
+        except MemoryError:
             raise
         except Exception:
             raise Fail("password")
@@ -505,7 +512,7 @@ def _open(path):
         num_pages = len(reader.pages)
     except FileNotDecryptedError:
         raise Fail("password")
-    except _OUT_OF_MEMORY:
+    except MemoryError:
         raise
     except Exception:
         raise Fail("damaged")
@@ -520,7 +527,7 @@ def _page_texts(reader, num_pages, max_chars):
     for i in range(num_pages):
         try:
             text = reader.pages[i].extract_text() or ""
-        except _OUT_OF_MEMORY:
+        except MemoryError:
             raise
         except Exception:
             text, failed = "", failed + 1
@@ -540,7 +547,7 @@ def _outline(reader):
         if not outline_within_limit(reader):
             return []
         return reader.outline
-    except _OUT_OF_MEMORY:
+    except MemoryError:
         raise
     except Exception:
         return []
@@ -605,10 +612,12 @@ def main(argv):
             result = extract(path, max_pages, max_chars)
         except Fail as e:
             result = {"error": e.code, **e.detail}
-        except ModuleNotFoundError as e:
-            result = {"error": "unreadable", "type": type(e).__name__}
-        except _OUT_OF_MEMORY:
-            result = {"error": "memory"}
+        except MemoryError as e:
+            result = {"error": "memory", "type": type(e).__name__}
+        except ImportError as e:
+            result = {"error": ("memory" if _loader_out_of_memory(e)
+                                else "unreadable"),
+                      "type": type(e).__name__}
         except RecursionError:
             result = {"error": "damaged"}
         except Exception as e:

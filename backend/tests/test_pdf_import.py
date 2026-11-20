@@ -485,12 +485,29 @@ def test_memory_limit(client, monkeypatch):
     assert r.get_json()["error"] == pdf_import.MSG_TOO_BIG
 
 
+_MEMORY = {"error": "memory", "type": "ImportError"}
+_UNREADABLE = {"error": "unreadable", "type": "ImportError"}
+
+
 @pytest.mark.parametrize("exc, expected", [
-    (MemoryError(), {"error": "memory"}),
+    (MemoryError(), {"error": "memory", "type": "MemoryError"}),
     # Past the address-space limit a module can fail to load before any
-    # allocation raises MemoryError (seen on Python 3.12 on Linux).
-    (ImportError("/x/unicodedata.so: failed to map segment from shared "
-                 "object"), {"error": "memory"}),
+    # allocation raises MemoryError. The messages seen in Linux containers:
+    (ImportError("/usr/local/lib/python3.12/lib-dynload/unicodedata.cpython-"
+                 "312-aarch64-linux-gnu.so: failed to map segment from shared "
+                 "object"), _MEMORY),
+    (ImportError("/usr/local/lib/python3.9/lib-dynload/_contextvars.cpython-"
+                 "39-aarch64-linux-gnu.so: failed to map segment from shared "
+                 "object"), _MEMORY),
+    # ... and the same with the errno text the loader may add.
+    (ImportError("/x/_struct.so: failed to map segment from shared object: "
+                 "Cannot allocate memory"), _MEMORY),
+    # A broken install is not the file's size: unreadable, as before.
+    (ImportError("libfoo.so.1: cannot open shared object file: No such file "
+                 "or directory"), _UNREADABLE),
+    (ImportError("cannot import name 'PdfReader' from 'pypdf'"), _UNREADABLE),
+    (ImportError("libgomp.so.1: cannot allocate memory in static TLS block"),
+     _UNREADABLE),
     (ModuleNotFoundError("No module named 'pypdf'"),
      {"error": "unreadable", "type": "ModuleNotFoundError"}),
 ])
@@ -512,6 +529,29 @@ def test_worker_reports_the_memory_limit(monkeypatch, capsysbinary, exc,
     finally:
         logging.disable(was_disabled)  # main() silences logging, as a child
     assert json.loads(capsysbinary.readouterr().out) == expected
+
+
+@pytest.mark.parametrize("output, message, logged_line", [
+    ('{"error": "memory", "type": "ImportError"}', "MSG_TOO_BIG",
+     "PDF extraction reached the memory limit: ImportError"),
+    ('{"error": "unreadable", "type": "ImportError"}', "MSG_DAMAGED",
+     "PDF extraction failed: ImportError"),
+])
+def test_import_failures_are_logged_with_their_type(
+        client, monkeypatch, tmp_path, caplog, output, message, logged_line):
+    """Both outcomes of an ImportError in the worker reach the log at
+    WARNING, with the type only: never the file's name or content."""
+    import logging
+    monkeypatch.setattr(pdf_import, "WORKER_PATH", _script(
+        tmp_path, f"import sys\nsys.stdout.write({output!r})\n"))
+    with caplog.at_level(logging.WARNING, logger=pdf_import.logger.name):
+        r = _analyze(client, "Private Name.pdf", _pdf([_body("secret")]))
+    assert r.status_code == 400
+    assert r.get_json()["error"] == getattr(pdf_import, message)
+    lines = [rec.getMessage() for rec in caplog.records
+             if rec.name == pdf_import.logger.name
+             and rec.levelno == logging.WARNING]
+    assert lines == [logged_line]
 
 
 def test_worker_failure_logs_type_only(client, monkeypatch, tmp_path, caplog):
