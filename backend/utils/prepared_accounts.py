@@ -30,16 +30,20 @@ the person goes with them:
   start its own trial with the same card;
 * who invited it (#439), when nobody invited the prepared account.
 
-An email account with writing, or one that paid, stays as it is: opening
-the prepared account is then only the sign-in, and the email account is
-still there for its address.
+An email account with writing, invitations it sent, poll answers or
+feedback, one that paid (also a trial that became paid at Stripe before
+its webhook arrived), and one the admin blocked or set up by hand stays as
+it is: opening the prepared account is then only the sign-in, and the
+email account is still there for its address.
 
 Never without the X proof: the offer is written only by a completed
 Connect X round trip in this browser session (backend/oauth.py binds X's
 callback to the session that started it), it names the email account that
 asked and lasts as long as a sign-in link, and flask-dance's token for the
 prepared account's X id must still be in the session. An email address or
-a handle never finds a prepared account.
+a handle never finds a prepared account. When the question ends without
+Open (Stay, expiry, any other sign-in starting), the offer and that X
+token go together, so the token never signs anyone in later.
 
 Ids, flags and counts only: nothing here reads content.
 """
@@ -51,8 +55,9 @@ from flask_login import current_user
 
 from backend.extensions import db
 from backend.models import (
-    Draft, ExternalItem, Node, Referral, ShareDraft, TrialCard, User,
-    UserArtifact, UserProfile, UserPrompt, UserRecentContext, UserTodo,
+    Draft, ExternalItem, Invite, Node, PollResponse, Referral, ShareDraft,
+    TrialCard, User, UserArtifact, UserFeedback, UserProfile, UserPrompt,
+    UserRecentContext, UserTodo,
 )
 
 logger = logging.getLogger(__name__)
@@ -61,9 +66,10 @@ OFFER_SESSION_KEY = "prepared_account_offer"
 
 # Why an email account stays when its person opens the prepared account.
 STAYS_WRITING = "writing"   # it holds writing of its own
+STAYS_USED = "used"         # invitations it sent, poll answers, feedback
 STAYS_PAID = "paid"         # it paid, or its subscription is past its trial
 STAYS_KEPT = "kept"         # admin, alpha tester, a plan set by hand,
-#                             a deletion under way
+#                             blocked or deactivated, a deletion under way
 
 # Plans a new account gets without an admin (as unclaimed_accounts.
 # DEFAULT_PLANS): "alpha" while payments are off, "free" while they are on.
@@ -129,16 +135,39 @@ def holds_writing(user_id):
         return any(q.first() is not None for q in checks)
 
 
+def holds_ties(user_id):
+    """Whether the account holds what other people or Loore count on:
+    invitations it sent that are open or were used, referrals where it is
+    the inviter (#439: its reward would be lost with it), poll answers,
+    feedback. Hidden rows count too. Exists checks on ids only."""
+    from backend.utils.hidden_rows import including_hidden_rows
+    from backend.utils.referrals import OPEN, USED
+    checks = (
+        db.session.query(Invite.id).filter(
+            Invite.inviter_id == user_id, Invite.state.in_((OPEN, USED))),
+        db.session.query(Referral.id).filter(Referral.inviter_id == user_id),
+        db.session.query(PollResponse.id).filter(
+            PollResponse.user_id == user_id),
+        db.session.query(UserFeedback.id).filter(
+            UserFeedback.user_id == user_id),
+    )
+    with including_hidden_rows():
+        return any(q.first() is not None for q in checks)
+
+
 def stays_reason(user):
     """None when the email account *user* is deleted on the move (it holds
     no writing and never paid), else why it stays (STAYS_*)."""
     from backend.utils.account_deletion import deletion_refusal
+    from backend.utils.approval import is_blocked
     from backend.utils.user_purge import active_job
     # Not User.plan_set_by_hand: that counts the "alpha" every account gets
     # while payments are off. An alpha tester keeps the account its free
-    # month and price belong to.
+    # month and price belong to. One the admin blocked or deactivated (#697)
+    # stays as the admin left it, its trial card's mark included.
     if (user.is_admin or user.is_alpha_tester
             or (user.plan or "alpha") not in _DEFAULT_PLANS
+            or is_blocked(user) or user.deactivated_at is not None
             or deletion_refusal(user) is not None):
         return STAYS_KEPT
     job = active_job(user.id)
@@ -152,6 +181,8 @@ def stays_reason(user):
         return STAYS_PAID
     if holds_writing(user.id):
         return STAYS_WRITING
+    if holds_ties(user.id):
+        return STAYS_USED
     return None
 
 
@@ -177,15 +208,35 @@ def offer(user, prepared, twitter_id, handle):
 
 
 def drop_offer():
+    """Only the offer: after Open, the X token is the prepared account's
+    own sign-in."""
     session.pop(OFFER_SESSION_KEY, None)
+
+
+def has_offer():
+    return OFFER_SESSION_KEY in session
+
+
+def forget():
+    """The question is over without Open (Stay, expired, another sign-in
+    starting, another account in this browser): the offer and the X token
+    it kept both go, so that token can never sign anyone in afterwards
+    (routes/auth.login). Connect X asks X again from the start."""
+    drop_offer()
+    bp = current_app.blueprints.get("twitter")
+    if bp is not None:
+        try:
+            del bp.token
+        except KeyError:
+            pass
 
 
 def current_offer():
     """(offer, email account, prepared account) while this browser holds
     the X proof for the signed-in account; None otherwise (a stale offer
-    is dropped). The proof: the offer Connect X wrote, for the account
-    signed in now, within its time, and flask-dance's token for the
-    prepared account's X id still in the session."""
+    is forgotten with its X token). The proof: the offer Connect X wrote,
+    for the account signed in now, within its time, and flask-dance's
+    token for the prepared account's X id still in the session."""
     from backend.utils.account_deletion import session_x_sign_in_token
     data = session.get(OFFER_SESSION_KEY)
     if not isinstance(data, dict):
@@ -193,14 +244,14 @@ def current_offer():
     if (not current_user.is_authenticated
             or data.get("user_id") != current_user.id
             or time.time() - float(data.get("at") or 0) > _max_age()):
-        drop_offer()
+        forget()
         return None
     prepared_id = data.get("prepared_id")
     prepared = (db.session.get(User, prepared_id)
                 if isinstance(prepared_id, int) else None)
     if (prepared is None or prepared.twitter_id != data.get("twitter_id")
             or session_x_sign_in_token(prepared) is None):
-        drop_offer()
+        forget()
         return None
     return data, current_user._get_current_object(), prepared
 
@@ -215,27 +266,56 @@ def describe(user, prepared, handle):
         "deleted": deleted,
         "stays_because": reason,
         "email_moves": deleted and bool(user.email) and not prepared.email,
+        # The prepared account has an address of its own: the person's
+        # stays with the deleted account, and signing in with it offers to
+        # restore that account for 30 days.
+        "email_stays": deleted and bool(user.email) and bool(prepared.email),
         "trial_ends": deleted and user.subscription_status == "trialing",
     }
 
 
 # ── The move ───────────────────────────────────────────────────────────
 
+_CHANGED = ("Something changed in this account since the question was "
+            "shown. Please read it again.")
+
+
 def _end_trial(user, config=None):
     """Part 3: a trial running on the email account is cancelled the way
     #649 cancels a second trial of one account (stripe_billing.
     cancel_duplicate: marked as Loore's, a payment refunded if there was
     one, a discount code's use given back). One already cancelled at
-    Stripe is only recorded. Raises when Stripe cannot be reached; nothing
-    else has changed then. Returns True when a trial ended."""
+    Stripe with nothing charged is only recorded.
+
+    The database can lag behind Stripe: a trial that ended a moment ago is
+    active (or past due) at Stripe before its webhook arrives, and its
+    first invoice is charged or on its way. That is no trial to end with
+    nothing charged, so nothing goes ahead: what Stripe says is recorded
+    and MoveRefused("changed") raised, and the question, read again, says
+    the account stays. Raises when Stripe cannot be reached; nothing else
+    has changed then. Returns True when a trial ended."""
     from backend.utils import stripe_billing
     if (not user.stripe_subscription_id
             or user.subscription_status != "trialing"):
         return False
     gateway = stripe_billing.get_gateway(config)
     sub = gateway.retrieve_subscription(user.stripe_subscription_id)
-    if sub.get("status") == "trialing":
+    status = sub.get("status")
+    if status == "trialing":
         sub = stripe_billing.cancel_duplicate(gateway, sub)
+    else:
+        invoice, _pi = stripe_billing._latest_payment_intent(gateway, sub)
+        charged = bool(invoice and invoice.get("amount_paid"))
+        if charged or status not in ("canceled", "incomplete_expired"):
+            stripe_billing.apply_subscription(sub, config)
+            if charged:
+                # As the invoice.paid webhook will: the account paid.
+                user.subscription_ever_paid = True
+            db.session.commit()
+            logger.warning("User %s: opening the prepared account refused, "
+                           "the trial %s is %s at Stripe", user.id,
+                           sub.get("id"), status)
+            raise MoveRefused("changed", _CHANGED)
     stripe_billing.apply_subscription(sub, config)
     return True
 
@@ -299,9 +379,7 @@ def open_prepared(user, prepared, *, twitter_id, delete_this_account,
             "Sign in with X to open it.")
     if (stays_reason(user) is None) != bool(delete_this_account):
         db.session.rollback()
-        raise MoveRefused(
-            "changed", "Something changed in this account since the "
-                       "question was shown. Please read it again.")
+        raise MoveRefused("changed", _CHANGED)
     result = {"deleted": False, "email_moved": None, "trial_ended": False}
     if not delete_this_account:
         db.session.commit()

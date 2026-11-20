@@ -101,6 +101,7 @@ test('what the page says about the account the person is in', () => {
   expect(thisAccountText({ ...QUESTION, trial_ends: true })).toBe(
     'You are signed in to another account, made when you signed in with anna@example.com. '
     + 'It holds no writing, so opening the prepared account deletes it. '
+    + 'After 30 days it is deleted forever. '
     + 'From then on, anna@example.com signs in to the prepared account. '
     + 'The trial you started here ends now, with nothing charged, and the prepared account '
     + 'can start its own trial with the same card.');
@@ -109,4 +110,19 @@ test('what the page says about the account the person is in', () => {
       + 'It holds writing, so it stays as it is. Sign in with anna@example.com to come back to it.');
   expect(thisAccountText({ ...QUESTION, deleted: false, stays_because: 'paid', email_moves: false }))
     .toMatch(/It has a paid subscription, so it stays as it is\./);
+  expect(thisAccountText({ ...QUESTION, deleted: false, stays_because: 'used', email_moves: false }))
+    .toMatch(/It holds invitations you sent, poll answers or feedback, so it stays as it is\./);
+});
+
+// The prepared account has an address of its own: the person's address
+// stays with the deleted account, which signing in with it can restore.
+test('when the address stays with the deleted account, the page says how to restore it', () => {
+  const text = thisAccountText({ ...QUESTION, email_moves: false, email_stays: true });
+  expect(text).toBe(
+    'You are signed in to another account, made when you signed in with anna@example.com. '
+    + 'It holds no writing, so opening the prepared account deletes it. '
+    + 'Your address anna@example.com stays with it: if you change your mind, you can still '
+    + 'restore it within 30 days by signing in with anna@example.com; after that it is deleted '
+    + 'forever. The prepared account opens with Sign in with X.');
+  expect(text).not.toMatch(/signs in to the prepared account/);
 });

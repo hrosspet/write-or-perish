@@ -216,8 +216,7 @@ def open_prepared_account():
             delete_this_account=body.get("delete_this_account") is True)
     except prepared_accounts.MoveRefused as e:
         if e.code == "not_prepared":
-            prepared_accounts.drop_offer()
-            _drop_x_token()
+            prepared_accounts.forget()
         return jsonify({"error": e.message, "code": e.code}), 409
     except Exception as e:  # noqa: BLE001 - Stripe unreachable, mostly
         # Ending a trial comes first, so a failure there changed nothing;
@@ -247,8 +246,7 @@ def stay_in_this_account():
     """Stay in the email account: forget the offer and the X token, so the
     next Connect X asks X again."""
     from backend.utils import prepared_accounts
-    prepared_accounts.drop_offer()
-    _drop_x_token()
+    prepared_accounts.forget()
     return jsonify({"ok": True})
 
 
@@ -300,8 +298,23 @@ def x_connect():
     session[X_CONNECT_SESSION_KEY] = {"user_id": current_user.id}
     # A token left from an earlier X sign-in in this browser would skip X
     # and connect whichever X account that was; ask X which one instead.
+    # A question about a prepared account still waiting (#714) is asked
+    # again when this round trip comes back.
+    from backend.utils import prepared_accounts
+    prepared_accounts.forget()
     _drop_x_token()
     return redirect(url_for("twitter.login"))
+
+
+def _forget_prepared_question(connecting):
+    """The question about a prepared account (#714) keeps X's token for
+    that account only for its own answer. Any way through /auth/login but
+    the Connect X return that asks it (a new sign-in starting, an old tab,
+    a link) drops both first, so that token never signs anyone in; Connect
+    X asks again from the start."""
+    from backend.utils import prepared_accounts
+    if not connecting and prepared_accounts.has_offer():
+        prepared_accounts.forget()
 
 
 @auth_bp.route("/login")
@@ -312,6 +325,7 @@ def login():
         session['next_url'] = next_url
 
     connecting = _pop_connect_intent()
+    _forget_prepared_question(connecting)
     # An invite code (#439) waits in the session through the round trip
     # to X (OAuth comes back to the browser that started it); it counts
     # when the X account that comes back is the one the invite names.
@@ -651,7 +665,7 @@ def logout():
     _drop_x_token()
     session.pop(X_CONNECT_SESSION_KEY, None)
     from backend.utils.prepared_accounts import drop_offer
-    drop_offer()
+    drop_offer()   # the X token went just above
     flash("Logged out successfully", "success")
     frontend_url = current_app.config.get("FRONTEND_URL")
     # "Sign out and use the other account" on /confirm-email comes back to

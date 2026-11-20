@@ -225,7 +225,7 @@ class TestTheQuestion:
         q = _call(client, "get", "/auth/prepared-account").get_json()
         assert q == {"handle": HANDLE, "email": ANNA_EMAIL, "deleted": True,
                      "stays_because": None, "email_moves": True,
-                     "trial_ends": False}
+                     "email_stays": False, "trial_ends": False}
 
     def test_an_account_with_writing_stays(self, app):
         _prepared()
@@ -559,6 +559,289 @@ class TestTrial:
         assert "cancel_subscription" not in gateway.names()
         assert _fresh(anna).subscription_status == "ended"
         assert TrialCard.query.one().user_id == anna_x.id
+
+    @pytest.mark.parametrize("stripe_status", ["active", "past_due"])
+    def test_a_trial_that_became_paid_at_stripe_stops_the_move(
+            self, app, gateway, stripe_status):
+        """The database still says trialing, Stripe already says the
+        trial ended (its webhook is on its way): no trial to end with
+        nothing charged. Nothing is deleted or moved; read again, the
+        question says the account stays."""
+        anna_x = _prepared()
+        anna = _email_account()
+        _trial_on(app, gateway, anna, "cus_e", "sub_e", "pm_e", "fp_card_1",
+                  "evt_1")
+        client, _ = _connect(app, anna)
+        q = _call(client, "get", "/auth/prepared-account").get_json()
+        assert q["deleted"] is True and q["trial_ends"] is True
+        gateway.subscriptions["sub_e"]["status"] = stripe_status
+
+        resp = _open(client)
+
+        assert resp.status_code == 409 and resp.get_json()["code"] == "changed"
+        assert _signed_in_id(client) == anna.id
+        assert "cancel_subscription" not in gateway.names()
+        sub_e = gateway.subscriptions["sub_e"]
+        assert sub_e["status"] == stripe_status
+        assert not sub_e.get("cancel_at_period_end")
+        empty = _fresh(anna)
+        assert empty.deleted_at is None and empty.email == ANNA_EMAIL
+        assert empty.subscription_status == stripe_status
+        assert TrialCard.query.one().user_id == anna.id
+        assert _fresh(anna_x).email is None
+        assert UserDataPurge.query.count() == 0
+        q = _call(client, "get", "/auth/prepared-account").get_json()
+        assert q["deleted"] is False and q["stays_because"] == "paid"
+        # Open is then only the sign-in.
+        assert _open(client, delete=False).status_code == 200
+        assert _signed_in_id(client) == anna_x.id
+        assert _fresh(anna).deleted_at is None
+
+    def test_a_cancelled_subscription_that_charged_stops_the_move(
+            self, app, gateway):
+        anna = _email_account()
+        _prepared()
+        _trial_on(app, gateway, anna, "cus_e", "sub_e", "pm_e", "fp_card_1",
+                  "evt_1")
+        client, _ = _connect(app, anna)
+        gateway.invoices["in_1"] = {"id": "in_1", "amount_paid": 3000,
+                                    "payment_intent": "pi_1"}
+        gateway.subscriptions["sub_e"].update(
+            {"status": "canceled", "latest_invoice": "in_1"})
+
+        resp = _open(client)
+
+        assert resp.status_code == 409
+        empty = _fresh(anna)
+        assert empty.deleted_at is None and empty.subscription_ever_paid
+        assert TrialCard.query.one().user_id == anna.id
+
+
+# ── Accounts that stay ──────────────────────────────────────────────────
+
+def _poll_answer(user):
+    from backend.models import Poll, PollResponse
+    poll = Poll(question="?")
+    _db.session.add(poll)
+    _db.session.flush()
+    _db.session.add(PollResponse(poll_id=poll.id, user_id=user.id))
+
+
+def _feedback(user):
+    from backend.models import UserFeedback
+    _db.session.add(UserFeedback(user_id=user.id, content=""))
+
+
+def _invite(state):
+    def add(user):
+        _db.session.add(Invite(
+            inviter_id=user.id, code=f"C-{state}", kind="email",
+            target="bob@example.com", state=state, month="2026-11",
+            expires_at=datetime.utcnow() + timedelta(days=20)))
+    return add
+
+
+def _referral_as_inviter(user):
+    bob = User(username="bob", approved=True, last_seen_at=datetime.utcnow())
+    _db.session.add(bob)
+    _db.session.flush()
+    _db.session.add(Referral(inviter_id=user.id, friend_id=bob.id))
+
+
+class TestAccountsThatStay:
+    @pytest.mark.parametrize("add", [
+        _invite("open"), _invite("used"), _referral_as_inviter,
+        _poll_answer, _feedback,
+    ], ids=["open invite", "used invite", "referral as inviter",
+            "poll answer", "feedback"])
+    def test_invitations_answers_and_feedback_keep_the_account(
+            self, app, add):
+        anna_x = _prepared()
+        anna = _email_account()
+        add(anna)
+        _db.session.commit()
+        client, _ = _connect(app, anna)
+        q = _call(client, "get", "/auth/prepared-account").get_json()
+        assert q["deleted"] is False and q["stays_because"] == "used"
+
+        assert _open(client, delete=False).status_code == 200
+
+        assert _signed_in_id(client) == anna_x.id
+        empty = _fresh(anna)
+        assert empty.deleted_at is None and empty.email == ANNA_EMAIL
+        assert _fresh(anna_x).email is None
+
+    def test_a_withdrawn_or_expired_invite_does_not(self, app):
+        _prepared()
+        anna = _email_account()
+        _invite("withdrawn")(anna)
+        _invite("expired")(anna)
+        _db.session.commit()
+        client, _ = _connect(app, anna)
+        q = _call(client, "get", "/auth/prepared-account").get_json()
+        assert q["deleted"] is True
+
+    @pytest.mark.parametrize("kw", [
+        {"approved": False, "deactivated_at": "now"},   # blocked (#697)
+        {"approved": True, "deactivated_at": "now"},    # held as not active
+    ], ids=["blocked", "deactivated"])
+    def test_an_account_the_admin_blocked_stays_with_its_card_mark(
+            self, app, gateway, kw):
+        anna_x = _prepared()
+        anna = _email_account()
+        _trial_on(app, gateway, anna, "cus_e", "sub_e", "pm_e", "fp_card_1",
+                  "evt_1")
+        empty = _fresh(anna)
+        for k, v in kw.items():
+            setattr(empty, k, datetime.utcnow() if v == "now" else v)
+        _db.session.commit()
+        client, _ = _connect(app, anna)
+        q = _call(client, "get", "/auth/prepared-account").get_json()
+        assert q["deleted"] is False and q["stays_because"] == "kept"
+        # Asked to delete it anyway: refused, nothing moves.
+        assert _open(client, delete=True).status_code == 409
+        assert TrialCard.query.one().user_id == anna.id
+
+        assert _open(client, delete=False).status_code == 200
+
+        assert _signed_in_id(client) == anna_x.id
+        empty = _fresh(anna)
+        assert empty.deleted_at is None and empty.email == ANNA_EMAIL
+        assert empty.subscription_status == "trialing"
+        assert gateway.subscriptions["sub_e"]["status"] == "trialing"
+        assert TrialCard.query.one().user_id == anna.id
+
+
+# ── The X token never outlives the question ─────────────────────────────
+
+class TestTheTokenGoesWithTheQuestion:
+    def test_a_sign_in_starting_meanwhile_drops_it(self, app):
+        """The question was left unanswered; later the browser comes
+        through /auth/login (a new sign-in, an old tab): the token is gone
+        before X is asked, so it signs nobody in."""
+        anna_x = _prepared()
+        anna = _email_account()
+        client, _ = _connect(app, anna)
+        assert "twitter_oauth_token" in _session(client)
+
+        resp = _call(client, "get", "/auth/login")   # the real flask-dance
+
+        assert resp.status_code == 302
+        assert resp.headers["Location"].endswith("/auth/twitter")  # asks X
+        sess = _session(client)
+        assert "twitter_oauth_token" not in sess
+        assert prepared_accounts.OFFER_SESSION_KEY not in sess
+        assert _signed_in_id(client) == anna.id
+        assert _fresh(anna_x).last_seen_at is None
+
+    def test_an_expired_question_drops_it(self, app):
+        _prepared()
+        anna = _email_account()
+        client, _ = _connect(app, anna)
+        with client.session_transaction() as sess:
+            data = dict(sess[prepared_accounts.OFFER_SESSION_KEY])
+            data["at"] = time.time() - 901
+            sess[prepared_accounts.OFFER_SESSION_KEY] = data
+
+        assert _call(client, "get", "/auth/prepared-account").status_code == 410
+
+        sess = _session(client)
+        assert "twitter_oauth_token" not in sess
+        assert prepared_accounts.OFFER_SESSION_KEY not in sess
+
+    def test_connect_x_asks_again_afterwards(self, app):
+        anna_x = _prepared()
+        anna = _email_account()
+        client, _ = _connect(app, anna)
+        _call(client, "get", "/auth/login")          # the question is dropped
+        assert _open(client).status_code == 410
+
+        start = _call(client, "get", "/auth/x/connect")
+        assert start.headers["Location"].endswith("/auth/twitter")
+        _x_token(client, X_ID)
+        resp = _callback(client, X_ID)
+        assert resp.headers["Location"] == f"{FRONTEND}/prepared-account"
+        assert _open(client).status_code == 200
+        assert _signed_in_id(client) == anna_x.id
+
+
+# ── A subscription that arrives for an account in deletion ──────────────
+
+class TestSubscriptionForAnAccountInDeletion:
+    def _in_deletion(self, **kw):
+        from backend.utils.account_deletion import schedule_account_deletion
+        user = _email_account(stripe_customer_id="cus_d", **kw)
+        schedule_account_deletion(user, requested_by_id=user.id,
+                                  source="self")
+        return _fresh(user)
+
+    def test_a_trial_checkout_finished_after_the_deletion_is_cancelled(
+            self, app, gateway):
+        user = self._in_deletion()
+        _card(gateway, "pm_d", "fp_card_9")
+        _trial(gateway, "sub_d", "cus_d", "pm_d")
+
+        _created(app, "sub_d", "evt_d")
+
+        sub = gateway.subscriptions["sub_d"]
+        assert sub["status"] == "canceled"
+        assert sub["metadata"][stripe_billing.DUPLICATE_METADATA_KEY] == "1"
+        assert "create_refund" not in gateway.names()
+        user = _fresh(user)
+        assert user.deleted_at is not None
+        assert user.subscription_status == "ended"
+        assert not user.subscription_cancelled_by_owner
+        assert TrialCard.query.count() == 0   # the card had no trial here
+
+        # A restore during the 30 days finds no subscription.
+        from backend.utils.account_deletion import restore_account
+        assert restore_account(user)
+        user = _fresh(user)
+        assert user.deleted_at is None
+        assert user.subscription_access_state == "none"
+
+    def test_a_paid_one_is_refunded(self, app, gateway):
+        user = self._in_deletion()
+        sub = tp.subscription("sub_d", customer="cus_d", status="active",
+                              latest_invoice="in_d")
+        gateway.subscriptions["sub_d"] = sub
+        gateway.invoices["in_d"] = {"id": "in_d", "amount_paid": 3000,
+                                    "payment_intent": "pi_d"}
+
+        _created(app, "sub_d", "evt_d")
+
+        assert gateway.subscriptions["sub_d"]["status"] == "canceled"
+        refunds = [c for c in gateway.calls if c[0] == "create_refund"]
+        assert len(refunds) == 1 and refunds[0][1]["payment_intent"] == "pi_d"
+        assert _fresh(user).subscription_status == "ended"
+
+    def test_the_subscription_it_had_stays(self, app, gateway):
+        """The account's own subscription (its renewal stopped by the
+        deletion) is not cancelled by its later events."""
+        sub = tp.subscription("sub_own", customer="cus_d", status="active")
+        gateway.subscriptions["sub_own"] = sub
+        user = _email_account(stripe_customer_id="cus_d")
+        _created(app, "sub_own", "evt_1")
+        from backend.utils.account_deletion import schedule_account_deletion
+        schedule_account_deletion(_fresh(user), requested_by_id=user.id,
+                                  source="self")
+        assert gateway.subscriptions["sub_own"]["cancel_at_period_end"] is True
+
+        tp._post_event(app, tp._event("customer.subscription.updated",
+                                      {"id": "sub_own"}, "evt_2"))
+
+        assert gateway.subscriptions["sub_own"]["status"] == "active"
+        assert "cancel_subscription" not in gateway.names()
+        assert _fresh(user).subscription_status == "active"
+
+    def test_a_live_account_keeps_its_new_trial(self, app, gateway):
+        """The control: the same checkout for an account not in deletion."""
+        user = _email_account(stripe_customer_id="cus_d")
+        _card(gateway, "pm_d", "fp_card_9")
+        _trial(gateway, "sub_d", "cus_d", "pm_d")
+        _created(app, "sub_d", "evt_d")
+        assert gateway.subscriptions["sub_d"]["status"] == "trialing"
+        assert _fresh(user).subscription_status == "trialing"
 
 
 # ── Never without the X proof ───────────────────────────────────────────
