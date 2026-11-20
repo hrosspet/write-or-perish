@@ -94,6 +94,13 @@ final class ChunkUploader: NSObject {
     var now: () -> Date = Date.init
     /// Called once when a session hits a fatal error.
     var onFatal: ((String, String) -> Void)?
+    /// Called once per session when the server refuses its audio for the
+    /// usage limit or the account's open recordings (402, 429; a recording
+    /// that held no audio for too long, backend/utils/recording_limits),
+    /// with the server's words. The audio stays on the phone and is sent
+    /// again later (a relaunch, the next chunk of a continued recording).
+    var onRefused: ((String, String) -> Void)?
+    private var refusalsSaid: Set<String> = []
     /// Called when a background relaunch finished its events.
     var backgroundCompletionHandler: (() -> Void)?
 
@@ -304,6 +311,7 @@ final class ChunkUploader: NSObject {
         workers = [:]
         manifests = [:]
         fatalMessages = [:]
+        refusalsSaid = []
         degraded = []
         if useBackgroundSession {
             backgroundSession.getAllTasks { tasks in tasks.forEach { $0.cancel() } }
@@ -350,7 +358,7 @@ final class ChunkUploader: NSObject {
         return record.status != .stored
     }
 
-    private enum AttemptResult { case stored, retry, giveUp, fatal(String) }
+    private enum AttemptResult { case stored, retry, giveUp, fatal(String), refused(String) }
 
     private func upload(_ sessionId: String, index: Int) async {
         var attempt = 0
@@ -368,6 +376,10 @@ final class ChunkUploader: NSObject {
                 return
             case .giveUp:
                 mark(sessionId, index, .failed)
+                return
+            case .refused(let message):
+                mark(sessionId, index, .failed)
+                sayRefusal(sessionId, message)
                 return
             case .retry:
                 if isInit && manifests[sessionId]?.closed == false {
@@ -392,6 +404,12 @@ final class ChunkUploader: NSObject {
         degraded.remove(sessionId)
         mark(sessionId, index, .stored)
         try? fileManager.removeItem(at: bodyFile(sessionId, index))
+    }
+
+    private func sayRefusal(_ sessionId: String, _ message: String) {
+        guard !refusalsSaid.contains(sessionId) else { return }
+        refusalsSaid.insert(sessionId)
+        onRefused?(sessionId, message)
     }
 
     private func failFatally(_ sessionId: String, _ index: Int, _ message: String) {
@@ -423,7 +441,7 @@ final class ChunkUploader: NSObject {
             case .fatal(let message):
                 failFatally(sessionId, index, message)
                 return
-            case .giveUp, .retry:
+            case .giveUp, .retry, .refused:
                 mark(sessionId, index, .failed)
                 if isInit { return }
             }
@@ -483,6 +501,15 @@ final class ChunkUploader: NSObject {
             return .retry
         case 401, 403, 404, 413, 422:
             return .giveUp
+        case 402, 429:
+            // A recording that held no audio for too long, refused as a new
+            // start would be: the usage limit, or the account's open
+            // recordings (backend/utils/recording_limits). Retrying now
+            // cannot help; the chunk stays on the phone.
+            let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+            let words = (json?["message"] as? String) ?? (json?["error"] as? String)
+            return .refused(words.flatMap { $0.contains(" ") ? $0 : nil }
+                            ?? "Loore can't take this recording right now. It is kept on this phone.")
         default:
             return .retry
         }

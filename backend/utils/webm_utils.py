@@ -19,6 +19,7 @@ Covers:
   (`drop_fragment_decode_times`, `_ensure_mp4_duration_matches_audio`).
 """
 
+import contextvars
 import logging
 import os
 import pathlib
@@ -26,10 +27,30 @@ import shutil
 import struct
 import subprocess
 import tempfile
+import time
 import uuid
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+# A deadline (a time.monotonic() value) for the merge's ffmpeg work, set by
+# a caller that has one for all its audio work (the batch transcription
+# task): each ffmpeg call in concat_fragmented_media then gets the time left
+# as its timeout, at most its own. None: each its own.
+audio_work_deadline = contextvars.ContextVar("audio_work_deadline",
+                                             default=None)
+
+
+def _timeout(cap: float) -> float:
+    """*cap*, cut to the time left until audio_work_deadline. Raises
+    subprocess.TimeoutExpired when none is left."""
+    deadline = audio_work_deadline.get()
+    if deadline is None:
+        return cap
+    left = min(cap, deadline - time.monotonic())
+    if left <= 0:
+        raise subprocess.TimeoutExpired("ffmpeg", 0)
+    return left
 
 
 def get_webm_duration(filepath: str) -> Optional[float]:
@@ -441,7 +462,7 @@ def concat_fragmented_media(paths: list,
         result = subprocess.run(
             ['ffmpeg', '-y', '-fflags', '+genpts',
              '-i', raw_path, '-c', 'copy', out_path],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, text=True, timeout=_timeout(120),
         )
         if result.returncode != 0:
             raise RuntimeError(
@@ -537,7 +558,7 @@ def _mp4_durations(path: str):
              '-count_packets', '-show_entries',
              'stream=codec_name,sample_rate,nb_read_packets:format=duration',
              '-of', 'default=noprint_wrappers=1', path],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, text=True, timeout=_timeout(60),
         )
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return None
@@ -570,7 +591,8 @@ def _rebuild_from_decoded_audio(raw_path: str, work_dir: str) -> str:
         ['ffmpeg', '-y', '-i', wav_path, '-c:a', 'aac', '-b:a', '64k',
          rebuilt],
     ):
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=_timeout(600))
         if r.returncode != 0:
             raise RuntimeError(f"ffmpeg rebuild failed: {r.stderr[:500]}")
     return rebuilt
