@@ -191,18 +191,19 @@ final class AccountModelTests: StubbedAppTestCase {
 
     /// #714: Connect X can land on the web's question about a prepared
     /// account; the app says where to answer it.
-    func testConnectXLandingOnAPreparedAccount() async throws {
+    /// (No user reload here: its timezone and updates calls would land in
+    /// the next test's call log.)
+    func testConnectXLandingOnAPreparedAccount() {
         let base = "https://loore.test"
         XCTAssertEqual(AccountModel.xConnectOutcome(URL(string: "\(base)/prepared-account")!), "prepared")
         XCTAssertEqual(AccountModel.xConnectOutcome(URL(string: "\(base)/account?x_login=linked#x")!), "linked")
         XCTAssertNil(AccountModel.xConnectOutcome(URL(string: "\(base)/dashboard")!))
-        try signIn(["email": "a@example.com"])
-        let model = AccountModel(app: app)
-        StubURLProtocol.install { _ in .json(200, #"{"user":\#(Self.userJSON)}"#) }
-        await model.xLoginReturned("prepared")
-        XCTAssertEqual(model.xMessage?.text,
+        let message = AccountModel.xLoginMessages["prepared"]
+        XCTAssertEqual(message?.text,
                        "Loore prepared an account for that X account. To open it, use Connect X in Settings on the Loore website.")
-        XCTAssertEqual(model.xMessage?.kind, .info)
+        XCTAssertEqual(message?.kind, .info)
+        XCTAssertEqual(AccountModel.xLoginMessages["taken_placeholder"]?.text,
+                       "An account was set up for that X account, but it can't be opened now. Write to info@loore.org.")
     }
 
     func testDisconnectXCallsTheServerAndForgetsTheHandle() async throws {

@@ -14,6 +14,7 @@ flask-dance X blueprint added. X itself is never called: the callback's
 verify_credentials is a stub, or (in the round trip) only the HTTP
 exchange with X is faked.
 """
+import sys
 import time
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
@@ -21,13 +22,21 @@ from unittest.mock import MagicMock, patch
 import pytest
 from flask import g
 
-from backend.extensions import db as _db
-from backend.models import (
+# Other test files swap flask_login (and more) for MagicMocks when they are
+# collected: import the real ones (as test_x_login_linking.py does).
+for _mod in ["flask_login", "backend.models", "backend.extensions"]:
+    if _mod in sys.modules and isinstance(sys.modules[_mod], MagicMock):
+        del sys.modules[_mod]
+
+import flask_login as _real_flask_login  # noqa: E402
+import backend.models as _real_backend_models  # noqa: E402
+from backend.extensions import db as _db  # noqa: E402
+from backend.models import (  # noqa: E402
     Invite, Node, Referral, TrialCard, User, UserDataPurge)
-from backend.tests import test_payments as tp
-from backend.tests.test_trial_card import (
+from backend.tests import test_payments as tp  # noqa: E402
+from backend.tests.test_trial_card import (  # noqa: E402
     CardGateway, _card, _created, _fresh, _trial)
-from backend.utils import prepared_accounts, stripe_billing, trial_cards
+from backend.utils import prepared_accounts, stripe_billing, trial_cards  # noqa: E402
 
 FRONTEND = "https://loore.test"
 X_ID = "4242"
@@ -48,24 +57,41 @@ def gateway(monkeypatch):
 
 
 @pytest.fixture
-def notices(monkeypatch):
-    import backend.routes.auth as auth_mod
-    sent = []
-    monkeypatch.setattr(auth_mod, "send_x_connected_notice",
-                        lambda to, handle: sent.append((to, handle)))
-    return sent
+def notices():
+    """The "X is now connected" notices sent (the app fixture replaces the
+    mail on the auth module it imports)."""
+    return []
+
+
+def _affected(k):
+    return (k == "flask_login" or k.startswith("backend.routes")
+            or k == "backend.models" or k == "backend.utils.privacy")
 
 
 @pytest.fixture
-def app(gateway, notices):
+def app(gateway, notices, monkeypatch):
+    # The routes are imported fresh against the real flask_login (another
+    # test file may have left a MagicMock there), and everything is put back
+    # afterwards, the packages' attributes included: the teardown of
+    # test_detached_prompt_stays_agentic.py (this file sorts before
+    # test_privacy_utils.py, whose patches resolve through those attributes).
+    saved = {k: sys.modules[k] for k in list(sys.modules) if _affected(k)}
+    sys.modules["flask_login"] = _real_flask_login
+    sys.modules["backend.models"] = _real_backend_models
+    for k in [k for k in list(sys.modules)
+              if k.startswith("backend.routes") or k == "backend.utils.privacy"]:
+        del sys.modules[k]
+
+    import backend.routes.auth as auth_mod
+    monkeypatch.setattr(auth_mod, "send_x_connected_notice",
+                        lambda to, handle: notices.append((to, handle)))
     app = tp._make_app(payments=True)
     app.config["TWITTER_API_KEY"] = "fake"
     app.config["TWITTER_API_SECRET"] = "fake"
     app.config["MAGIC_LINK_EXPIRY_SECONDS"] = 900
     app.config["FRONTEND_URL"] = FRONTEND
     from backend.oauth import init_twitter_blueprint
-    from backend.routes.auth import auth_bp
-    app.register_blueprint(auth_bp, url_prefix="/auth")
+    app.register_blueprint(auth_mod.auth_bp, url_prefix="/auth")
     init_twitter_blueprint(app)
     ctx = app.app_context()
     ctx.push()
@@ -74,6 +100,22 @@ def app(gateway, notices):
     _db.session.remove()
     _db.drop_all()
     ctx.pop()
+
+    current = [k for k in list(sys.modules) if _affected(k)]
+    for k in current:
+        if k not in saved:
+            del sys.modules[k]
+    for k, mod in saved.items():
+        sys.modules[k] = mod
+    for k in set(current) | set(saved):
+        pkg_name, _, attr = k.rpartition(".")
+        pkg = sys.modules.get(pkg_name)
+        if pkg is None or not attr:
+            continue
+        if k in saved:
+            setattr(pkg, attr, saved[k])
+        elif hasattr(pkg, attr):
+            delattr(pkg, attr)
 
 
 # ── The world ───────────────────────────────────────────────────────────
