@@ -230,7 +230,7 @@ def list_users():
         user_is_capped,
     )
     from backend.utils.approval import (
-        approval_waived, counts_as_approved, is_blocked)
+        approval_waived, counts_as_approved, held_as_spam, is_blocked)
 
     config = current_app.config
     waived = approval_waived(config)
@@ -296,8 +296,11 @@ def list_users():
             # itself while they were on reads as waiting (#697).
             "approved": counts_as_approved(user, config),
             # Payments on (#697): the admin blocked it (Inactive otherwise
-            # only means it has not come back since payments went on).
-            **({"blocked": is_blocked(user)} if waived else {}),
+            # only means it has not come back since payments went on), or
+            # the spam mark holds it (#713: not let in at its next visit).
+            **({"blocked": is_blocked(user),
+                "held_as_spam": held_as_spam(user, config)}
+               if waived else {}),
             "email": user.email,
             "plan": user.plan,
             "deactivated_at": iso_utc(user.deactivated_at),

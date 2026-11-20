@@ -16,6 +16,14 @@ test('payments on: Active, Blocked, Inactive', () => {
   expect(statusLabel({ approved: false, blocked: false }, true)).toBe('Inactive');
 });
 
+test('payments on: an account the spam mark holds (#713)', () => {
+  expect(statusLabel({ approved: false, blocked: false, held_as_spam: true }, true))
+    .toBe('Held (spam)');
+  // Blocked and marked: Blocked, with its Unblock button.
+  expect(statusLabel({ approved: false, blocked: true, held_as_spam: true }, true))
+    .toBe('Blocked');
+});
+
 test('control: payments off, as before', () => {
   expect(statusLabel({ approved: true }, false)).toBe('Active');
   expect(statusLabel({ approved: false }, false)).toBe('Inactive');

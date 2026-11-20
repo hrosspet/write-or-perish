@@ -178,11 +178,16 @@ def unblock(user, now=None):
     (no ``approved_before_block``) is activated as Activate always did:
     approved now, with the alpha testers' free month where it applies;
     its ``deactivated_at`` stays, as after any Activate (the terms are
-    asked again). Returns False when it was not blocked. Does not
-    commit."""
+    asked again). Such an account marked as spam (#713) is not approved:
+    the block is cleared and nothing else, so the mark holds it
+    (``held_as_spam``) until the admin activates it by hand. Returns
+    False when it was not blocked. Does not commit."""
     if not is_blocked(user):
         return False
     prior = user.approved_before_block
+    if prior is None and getattr(user, "spam", False):
+        user.deactivated_at = None
+        return True
     if prior is None:
         user.approved = True
         user.approved_at = now or datetime.utcnow()

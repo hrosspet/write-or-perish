@@ -132,6 +132,39 @@ class TestNeverLetIn:
         assert me["approved"] is False and me["account_blocked"] is True
         assert _fresh(u).approved is False
 
+    def test_unblock_of_one_deactivated_in_the_alpha_approves_nothing(
+            self, real_app):
+        """Deactivated during the alpha (no approved_before_block) and
+        marked as spam: Unblock clears the block and approves nothing (no
+        Activate, no alpha free month); the mark holds it, and the row
+        offers Activate."""
+        _admin_user, admin = _admin(real_app)
+        u = _spam(username="oldspam", plan="alpha",
+                  deactivated_at=datetime(2026, 9, 1))
+        assert u.approved_before_block is None
+        r = _block(admin, u, False)
+        assert r.get_json() == {"blocked": False, "approved": False}
+        user = _fresh(u)
+        assert user.approved is False and user.approved_at is None
+        assert user.deactivated_at is None
+        assert user.plan == "alpha" and user.alpha_free_granted_at is None
+        me = _me(_client(real_app, u))
+        assert me["approved"] is False and me["account_blocked"] is True
+        assert _fresh(u).approved is False   # not let in by the gate either
+        row = _users_list(admin)["oldspam"]
+        assert row["blocked"] is False and row["held_as_spam"] is True
+        assert row["approved"] is False   # Activate is offered
+
+    def test_control_unblock_of_one_deactivated_in_the_alpha_activates(
+            self, real_app):
+        # Not marked: Unblock is Activate, as it always was (#700).
+        _admin_user, admin = _admin(real_app)
+        u = _add(username="old", plan="alpha",
+                 deactivated_at=datetime(2026, 9, 1))
+        r = _block(admin, u, False)
+        assert r.get_json() == {"blocked": False, "approved": True}
+        assert _fresh(u).approved is True
+
 
 # ── Marked after the gate let it in ─────────────────────────────────────
 
@@ -192,14 +225,29 @@ class TestMarkedLater:
         _db.session.commit()
         assert resolve_api_token(plain, SCOPE_EXTERNAL_WRITE) is None
 
-    def test_the_users_list_offers_activate(self, real_app):
+    def test_the_users_list_says_held_and_offers_activate(self, real_app):
         _admin_user, admin = _admin(real_app)
-        _let_in_then_marked(username="later")
-        row = _users_list(admin)["later"]
-        # Not approved and not blocked: the row has Activate (AdminPanel).
+        _let_in_then_marked(username="later", subscription_status="active",
+                            subscription_level="standard")
+        _add(username="byhand", approved=True, spam=True)
+        _add(username="notyet")
+        rows = _users_list(admin)
+        row = rows["later"]
+        # Not approved and not blocked: the row has Activate (AdminPanel),
+        # and its Status reads "Held (spam)".
         assert row["approved"] is False
         assert row["blocked"] is False
         assert row["spam"] is True
+        assert row["held_as_spam"] is True
+        assert rows["byhand"]["held_as_spam"] is False
+        assert rows["notyet"]["held_as_spam"] is False
+
+    def test_control_payments_off_the_list_has_no_held_key(
+            self, payments_off):
+        _admin_user, admin = _admin(payments_off)
+        _spam(username="spammer")
+        rows = _users_list(admin)
+        assert all("held_as_spam" not in r for r in rows.values())
 
 
 # ── The admin's hand ────────────────────────────────────────────────────
