@@ -230,7 +230,7 @@ def list_users():
         user_is_capped,
     )
     from backend.utils.approval import (
-        approval_waived, counts_as_approved, is_blocked)
+        approval_waived, counts_as_approved, held_as_spam, is_blocked)
 
     config = current_app.config
     waived = approval_waived(config)
@@ -296,8 +296,11 @@ def list_users():
             # itself while they were on reads as waiting (#697).
             "approved": counts_as_approved(user, config),
             # Payments on (#697): the admin blocked it (Inactive otherwise
-            # only means it has not come back since payments went on).
-            **({"blocked": is_blocked(user)} if waived else {}),
+            # only means it has not come back since payments went on), or
+            # the spam mark holds it (#713: not let in at its next visit).
+            **({"blocked": is_blocked(user),
+                "held_as_spam": held_as_spam(user, config)}
+               if waived else {}),
             "email": user.email,
             "plan": user.plan,
             "deactivated_at": iso_utc(user.deactivated_at),
@@ -371,12 +374,14 @@ def toggle_user_status(user_id):
     an account never approved: Activate by hand, as before (an "alpha"
     account then gets the alpha testers' free month, convert_if_alpha).
     Payments off, an account the gate let in by itself while they were on
-    reads as waiting (approval.waiting_again); Activate approves it by
-    hand."""
+    reads as waiting (approval.waiting_again); payments on, one the gate
+    let in that the admin then marked as spam reads as not approved
+    (approval.held_as_spam, #713). Activate approves either by hand, and
+    the spam mark stays."""
     from backend.utils.approval import (
-        approval_waived, approved_by_hand, is_blocked, waiting_again)
+        approval_waived, approved_by_hand, counts_as_approved, is_blocked)
     user = User.query.get_or_404(user_id)
-    if waiting_again(user):
+    if user.approved and not counts_as_approved(user):
         approved_by_hand(user)
         user.approved_at = datetime.utcnow()
         db.session.commit()
@@ -936,8 +941,11 @@ def set_signup_email_setting():
 @login_required
 @admin_required
 def toggle_user_spam(user_id):
-    """Flip the admin spam flag. Marking spam only hides the row behind
-    the Users-table eye toggle; it does not deactivate the account."""
+    """Flip the admin spam flag. Marking spam hides the row behind the
+    Users-table eye toggle. While payments are on it also holds an
+    account the admin did not approve by hand: it is never let in by the
+    gate, and one let in already is not active from now on
+    (utils/approval.held_as_spam, #713). Unmarking approves nothing."""
     user = User.query.get_or_404(user_id)
     user.spam = not bool(user.spam)
     db.session.commit()

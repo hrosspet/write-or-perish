@@ -615,11 +615,13 @@ export function purgeLabel(job) {
 }
 
 // The Users tab's Status cell. Payments on (#697): "Blocked" for an
-// account the admin blocked; "Inactive" is then one that has not come back
-// since payments went on (it is let in at its next visit).
+// account the admin blocked; "Held (spam)" for one the spam mark holds
+// (#713: not let in, Activate lets it in); "Inactive" is then one that has
+// not come back since payments went on (it is let in at its next visit).
 export function statusLabel(u, letInWithoutApproval) {
   if (u.approved) return "Active";
   if (letInWithoutApproval && u.blocked) return "Blocked";
+  if (letInWithoutApproval && u.held_as_spam) return "Held (spam)";
   return "Inactive";
 }
 
@@ -1727,7 +1729,12 @@ function AdminPanel() {
                 </span>{" "}
                 <button
                   onClick={() => toggleSpam(u.id)}
-                  title={u.spam ? "Unmark as spam" : "Mark as spam (hides the row behind the eye toggle; does not deactivate)"}
+                  title={u.spam
+                    ? "Unmark as spam"
+                    : letInWithoutApproval
+                      // Payments on (#713): the mark also holds the account.
+                      ? "Mark as spam: hides the row behind the eye toggle, and an account you did not approve by hand is not active from now on, until you Activate it or unmark it"
+                      : "Mark as spam (hides the row behind the eye toggle; does not deactivate)"}
                   style={u.spam ? { color: "var(--error)" } : undefined}
                 >
                   {u.spam ? "Not spam" : "Spam"}

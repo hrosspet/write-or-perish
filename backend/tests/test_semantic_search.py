@@ -265,6 +265,41 @@ def test_candidates_skip_a_blocked_account_while_payments_are_on(app):
         assert item.id in {i.id for i, _ in _candidate_external_items(50)}
 
 
+def test_candidates_skip_an_account_marked_as_spam_while_payments_are_on(
+        app):
+    """#713: nothing new is embedded for an account the gate let in that
+    the admin then marked as spam while payments are on, whatever its paid
+    set; approved by hand (Activate), it is again. Control: payments off,
+    the query is what it was."""
+    from datetime import datetime
+    with app.app_context():
+        user = User.query.first()
+        user.plan = "alpha"   # the paid set, by hand
+        user.approved = True
+        user.let_in_at = datetime.utcnow()   # let in by the gate
+        user.spam = True
+        node = _mk_node(user.id, "written before the mark")
+        item = ExternalItem(user_id=user.id, source="web_clip",
+                            external_id="s" * 64)
+        item.set_content("a page")
+        _db.session.add(item)
+        _db.session.commit()
+        app.config["PAYMENTS_ENABLED"] = True
+        try:
+            assert node.id not in {n.id for n, _, _, _ in _candidate_nodes(50)}
+            assert item.id not in {
+                i.id for i, _ in _candidate_external_items(50)}
+            user.let_in_at = None   # Activate: approved by hand
+            _db.session.commit()
+            assert node.id in {n.id for n, _, _, _ in _candidate_nodes(50)}
+            user.let_in_at = datetime.utcnow()
+            _db.session.commit()
+        finally:
+            app.config["PAYMENTS_ENABLED"] = False
+        assert node.id in {n.id for n, _, _, _ in _candidate_nodes(50)}
+        assert item.id in {i.id for i, _ in _candidate_external_items(50)}
+
+
 def test_embedding_owner_is_human_not_llm_author(app):
     # AI-reply nodes are authored by the synthetic llm-<model> account but
     # owned by the human (human_owner_id). Embedding cost + the row must both

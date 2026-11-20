@@ -400,8 +400,10 @@ class User(db.Model, UserMixin):
     # moves an existing Keep earlier).
     unclaimed_keep_until = db.Column(db.DateTime, nullable=True)
     # Admin-flagged spam signup. Hidden from the admin Users table by
-    # default (eye toggle); nothing else changes — the account keeps
-    # whatever approved/plan state it had.
+    # default (eye toggle). While payments are on, an account so marked
+    # that the admin did not approve by hand is not active: never let in
+    # by the approval gate, no background jobs (#713,
+    # utils/approval.held_as_spam). It keeps its approved/plan state.
     spam = db.Column(db.Boolean, nullable=False, default=False,
                      server_default=db.text("false"))
     # When the account was (last) approved — the "since activation" origin
@@ -589,9 +591,14 @@ class User(db.Model, UserMixin):
         * A deleted account in its grace period (#269) is left out: it
           is hidden, and nothing runs for it unless it is restored.
 
+        * Payments on: an account held as spam (#713) is left out, as a
+          blocked one is by ``approved``; it may still be approved, when
+          the gate let it in before the admin marked it.
+
         Shared helper (not an inline filter) so the profile and
         recent-context tasks can't drift apart again.
         """
+        from backend.utils.approval import not_held_as_spam_clause
         from backend.utils.hidden_rows import account_on_hold_user_ids
         from backend.utils.privacy import AI_ALLOWED
         llm_authors = db.session.query(Node.user_id).filter(
@@ -610,6 +617,7 @@ class User(db.Model, UserMixin):
             ~cls.id.in_(llm_authors),
             ~cls.id.in_(purging),
             cls.deleted_at.is_(None),
+            *not_held_as_spam_clause(),
         )
 
 

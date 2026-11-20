@@ -321,8 +321,9 @@ def create_app():
     #     their address before approval).
     #   - For other API requests, return a 403 JSON error.
     #   - For other (HTML) requests, redirect to "/" with the query flag ?alpha=1.
-    # While payments are on, only an account the admin blocked is held here
-    # (utils/approval.py): every other one is approved on arrival.
+    # While payments are on, only an account the admin blocked or marked as
+    # spam is held here (utils/approval.py): every other one is approved on
+    # arrival.
     @app.before_request
     def touch_last_seen_hook():
         # Admin Activity tab: who came back, and where they last were.
@@ -337,7 +338,8 @@ def create_app():
             return  # nothing to check
 
         # `approved`, except, payments off, an account the gate let in by
-        # itself while they were on (#697: approval.waiting_again).
+        # itself while they were on (#697: approval.waiting_again), and,
+        # payments on, one held as spam (#713: approval.held_as_spam).
         from backend.utils import approval
         if approval.counts_as_approved(current_user):
             return  # approved users proceed
@@ -345,8 +347,8 @@ def create_app():
         # Payments on (#697; Peter, 2026-11-13): nobody waits for approval.
         # An account never approved is approved on its first request and
         # goes on to the trial step (block_accounts_without_subscription
-        # below); one the admin blocked is refused here, with its own text.
-        # No-op while payments are off.
+        # below); one the admin blocked or marked as spam is refused here,
+        # with its own text. No-op while payments are off.
         if approval.let_in(current_user):
             db.session.commit()
             return
@@ -362,10 +364,11 @@ def create_app():
         if request.endpoint and request.endpoint.startswith("public_pages."):
             return
 
-        # Payments on (#697): an account the admin blocked reaches only who
-        # it is, its subscription and Stripe's page to cancel it, its data
-        # download, the terms and deleting itself (approval.BLOCKED_OPEN).
-        if approval.approval_waived() and approval.is_blocked(current_user):
+        # Payments on (#697): an account the admin blocked, or one held as
+        # spam (#713), reaches only who it is, its subscription and
+        # Stripe's page to cancel it, its data download, the terms and
+        # deleting itself (approval.BLOCKED_OPEN).
+        if approval.not_active(current_user):
             if approval.open_while_blocked(request.method, request.path):
                 return
             return _refuse_unapproved()
