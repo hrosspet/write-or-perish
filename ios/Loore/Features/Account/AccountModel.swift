@@ -20,8 +20,20 @@ final class AccountModel {
         "failed": Message(kind: .error, text: "Could not read your X account. Please try again."),
         "other_x": Message(kind: .error, text: "This account is already connected to a different X account."),
         "taken": Message(kind: .error, text: "That X account already signs in to another Loore account, so it can't be connected here. If that account was made by accident, write to info@loore.org and we'll remove it so you can connect X here."),
-        "taken_placeholder": Message(kind: .error, text: "An account was already set up for that X account, and no one has signed in to it yet. Write to info@loore.org and we'll join it with this one."),
+        "taken_placeholder": Message(kind: .error, text: "An account was set up for that X account, but it can't be opened now. Write to info@loore.org."),
+        // The web's question at /prepared-account (#714). Its answer needs
+        // the X proof the sheet's web session held, which closed with it.
+        "prepared": Message(kind: .info, text: "Loore prepared an account for that X account. To open it, use Connect X in Settings on the Loore website."),
     ]
+
+    /// The outcome of the Connect X web flow from the frontend page it
+    /// landed on: `x_login=<outcome>` on the Account page, or "prepared"
+    /// when the server asked about a prepared account (#714).
+    static func xConnectOutcome(_ url: URL) -> String? {
+        if url.path == "/prepared-account" { return "prepared" }
+        return URLComponents(url: url, resolvingAgainstBaseURL: false)?
+            .queryItems?.first { $0.name == "x_login" }?.value
+    }
 
     private let app: AppState
 

@@ -36,6 +36,7 @@ import ConfirmEmailPage from "./pages/ConfirmEmailPage";
 import ConfirmAccountDeletionPage from "./pages/ConfirmAccountDeletionPage";
 import AccountDeletedPage from "./pages/AccountDeletedPage";
 import AccountRestorePage from "./pages/AccountRestorePage";
+import PreparedAccountPage from "./pages/PreparedAccountPage";
 import ArtifactsPage from "./pages/ArtifactsPage";
 import SharePage from "./pages/SharePage";
 import PublicSharePage from "./pages/PublicSharePage";
@@ -204,6 +205,8 @@ function App() {
           <Route path="/confirm-account-deletion" element={<ConfirmAccountDeletionPage />} />
           <Route path="/account-deleted" element={<AccountDeletedPage />} />
           <Route path="/account-restore" element={<AccountRestorePage />} />
+          {/* Connect X found the account prepared for this person (#714). */}
+          <Route path="/prepared-account" element={<PreparedAccountPage />} />
           <Route path="*" element={<SubscribePage />} />
         </Routes>
       </>
@@ -288,6 +291,9 @@ function App() {
           <Route path="/confirm-account-deletion" element={<ConfirmAccountDeletionPage />} />
           <Route path="/account-deleted" element={<AccountDeletedPage />} />
           <Route path="/account-restore" element={<AccountRestorePage />} />
+          {/* Connect X found the account prepared for this person (#714).
+              Not ProtectedRoute: a waitlisted account answers it too. */}
+          <Route path="/prepared-account" element={<PreparedAccountPage />} />
           {/* Welcome - protected (for newly approved users) */}
           <Route path="/welcome" element={<ProtectedRoute><WelcomePage /></ProtectedRoute>} />
           {/* Workflow routes */}

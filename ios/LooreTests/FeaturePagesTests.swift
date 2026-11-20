@@ -189,6 +189,22 @@ final class AccountModelTests: StubbedAppTestCase {
         XCTAssertNil(model.xMessage, "an unknown outcome shows nothing")
     }
 
+    /// #714: Connect X can land on the web's question about a prepared
+    /// account; the app says where to answer it.
+    func testConnectXLandingOnAPreparedAccount() async throws {
+        let base = "https://loore.test"
+        XCTAssertEqual(AccountModel.xConnectOutcome(URL(string: "\(base)/prepared-account")!), "prepared")
+        XCTAssertEqual(AccountModel.xConnectOutcome(URL(string: "\(base)/account?x_login=linked#x")!), "linked")
+        XCTAssertNil(AccountModel.xConnectOutcome(URL(string: "\(base)/dashboard")!))
+        try signIn(["email": "a@example.com"])
+        let model = AccountModel(app: app)
+        StubURLProtocol.install { _ in .json(200, #"{"user":\#(Self.userJSON)}"#) }
+        await model.xLoginReturned("prepared")
+        XCTAssertEqual(model.xMessage?.text,
+                       "Loore prepared an account for that X account. To open it, use Connect X in Settings on the Loore website.")
+        XCTAssertEqual(model.xMessage?.kind, .info)
+    }
+
     func testDisconnectXCallsTheServerAndForgetsTheHandle() async throws {
         try signIn(["email": "a@example.com", "twitter_login": true, "twitter_handle": "sw"])
         let model = AccountModel(app: app)
