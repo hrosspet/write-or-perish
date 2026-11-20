@@ -254,12 +254,12 @@ def login():
     if not from_x:
         # Anything else starts a sign-in, and Sign in with X always starts
         # a fresh round trip to X: a token an earlier X sign-in in this
-        # browser left in the session is dropped, never reused, and so is a
-        # sign-in held at the invite question. Before anything reads
-        # twitter.authorized: flask-dance keeps a token it has loaded for
-        # the rest of the request.
+        # browser left in the session is dropped, never reused, and so is
+        # an unanswered offer from an earlier sign-in. Before anything
+        # reads twitter.authorized: flask-dance keeps a token it has loaded
+        # for the rest of the request.
         _drop_x_token()
-        session.pop(INVITE_CHOICE_KEY, None)
+        _forget_unanswered_offers()
     # Where the sign-in started (#704), kept through the round trip to X.
     _remember_destination(starting=not returned and not twitter.authorized)
 
@@ -361,6 +361,16 @@ def _forget_held_choice():
     return pending
 
 
+def _forget_unanswered_offers():
+    """A new sign-in starts in this browser: what an earlier sign-in here
+    left waiting for an answer is forgotten. The question at the invite
+    (as "Sign in differently" does) and the offer to restore a deleted
+    account; going Back to either page finds nothing to answer."""
+    from backend.utils.account_deletion import RESTORE_SESSION_KEY
+    session.pop(RESTORE_SESSION_KEY, None)
+    _forget_held_choice()
+
+
 def _ask_about_invite(kind, pending):
     pending["next_url"] = session.pop('next_url', None)
     pending["at"] = datetime.utcnow().timestamp()
@@ -420,9 +430,9 @@ def magic_link_send():
     if not is_valid_email(email):
         return jsonify({"error": "Please enter a valid email address."}), 400
 
-    # A new sign-in starts in this browser: a sign-in held at the invite
-    # question here is forgotten, as "Sign in differently" does.
-    _forget_held_choice()
+    # A new sign-in starts in this browser: an unanswered offer from an
+    # earlier sign-in here is forgotten.
+    _forget_unanswered_offers()
 
     if next_url and not is_safe_redirect_url(next_url):
         next_url = None
