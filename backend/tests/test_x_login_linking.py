@@ -990,9 +990,13 @@ class TestFailedCredentialsCheck:
             def get(self, *a, **k):
                 return self.resp
 
+        from backend.oauth import X_AUTHORIZED_SESSION_KEY
         client = app.test_client()
         with client.session_transaction() as sess:
+            # What X's callback leaves: the token, and the note that the
+            # next /auth/login is X's return.
             sess["twitter_oauth_token"] = {"oauth_token": "t", "oauth_token_secret": "s"}
+            sess[X_AUTHORIZED_SESSION_KEY] = True
         failing = SessionX(MagicMock(ok=False, status_code=401))
         with patch("backend.routes.auth.twitter", failing):
             first = client.get("/auth/login")

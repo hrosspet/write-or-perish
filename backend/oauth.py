@@ -3,7 +3,8 @@ from urllib.parse import parse_qs, parse_qsl, urlparse
 
 from flask import g, request, session
 from flask_dance.consumer import (
-    OAuth1ConsumerBlueprint, oauth_before_login, oauth_error)
+    OAuth1ConsumerBlueprint, oauth_authorized, oauth_before_login,
+    oauth_error)
 from flask_dance.contrib.twitter import make_twitter_blueprint
 
 logger = logging.getLogger(__name__)
@@ -25,12 +26,26 @@ X_REQUEST_TOKEN_SESSION_KEY = "x_oauth_request_token"
 # page again: Cancel led back to X, and an X outage redirected in a loop.
 X_RETURN_SESSION_KEY = "x_sign_in_returned"
 
+# Set when X's callback has just stored a token: the next /auth/login is
+# X's return and signs in with that token. Any other request to
+# /auth/login starts a sign-in, which always goes to X for a fresh
+# authorization: a token stored by an earlier X sign-in in this browser is
+# dropped there, never reused.
+X_AUTHORIZED_SESSION_KEY = "x_sign_in_authorized"
+
 
 def _note_x_return(sender, message=None, response=None, **kwargs):
     """oauth_error: flask-dance is about to redirect to /auth/login without
     a token. The message is not logged here (flask-dance logs its own)."""
+    session.pop(X_AUTHORIZED_SESSION_KEY, None)
     session[X_RETURN_SESSION_KEY] = (
         "cancelled" if request.args.get("denied") else "failed")
+
+
+def _note_x_authorized(sender, token=None, **kwargs):
+    """oauth_authorized: flask-dance is about to store the token X just
+    issued and redirect to /auth/login."""
+    session[X_AUTHORIZED_SESSION_KEY] = True
 
 
 def _remember_request_token(sender, url, **kwargs):
@@ -38,6 +53,7 @@ def _remember_request_token(sender, url, **kwargs):
     with this request token."""
     token = parse_qs(urlparse(url).query).get("oauth_token", [None])[0]
     session[X_REQUEST_TOKEN_SESSION_KEY] = token
+    session.pop(X_AUTHORIZED_SESSION_KEY, None)
 
 
 def _refuse_foreign_callback():
@@ -112,6 +128,7 @@ def init_twitter_blueprint(app):
     # the subclass only replaces how `session` is stored.
     twitter_bp.__class__ = _RequestLocalSessionBlueprint
     oauth_before_login.connect(_remember_request_token, sender=twitter_bp)
+    oauth_authorized.connect(_note_x_authorized, sender=twitter_bp)
     oauth_error.connect(_note_x_return, sender=twitter_bp)
     twitter_bp.before_request(_refuse_foreign_callback)
     # Register this blueprint on the app

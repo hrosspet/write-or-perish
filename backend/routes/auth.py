@@ -6,7 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from backend.models import User
 from backend.extensions import db
 from flask_dance.contrib.twitter import twitter
-from backend.oauth import X_RETURN_SESSION_KEY
+from backend.oauth import X_AUTHORIZED_SESSION_KEY, X_RETURN_SESSION_KEY
 from backend.utils.destination import safe_destination
 from flask import session
 from backend.utils.magic_link import (
@@ -247,8 +247,19 @@ def login():
     # an error (backend/oauth.py). A sign-in started from a page names
     # `next`; a return from X never does.
     returned = session.pop(X_RETURN_SESSION_KEY, None)
+    # X's callback stored a token for this return (backend/oauth.py).
+    from_x = session.pop(X_AUTHORIZED_SESSION_KEY, None)
     if 'next' in request.args:
-        returned = None
+        returned = from_x = None
+    if not from_x:
+        # Anything else starts a sign-in, and Sign in with X always starts
+        # a fresh round trip to X: a token an earlier X sign-in in this
+        # browser left in the session is dropped, never reused, and so is a
+        # sign-in held at the invite question. Before anything reads
+        # twitter.authorized: flask-dance keeps a token it has loaded for
+        # the rest of the request.
+        _drop_x_token()
+        session.pop(INVITE_CHOICE_KEY, None)
     # Where the sign-in started (#704), kept through the round trip to X.
     _remember_destination(starting=not returned and not twitter.authorized)
 
@@ -336,7 +347,18 @@ def _counts_as_new(user):
 # this browser's session, for as long as a sign-in link lasts, until the
 # person chooses: sign in differently (nothing was made) or continue
 # without the invitation (the account is made then, with no inviter).
+# Starting another sign-in in this browser forgets it, as signing in
+# differently does.
 INVITE_CHOICE_KEY = "invite_choice"
+
+
+def _forget_held_choice():
+    """Forget the sign-in held at the invite question; an X one's token
+    goes with it. What was held, or None."""
+    pending = session.pop(INVITE_CHOICE_KEY, None)
+    if isinstance(pending, dict) and pending.get("method") == "x":
+        _drop_x_token()
+    return pending
 
 
 def _ask_about_invite(kind, pending):
@@ -397,6 +419,10 @@ def magic_link_send():
 
     if not is_valid_email(email):
         return jsonify({"error": "Please enter a valid email address."}), 400
+
+    # A new sign-in starts in this browser: a sign-in held at the invite
+    # question here is forgotten, as "Sign in differently" does.
+    _forget_held_choice()
 
     if next_url and not is_safe_redirect_url(next_url):
         next_url = None
@@ -581,9 +607,7 @@ def invite_choice_cancel():
     while referrals are off."""
     if not referrals.referrals_enabled():
         return jsonify({"error": "Not found"}), 404
-    pending = session.pop(INVITE_CHOICE_KEY, None)
-    if isinstance(pending, dict) and pending.get("method") == "x":
-        _drop_x_token()
+    pending = _forget_held_choice()
     # The page the sign-in started on goes back with the answer, so the
     # next sign-in still returns to it (#704).
     held = pending.get("next_url") if isinstance(pending, dict) else None
