@@ -178,7 +178,8 @@ class CircleSets:
 
     * ``readable``: the shared entries the user reads as part of their
       audience (not as their author): alive "circles" entries of an
-      author who is not hidden (#269) and whom the user has not muted,
+      author who is not hidden (#269), not blocked by the admin
+      (blocked_owner_filter) and whom the user has not muted,
       shared with the user by name or through a circle the user is in
       now (and, for a member added with "Only new entries", shared with
       that circle since). Empty while Circles is off for the user.
@@ -262,7 +263,8 @@ def _load_circle_sets(user_id) -> CircleSets:
                     Node.audience_root_id == Node.id,
                     Node.deleted_at.is_(None),
                     owner != user_id,
-                    hidden_owner_filter(Node))
+                    hidden_owner_filter(Node),
+                    blocked_owner_filter(Node))
                 if muted:
                     q = q.filter(~owner.in_(muted))
                 readable.update(i for (i,) in q)
@@ -543,6 +545,20 @@ def hidden_owner_filter(node_model):
     hidden = select(User.id).where(User.deleted_at.isnot(None))
     return ~func.coalesce(
         node_model.human_owner_id, node_model.user_id).in_(hidden)
+
+
+def blocked_owner_filter(node_model):
+    """Query form of "the node's owner is not an account the admin turned
+    off" (utils/approval.is_blocked: not approved and deactivated; the
+    Block switch while payments are on, Deactivate while they are off).
+    Circles reads it: such an author's shared entries are closed to their
+    readers until the account is turned on again. An uncorrelated
+    subquery over the blocked accounts, which is usually empty."""
+    from backend.models import User
+    blocked = select(User.id).where(User.approved.is_(False),
+                                    User.deactivated_at.isnot(None))
+    return ~func.coalesce(
+        node_model.human_owner_id, node_model.user_id).in_(blocked)
 
 
 def can_user_access_node(node, user_id: Optional[int] = None,

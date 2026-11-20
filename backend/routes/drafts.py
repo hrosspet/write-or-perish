@@ -1606,6 +1606,14 @@ def save_streaming_as_node(session_id):
                 "error": "Replies under public posts are public.",
                 "code": "public_reply_required",
             }), 400
+        # A shared thread has one audience (Circles), as for a typed
+        # reply: the form's level for a recorded reply under a shared
+        # node is "circles", or nothing is saved.
+        from backend.utils import circles as cz
+        if (cz.circles_enabled(current_user)
+                and cz.reply_requires_circles(
+                    parent, privacy_level, current_user.id)):
+            return cz.circle_reply_required_response()
 
     # A public entry quotes only public nodes (Peter, 2026-11-12); the
     # session stays, so the text can be changed and saved again.
