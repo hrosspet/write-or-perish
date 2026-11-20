@@ -11,6 +11,7 @@ enum TermsText {
     static let blocks: [TermsBlock] = [
         .title("Terms of Service"),
         .summaryBox(title: "The short version", items: [
+            "**Loore is for finding and using your own potential.** We say what it will not do, and that statement is part of these terms.",
             "**Loore is run by [OPERATOR NAME] in the Czech Republic.** Czech law applies, and you keep the consumer protection of the country you live in.",
             "**Your writing is yours.** We claim no rights to it beyond what we need to run Loore, unless you mark it for training.",
             "**It is private by default and encrypted at rest.** We can technically decrypt it, so this rests on trust. The [Privacy Policy](https://loore.org/privacy) says what we keep and who receives what.",
@@ -19,6 +20,18 @@ enum TermsText {
             "**You can leave at any time.** Export your writing, or delete your account: you have 30 days to change your mind, then it is deleted forever.",
         ]),
         .rule,
+        .sectionTitle("What Loore is for"),
+        .paragraph("**What Loore is for.** Loore exists to help you find and use your own potential: what you could do and become that you have not yet seen or acted on. Reflection, your profile and your intentions are tools for that. They are not goals in themselves."),
+        .paragraph("**What it costs you.** Every tool gives something and takes something. What a tool does for you, you practise less yourself; that is how learning works, not a fault of one tool. Loore is no exception. It is meant to help you find and fulfil your potential sooner, or more fully, than you would alone. The things it helps you with are things you will have less chance to learn to do, or to do better, on your own. We want you to choose that trade-off knowingly, and Loore is built to help you with it: it asks before it answers, and it leaves to you the work you say you want to do yourself."),
+        .paragraph("**What Loore will not do.**"),
+        .bullets([
+            "It will not try to keep you in the app. Time spent in Loore is not something we measure success by.",
+            "It will not lead you toward easier goals so that you, or Loore, look more successful. A hard intention that you chose is worth more than an easy one that Loore suggested.",
+            "It will not take over your thinking. It asks before it answers, so that the answer is yours.",
+            "It will not stand between you and other people. Where it can, it points you toward them.",
+            "It will not use what you write for anything you have not agreed to.",
+        ]),
+        .paragraph("**If we fall short.** Tell us. This statement is part of our terms, and you can leave with everything you wrote at any time."),
         .sectionTitle("1. Who runs Loore"),
         .paragraph("Loore (loore.org and the Loore iPhone app) is run by [OPERATOR NAME], [LEGAL FORM], company ID (IČO) [COMPANY ID], [ADDRESS], Czech Republic. In these terms, \"we\" and \"Loore\" mean the operator."),
         .paragraph("Write to us at [info@loore.org](mailto:info@loore.org)."),
