@@ -133,7 +133,7 @@ enum AppRoute: Hashable, Sendable {
         case ("confirm-email", 1): return .confirmEmail(token: query["token"])
         case ("confirm-account-deletion", 1): return .confirmAccountDeletion(token: query["token"])
         case ("alpha-thank-you", 1): return .waitlist
-        case ("landing", 1), ("vision", 1), ("why-loore", 1), ("how-to", 1):
+        case ("landing", 1), ("vision", 1), ("why-loore", 1), ("how-to", 1), ("terms", 1), ("privacy", 1):
             return .webPage(path: "/" + first)
         case ("login", 1): return .home
         default:

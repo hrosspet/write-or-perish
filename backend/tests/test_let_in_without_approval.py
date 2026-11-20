@@ -704,14 +704,21 @@ def _notices(monkeypatch):
     return calls
 
 
+def _accept(client):
+    """Accept the current Terms, as the apps do: with the version shown
+    (#440; any other version records nothing)."""
+    from backend.routes.terms import CURRENT_TERMS_VERSION
+    return client.post("/api/terms/accept",
+                       json={"version": CURRENT_TERMS_VERSION})
+
+
 class TestSignupEmail:
     def test_none_while_payments_are_on(self, real_app, monkeypatch):
         calls = _notices(monkeypatch)
         u = _add(username="newcomer", email="n@example.com")
-        assert _client(real_app, u).post("/api/terms/accept").status_code \
-            == 200
-        assert _client(real_app, _blocked(username="blocked")).post(
-            "/api/terms/accept").status_code == 200
+        assert _accept(_client(real_app, u)).status_code == 200
+        assert _accept(_client(
+            real_app, _blocked(username="blocked"))).status_code == 200
         assert calls == []
 
     def test_control_new_accounts_head_the_users_list(self, real_app):
@@ -728,11 +735,11 @@ class TestSignupEmail:
         calls = _notices(monkeypatch)
         u = _add(username="newcomer")
         c = _client(payments_off, u)
-        c.post("/api/terms/accept")
-        c.post("/api/terms/accept")
+        _accept(c)
+        _accept(c)
         assert calls == ["newcomer", "newcomer"]
         ok = _add(username="approved", approved=True)
-        _client(payments_off, ok).post("/api/terms/accept")
+        _accept(_client(payments_off, ok))
         assert calls == ["newcomer", "newcomer"]
 
     def test_control_the_email_is_the_base_one(self):

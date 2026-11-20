@@ -111,9 +111,11 @@ export function deleteAccountXNote(xConnected, info) {
  * username is typed. An account with an email address confirms from a
  * mailed link, which the button says. onConfirm(typed) returns a
  * promise; a rejection's message is shown.
+ * zIndex: raised when the dialog opens over the Terms dialog (#440).
  */
 function DeleteAccountDialog({
   open, username, email, info, xConnected, writingDeletionAt, onConfirm, onClose,
+  zIndex,
 }) {
   const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
@@ -153,7 +155,7 @@ function DeleteAccountDialog({
   };
 
   return (
-    <div onClick={onClose} style={overlayStyle}>
+    <div onClick={onClose} style={zIndex ? { ...overlayStyle, zIndex } : overlayStyle}>
       <div
         onClick={(e) => e.stopPropagation()}
         style={cardStyle}

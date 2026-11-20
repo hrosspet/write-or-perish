@@ -21,6 +21,7 @@ import ProtectedRoute from "./components/ProtectedRoute";
 import VisionPage from "./pages/VisionPage";
 import WhyLoorePage from "./pages/WhyLoorePage";
 import HowToPage from "./pages/HowToPage";
+import LegalPage, { LEGAL_PATHS } from "./pages/LegalPage";
 import AlphaThankYouPage from "./pages/AlphaThankYouPage";
 import WelcomePage from "./pages/WelcomePage";
 import HomePage from "./pages/HomePage";
@@ -114,6 +115,12 @@ function AtRoute() {
   return <PublicSharePage usernameOverride={username} />;
 }
 
+// Pages the Terms dialog stays off (#440): the legal pages, and the
+// signed-out pages of an account deletion (#269).
+export const TERMS_DIALOG_EXEMPT_PATHS = [
+  ...LEGAL_PATHS, "/confirm-account-deletion", "/account-deleted", "/account-restore",
+];
+
 function RootRoute() {
   const { user, loading } = useUser();
   if (loading) return null;
@@ -192,7 +199,7 @@ function App() {
   if (noSubscription) {
     return (
       <>
-        {showTerms && (
+        {showTerms && !TERMS_DIALOG_EXEMPT_PATHS.includes(pathname) && (
           <TermsModal
             onAccepted={() => {
               setUser({ ...user, terms_up_to_date: true });
@@ -201,6 +208,9 @@ function App() {
           />
         )}
         <Routes>
+          {/* The legal pages (#440): the Terms dialog's links open them. */}
+          <Route path="/terms" element={<LegalPage kind="terms" />} />
+          <Route path="/privacy" element={<LegalPage kind="privacy" />} />
           <Route path="/confirm-account-deletion" element={<ConfirmAccountDeletionPage />} />
           <Route path="/account-deleted" element={<AccountDeletedPage />} />
           <Route path="/account-restore" element={<AccountRestorePage />} />
@@ -244,8 +254,12 @@ function App() {
         <SearchModal scope={searchScope} onClose={() => setShowSearch(false)} onOpenNode={openThread} />
       )}
 
-      {/* Render the Terms Modal if the user hasn't accepted the terms yet */}
-      {showTerms && (
+      {/* Render the Terms Modal if the user hasn't accepted the terms yet.
+          Not over /terms and /privacy themselves (#440): the dialog's links
+          open them in a new tab, to be read before agreeing. Nor over the
+          pages of an account deletion started from the dialog, so a person
+          who doesn't accept can confirm it from the emailed link. */}
+      {showTerms && !TERMS_DIALOG_EXEMPT_PATHS.includes(pathname) && (
         <TermsModal
           onAccepted={() => {
             setUser({ ...user, terms_up_to_date: true });
@@ -279,6 +293,9 @@ function App() {
           <Route path="/vision" element={<VisionPage />} />
           <Route path="/why-loore" element={<WhyLoorePage />} />
           <Route path="/how-to" element={<HowToPage />} />
+          {/* Legal pages (#440): public, no sign-in. */}
+          <Route path="/terms" element={<LegalPage kind="terms" />} />
+          <Route path="/privacy" element={<LegalPage kind="privacy" />} />
           {/* Alpha thank you - public (for unapproved users) */}
           <Route path="/alpha-thank-you" element={<AlphaThankYouPage />} />
           {/* Confirms a new sign-in email (#260). Not ProtectedRoute: waitlisted

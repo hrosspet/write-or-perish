@@ -5,9 +5,10 @@ import api from "../api";
 // the browser's download list with its progress, and is never held in this
 // page's memory. A HEAD request first checks that it can start (signed
 // in, server reachable); the server builds nothing for it. Used by the
-// menu's "Export data" and, for an account that is not let in (#438), by
-// the subscribe page's "Download your data". Resolves false when the
-// download could not start.
+// menu's "Export data", by the Terms dialog, where a person who doesn't
+// accept new Terms can take their writing with them (#440), and, for an
+// account that is not let in (#438), by the subscribe page's "Download
+// your data". Resolves false when the download could not start.
 export async function downloadAccountData() {
   try {
     await api.head("/export/threads");

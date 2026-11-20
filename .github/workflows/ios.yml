@@ -6,6 +6,7 @@ on:
   pull_request:
     paths:
       - "ios/**"
+      - "frontend/src/legal/**"
       - ".github/workflows/ios.yml"
   workflow_dispatch:
 
@@ -34,7 +35,7 @@ jobs:
           sudo xcode-select -s "$XCODE/Contents/Developer"
           xcodebuild -version
 
-      - name: Terms text matches the web
+      - name: Terms text matches frontend/src/legal/terms.json
         run: python3 ios/scripts/check_terms_text.py
 
       - name: Install XcodeGen

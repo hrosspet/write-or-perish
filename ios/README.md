@@ -311,7 +311,8 @@ Release build they are compiled out.
 cd ios && xcodegen
 xcodebuild -project Loore.xcodeproj -scheme Loore \
   -destination 'platform=iOS Simulator,name=iPhone 17' test      # 733 unit tests
-python3 ios/scripts/check_terms_text.py                          # Terms text == TermsModal.js
+python3 ios/scripts/check_terms_text.py                          # TermsText.swift == frontend/src/legal/terms.json
+python3 ios/scripts/check_terms_text.py --write                  # regenerate TermsText.swift after editing terms.json
 ```
 
 CI (`.github/workflows/ios.yml`) runs both on pull requests that touch `ios/**`.

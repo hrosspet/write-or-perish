@@ -63,6 +63,11 @@ struct MoreView: View {
                     MenuRow(title: "Why Loore") { app.open(.webPage(path: "/why-loore")) }
                     MenuRow(title: "Vision") { app.open(.webPage(path: "/vision")) }
                     MenuRow(title: "How To") { app.open(.webPage(path: "/how-to")) }
+                    // The public legal pages (#440), as on the web.
+                    MenuRow(title: "Terms of Service") { app.open(.webPage(path: "/terms")) }
+                        .accessibilityIdentifier("more.terms")
+                    MenuRow(title: "Privacy Policy") { app.open(.webPage(path: "/privacy")) }
+                        .accessibilityIdentifier("more.privacy")
                 }
 
                 MenuGroup {
@@ -312,9 +317,11 @@ struct CraftModeDialog: View {
 // MARK: - Share sheet
 
 /// The account's data as one file: `GET /api/export/threads` to a temporary
-/// file named as the web names it. The More menu's "Export data", and the
-/// not-let-in screen's "Download your data" (#438; Peter, 2026-11-13: "yes, Ben
-/// should be able to export"). The caller shares it, then removes it.
+/// file named as the web names it. The More menu's "Export data", the Terms
+/// screen, where a person who doesn't accept new Terms can take their writing
+/// with them (#440), and the not-let-in screen's "Download your data" (#438;
+/// Peter, 2026-11-13: "yes, Ben should be able to export"). The caller shares
+/// it, then removes it.
 enum DataExport {
     static let failedMessage = "Export failed. Please try again."
 
