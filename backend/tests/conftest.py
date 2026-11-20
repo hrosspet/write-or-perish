@@ -159,6 +159,25 @@ def _no_provider_cancel_from_a_content_deletion(monkeypatch):
                             lambda *a, **k: None)
 
 
+class _FourCharactersAToken:
+    """Stand-in for tiktoken's o200k_base: a token per four characters."""
+
+    def encode(self, text, disallowed_special=()):
+        return [0] * (len(text or "") // 4)
+
+
+@pytest.fixture(autouse=True)
+def _no_tiktoken_download(monkeypatch):
+    """tiktoken fetches an encoding over the network the first time a
+    process uses it (CI has no cached copy), which the network guard
+    refuses. A Glean's list is fitted with o200k counts made on the server
+    (#717, tokens.local_token_counter); in tests they are a token per four
+    characters. A test that wants other counts patches
+    local_token_counter itself."""
+    from backend.utils import tokens
+    monkeypatch.setitem(tokens._O200K, "enc", _FourCharactersAToken())
+
+
 @pytest.fixture(autouse=True)
 def _no_real_stripe(monkeypatch):
     """No test reaches Stripe (#438): a developer's .env holds a sandbox
