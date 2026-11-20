@@ -332,7 +332,7 @@ describe('payments on: terms, then the subscribe page, then the entry', () => {
     expect(kept()).toBeNull();
   });
 
-  test('control: back from a cancelled checkout, the same', () => {
+  test('back from a cancelled checkout, the same', () => {
     keepFromEarlierLoad('/node/5#reply-2');
     mockUser = onNoSub({ terms_up_to_date: true, subscription: { state: 'active' } });
     renderAt('/account?subscription=cancelled#subscription');
