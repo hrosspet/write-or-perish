@@ -85,7 +85,8 @@ from backend.utils.artifact_versions import (
     artifact_diff, parse_version, stored_version, version_number,
 )
 from backend.utils.privacy import (
-    AI_ALLOWED, X_API_INPUT, account_allows_ai, chat_at_most,
+    AI_ALLOWED, CIRCLE_INPUT, account_allows_ai, chat_at_most,
+    others_circle_writing,
 )
 from backend.utils.proposals import is_own_live_proposal
 from backend.utils.placeholders import (
@@ -2570,14 +2571,18 @@ def _redact_tool_input(inp):
     }
 
 
-def _written_from(licence, llm_node, node_chain, previous=None):
-    """X_API_INPUT when a tool write of this turn is written from X API
-    posts (#689), else None: what the turn's payload took in (*licence*,
-    None when the call runs later, on approval), what the reply that made
-    the call was marked with when it was finalized, the chain's own, and
-    the version the write replaces (update_artifact rewrites the whole
-    text)."""
-    from backend.utils.privacy import unlicensed_input
+def _written_from(licence, llm_node, node_chain, previous=None,
+                  user_id=None):
+    """The mark of a tool write of this turn (privacy.strongest_input):
+    X_API_INPUT when it is written from X API posts (#689), CIRCLE_INPUT
+    when from another person's writing in a shared thread, else None. From
+    what the turn's payload took in (*licence*, None when the call runs
+    later, on approval), what the reply that made the call was marked with
+    when it was finalized, the chain's own marks and its other people's
+    shared writing (for *user_id*, the requester), and the version the
+    write replaces (update_artifact rewrites the whole text)."""
+    from backend.utils.privacy import (
+        others_circle_writing, strongest_input, unlicensed_input)
     kinds = set(chain_inputs(node_chain))
     if licence is not None:
         kinds |= licence.inputs
@@ -2585,7 +2590,9 @@ def _written_from(licence, llm_node, node_chain, previous=None):
         kind = unlicensed_input(row) if row is not None else None
         if kind:
             kinds.add(kind)
-    return X_API_INPUT if X_API_INPUT in kinds else None
+    if others_circle_writing(node_chain, user_id):
+        kinds.add(CIRCLE_INPUT)
+    return strongest_input(kinds)
 
 
 def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
@@ -2776,7 +2783,8 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                         # version marked so, carries that mark and is
                         # never 'train' (#689).
                         written_from = _written_from(
-                            licence, llm_node, node_chain, previous)
+                            licence, llm_node, node_chain, previous,
+                            user_id=user_id)
                         owner = User.query.get(user_id)
                         writes_train = (
                             owner is not None
@@ -5019,11 +5027,20 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # mid-turn — joins the payload below and reports here; the
             # keys are re-read from it before every provider call (#325).
             licence = PayloadLicence(
-                key_type, logger=logger, label=f"Node {llm_node_id}")
+                key_type, logger=logger, label=f"Node {llm_node_id}",
+                requester_id=user_id)
             # X API posts, or replies written from them, in the chain
             # itself: no reply written from it may pass them on for
-            # training (#689).
+            # training (#689). The same for text written from another
+            # person's writing in a shared thread (CIRCLE_INPUT).
             licence.mark(*chain_inputs(node_chain))
+            # Circles: the chain holds another person's writing in a
+            # shared thread (the entry for a reader, a reader's reply for
+            # the author): what this turn writes, the reply and any
+            # document a tool writes, is Chat at most, for good.
+            if others_circle_writing(node_chain, user_id):
+                licence.to_chat("the chain holds another person's writing "
+                                "in a shared thread", CIRCLE_INPUT)
             # The user's own rows the placeholders resolved to, and those
             # a cached system render carries (#326). Each resolved
             # placeholder is in the payload: it was fetched because an
@@ -5987,13 +6004,14 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 posts (or text written from them) may repeat their words,
                 so it carries the mark (Node.unlicensed_input), is stored
                 at Chat at most, and every later licence decision reads
-                it as Chat; Train is never offered for it. Set on each
-                node as it is finalized, from the licence as it then is.
-                Other people's saved writing marks nothing (Peter,
-                2026-09-29)."""
+                it as Chat; Train is never offered for it. The same for a
+                payload that held another person's writing in a shared
+                thread (Circles, CIRCLE_INPUT). Set on each node as it is
+                finalized, from the licence as it then is. Other people's
+                saved writing marks nothing (Peter, 2026-09-29)."""
                 kind = licence.unlicensed_input
                 target.unlicensed_input = kind
-                if kind == X_API_INPUT:
+                if kind:
                     target.ai_usage = chat_at_most(target.ai_usage)
 
             def _finalize(target_node, resp):

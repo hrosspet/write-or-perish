@@ -5,15 +5,17 @@ This module provides functions to select the appropriate API keys based on
 privacy/ai_usage settings. Separated from tasks to avoid circular imports.
 """
 from backend.utils.privacy import (
-    AIUsage, X_API_INPUT, X_API_PROVENANCES,
-    effective_ai_usage, node_train_licence_clause, unlicensed_input,
+    AIUsage, CIRCLE_INPUT, INPUT_MARKS, X_API_INPUT, X_API_PROVENANCES,
+    effective_ai_usage, node_train_licence_clause, strongest_input,
+    unlicensed_input,
 )
 
 
 def chain_inputs(node_chain) -> set:
-    """{X_API_INPUT} when the chain's own nodes hold X API input (#689),
-    else empty. AI replies count here: one written from X API posts may
-    repeat their words."""
+    """The marks (INPUT_MARKS) the chain's own nodes carry: X API input
+    (#689), text written from another person's writing in a shared thread
+    (CIRCLE_INPUT). AI replies count here: one written from such input may
+    repeat its words."""
     return {kind for kind in (unlicensed_input(n) for n in node_chain)
             if kind}
 
@@ -166,8 +168,13 @@ class PayloadLicence:
     """
 
     def __init__(self, key_type: str, logger=None, label: str = "payload",
-                 track_rows: bool = False):
+                 track_rows: bool = False, requester_id=None):
         self._key_type = key_type
+        # The user the turn is for (Circles): another person's writing in
+        # a shared thread that a resolution pulls in marks what the turn
+        # writes (CIRCLE_INPUT); the requester's own does not. None: no
+        # such mark from resolutions (a collector of the user's own rows).
+        self.requester_id = requester_id
         self._logger = logger
         self._label = label
         # Why it dropped, when it did: a licence used as a collector (one
@@ -177,10 +184,11 @@ class PayloadLicence:
         # ({table: {ids}}): what a cached render's verdict rests on, to be
         # re-checked when the render is served again (#326).
         self.rows = {} if track_rows else None
-        # {X_API_INPUT} once the payload took in X API posts or text
-        # written from them (#689). Recorded whether or not the key had
-        # already dropped, since the reply and any artifact written in the
-        # turn are marked from it.
+        # The marks (INPUT_MARKS) of what the payload took in: X API posts
+        # or text written from them (#689), another person's writing in a
+        # shared thread or text written from it (CIRCLE_INPUT). Recorded
+        # whether or not the key had already dropped, since the reply and
+        # any artifact written in the turn are marked from it.
         self.inputs = set()
 
     def track_row(self, table: str, row_ids) -> None:
@@ -194,17 +202,17 @@ class PayloadLicence:
 
     @property
     def unlicensed_input(self):
-        """The mark for text written from this payload (#689): X_API_INPUT
-        or None."""
-        return X_API_INPUT if X_API_INPUT in self.inputs else None
+        """The mark for text written from this payload: X_API_INPUT
+        (#689), CIRCLE_INPUT, or None (privacy.strongest_input)."""
+        return strongest_input(self.inputs)
 
     def mark(self, *kinds) -> None:
-        """Record X API input (a cached render's, the chain's)."""
-        self.inputs.update(k for k in kinds if k == X_API_INPUT)
+        """Record marked input (a cached render's, the chain's)."""
+        self.inputs.update(k for k in kinds if k in INPUT_MARKS)
 
     def to_chat(self, reason: str, kind=None) -> None:
-        """Drop to the chat key for the rest of the turn; *kind* is
-        X_API_INPUT when X API input is behind it (#689)."""
+        """Drop to the chat key for the rest of the turn; *kind* is the
+        mark of the input behind it (INPUT_MARKS), if any."""
         self.mark(kind)
         if self._key_type == AIUsage.CHAT.value:
             return
@@ -252,6 +260,14 @@ class PayloadLicence:
             if others:
                 self.to_chat(f"{what} {min(others)} is another person's "
                              "writing in a shared thread")
+        # ... and what the turn writes from another person's writing there
+        # is marked (CIRCLE_INPUT): the requester's own is not.
+        if self.requester_id is not None:
+            from backend.utils.privacy import others_circle_writing_ids
+            others = others_circle_writing_ids(node_ids, self.requester_id)
+            if others:
+                self.to_chat(f"{what} {min(others)} is another person's "
+                             "writing in a shared thread", CIRCLE_INPUT)
         from sqlalchemy import not_
         from backend.models import Node
         rows = Node.query.with_entities(
@@ -264,6 +280,10 @@ class PayloadLicence:
             if provenance in X_API_PROVENANCES or mark == X_API_INPUT:
                 self.to_chat(f"{what} {node_id} holds X API input",
                              X_API_INPUT)
+            elif mark == CIRCLE_INPUT:
+                self.to_chat(f"{what} {node_id} was written from another "
+                             "person's writing in a shared thread",
+                             CIRCLE_INPUT)
             else:
                 self.to_chat(f"{what} {node_id} is {ai_usage!r}")
 
@@ -335,8 +355,9 @@ class ContextUsage:
         return None
 
     def inputs(self, text=None):
-        """{X_API_INPUT} when a placeholder that resolved (or one appearing
-        in *text*) rendered X API input (#689), else empty."""
+        """The marks (INPUT_MARKS) of what a placeholder that resolved (or
+        one appearing in *text*) rendered: X API input (#689), text
+        written from another person's writing in a shared thread."""
         kinds = set()
         for placeholder, lic in self._licences.items():
             if text is not None and placeholder not in text:

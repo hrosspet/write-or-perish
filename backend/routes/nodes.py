@@ -876,12 +876,13 @@ def create_node():
                     "error": "Replies under public posts are public.",
                     "code": "public_reply_required",
                 }), 400
-            # A shared thread has one audience, see the text path.
+            # A shared thread has one audience, and someone else's is
+            # never made public: the same check as the text path.
             from backend.utils import circles as cz
-            if (cz.circles_enabled(current_user)
-                    and cz.reply_requires_circles(
-                    parent, privacy_level, current_user.id)):
-                return cz.circle_reply_required_response()
+            refused = cz.new_reply_refusal(parent, privacy_level,
+                                           current_user)
+            if refused is not None:
+                return refused
 
         agentic, auto_reply_model, err, auto_off = _upload_reply_options(
             request.form, parent_id, ai_usage, privacy_level)
@@ -1011,11 +1012,13 @@ def create_node():
         # A shared thread has one audience (Circles): a reply under a
         # shared node is "circles" and is read by exactly the people the
         # entry is shared with. The app names them before sending.
+        # In someone else's shared thread, wherever the parent sits in it,
+        # never Everyone (new_node_thread_refusal; apply_requested_sharing
+        # below holds the saved node to the same rule).
         from backend.utils import circles as cz
-        if (cz.circles_enabled(current_user)
-                and cz.reply_requires_circles(
-                    parent, privacy_level, current_user.id)):
-            return cz.circle_reply_required_response()
+        refused = cz.new_reply_refusal(parent, privacy_level, current_user)
+        if refused is not None:
+            return refused
 
     # A public entry quotes only public nodes (Peter, 2026-11-12).
     if privacy_level == PrivacyLevel.PUBLIC:
@@ -1276,14 +1279,18 @@ def update_node(node_id):
         # form opened on an entry stored at Train before that rule sends
         # the stored value back with a text edit: the edit is saved and
         # the entry takes Chat, what the training licence reads anyway.
+        # The same for a reply written from another person's writing in a
+        # shared thread (Circles, CIRCLE_INPUT), with its own text.
         from backend.utils.privacy import (
-            TRAIN_REFUSED_CODE, TRAIN_REFUSED_MESSAGE, train_refused,
+            CIRCLE_TRAIN_REFUSED_CODE, TRAIN_REFUSED_CODE, never_train,
+            train_refused, train_refused_message,
         )
-        if ai_usage == "train" and train_refused(node):
+        if ai_usage == "train" and never_train(node):
             if node.ai_usage != "train":
                 return jsonify({
-                    "error": TRAIN_REFUSED_MESSAGE,
-                    "code": TRAIN_REFUSED_CODE,
+                    "error": train_refused_message(node),
+                    "code": (TRAIN_REFUSED_CODE if train_refused(node)
+                             else CIRCLE_TRAIN_REFUSED_CODE),
                 }), 400
             ai_usage = "chat"
         # A read's nodes quote other people's public tweets, which Loore
@@ -1459,10 +1466,20 @@ def update_node(node_id):
     }
     if kept_from_train:
         # Replies fetched through the X API stayed off Train (#689); the
-        # clients say so with this text.
-        from backend.utils.privacy import TRAIN_REFUSED_MESSAGE
-        body["kept_from_train"] = len(kept_from_train)
-        body["kept_from_train_message"] = TRAIN_REFUSED_MESSAGE
+        # clients say so with this text. Replies written from another
+        # person's writing in a shared thread (Circles) stayed too: their
+        # own count and text, which today's clients do not show.
+        from backend.utils.privacy import (
+            CIRCLE_TRAIN_REFUSED_MESSAGE, TRAIN_REFUSED_MESSAGE, train_refused)
+        x_kept = [n for n in kept_from_train if train_refused(n)]
+        circle_kept = len(kept_from_train) - len(x_kept)
+        if x_kept:
+            body["kept_from_train"] = len(x_kept)
+            body["kept_from_train_message"] = TRAIN_REFUSED_MESSAGE
+        if circle_kept:
+            body["kept_from_train_circle"] = circle_kept
+            body["kept_from_train_circle_message"] = (
+                CIRCLE_TRAIN_REFUSED_MESSAGE)
     return jsonify(body), 200
 
 @nodes_bp.route("/<int:node_id>/audience", methods=["GET"])
@@ -2068,10 +2085,12 @@ def get_node(node_id):
     # thread, where the walk looks through the read (reply_ai_usage; only
     # there, so other threads pay no chain queries).
     reply_usage = node.ai_usage or current_user.default_ai_usage
-    # An AI reply written from posts fetched from X is Chat by construction
-    # (#689): the walk looks through it too.
+    # An AI reply written from posts fetched from X (#689), or from another
+    # person's writing in a shared thread, is Chat by construction: the
+    # walk looks through it too.
+    from backend.utils.privacy import INPUT_MARKS
     x_capped_reply = (node.node_type == "llm"
-                      and node.unlicensed_input == "x_api")
+                      and node.unlicensed_input in INPUT_MARKS)
     if ((in_read_thread or x_capped_reply)
             and (node.human_owner_id or node.user_id) == current_user.id):
         from backend.utils.llm_nodes import reply_ai_usage
@@ -3250,10 +3269,10 @@ def init_chunked_upload():
 
     if parent_id:
         from backend.utils import circles as cz
-        if (cz.circles_enabled(current_user) and cz.reply_requires_circles(
-                Node.query.get(parent_id), privacy_level,
-                current_user.id)):
-            return cz.circle_reply_required_response()
+        refused = cz.new_reply_refusal(Node.query.get(parent_id),
+                                       privacy_level, current_user)
+        if refused is not None:
+            return refused
 
     agentic, auto_reply_model, err, auto_off = _upload_reply_options(
         data, parent_id, ai_usage, privacy_level)
@@ -3620,10 +3639,10 @@ def init_streaming_transcription():
 
     if parent_id:
         from backend.utils import circles as cz
-        if (cz.circles_enabled(current_user) and cz.reply_requires_circles(
-                Node.query.get(parent_id), privacy_level,
-                current_user.id)):
-            return cz.circle_reply_required_response()
+        refused = cz.new_reply_refusal(Node.query.get(parent_id),
+                                       privacy_level, current_user)
+        if refused is not None:
+            return refused
 
     # Generate session ID
     import uuid

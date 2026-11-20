@@ -1052,9 +1052,8 @@ def apply_requested_sharing(node, user, data, *, old_privacy=None,
     source = thread_source(node) if pointers_may_exist() else None
     if source is not None and source.is_someone_elses(user.id):
         if node.privacy_level == PrivacyLevel.PUBLIC.value:
-            raise AudienceError(
-                "Only the author of the entry can make this thread public.",
-                code="circle_thread_public", status=403)
+            raise AudienceError(THREAD_PUBLIC, code="circle_thread_public",
+                                status=403)
         if node.privacy_level != CIRCLES:
             leave_audience(node)
             return None
@@ -1161,6 +1160,71 @@ def circle_reply_required_response():
     from flask import jsonify
     return jsonify({"error": REPLY_AUDIENCE,
                     "code": "circle_reply_required"}), 400
+
+
+THREAD_PUBLIC = "Only the author of the entry can make this thread public."
+
+
+def new_node_thread_refusal(parent, privacy_level, user):
+    """The rule apply_requested_sharing holds a node written into someone
+    else's shared thread to, for a node *user* is about to create under
+    *parent* at *privacy_level*: an AudienceError, or None. Decided by the
+    thread (the parent's own pointer, else its ancestors': thread_source),
+    not by whether the parent itself is shared now, so a reply under the
+    writer's own Only-me node in that thread is held to it too.
+
+    * Everyone: refused (403 circle_thread_public). Only the entry's
+      author makes their thread public.
+    * Circles: refused where the thread's people would not read it: the
+      thread is closed to the writer (thread_write_refusal, 403), or the
+      parent is in the writer's own Only-me branch (400
+      circle_only_me_branch).
+    * Only me: allowed.
+
+    Whether or not Circles is on for the writer, as in
+    apply_requested_sharing."""
+    from backend.utils.privacy import pointers_may_exist
+    if parent is None or user is None or not pointers_may_exist():
+        return None
+    if (parent.audience_root_id is not None
+            and parent.audience_root_id == parent.id):
+        source = ThreadSource(parent.id, entry_owner_id(parent))
+    else:
+        source = thread_source(parent)
+    if source is None or not source.is_someone_elses(user.id):
+        return None
+    if privacy_level == PrivacyLevel.PUBLIC.value:
+        return AudienceError(THREAD_PUBLIC, code="circle_thread_public",
+                             status=403)
+    if privacy_level != CIRCLES:
+        return None
+    refused = thread_write_refusal(source, user)
+    if refused is not None:
+        return refused
+    in_thread = shared_entry_of(parent)
+    if in_thread is None or in_thread.id != source.entry_id:
+        return AudienceError(ONLY_ME_BRANCH, code="circle_only_me_branch")
+    return None
+
+
+def new_reply_refusal(parent, privacy_level, user):
+    """The one check every path that creates a node under *parent* runs
+    before it writes anything (typed, uploaded, chunked upload, live
+    transcription, a recording's session and its save): a response for
+    the route to return, or None.
+
+    * Under a node of a shared thread the user reads, the reply is
+      "circles" (400 circle_reply_required), as a reply under a public
+      node is public; only while Circles is on for the user.
+    * In someone else's shared thread, wherever the parent sits in it,
+      the thread rule (new_node_thread_refusal)."""
+    if parent is None or user is None:
+        return None
+    if circles_enabled(user) and reply_requires_circles(
+            parent, privacy_level, user.id):
+        return circle_reply_required_response()
+    refused = new_node_thread_refusal(parent, privacy_level, user)
+    return refused.response() if refused is not None else None
 
 
 # ── Notes and mutes ─────────────────────────────────────────────────────

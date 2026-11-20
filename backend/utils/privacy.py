@@ -909,6 +909,32 @@ TRAIN_REFUSED_CODE = "x_api_no_train"
 # (Peter, 2026-09-29), and the training key leaves out only the call that
 # carries the reference itself (PayloadLicence.note_external), as before.
 X_API_INPUT = "x_api"
+# The mark on text a model wrote from a turn whose input held another
+# person's writing in a circle-shared thread (Circles): a node of such a
+# thread, or a row already marked so, that is not the requester's own
+# (others_circle_writing). The same column and the same consequences as
+# X_API_INPUT: Chat at most, for good, also in later versions the user
+# edits; Train is refused with CIRCLE_TRAIN_REFUSED_MESSAGE. Nobody's
+# writing trains without their own choice, and in a shared thread the
+# turn's input holds the other person's words whichever side asks.
+CIRCLE_INPUT = "circle"
+INPUT_MARKS = (X_API_INPUT, CIRCLE_INPUT)
+CIRCLE_TRAIN_REFUSED_MESSAGE = (
+    "Written from a thread shared with other people: it can't be used "
+    "for training.")
+CIRCLE_TRAIN_REFUSED_CODE = "circle_no_train"
+
+
+def strongest_input(kinds):
+    """The one mark a row written from input of these *kinds* carries:
+    X_API_INPUT before CIRCLE_INPUT (the column holds one value, and both
+    keep the row off Train), else None."""
+    kinds = set(kinds or ())
+    if X_API_INPUT in kinds:
+        return X_API_INPUT
+    if CIRCLE_INPUT in kinds:
+        return CIRCLE_INPUT
+    return None
 # The documents Loore's models write from the person's writing: profile
 # versions and windows, recent context, the todo list, the artifacts
 # (intentions, memory, digest, ...). Of an account that has had an X API
@@ -955,23 +981,75 @@ def x_api_account(user_id) -> bool:
 
 
 def unlicensed_input(row):
-    """``X_API_INPUT`` when *row* holds X API input, else None: an entry
-    fetched through the X API (provenance), a model-written node, artifact
-    or todo version marked so, or any document derived from the writing of
-    an account that has had an X API pre-fill (``x_api_account``)."""
-    if getattr(row, "unlicensed_input", None) == X_API_INPUT:
+    """``X_API_INPUT`` when *row* holds X API input: an entry fetched
+    through the X API (provenance), a model-written node, artifact or todo
+    version marked so, or any document derived from the writing of an
+    account that has had an X API pre-fill (``x_api_account``).
+    ``CIRCLE_INPUT`` when it is marked as written from another person's
+    writing in a shared thread (Circles). Else None."""
+    mark = getattr(row, "unlicensed_input", None)
+    if mark == X_API_INPUT:
         return X_API_INPUT
     if getattr(row, "provenance", None) in X_API_PROVENANCES:
         return X_API_INPUT
     if (getattr(row, "__tablename__", None) in DERIVED_TABLES
             and x_api_account(getattr(row, "user_id", None))):
         return X_API_INPUT
+    if mark == CIRCLE_INPUT:
+        return CIRCLE_INPUT
     return None
 
 
 def train_refused(row) -> bool:
-    """Whether *row* may never be at Train: it holds X API input."""
+    """Whether *row* may never be at Train because it holds X API input
+    (the screens then offer no Train and say why, #689)."""
     return unlicensed_input(row) == X_API_INPUT
+
+
+def never_train(row) -> bool:
+    """Whether *row* may never be at Train: it holds X API input, or was
+    written from another person's writing in a shared thread."""
+    return unlicensed_input(row) is not None
+
+
+def train_refused_message(row) -> str:
+    """Why *row* (never_train) may not be at Train, in the user's words."""
+    return (CIRCLE_TRAIN_REFUSED_MESSAGE
+            if unlicensed_input(row) == CIRCLE_INPUT
+            else TRAIN_REFUSED_MESSAGE)
+
+
+def others_circle_writing(nodes, user_id) -> bool:
+    """Whether *nodes* (objects) hold another person's writing in a
+    circle-shared thread, for a turn of *user_id*: a "circles" node with a
+    thread pointer (the shared entry, a reply in its thread, an AI reply
+    someone asked for there) whose owner is not *user_id*. The user's own
+    nodes there do not count; a row already marked CIRCLE_INPUT is read
+    through unlicensed_input."""
+    if user_id is None:
+        return False
+    return any(
+        getattr(n, "privacy_level", None) == PrivacyLevel.CIRCLES.value
+        and getattr(n, "audience_root_id", None) is not None
+        and _node_owner_id(n) != user_id
+        for n in nodes)
+
+
+def others_circle_writing_ids(node_ids, user_id):
+    """Those of *node_ids* that are another person's writing in a
+    circle-shared thread for *user_id* (others_circle_writing), in one
+    query; none while no node carries a thread pointer."""
+    ids = {i for i in (node_ids or ()) if i is not None}
+    if not ids or user_id is None or not pointers_may_exist():
+        return set()
+    from backend.extensions import db
+    from backend.models import Node
+    owner = func.coalesce(Node.human_owner_id, Node.user_id)
+    return {nid for (nid,) in db.session.query(Node.id).filter(
+        Node.id.in_(sorted(ids)),
+        Node.privacy_level == PrivacyLevel.CIRCLES.value,
+        Node.audience_root_id.isnot(None),
+        owner != user_id)}
 
 
 def cap_ai_usage(ai_usage, provenance):
@@ -991,10 +1069,11 @@ def chat_at_most(ai_usage):
 def effective_ai_usage(row):
     """The AI usage the training licence reads, and the screens show, for
     *row*: its stored ai_usage, Chat at most when the row holds X API input
-    (``unlicensed_input``, #689), so nothing stored at Train before the
-    rule reaches the training key. Other rows read as stored."""
+    (``unlicensed_input``, #689) or was written from another person's
+    writing in a shared thread (CIRCLE_INPUT), so nothing stored at Train
+    reaches the training key. Other rows read as stored."""
     stored = getattr(row, 'ai_usage', AIUsage.NONE.value)
-    return chat_at_most(stored) if train_refused(row) else stored
+    return chat_at_most(stored) if never_train(row) else stored
 
 
 # What the editors show is what the licence reads.
@@ -1003,8 +1082,9 @@ shown_ai_usage = effective_ai_usage
 
 def node_train_licence_clause(node_model):
     """SQL for "this node is licensed for training": at Train, not
-    fetched through the X API and not written from such posts. The query
-    form of effective_ai_usage for nodes."""
+    fetched through the X API and not written from such posts or from
+    another person's writing in a shared thread (no unlicensed_input
+    mark). The query form of effective_ai_usage for nodes."""
     return and_(
         node_model.ai_usage == AIUsage.TRAIN.value,
         func.coalesce(node_model.provenance, "").notin_(X_API_PROVENANCES),

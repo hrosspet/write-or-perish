@@ -670,10 +670,15 @@ def init_streaming():
     # (Circles), as a typed reply is.
     if parent_id:
         from backend.utils import circles as cz
-        if cz.reply_requires_circles(
-                Node.query.get(int(parent_id)), privacy_level,
-                current_user.id):
+        parent = Node.query.get(int(parent_id))
+        if cz.reply_requires_circles(parent, privacy_level,
+                                     current_user.id):
             privacy_level = "circles"
+        # In someone else's shared thread, wherever the parent sits in it,
+        # never Everyone: refused before the session (and the mic) starts.
+        refused = cz.new_reply_refusal(parent, privacy_level, current_user)
+        if refused is not None:
+            return refused
     # Payments on (#438): no transcription without the paid set, dictation
     # included, so the mic never opens for a recording nobody would turn
     # into text. Typing works as before.
@@ -1606,19 +1611,18 @@ def save_streaming_as_node(session_id):
                 "error": "Replies under public posts are public.",
                 "code": "public_reply_required",
             }), 400
-    # A shared thread has one audience (Circles), as for a typed reply
-    # (routes/nodes.py): a recorded reply under a shared node is saved
-    # only as "circles", whichever level would be stored, the form's (any
-    # level, Everyone included) or the one the recording started with
-    # (the node may have been shared since). Nothing is saved otherwise;
-    # the session stays.
+    # The same check as a typed reply (circles.new_reply_refusal), for the
+    # level that would be stored, the form's (any level, Everyone
+    # included) or the one the recording started with (the node may have
+    # been shared since): under a shared node only "circles", and in
+    # someone else's shared thread, wherever the parent sits in it, never
+    # Everyone. Nothing is saved otherwise; the session stays.
     if draft.parent_id:
         from backend.utils import circles as cz
-        if (cz.circles_enabled(current_user)
-                and cz.reply_requires_circles(
-                    Node.query.get(draft.parent_id), privacy_level,
-                    current_user.id)):
-            return cz.circle_reply_required_response()
+        refused = cz.new_reply_refusal(Node.query.get(draft.parent_id),
+                                       privacy_level, current_user)
+        if refused is not None:
+            return refused
 
     # A public entry quotes only public nodes (Peter, 2026-11-12); the
     # session stays, so the text can be changed and saved again.

@@ -3055,26 +3055,74 @@ CIRCLE_REPLIES_INTRO = (
     "and replies are theirs and are not part of your data.")
 
 
+CircleReplyRow = namedtuple(
+    "CircleReplyRow", ["id", "created_at", "audience_root_id"])
+
+
 def circle_reply_rows(user_id):
-    """Circles: the user's own nodes in other people's shared threads
-    (typed replies and the AI replies they asked for), oldest first, as
-    rows of id, created_at, node_type, llm_model and audience_root_id.
-    Metadata only. Such a thread is rooted in someone else's entry, so
-    the thread export above never reaches these nodes; the download
-    lists them in a section of their own (_circle_reply_pieces)."""
+    """Circles: every node of the user's own in other people's shared
+    threads, wherever it sits there, oldest first, as rows of id,
+    created_at and audience_root_id (the entry of the thread). Metadata
+    only, and only the user's nodes: nobody else's.
+
+    * What the user wrote into such a thread (a typed reply, an AI reply
+      they asked for): it points at the thread's entry.
+    * What hangs below it without a pointer: the user's own Only-me
+      branch there (a reply taken back to Only me and what they wrote
+      under it).
+    * What the user wrote without a pointer directly under someone else's
+      node of the thread (a Text mode or Voice session started there) and
+      below it.
+
+    Such a thread is rooted in someone else's entry, so the thread export
+    above never reaches these nodes; the download lists them in a section
+    of their own (_circle_reply_pieces)."""
     from backend.utils.privacy import audience_entry_owner, pointers_may_exist
+    from backend.utils.thread_tree import subtree_walk
     if not pointers_may_exist():
         return []
-    rows = (
-        db.session.query(Node.id, Node.created_at, Node.node_type,
-                         Node.llm_model, Node.audience_root_id)
-        .filter(or_(Node.user_id == user_id, Node.human_owner_id == user_id),
-                Node.audience_root_id.isnot(None),
+    mine = or_(Node.user_id == user_id, Node.human_owner_id == user_id)
+    pointed = [
+        CircleReplyRow(r.id, r.created_at, r.audience_root_id)
+        for r in db.session.query(
+            Node.id, Node.created_at, Node.audience_root_id)
+        .filter(mine, Node.audience_root_id.isnot(None),
                 Node.audience_root_id != Node.id,
                 Node.deleted_at.is_(None))
-        .order_by(Node.created_at, Node.id).all())
-    return [r for r in rows
-            if audience_entry_owner(r.audience_root_id) != user_id]
+        if audience_entry_owner(r.audience_root_id) != user_id]
+    # The user's nodes without a pointer directly under someone else's
+    # node of a shared thread (the entry, or a node that points at one).
+    parent = db.aliased(Node)
+    parent_owner = func.coalesce(parent.human_owner_id, parent.user_id)
+    hung = [
+        CircleReplyRow(r.id, r.created_at, r.entry_id)
+        for r in db.session.query(
+            Node.id, Node.created_at,
+            parent.audience_root_id.label("entry_id"))
+        .join(parent, parent.id == Node.parent_id)
+        .filter(mine, Node.audience_root_id.is_(None),
+                parent.audience_root_id.isnot(None),
+                parent_owner != user_id,
+                Node.deleted_at.is_(None))
+        if audience_entry_owner(r.entry_id) != user_id]
+    found = {r.id: r for r in pointed + hung}
+    # Below each of them, the user's own nodes without a pointer.
+    entry_of = {r.id: r.audience_root_id for r in found.values()}
+    starts = sorted(entry_of)
+    for at in range(0, len(starts), 500):
+        walk = subtree_walk(starts[at:at + 500],
+                            name="circle_reply_branches")
+        for row in db.session.query(
+                walk.c.id, walk.c.root_id, walk.c.created_at).join(
+                Node, Node.id == walk.c.id).filter(
+                walk.c.depth > 0, walk.c.deleted_at.is_(None),
+                or_(walk.c.user_id == user_id,
+                    walk.c.human_owner_id == user_id),
+                Node.audience_root_id.is_(None)):
+            if row.id not in found:
+                found[row.id] = CircleReplyRow(
+                    row.id, row.created_at, entry_of[row.root_id])
+    return sorted(found.values(), key=lambda r: (r.created_at, r.id))
 
 
 def _circle_reply_pieces(user, rows):
@@ -3094,6 +3142,10 @@ def _circle_reply_pieces(user, rows):
         for row in batch:
             node = loaded.get(row.id)
             if node is None or not can_user_access_node(node, user.id):
+                continue
+            # A Text mode or Voice session's prompt node is the user's
+            # prompt, not something they wrote into the thread.
+            if _is_system_prompt_node(node):
                 continue
             where = "in a shared thread"
             if in_audience(row.audience_root_id, user.id):
