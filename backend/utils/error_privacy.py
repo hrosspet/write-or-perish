@@ -20,7 +20,8 @@ is what failed and where: the exception's type and its stack frames.
 - ``scrub_sentry_event`` and ``scrub_sentry_breadcrumb`` do the same for
   what reaches Sentry: exception messages are replaced, log messages lose
   the text of the exceptions they quote and any database values, and
-  email addresses are masked (#666).
+  email addresses are masked (#666). Artifact names in addresses are
+  replaced too (``mask_artifact_names``).
 """
 
 import logging
@@ -278,6 +279,29 @@ def mask_emails_in(value, depth=0):
     return value
 
 
+# --- Artifact names in addresses ------------------------------------------
+# The name of an artifact a user created is theirs (Peter, 2026-11-20),
+# and the artifact routes carry it in the path: /artifacts/<name> in the
+# app, /api/artifacts/<name>[/...] in the API. Flask logs a failed
+# request's path ("Exception on /api/artifacts/<name> [GET]") and Sentry
+# keeps the request's address and the page's (Referer), so the name is
+# replaced in each. Every name is replaced, the ones Loore defines too:
+# the route is what helps debugging. The version routes
+# (/api/artifacts/versions/<id>) carry an id and stay.
+ARTIFACT_NAME_REMOVED = ":kind"
+_ARTIFACT_NAME_IN_PATH = re.compile(
+    r"(/artifacts/)(?!versions/\d)[^/\s?#\"'<>()\[\]{},;]+")
+
+
+def mask_artifact_names(text):
+    """*text* with the artifact name in every artifact address replaced
+    by ARTIFACT_NAME_REMOVED. Anything that is not a string is returned
+    as it is."""
+    if not isinstance(text, str) or "/artifacts/" not in text:
+        return text
+    return _ARTIFACT_NAME_IN_PATH.sub(r"\1" + ARTIFACT_NAME_REMOVED, text)
+
+
 def _texts_of(exc):
     """The ways *exc*'s text can appear in a message, longest first."""
     texts = set()
@@ -298,8 +322,8 @@ def _texts_of(exc):
 
 def scrub_text(text, exceptions=()):
     """*text* with each of *exceptions*' text replaced by its type name,
-    then without database values (strip_database_values) and without
-    email addresses (mask_emails)."""
+    then without database values (strip_database_values), email
+    addresses (mask_emails) and artifact names (mask_artifact_names)."""
     if not isinstance(text, str) or not text:
         return text
     for exc in exceptions:
@@ -307,7 +331,7 @@ def scrub_text(text, exceptions=()):
         for exc_text in _texts_of(exc):
             if exc_text in text:
                 text = text.replace(exc_text, name)
-    return mask_emails(strip_database_values(text))
+    return mask_artifact_names(mask_emails(strip_database_values(text)))
 
 
 def _exceptions_for(hint):

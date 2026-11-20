@@ -4,15 +4,26 @@ pre-fill, embeddings, summaries and batch profiles, none of which say
 anything about whether the person came back.
 
 Also the throttled ``touch_last_seen`` used by the app's before_request.
+
+The names of the artifacts a user creates are theirs: nobody else sees
+them, admins included (Peter, 2026-11-20). The tab names only the kinds
+Loore defines (UserArtifact.SYSTEM_KINDS) and counts the views of the
+user's own artifacts together (``artifact_views``), and the last-seen
+path drops the name (``redact_artifact_path``).
 """
+import re
 from datetime import datetime, timedelta
 
 from sqlalchemy import func
 
 from backend.extensions import db
 from backend.models import (
-    APICostLog, ApiToken, ArtifactView, Node, User, UserProfile,
+    APICostLog, ApiToken, ArtifactView, Node, User, UserArtifact,
+    UserProfile,
 )
+
+# How the tab names the artifacts a user created, all of them together.
+USER_CREATED_LABEL = "user-created"
 
 TOUCH_INTERVAL = timedelta(minutes=5)
 # Paths the frontend polls or hits on every page — they don't say where
@@ -27,6 +38,35 @@ UNINFORMATIVE_PREFIXES = ("/api/dashboard", "/api/notifications", "/api/ready",
 USER_REQUEST_TYPES = ("conversation", "transcription", "tts", "embedding_query")
 IMPORT_ORIGINS = ("twitter", "chatgpt", "claude", "markdown", "docx", "pdf")
 
+# /api/artifacts/<name>[/...]: the routes that carry an artifact's name.
+_ARTIFACT_PATH = re.compile(r"^/api/artifacts/([^/]+)(/.*)?$")
+# What the artifact routes put after the name; anything else is dropped.
+_ARTIFACT_PATH_TAIL = re.compile(r"(?:/viewed|/versions|/revert/\d+)?/?")
+# /api/artifacts/versions/<id>[/changes]: a version's id, no name.
+_VERSION_PATH_TAIL = re.compile(r"/\d+(?:/changes)?/?")
+
+
+def redact_artifact_path(path):
+    """*path* without the name of an artifact the user created:
+    /api/artifacts/<name>/versions becomes
+    /api/artifacts/user-created/versions. A name Loore defines stays,
+    and so do the routes of a version by id. Other paths come back as
+    they are. Fails closed: a name not on UserArtifact.SYSTEM_KINDS is
+    replaced, and an unknown tail after the name is dropped."""
+    if not path:
+        return path
+    m = _ARTIFACT_PATH.match(path)
+    if not m:
+        return path
+    name, tail = m.group(1), m.group(2) or ""
+    if name == "versions" and _VERSION_PATH_TAIL.fullmatch(tail):
+        return path
+    if name not in UserArtifact.SYSTEM_KINDS:
+        name = USER_CREATED_LABEL
+    if not _ARTIFACT_PATH_TAIL.fullmatch(tail):
+        tail = ""
+    return f"/api/artifacts/{name}{tail}"
+
 
 def touch_last_seen(user, path, now=None):
     """Record an authenticated request. Writes when the user moved to a new
@@ -35,7 +75,7 @@ def touch_last_seen(user, path, now=None):
     once per TOUCH_INTERVAL. Returns True when it wrote. Never raises."""
     now = now or datetime.utcnow()
     informative = bool(path) and not path.startswith(UNINFORMATIVE_PREFIXES)
-    area = path[:128] if informative else None
+    area = redact_artifact_path(path)[:128] if informative else None
     moved = informative and area != user.last_seen_path
     if not moved and user.last_seen_at and now - user.last_seen_at < TOUCH_INTERVAL:
         return False
@@ -148,6 +188,52 @@ def _day_counts(query_col, filters, since):
     return out
 
 
+def artifact_views(user_id, since):
+    """The user's artifact views since *since*, most recent first.
+
+    One entry per kind Loore defines: {"kind", "count", "last"}. One
+    entry for all the artifacts the user created together:
+    {"kind": USER_CREATED_LABEL, "user_created": True, "count": views,
+    "artifacts": how many different artifacts, "last"}. Their names
+    never leave this function: a row from before 2026-11-20 holds one,
+    and is matched to its artifact here only so that the artifact is
+    counted once with its newer rows."""
+    rows = (db.session.query(ArtifactView.kind, ArtifactView.artifact_id,
+                             func.count(), func.max(ArtifactView.viewed_at))
+            .filter(ArtifactView.user_id == user_id,
+                    ArtifactView.viewed_at >= since)
+            .group_by(ArtifactView.kind, ArtifactView.artifact_id).all())
+    entries = []
+    views, last_view, artifacts, named = 0, None, set(), []
+    for kind, artifact_id, n, last in rows:
+        if artifact_id is None and kind in UserArtifact.SYSTEM_KINDS:
+            entries.append({"kind": kind, "count": n,
+                            "last": last.isoformat() if last else None})
+            continue
+        views += n
+        if last is not None and (last_view is None or last > last_view):
+            last_view = last
+        if artifact_id is not None:
+            artifacts.add(artifact_id)
+        else:
+            named.append(kind)
+    if named:
+        first_ids = dict(
+            db.session.query(UserArtifact.kind, func.min(UserArtifact.id))
+            .filter(UserArtifact.user_id == user_id,
+                    UserArtifact.deleted_at.is_(None),
+                    UserArtifact.kind.in_(named))
+            .group_by(UserArtifact.kind).all())
+        # A name with no live artifact left counts as one artifact.
+        artifacts.update(first_ids.get(k, ("gone", k)) for k in named)
+    if views:
+        entries.append({
+            "kind": USER_CREATED_LABEL, "user_created": True,
+            "count": views, "artifacts": len(artifacts),
+            "last": last_view.isoformat() if last_view else None})
+    return sorted(entries, key=lambda v: v["last"] or "", reverse=True)
+
+
 def activity_report(days=14, now=None):
     """One row per approved, non-spam, non-placeholder user, sorted by
     last seen (never-seen last). Everything is counted since activation."""
@@ -184,13 +270,6 @@ def activity_report(days=14, now=None):
             APICostLog.created_at >= since).scalar() or 0
         imports = Node.query.filter(*own, Node.origin.in_(IMPORT_ORIGINS),
                                     Node.created_at >= since).count()
-        views = (db.session.query(ArtifactView.kind, func.count(), func.max(ArtifactView.viewed_at))
-                 .filter(ArtifactView.user_id == u.id, ArtifactView.viewed_at >= since)
-                 .group_by(ArtifactView.kind).all())
-        artifact_views = sorted(
-            ({"kind": k, "count": n, "last": last.isoformat() if last else None}
-             for k, n, last in views),
-            key=lambda v: v["last"] or "", reverse=True)
         profiles_since = UserProfile.query.filter(
             UserProfile.user_id == u.id, UserProfile.created_at >= since).count()
         latest_profile = (UserProfile.query.filter_by(user_id=u.id)
@@ -202,7 +281,8 @@ def activity_report(days=14, now=None):
             "activated_at": since.isoformat() if since else None,
             "accepted_terms_at": u.accepted_terms_at.isoformat() if u.accepted_terms_at else None,
             "last_seen_at": u.last_seen_at.isoformat() if u.last_seen_at else None,
-            "last_seen_path": u.last_seen_path,
+            # Paths stored before 2026-11-20 can hold an artifact's name.
+            "last_seen_path": redact_artifact_path(u.last_seen_path),
             "strip": strip,
             "active_days": len(active_days),
             "days_since_activation": max((today - act_day).days, 0),
@@ -211,7 +291,7 @@ def activity_report(days=14, now=None):
             "voice_nodes": sum(voice_by_day.values()),
             "voice_minutes": round(voice_sec / 60, 1),
             "imports": imports,
-            "artifact_views": artifact_views,
+            "artifact_views": artifact_views(u.id, since),
             "profile_versions_since_activation": profiles_since,
             "latest_profile_at": latest_profile.created_at.isoformat() if latest_profile else None,
             "user_spend_usd": user_spend / 1_000_000,
