@@ -1,13 +1,48 @@
 from datetime import datetime
 from flask_login import UserMixin
 import logging
-from sqlalchemy import event, or_
+from sqlalchemy import and_, event, or_
 from backend.extensions import db
 from backend.utils.encryption import (
     encrypt_content, decrypt_content, encrypt_with_dek, is_encrypted,
     is_encryption_enabled)
 
 logger = logging.getLogger(__name__)
+
+
+def _default_plan():
+    """A new account's plan: "alpha" as always, or "free" while payments
+    are on (PAYMENTS_ENABLED, #438), where a subscription gives what
+    alpha gave. Read when the row is inserted; no app context (a bare
+    script) keeps "alpha"."""
+    try:
+        from flask import current_app, has_app_context
+        if has_app_context() and current_app.config.get("PAYMENTS_ENABLED"):
+            return "free"
+    except Exception:  # noqa: BLE001 - never fail an insert over this
+        pass
+    return "alpha"
+
+
+# Subscription levels (#438), their order in the Subscribe view. The
+# discounted level is opened by a code and is never offered.
+SUBSCRIPTION_LEVELS = ("standard", "supporter", "discounted")
+# Subscription states a Stripe status maps to (utils/stripe_billing). The
+# first three are live at Stripe (it renews or retries); only trialing and
+# active give the paid feature set (Peter, 2026-11-12: a failed payment
+# gives "zero days").
+SUBSCRIPTION_STATUSES = ("none", "trialing", "active", "past_due", "ended")
+SUBSCRIPTION_GRANTING_STATUSES = ("trialing", "active", "past_due")
+# Where an account whose plan was not set by hand stands while payments
+# are on (User.subscription_access_state; Peter, 2026-11-12):
+#   "active": a trialing or active subscription: everything.
+#   "lapsed": it had a subscription that ended, was cancelled, or failed a
+#             payment after paying at least once: reading, writing, export,
+#             Settings; no AI, no background jobs.
+#   "none":   never had one (or its first payment failed): not let in; only
+#             the subscribe page, signing out, the terms, deletion.
+ACCESS_STATES = ("active", "lapsed", "none")
+
 
 class User(db.Model, UserMixin):
     id = db.Column(db.Integer, primary_key=True)
@@ -105,8 +140,92 @@ class User(db.Model, UserMixin):
         db.String(64), nullable=True, default="UTC", server_default="UTC"
     )
 
-    # Subscription plan ("free", "alpha", "pro", etc.).
-    plan = db.Column(db.String(16), nullable=False, default="alpha")
+    # Subscription plan ("free", "alpha", "pro", etc.). Set by hand (the
+    # admin's plan editor) or by the default above; never by a Stripe
+    # event (#438): a subscription gives a "free" account the paid
+    # feature set through the columns below (on_paid_plan).
+    plan = db.Column(db.String(16), nullable=False, default=_default_plan)
+
+    # --- Stripe subscription (#438) ---
+    # Written only from Stripe (utils/stripe_billing.apply_subscription,
+    # which re-reads the subscription from Stripe for every event), never
+    # by hand. The Customer holds the buyer's details at Stripe; Loore
+    # keeps the ids and the state, no payment details.
+    stripe_customer_id = db.Column(db.String(255), nullable=True,
+                                   unique=True)
+    stripe_subscription_id = db.Column(db.String(255), nullable=True,
+                                       index=True)
+    # SUBSCRIPTION_LEVELS, from the subscription's price; NULL: none.
+    subscription_level = db.Column(db.String(16), nullable=True)
+    # SUBSCRIPTION_STATUSES.
+    subscription_status = db.Column(
+        db.String(16), nullable=False, default="none",
+        server_default="none")
+    # When the paid period (or the trial) ends, UTC: the next payment, or
+    # the end of a subscription cancelled at period end.
+    subscription_period_end = db.Column(db.DateTime, nullable=True)
+    subscription_trial_end = db.Column(db.DateTime, nullable=True)
+    subscription_cancel_at_period_end = db.Column(
+        db.Boolean, nullable=False, default=False,
+        server_default=db.text("false"))
+    # Set for good once a subscription of this account had a trial: the
+    # next checkout has none.
+    subscription_trial_used = db.Column(
+        db.Boolean, nullable=False, default=False,
+        server_default=db.text("false"))
+    # The subscription that used the trial: another subscription that
+    # still arrives with a trial is cancelled (stripe_billing).
+    subscription_trial_sub_id = db.Column(db.String(255), nullable=True)
+    subscription_trial_start = db.Column(db.DateTime, nullable=True)
+    # The trial's own usage ceiling was reached (SUBSCRIPTION_TRIAL_SPEND_
+    # LIMIT_USD over the whole trial): capped until the first payment,
+    # also across a month boundary and past the trial's end
+    # (utils/spend.user_is_capped).
+    subscription_trial_capped = db.Column(
+        db.Boolean, nullable=False, default=False,
+        server_default=db.text("false"))
+    # The account paid at least once: an invoice of its subscription was
+    # paid with an amount above zero (not "active", which Stripe sets at
+    # a trial's end before charging). Set for good: after a failed
+    # payment or an end it decides "lapsed" over "none".
+    subscription_ever_paid = db.Column(
+        db.Boolean, nullable=False, default=False,
+        server_default=db.text("false"))
+    # Its owner cancelled one of the account's subscriptions (a trial
+    # included). Set for good, so a later attempt to subscribe again that
+    # never went through does not undo "lapsed".
+    subscription_cancelled_by_owner = db.Column(
+        db.Boolean, nullable=False, default=False,
+        server_default=db.text("false"))
+    # Why the current subscription ended (Stripe's
+    # cancellation_details.reason: "cancellation_requested",
+    # "payment_failed", "payment_disputed"); NULL while it runs.
+    subscription_end_reason = db.Column(db.String(32), nullable=True)
+    # Why the current subscription gives nothing although Stripe has it
+    # live: "dispute" (a payment was disputed) or "refund" (its latest
+    # payment was refunded in full). NULL: nothing withdrawn.
+    subscription_revoked = db.Column(db.String(16), nullable=True)
+    # When a trial of this account was cancelled because its card had
+    # already started a trial on another account (#697, TrialCard). The
+    # subscribe page then says so; a subscription without a trial is
+    # possible. NULL: never.
+    subscription_trial_card_refused_at = db.Column(db.DateTime,
+                                                   nullable=True)
+
+    # --- The alpha free month (#438; Peter, 2026-11-12: alpha testers are
+    # "free for one month after the opening, then the discounted price") ---
+    # When `flask alpha-free-month --apply` moved this account from the
+    # hand-set "alpha" plan to "free" and gave it a free month. It marks an
+    # alpha tester for good: the discounted price is theirs without a code,
+    # and an ended free month leaves the account lapsed, never shut out.
+    alpha_free_granted_at = db.Column(db.DateTime, nullable=True)
+    # The free month, UTC: one start for every tester, the Beta release
+    # date the owner gives the command (Peter, 2026-11-13: "at the beta
+    # release date"), and its end ALPHA_FREE_MONTH_DAYS later, whether or
+    # not the tester visits. Before the start the tester keeps the alpha
+    # plan's access.
+    alpha_free_start = db.Column(db.DateTime, nullable=True)
+    alpha_free_until = db.Column(db.DateTime, nullable=True)
 
     # Per-user monthly spend hard cap (issue: free-alpha guardrail). Stores the
     # "YYYY-MM" (UTC) in which the user crossed PER_USER_MONTHLY_LIMIT_USD. While
@@ -208,6 +327,14 @@ class User(db.Model, UserMixin):
     # A yes clears it in the same UPDATE that checks it, so one question
     # starts at most one rebuild; a newer question replaces it.
     profile_rebuild_offer_id = db.Column(db.String(32), nullable=True)
+    # The date of the oldest entry an import changed while the user's
+    # profile window work was in the Batch queue or being rendered (#639).
+    # A set in flight cannot take the import's re-tip (#625), so it waits
+    # here and is applied once nothing of the user's is in flight
+    # (tasks/exports.apply_waiting_import_date): the next advance, the
+    # seeder's gate, or the synchronous check. Several imports keep the
+    # oldest date. Only applying it clears it; a collected window never does.
+    profile_import_retip_from = db.Column(db.DateTime, nullable=True)
     # The user agreed that their writing may reach both providers' models
     # for a large profile build (Peter, 2026-11-05). Set only by the user's
     # own answer to the question of #599 (the dialog, or Account), through
@@ -240,12 +367,29 @@ class User(db.Model, UserMixin):
     # Community Archive handle this account was pre-filled from (admin
     # cold-start bootstrap); null for organically-grown accounts.
     prefilled_handle = db.Column(db.String(64), nullable=True)
+    # When the account was last made ready ahead of its owner, on this
+    # server's clock (UTC): the admin's Community Archive and X API
+    # pre-fills and scripts/load_user.py set it to now, every time, never
+    # to a time carried in a bundle. The 90 days after which an account
+    # nobody claimed is deleted count from it (#685), so preparing an
+    # account again opens it again. NULL on accounts pre-filled before
+    # the column existed (backend/utils/unclaimed_accounts.py falls back
+    # to the creation and the first pre-filled entry).
+    prefilled_at = db.Column(db.DateTime, nullable=True)
     # Opt-in answer to "seed your Loore from your public tweets?" asked on
     # /alpha-thank-you (and once more on /welcome). "yes" | "no" | NULL.
     # NULL = never answered / dismissed: the question is deliberately
     # escapable, so "we don't know" is a real state distinct from "no".
     prefill_consent = db.Column(db.String(8), nullable=True)
     prefill_consent_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    # An admin's "Keep" on a pre-filled account nobody has claimed (#685,
+    # backend/utils/unclaimed_accounts.py): it is not deleted before this
+    # time (UTC), e.g. when someone was promised more time. KEEP_FOREVER
+    # there keeps it for good. NULL: the period from the day the account
+    # was opened applies. Set by the admin's Keep (which may also clear
+    # it) and by Activate & Welcome (the welcome link's 30 days; it never
+    # moves an existing Keep earlier).
+    unclaimed_keep_until = db.Column(db.DateTime, nullable=True)
     # Admin-flagged spam signup. Hidden from the admin Users table by
     # default (eye toggle); nothing else changes — the account keeps
     # whatever approved/plan state it had.
@@ -255,6 +399,16 @@ class User(db.Model, UserMixin):
     # for the admin Activity tab. Null for accounts approved before the
     # column existed: fall back to accepted_terms_at, then created_at.
     approved_at = db.Column(db.DateTime, nullable=True)
+    # When the approval gate let this account in by itself, while payments
+    # were on (#697, utils/approval.let_in). Not set by the admin's own
+    # approval or by a whitelist or pre-fill, and cleared when the admin
+    # approves the account by hand. With payments off again, such an
+    # account without the paid set waits for approval like a new one.
+    let_in_at = db.Column(db.DateTime, nullable=True)
+    # Whether the account was approved when the admin blocked it (#697,
+    # utils/approval.block), so Unblock restores exactly that. NULL: not
+    # blocked by Block (an account deactivated before payments, or none).
+    approved_before_block = db.Column(db.Boolean, nullable=True)
     # Last authenticated API request (throttled to one write per
     # ACTIVITY_TOUCH_INTERVAL) and its path, so "checked the profile and
     # left" is distinguishable from "never came". Not engagement — a view
@@ -269,11 +423,80 @@ class User(db.Model, UserMixin):
     VOICE_MODE_PLANS = {"alpha", "pro"}
 
     @property
+    def plan_set_by_hand(self):
+        """A plan that gives the paid feature set by itself (alpha, pro):
+        a subscription neither adds to it nor takes from it (#438). An alpha
+        tester whose free month is still to come keeps the alpha plan's
+        access until it starts."""
+        return ((self.plan or "free") in self.VOICE_MODE_PLANS
+                or self.alpha_free_month_upcoming)
+
+    @property
+    def subscription_grants_access(self):
+        """A trialing or active subscription at a known level, never one
+        withdrawn for a dispute or a full refund. A failed payment
+        (past_due) gives nothing from the moment it is seen."""
+        return (self.subscription_level in SUBSCRIPTION_LEVELS
+                and not self.subscription_revoked
+                and self.subscription_status in ("trialing", "active"))
+
+    @property
+    def is_alpha_tester(self):
+        """Given the alpha free month (alpha_free_granted_at)."""
+        return self.alpha_free_granted_at is not None
+
+    @property
+    def alpha_free_month_upcoming(self):
+        """An alpha tester before the free month's start: nothing has
+        changed for them yet (plan_set_by_hand)."""
+        if self.alpha_free_granted_at is None or self.alpha_free_start is None:
+            return False
+        return datetime.utcnow() < self.alpha_free_start
+
+    @property
+    def alpha_free_month_active(self):
+        """An alpha tester inside the free month (from its start to its
+        end): it gives the paid feature set like a subscription."""
+        if (self.alpha_free_granted_at is None
+                or self.alpha_free_start is None
+                or self.alpha_free_until is None):
+            return False
+        return self.alpha_free_start <= datetime.utcnow() < \
+            self.alpha_free_until
+
+    @property
+    def subscription_access_state(self):
+        """ACCESS_STATES for an account whose plan was not set by hand."""
+        if self.subscription_grants_access or self.alpha_free_month_active:
+            return "active"
+        if self.subscription_ever_paid:
+            return "lapsed"
+        # A subscription (a trial included) its owner cancelled: they had
+        # one, and keep what they wrote. A first payment that failed:
+        # never let in.
+        if self.subscription_cancelled_by_owner:
+            return "lapsed"
+        # An alpha tester whose free month ended keeps reading, writing and
+        # export: they used Loore before payments existed.
+        if self.is_alpha_tester:
+            return "lapsed"
+        return "none"
+
+    @property
+    def on_paid_plan(self):
+        """The paid feature set (Voice mode, profile and recent-context
+        updates): a plan set by hand, a subscription that grants it, or an
+        alpha tester's free month. Without either this is the plan check it
+        replaces."""
+        return (self.plan_set_by_hand or self.subscription_grants_access
+                or self.alpha_free_month_active)
+
+    @property
     def has_voice_mode(self):
         """Whether this user can access Voice-Mode features."""
         if self.is_admin:
             return True
-        return (self.plan or "free") in self.VOICE_MODE_PLANS
+        return self.on_paid_plan
 
     # Plans that may run {user_export} with no token budget (the full
     # archive on every reply). Others must cap it — see
@@ -286,6 +509,32 @@ class User(db.Model, UserMixin):
         if self.is_admin:
             return True
         return (self.plan or "free") in self.UNRESTRICTED_EXPORT_PLANS
+
+    @classmethod
+    def subscription_grants_access_clause(cls):
+        """subscription_grants_access in SQL."""
+        return and_(
+            cls.subscription_level.in_(list(SUBSCRIPTION_LEVELS)),
+            cls.subscription_revoked.is_(None),
+            cls.subscription_status.in_(["trialing", "active"]))
+
+    @classmethod
+    def alpha_free_month_clause(cls):
+        """In SQL: an alpha tester whose free month has not ended, the
+        month itself or the alpha access before it (both give the paid
+        feature set)."""
+        return and_(cls.alpha_free_granted_at.isnot(None),
+                    cls.alpha_free_until > datetime.utcnow())
+
+    @classmethod
+    def paid_features_clause(cls):
+        """In SQL: the account may start model calls (an admin, a plan set
+        by hand, a subscription that gives access, or an alpha tester's
+        free month)."""
+        return or_(cls.is_admin.is_(True),
+                   cls.plan.in_(list(cls.VOICE_MODE_PLANS)),
+                   cls.subscription_grants_access_clause(),
+                   cls.alpha_free_month_clause())
 
     def get_id(self):
         return str(self.id)
@@ -342,7 +591,12 @@ class User(db.Model, UserMixin):
         purging = account_on_hold_user_ids()
         return cls.query.filter(
             cls.approved.is_(True),
-            cls.plan.in_(list(cls.VOICE_MODE_PLANS)),
+            # on_paid_plan in SQL: a plan set by hand, a subscription that
+            # grants the paid feature set (#438), or an alpha tester's free
+            # month.
+            or_(cls.plan.in_(list(cls.VOICE_MODE_PLANS)),
+                cls.subscription_grants_access_clause(),
+                cls.alpha_free_month_clause()),
             cls.default_ai_usage.in_(list(AI_ALLOWED)),
             ~cls.id.in_(llm_authors),
             ~cls.id.in_(purging),
@@ -389,6 +643,32 @@ class UsernameHistory(db.Model):
 
     user = db.relationship("User", backref=db.backref(
         "former_usernames", cascade="all, delete-orphan"))
+
+
+class SignInLink(db.Model):
+    """A sign-in link that was emailed: the sign-in email's link, or the
+    welcome email's (backend/utils/sign_in_links.py).
+
+    One row per link, so a new link for an address leaves the ones
+    already sent working: each stays valid until it expires. Only hashes
+    are kept: the token's (sha256, like the other emailed links) and the
+    address's, keyed with the app's secret, so an address's links can be
+    found without holding the address. The address the link signs in to
+    travels in the signed token itself.
+    """
+    __tablename__ = "sign_in_link"
+
+    id = db.Column(db.Integer, primary_key=True)
+    token_hash = db.Column(db.String(64), nullable=False, unique=True)
+    address_hash = db.Column(db.String(64), nullable=False, index=True)
+    # The account the link was sent for (the one holding the address
+    # then); null when the address had none, until the link's first open
+    # makes it. Not a foreign key: the address's links are withdrawn when
+    # the account is deleted, and an id nobody holds matches no account.
+    user_id = db.Column(db.Integer, nullable=True)
+    created_at = db.Column(db.DateTime, nullable=False,
+                           default=datetime.utcnow)
+    expires_at = db.Column(db.DateTime, nullable=False, index=True)
 
 
 class ProfileBatchJob(db.Model):
@@ -605,6 +885,22 @@ class Node(db.Model):
     # NULL = written in Loore, or imported before this column existed.
     # Never part of dedup: source_key alone decides a re-import match.
     provenance = db.Column(db.String(16), nullable=True)
+    # One imported item saved as several entries (the chapters of a Word
+    # or PDF document, the parts of a file or message above the per-entry
+    # cap): every entry of it holds the same random token (uuid4 hex),
+    # while source_key sits on its last entry only. A re-import finds the
+    # item's other entries by it (#638). NULL for an item saved as one
+    # entry, for anything written in Loore, and for items imported
+    # before this column existed. Says nothing about the content.
+    split_item = db.Column(db.String(32), nullable=True, index=True)
+    # On a model-written node: "x_api" when the call that wrote it carried
+    # posts Loore fetched through the X API (or text a model wrote from
+    # them), so the text may repeat them (#689). The node is Chat at most,
+    # Train is never offered for it, and the training licence reads it as
+    # Chat. NULL = nothing of the kind (every node written before #689,
+    # and replies written from other people's saved writing, which may be
+    # Train: Peter, 2026-09-29). utils/privacy.unlicensed_input reads it.
+    unlicensed_input = db.Column(db.String(16), nullable=True)
 
     # DB-level backstop against concurrent imports racing past the
     # application dedup check. NULL source_key rows are exempt (both
@@ -1072,6 +1368,9 @@ class UserTodo(db.Model):
     privacy_level = db.Column(db.String(16), nullable=False, default="private")
     # Todo is used as AI context in Voice sessions — must be AI-readable
     ai_usage = db.Column(db.String(16), nullable=False, default="chat")
+    # As Node.unlicensed_input (#689): a merge written from a reply or a
+    # list that carried such content, and every later version.
+    unlicensed_input = db.Column(db.String(16), nullable=True)
 
     user = db.relationship("User", backref="todos")
 
@@ -1127,6 +1426,9 @@ class UserArtifact(db.Model):
     privacy_level = db.Column(db.String(16), nullable=False, default="private")
     # Artifacts are LLM working memory — must be AI-readable to function.
     ai_usage = db.Column(db.String(16), nullable=False, default="chat")
+    # As Node.unlicensed_input (#689): a version the model wrote in a turn
+    # that carried such content, and every later version of the kind.
+    unlicensed_input = db.Column(db.String(16), nullable=True)
     # Soft delete (#603), as for nodes: the user's delete stamps every
     # version of the kind at once, and from then on no reader sees them
     # (read through live() / get_live() / latest_for()). The daily
@@ -1380,6 +1682,16 @@ class NodeTranscriptChunk(db.Model):
 
 class APICostLog(db.Model):
     __tablename__ = "api_cost_log"
+    # Whether an account has ever had an X API pre-fill is asked on every
+    # reply and pre-warm (utils/privacy.x_api_account, #689). Almost no
+    # account has such a row, and without this partial index the lookup
+    # would read all of the user's cost rows to find none; with it, it is
+    # one probe of a tiny index (one entry per X API pre-fill).
+    __table_args__ = (
+        db.Index("ix_api_cost_log_x_prefill_user", "user_id",
+                 postgresql_where=db.text("request_type = 'x_prefill'"),
+                 sqlite_where=db.text("request_type = 'x_prefill'")),
+    )
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False, index=True)
     model_id = db.Column(db.String(64), nullable=False)
@@ -1630,6 +1942,11 @@ class ExternalAccount(db.Model):
     # to the end, when no sync has finished yet). Committed together
     # with the first stored page, so a killed worker leaves it set too.
     sync_incomplete = db.Column(db.Boolean, nullable=True)
+    # When the nightly sync first skipped this account because its owner
+    # had not used Loore for UNUSED_ACCOUNT_PAUSE_DAYS (#647); NULL while
+    # the nightly sync runs. Once the owner is back, the hourly gate sends
+    # one catch-up sync at once, whatever their local hour, and clears it.
+    sync_paused_at = db.Column(db.DateTime, nullable=True)
 
     user = db.relationship("User", backref="external_accounts")
 
@@ -2195,6 +2512,46 @@ class RecentContextBatchJob(db.Model):
     collected_at = db.Column(db.DateTime, nullable=True, index=True)
 
 
+class AnthropicBatchDeletion(db.Model):
+    """An Anthropic Message Batch Loore created, kept until the batch is
+    deleted at Anthropic once Loore no longer needs it (#693; the OpenAI
+    twin, #667, deletes a batch's files).
+
+    The row is written in the same commit as the record that owns the
+    batch (the batch job row, or the Glean reply's "_batch" entry), so a
+    crash between saving the results and deleting the batch leaves a row
+    the hourly sweep finds (utils/anthropic_batch_deletion.py). Batch ids,
+    ids and times only: nothing of a request or a result."""
+    __tablename__ = "anthropic_batch_deletion"
+
+    id = db.Column(db.Integer, primary_key=True)
+    batch_id = db.Column(db.String(255), nullable=False, unique=True)
+    # What owns the batch: a batch job table's name
+    # ("profile_batch_job", ...), "read" (a Glean reply's one-item batch,
+    # on node_id), or the code that queued an unowned batch for deletion
+    # ("backfill_intentions", "purge").
+    source = db.Column(db.String(32), nullable=False)
+    # The reply node of a "read" batch. No foreign key: the node can be
+    # deleted before its batch is.
+    node_id = db.Column(db.Integer, nullable=True)
+    # The key the batch was created under ("chat" | "train"): a batch
+    # lives in its key's workspace.
+    key_type = db.Column(db.String(16), nullable=False, default="chat")
+    created_at = db.Column(
+        db.DateTime, nullable=False, default=datetime.utcnow)
+    # When the sweep last looked at the row: it takes the rows it looked
+    # at longest ago first.
+    checked_at = db.Column(db.DateTime, nullable=True)
+    # When Loore asked Anthropic to cancel the batch (it was still
+    # running when Loore no longer needed it).
+    cancel_requested_at = db.Column(db.DateTime, nullable=True)
+    # Failed delete calls, and the last one's error type.
+    attempts = db.Column(db.Integer, nullable=False, default=0)
+    last_error = db.Column(db.String(64), nullable=True)
+    # When Anthropic confirmed the deletion (or answered 404).
+    deleted_at = db.Column(db.DateTime, nullable=True, index=True)
+
+
 class UserDataPurge(db.Model):
     """One request to delete all of a user's data (#268), and the record
     of what the purge did.
@@ -2232,7 +2589,9 @@ class UserDataPurge(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, nullable=False, index=True)
-    # "self" (the user's own request) | "admin"
+    # "self" (the user's own request) | "admin" | "unclaimed" (a
+    # pre-filled account nobody claimed within the period, #685: due at
+    # once, no email, the handle not held back)
     source = db.Column(db.String(16), nullable=False)
     # What the purge deletes: "hidden" = what the request hid when it was
     # made (UserDataPurgeHidden), the user's own request or an admin's;
@@ -2470,6 +2829,213 @@ class PrefillBundleNodeMap(db.Model):
     created = db.Column(db.Boolean, nullable=False, default=True)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
                         nullable=False, index=True)
+
+
+class StripeEvent(db.Model):
+    """A Stripe webhook event already applied (#438): its id is the key,
+    so a redelivered event is answered without being applied again
+    (routes/webhooks.stripe_webhook). Ids and the type only."""
+    __tablename__ = "stripe_event"
+
+    id = db.Column(db.String(255), primary_key=True)
+    type = db.Column(db.String(128), nullable=False)
+    received_at = db.Column(db.DateTime, nullable=False,
+                            default=datetime.utcnow)
+
+
+class DiscountCode(db.Model):
+    """A code that opens the discounted price (#438; Peter, 2026-11-12:
+    "opened by a code, no proof asked"). Loore's own, not a Stripe
+    promotion code: redeemed in Loore, it makes the backend start the
+    checkout with the discounted price. Created in the admin panel."""
+    __tablename__ = "discount_code"
+
+    id = db.Column(db.Integer, primary_key=True)
+    # Stored upper-case without spaces (utils/discount_codes.normalize).
+    code = db.Column(db.String(64), nullable=False, unique=True)
+    # NULL: no limit. Counts checkouts in progress and completed ones.
+    max_uses = db.Column(db.Integer, nullable=True)
+    expires_at = db.Column(db.DateTime, nullable=True)
+    note = db.Column(db.String(255), nullable=True)
+    active = db.Column(db.Boolean, nullable=False, default=True,
+                       server_default=db.text("true"))
+    created_at = db.Column(db.DateTime, nullable=False,
+                           default=datetime.utcnow)
+    created_by_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                              nullable=True)
+
+
+class DiscountRedemption(db.Model):
+    """A use of a discount code: written once, when the subscription the
+    code opened is created and kept (never when a checkout is opened), one
+    row per subscription. "void" when that subscription was cancelled as
+    a duplicate, which gives the use back. An account deletion keeps the
+    row without the account, so a code's use count stays right."""
+    __tablename__ = "discount_redemption"
+
+    id = db.Column(db.Integer, primary_key=True)
+    code_id = db.Column(db.Integer, db.ForeignKey("discount_code.id"),
+                        nullable=False, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=True, index=True)
+    stripe_subscription_id = db.Column(db.String(255), nullable=False,
+                                       unique=True)
+    state = db.Column(db.String(16), nullable=False, default="redeemed")
+    created_at = db.Column(db.DateTime, nullable=False,
+                           default=datetime.utcnow)
+
+
+class CheckoutSession(db.Model):
+    """A Stripe Checkout Session Loore opened (#438). An account has at
+    most one "open" at a time: opening another expires the one before at
+    Stripe, so only one can be completed. A session that carries a
+    discount code is expired when the code's last use goes to someone
+    else. Ids, the level and the code only."""
+    __tablename__ = "checkout_session"
+
+    id = db.Column(db.String(255), primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=False, index=True)
+    level = db.Column(db.String(16), nullable=False)
+    code_id = db.Column(db.Integer, db.ForeignKey("discount_code.id"),
+                        nullable=True, index=True)
+    # "open", "complete" or "expired".
+    state = db.Column(db.String(16), nullable=False, default="open")
+    created_at = db.Column(db.DateTime, nullable=False,
+                           default=datetime.utcnow)
+
+
+class Invite(db.Model):
+    """A personal invite (#439; Peter, 2026-11-13: "one invite a month, no
+    accumulation of invites"): made by an account for one named person,
+    by X handle or email address. Its link records a referral for exactly
+    one sign-up, that person's (utils/referrals). One a calendar month
+    (UTC) per inviter, one open at a time; INVITE_EXPIRY_DAYS after it is
+    made an unused one expires. An account deletion keeps the row without
+    the deleted account."""
+    __tablename__ = "invite"
+    __table_args__ = (
+        # One open invite per inviter, and one used invite per inviter and
+        # month it was made in, held by the database too (utils/referrals
+        # also takes a per-inviter lock and changes a state only while it
+        # is open).
+        db.Index("uq_invite_one_open_per_inviter", "inviter_id",
+                 unique=True,
+                 postgresql_where=db.text("state = 'open'"),
+                 sqlite_where=db.text("state = 'open'")),
+        db.Index("uq_invite_one_used_per_inviter_month", "inviter_id",
+                 "month", unique=True,
+                 postgresql_where=db.text("state = 'used'"),
+                 sqlite_where=db.text("state = 'used'")),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    inviter_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                           nullable=True, index=True)
+    # Random (secrets.token_urlsafe), never derived from anything.
+    code = db.Column(db.String(32), nullable=False, unique=True)
+    # "x" (an X handle) or "email".
+    kind = db.Column(db.String(8), nullable=False)
+    # The handle (lower case, no "@") or the address (lower case), only
+    # while the invite is open: personal data of someone who may never
+    # sign up, so it is cleared when the invite is used, withdrawn or
+    # expires. Matching is all it is for.
+    target = db.Column(db.String(320), nullable=True)
+    # For an X handle: the X account id it named when the invite was made
+    # (a sign-in matches on it, so a handle taken over by someone else
+    # does not match). NULL when it could not be looked up then (the
+    # handle's text is matched instead). Cleared with the target.
+    target_x_id = db.Column(db.String(32), nullable=True)
+    # "YYYY-MM" (UTC): the month whose invite this is.
+    month = db.Column(db.String(7), nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False,
+                           default=datetime.utcnow)
+    expires_at = db.Column(db.DateTime, nullable=False)
+    # "open", "used", "withdrawn" or "expired"; ended_at when it stopped
+    # being open.
+    state = db.Column(db.String(16), nullable=False, default="open",
+                      index=True)
+    ended_at = db.Column(db.DateTime, nullable=True)
+
+
+class Referral(db.Model):
+    """Who invited whom (#439), recorded at the friend's signup through
+    the inviter's invite, and the free week each got on the friend's first
+    payment (utils/referrals). One per friend: the first inviter is kept.
+    An account deletion keeps the row without the deleted account."""
+    __tablename__ = "referral"
+
+    id = db.Column(db.Integer, primary_key=True)
+    inviter_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                           nullable=True, index=True)
+    friend_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                          nullable=True, unique=True)
+    # The invite the friend signed up through (NULL for a referral made
+    # through the reusable link that invites replaced).
+    invite_id = db.Column(db.Integer, db.ForeignKey("invite.id"),
+                          nullable=True, unique=True)
+    created_at = db.Column(db.DateTime, nullable=False,
+                           default=datetime.utcnow)
+    # Set once, on the friend's first payment above zero.
+    rewarded_at = db.Column(db.DateTime, nullable=True)
+    reward_invoice_id = db.Column(db.String(255), nullable=True)
+    # Per side: "granted", "failed" (Stripe refused; give it by hand),
+    # "skipped_deleted", "skipped_no_account" or "skipped_self"; NULL
+    # before the reward. The credit as Stripe made it.
+    inviter_reward = db.Column(db.String(32), nullable=True)
+    inviter_credit_cents = db.Column(db.Integer, nullable=True)
+    inviter_credit_currency = db.Column(db.String(8), nullable=True)
+    inviter_credit_txn = db.Column(db.String(255), nullable=True)
+    friend_reward = db.Column(db.String(32), nullable=True)
+    friend_credit_cents = db.Column(db.Integer, nullable=True)
+    friend_credit_currency = db.Column(db.String(8), nullable=True)
+    friend_credit_txn = db.Column(db.String(255), nullable=True)
+
+
+class DiscountCodeAttempt(db.Model):
+    """A code an account tried, for the code field's rate limit
+    (DISCOUNT_CODE_ATTEMPTS_PER_HOUR). Only who and when, never the text
+    tried."""
+    __tablename__ = "discount_code_attempt"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=False, index=True)
+    created_at = db.Column(db.DateTime, nullable=False,
+                           default=datetime.utcnow, index=True)
+    ok = db.Column(db.Boolean, nullable=False, default=False)
+
+
+class BillingRequest(db.Model):
+    """A checkout started or a subscription synced by an account (#697),
+    for the hourly limits on both (CHECKOUT_STARTS_PER_HOUR,
+    BILLING_SYNCS_PER_HOUR; utils/billing_limits). Only who, which and
+    when."""
+    __tablename__ = "billing_request"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=False, index=True)
+    # "checkout" or "sync".
+    kind = db.Column(db.String(16), nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False,
+                           default=datetime.utcnow, index=True)
+
+
+class TrialCard(db.Model):
+    """A card that started a free trial (#697): one trial per card as
+    well as per account (utils/trial_cards). Only a keyed hash of the
+    card's Stripe fingerprint (never the fingerprint, never card data)
+    and when the trial started. An account deletion keeps the row without
+    the account, as the anonymous mark that this card had its trial."""
+    __tablename__ = "trial_card"
+
+    id = db.Column(db.Integer, primary_key=True)
+    card_hash = db.Column(db.String(64), nullable=False, unique=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=True, index=True)
+    created_at = db.Column(db.DateTime, nullable=False,
+                           default=datetime.utcnow)
 
 
 # The per-user tables whose rows a waiting "Delete all my content" hides

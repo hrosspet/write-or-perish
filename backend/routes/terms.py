@@ -3,6 +3,7 @@ from flask import Blueprint, jsonify, request
 from flask_login import login_required, current_user
 from backend.extensions import db
 from backend.utils.email import send_admin_signup_notification
+from backend.utils.approval import signup_notice_due
 from backend.utils.timefmt import iso_utc
 from datetime import datetime
 
@@ -20,7 +21,10 @@ def accept_terms():
     current_user.accepted_terms_version = CURRENT_TERMS_VERSION
     db.session.commit()
 
-    if not current_user.approved:
+    # An account waiting for approval, as always while payments are off.
+    # Payments on (#697): never, nobody waits; new accounts head the
+    # admin's Users list.
+    if signup_notice_due(current_user):
         try:
             send_admin_signup_notification(
                 current_user.username, current_user.email

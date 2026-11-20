@@ -359,7 +359,7 @@ test('a reply that cannot start sounds at once', async () => {
   expect(result.current.hasError).toBe(true);
 });
 
-test('a reply refused for AI usage None stays silent (the page explains)', async () => {
+test('a reply refused for AI usage None gets no error sound (the page explains; #651 says why)', async () => {
   server.voicePost = () => Promise.reject(httpError(403, { code: 'ai_usage_none', scope: 'thread' }));
   const onAiUsageRefused = jest.fn();
   await finishRecordingWithoutReplyNode({ onAiUsageRefused });

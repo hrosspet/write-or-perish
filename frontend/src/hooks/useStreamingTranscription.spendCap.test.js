@@ -62,6 +62,30 @@ test('a 402 from init never opens the mic and returns to idle with a toast', asy
   expect(onError.mock.calls[0][0].spendCapped).toBe(true);
 });
 
+// Payments (#438): no transcription without a subscription, dictation
+// included. Like the cap: no mic, back to idle; the banner (raised by the
+// api.js interceptor) says why, so no toast here.
+test('a 402 subscription_required from init never opens the mic', async () => {
+  const err = new Error('Request failed with status code 402');
+  err.response = {
+    status: 402,
+    data: {
+      error: 'subscription_required',
+      message: "Your subscription has ended, so Loore doesn't transcribe recordings. Typing works as before.",
+    },
+  };
+  mockPost.mockRejectedValue(err);
+  const onError = jest.fn();
+  const { result } = renderHook(() => useStreamingTranscription({ onError }));
+
+  await act(async () => { await result.current.startStreaming(); });
+
+  expect(mockStartRecording).not.toHaveBeenCalled();
+  expect(result.current.sessionState).toBe('idle');
+  expect(mockAddToast).not.toHaveBeenCalled();
+  expect(onError.mock.calls[0][0].subscriptionRequired).toBe(true);
+});
+
 test('any other init failure still ends in the error state', async () => {
   mockPost.mockRejectedValue(new Error('Network Error'));
   const onError = jest.fn();

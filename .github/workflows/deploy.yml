@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   test-backend:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # Python 3.9 is not available on ubuntu-latest (26.04)
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -35,7 +35,11 @@ jobs:
           cache-dependency-path: backend/requirements.txt
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+        timeout-minutes: 10
+        run: |
+          APT_OPTS="-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o DPkg::Lock::Timeout=60"
+          sudo apt-get $APT_OPTS update
+          sudo apt-get $APT_OPTS install -y ffmpeg
 
       - name: Install Python dependencies
         run: |

@@ -55,7 +55,11 @@ def resolve_api_token(plaintext, scope):
     # The session path enforces approval in a before_request hook that
     # only sees flask-login users; the bearer path must enforce it here.
     user = row.user
-    if (user is None or not user.approved or user.deactivated_at is not None
+    # counts_as_approved: `approved`, except an account the gate let in by
+    # itself while payments were on, once they are off again (#697).
+    from backend.utils.approval import counts_as_approved
+    if (user is None or not counts_as_approved(user)
+            or user.deactivated_at is not None
             or user.deleted_at is not None):   # a deleted account (#269)
         return None
     now = datetime.utcnow()
@@ -76,6 +80,9 @@ def token_or_login_required(scope):
     silent fallback would hide a revoked token behind a logged-in tab.
     """
     def decorator(fn):
+        # Marks the view, so a test can list every token-accepting route.
+        fn.accepts_api_token = scope
+
         @wraps(fn)
         def wrapper(*args, **kwargs):
             bearer = _bearer_from_request()
@@ -83,6 +90,13 @@ def token_or_login_required(scope):
                 row = resolve_api_token(bearer, scope)
                 if row is None:
                     return jsonify({"error": "invalid_token"}), 401
+                # The session's before_request gate (#438) sees only
+                # flask-login users: the same access rule for the
+                # token's account.
+                from backend.utils.subscriptions import refuse_not_let_in
+                refused = refuse_not_let_in(row.user)
+                if refused is not None:
+                    return refused
                 g.api_user = row.user
                 g.api_token = row
                 return fn(*args, **kwargs)

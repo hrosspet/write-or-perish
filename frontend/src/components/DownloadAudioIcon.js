@@ -3,12 +3,12 @@ import { FaDownload, FaSpinner } from 'react-icons/fa';
 import api from '../api';
 import { useUser } from '../contexts/UserContext';
 
-const DownloadAudioIcon = ({ nodeId, isPublic, aiUsage }) => {
+const DownloadAudioIcon = ({ nodeId, isPublic, aiUsage, ownRecording }) => {
   const { user } = useUser();
   const [loading, setLoading] = useState(false);
 
   // Same visibility rules as SpeakerIcon
-  if (!user || (!user.voice_mode_enabled && !isPublic)) {
+  if (!user || (!user.voice_mode_enabled && !isPublic && !ownRecording)) {
     return null;
   }
 

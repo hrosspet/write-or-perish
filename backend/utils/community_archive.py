@@ -1,25 +1,51 @@
 """Community Archive client (https://www.community-archive.org).
 
-An opt-in public corpus of user-uploaded Twitter archives, served through a
-public Supabase REST API (the anon key is published in their docs). Used by
-the admin "pre-fill from Community Archive" action to bootstrap an account's
-profile from its public tweets before the person ever writes in Loore.
+An opt-in public corpus of user-uploaded Twitter archives. Used by the
+admin "pre-fill from Community Archive" action to bootstrap an account's
+profile from its public tweets before the person ever writes in Loore,
+by the account lookups (the whitelist, the coverage check), and by Glean,
+which reads the archive's daily bulk export.
+
+Two ways in for accounts and tweets (#688):
+
+- the Community Archive API v1 (``API_V1_URL``), with a personal key in
+  ``COMMUNITY_ARCHIVE_API_KEY``. Used for every call below whenever the
+  key is set;
+- the public Supabase REST API with the published anon key, which the
+  archive retires on 19 November 2026 (REST_RETIRED_AT). Used while no
+  key is set, as before; from that date its first use in a process logs
+  an ERROR saying the key is needed.
+
+Every function returns the same shape on either path, so callers do not
+know which one answered. A failed request raises what the REST path
+raised (urllib's HTTPError / URLError); CommunityArchiveError stays the
+user-facing problem (several accounts with one username, no snapshot).
 
 Stdlib only — the CLI in backend/scripts/fetch_community_archive.py reuses
-it without Loore's dependencies.
+it without Loore's dependencies (outside the app the key comes from the
+environment).
 
-Paging is keyset (``tweet_id > last``), not offset: the REST view 500s on
-deep offsets, which is what made large accounts impractical before.
+REST paging is keyset (``tweet_id > last``), not offset: the REST view
+500s on deep offsets, which is what made large accounts impractical
+before. v1 pages with an opaque cursor.
 """
 import contextlib
+import email.utils
 import fcntl
+import http.client
 import json
+import logging
 import os
 import pathlib
 import re
+import shutil
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
+
+log = logging.getLogger(__name__)
 
 SUPABASE_URL = "https://fabxmporizzqflnftavs.supabase.co"
 # Public anon key, from
@@ -54,7 +80,298 @@ class CommunityArchiveError(Exception):
     """User-facing problem (unknown handle, API failure)."""
 
 
+# What the admin reads when a lookup or a pre-fill needs the key (#688).
+REST_RETIRED_MESSAGE = (
+    "The Community Archive retired its old API on 19 November 2026; set "
+    "COMMUNITY_ARCHIVE_API_KEY on the server to use its API v1 (see "
+    "docs/LOCAL-DEV.md).")
+
+
+class CommunityArchiveRetired(CommunityArchiveError):
+    """No API key, and the REST API is past its retirement date and did not
+    answer usefully: the admin is told to set the key, never that the
+    handle is not in the archive (that cannot be known)."""
+
+    def __init__(self):
+        super().__init__(REST_RETIRED_MESSAGE)
+
+
+class V1BudgetSpent(CommunityArchiveError):
+    """A caller's request budget (on_request) refused another request."""
+
+
+# ── Community Archive API v1 (#688) ───────────────────────────────────────
+# Reference: API_V1_URL + "/openapi.json"; migration guide
+# docs/api-v1-migration.md in TheExGenesis/community-archive.
+
+API_V1_URL = "https://analytics.community-archive.org/v1"
+API_KEY_SETTING = "COMMUNITY_ARCHIVE_API_KEY"
+# The archive's docs: the Supabase REST API "is retired on 19 November 2026".
+REST_RETIRED_AT = datetime(2026, 11, 19, tzinfo=timezone.utc)
+V1_TIMEOUT = 30  # seconds per request (the migration guide's client uses 30)
+V1_TWEET_PAGE_LIMIT = 200  # the documented maximum for tweet listings
+# A 429 or 503 is retried after its Retry-After, up to this many tries of
+# one request; a Retry-After above V1_MAX_RETRY_AFTER is cut to it (the
+# per-minute limit resets within a minute). Without the header, wait
+# V1_DEFAULT_RETRY_AFTER (the migration guide's example uses 5).
+V1_MAX_ATTEMPTS = 5
+V1_MAX_RETRY_AFTER = 60
+V1_DEFAULT_RETRY_AFTER = 5
+V1_RETRY_STATUSES = (429, 503)
+# A server error (500, 502, 504: the API's own timeout), a dropped
+# connection or a request timeout is tried V1_TRANSIENT_TRIES times in
+# all, waiting V1_TRANSIENT_BACKOFF seconds before each retry (at most 6 s
+# of waiting, plus up to three request timeouts). Repeating a page request
+# with the same cursor is safe: it reads, never writes.
+V1_TRANSIENT_STATUSES = (500, 502, 504)
+V1_TRANSIENT_TRIES = 3
+V1_TRANSIENT_BACKOFF = (2, 4)
+
+_sleep = time.sleep  # tests replace it
+# Monotonic time before which no v1 request starts in this process: set
+# when a response says the key's per-minute allowance is used up
+# (RateLimit-Remaining: 0), so the next request waits for RateLimit-Reset
+# instead of collecting a 429.
+_v1_not_before = 0.0
+_rest_retired_logged = False
+
+
+def api_key():
+    """The Community Archive API key, or None. Inside the app it is the
+    config value (backend/config.py, from the environment); outside it
+    (the CLI scripts) the environment variable. Never logged."""
+    try:
+        from flask import current_app, has_app_context
+        if has_app_context():
+            return (current_app.config.get(API_KEY_SETTING) or "").strip() or None
+    except ImportError:  # the stdlib-only CLI
+        pass
+    return (os.environ.get(API_KEY_SETTING) or "").strip() or None
+
+
+def v1_enabled():
+    """Whether calls go to API v1 (a key is set) rather than REST."""
+    return api_key() is not None
+
+
+def rest_retired(now=None):
+    """No key, and the REST API is past its retirement date."""
+    now = now or datetime.now(timezone.utc)
+    return now >= REST_RETIRED_AT and not v1_enabled()
+
+
+def _warn_if_rest_retired(now=None):
+    """The REST path is about to be used: from REST_RETIRED_AT on, say once
+    per process, at ERROR (so Sentry reports it), that it is gone and the
+    pre-fill needs the key. Before that date, silent."""
+    global _rest_retired_logged
+    if _rest_retired_logged:
+        return
+    now = now or datetime.now(timezone.utc)
+    if now < REST_RETIRED_AT:
+        return
+    _rest_retired_logged = True
+    log.error(
+        "Community Archive: the archive retired its Supabase REST API on "
+        "%s and %s is not set, so the pre-fill and the archive account "
+        "lookups fail. Set the key (see docs/LOCAL-DEV.md).",
+        REST_RETIRED_AT.date().isoformat(), API_KEY_SETTING)
+
+
+def _seconds_header(headers, name, default):
+    """A header holding seconds (Retry-After, RateLimit-Reset): delta
+    seconds, an epoch timestamp, or an HTTP date; *default* when absent or
+    unreadable. Clamped to 0..V1_MAX_RETRY_AFTER."""
+    raw = ((headers.get(name) if headers is not None else None) or "").strip()
+    wait = default
+    if raw:
+        try:
+            wait = float(raw)
+            if wait > 1e9:  # an epoch timestamp, not a delta
+                wait -= time.time()
+        except ValueError:
+            try:
+                when = email.utils.parsedate_to_datetime(raw)
+                wait = (when - datetime.now(timezone.utc)).total_seconds()
+            except (TypeError, ValueError, IndexError):
+                wait = default
+    return max(0.0, min(float(wait), float(V1_MAX_RETRY_AFTER)))
+
+
+def _note_rate_limit(headers):
+    global _v1_not_before
+    if headers is None:
+        return
+    remaining = (headers.get("RateLimit-Remaining") or "").strip()
+    if remaining == "0":
+        _v1_not_before = time.monotonic() + _seconds_header(
+            headers, "RateLimit-Reset", V1_DEFAULT_RETRY_AFTER)
+
+
+def _v1_error_code(err):
+    """The v1 error code of an HTTPError's JSON body ("rate_limited",
+    "query_budget_exceeded", ...), or None."""
+    try:
+        body = json.loads(err.read() or b"{}")
+        return ((body.get("error") or {}).get("code")) or None
+    except Exception:  # noqa: BLE001 - only for the log line
+        return None
+
+
+# What a request can fail with short of an HTTP status: no connection, a
+# connection dropped mid-answer, a timeout on connect or on the body read
+# (a bare socket.timeout, i.e. TimeoutError), a truncated or garbled body.
+_V1_TRANSIENT_ERRORS = (urllib.error.URLError, TimeoutError, ConnectionError,
+                        http.client.HTTPException, ValueError)
+
+
+def _v1_get(path, params=None, timeout=None, on_request=None):
+    """GET one API v1 endpoint and return its decoded JSON.
+
+    429 and 503 are retried after Retry-After (V1_MAX_ATTEMPTS tries); a
+    response that says the minute's allowance is used up delays the next
+    request until RateLimit-Reset. A 500, 502 or 504, a dropped connection
+    or a timeout is retried after a short backoff (V1_TRANSIENT_TRIES
+    tries). ``timeout`` is a budget for the whole call, waits included (the
+    whitelist's lookup budget); without it each try gets V1_TIMEOUT.
+    ``on_request()`` is called before every HTTP request, retries included;
+    it may raise (a daily budget, V1BudgetSpent) to stop the call. A
+    failure past the retries raises urllib's HTTPError or URLError (or the
+    socket's error), as the REST calls did. The key travels only in the
+    Authorization header and is never logged."""
+    key = api_key()
+    if not key:
+        raise CommunityArchiveError(f"{API_KEY_SETTING} is not set")
+    query = urllib.parse.urlencode(
+        {k: v for k, v in (params or {}).items() if v is not None})
+    url = f"{API_V1_URL}{path}" + (f"?{query}" if query else "")
+    deadline = time.monotonic() + timeout if timeout else None
+
+    def remaining():
+        return None if deadline is None else deadline - time.monotonic()
+
+    def wait_or_give_up(wait):
+        left = remaining()
+        if left is not None and wait >= left:
+            return False
+        _sleep(wait)
+        return True
+
+    limited = transient = 0
+    while True:
+        hold = _v1_not_before - time.monotonic()
+        if hold > 0:
+            left = remaining()
+            if left is not None and hold >= left:
+                raise urllib.error.URLError(
+                    "Community Archive API rate limit outlasts the time budget")
+            _sleep(hold)
+        left = remaining()
+        if left is not None and left <= 0:
+            raise urllib.error.URLError("Community Archive API time budget spent")
+        if on_request is not None:
+            on_request()
+        req = urllib.request.Request(url, headers={
+            "Authorization": f"Bearer {key}", "Accept": "application/json"})
+        try:
+            with urllib.request.urlopen(
+                    req, timeout=min(V1_TIMEOUT, left) if left else V1_TIMEOUT) as resp:
+                _note_rate_limit(resp.headers)
+                return json.load(resp)
+        except urllib.error.HTTPError as e:
+            _note_rate_limit(e.headers)
+            if e.code in V1_RETRY_STATUSES:
+                limited += 1
+                if limited < V1_MAX_ATTEMPTS:
+                    wait = _seconds_header(e.headers, "Retry-After",
+                                           V1_DEFAULT_RETRY_AFTER)
+                    log.info("Community Archive API %s: HTTP %s, retrying in "
+                             "%.0f s", path, e.code, wait)
+                    if wait_or_give_up(wait):
+                        continue
+            elif e.code in V1_TRANSIENT_STATUSES:
+                transient += 1
+                if transient < V1_TRANSIENT_TRIES:
+                    wait = V1_TRANSIENT_BACKOFF[transient - 1]
+                    log.info("Community Archive API %s: HTTP %s, retrying in "
+                             "%d s", path, e.code, wait)
+                    if wait_or_give_up(wait):
+                        continue
+            log.warning("Community Archive API %s: HTTP %s (%s)", path,
+                        e.code, _v1_error_code(e) or "no error code")
+            raise
+        except _V1_TRANSIENT_ERRORS as e:
+            transient += 1
+            if transient < V1_TRANSIENT_TRIES:
+                wait = V1_TRANSIENT_BACKOFF[transient - 1]
+                log.info("Community Archive API %s: %s, retrying in %d s",
+                         path, type(e).__name__, wait)
+                if wait_or_give_up(wait):
+                    continue
+            log.warning("Community Archive API %s: %s", path, type(e).__name__)
+            raise
+
+
+def _v1_pages(path, params, timeout=None, on_request=None):
+    """Each page's ``data`` list of a cursor-paged v1 listing, following
+    ``next_cursor`` until it is null (never stopping on a short page:
+    withdrawn tweets make pages short)."""
+    cursor = None
+    while True:
+        page = _v1_get(path, dict(params, cursor=cursor), timeout=timeout,
+                       on_request=on_request)
+        yield page.get("data") or []
+        cursor = page.get("next_cursor")
+        if not cursor:
+            return
+
+
+def v1_account_tweets_page(account_id, cursor=None, order="asc",
+                           limit=V1_TWEET_PAGE_LIMIT, timeout=None):
+    """One page of an account's v1 timeline: (rows, next_cursor). The
+    ``limit`` is the same on every page of one read (whether a cursor takes
+    another limit is not documented). An account v1 does not know is an
+    empty last page, like an unknown id on REST."""
+    try:
+        page = _v1_get(f"/accounts/{_v1_account_path(account_id)}/tweets",
+                       {"order": order, "limit": limit, "cursor": cursor},
+                       timeout=timeout)
+    except urllib.error.HTTPError as e:
+        if e.code == 404 and cursor is None:
+            return [], None
+        raise
+    return page.get("data") or [], page.get("next_cursor") or None
+
+
+def _v1_account_row(a):
+    """A v1 Account as the REST all_account row the callers read. v1 has no
+    ``created_via``: an account without an uploaded archive (has_archive
+    false) came in through the browser extension, which REST called
+    'twitter_import'; an uploader's is None (shown as "via archive")."""
+    has_archive = a.get("has_archive")
+    return {
+        "account_id": str(a.get("account_id")),
+        "username": a.get("username"),
+        "account_display_name": a.get("account_display_name"),
+        "num_tweets": a.get("num_tweets"),
+        "created_via": "twitter_import" if has_archive is False else None,
+        "has_archive": has_archive,
+    }
+
+
+def _v1_account_path(account_id):
+    """The path segment for an account id: v1 reads a numeric segment as an
+    id and anything else as a username, so a non-numeric id is refused
+    rather than looked up as somebody's handle."""
+    account_id = str(account_id)
+    if not account_id.isdigit():
+        raise CommunityArchiveError(
+            f"Community Archive account id {account_id!r} is not numeric")
+    return account_id
+
+
 def _get(table, params, timeout=None):
+    _warn_if_rest_retired()
     query = urllib.parse.urlencode(params)
     req = urllib.request.Request(
         f"{SUPABASE_URL}/rest/v1/{table}?{query}",
@@ -73,19 +390,37 @@ def fetch_account(handle, timeout=None):
     ``jane_doe`` also fetches ``jane1doe``; rows are therefore matched
     exactly here, never taken as returned. Loore keys X logins on the id
     this returns, so a look-alike's id would let that other X user into
-    the account. Same exact rule as fetch_account_parquet."""
+    the account. Same exact rule as fetch_account_parquet. API v1's
+    ``usernames`` lookup is exact and case-insensitive; its rows go
+    through the same check, several matches included."""
     handle = (handle or "").strip().lstrip("@")
     # X handles are [A-Za-z0-9_]; anything else cannot be in the archive,
     # and "*" / "%" would be wildcards in the filter below.
     if not _HANDLE_RE.fullmatch(handle):
         return None
-    rows = _get("all_account", {
-        # "_" is ilike's single-character wildcard: escaped, or "_____"
-        # matches every five-letter username and can overrun the server's
-        # row cap, dropping the exact match or hiding a duplicate.
-        "username": "ilike." + handle.replace("_", "\\_"),
-        "select": "account_id,username,account_display_name,num_tweets,created_via",
-    }, **({"timeout": timeout} if timeout else {}))
+    retired = False
+    if v1_enabled():
+        rows = [_v1_account_row(a) for a in (_v1_get(
+            "/accounts", {"usernames": handle},
+            timeout=timeout).get("data") or [])]
+    else:
+        # Past the retirement date a REST failure, or no match, says the
+        # key is needed (CommunityArchiveRetired), never "not in the
+        # archive": a retired API that answers [] proves nothing.
+        retired = rest_retired()
+        try:
+            rows = _get("all_account", {
+                # "_" is ilike's single-character wildcard: escaped, or
+                # "_____" matches every five-letter username and can
+                # overrun the server's row cap, dropping the exact match
+                # or hiding a duplicate.
+                "username": "ilike." + handle.replace("_", "\\_"),
+                "select": "account_id,username,account_display_name,num_tweets,created_via",
+            }, **({"timeout": timeout} if timeout else {}))
+        except Exception as e:
+            if retired:
+                raise CommunityArchiveRetired() from e
+            raise
     exact = {}
     for row in rows:
         if (row.get("username") or "").lower() == handle.lower():
@@ -94,6 +429,8 @@ def fetch_account(handle, timeout=None):
         raise CommunityArchiveError(
             f"@{handle}: {len(exact)} Community Archive accounts have exactly "
             "that username; refusing to guess which one")
+    if not exact and retired:
+        raise CommunityArchiveRetired()
     return next(iter(exact.values()), None)
 
 
@@ -102,7 +439,15 @@ def iter_tweets(account_id, page_size=PAGE_SIZE, on_page=None, timeout=None):
     at a time (memory = one page). ``on_page(fetched_so_far)`` is called
     after each page for progress reporting. Keyed on the account id, not
     the username: a username filter is ``ilike`` (``_`` is a wildcard) and
-    could pull a look-alike account's tweets into the wrong archive."""
+    could pull a look-alike account's tweets into the wrong archive.
+
+    With an API key the rows come from v1's account timeline (oldest
+    first, ``page_size`` capped at V1_TWEET_PAGE_LIMIT), the same fields
+    under the same names; an account v1 does not know yields nothing,
+    like an unknown id on REST."""
+    if v1_enabled():
+        yield from _iter_tweets_v1(account_id, page_size, on_page, timeout)
+        return
     last_id, fetched = None, 0
     while True:
         params = {
@@ -122,6 +467,25 @@ def iter_tweets(account_id, page_size=PAGE_SIZE, on_page=None, timeout=None):
             on_page(fetched)
         if len(rows) < page_size:
             return
+
+
+def _iter_tweets_v1(account_id, page_size, on_page, timeout):
+    path = f"/accounts/{_v1_account_path(account_id)}/tweets"
+    params = {"order": "asc",
+              "limit": max(1, min(int(page_size), V1_TWEET_PAGE_LIMIT))}
+    fetched = 0
+    try:
+        for rows in _v1_pages(path, params, timeout=timeout):
+            for row in rows:
+                yield row
+            fetched += len(rows)
+            if on_page:
+                on_page(fetched)
+    except urllib.error.HTTPError as e:
+        if e.code != 404 or fetched:
+            raise
+        if on_page:
+            on_page(0)
 
 
 def to_export_entry(row):
@@ -394,11 +758,20 @@ def iter_tweets_parquet(account_id, snapshot_dir, batch=1000, on_page=None):
 # ── coverage check (before paying for an import) ──────────────────────────
 
 CHECK_SCAN_LIMIT = 20000  # rows the REST summary will walk before giving up on detail
+# Rows the v1 summary walks (V1_CHECK_SCAN_LIMIT / 200 = 10 requests): v1
+# has no count, so without a cap the admin's check would page through a
+# whole large account, at 60 requests a minute, inside a web request.
+V1_CHECK_SCAN_LIMIT = 2000
 
 
 def count_archived(account_id):
     """Exact number of tweets the archive holds for an account — from the
-    Content-Range header, independent of paging."""
+    Content-Range header, independent of paging. None when unknown: API
+    v1 has no count (#688), so with a key this is always None, which every
+    caller already reads as "unknown"."""
+    if v1_enabled():
+        return None
+    _warn_if_rest_retired()
     req = urllib.request.Request(
         f"{SUPABASE_URL}/rest/v1/tweets?account_id=eq.{account_id}&select=tweet_id",
         headers={"apikey": ANON_KEY, "Authorization": f"Bearer {ANON_KEY}",
@@ -472,6 +845,24 @@ def coverage_summary(handle, snapshot_dir=None, scan_limit=CHECK_SCAN_LIMIT):
         out.update({"archived": archived, "retweets": None, "replies": None,
                     "originals": None, "est_tokens": None,
                     "detail_source": "count_only"})
+        return out
+    if v1_enabled():
+        # No count to decide by: walk at most V1_CHECK_SCAN_LIMIT rows; an
+        # account with more reports no detail, like count_only above but
+        # without the count v1 does not give.
+        limit = min(scan_limit, V1_CHECK_SCAN_LIMIT)
+        rows = []
+        for row in iter_tweets(account["account_id"],
+                               page_size=V1_TWEET_PAGE_LIMIT):
+            rows.append(row)
+            if len(rows) > limit:
+                out.update({"archived": None, "retweets": None,
+                            "replies": None, "originals": None,
+                            "est_tokens": None,
+                            "detail_source": "too_many_to_scan"})
+                return out
+        out.update(_summarize_rows(rows))
+        out["detail_source"] = "api-v1"
         return out
     out.update(_summarize_rows(iter_tweets(account["account_id"])))
     out["detail_source"] = "rest"
@@ -691,3 +1082,369 @@ def following_handles(snapshot_dir, username):
         return None
     data = json.loads(path.read_text())
     return [u for u in data.get("usernames", []) if u]
+
+
+# ── Glean's day from API v1 (#688) ────────────────────────────────────────
+# When the bulk export goes stale, Glean reads the last day from v1 instead
+# (ca_feed.glean_source_dir). The day is fetched once per day window, in
+# the background (ca_feed.refresh_v1_day_for_read), into
+# <snapshot_dir>/api-v1/<window id>/ as a tweets.parquet and a
+# profiles.parquet with the export's column names plus an export_id marker,
+# so render_recent_tweets and fetch_tweets_by_id read it unchanged: the
+# same filters (retweets, the reader's own handle, follows, read tweets),
+# the same order, the same numbering.
+
+V1_DAYS_DIRNAME = "api-v1"
+V1_WINDOW_PREFIX = "api-v1-"
+# A day window ends at this UTC hour, the time the archive's export used to
+# run: a day read from v1 covers the hours a day read from a fresh export
+# did, and one fetch serves every Glean until the next window.
+V1_DAY_END_HOUR_UTC = 7
+# Cached day windows kept; older ones are deleted. A pinned batch (admin
+# experiments, back within a day) collects its picks from its own window.
+V1_DAYS_KEPT = 3
+# A 422 (the request exceeded its query budget) halves the window, down to
+# windows of this length.
+V1_MIN_SPLIT = timedelta(hours=1)
+# After a failed fetch of a day the same window is not tried again for
+# this long: the fetch resumes from its stored cursor, so a retry costs
+# only the pages still missing, but if the API no longer takes the cursor
+# the window starts over, and a failure that repeats must not re-read a
+# day (~120 requests) on every 30-minute beat and every Glean.
+V1_DAY_RETRY_AFTER = timedelta(hours=1)
+
+
+class V1DayWaiting(Exception):
+    """The current day window failed less than V1_DAY_RETRY_AFTER ago."""
+
+
+# What the writer keeps of each v1 tweet; read back with these types.
+_V1_TWEET_COLUMNS = {
+    "tweet_id": "VARCHAR", "account_id": "VARCHAR", "username": "VARCHAR",
+    "account_display_name": "VARCHAR", "created_at": "VARCHAR",
+    "full_text": "VARCHAR", "favorite_count": "BIGINT",
+    "retweet_count": "BIGINT", "reply_to_tweet_id": "VARCHAR",
+    "reply_to_user_id": "VARCHAR", "retweeted_tweet_id": "VARCHAR",
+    "quoted_tweet_id": "VARCHAR", "conversation_id": "VARCHAR",
+}
+
+
+def v1_day_window(now=None):
+    """(since, until) of the newest whole day window at *now*: the 24 hours
+    ending at the last V1_DAY_END_HOUR_UTC o'clock, UTC-aware."""
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    end = now.replace(hour=V1_DAY_END_HOUR_UTC, minute=0, second=0,
+                      microsecond=0)
+    if end > now:
+        end -= timedelta(days=1)
+    return end - timedelta(days=1), end
+
+
+def v1_window_id(until):
+    """The export_id of a v1 day, e.g. 'api-v1-2026-11-13T07-00Z'."""
+    return V1_WINDOW_PREFIX + until.astimezone(timezone.utc).strftime(
+        "%Y-%m-%dT%H-%MZ")
+
+
+def _v1_days_root(snapshot_dir):
+    return pathlib.Path(snapshot_dir) / V1_DAYS_DIRNAME
+
+
+def v1_day_dir_for_export(snapshot_dir, export_id):
+    """The cached v1 day a render's export_id names, or None (the id of a
+    bulk export, or a day no longer cached)."""
+    if not export_id or not str(export_id).startswith(V1_WINDOW_PREFIX):
+        return None
+    d = _v1_days_root(snapshot_dir) / str(export_id)
+    return d if snapshot_export_id(d) == str(export_id) else None
+
+
+def latest_v1_day(snapshot_dir):
+    """The newest complete cached v1 day dir, or None."""
+    root = _v1_days_root(snapshot_dir)
+    if not root.is_dir():
+        return None
+    names = sorted(p.name for p in root.iterdir()
+                   if p.is_dir() and p.name.startswith(V1_WINDOW_PREFIX)
+                   and snapshot_export_id(p) == p.name)
+    return root / names[-1] if names else None
+
+
+def _iso_z(dt):
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _parse_z(value):
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+_PROGRESS = "progress.json"
+
+
+def _load_progress(d):
+    try:
+        state = json.loads((pathlib.Path(d) / _PROGRESS).read_text())
+    except (OSError, ValueError):
+        return None
+    return state if isinstance(state, dict) else None
+
+
+def _save_progress(d, state):
+    """Replace progress.json in one rename, so a crash leaves the old one."""
+    d = pathlib.Path(d)
+    tmp = d / f"{_PROGRESS}.tmp"
+    tmp.write_text(json.dumps(state))
+    os.replace(tmp, d / _PROGRESS)
+
+
+def _staged_ids(staged):
+    ids = set()
+    if staged.exists():
+        with open(staged) as f:
+            for line in f:
+                try:
+                    ids.add(str(json.loads(line)["tweet_id"]))
+                except (ValueError, KeyError, TypeError):
+                    continue
+    return ids
+
+
+def _fetch_day_pages(part, state, timeout=None, on_request=None):
+    """Page the day's windows (state["pending"], each [since, until) as
+    ``…Z`` text) into part/tweets.jsonl, from state["cursor"]. After each
+    page the rows are flushed first and the progress saved second, so a
+    crash at any point resumes at or before the page it lost (a page read
+    twice is deduped by tweet_id). A 422 halves the window at the head of
+    the queue, down to V1_MIN_SPLIT. A cursor stored by an earlier run that
+    the API no longer takes (400) starts that window over, once. Returns
+    how many distinct tweets are staged."""
+    staged = part / "tweets.jsonl"
+    seen = _staged_ids(staged)
+    resumed = state.get("cursor")
+    with open(staged, "a") as out:
+        while state["pending"]:
+            since, until = state["pending"][0]
+            params = {"since": since, "until": until, "order": "asc",
+                      "limit": V1_TWEET_PAGE_LIMIT, "cursor": state["cursor"]}
+            try:
+                page = _v1_get("/tweets", params, timeout=timeout,
+                               on_request=on_request)
+            except urllib.error.HTTPError as e:
+                span = _parse_z(until) - _parse_z(since)
+                if e.code == 422 and span > V1_MIN_SPLIT:
+                    mid = _iso_z(_parse_z(since) + span / 2)
+                    log.info("Community Archive API: %s to %s too broad; "
+                             "splitting", since, until)
+                    state["pending"][0:1] = [[since, mid], [mid, until]]
+                    state["cursor"] = None
+                    _save_progress(part, state)
+                    continue
+                if e.code == 400 and resumed and state["cursor"] == resumed:
+                    log.info("Community Archive API: the stored cursor was "
+                             "refused; %s to %s starts over", since, until)
+                    state["cursor"] = resumed = None
+                    _save_progress(part, state)
+                    continue
+                raise
+            for t in page.get("data") or []:
+                tweet_id = str(t.get("tweet_id") or "")
+                if not tweet_id or tweet_id in seen:
+                    continue
+                seen.add(tweet_id)
+                out.write(json.dumps(
+                    {k: t.get(k) for k in _V1_TWEET_COLUMNS}) + "\n")
+            out.flush()
+            state["pages"] = int(state.get("pages") or 0) + 1
+            if page.get("next_cursor"):
+                state["cursor"] = page["next_cursor"]
+            else:
+                state["pending"].pop(0)
+                state["cursor"] = None
+            _save_progress(part, state)
+    return len(seen)
+
+
+def _sql_path(path):
+    return "'" + str(path).replace("'", "''") + "'"
+
+
+def _write_v1_day(d, window_id, staged):
+    """Turn the staged JSON lines (one v1 tweet each) into the export's two
+    parquet files and the export_id marker in dir *d*."""
+    import duckdb  # lazy, like _duckdb
+    con = duckdb.connect()
+    con.execute(f"SET memory_limit='{DUCKDB_MEMORY_LIMIT}'")
+    con.execute("SET threads=1")
+    columns = "{" + ", ".join(f"'{k}': '{v}'" for k, v
+                              in _V1_TWEET_COLUMNS.items()) + "}"
+    con.execute(
+        "create table v as select * from read_json("
+        f"{_sql_path(staged)}, format='newline_delimited', "
+        f"columns={columns})")
+    con.execute(
+        "copy (select tweet_id, account_id, "
+        "created_at::TIMESTAMPTZ as created_at, full_text, favorite_count, "
+        "retweet_count, reply_to_tweet_id, "
+        "reply_to_user_id as reply_to_account_id, retweeted_tweet_id, "
+        "quoted_tweet_id, conversation_id from v) "
+        f"to {_sql_path(d / 'tweets.parquet')} (format parquet)")
+    con.execute(
+        "copy (select account_id, "
+        "arg_max(username, created_at::TIMESTAMPTZ) as username, "
+        "arg_max(account_display_name, created_at::TIMESTAMPTZ) "
+        "as display_name, NULL::BIGINT as num_tweets "
+        "from v group by account_id) "
+        f"to {_sql_path(d / 'profiles.parquet')} (format parquet)")
+    con.close()
+    (d / "export_id").write_text(window_id)
+
+
+def _prune_v1_days(root, keep=V1_DAYS_KEPT):
+    days = sorted(p for p in root.iterdir()
+                  if p.is_dir() and p.name.startswith(V1_WINDOW_PREFIX)
+                  and not p.name.endswith(".part"))
+    for old in days[:-keep] if keep else days:
+        # Under the readers' lock: a render reading this day finishes first.
+        with _snapshot_lock(old):
+            shutil.rmtree(old, ignore_errors=True)
+
+
+def ensure_v1_day(snapshot_dir, now=None, timeout=None, on_request=None):
+    """Make the current day window's tweets cached from API v1; fetch only
+    when that window is not cached yet. Returns (window_id, fetched).
+
+    The day is paged into a ``.part`` dir with its progress (the windows
+    still to read and the cursor) saved after every page, and renamed into
+    place only when complete: a reader never sees part of a day, and a run
+    that fails keeps what it read; the next run resumes from the stored
+    cursor. A window whose last run failed is not tried again for
+    V1_DAY_RETRY_AFTER (raises V1DayWaiting). ``on_request`` is passed to
+    every request (the caller's daily budget). One fetcher at a time per
+    snapshot dir: another one running raises SnapshotBusy at once. A day
+    with no tweets at all raises CommunityArchiveError and caches nothing;
+    a failed request raises urllib's error."""
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    since, until = v1_day_window(now)
+    window_id = v1_window_id(until)
+    root = _v1_days_root(snapshot_dir)
+    final = root / window_id
+    if snapshot_export_id(final) == window_id:
+        return window_id, False
+    with _download_lock(root, wait=False):
+        if snapshot_export_id(final) == window_id:
+            return window_id, False
+        part = root / f"{window_id}.part"
+        for other in root.iterdir():  # earlier windows never complete now
+            if (other.is_dir() and other.name.endswith(".part")
+                    and other != part):
+                shutil.rmtree(other, ignore_errors=True)
+        state = _load_progress(part)
+        if (state is None or state.get("window_id") != window_id
+                or not isinstance(state.get("pending"), list)):
+            shutil.rmtree(part, ignore_errors=True)
+            part.mkdir(parents=True)
+            state = {"window_id": window_id, "cursor": None, "pages": 0,
+                     "pending": [[_iso_z(since), _iso_z(until)]]}
+            _save_progress(part, state)
+        failed_at = state.get("failed_at")
+        if failed_at and now - _parse_z(failed_at) < V1_DAY_RETRY_AFTER:
+            raise V1DayWaiting(f"{window_id} failed at {failed_at}")
+        state.pop("failed_at", None)
+        try:
+            count = _fetch_day_pages(part, state, timeout, on_request)
+            if not count:
+                # Nothing at all: start the window over on the next try.
+                state.update(cursor=None, pending=[[_iso_z(since),
+                                                    _iso_z(until)]])
+                (part / "tweets.jsonl").unlink()
+                raise CommunityArchiveError(
+                    "Community Archive API: no tweets from "
+                    f"{_iso_z(since)} to {_iso_z(until)}")
+            _write_v1_day(part, window_id, part / "tweets.jsonl")
+        except BaseException:
+            state["failed_at"] = _iso_z(now)
+            _save_progress(part, state)
+            raise
+        (part / "tweets.jsonl").unlink()
+        (part / _PROGRESS).unlink()
+        if final.exists():  # an incomplete leftover
+            shutil.rmtree(final)
+        os.replace(part, final)
+        _prune_v1_days(root)
+    log.info("Community Archive API: cached %d tweets for %s in %d pages",
+             count, window_id, state.get("pages") or 0)
+    return window_id, True
+
+
+# ── a pre-fill's read of one account, resumable (#688) ────────────────────
+
+# What a pre-fill keeps of each tweet: what to_export_entry reads.
+_V1_PREFILL_COLUMNS = (
+    "tweet_id", "created_at", "full_text", "favorite_count", "retweet_count",
+    "reply_to_tweet_id", "reply_to_user_id", "reply_to_username")
+
+
+def stage_account_tweets_v1(account_id, stash_dir, run_seconds=None,
+                            on_page=None, clock=time.monotonic):
+    """Page an account's v1 timeline, oldest first, into
+    ``stash_dir/tweets.jsonl``, with the cursor saved in
+    ``stash_dir/progress.json`` after every page. A stash left by an
+    earlier run for the same account (one that failed, or stopped at its
+    time budget) is resumed from its cursor, so no page is read twice; a
+    stash of another account is discarded. After ``run_seconds`` of paging
+    (at least one page) it stops with the progress saved. Returns (done,
+    fetched): done is True once the timeline's last page is staged. A
+    stored cursor the API no longer takes (400) starts the read over,
+    once. ``on_page(fetched)`` after each page."""
+    d = pathlib.Path(stash_dir)
+    state = _load_progress(d)
+    if not state or state.get("account_id") != str(account_id):
+        shutil.rmtree(d, ignore_errors=True)
+        d.mkdir(parents=True)
+        state = {"account_id": str(account_id), "cursor": None,
+                 "fetched": 0, "done": False}
+        _save_progress(d, state)
+    if state.get("done"):
+        return True, int(state.get("fetched") or 0)
+    resumed = state.get("cursor")
+    started = clock()
+    with open(d / "tweets.jsonl", "a") as out:
+        while True:
+            try:
+                rows, next_cursor = v1_account_tweets_page(
+                    account_id, cursor=state.get("cursor"))
+            except urllib.error.HTTPError as e:
+                if e.code == 400 and resumed and state.get("cursor") == resumed:
+                    log.info("Community Archive API: the stored cursor for "
+                             "account %s was refused; reading it again",
+                             account_id)
+                    out.seek(0)
+                    out.truncate()
+                    state.update(cursor=None, fetched=0)
+                    resumed = None
+                    _save_progress(d, state)
+                    continue
+                raise
+            for row in rows:
+                out.write(json.dumps(
+                    {k: row.get(k) for k in _V1_PREFILL_COLUMNS}) + "\n")
+            out.flush()
+            state["fetched"] = int(state.get("fetched") or 0) + len(rows)
+            state["cursor"] = next_cursor
+            state["done"] = not next_cursor
+            _save_progress(d, state)
+            if on_page:
+                on_page(state["fetched"])
+            if state["done"]:
+                return True, state["fetched"]
+            if run_seconds is not None and clock() - started >= run_seconds:
+                return False, state["fetched"]
+
+
+def iter_staged_tweets(stash_dir):
+    """The rows stage_account_tweets_v1 staged, in the order read."""
+    with open(pathlib.Path(stash_dir) / "tweets.jsonl") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                yield json.loads(line)

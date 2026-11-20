@@ -85,9 +85,11 @@ class _FakeSelf:
 def app():
     saved_flask_app = _sync_mod.flask_app
     _sync_mod.flask_app = _app
+    from datetime import datetime
     with _app.app_context():
         _db.create_all()
-        user = User(username="tester")
+        # In use: an account nobody used for a month is paused (#647).
+        user = User(username="tester", last_seen_at=datetime.utcnow())
         _db.session.add(user)
         _db.session.commit()
         yield _app
@@ -665,10 +667,14 @@ def test_nightly_fanout_dispatches_local_3am_connected_only(app, monkeypatch):
     night_user.timezone = night_tz
     _mk_account(night_user.id)
 
-    day_user = User(username="daytime", timezone=day_tz)
-    revoked_user = User(username="revoked", timezone=night_tz)
-    fresh_user = User(username="freshly-synced", timezone=night_tz)
-    no_account_user = User(username="never-connected", timezone=night_tz)
+    seen = datetime.utcnow()
+    day_user = User(username="daytime", timezone=day_tz, last_seen_at=seen)
+    revoked_user = User(username="revoked", timezone=night_tz,
+                        last_seen_at=seen)
+    fresh_user = User(username="freshly-synced", timezone=night_tz,
+                      last_seen_at=seen)
+    no_account_user = User(username="never-connected", timezone=night_tz,
+                           last_seen_at=seen)
     _db.session.add_all([day_user, revoked_user, fresh_user,
                          no_account_user])
     _db.session.commit()
@@ -719,6 +725,32 @@ def test_nightly_fanout_noop_without_client_id(app, monkeypatch):
     finally:
         _app.config["X_CLIENT_ID"] = "client-id"
     assert result == {"status": "not_configured"}
+
+
+def test_payments_on_a_blocked_account_is_not_synced(app, monkeypatch):
+    """#697: while payments are on, the nightly sync skips an account the
+    admin blocked (deactivated), whatever its paid set. Control: payments
+    off, it is synced as before."""
+    from datetime import datetime
+    user = User.query.first()
+    user.timezone = _tz_at_hour(_sync_mod.NIGHTLY_SYNC_LOCAL_HOUR)
+    user.plan = "alpha"   # the paid set, by hand
+    user.approved = False
+    user.deactivated_at = datetime.utcnow()
+    _db.session.commit()
+    _mk_account(user.id)
+    dispatched = []
+    fake_task = MagicMock()
+    fake_task.apply_async = lambda args, countdown: dispatched.append(args[0])
+    monkeypatch.setattr(_sync_mod, "sync_twitter_bookmarks", fake_task)
+
+    monkeypatch.setitem(_app.config, "PAYMENTS_ENABLED", True)
+    assert _sync_mod.sync_all_twitter_bookmarks() == {
+        "status": "ok", "dispatched": 0}
+    monkeypatch.setitem(_app.config, "PAYMENTS_ENABLED", False)
+    assert _sync_mod.sync_all_twitter_bookmarks() == {
+        "status": "ok", "dispatched": 1}
+    assert dispatched == [user.id]
 
 
 def test_successful_sync_logs_api_cost(app, monkeypatch):
@@ -1355,3 +1387,266 @@ def test_a_disconnect_mid_sync_still_releases_the_lock(
 
     _sync_mod.sync_twitter_bookmarks(_FakeSelf(), uid)
     assert fake_lock.held == {}
+
+
+# ── Accounts nobody uses (#647) ─────────────────────────────────────────
+# Peter, 2026-11-12: background work pauses after a month without use
+# (UNUSED_ACCOUNT_PAUSE_DAYS, 30 days) and catches up once when the owner
+# is back.
+
+def _record_dispatches(monkeypatch):
+    dispatched = []
+    fake_task = MagicMock()
+    fake_task.apply_async = lambda args, countdown: dispatched.append(
+        args[0])
+    monkeypatch.setattr(_sync_mod, "sync_twitter_bookmarks", fake_task)
+    return dispatched
+
+
+def test_nightly_sync_pauses_an_account_nobody_used_for_a_month(
+        app, monkeypatch):
+    """At their local 3am: the owner seen 29 days ago is synced; the
+    owner last seen 31 days ago, and a pre-filled account nobody has
+    signed into, are not, and the pause is recorded on the account."""
+    from datetime import datetime, timedelta
+    night_tz = _tz_at_hour(_sync_mod.NIGHTLY_SYNC_LOCAL_HOUR)
+    now = datetime.utcnow()
+    recent = User.query.first()
+    recent.timezone = night_tz
+    recent.last_seen_at = now - timedelta(days=29)
+    away = User(username="away", timezone=night_tz,
+                last_seen_at=now - timedelta(days=31))
+    never = User(username="prefilled", timezone=night_tz,
+                 prefilled_handle="prefilled")
+    _db.session.add_all([away, never])
+    _db.session.commit()
+    _mk_account(recent.id)
+    away_account = _mk_account(away.id)
+    never_account = _mk_account(never.id)
+    dispatched = _record_dispatches(monkeypatch)
+
+    assert _sync_mod.sync_all_twitter_bookmarks() == {
+        "status": "ok", "dispatched": 1}
+    assert dispatched == [recent.id]
+    _db.session.expire_all()
+    assert ExternalAccount.query.get(away_account.id).sync_paused_at
+    assert ExternalAccount.query.get(never_account.id).sync_paused_at
+    assert ExternalAccount.query.filter_by(
+        user_id=recent.id).one().sync_paused_at is None
+
+
+def test_a_paused_account_stays_paused_while_its_owner_is_away(
+        app, monkeypatch):
+    """Later nights send nothing and keep the time the pause began."""
+    from datetime import datetime, timedelta
+    user = User.query.first()
+    user.timezone = _tz_at_hour(_sync_mod.NIGHTLY_SYNC_LOCAL_HOUR)
+    user.last_seen_at = datetime.utcnow() - timedelta(days=45)
+    account = _mk_account(user.id)
+    began = datetime.utcnow() - timedelta(days=15)
+    account.sync_paused_at = began
+    account.last_synced_at = began - timedelta(days=1)
+    _db.session.commit()
+    dispatched = _record_dispatches(monkeypatch)
+
+    for _ in range(2):
+        assert _sync_mod.sync_all_twitter_bookmarks()["dispatched"] == 0
+    assert dispatched == []
+    _db.session.expire_all()
+    assert ExternalAccount.query.get(account.id).sync_paused_at == began
+
+
+def test_a_returning_owner_gets_one_catch_up_sync_of_the_whole_pause(
+        app, monkeypatch):
+    """The owner opens Loore at midday after six weeks away. Within the
+    hour, not at their next 3am, one sync is sent, and it reads every
+    bookmark saved during the pause; the next hourly runs send nothing
+    more (the nightly sync then waits out its 20 h gap)."""
+    from datetime import datetime, timedelta
+    uid = User.query.first().id
+    user = User.query.get(uid)
+    user.timezone = _tz_at_hour((_sync_mod.NIGHTLY_SYNC_LOCAL_HOUR + 9) % 24)
+    user.last_seen_at = datetime.utcnow() - timedelta(minutes=2)
+    account, synced, old = _synced_account_with_old_bookmarks(
+        uid, 200, days_ago=42)
+    account.sync_paused_at = synced + timedelta(days=12)
+    _db.session.commit()
+    real_sync = _sync_mod.sync_twitter_bookmarks
+    dispatched = _record_dispatches(monkeypatch)
+
+    assert _sync_mod.sync_all_twitter_bookmarks()["dispatched"] == 1
+    assert dispatched == [uid]
+    _db.session.expire_all()
+    assert ExternalAccount.query.get(account.id).sync_paused_at is None
+
+    # The catch-up itself: 150 bookmarks saved while nobody used Loore.
+    _fake_x_bookmarks(monkeypatch, [f"p{i}" for i in range(150)] + old)
+    result = real_sync(_FakeSelf(), uid)
+    assert result["status"] == "ok" and result["created"] == 150
+
+    dispatched = _record_dispatches(monkeypatch)
+    assert _sync_mod.sync_all_twitter_bookmarks()["dispatched"] == 0
+    assert dispatched == []
+
+
+def test_a_sync_now_since_the_pause_leaves_nothing_to_catch_up(
+        app, monkeypatch):
+    """The owner came back and pressed "Sync now" on the Import page
+    before the hourly run: that sync finished after the pause began, so
+    the hourly run only lifts the pause."""
+    from datetime import datetime, timedelta
+    user = User.query.first()
+    user.timezone = _tz_at_hour((_sync_mod.NIGHTLY_SYNC_LOCAL_HOUR + 9) % 24)
+    user.last_seen_at = datetime.utcnow() - timedelta(minutes=5)
+    account = _mk_account(user.id)
+    account.sync_paused_at = datetime.utcnow() - timedelta(days=20)
+    account.last_synced_at = datetime.utcnow() - timedelta(minutes=3)
+    _db.session.commit()
+    dispatched = _record_dispatches(monkeypatch)
+
+    assert _sync_mod.sync_all_twitter_bookmarks()["dispatched"] == 0
+    assert dispatched == []
+    _db.session.expire_all()
+    assert ExternalAccount.query.get(account.id).sync_paused_at is None
+
+
+def test_a_clip_is_use_and_the_pause_setting_can_turn_it_off(
+        app, monkeypatch):
+    """A page clipped with the Chrome clipper last week keeps the nightly
+    sync running for an owner who has not opened the app for two months.
+    UNUSED_ACCOUNT_PAUSE_DAYS = 0 turns the pause off."""
+    from datetime import datetime, timedelta
+    from backend.models import ApiToken
+    night_tz = _tz_at_hour(_sync_mod.NIGHTLY_SYNC_LOCAL_HOUR)
+    clipper = User.query.first()
+    clipper.timezone = night_tz
+    clipper.last_seen_at = datetime.utcnow() - timedelta(days=60)
+    away = User(username="away", timezone=night_tz,
+                last_seen_at=datetime.utcnow() - timedelta(days=60))
+    _db.session.add(away)
+    _db.session.add(ApiToken(
+        user_id=clipper.id, name="clipper", token_hash="h" * 64,
+        prefix="abcdefgh",
+        last_used_at=datetime.utcnow() - timedelta(days=7)))
+    _db.session.commit()
+    _mk_account(clipper.id)
+    _mk_account(away.id)
+    dispatched = _record_dispatches(monkeypatch)
+
+    _sync_mod.sync_all_twitter_bookmarks()
+    assert dispatched == [clipper.id]
+
+    ExternalAccount.query.update({"sync_paused_at": None,
+                                  "last_synced_at": None})
+    _db.session.commit()
+    dispatched = _record_dispatches(monkeypatch)
+    _app.config["UNUSED_ACCOUNT_PAUSE_DAYS"] = 0
+    try:
+        _sync_mod.sync_all_twitter_bookmarks()
+    finally:
+        _app.config.pop("UNUSED_ACCOUNT_PAUSE_DAYS")
+    assert sorted(dispatched) == sorted([clipper.id, away.id])
+
+
+# ── Payments on: the paid check before #659's rules (PR #680) ───────────
+# The payments train merged #649's "no background job for an account
+# without the paid set" with #659's per-account _sync_due (nightly, pause,
+# catch-up) by hand: the paid check runs first, for every account, then
+# _sync_due. So an account without the paid set gets neither the nightly
+# sync nor a catch-up, and its pause stays as it is.
+
+@pytest.fixture
+def payments_on():
+    _app.config["PAYMENTS_ENABLED"] = True
+    yield
+    _app.config.pop("PAYMENTS_ENABLED", None)
+
+
+def _subscriber(user, paid):
+    """*user* on "free" with a subscription that is active (the paid set)
+    or ended (lapsed: let in, without the paid set)."""
+    user.plan = "free"
+    user.subscription_level = "standard"
+    user.subscription_status = "active" if paid else "ended"
+    user.subscription_ever_paid = True
+    _db.session.commit()
+    return user
+
+
+def test_payments_on_the_nightly_sync_needs_the_paid_set(
+        app, payments_on, monkeypatch):
+    """At their local 3am, both in use: the subscriber is synced, the
+    lapsed account is not, and no pause is recorded for it. Guards the
+    merged ``if not ai_replies_allowed(account.user): continue`` (merged
+    the other way, #659's gate alone, the lapsed account is synced)."""
+    from datetime import datetime
+    night_tz = _tz_at_hour(_sync_mod.NIGHTLY_SYNC_LOCAL_HOUR)
+    paid = _subscriber(User.query.first(), paid=True)
+    paid.timezone = night_tz
+    lapsed = _subscriber(User(username="lapsed", timezone=night_tz,
+                              last_seen_at=datetime.utcnow()), paid=False)
+    _db.session.add(lapsed)
+    _db.session.commit()
+    _mk_account(paid.id)
+    lapsed_account = _mk_account(lapsed.id)
+    dispatched = _record_dispatches(monkeypatch)
+
+    assert _sync_mod.sync_all_twitter_bookmarks()["dispatched"] == 1
+    assert dispatched == [paid.id]
+    _db.session.expire_all()
+    assert ExternalAccount.query.get(lapsed_account.id).sync_paused_at is None
+
+
+def test_payments_on_no_catch_up_without_the_paid_set_the_pause_waits(
+        app, payments_on, monkeypatch):
+    """Both owners are back after a pause, at midday their time: the
+    subscriber gets #659's catch-up and the pause is lifted; the lapsed
+    account gets none, and its pause is kept as it was. Guards the order
+    of the merge: the paid check before _sync_due (after it, _sync_due
+    would already have lifted the lapsed account's pause)."""
+    from datetime import datetime, timedelta
+    day_tz = _tz_at_hour((_sync_mod.NIGHTLY_SYNC_LOCAL_HOUR + 9) % 24)
+    began = datetime.utcnow() - timedelta(days=20)
+    owners = []
+    for name, paid in (("paid", True), ("lapsed", False)):
+        user = _subscriber(User(username=name, timezone=day_tz,
+                                last_seen_at=datetime.utcnow()), paid=paid)
+        _db.session.add(user)
+        _db.session.commit()
+        account = _mk_account(user.id)
+        account.sync_paused_at = began
+        account.last_synced_at = began - timedelta(days=1)
+        _db.session.commit()
+        owners.append((user, account))
+    (paid, paid_account), (lapsed, lapsed_account) = owners
+    dispatched = _record_dispatches(monkeypatch)
+
+    assert _sync_mod.sync_all_twitter_bookmarks()["dispatched"] == 1
+    assert dispatched == [paid.id]
+    _db.session.expire_all()
+    assert ExternalAccount.query.get(paid_account.id).sync_paused_at is None
+    assert ExternalAccount.query.get(lapsed_account.id).sync_paused_at == \
+        began
+
+    # The subscription comes back: the next hourly run catches up.
+    _subscriber(_db.session.get(User, lapsed.id), paid=True)
+    dispatched = _record_dispatches(monkeypatch)
+    assert _sync_mod.sync_all_twitter_bookmarks()["dispatched"] == 1
+    assert dispatched == [lapsed.id]
+
+
+def test_payments_on_a_subscriber_nobody_uses_is_paused(
+        app, payments_on, monkeypatch):
+    """Control: #659's pause for a subscriber away for 40 days."""
+    from datetime import datetime, timedelta
+    away = _subscriber(User.query.first(), paid=True)
+    away.timezone = _tz_at_hour(_sync_mod.NIGHTLY_SYNC_LOCAL_HOUR)
+    away.last_seen_at = datetime.utcnow() - timedelta(days=40)
+    _db.session.commit()
+    account = _mk_account(away.id)
+    dispatched = _record_dispatches(monkeypatch)
+
+    assert _sync_mod.sync_all_twitter_bookmarks()["dispatched"] == 0
+    assert dispatched == []
+    _db.session.expire_all()
+    assert ExternalAccount.query.get(account.id).sync_paused_at is not None

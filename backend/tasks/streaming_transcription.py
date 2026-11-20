@@ -32,6 +32,10 @@ from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.encryption import decrypt_file_to_temp
 from backend.utils.cost import calculate_audio_cost_microdollars
 from backend.utils.error_privacy import TRANSCRIPTION_FAILED_TEXT
+from backend.utils.recording_ai_usage import (
+    NOT_TRANSCRIBED_TEXT, draft_may_transcribe, mark_chunks_not_transcribed,
+    may_transcribe, not_transcribed_note,
+)
 from backend.utils import voice_timing
 
 logger = get_task_logger(__name__)
@@ -54,6 +58,12 @@ VOICE_REPLY_SKIPPED_SPEND_CAP = (
     "Your recording is saved. Loore didn't reply because you've reached "
     "your monthly usage limit, which resets at the start of next month."
 )
+# The same for a ceiling only the first payment lifts (#438: the trial's,
+# an alpha tester's free month's), which does not reset with the month.
+VOICE_REPLY_SKIPPED_SPEND_CAP_UNTIL_PAYMENT = (
+    "Your recording is saved. Loore didn't reply because you've reached "
+    "your usage limit, which lifts with your first payment."
+)
 # The same when AI usage keeps the recording, or the thread it continues,
 # away from AI (streaming init refuses such a recording; this covers a
 # setting changed while it was recorded).
@@ -61,6 +71,25 @@ VOICE_REPLY_SKIPPED_AI_USAGE = (
     "Your recording is saved. Loore didn't reply because AI usage is set "
     "to None."
 )
+
+
+def voice_reply_skipped_spend_cap(user_id):
+    """The capped recording's text for *user_id*'s kind of ceiling."""
+    from backend.utils.spend import cap_lifts_with_payment
+    if cap_lifts_with_payment(user_id):
+        return VOICE_REPLY_SKIPPED_SPEND_CAP_UNTIL_PAYMENT
+    return VOICE_REPLY_SKIPPED_SPEND_CAP
+
+
+def _ai_replies_allowed(user_id):
+    """Payments on (#438): whether the account gets AI replies. True
+    while payments are off, without a query."""
+    from backend.utils.subscriptions import (
+        ai_replies_allowed, payments_enabled)
+    if not payments_enabled():
+        return True
+    from backend.models import User
+    return ai_replies_allowed(db.session.get(User, user_id))
 # The same when the turn asked for a read-only model: the reply is not
 # moved to another model (Peter, 2026-10-02), so there is none.
 VOICE_REPLY_SKIPPED_READ_ONLY = (
@@ -192,6 +221,17 @@ def transcribe_chunk(self, node_id: int, chunk_index: int, chunk_path: str):
 
         if not chunk_record:
             raise ValueError(f"Chunk record not found for node {node_id}, chunk {chunk_index}")
+
+        # No AI means no AI (#665): the entry may have been set to None
+        # since the chunk was queued. Kept, not sent to the provider.
+        node = Node.query.get(node_id)
+        if node is not None and not may_transcribe(node.ai_usage):
+            mark_chunks_not_transcribed([chunk_record])
+            db.session.commit()
+            logger.info(f"Node {node_id} chunk {chunk_index}: not "
+                        f"transcribed, AI usage is None")
+            return {'node_id': node_id, 'chunk_index': chunk_index,
+                    'status': 'not_transcribed'}
 
         # Update status to processing
         chunk_record.status = 'processing'
@@ -390,27 +430,29 @@ def finalize_streaming(self, node_id: int, session_id: str, total_chunks: int):
 
         full_transcript = "\n\n".join(transcripts)
 
+        # Chunks kept without their text because the entry was set to None
+        # while it was recorded (#665): the note says so, and the audio is
+        # kept with the entry below instead of being deleted.
+        has_text = bool(full_transcript.strip())
+        kept_note = not_transcribed_note(failed_chunks, has_text)
+        keep_audio = any(c.error == NOT_TRANSCRIBED_TEXT
+                         for c in failed_chunks)
+        if kept_note and not has_text:
+            body = kept_note
+        elif failed_chunks:
+            failed_indices = [c.chunk_index for c in failed_chunks]
+            note = (kept_note or
+                    f"*Note: Chunks {failed_indices} failed to transcribe*")
+            body = f"{note}\n\n{full_transcript}"
+        else:
+            body = full_transcript
+
         # Format final content - only add title for top-level nodes
         if node.parent_id is None:
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            if failed_chunks:
-                failed_indices = [c.chunk_index for c in failed_chunks]
-                final_content = (
-                    f"# {timestamp} Voice note\n\n"
-                    f"*Note: Chunks {failed_indices} failed to transcribe*\n\n"
-                    f"{full_transcript}"
-                )
-            else:
-                final_content = f"# {timestamp} Voice note\n\n{full_transcript}"
+            final_content = f"# {timestamp} Voice note\n\n{body}"
         else:
-            if failed_chunks:
-                failed_indices = [c.chunk_index for c in failed_chunks]
-                final_content = (
-                    f"*Note: Chunks {failed_indices} failed to transcribe*\n\n"
-                    f"{full_transcript}"
-                )
-            else:
-                final_content = full_transcript
+            final_content = body
 
         # Update node
         from backend.utils.tokens import approximate_token_count
@@ -420,7 +462,11 @@ def finalize_streaming(self, node_id: int, session_id: str, total_chunks: int):
         # it; split into a serial chain (audio stays on this head node).
         from backend.utils.node_split import split_node_into_chain
         split_node_into_chain(node)
-        node.transcription_status = 'completed'
+        if kept_note and not has_text:
+            node.transcription_status = 'failed'
+            node.transcription_error = NOT_TRANSCRIBED_TEXT
+        else:
+            node.transcription_status = 'completed'
         node.transcription_completed_at = datetime.utcnow()
         node.transcription_progress = 100
         db.session.commit()
@@ -432,7 +478,17 @@ def finalize_streaming(self, node_id: int, session_id: str, total_chunks: int):
         chunk_dir = storage_path(
             audio_storage_root, "streaming", node.user_id, session_id)
 
-        if chunk_dir.exists():
+        if keep_audio and chunk_dir.exists():
+            # Where the entry's audio is played from (GET audio-chunks).
+            from backend.utils.audio_storage import (
+                move_draft_audio_to_node_dir,
+            )
+            move_draft_audio_to_node_dir(
+                chunk_dir,
+                storage_path(audio_storage_root, "nodes", node.user_id,
+                             node.id),
+                logger)
+        elif chunk_dir.exists():
             try:
                 shutil.rmtree(chunk_dir)
                 logger.info(f"Cleaned up streaming chunks for session {session_id}")
@@ -504,6 +560,14 @@ def transcribe_draft_chunk(self, session_id: str, chunk_index: int, chunk_path: 
 
         if not chunk_record:
             raise ValueError(f"Chunk record not found for session {session_id}, chunk {chunk_index}")
+
+        # No AI means no AI (#665), as in transcribe_chunk_batch.
+        draft = Draft.query.filter_by(session_id=session_id).first()
+        if draft is not None and not draft_may_transcribe(draft):
+            mark_chunks_not_transcribed([chunk_record])
+            db.session.commit()
+            return {'session_id': session_id, 'chunk_index': chunk_index,
+                    'status': 'not_transcribed'}
 
         # Update status to processing
         chunk_record.status = 'processing'
@@ -695,6 +759,25 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
                 'session_id': session_id,
                 'chunk_indices': chunk_indices,
                 'status': 'draft_deleted',
+            }
+
+        # No AI means no AI (#665): the entry this recording becomes may
+        # not let AI read it (a Voice turn whose thread was set to None
+        # while it was recorded, or a session started before the routes
+        # refused one). Asked here, right before the provider call: the
+        # chunks keep their audio files and are marked not transcribed.
+        if not draft_may_transcribe(draft):
+            mark_chunks_not_transcribed(NodeTranscriptChunk.query.filter(
+                NodeTranscriptChunk.session_id == session_id,
+                NodeTranscriptChunk.chunk_index.in_(chunk_indices),
+            ).all())
+            db.session.commit()
+            logger.info(f"Session {session_id}: chunks {chunk_indices} not "
+                        f"transcribed, AI usage is None")
+            return {
+                'session_id': session_id,
+                'chunk_indices': chunk_indices,
+                'status': 'not_transcribed',
             }
 
         # Family-only mime drives the on-disk extension. Defensive None
@@ -1130,6 +1213,7 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
         if (user_id and model and label == 'Voice'
                 and is_chat_model(model)
                 and not user_is_capped(user_id)
+                and _ai_replies_allowed(user_id)
                 and _voice_reply_refusal(user_id, parent_id, draft) is None
                 and _voice_approval_skip(user_id, parent_id) is None
                 and not _voice_thread_too_long(user_id, parent_id, model)):
@@ -1190,7 +1274,13 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
             status='stored'
         ).order_by(NodeTranscriptChunk.chunk_index).all()
 
-        if stored_chunks:
+        if stored_chunks and not draft_may_transcribe(draft):
+            # No AI means no AI (#665): kept, not queued for the provider.
+            mark_chunks_not_transcribed(stored_chunks)
+            db.session.commit()
+            logger.info(f"Session {session_id}: {len(stored_chunks)} stored "
+                        f"chunk(s) not transcribed, AI usage is None")
+        elif stored_chunks:
             remaining_indices = [c.chunk_index for c in stored_chunks]
             logger.info(
                 f"Session {session_id}: triggering transcription of "
@@ -1310,22 +1400,29 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
         # title them (also stops the title leaking onto the node via the
         # frontend POST /voice fallback when the server-side chain is skipped).
         title_label = label or "Voice note"
+        # Chunks kept without their text because the entry may not be read
+        # by AI (#665) get a note that says so, not "failed".
+        failed_note = None
+        if failed_chunks:
+            failed_note = (
+                not_transcribed_note(failed_chunks,
+                                     bool(full_transcript.strip()))
+                or f"*Note: Chunks {[c.chunk_index for c in failed_chunks]} "
+                   f"failed to transcribe*")
         if draft.parent_id is None and label != 'Voice':
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             if failed_chunks:
-                failed_indices = [c.chunk_index for c in failed_chunks]
                 final_content = (
                     f"# {timestamp} {title_label}\n\n"
-                    f"*Note: Chunks {failed_indices} failed to transcribe*\n\n"
+                    f"{failed_note}\n\n"
                     f"{full_transcript}"
                 )
             else:
                 final_content = f"# {timestamp} {title_label}\n\n{full_transcript}"
         else:
             if failed_chunks:
-                failed_indices = [c.chunk_index for c in failed_chunks]
                 final_content = (
-                    f"*Note: Chunks {failed_indices} failed to transcribe*\n\n"
+                    f"{failed_note}\n\n"
                     f"{full_transcript}"
                 )
             else:
@@ -1517,7 +1614,10 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
 
     prompt_key = label.lower()  # 'voice'
     refused = _voice_reply_refusal(user_id, parent_id, draft)
-    if refused is None and not skip_message:
+    # A waiting change answers after the plan (#438): an account without
+    # AI replies is told that first, by create_llm_placeholder below.
+    if (refused is None and not skip_message
+            and _ai_replies_allowed(user_id)):
         skip_message = _voice_approval_skip(user_id, parent_id)
     if refused is None and skip_message:
         # No reply for another reason (#513: nothing was transcribed); the
@@ -1621,12 +1721,19 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     # ReadOnlyModelRefused the same way: the client sent a read-only model
     # (an app whose picker does not filter on "chat"); the recording is
     # kept and the reply is not moved to another model.
+    # SubscriptionRequired the same way (#438): payments are on and the
+    # account's access ended while this recording was made (streaming
+    # init refuses an account without it); the recording is kept with its
+    # transcript, and its text names the reason, which the Voice screen
+    # says aloud (voice_refusals.SUBSCRIPTION_CODES). Raised before
+    # ThreadTooLong (create_llm_placeholder checks the plan first).
     # ThreadTooLong the same way (#648): the thread grew past the limit
     # with this recording; it is kept, and the Voice screen says aloud why
     # no reply follows (the warning's code, thread_size.skipped_reply_code).
     from backend.utils.placeholders import UserExportValidationError
     from backend.utils.node_deletion import ParentDeletedError
     from backend.utils.spend import SpendCapExceeded
+    from backend.utils.subscriptions import SubscriptionRequired
     from backend.utils.thread_size import (
         ThreadTooLong,
     )
@@ -1637,9 +1744,11 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
         )
     except (UserExportValidationError, ParentDeletedError,
             SpendCapExceeded, AIUsageRefused, ReadOnlyModelRefused,
-            ThreadTooLong) as e:
+            SubscriptionRequired, ThreadTooLong) as e:
         if isinstance(e, SpendCapExceeded):
-            message = VOICE_REPLY_SKIPPED_SPEND_CAP
+            message = voice_reply_skipped_spend_cap(user_id)
+        elif isinstance(e, SubscriptionRequired):
+            message = e.recording_message
         elif isinstance(e, AIUsageRefused):
             message = VOICE_REPLY_SKIPPED_AI_USAGE
         elif isinstance(e, ReadOnlyModelRefused):

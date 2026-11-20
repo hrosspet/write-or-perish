@@ -278,6 +278,10 @@ def _submit(user, template, budget, chronological, keys, label, built=None,
     db.session.add(ProfileBatchJob(
         provider_key=provider_key, batch_id=batch_id, status="pending",
         items=[item], submitted_at=datetime.utcnow()))
+    # Deleted at Anthropic once the job is no longer pending (#693).
+    from backend.utils import anthropic_batch_deletion
+    anthropic_batch_deletion.register(
+        provider_key, batch_id, ProfileBatchJob.__tablename__)
     db.session.commit()
     logger.info("intentions user %s: submitted batch %s (%s export ~%s est tokens, budget=%s)",
                 user.id, batch_id, label, est, budget)
@@ -432,8 +436,10 @@ def _provider_cancel(provider_key, batch_id, keys):
             from anthropic import Anthropic
             Anthropic(api_key=keys.get("anthropic")).messages.batches.cancel(batch_id)
         elif provider_key.startswith("openai:"):
-            from openai import OpenAI
-            OpenAI(api_key=keys.get("openai")).batches.cancel(batch_id)
+            # Nothing reads the batch again: its files go too (#667).
+            from backend.utils.llm_batch import openai_batch_cancel_one
+            openai_batch_cancel_one(keys.get("openai"), batch_id,
+                                    delete_files=True)
         else:
             return f"unknown provider {provider_key}"
         return None
@@ -549,6 +555,16 @@ def mark_intentions_item_gave_up(item, job):
     column shows "failed" (otherwise the abandoned run is invisible — the
     job is marked collected and no new artifact version appears)."""
     _mark_item(item, job, gave_up=True)
+
+
+def mark_intentions_item_unsaved(item, job):
+    """A result that came back but could not be saved (the save raised):
+    shown as "failed", and flagged so its batch stays at the provider
+    while the provider keeps results (anthropic_batch_deletion
+    .UNSAVED_RESULT), where `backfill_intentions.py --collect <batch id>`
+    can still save it (#693 review)."""
+    from backend.utils.anthropic_batch_deletion import UNSAVED_RESULT
+    _mark_item(item, job, gave_up=True, **{UNSAVED_RESULT: True})
 
 
 def handle_failed_intentions_item(user, item, job, keys):

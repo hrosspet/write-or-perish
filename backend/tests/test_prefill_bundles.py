@@ -1072,10 +1072,10 @@ def test_admin_load_makes_an_account_its_owner_x_sign_in_finds(world, monkeypatc
 
 def _person_signs(user):
     """What would tell the deletion of unclaimed pre-filled accounts
-    (#685, PR #701) that a person used the account: the eleven user-row
-    signals of PR #701 (utils/unclaimed_accounts._COLUMN_SIGNALS), and the
-    row checks a load could trip. That module is not on this branch, so
-    the fields are asserted here directly."""
+    (#685, PR #701) that a person used the account: the user-row signals
+    of utils/unclaimed_accounts._COLUMN_SIGNALS (and the time zone, which
+    it leaves out), and the row checks a load could trip, asserted here
+    field by field as well as through that module."""
     from backend.models import (
         ApiToken, ChangelogReadState, Draft, ExternalAccount, NodeVersion,
         UsernameHistory, UserPrompt, UserTodo, APICostLog)
@@ -1143,6 +1143,70 @@ def test_an_account_made_ready_stays_recognisably_unclaimed(world, monkeypatch):
             first_stored = db.session.query(db.func.min(Node.updated_at)).filter(
                 Node.human_owner_id == user.id).scalar()
             assert first_stored >= before
+            # #701's own reading: no sign of a person, and the 90 days
+            # count from the load (prefilled_at, this server's clock).
+            from backend.utils import unclaimed_accounts as ua
+            assert ua.person_signals(user) == []
+            assert user.prefilled_at is not None and user.prefilled_at >= before
+            seen = ua.assess(user, datetime.utcnow(), config=prod.config)
+            assert (seen.status, seen.basis) == ("waiting", "prefilled")
+            assert seen.opened_at == user.prefilled_at
+            assert user.id in {u.id for u in ua.candidates()}
+
+
+def test_a_load_again_opens_the_account_again(world, monkeypatch):
+    """Every load sets prefilled_at to now (#685: preparing an account
+    again opens it again), as the admin's pre-fills and load_user.py do."""
+    _bundle(world, monkeypatch)
+    prod = world.prod()
+    with prod.app_context():
+        load, _ = _start("alice")
+        assert _run_until_done(load.id) == "done"
+        user = db.session.get(User, load.user_id)
+        user.prefilled_at = T0
+        db.session.commit()
+        _put_bundle(world, [_entry(0)], x_id="1001", handle="alice")
+        again, refusal = _start("1001")
+        assert refusal is None
+        assert _run_until_done(again.id) == "done"
+        assert db.session.get(User, load.user_id).prefilled_at > T0
+
+
+def test_x_api_posts_in_a_bundle_are_recorded_on_the_account(world, monkeypatch):
+    """A bundle's tweets fetched through the X API (provenance prefill_x)
+    stay at Chat at most, and the account gets the $0 X API pre-fill
+    record once, as load_user.py writes it (#689): its derived documents
+    then read as Chat at most too. A Community Archive bundle gets none."""
+    from backend.models import APICostLog
+    from backend.utils import dump_rows
+    from backend.utils.privacy import (
+        X_API_PREFILL_REQUEST, train_refused, x_api_account)
+    _put_bundle(world, [_entry(0, provenance="prefill_x", ai_usage="train"),
+                        _entry(1, provenance="prefill_x")], x_id="2001")
+    _put_bundle(world, [_entry(0, x_id="3001")], x_id="3001", handle="other")
+    _prod_mode(monkeypatch)
+    prod = world.prod()
+    with prod.app_context():
+        load, _ = _start("2001")
+        assert _run_until_done(load.id) == "done"
+        uid = load.user_id
+        rows = APICostLog.query.filter_by(
+            user_id=uid, request_type=X_API_PREFILL_REQUEST).all()
+        assert len(rows) == 1 and rows[0].cost_microdollars == 0
+        assert x_api_account(uid)
+        assert {n.ai_usage for n in Node.query.filter_by(human_owner_id=uid)} == {"chat"}
+        profile = UserProfile.query.filter_by(user_id=uid).one()
+        assert profile.ai_usage == "chat" and train_refused(profile)
+        # Once per account: a later part or load writes no second record.
+        assert dump_rows.record_x_api_posts(uid, "prefill_bundle") is False
+        db.session.commit()
+        assert APICostLog.query.filter_by(
+            user_id=uid, request_type=X_API_PREFILL_REQUEST).count() == 1
+
+        other, _ = _start("3001")
+        assert _run_until_done(other.id) == "done"
+        assert APICostLog.query.filter_by(user_id=other.user_id).count() == 0
+        assert not x_api_account(other.user_id)
 
 
 def test_a_chunked_load_resumes_after_a_killed_run(world, monkeypatch):
@@ -2091,16 +2155,109 @@ def test_overlapping_merges_of_one_account_make_one_call(world, monkeypatch):
         assert pbm._claim(second_id) == "running"
 
 
-def test_let_in_when_ready_leaves_a_blocked_account_out(world, monkeypatch):
+def test_let_in_when_ready_with_payments_off_approves_as_activate(world, monkeypatch):
+    """Payments off, #700's approval.let_in approves nobody (everyone waits
+    for the admin then): the load approves a never-approved account
+    itself, as the admin's Activate does, and leaves a blocked or an
+    already approved account alone. The plan stays the account's."""
+    from backend.utils.approval import is_blocked
     prod = world.prod()
     with prod.app_context():
+        prod.config["PAYMENTS_ENABLED"] = False
         blocked = User(username="b", approved=False, deactivated_at=datetime.utcnow())
         fresh = User(username="f", approved=False)
-        db.session.add_all([blocked, fresh])
+        earlier = User(username="e", approved=True, approved_at=T0)
+        db.session.add_all([blocked, fresh, earlier])
         db.session.commit()
-        assert pbl.let_in_when_ready(blocked) is False and blocked.approved is False
-        assert pbl.let_in_when_ready(fresh) is True and fresh.approved is True
-        assert fresh.plan == "alpha"     # the plan is #700's rule to own
+        assert pbl.let_in_when_ready(blocked) is False and is_blocked(blocked)
+        assert pbl.let_in_when_ready(fresh) is True
+        assert fresh.approved is True and fresh.approved_at is not None
+        assert fresh.plan == "alpha" and fresh.let_in_at is None
+        assert pbl.let_in_when_ready(earlier) is False and earlier.approved_at == T0
+
+
+def test_let_in_when_ready_with_payments_on_is_approval_let_in(world, monkeypatch):
+    """Payments on: #700's approval.let_in, so its rules hold here too.
+    The default "alpha" plan becomes "free" (the trial step follows),
+    let_in_at says the admin did not do it, and a blocked or a system
+    account is never let in. An account the gate let in at its first
+    request is left as it is."""
+    from backend.utils.approval import is_blocked
+    from backend.utils.system_accounts import SYSTEM_USERNAMES
+    prod = world.prod()
+    with prod.app_context():
+        prod.config["PAYMENTS_ENABLED"] = True
+        # Accounts from before payments carry the old default plan, "alpha".
+        blocked = User(username="b", approved=False, plan="alpha",
+                       deactivated_at=datetime.utcnow())
+        fresh = User(username="f", approved=False, plan="alpha")
+        system = User(username=SYSTEM_USERNAMES[0], approved=False)
+        gate = User(username="g", approved=True, approved_at=T0, let_in_at=T0,
+                    plan="free")
+        db.session.add_all([blocked, fresh, system, gate])
+        db.session.commit()
+        assert pbl.let_in_when_ready(blocked) is False and is_blocked(blocked)
+        assert blocked.plan == "alpha"
+        assert pbl.let_in_when_ready(fresh) is True
+        assert fresh.approved is True and fresh.plan == "free"
+        assert fresh.let_in_at is not None and fresh.approved_at == fresh.let_in_at
+        assert pbl.let_in_when_ready(system) is False and system.approved is False
+        assert pbl.let_in_when_ready(gate) is False
+        assert (gate.approved_at, gate.let_in_at, gate.plan) == (T0, T0, "free")
+
+
+@pytest.mark.parametrize("payments", [False, True])
+def test_a_yes_lets_in_by_the_rule_of_the_payments_switch(world, monkeypatch, payments):
+    """The whole automatic path for an account never let in (the test app
+    has no approval gate): payments off, it is approved with its plan;
+    on, #700's let_in makes the plan "free"."""
+    _bundle(world, monkeypatch)
+    prod = world.prod()
+    with prod.app_context():
+        prod.config["PAYMENTS_ENABLED"] = payments
+        user_id = _x_user().id
+        client = prod.test_client()
+        _login(client, user_id)
+        _yes(client)
+        assert _run_until_done(world.dispatched[0]) == "done"
+        user = db.session.get(User, user_id)
+        assert user.approved is True
+        assert user.plan == ("free" if payments else "alpha")
+        assert (user.let_in_at is not None) is payments
+        assert len(world.calls) == 1
+
+
+def test_payments_on_the_final_merge_runs_for_an_account_without_a_subscription(world, monkeypatch):
+    """Payments on, the gate let the person in at their first request
+    (plan "free", no trial, no subscription: no billed call of their own).
+    Their Yes loads the bundle and the final merge is made all the same:
+    the one exemption, the prepared profile they see before a card form.
+    Nothing else of the account changes."""
+    from backend.utils.subscriptions import access_state, ai_replies_allowed
+    _bundle(world, monkeypatch)
+    prod = world.prod()
+    with prod.app_context():
+        prod.config["PAYMENTS_ENABLED"] = True
+        let_in = datetime.utcnow()
+        user_id = _x_user(approved=True, approved_at=let_in, let_in_at=let_in,
+                          plan="free").id
+        user = db.session.get(User, user_id)
+        assert access_state(user) == "none" and not ai_replies_allowed(user)
+        client = prod.test_client()
+        _login(client, user_id)
+        _yes(client)
+        assert _run_until_done(world.dispatched[0]) == "done"
+        load = PrefillBundleLoad.query.one()
+        assert load.merge_status == "done" and len(world.calls) == 1
+        user = db.session.get(User, user_id)
+        assert (user.approved, user.plan, user.let_in_at) == (True, "free", let_in)
+        assert access_state(user) == "none"
+        current = UserProfile.query.filter_by(user_id=user_id).order_by(
+            UserProfile.id.desc()).first()
+        assert current.generated_by == "claude-opus-5.5"
+        _login(client, user_id)
+        state = client.get("/api/dashboard/starting-point").get_json()
+        assert state["starting_point"]["status"] == "ready" and state["approved"] is True
 
 
 # ── Removal and the exclusion list ───────────────────────────────────────

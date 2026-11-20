@@ -82,6 +82,19 @@ test('a pending change offers Resend and Cancel; Cancel uses the pending-only ro
     .toBe('confirmed-elsewhere@example.com');
 });
 
+// Control: a request over the account's or the client's limit is a 429
+// with a calm message (backend/utils/send_limits.py), shown as any error is.
+test('a request over the limit shows the server\'s calm message', async () => {
+  const wait = 'If you asked a moment ago, the email is on its way. Please '
+    + 'check your inbox, or try again in a few minutes.';
+  mockPost.mockRejectedValue({ response: { status: 429, data: { error: wait } } });
+  renderPage();
+  const input = screen.getByPlaceholderText('alice@example.com');
+  fireEvent.change(input, { target: { value: 'new@example.com' } });
+  fireEvent.keyDown(input, { key: 'Enter' });
+  expect(await screen.findByText(wait)).toBeTruthy();
+});
+
 test('an expired link says so and offers a new one for the same address', async () => {
   mockPost.mockResolvedValue({ data: {
     email: 'alice@example.com', pending_email: 'new@example.com', pending_email_expired: false,

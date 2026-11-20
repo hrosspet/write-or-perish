@@ -16,7 +16,14 @@ import os
 final class DictationController {
     enum State: Equatable { case idle, initializing, recording, finalizing, error }
 
-    private(set) var state: State = .idle
+    private(set) var state: State = .idle {
+        // From its first chunk to its transcript the dictation is a recording in
+        // progress (`AudioCenter.recordingInProgress`, #438).
+        didSet {
+            guard state != oldValue else { return }
+            app?.audio.dictation(self, inProgress: state == .recording || state == .finalizing)
+        }
+    }
     private(set) var isInterrupted = false
     private(set) var elapsed: Double = 0
     /// A recording exists for "Save audio" (kept in memory; a file is written
@@ -103,6 +110,12 @@ final class DictationController {
                 guard gen == self.generation else { return }
                 if SpendCap.isSpendCapError(error) {
                     app.toasts.show(SpendCap.toastMessage(.record), duration: 8)
+                    self.state = .idle
+                    self.callbacks.failed(nil, true)
+                } else if case APIError.subscriptionRequired = error {
+                    // Payments on (#438): no transcription without a
+                    // subscription. Refused before the mic opened; the
+                    // banner shows the server's words (APIEvent).
                     self.state = .idle
                     self.callbacks.failed(nil, true)
                 } else {

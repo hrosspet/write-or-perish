@@ -30,6 +30,42 @@ def dt(value):
         return None
 
 
+def mark(row):
+    """A dumped row's unlicensed input mark (#689), if it is a known one."""
+    from backend.utils.privacy import X_API_INPUT
+    value = row.get("unlicensed_input")
+    return value if value == X_API_INPUT else None
+
+
+def holds_x_api_input(nd):
+    """Whether a dumped entry was fetched through the X API, or is a reply
+    written from such posts (#689)."""
+    from backend.utils.privacy import X_API_INPUT, train_refused_for
+    return mark(nd) == X_API_INPUT or train_refused_for(nd.get("provenance"))
+
+
+def record_x_api_posts(user_id, ref):
+    """The account now holds X API posts (#689): every document a model
+    wrote from its writing (the loaded profile and intentions too) reads
+    as Chat at most (privacy.x_api_account). That reads the pre-fill's
+    cost record, which stayed on the server where the posts were fetched:
+    a $0 row records it here, once per account. Returns whether it wrote
+    one; the caller commits."""
+    from backend.models import APICostLog
+    from backend.utils.privacy import X_API_PREFILL_REQUEST
+    if db.session.query(APICostLog.id).filter(
+            APICostLog.user_id == user_id,
+            APICostLog.request_type == X_API_PREFILL_REQUEST).first():
+        return False
+    db.session.add(APICostLog(
+        user_id=user_id, model_id="x-api/timeline",
+        request_type=X_API_PREFILL_REQUEST, request_ref=ref,
+        input_tokens=0, output_tokens=0, cost_microdollars=0))
+    # x_api_account keeps its answer for the session: ask again.
+    db.session.info.get("x_api_accounts", {}).pop(user_id, None)
+    return True
+
+
 def new_profile(pf, user_id):
     """A UserProfile for a dumped version (``parent_profile_id`` and
     ``merged_profile_id`` point at dumped ids: the caller remaps them)."""
@@ -81,6 +117,7 @@ def new_todo(td, user_id):
         tokens_used=td.get("tokens_used") or 0,
         privacy_level=td.get("privacy_level") or "private",
         ai_usage=td.get("ai_usage") or "chat",
+        unlicensed_input=mark(td),
     )
     row.set_content(td.get("content") or "")
     if dt(td.get("created_at")):
@@ -97,6 +134,7 @@ def new_artifact(a, user_id):
         tokens_used=a.get("tokens_used") or 0,
         privacy_level=a.get("privacy_level") or "private",
         ai_usage=a.get("ai_usage") or "chat",
+        unlicensed_input=mark(a),
     )
     row.set_content(a.get("content") or "")
     if dt(a.get("created_at")):
@@ -110,6 +148,14 @@ def new_node(nd, user_id, author_id, dek=None):
     the caller once every entry has its new id."""
     from backend.models import Node
     from backend.routes.import_data import PROVENANCES
+    from backend.utils.privacy import X_API_INPUT, cap_ai_usage, chat_at_most
+    # A tweet fetched through the X API, or a reply written from such
+    # posts, comes in at Chat at most (#689): no load lifts it to Train,
+    # and a reply keeps the mark of what it was written from.
+    marked = mark(nd)
+    ai_usage = nd.get("ai_usage", "none")
+    ai_usage = (chat_at_most(ai_usage) if marked == X_API_INPUT
+                else cap_ai_usage(ai_usage, nd.get("provenance")))
     new = Node(
         user_id=author_id,
         human_owner_id=user_id if nd.get("owner_is_user", True) else None,
@@ -118,7 +164,8 @@ def new_node(nd, user_id, author_id, dek=None):
         token_count=nd.get("token_count") or 0,
         distributed_tokens=nd.get("distributed_tokens") or 0,
         privacy_level=nd.get("privacy_level", "private"),
-        ai_usage=nd.get("ai_usage", "none"),
+        ai_usage=ai_usage,
+        unlicensed_input=marked,
         source_key=nd.get("source_key"),
         origin=nd.get("origin"),
         provenance=(nd.get("provenance")

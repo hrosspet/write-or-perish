@@ -13,6 +13,9 @@ enum APIPath {
     static let logout = "/auth/logout"
     static let xLogin = "/auth/login"
     static let xConnect = "/auth/x/connect"
+    /// A sign-in held because the invite it came with names someone else (#439).
+    static let inviteChoiceContinue = "/auth/invite-choice/continue"
+    static let inviteChoiceCancel = "/auth/invite-choice/cancel"
 
     // MARK: Account
     static let dashboard = "/api/dashboard/"
@@ -51,6 +54,8 @@ enum APIPath {
     static func toolApprovalReject(_ id: Int) -> String { "/api/tool-approvals/\(id)/reject" }
     /// `?node=<reply id>`: the spoken announcement while that reply's changes wait.
     static let voiceApprovalAnnouncement = "/api/voice/approval-announcement"
+    /// A refused Voice turn's sentence, by the refusal's code (#651).
+    static func voiceRefusalClip(_ code: String) -> String { "/api/voice/refusal/\(code).mp3" }
 
     // MARK: Nodes
     static let nodes = "/api/nodes/"

@@ -54,6 +54,7 @@ import argparse
 import json
 import os
 import sys
+from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
@@ -68,6 +69,7 @@ def _check_schema(db):
         "user_profile": {"parent_profile_id", "generation_type", "source_data_cutoff",
                          "source_origin_stats", "source_tokens_used"},
         "user_recent_context": {"profile_id", "source_data_cutoff"},
+        "user": {"prefilled_at"},
     }
     for table, cols in need.items():
         have = {c["name"] for c in insp.get_columns(table)}
@@ -224,6 +226,7 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
               f"intentions version(s) from the dump", file=sys.stderr)
 
     # Nodes last, so context pins on system nodes resolve to the rows above.
+    holds_x_api = False
     prompt_cache = {}
     pinned = 0
 
@@ -241,6 +244,11 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
             id_map[nd["id"]] = existing_keys[key]
             skipped += 1
             continue
+        # A tweet the dump says was fetched through the X API, or a reply
+        # written from such posts, comes in at Chat at most (#689,
+        # dump_rows.new_node), so no load lifts it to Train.
+        if dump_rows.holds_x_api_input(nd):
+            holds_x_api = True
         new = dump_rows.new_node(
             nd, user_id, _author_id(nd.get("author_username"), user_id, cache, db, User))
         db.session.add(new)
@@ -275,6 +283,17 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
             db.session.query(Node).filter(Node.id == new_id).update(
                 values, synchronize_session=False)
             relinked += 1
+    if holds_x_api and dump_rows.record_x_api_posts(user_id, "load_user"):
+        print("the bundle holds X API posts: recorded on the account "
+              "(#689)", file=sys.stderr)
+    db.session.commit()
+
+    # The account was made ready ahead of its owner now, on this server:
+    # the 90 days after which a pre-filled account nobody claimed is
+    # deleted count from the load (#685), never from a time in the bundle
+    # (its entries keep the lab's timestamps).
+    db.session.query(User).filter(User.id == user_id).update(
+        {"prefilled_at": datetime.utcnow()}, synchronize_session=False)
     db.session.commit()
 
     print(f"loaded '{username}' (id {user_id}): {created} nodes created, "

@@ -8,7 +8,8 @@ for one Community Archive member: their public tweets and the profile
   (``start_admin_load``): it fills the account with the bundle's X id, or
   opens one under the bundle's handle with that X id, so the person's X
   sign-in finds it. It does not let anyone in: the admin approves as for
-  any account (and with payments on, #700's gate does);
+  any account (and with payments on, #700's gate lets the person in at
+  their first request);
 - the person's Yes on "Start from your tweets" (``maybe_start_self_load``):
   only for a signed-in account whose X id an X sign-in proved. The request
   only records the Yes and queues a check; the background task looks for
@@ -49,8 +50,8 @@ The load changes nothing of the account that only a person's own action
 sets (sign-in, terms, X handle, consent, settings, time zone), so an
 account the admin made ready that nobody signs in to stays recognisable
 as unclaimed and is deleted after 90 days like any pre-filled one (#685):
-``prefilled_handle`` is set, and the entries' ``updated_at`` is when this
-server stored them.
+``prefilled_handle`` is set, ``prefilled_at`` is when this server loaded
+it, and the entries' ``updated_at`` is when this server stored them.
 
 Content is encrypted with this server's key, one data key per chunk, as
 imports do (backend/utils/dump_rows.py). Nothing here decrypts content or
@@ -328,19 +329,24 @@ def target_refusal(user, x_id, *, allow_signed_in, allow_own_writing):
 def let_in_when_ready(user):
     """The one place a bundle load lets a person in: after their own Yes,
     when the load is done (Peter, 2026-11-13: "lets them in when it is
-    ready", no approval step). It approves an account that was never let
-    in and that no admin blocked (deactivated_at), as the admin's
-    Activate does. Returns whether it approved.
+    ready", no approval step). It lets in an account that was never let
+    in and that no admin blocked (deactivated_at). Nothing else in this
+    module sets ``approved``, ``approved_at`` or ``plan``. Returns whether
+    it let the account in; the caller commits.
 
-    MERGE WITH #700 (payments): with payments on, #700's gate has let the
-    person in at their first request, before they could answer, so this
-    finds them approved and does nothing. When both are merged, this body
-    must call #700's ``approval.let_in(user)`` instead of setting
-    ``approved`` itself, so the plan rule (the default "alpha" becomes
-    "free") applies here too, and nothing else in this module may set
-    ``approved`` or ``plan``."""
+    - Payments on (#697): #700's own ``approval.let_in``, as its gate does
+      at a request, so its rules hold here too: the default "alpha" plan
+      becomes "free" (the trial step follows), and a blocked, deleted or
+      system account is never let in. The gate has usually let the person
+      in at their first request already; then this does nothing.
+    - Payments off: ``approval.let_in`` approves nobody (everyone waits
+      for the admin then), so the account is approved here, as the
+      admin's Activate does while payments are off."""
+    from backend.utils import approval
     if user.approved or user.deactivated_at is not None:
         return False
+    if approval.approval_waived():
+        return approval.let_in(user, now=_now())
     user.approved = True
     user.approved_at = _now()
     return True
@@ -748,6 +754,11 @@ def _load_header(load, user, header, token):
         # It is also what makes an account nobody signed in to known to
         # the deletion of unclaimed pre-filled accounts (#685).
         user.prefilled_handle = handle
+    # As every pre-fill and load_user.py (#685): the account is made ready
+    # ahead of its owner now, on this server's clock, never a time in the
+    # bundle; the 90 days of an account nobody claims count from here,
+    # also when it is loaded again.
+    user.prefilled_at = _now()
     # As load_user.py: no profile build of a loaded account crosses
     # providers on its own (#589's public-only rule, #687).
     user.profile_private_read = True
@@ -831,6 +842,7 @@ def _node_chunk(load, uid, storage, dump_username, token):
     stored_at = _now()
     dek = None
     created = skipped = 0
+    x_api = False
     for nd in batch:
         key = nd["source_key"]
         if key in existing:
@@ -841,6 +853,7 @@ def _node_chunk(load, uid, storage, dump_username, token):
             continue
         if dek is None:
             dek = new_dek() or False   # False: encryption is off here
+        x_api = x_api or dump_rows.holds_x_api_input(nd)
         node = dump_rows.new_node(nd, uid, uid, dek=dek or None)
         node.updated_at = stored_at
         db.session.add(node)
@@ -854,6 +867,11 @@ def _node_chunk(load, uid, storage, dump_username, token):
             emb.node_updated_at = stored_at   # still matches the entry
             db.session.add(emb)
         created += 1
+    if x_api:
+        # Posts fetched through the X API (#689), as load_user.py: the
+        # account's derived documents read as Chat at most. In the chunk's
+        # transaction, so the record and the posts land together.
+        dump_rows.record_x_api_posts(uid, "prefill_bundle")
     _progress(load.id, token, nodes_done=load.nodes_done + len(batch),
               created_count=load.created_count + created,
               skipped_count=load.skipped_count + skipped, stalled_runs=0)

@@ -41,8 +41,9 @@ from backend.utils.cost import llm_cost_log_fields
 from backend.utils.chunk_plan import UPDATE_THRESHOLD_UNITS
 from backend.utils.llm_batch import (
     BATCH_JOB_MAX_AGE, apply_batch_key_override, batch_check_and_collect,
-    batch_submit, blocked_items,
+    batch_submit, blocked_items, drop_openai_batch,
 )
+from backend.utils import anthropic_batch_deletion
 from backend.utils import refusal_backoff
 
 from backend.utils.hidden_rows import (
@@ -135,8 +136,8 @@ def _should_generate_recent_context(user):
     """
     user_id = user.id
 
-    # Only for Voice-Mode plans
-    if (user.plan or "free") not in User.VOICE_MODE_PLANS:
+    # Only for Voice-Mode plans (set by hand, or a subscription, #438)
+    if not user.on_paid_plan:
         return False, None, None
 
     # User must be inactive for 5+ min
@@ -503,6 +504,9 @@ def _submit_batch(built):
         ]
         db.session.add(RecentContextBatchJob(
             provider_key=provider_key, batch_id=batch_id, items=items))
+        # Deleted at Anthropic once the job is no longer pending (#693).
+        anthropic_batch_deletion.register(
+            provider_key, batch_id, RecentContextBatchJob.__tablename__)
         submitted += len(items)
     db.session.commit()
     # batch_submit logs (not raises) a provider's failure; those users have
@@ -727,7 +731,12 @@ def _collect_recent_context_batches():
             results = {}
         if still_pending:
             if now - job.submitted_at > BATCH_JOB_MAX_AGE:
-                abandoned += _abandon(job, now)
+                gave_up = _abandon(job, now)
+                abandoned += gave_up
+                if gave_up and (job.provider_key or "").startswith("openai:"):
+                    # Nothing reads the batch again: cancelled if it still
+                    # runs, and its files go (#667).
+                    drop_openai_batch(keys.get("openai"), job.batch_id)
             continue
         ended.append((job, results))
 
@@ -743,7 +752,14 @@ def _collect_recent_context_batches():
                         "batch(es) are collected next run", len(ended))
             return {"collected": 0, "abandoned": abandoned}
         for job, results in ended:
-            collected += _claim_and_apply(job, results, now)
+            claimed = _claim_and_apply(job, results, now)
+            collected += claimed
+            if claimed:
+                # Saved: the batch's files at OpenAI (#667) and the batch
+                # at Anthropic (#693) can go. A run that lost the claim
+                # leaves them to the one that won.
+                anthropic_batch_deletion.delete_collected_batches(
+                    results, keys, RecentContextBatchJob.__tablename__)
     return {"collected": collected, "abandoned": abandoned}
 
 

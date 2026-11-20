@@ -83,6 +83,19 @@ final class AccountModelTests: StubbedAppTestCase {
         XCTAssertEqual(model.emailMessage?.text, "New link sent. The earlier one no longer works.")
     }
 
+    /// Control: a request over the account's or the client's limit is a 429
+    /// with a calm message (backend/utils/send_limits.py), shown as any error is.
+    func testARequestOverTheLimitShowsTheServersCalmMessage() async throws {
+        try signIn(["email": "a@example.com"])
+        let wait = "If you asked a moment ago, the email is on its way. Please check your inbox, or try again in a few minutes."
+        let body = #"{"error":"\#(wait)"}"#
+        StubURLProtocol.install { _ in .json(429, body) }
+        let model = AccountModel(app: app)
+        await model.sendEmailLink("b@example.com")
+        XCTAssertEqual(model.emailMessage?.text, wait)
+        XCTAssertNil(app.user?.pendingEmail)
+    }
+
     func testRemoveEmailOnlyWithXLogin() async throws {
         try signIn(["email": "a@example.com"])
         XCTAssertFalse(AccountModel(app: app).showsRemoveEmail)
@@ -418,6 +431,22 @@ final class ReadReplyTests: StubbedAppTestCase {
                        "Tweets from \(from) to \(to) (your time): 1,234 by 56 accounts. 7 you had already read were left out.")
         XCTAssertFalse(ReadWindowLine.text(try window(excluded: 0))!.contains("left out"))
         XCTAssertNil(ReadWindowLine.text(try decode(ReadWindow.self, #"{"tweets":3}"#)), "no line without a window")
+    }
+
+    func testWindowLineSaysWhenTheArchiveWasStale() throws {
+        // #688: the server sets export_stale when the newest tweet was over 36 hours old.
+        let utc = TimeZone(identifier: "UTC")!
+        let stale = try decode(ReadWindow.self, """
+        {"window_start":"2026-11-02T12:00:00Z","window_end":"2026-11-03T12:00:00Z","tweets":900,"accounts":120,"excluded":0,"export_stale":true}
+        """)
+        XCTAssertEqual(stale.exportStale, true)
+        XCTAssertTrue(ReadWindowLine.text(stale, timeZone: utc)!.hasSuffix(
+            " The newest tweets available are from 3 November; the archive's daily export has not updated since."))
+        let fresh = try decode(ReadWindow.self, """
+        {"window_start":"2026-11-02T12:00:00Z","window_end":"2026-11-03T12:00:00Z","tweets":900,"accounts":120,"excluded":0,"export_stale":false}
+        """)
+        XCTAssertFalse(ReadWindowLine.text(fresh, timeZone: utc)!.contains("newest tweets available"))
+        XCTAssertNil(ReadWindowLine.staleExportNote(try window(excluded: 0)), "older servers send no flag")
     }
 
     func testCancelledLineSaysWhyToTheOwnerOnly() throws {
@@ -861,7 +890,7 @@ final class ImportTests: StubbedAppTestCase {
         XCTAssertNotNil(model.analysis)
         XCTAssertEqual(model.aiUsage, .chat)
         XCTAssertEqual(model.confirmBody(model.analysis!, onDeleted: nil)["ai_usage"] as? String, "chat")
-        XCTAssertEqual(model.privacy, .private)
+        XCTAssertEqual(model.confirmBody(model.analysis!, onDeleted: nil)["privacy_level"] as? String, "private")
 
         app.useForTesting(api: app.api, user: try decode(CurrentUser.self,
             #"{"id":5,"username":"seowriter","approved":true,"default_ai_usage":"none"}"#))
@@ -1043,6 +1072,20 @@ final class ImportTests: StubbedAppTestCase {
         conversations.archiveSummary = "These numbers count messages. Your archive has 2 conversations with 8 messages."
         XCTAssertEqual(conversations.stats.map(\.label), ["Messages imported", "Messages skipped"])
         XCTAssertEqual(conversations.notes.first, conversations.archiveSummary)
+    }
+
+    /// #638: a re-import that could set its settings only on the last entry
+    /// of some older items says so, in the web app's words.
+    func testPartlyUpdatedNote() {
+        let one = ImportResult(["created": 0, "updated": 1, "partly_updated": 1])
+        XCTAssertEqual(one.partlyUpdated, 1)
+        XCTAssertEqual(one.notes.last,
+                       "1 item could be updated only in part: its last entry now has these settings, but Loore could "
+                       + "not confirm which entries before it belong to the same document or message, so those kept "
+                       + "their own. You can change them on each entry.")
+        let many = ImportResult(["created": 0, "updated": 3, "partly_updated": 2])
+        XCTAssertTrue(many.notes.last?.hasPrefix("2 items could be updated only in part: the last entry of each") ?? false)
+        XCTAssertFalse(ImportResult(["created": 0, "updated": 1]).notes.contains { $0.contains("only in part") })
     }
 }
 

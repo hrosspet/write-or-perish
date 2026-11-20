@@ -239,13 +239,15 @@ struct ToastStack: View {
 /// "LIMIT REACHED" banner (web `SpendCapBanner`): shown after a 402 until dismissed.
 struct SpendCapBanner: View {
     let message: String
+    /// The eyebrow: "LIMIT REACHED", or "REPLIES PAUSED" for a refused reply (#438).
+    var eyebrow = "LIMIT REACHED"
     let onDismiss: () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
             AdaptiveStack(spacing: 12) {
-                Text("LIMIT REACHED")
+                Text(eyebrow)
                     .font(LooreFont.eyebrow)
                     .tracking(1.3)
                     .foregroundStyle(LooreColor.accent)

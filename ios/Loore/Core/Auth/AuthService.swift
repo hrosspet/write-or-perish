@@ -128,7 +128,47 @@ final class AuthService {
                 message += " (This link is for \(host); the app is using \(environment.displayName).)"
             }
             throw AuthFailure(message: message)
+        case .inviteMismatch(let kind):
+            // The held sign-in rides in the session cookie this 302 set (adopted
+            // above); nothing was made. The view asks how to go on.
+            throw InviteMismatch(kind: kind)
         }
+    }
+
+    /// The pasted link came with an invite made for someone else (#439): the
+    /// sign-in waits for `continueWithoutInvite()` or `cancelInviteChoice()`.
+    struct InviteMismatch: Error, Equatable {
+        let kind: String?
+        var text: String { MagicLink.inviteMismatchText(kind: kind) }
+    }
+
+    private struct InviteChoiceAnswer: Decodable, Sendable {
+        var redirect: String?
+    }
+
+    /// Continue without the invitation: the held sign-in finishes (the account is
+    /// made then, with no inviter). Returns the landing path, as `verifyMagicLink`.
+    @discardableResult
+    func continueWithoutInvite() async throws -> String? {
+        let answer: InviteChoiceAnswer
+        do {
+            answer = try await api.post(APIPath.inviteChoiceContinue, json: .object([:]))
+        } catch let error as APIError {
+            if error.isOffline {
+                throw AuthFailure(message: "Couldn't reach Loore. Check your connection and try again.")
+            }
+            throw AuthFailure(message: error.userMessage(fallback: "This sign-in has expired. Please sign in again."))
+        }
+        captureCookies()
+        guard hasAuthCookies else {
+            throw AuthFailure(message: "Loore accepted the link but the sign-in cookie didn't arrive. Please try again.")
+        }
+        return MagicLink.landingPath(location: answer.redirect)
+    }
+
+    /// Sign in differently: the held sign-in is forgotten; nothing was made.
+    func cancelInviteChoice() async {
+        let _: EmptyResponse? = try? await api.post(APIPath.inviteChoiceCancel, json: .object([:]))
     }
 
     private func adoptSetCookieHeaders(from response: HTTPURLResponse) {

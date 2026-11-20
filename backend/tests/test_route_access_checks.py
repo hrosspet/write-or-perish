@@ -528,9 +528,11 @@ def transcription(monkeypatch):
 
 
 def _init_upload(app, user, upload_id, total_chunks=1, filesize=4):
+    # An entry the AI may transcribe (#665: None is refused).
     return _call(app, user, "POST", "/api/nodes/upload/init", json={
         "filename": "talk.m4a", "filesize": filesize,
-        "total_chunks": total_chunks, "upload_id": upload_id})
+        "total_chunks": total_chunks, "upload_id": upload_id,
+        "ai_usage": "chat"})
 
 
 def _send_chunk(app, user, upload_id, node_id, index, payload):

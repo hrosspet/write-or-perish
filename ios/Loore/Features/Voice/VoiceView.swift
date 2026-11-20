@@ -562,6 +562,13 @@ struct VoiceView: View {
         if app.spendCapped {
             app.notifySpendBlocked()
             app.toasts.show(SpendCap.toastMessage(.record), duration: 8)
+            // ...and say it (#651): the user may not be looking.
+            Task { await voice.announceUsageLimit() }
+            return
+        }
+        // Payments on, no AI replies (#438): Voice mode is paused.
+        if app.subscriptionRequired {
+            app.notifySubscriptionRequired()
             return
         }
         Task {
@@ -582,6 +589,10 @@ struct VoiceView: View {
             app.toasts.show(SpendCap.toastMessage(.glean), duration: 8)
             return
         }
+        if app.subscriptionRequired {
+            app.notifySubscriptionRequired()
+            return
+        }
         Task { await voice.glean() }
     }
 
@@ -593,6 +604,13 @@ struct VoiceView: View {
         if app.spendCapped {
             app.notifySpendBlocked()
             app.toasts.show(SpendCap.toastMessage(.record), duration: 8)
+            // ...and say it (#651), the reply stopped first as Continue stops it.
+            Task { await voice.announceUsageLimit() }
+            return
+        }
+        // Payments on, no AI replies (#438): Voice mode is paused.
+        if app.subscriptionRequired {
+            app.notifySubscriptionRequired()
             return
         }
         voice.continueConversation()

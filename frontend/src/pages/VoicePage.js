@@ -13,6 +13,7 @@ import { useToolApprovals } from '../hooks/useToolApprovals';
 import { voiceWaitingLine } from '../utils/toolApprovals';
 import { useToast } from '../contexts/ToastContext';
 import { isSpendBlocked, notifySpendBlocked, spendCapToastMessage } from '../utils/spendCap';
+import { isSubscriptionRequired, notifySubscriptionRequired } from '../utils/subscription';
 import { isAiAllowed } from '../utils/aiUsage';
 import {
   THREAD_LIMIT_TEXT, THREAD_NOTICE_TEXT, THREAD_TOO_LONG_CODE,
@@ -643,7 +644,7 @@ function VoiceSession({
   const {
     phase, isStopping, hasError, isOnline, streaming, audio, handleStart, handleStop,
     handleContinue, handleResumeSession, handleCancelProcessing, setThreadParentId,
-    handleResumeRecording, getThreadParentId,
+    handleResumeRecording, getThreadParentId, refuseForUsageLimit,
   } = useVoiceSession({
     apiEndpoint: '/voice',
     ttsTitle: 'Voice',
@@ -728,6 +729,10 @@ function VoiceSession({
     if (isSpendBlocked()) {
       notifySpendBlocked();
       addToast(spendCapToastMessage('glean'), 8000);
+      return;
+    }
+    if (isSubscriptionRequired()) {
+      notifySubscriptionRequired();
       return;
     }
     // The voice reply stops, its queue too (the player is global, so a
@@ -1067,6 +1072,13 @@ function VoiceSession({
               if (isSpendBlocked()) {
                 notifySpendBlocked();
                 addToast(spendCapToastMessage('record'), 8000);
+                // ...and says it (#651): the user may not be looking.
+                refuseForUsageLimit();
+                return;
+              }
+              // Payments on, no AI replies (#438): Voice mode is paused.
+              if (isSubscriptionRequired()) {
+                notifySubscriptionRequired();
                 return;
               }
               handleStart();
@@ -1397,6 +1409,12 @@ function VoiceSession({
           if (isSpendBlocked()) {
             notifySpendBlocked();
             addToast(spendCapToastMessage('record'), 8000);
+            // ...and says it (#651), the reply paused first.
+            refuseForUsageLimit();
+            return;
+          }
+          if (isSubscriptionRequired()) {
+            notifySubscriptionRequired();
             return;
           }
           handleContinue(voiceReset);
