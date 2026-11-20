@@ -1699,7 +1699,12 @@ function AdminPanel() {
                 </span>{" "}
                 <button
                   onClick={() => toggleSpam(u.id)}
-                  title={u.spam ? "Unmark as spam" : "Mark as spam (hides the row behind the eye toggle; does not deactivate)"}
+                  title={u.spam
+                    ? "Unmark as spam"
+                    : letInWithoutApproval
+                      // Payments on (#713): the mark also holds the account.
+                      ? "Mark as spam: hides the row behind the eye toggle, and an account you did not approve by hand is not active from now on, until you Activate it or unmark it"
+                      : "Mark as spam (hides the row behind the eye toggle; does not deactivate)"}
                   style={u.spam ? { color: "var(--error)" } : undefined}
                 >
                   {u.spam ? "Not spam" : "Spam"}
