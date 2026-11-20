@@ -10,10 +10,14 @@ kept only while the invite is open. The reward is test_referrals.py's.
 Harnesses shared with test_referrals.py: the payments test app (with the
 referrals blueprint) and the app with the real sign-in routes.
 """
+import json
+from contextlib import ExitStack
 from datetime import datetime, timedelta
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlparse
 
 import pytest
+import requests
 
 from backend.extensions import db as _db
 from backend.models import Invite, Referral, User
@@ -674,6 +678,37 @@ class TestSomeoneElse:
         assert Referral.query.count() == 0
         assert _db.session.get(Invite, invite.id).state == "open"
 
+    def test_sign_in_differently_hands_the_page_back(self, signup_app):  # noqa: F811
+        """#704: the page the sign-in started on comes back with the
+        answer, so the next sign-in still returns to it. Only a page inside
+        Loore ever does."""
+        _ana, invite = _open("fred@example.com")
+        client = signup_app.test_client()
+        sent = {}
+        with patch("backend.routes.auth.send_magic_link_email",
+                   lambda e, url, **_kw: sent.update(url=url)):
+            client.post("/auth/magic-link/send", json={
+                "email": "fred.work@example.com", "invite": invite.code,
+                "next_url": "/@ana/entry?x=1#r"})
+        link = "/" + sent["url"].split("://", 1)[1].split("/", 1)[1]
+        client.get(link)
+        r = client.post("/auth/invite-choice/cancel", json={})
+        assert r.status_code == 200
+        assert r.get_json() == {"ok": True, "next_url": "/@ana/entry?x=1#r"}
+
+    def test_sign_in_differently_without_a_page_or_a_hostile_one(
+            self, signup_app):  # noqa: F811
+        _ana, invite = _open("@fred_x")
+        client = signup_app.test_client()
+        _x_answer(signup_app, client, invite.code, 77, "fred_x_old")
+        with client.session_transaction() as sess:
+            from backend.routes.auth import INVITE_CHOICE_KEY
+            sess[INVITE_CHOICE_KEY]["next_url"] = "/%2F%2Fevil.example"
+        r = client.post("/auth/invite-choice/cancel", json={})
+        assert r.get_json() == {"ok": True, "next_url": None}
+        r = client.post("/auth/invite-choice/cancel", json={})
+        assert r.get_json() == {"ok": True, "next_url": None}
+
     def test_another_x_account_signs_in_differently(self, signup_app):  # noqa: F811
         _ana, invite = _open("@fred_x")
         client = signup_app.test_client()
@@ -739,6 +774,215 @@ class TestSomeoneElse:
         r = client.post("/auth/invite-choice/continue", json={})
         assert r.status_code == 410
         assert User.query.filter_by(email="vic@example.com").first() is None
+
+
+# ── An X sign-in held at the question, then the next one ────────────────
+# Sign in with X always starts a fresh round trip to X: only X's own
+# return (/auth/login right after X's callback stored a token) signs in
+# with a token. Through flask-dance's real views; only X's HTTP answers
+# are faked.
+
+def _x_service(identities):
+    """X in miniature: the n-th authorization at X in the test is
+    identities[n - 1], an (X id, handle) pair. `verified` lists the access
+    token of each verify_credentials call, the one that tells /auth/login
+    who signed in."""
+    calls = {"requests": 0, "verified": []}
+
+    def fetch_token(self, url, **kw):
+        if "request_token" in url:
+            calls["requests"] += 1
+            token = {"oauth_token": f"REQ-{calls['requests']}",
+                     "oauth_token_secret": "rs",
+                     "oauth_callback_confirmed": "true"}
+        else:
+            n = self._client.client.resource_owner_key.split("-")[1]
+            token = {"oauth_token": f"ACCESS-{n}", "oauth_token_secret": "as"}
+        self._populate_attributes(token)
+        return token
+
+    def send(self, prep, **kw):
+        auth = prep.headers.get("Authorization", "")
+        auth = auth.decode() if isinstance(auth, bytes) else auth
+        access = auth.split('oauth_token="')[1].split('"')[0]
+        calls["verified"].append(access)
+        x_id, handle = identities[int(access.split("-")[1]) - 1]
+        resp = requests.Response()
+        resp.status_code = 200
+        resp._content = json.dumps({"id": x_id, "screen_name": handle}).encode()
+        return resp
+
+    stack = ExitStack()
+    stack.enter_context(patch(
+        "requests_oauthlib.OAuth1Session._fetch_token", fetch_token))
+    stack.enter_context(patch("requests.sessions.Session.send", send))
+    return calls, stack
+
+
+def _back_from_x(client):
+    """The browser at X: authorized there, X's callback, then the answer
+    of /auth/login to X's return."""
+    to_x = client.get("/auth/twitter")
+    req = parse_qs(urlparse(to_x.headers["Location"]).query)["oauth_token"][0]
+    back = client.get(
+        f"/auth/twitter/authorized?oauth_token={req}&oauth_verifier=V")
+    assert back.headers["Location"].endswith("/auth/login")
+    return client.get("/auth/login")
+
+
+def _goes_to_x(response):
+    return (response.status_code == 302
+            and response.headers["Location"].endswith("/auth/twitter"))
+
+
+def _session_keys(client):
+    with client.session_transaction() as sess:
+        return set(sess.keys())
+
+
+def _hold(client, code):
+    """Mallory (X id 77) follows the invite made for @fred_x and signs in
+    with her own X account: held at the question. Nobody answers it."""
+    assert _goes_to_x(client.get(f"/auth/login?next=%2Fnode%2F5&invite={code}"))
+    r = _back_from_x(client)
+    assert r.headers["Location"] == MISMATCH + "x"
+    assert {"twitter_oauth_token", "invite_choice"} <= _session_keys(client)
+
+
+def _ben():
+    """Someone else with an account of his own (X id 9001)."""
+    ben = User(username="ben", twitter_id="9001", approved=True,
+               last_seen_at=datetime.utcnow())
+    _db.session.add(ben)
+    _db.session.commit()
+    return ben
+
+
+def _age(app, client):
+    """The held sign-in waited longer than a sign-in link lasts."""
+    with client.session_transaction() as sess:
+        held = dict(sess["invite_choice"])
+        held["at"] -= app.config.get("MAGIC_LINK_EXPIRY_SECONDS", 900) + 1
+        sess["invite_choice"] = held
+
+
+class TestAHeldXSignInAndTheNextOne:
+    @pytest.mark.parametrize("start", [
+        "/auth/login?next=%2Fnode%2F6",   # the sign-in page's button
+        "/auth/login",                    # a start that names no page
+    ])
+    def test_the_next_sign_in_with_x_goes_to_x_again(
+            self, signup_app, start):  # noqa: F811
+        """Ben uses the same browser next: his Sign in with X goes to X
+        and signs him in to his own account. The held sign-in's token is
+        never asked about again, nothing is made for Mallory's X account,
+        and the question is gone."""
+        _ana, invite = _open("@fred_x")
+        ben = _ben()
+        client = signup_app.test_client()
+        calls, x = _x_service([(77, "mallory"), (9001, "ben_x")])
+        with x:
+            _hold(client, invite.code)
+            r = client.get(start)
+            assert _goes_to_x(r)
+            assert calls["verified"] == ["ACCESS-1"]
+            assert not {"twitter_oauth_token", "invite_choice"} & \
+                _session_keys(client)
+            r = _back_from_x(client)
+        assert calls["verified"] == ["ACCESS-1", "ACCESS-2"]
+        assert _signed_in_as(client) == str(ben.id)
+        assert r.headers["Location"] == FRONTEND_URL + (
+            "/node/6" if "next" in start else "/dashboard")
+        assert User.query.filter_by(twitter_id="77").first() is None
+        assert client.post("/auth/invite-choice/continue",
+                           json={}).status_code == 410
+        assert User.query.filter_by(twitter_id="77").first() is None
+        assert _db.session.get(Invite, invite.id).state == "open"
+
+    def test_an_email_sign_in_started_here_forgets_it_too(
+            self, signup_app):  # noqa: F811
+        _ana, invite = _open("@fred_x")
+        client = signup_app.test_client()
+        calls, x = _x_service([(77, "mallory")])
+        with x:
+            _hold(client, invite.code)
+            _send(client, "ben@example.com", None)
+        assert not {"twitter_oauth_token", "invite_choice"} & \
+            _session_keys(client)
+        assert client.post("/auth/invite-choice/continue",
+                           json={}).status_code == 410
+        assert User.query.filter_by(twitter_id="77").first() is None
+
+    def test_continue_still_makes_the_account(self, signup_app):  # noqa: F811
+        """Control: "Continue without the invitation" signs Mallory in, to
+        the page the sign-in started on, with the token of her own X
+        sign-in kept, as for any X sign-in."""
+        _ana, invite = _open("@fred_x")
+        client = signup_app.test_client()
+        calls, x = _x_service([(77, "mallory")])
+        with x:
+            _hold(client, invite.code)
+            r = client.post("/auth/invite-choice/continue", json={})
+        assert r.status_code == 200
+        assert r.get_json() == {"redirect": f"{FRONTEND_URL}/node/5"}
+        mallory = User.query.filter_by(twitter_id="77").one()
+        assert _signed_in_as(client) == str(mallory.id)
+        keys = _session_keys(client)
+        assert "twitter_oauth_token" in keys and "invite_choice" not in keys
+        assert calls["verified"] == ["ACCESS-1"]
+        assert Referral.query.count() == 0
+
+    def test_sign_in_differently_still_forgets_it(self, signup_app):  # noqa: F811
+        """Control: "Sign in differently" hands the page back, drops the
+        token, and the next Sign in with X goes to X."""
+        _ana, invite = _open("@fred_x")
+        client = signup_app.test_client()
+        calls, x = _x_service([(77, "mallory")])
+        with x:
+            _hold(client, invite.code)
+            r = client.post("/auth/invite-choice/cancel", json={})
+            assert r.get_json() == {"ok": True, "next_url": "/node/5"}
+            assert not {"twitter_oauth_token", "invite_choice"} & \
+                _session_keys(client)
+            assert _goes_to_x(client.get("/auth/login?next=%2Fnode%2F5"))
+        assert calls["verified"] == ["ACCESS-1"]
+        assert User.query.count() == 1   # Ana only
+
+    def test_continue_after_the_hold_expired(self, signup_app):  # noqa: F811
+        """Control: past a sign-in link's lifetime, Continue makes nothing
+        and drops the token; the next Sign in with X goes to X."""
+        _ana, invite = _open("@fred_x")
+        client = signup_app.test_client()
+        calls, x = _x_service([(77, "mallory")])
+        with x:
+            _hold(client, invite.code)
+            _age(signup_app, client)
+            r = client.post("/auth/invite-choice/continue", json={})
+            assert r.status_code == 410
+            assert not {"twitter_oauth_token", "invite_choice"} & \
+                _session_keys(client)
+            assert _goes_to_x(client.get("/auth/login?next=%2Fnode%2F5"))
+        assert calls["verified"] == ["ACCESS-1"]
+        assert User.query.filter_by(twitter_id="77").first() is None
+
+    def test_an_expired_hold_nobody_answered(self, signup_app):  # noqa: F811
+        """Expired and never answered: the next Sign in with X still goes
+        to X, and the old question cannot be answered afterwards."""
+        _ana, invite = _open("@fred_x")
+        ben = _ben()
+        client = signup_app.test_client()
+        calls, x = _x_service([(77, "mallory"), (9001, "ben_x")])
+        with x:
+            _hold(client, invite.code)
+            _age(signup_app, client)
+            assert _goes_to_x(client.get("/auth/login?next=%2Fnode%2F6"))
+            _back_from_x(client)
+        assert calls["verified"] == ["ACCESS-1", "ACCESS-2"]
+        assert _signed_in_as(client) == str(ben.id)
+        assert client.post("/auth/invite-choice/continue",
+                           json={}).status_code == 410
+        assert _signed_in_as(client) == str(ben.id)
+        assert User.query.filter_by(twitter_id="77").first() is None
 
 
 # ── The reward, the admin list, the account deletion ────────────────────

@@ -3,7 +3,7 @@
 // ways on.
 import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
-import { MemoryRouter, Routes, Route } from 'react-router-dom';
+import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
 import InviteMismatchPage from './InviteMismatchPage';
 
 let assigned;
@@ -17,11 +17,16 @@ beforeEach(() => {
   global.fetch = jest.fn();
 });
 
+function LoginProbe() {
+  const loc = useLocation();
+  return <div>sign-in page {loc.search}</div>;
+}
+
 const renderAt = (search) => render(
   <MemoryRouter initialEntries={[`/invite-mismatch${search}`]}>
     <Routes>
       <Route path="/invite-mismatch" element={<InviteMismatchPage />} />
-      <Route path="/login" element={<div>sign-in page</div>} />
+      <Route path="/login" element={<LoginProbe />} />
     </Routes>
   </MemoryRouter>,
 );
@@ -62,4 +67,22 @@ test('an expired hold says so', async () => {
   fireEvent.click(screen.getByText('Continue without the invitation'));
   expect(await screen.findByText(/This sign-in has expired/)).toBeInTheDocument();
   expect(assigned).toBeNull();
+});
+
+test('sign in differently keeps the page the sign-in started on', async () => {
+  global.fetch.mockResolvedValue({
+    ok: true, json: () => Promise.resolve({ ok: true, next_url: '/node/5#reply-2' }),
+  });
+  renderAt('?for=x');
+  fireEvent.click(screen.getByText('Sign in differently'));
+  expect(await screen.findByText(/sign-in page \?returnUrl=%2Fnode%2F5%23reply-2/)).toBeInTheDocument();
+});
+
+test('sign in differently drops a destination that is not a Loore page', async () => {
+  global.fetch.mockResolvedValue({
+    ok: true, json: () => Promise.resolve({ ok: true, next_url: '//evil.example' }),
+  });
+  renderAt('?for=x');
+  fireEvent.click(screen.getByText('Sign in differently'));
+  expect(await screen.findByText(/^sign-in page\s*$/)).toBeInTheDocument();
 });

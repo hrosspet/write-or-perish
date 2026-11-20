@@ -3,6 +3,7 @@ import { Link, useLocation, useSearchParams } from "react-router-dom";
 import { useUser } from "../contexts/UserContext";
 import api from "../api";
 import { emailState } from "../utils/emailState";
+import { here, signInPath } from "../utils/destination";
 
 const backendUrl = process.env.REACT_APP_BACKEND_URL || "";
 
@@ -62,13 +63,12 @@ export default function ConfirmEmailPage() {
     body = "Open the link from the confirmation email again, or request a new one.";
     if (user) action = <Link to={back.to} style={linkStyle}>{back.label} &rarr;</Link>;
   } else if (!user) {
-    const returnUrl = encodeURIComponent(location.pathname + location.search);
     heading = "Sign in to confirm";
     body = "A new sign-in email can only be confirmed from inside the account "
       + "that asked for it. Sign in to that account the way you usually do, "
       + "not with the address you are confirming, and you will come straight "
       + "back here.";
-    action = <Link to={`/login?returnUrl=${returnUrl}`} style={linkStyle}>Sign in &rarr;</Link>;
+    action = <Link to={signInPath(here(location))} style={linkStyle}>Sign in &rarr;</Link>;
   } else if (!result) {
     heading = "Confirming your email";
     body = "One moment.";

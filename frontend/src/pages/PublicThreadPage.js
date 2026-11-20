@@ -4,6 +4,8 @@ import api from '../api';
 import { useUser } from '../contexts/UserContext';
 import MarkdownBody from '../components/MarkdownBody';
 import { formatDate } from '../utils/date';
+import { here, signInPath } from '../utils/destination';
+import NotSharedNotice from '../components/NotSharedNotice';
 
 /**
  * PublicThreadPage — the logged-out view of /node/:id (#228)
@@ -154,18 +156,11 @@ export default function PublicThreadPage({ nodeIdOverride }) {
     // this page via a failed permalink resolution — for them login would
     // redirect-loop, so they keep the plain not-found message.
     if (!user) {
-      const returnUrl = encodeURIComponent(location.pathname + location.search);
-      return <Navigate to={`/login?returnUrl=${returnUrl}`} replace />;
+      return <Navigate to={signInPath(here(location))} replace />;
     }
-    return shell(
-      <p style={{
-        textAlign: 'center', color: 'var(--text-muted)',
-        fontFamily: 'var(--sans)', fontSize: '0.9rem', fontWeight: 300,
-        marginTop: '20vh',
-      }}>
-        Nothing here.
-      </p>
-    );
+    // Signed in (a permalink that did not resolve): the same words as a
+    // thread the account may not open (#704).
+    return shell(<NotSharedNotice />);
   }
 
   return shell(
@@ -193,7 +188,7 @@ export default function PublicThreadPage({ nodeIdOverride }) {
         </p>
         <button
           type="button"
-          onClick={() => navigate(`/login?returnUrl=${encodeURIComponent('/node/' + id)}`)}
+          onClick={() => navigate(signInPath(here(location)))}
           style={{
             background: 'var(--accent)',
             color: 'var(--bg-deep)',
