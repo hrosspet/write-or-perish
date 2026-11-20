@@ -733,6 +733,24 @@ function AdminPanel() {
     fetchUsers();
   }, []);
 
+  // "Email me about new signups" (#715): this admin's own setting, on by
+  // default; null until the first response.
+  const [signupEmail, setSignupEmail] = useState(null);
+  useEffect(() => {
+    api.get("/admin/signup_email")
+      .then((r) => setSignupEmail(!!r.data.enabled))
+      .catch((err) => console.error(err));
+  }, []);
+  const changeSignupEmail = async (enabled) => {
+    try {
+      const r = await api.put("/admin/signup_email", { enabled });
+      setSignupEmail(!!r.data.enabled);
+    } catch (err) {
+      console.error(err);
+      setError("Error saving the signup email setting.");
+    }
+  };
+
   const toggleApproved = async (userId) => {
     try {
       await api.post(`/admin/users/${userId}/toggle`);
@@ -1331,6 +1349,16 @@ function AdminPanel() {
       <AdminDeleteAccountDialog user={deleteAsk} onClose={closeDelete} onStarted={() => fetchUsers()} />
 
       {error && <div style={{ color: "var(--error)" }}>{error}</div>}
+      {signupEmail !== null && (
+        <label style={{ display: "block", margin: "8px 0", color: "var(--text-primary)" }}>
+          <input
+            type="checkbox"
+            checked={signupEmail}
+            onChange={(e) => changeSignupEmail(e.target.checked)}
+          />{" "}
+          Email me about new signups
+        </label>
+      )}
       <table style={{ width: "100%", borderCollapse: "collapse", color: "var(--text-primary)" }}>
         <thead>
           <tr>

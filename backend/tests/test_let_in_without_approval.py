@@ -705,8 +705,12 @@ def _notices(monkeypatch):
 
 
 class TestSignupEmail:
-    def test_none_while_payments_are_on(self, real_app, monkeypatch):
+    def test_no_approval_request_while_payments_are_on(self, real_app,
+                                                       monkeypatch):
+        # Payments on send the information email of #715 instead (tested
+        # in test_admin_signup_email.py), never an approval request.
         calls = _notices(monkeypatch)
+        _admin(real_app)
         u = _add(username="newcomer", email="n@example.com")
         assert _client(real_app, u).post("/api/terms/accept").status_code \
             == 200
@@ -726,14 +730,16 @@ class TestSignupEmail:
     def test_control_payments_off_asks_for_approval(self, payments_off,
                                                     monkeypatch):
         calls = _notices(monkeypatch)
+        _admin(payments_off)
         u = _add(username="newcomer")
         c = _client(payments_off, u)
         c.post("/api/terms/accept")
         c.post("/api/terms/accept")
-        assert calls == ["newcomer", "newcomer"]
+        # One email per account (#715), not one per acceptance.
+        assert calls == ["newcomer"]
         ok = _add(username="approved", approved=True)
         _client(payments_off, ok).post("/api/terms/accept")
-        assert calls == ["newcomer", "newcomer"]
+        assert calls == ["newcomer"]
 
     def test_control_the_email_is_the_base_one(self):
         import inspect
