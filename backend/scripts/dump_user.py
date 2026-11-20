@@ -66,6 +66,28 @@ def _iso(dt):
     return dt.isoformat() if dt else None
 
 
+def _x_api_input(user):
+    """Whether the account holds X API input (#689): this server's record
+    of an X API pre-fill (privacy.x_api_account; it stays when the posts
+    are deleted), or an entry fetched through the X API or written from
+    such posts, deleted ones included. A loader records it on the target
+    account before it writes any profile, context or document
+    (load_user.py, the pre-fill bundle load), so those never read as
+    Train there. Counted per column with no LIMIT (#698). Metadata only."""
+    from sqlalchemy import func, or_
+    from backend.extensions import db
+    from backend.models import Node
+    from backend.utils.privacy import (
+        X_API_INPUT, X_API_PROVENANCES, x_api_account)
+    if x_api_account(user.id):
+        return True
+    held = or_(Node.provenance.in_(X_API_PROVENANCES),
+               Node.unlicensed_input == X_API_INPUT)
+    return any(db.session.query(func.count(Node.id)).filter(
+        column == user.id, held).scalar()
+        for column in (Node.user_id, Node.human_owner_id))
+
+
 def _run(username, out_path, include_private=False):
     from sqlalchemy import or_
     from backend.extensions import db
@@ -127,6 +149,9 @@ def _run(username, out_path, include_private=False):
             # The handle a pre-fill brought the tweets from (#662).
             "prefilled_handle": user.prefilled_handle,
         },
+        # The account holds X API input (#689): the loader records it
+        # before it writes the documents below (_x_api_input).
+        "x_api_input": _x_api_input(user),
         "profiles": _profiles(user, UserProfile),
         "recent_contexts": _recent(user, UserRecentContext),
         "todos": _todos(user, UserTodo),

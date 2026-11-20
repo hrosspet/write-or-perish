@@ -238,6 +238,11 @@ def fingerprint(user):
         db.session.query(func.count(NodeEmbedding.node_id)).filter(
             NodeEmbedding.user_id == uid).scalar(),
     ]
+    # Only when it holds X API input (#689): such an account's bundle from
+    # before the header said so is exported again, with the flag; the
+    # others keep their fingerprint.
+    if dump_user._x_api_input(user):
+        parts.append("x_api_input")
     return hashlib.sha256(json.dumps(parts, default=str).encode()).hexdigest()
 
 
@@ -256,7 +261,9 @@ def compress(raw_path, gz_path):
     object): the header line, counts and dates, and the manifest's
     ``object`` part. One line, and one member, in memory at a time."""
     from backend.utils import prefill_bundles as pb
-    stats = {"nodes": 0, "embeddings": 0, "oldest": None, "newest": None}
+    from backend.utils.dump_rows import holds_x_api_input
+    stats = {"nodes": 0, "embeddings": 0, "x_api": 0, "oldest": None,
+             "newest": None}
     seen = {"header": None}
 
     def lines():
@@ -271,6 +278,8 @@ def compress(raw_path, gz_path):
                     stats["nodes"] += 1
                     if nd.get("embedding"):
                         stats["embeddings"] += 1
+                    if holds_x_api_input(nd):
+                        stats["x_api"] += 1
                     at = nd.get("created_at")
                     if at:
                         stats["oldest"] = at if stats["oldest"] is None else min(stats["oldest"], at)
@@ -348,6 +357,7 @@ def export_one(user, storage, workdir, fp, snapshot=None):
                 "todos": len(header.get("todos") or []),
                 "artifacts": len(artifacts),
                 "intentions": sum(1 for a in artifacts if a.get("kind") == "intentions"),
+                "x_api_entries": stats["x_api"],
             },
             "oldest_entry_at": _iso_z(stats["oldest"]),
             "newest_entry_at": _iso_z(stats["newest"]),
@@ -360,6 +370,10 @@ def export_one(user, storage, workdir, fp, snapshot=None):
                  if p.get("generation_type") not in _set_internal_types()]),
             "intentions_generated_by": _newest_generated_by(
                 [a for a in artifacts if a.get("kind") == "intentions"]),
+            # The bundle holds X API input (#689). The load reads the
+            # header's flag and the entries themselves; this is for the
+            # admin's Check and status.
+            "x_api_input": bool(header.get("x_api_input")) or stats["x_api"] > 0,
             "object": obj,
         }
         # Checked again just before writing and once more after: a
@@ -494,7 +508,7 @@ def run_status(storage, x_id=None, out=print):
         if manifest:
             shown = {k: manifest.get(k) for k in (
                 "x_id", "handle", "exported_at", "newest_entry_at", "counts",
-                "bundle_format", "dump_format")}
+                "bundle_format", "dump_format", "x_api_input")}
             shown["bytes"] = (manifest.get("object") or {}).get("bytes")
             out(json.dumps(shown, indent=1, sort_keys=True))
         else:

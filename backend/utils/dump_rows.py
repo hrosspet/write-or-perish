@@ -44,6 +44,26 @@ def holds_x_api_input(nd):
     return mark(nd) == X_API_INPUT or train_refused_for(nd.get("provenance"))
 
 
+def header_holds_x_api_input(header):
+    """Whether a dump's header says the account holds X API input (#689):
+    its ``x_api_input`` flag (dump_user.py writes it; older dumps lack
+    it), or a todo or artifact version marked as written from X API
+    posts. The entries are asked separately (holds_x_api_input): a
+    loader reads them before it writes anything."""
+    if header.get("x_api_input") is True:
+        return True
+    return any(isinstance(row, dict) and mark(row) is not None
+               for key in ("todos", "artifacts")
+               for row in header.get(key) or [])
+
+
+def line_may_hold_x_api_input(line):
+    """A cheap first look at one raw dump line (or a part's text): False
+    when it cannot hold X API input, so only the rest are parsed."""
+    from backend.utils.privacy import X_API_INPUT, X_API_PROVENANCES
+    return any(word in line for word in X_API_PROVENANCES + (X_API_INPUT,))
+
+
 def record_x_api_posts(user_id, ref):
     """The account now holds X API posts (#689): every document a model
     wrote from its writing (the loaded profile and intentions too) reads

@@ -1209,6 +1209,134 @@ def test_x_api_posts_in_a_bundle_are_recorded_on_the_account(world, monkeypatch)
         assert not x_api_account(other.user_id)
 
 
+def _x_api_second_part(world, first_part, x_id="2001", **header_over):
+    """A bundle whose first part (3 entries) is ``first_part`` and whose
+    second part holds three tweets fetched through the X API, with an
+    intentions version in the header."""
+    header_over.setdefault("artifacts", [{
+        "kind": "intentions", "title": "Intentions",
+        "content": "intentions drafted", "generated_by": "gpt-6.1-sol",
+        "created_at": "2024-02-02T00:00:00", "privacy_level": "private",
+        "ai_usage": "chat"}])
+    second = [_entry(3 + i, x_id=x_id, provenance="prefill_x") for i in range(3)]
+    _put_bundle(world, first_part + second, x_id=x_id, **header_over)
+
+
+def _documents_read_as_chat(uid):
+    """The account's X API record is there, and its loaded profile and
+    intentions are refused Train by it (#689)."""
+    from backend.utils.privacy import train_refused, x_api_account
+    profile = UserProfile.query.filter_by(user_id=uid).one()
+    intentions = UserArtifact.query.filter_by(user_id=uid, kind="intentions").one()
+    return (x_api_account(uid), train_refused(profile), train_refused(intentions))
+
+
+def test_the_x_api_record_comes_with_the_header_when_a_no_stops_the_load(world, monkeypatch):
+    """The bundle's X API posts are in its second part. A no after the
+    first part stops the load before them; the profile and intentions it
+    loaded read as Chat at most all the same: the record is written with
+    the header, before them (#689)."""
+    _x_api_second_part(world, [_entry(i, x_id="2001") for i in range(3)])
+    _prod_mode(monkeypatch)
+    prod = world.prod()
+    with prod.app_context():
+        load, _ = _start("2001")
+        assert pbl.run_load(load.id, max_chunks=1) == "continuing"
+        uid = load.user_id
+        assert Node.query.filter_by(human_owner_id=uid).count() == 3
+        db.session.query(User).filter_by(id=uid).update({"prefill_consent": "no"})
+        db.session.commit()
+        assert _run_until_done(load.id) == "stopped"
+        assert Node.query.filter_by(human_owner_id=uid, provenance="prefill_x").count() == 0
+        assert _documents_read_as_chat(uid) == (True, True, True)
+
+
+def test_the_x_api_record_comes_with_the_header_when_a_part_fails(world, monkeypatch):
+    """The first part is refused (an entry by another account), so the
+    load fails before the part with the X API posts; the profile and
+    intentions written with the header still read as Chat at most."""
+    _x_api_second_part(world, [_entry(0, x_id="2001"),
+                               _entry(1, x_id="2001", author_username="someone_else"),
+                               _entry(2, x_id="2001")])
+    _prod_mode(monkeypatch)
+    prod = world.prod()
+    with prod.app_context():
+        load, _ = _start("2001")
+        assert _run_until_done(load.id) == "failed"
+        assert db.session.get(PrefillBundleLoad, load.id).error == "foreign_author"
+        uid = load.user_id
+        assert Node.query.filter_by(human_owner_id=uid).count() == 0
+        assert _documents_read_as_chat(uid) == (True, True, True)
+
+
+def test_the_x_api_record_needs_x_api_input_or_the_headers_flag(world, monkeypatch):
+    """Control: a bundle with no X API input gets no record, and its
+    documents may be at Train as the person sets them. The header's flag
+    alone (the lab's X API record, its posts deleted there before export)
+    writes the record; so does an intentions version marked as written
+    from X API posts, which keeps its mark."""
+    from backend.models import APICostLog
+    from backend.utils.privacy import train_refused, x_api_account
+    marked = [{"kind": "intentions", "title": "Intentions", "content": "drafted",
+               "generated_by": "gpt-6.1-sol", "created_at": "2024-02-02T00:00:00",
+               "unlicensed_input": "x_api"}]
+    _put_bundle(world, [_entry(i, x_id="3001") for i in range(4)], x_id="3001",
+                handle="plain")
+    _put_bundle(world, [_entry(i, x_id="4001") for i in range(2)], x_id="4001",
+                handle="flagged", x_api_input=True)
+    _put_bundle(world, [_entry(i, x_id="5001") for i in range(2)], x_id="5001",
+                handle="marked", artifacts=marked)
+    _prod_mode(monkeypatch)
+    prod = world.prod()
+    with prod.app_context():
+        plain, _ = _start("3001")
+        assert _run_until_done(plain.id) == "done"
+        assert APICostLog.query.filter_by(user_id=plain.user_id).count() == 0
+        assert not x_api_account(plain.user_id)
+        assert not train_refused(UserProfile.query.filter_by(user_id=plain.user_id).one())
+        flagged, _ = _start("4001")
+        assert _run_until_done(flagged.id) == "done"
+        assert x_api_account(flagged.user_id)
+        assert train_refused(UserProfile.query.filter_by(user_id=flagged.user_id).one())
+        loaded_marked, _ = _start("5001")
+        assert _run_until_done(loaded_marked.id) == "done"
+        assert x_api_account(loaded_marked.user_id)
+        art = UserArtifact.query.filter_by(user_id=loaded_marked.user_id).one()
+        assert art.unlicensed_input == "x_api"
+
+
+def test_export_says_whether_a_bundle_holds_x_api_input(world, monkeypatch):
+    """The header and the manifest say it (#689): an X API tweet, or the
+    lab's X API record with no such tweet left. An account whose bundle
+    was exported before it said so, and that holds X API input, is
+    exported again; the others stay unchanged."""
+    from backend.models import APICostLog
+    with world.lab.app_context():
+        alice = _seed_lab_member()
+        bob = _seed_lab_member("ca_bob", "bob", "1002", n=3)
+        Node.query.filter_by(human_owner_id=bob.id, source_key="twitter:1002001") \
+            .update({"provenance": "prefill_x"})
+        db.session.commit()
+        alice_id = alice.id
+    assert _export(world, monkeypatch)["exported"] == 2
+
+    def flags(x_id):
+        m = json.loads(world.storage.read_bytes(f"bundles/{x_id}/manifest.json"))
+        header = pb.read_member(world.storage, x_id, m["object"]["members"][0])[0]
+        return m["x_api_input"], m["counts"]["x_api_entries"], header["x_api_input"]
+    assert flags("1001") == (False, 0, False)
+    assert flags("1002") == (True, 1, True)
+
+    with world.lab.app_context():
+        db.session.add(APICostLog(
+            user_id=alice_id, model_id="x-api/timeline", request_type="x_prefill",
+            input_tokens=0, output_tokens=0, cost_microdollars=0))
+        db.session.commit()
+    again = _export(world, monkeypatch)
+    assert again["exported"] == 1 and again["unchanged"] == 1
+    assert flags("1001") == (True, 0, True)
+
+
 def test_a_chunked_load_resumes_after_a_killed_run(world, monkeypatch):
     """One part per step; the third run is killed mid-part (no release, as
     a SIGKILL leaves it); the beat sends it again once stale and the load
@@ -2174,6 +2302,33 @@ def test_let_in_when_ready_with_payments_off_approves_as_activate(world, monkeyp
         assert fresh.approved is True and fresh.approved_at is not None
         assert fresh.plan == "alpha" and fresh.let_in_at is None
         assert pbl.let_in_when_ready(earlier) is False and earlier.approved_at == T0
+
+
+def test_let_in_when_ready_with_payments_off_follows_the_admins_marks(world, monkeypatch):
+    """Payments off: an account the admin marked as spam is not let in by
+    its Yes (it waits for the admin, as before). An account the gate let
+    in while payments were on, waiting again now that they are off
+    (approval.waiting_again), is approved by hand as Activate approves
+    it, so it does not stay on the waitlist with its starting point
+    ready."""
+    from backend.utils.approval import counts_as_approved, waiting_again
+    prod = world.prod()
+    with prod.app_context():
+        prod.config["PAYMENTS_ENABLED"] = False
+        spam = User(username="s", approved=False, spam=True)
+        again = User(username="w", approved=True, approved_at=T0, let_in_at=T0,
+                     plan="free")
+        db.session.add_all([spam, again])
+        db.session.commit()
+        assert waiting_again(again) and not counts_as_approved(again)
+        assert pbl.let_in_when_ready(spam) is False and spam.approved is False
+        assert pbl.let_in_when_ready(again) is True
+        assert again.let_in_at is None and again.approved_at > T0
+        assert counts_as_approved(again) and not waiting_again(again)
+        assert again.plan == "free"
+        # Payments on, a spam-marked account is not let in by its Yes either.
+        prod.config["PAYMENTS_ENABLED"] = True
+        assert pbl.let_in_when_ready(spam) is False and spam.approved is False
 
 
 def test_let_in_when_ready_with_payments_on_is_approval_let_in(world, monkeypatch):

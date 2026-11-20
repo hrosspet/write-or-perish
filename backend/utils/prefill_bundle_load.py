@@ -128,8 +128,11 @@ PROFILE_FIELDS = ("id", "content", "generated_by", "tokens_used",
                   "covers_start", "source_rendered_at")
 RECENT_FIELDS = ("content", "generated_by", "tokens_used", "created_at",
                  "source_data_cutoff", "source_tokens_covered", "profile_id")
+# unlicensed_input: a version written from X API posts keeps its mark
+# (#689; dump_rows.mark accepts only that value). A mark only restricts.
 ARTIFACT_FIELDS = ("kind", "title", "description", "content",
-                   "generated_by", "tokens_used", "created_at")
+                   "generated_by", "tokens_used", "created_at",
+                   "unlicensed_input")
 # Artifact kinds a pre-fill drafts.
 ARTIFACT_KINDS = ("intentions",)
 
@@ -329,26 +332,33 @@ def target_refusal(user, x_id, *, allow_signed_in, allow_own_writing):
 def let_in_when_ready(user):
     """The one place a bundle load lets a person in: after their own Yes,
     when the load is done (Peter, 2026-11-13: "lets them in when it is
-    ready", no approval step). It lets in an account that was never let
-    in and that no admin blocked (deactivated_at). Nothing else in this
-    module sets ``approved``, ``approved_at`` or ``plan``. Returns whether
-    it let the account in; the caller commits.
+    ready", no approval step). Never an account an admin blocked
+    (deactivated_at) or marked as spam: those stay where the admin put
+    them. Nothing else in this module sets ``approved``, ``approved_at``
+    or ``plan``. Returns whether it let the account in; the caller
+    commits.
 
     - Payments on (#697): #700's own ``approval.let_in``, as its gate does
       at a request, so its rules hold here too: the default "alpha" plan
-      becomes "free" (the trial step follows), and a blocked, deleted or
-      system account is never let in. The gate has usually let the person
-      in at their first request already; then this does nothing.
+      becomes "free" (the trial step follows), and a deleted or system
+      account is never let in. The gate has usually let the person in at
+      their first request already; then this does nothing.
     - Payments off: ``approval.let_in`` approves nobody (everyone waits
-      for the admin then), so the account is approved here, as the
-      admin's Activate does while payments are off."""
+      for the admin then), so the account is approved here as the admin's
+      Activate approves it: one never approved, and one the gate let in
+      while payments were on that waits again now (``waiting_again``)."""
     from backend.utils import approval
-    if user.approved or user.deactivated_at is not None:
+    if user.deactivated_at is not None or user.spam:
         return False
     if approval.approval_waived():
+        if user.approved:
+            return False
         return approval.let_in(user, now=_now())
+    if user.approved and not approval.waiting_again(user):
+        return False
     user.approved = True
     user.approved_at = _now()
+    approval.approved_by_hand(user)
     return True
 
 
@@ -581,6 +591,9 @@ def check(query):
         "profile_generated_by": manifest.get("profile_generated_by"),
         "final_generated_by": manifest.get("final_generated_by"),
         "intentions_generated_by": manifest.get("intentions_generated_by"),
+        # True or False from the export; None for a bundle exported before
+        # it said (the load reads the entries then, #689).
+        "x_api_input": manifest.get("x_api_input"),
         "bytes": (manifest.get("object") or {}).get("bytes"),
     }
     excluded = pb.exclusion(storage, x_id)
@@ -741,13 +754,21 @@ def _check_self_load(load, token, storage):
     return None
 
 
-def _load_header(load, user, header, token):
+def _load_header(load, user, header, token, x_api=False):
     """The account's fields and everything small, in one commit. Rows the
     account already has from an earlier load of the material (same time,
-    model and type) are not written again."""
+    model and type) are not written again.
+
+    ``x_api``: the bundle's entries hold X API input (verify_bundle). With
+    it, or the header's own flag, the account's X API record is written
+    first, in this commit, before any profile, context or intentions
+    version (#689): those then read as Chat at most however the load
+    ends, a no or a failed part after the header included."""
     from backend.utils.intentions_versions import KIND as INTENTIONS, protected_version
     profiles, recents, artifacts = clean_header(header)
     uid = user.id
+    if x_api or dump_rows.header_holds_x_api_input(header):
+        dump_rows.record_x_api_posts(uid, "prefill_bundle")
     handle = pb.clean_handle(load.handle)
     if handle and not user.prefilled_handle:
         # The handle the tweets came from; the X id proved it is theirs.
@@ -868,9 +889,9 @@ def _node_chunk(load, uid, storage, dump_username, token):
             db.session.add(emb)
         created += 1
     if x_api:
-        # Posts fetched through the X API (#689), as load_user.py: the
-        # account's derived documents read as Chat at most. In the chunk's
-        # transaction, so the record and the posts land together.
+        # Posts fetched through the X API (#689). The header step wrote
+        # the record already (it read every part first); this holds for
+        # a load whose header step ran before it did. Never a second row.
         dump_rows.record_x_api_posts(uid, "prefill_bundle")
     _progress(load.id, token, nodes_done=load.nodes_done + len(batch),
               created_count=load.created_count + created,
@@ -987,16 +1008,19 @@ def _work(load_id, token, storage, user, deadline, max_chunks):
     stage reached. A no given meanwhile ends pass 1 where it is: the
     entries loaded so far are linked and stay (#662)."""
     load = db.session.get(PrefillBundleLoad, load_id)
+    x_api = False
     if load.stage == "header":
         if user.prefill_consent == "no":
             raise pb.BundleError("prefill_declined", "The person said no.")
         # Every part checked before anything is written; each is checked
         # again when it is read, in case the object changes meanwhile.
-        pb.verify_bundle(storage, load.x_id, load.members, load.bundle_sha256)
+        # The same read says whether any entry holds X API input (#689).
+        x_api = pb.verify_bundle(storage, load.x_id, load.members,
+                                 load.bundle_sha256)
     header = pb.read_member(storage, load.x_id, load.members[0])[0]
     dump_username = (header.get("user") or {}).get("username")
     if load.stage == "header":
-        _load_header(load, user, header, token)
+        _load_header(load, user, header, token, x_api=x_api)
     steps = 0
     while time.monotonic() < deadline and (max_chunks is None or steps < max_chunks):
         load = db.session.get(PrefillBundleLoad, load_id)

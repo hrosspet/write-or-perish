@@ -14,7 +14,9 @@ MEMBER_LINES entries per member. ``gzip`` reads it as one file; a load
 reads one member at a time by its byte range (``read_member``), checks
 that member's sha256, and never downloads or decompresses the rest. So
 a load resumes at any member without reading what came before, and holds
-one member in memory.
+one member in memory. The check before a load writes anything
+(``verify_bundle``) reads each member once: its checksum, and whether
+its entries hold X API input (#689).
 
 The manifest is written after the bundle, so a bundle without a manifest
 (an export that stopped between the two) is never read; the next export
@@ -347,9 +349,20 @@ def member_at(members, entries_done):
 def verify_bundle(storage, x_id, members, sha256):
     """Check every part, and the whole object, against the manifest before
     a load writes anything: one streaming read, one part in memory at a
-    time, nothing decompressed. BundleError("checksum") on a mismatch."""
+    time. BundleError("checksum") on a mismatch.
+
+    Returns whether an entry holds X API input (#689: fetched through the
+    X API, or written from such posts), so the load records it on the
+    account before it writes the profile, whichever part the entry is in
+    and whether or not the load gets that far. Each entry part is
+    decompressed once for this, and only the lines that may hold such
+    input are parsed (dump_rows.line_may_hold_x_api_input). This is also
+    how a bundle exported before its header carried the flag is read."""
+    from backend.utils.dump_rows import (
+        holds_x_api_input, line_may_hold_x_api_input)
     whole = hashlib.sha256()
-    for member in members:
+    x_api = False
+    for index, member in enumerate(members):
         data = storage.read_range(bundle_name(x_id), member["offset"],
                                   member["length"])
         if data is None:
@@ -359,8 +372,22 @@ def verify_bundle(storage, x_id, members, sha256):
             raise BundleError("checksum", "A part of the bundle does not "
                                           "match its manifest.")
         whole.update(data)
+        if index == 0 or x_api:
+            continue    # the header is asked by its own flag
+        try:
+            text = zlib.decompress(data, 31).decode("utf-8")
+            if line_may_hold_x_api_input(text):
+                for line in split_lines(text):
+                    if line_may_hold_x_api_input(line):
+                        nd = json.loads(line)
+                        if isinstance(nd, dict) and holds_x_api_input(nd):
+                            x_api = True
+                            break
+        except (zlib.error, UnicodeDecodeError, ValueError):
+            raise BundleError("format", "A part of the bundle cannot be read.")
     if whole.hexdigest() != sha256:
         raise BundleError("checksum", "The bundle does not match its manifest.")
+    return x_api
 
 
 def split_lines(text):

@@ -80,17 +80,26 @@ def _check_schema(db):
 
 
 def _open_dump(path):
-    """Return (header, node_iterator, node_total). Format 2 (JSON Lines:
-    header line + one node per line) streams; format 1 (single JSON
+    """Return (header, node_iterator, node_total, x_api). Format 2 (JSON
+    Lines: header line + one node per line) streams; format 1 (single JSON
     document) is loaded whole for compatibility — fine on a workstation,
     NOT inside a memory-capped container (convert it first:
-    convert_user_dump.py)."""
+    convert_user_dump.py). ``x_api``: an entry of the dump holds X API
+    input (#689), read in the counting pass before anything is loaded;
+    only lines that may hold it are parsed."""
+    from backend.utils.dump_rows import (
+        holds_x_api_input, line_may_hold_x_api_input)
     with open(path, encoding="utf-8") as f:
         first = f.readline()
     if first.lstrip().startswith("{") and '"format": 2' in first[:200]:
         header = json.loads(first)
+        total, x_api = 0, False
         with open(path, encoding="utf-8") as f:
-            total = sum(1 for _ in f) - 1
+            f.readline()
+            for line in f:
+                total += 1
+                if not x_api and line.strip() and line_may_hold_x_api_input(line):
+                    x_api = holds_x_api_input(json.loads(line))
 
         def _iter():
             with open(path, encoding="utf-8") as f:
@@ -99,14 +108,15 @@ def _open_dump(path):
                     line = line.strip()
                     if line:
                         yield json.loads(line)
-        return header, _iter(), total
+        return header, _iter(), total, x_api
     with open(path, encoding="utf-8") as f:
         dump = json.load(f)
     if dump.get("format") != 1:
         sys.exit(f"Unsupported dump format {dump.get('format')!r}")
     print("WARNING: format-1 dump loaded whole into memory; use "
           "convert_user_dump.py for large archives", file=sys.stderr)
-    return dump, iter(dump["nodes"]), len(dump["nodes"])
+    x_api = any(holds_x_api_input(nd) for nd in dump["nodes"])
+    return dump, iter(dump["nodes"]), len(dump["nodes"]), x_api
 
 
 def _author_id(username, owner_id, cache, db, User):
@@ -129,7 +139,7 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
     from backend.extensions import db
     from backend.models import Node, User
 
-    dump, node_iter, node_total = _open_dump(path)
+    dump, node_iter, node_total, x_api_entries = _open_dump(path)
 
     _check_schema(db)
 
@@ -191,9 +201,20 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
 
     cache = {dump["user"]["username"]: user_id, username: user_id}
 
-    # Profile chain (ids remapped so parent_profile_id stays coherent).
     from backend.utils import dump_rows
     from backend.utils.dump_rows import LINK_COLUMNS, remap_profile_links
+    # The account holds X API input (#689): the dump's header says so, or
+    # an entry is one (read before anything was loaded). Recorded first,
+    # in the same commit as the profiles, so the profiles, contexts,
+    # todos and artifacts below read as Chat at most from the start,
+    # whether or not this run gets to the entries, and also when a run
+    # with --merge finds every entry already there.
+    if (x_api_entries or dump_rows.header_holds_x_api_input(dump)) and \
+            dump_rows.record_x_api_posts(user_id, "load_user"):
+        print("the dump holds X API posts: recorded on the account "
+              "(#689)", file=sys.stderr)
+
+    # Profile chain (ids remapped so parent_profile_id stays coherent).
     profile_map = {}
     for pf in dump.get("profiles", []):
         row = dump_rows.new_profile(pf, user_id)
@@ -226,7 +247,6 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
               f"intentions version(s) from the dump", file=sys.stderr)
 
     # Nodes last, so context pins on system nodes resolve to the rows above.
-    holds_x_api = False
     prompt_cache = {}
     pinned = 0
 
@@ -247,8 +267,6 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
         # A tweet the dump says was fetched through the X API, or a reply
         # written from such posts, comes in at Chat at most (#689,
         # dump_rows.new_node), so no load lifts it to Train.
-        if dump_rows.holds_x_api_input(nd):
-            holds_x_api = True
         new = dump_rows.new_node(
             nd, user_id, _author_id(nd.get("author_username"), user_id, cache, db, User))
         db.session.add(new)
@@ -283,9 +301,6 @@ def _run(path, as_username, merge, create_approved, twitter_id=None):
             db.session.query(Node).filter(Node.id == new_id).update(
                 values, synchronize_session=False)
             relinked += 1
-    if holds_x_api and dump_rows.record_x_api_posts(user_id, "load_user"):
-        print("the bundle holds X API posts: recorded on the account "
-              "(#689)", file=sys.stderr)
     db.session.commit()
 
     # The account was made ready ahead of its owner now, on this server:
