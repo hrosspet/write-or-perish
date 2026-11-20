@@ -102,7 +102,6 @@
         ["**Link and Stripe**", "If you subscribe: what you enter at checkout, such as your name, email, card and billing address. Link sells the subscription and handles that data under its own privacy policy.", "See Link's privacy policy"],
         ["**X**", "If you sign in with X or connect it: X tells us your X user ID and handle, and with bookmark sync, your bookmarks, every night. We send X the IDs of saved tweets to check they are still public. We never post to X.", "USA"],
         ["**GitHub**", "If you ask the AI to file a bug report or an idea, and confirm it: its title and text become a **public** issue in Loore's GitHub repository, labelled loore:<your username>. They stay public after you delete your account.", "USA"],
-        ["**Google Fonts**", "Your IP address and browser details, when a page loads Loore's fonts", "Google (worldwide)"],
         ["**YouTube**", "Only if you open a saved YouTube video: the player loads from youtube-nocookie.com", "Google (worldwide)"],
         ["**Community Archive**", "The X handles and user IDs we look up. We download public tweets from it; we send it nothing you wrote.", "Its hosting provider"]
       ]
