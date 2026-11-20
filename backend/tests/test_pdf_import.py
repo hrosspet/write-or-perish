@@ -485,6 +485,35 @@ def test_memory_limit(client, monkeypatch):
     assert r.get_json()["error"] == pdf_import.MSG_TOO_BIG
 
 
+@pytest.mark.parametrize("exc, expected", [
+    (MemoryError(), {"error": "memory"}),
+    # Past the address-space limit a module can fail to load before any
+    # allocation raises MemoryError (seen on Python 3.12 on Linux).
+    (ImportError("/x/unicodedata.so: failed to map segment from shared "
+                 "object"), {"error": "memory"}),
+    (ModuleNotFoundError("No module named 'pypdf'"),
+     {"error": "unreadable", "type": "ModuleNotFoundError"}),
+])
+def test_worker_reports_the_memory_limit(monkeypatch, capsysbinary, exc,
+                                         expected):
+    """The worker's own classification, on every platform: the Linux-only
+    test_memory_limit reaches it through whichever error the limit raises
+    first on that build."""
+    import json
+    import logging
+
+    def extract(*_):
+        raise exc
+    monkeypatch.setattr(worker, "set_limits", lambda *_: None)
+    monkeypatch.setattr(worker, "extract", extract)
+    was_disabled = logging.root.manager.disable
+    try:
+        assert worker.main(["w", "a.pdf", "1", "1", "1", "1"]) == 0
+    finally:
+        logging.disable(was_disabled)  # main() silences logging, as a child
+    assert json.loads(capsysbinary.readouterr().out) == expected
+
+
 def test_worker_failure_logs_type_only(client, monkeypatch, tmp_path, caplog):
     monkeypatch.setattr(pdf_import, "WORKER_PATH", _script(tmp_path, (
         "import sys\n"

@@ -468,6 +468,14 @@ def read_metadata(reader):
 
 # --- Extraction ------------------------------------------------------------
 
+# Past the address-space limit, Python can fail to load an extension
+# module ("failed to map segment from shared object": an ImportError)
+# before any allocation raises MemoryError; which comes first varies with
+# the build and the limit. Both mean the limit was reached. main() keeps a
+# module that is not installed (ModuleNotFoundError) apart.
+_OUT_OF_MEMORY = (MemoryError, ImportError)
+
+
 def _open(path):
     """(reader, page count). Raises Fail for a damaged or locked file."""
     from pypdf import PdfReader
@@ -476,7 +484,7 @@ def _open(path):
     try:
         reader = PdfReader(path, strict=False)
         encrypted = reader.is_encrypted
-    except MemoryError:
+    except _OUT_OF_MEMORY:
         raise
     except Exception:
         raise Fail("damaged")
@@ -487,7 +495,7 @@ def _open(path):
             opened = reader.decrypt("")
         except DependencyError:
             raise Fail("encryption_unsupported")
-        except MemoryError:
+        except _OUT_OF_MEMORY:
             raise
         except Exception:
             raise Fail("password")
@@ -497,7 +505,7 @@ def _open(path):
         num_pages = len(reader.pages)
     except FileNotDecryptedError:
         raise Fail("password")
-    except MemoryError:
+    except _OUT_OF_MEMORY:
         raise
     except Exception:
         raise Fail("damaged")
@@ -512,7 +520,7 @@ def _page_texts(reader, num_pages, max_chars):
     for i in range(num_pages):
         try:
             text = reader.pages[i].extract_text() or ""
-        except MemoryError:
+        except _OUT_OF_MEMORY:
             raise
         except Exception:
             text, failed = "", failed + 1
@@ -532,7 +540,7 @@ def _outline(reader):
         if not outline_within_limit(reader):
             return []
         return reader.outline
-    except MemoryError:
+    except _OUT_OF_MEMORY:
         raise
     except Exception:
         return []
@@ -597,7 +605,9 @@ def main(argv):
             result = extract(path, max_pages, max_chars)
         except Fail as e:
             result = {"error": e.code, **e.detail}
-        except MemoryError:
+        except ModuleNotFoundError as e:
+            result = {"error": "unreadable", "type": type(e).__name__}
+        except _OUT_OF_MEMORY:
             result = {"error": "memory"}
         except RecursionError:
             result = {"error": "damaged"}
