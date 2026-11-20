@@ -2257,13 +2257,13 @@ Logout (`GET /auth/logout`) calls `logout_user()`, which clears the session keys
 Redirect chain (every hop is a browser redirect; X's callback URL is registered on the backend host):
 
 1. Browser → `GET {BACKEND}/auth/login?next=<relative path>` (`LoginPage.handleTwitterLogin`). `next` is stored in `session["next_url"]` if safe.
-2. Not yet authorized with X → `302 /auth/twitter` (flask-dance `twitter.login`). The `oauth_before_login` hook stores the request token in `session["x_oauth_request_token"]`.
+2. Any `/auth/login` that is not X's return (step 5) drops an X token stored in the session and a sign-in held at the invite question. A start then always goes on to `302 /auth/twitter` (flask-dance `twitter.login`). The `oauth_before_login` hook stores the request token in `session["x_oauth_request_token"]`.
 3. `302 https://api.twitter.com/oauth/authenticate?oauth_token=…` — the person signs in at X.
-4. X → `GET {BACKEND}/auth/twitter/authorized?oauth_token=…&oauth_verifier=…`. `_refuse_foreign_callback` requires the `oauth_token` to equal the one saved in *this* session cookie (login-CSRF protection); a mismatch → `302 {FRONTEND_URL}/login?error=x_try_again`. flask-dance exchanges the token, stores it in the session, → `302 /auth/login`.
-5. `/auth/login` again: calls X `account/verify_credentials.json`; failure → token dropped, `302 {FRONTEND_URL}`. Finds the user **by numeric X id only** (never by handle); unknown id → creates `User(twitter_id, twitter_handle, username=<derived from handle>)` with `approved=False` (column default). Refused (no account creation) when `next_url` is `/confirm-email…` → `302 {FRONTEND_URL}/login?error=confirm_needs_account&returnUrl=…`.
+4. X → `GET {BACKEND}/auth/twitter/authorized?oauth_token=…&oauth_verifier=…`. `_refuse_foreign_callback` requires the `oauth_token` to equal the one saved in *this* session cookie (login-CSRF protection); a mismatch → `302 {FRONTEND_URL}/login?error=x_try_again`. flask-dance exchanges the token, stores it in the session, notes `session["x_sign_in_authorized"]` (`oauth_authorized`), → `302 /auth/login`.
+5. `/auth/login` again (X's return: the note is there and the request names no `next`): calls X `account/verify_credentials.json`; failure → token dropped, `302 {FRONTEND_URL}`. Finds the user **by numeric X id only** (never by handle); unknown id → creates `User(twitter_id, twitter_handle, username=<derived from handle>)` with `approved=False` (column default). Refused (no account creation) when `next_url` is `/confirm-email…` → `302 {FRONTEND_URL}/login?error=confirm_needs_account&returnUrl=…`.
 6. `login_user(user, remember=True)` → `302 {FRONTEND_URL}{next_url}` or `302 {FRONTEND_URL}/dashboard`, with the auth cookies on this response.
 
-Cancel at X: X returns with `denied=…`, flask-dance redirects to `/auth/login`, which (not authorized) starts the flow again (step 2).
+Cancel at X: X returns with `denied=…`, flask-dance redirects to `/auth/login`, which goes back to `{FRONTEND_URL}/login?error=x_cancelled` (an X error: `x_failed`), with `&returnUrl=` when the sign-in started on a page.
 
 ### 3.4 Connect X to an existing account (#311) and X bookmarks
 
