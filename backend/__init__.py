@@ -279,6 +279,11 @@ def create_app():
     app = Flask(__name__)
     app.config.from_object(Config)
     validate_default_model(app.config)
+    # Payments (#438): never on in production with a sandbox key.
+    from backend.utils.subscriptions import check_payments_config
+    _payments_off = check_payments_config(app.config)
+    if _payments_off:
+        app.logger.error(_payments_off)
 
     # Fix for running behind nginx reverse proxy - handles X-Forwarded-* headers
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
@@ -316,6 +321,8 @@ def create_app():
     #     their address before approval).
     #   - For other API requests, return a 403 JSON error.
     #   - For other (HTML) requests, redirect to "/" with the query flag ?alpha=1.
+    # While payments are on, only an account the admin blocked is held here
+    # (utils/approval.py): every other one is approved on arrival.
     @app.before_request
     def touch_last_seen_hook():
         # Admin Activity tab: who came back, and where they last were.
@@ -329,8 +336,20 @@ def create_app():
         if not current_user.is_authenticated:
             return  # nothing to check
 
-        if current_user.approved:
+        # `approved`, except, payments off, an account the gate let in by
+        # itself while they were on (#697: approval.waiting_again).
+        from backend.utils import approval
+        if approval.counts_as_approved(current_user):
             return  # approved users proceed
+
+        # Payments on (#697; Peter, 2026-11-13): nobody waits for approval.
+        # An account never approved is approved on its first request and
+        # goes on to the trial step (block_accounts_without_subscription
+        # below); one the admin blocked is refused here, with its own text.
+        # No-op while payments are off.
+        if approval.let_in(current_user):
+            db.session.commit()
+            return
 
         # Allow access to specific URL prefixes regardless.
         allowed_prefixes = ["/auth", "/static", "/favicon.ico"]
@@ -342,6 +361,14 @@ def create_app():
         # or the redirect below would loop).
         if request.endpoint and request.endpoint.startswith("public_pages."):
             return
+
+        # Payments on (#697): an account the admin blocked reaches only who
+        # it is, its subscription and Stripe's page to cancel it, its data
+        # download, the terms and deleting itself (approval.BLOCKED_OPEN).
+        if approval.approval_waived() and approval.is_blocked(current_user):
+            if approval.open_while_blocked(request.method, request.path):
+                return
+            return _refuse_unapproved()
 
         # Exempt endpoints that the frontend needs:
         # Allow GET requests to /api/dashboard to fetch current user info.
@@ -372,13 +399,26 @@ def create_app():
            (request.method == "GET" and account_path == "/api/account/restore"):
             return
 
+        return _refuse_unapproved()
+
+    def _refuse_unapproved():
         # For API calls, check if the request expects JSON.
         accept_header = request.headers.get("Accept", "")
         if request.path.startswith("/api") or request.is_json or "application/json" in accept_header:
-            return jsonify({"error": "Your account is not approved. Please wait for approval."}), 403
+            # The waiting text, or, payments on, the blocked account's.
+            from backend.utils.approval import refusal_body
+            return jsonify(refusal_body(current_user)), 403
 
         # For HTML (or non-JSON) requests, redirect to the landing page with an alpha flag.
         return redirect("/landing?alpha=1")
+
+    # Payments on (#438): an approved account that never had a subscription
+    # (and whose plan was not set by hand) reaches only who-am-I, its
+    # subscription, the terms and deleting itself; every other /api and
+    # /media route answers 402 {"error": "no_subscription"}. No-op while
+    # payments are off.
+    from backend.utils.subscriptions import block_accounts_without_subscription
+    app.before_request(block_accounts_without_subscription)
     # --------------------------------------------------------------------
 
     # Initialize Twitter blueprint.
@@ -463,9 +503,18 @@ def create_app():
     from backend.routes.updates import updates_bp
     app.register_blueprint(updates_bp, url_prefix="/api/updates")
 
-    # Inbound webhooks (GitHub issue-close → fix_ready notification).
+    # Inbound webhooks (GitHub issue-close → fix_ready notification;
+    # Stripe subscription events, #438).
     from backend.routes.webhooks import webhooks_bp
     app.register_blueprint(webhooks_bp, url_prefix="/api/webhooks")
+
+    # The signed-in user's subscription (#438): 404 unless PAYMENTS_ENABLED.
+    from backend.routes.billing import billing_bp
+    app.register_blueprint(billing_bp, url_prefix="/api/billing")
+
+    # The invite (#439): 404 unless payments and referrals are on.
+    from backend.routes.referrals import referrals_bp
+    app.register_blueprint(referrals_bp, url_prefix="/api/referrals")
 
     # AI preferences folded into the artifact model (#158 Slice 5): managed via
     # the generic /api/artifacts CRUD (kind="ai_preferences"); the dedicated
@@ -507,6 +556,21 @@ def create_app():
         from flask_login import current_user
         from backend.utils.spend import spend_cap_response
         return spend_cap_response(current_user)
+
+    # Payments on (#438): a reply for an account without AI replies (no
+    # subscription, or one that ended) raises SubscriptionRequired in
+    # create_llm_placeholder before any write; any route that lets it
+    # escape answers 402 {"error": "subscription_required", "message"}.
+    # Whatever the route flushed before the call is not kept.
+    from backend.utils.subscriptions import SubscriptionRequired
+
+    @app.errorhandler(SubscriptionRequired)
+    def _handle_subscription_required(exc):
+        from flask import jsonify as _jsonify
+        from backend.extensions import db
+        db.session.rollback()
+        return _jsonify({"error": "subscription_required",
+                         "message": exc.message}), 402
 
     # A reply (or a Voice turn) where AI may not read: create_llm_placeholder
     # raises AIUsageRefused before any write. Routes answer it themselves
@@ -568,6 +632,12 @@ def create_app():
     )
     app.cli.add_command(pgvector_enable_command)
     app.cli.add_command(pgvector_compare_command)
+    from backend.billing_cli import (
+        alpha_free_month_command, stripe_sync_catalog_command)
+    app.cli.add_command(stripe_sync_catalog_command)
+    app.cli.add_command(alpha_free_month_command)
+    from backend.unclaimed_cli import unclaimed_accounts_command
+    app.cli.add_command(unclaimed_accounts_command)
 
     try:
         from experiments.prompt_rct.run_rct import rct_cli

@@ -19,7 +19,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from backend.tests.test_no_replies_for_none import (  # noqa: F401 (fixtures)
-    app, task_mod, st, _user, _client, _voice_draft,
+    app, task_mod, st, _user, _client, _voice_draft, _node, _reply,
 )
 from backend.tests.test_thread_size import LIMIT, _thread
 from backend.extensions import db as _db
@@ -199,3 +199,94 @@ class TestFinalize:
         _decide(waiting)
         assert st._voice_approval_skip(alice.id, entry.id) is None
         assert st._voice_thread_too_long(alice.id, entry.id, "gpt-5")
+
+
+# ── The plan comes first (#438) ──────────────────────────────────────────
+# Payments on, an account without AI replies: Voice from an entry is
+# refused for the plan before a waiting change and before the length, as
+# in the other Voice entry points, and nothing is written.
+
+def _lapsed(user):
+    user.plan = "free"
+    user.subscription_status = "ended"
+    user.subscription_level = "standard"
+    _db.session.commit()
+    return user
+
+
+def _unprompted_thread(user):
+    """entry -> AI reply -> the user's next entry, with no agentic prompt
+    above (Voice would attach its prompt under the entry)."""
+    first = _node(user, content="first words")
+    reply = _reply(first, user)
+    entry = _node(user, reply, content="more words")
+    _db.session.commit()
+    return reply, entry
+
+
+def _from_node(client, entry):
+    return client.post(f"/api/voice/from-node/{entry.id}", json={})
+
+
+def _subscription_required(resp):
+    assert resp.status_code == 402, resp.get_data(as_text=True)
+    assert resp.get_json()["error"] == "subscription_required"
+
+
+class TestThePlanFirst:
+    @pytest.mark.parametrize("prompted", [True, False])
+    def test_from_node_refuses_the_plan_before_a_waiting_change(
+            self, limited, task_mod, prompted):  # noqa: F811
+        limited.config["PAYMENTS_ENABLED"] = True
+        alice = _lapsed(_user())
+        if prompted:
+            _root, reply, entry = _thread(alice, measured=UNDER)
+        else:
+            reply, entry = _unprompted_thread(alice)
+        _wait_on(reply, alice)
+        before = Node.query.count()
+
+        _subscription_required(_from_node(_client(limited, alice), entry))
+
+        # No Voice prompt attached under the entry, no reply.
+        assert Node.query.count() == before
+        task_mod.generate_llm_response.delay.assert_not_called()
+
+    def test_from_node_refuses_the_plan_before_the_length(
+            self, limited, task_mod):  # noqa: F811
+        limited.config["PAYMENTS_ENABLED"] = True
+        alice = _lapsed(_user())
+        _root, _reply_, entry = _thread(alice, measured=OVER)
+        before = Node.query.count()
+
+        _subscription_required(_from_node(_client(limited, alice), entry))
+
+        assert Node.query.count() == before
+        task_mod.generate_llm_response.delay.assert_not_called()
+
+    @pytest.mark.parametrize("payments", [False, True])
+    def test_otherwise_the_waiting_change_and_the_length_as_before(
+            self, limited, task_mod, payments):  # noqa: F811
+        # Switch off: any account, as on main (the plan is never asked).
+        # Switch on: an account with AI replies.
+        limited.config["PAYMENTS_ENABLED"] = payments
+        alice = _user()
+        if payments:
+            alice.plan = "free"
+            alice.subscription_status = "active"
+            alice.subscription_level = "standard"
+        else:
+            _lapsed(alice)
+        _db.session.commit()
+        client = _client(limited, alice)
+
+        reply, entry = _unprompted_thread(alice)
+        waiting = _wait_on(reply, alice)
+        resp = _from_node(client, entry)
+        assert resp.status_code == 200, resp.get_json()
+        assert resp.get_json()["mode"] == "ready"
+        _decide(waiting)
+
+        _root, _reply_, long_entry = _thread(alice, measured=OVER)
+        assert _code(_from_node(client, long_entry)) == TOO_LONG
+        task_mod.generate_llm_response.delay.assert_not_called()

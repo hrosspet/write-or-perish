@@ -75,6 +75,16 @@ enum SpendCap {
 
     enum Action { case record, upload, glean }
 
+    /// Payments on (#438): the cap is the trial's or an alpha tester's free
+    /// month's, which only the first payment lifts, not the month. Set from the
+    /// user (`spend_cap_lifts_with_payment`) and from each spend-cap 402
+    /// (`lifts_with_payment`); false while payments are off.
+    static var liftsWithPayment = false
+
+    /// The banner's text for such a cap when the server sent none. It names
+    /// the state, never where or how to pay.
+    static let untilPaymentMessage = "You've reached your usage limit. It lifts with your first payment."
+
     /// The toast that answers a refused record, upload or glean press (#341, #435).
     static func toastMessage(_ action: Action, now: Date = Date()) -> String {
         let what: String
@@ -82,6 +92,9 @@ enum SpendCap {
         case .upload: what = "upload audio"
         case .glean: what = "glean"
         case .record: what = "start a new recording"
+        }
+        if liftsWithPayment {
+            return "You've reached your usage limit, so you can't \(what) until your first payment."
         }
         return "You've reached your monthly usage limit, so you can't \(what) until it resets on \(resetDateText(now: now))."
     }

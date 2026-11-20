@@ -118,7 +118,15 @@ def _script(monkeypatch, tmp_path, collect, render=None, cancel=None):
     # The harness stubs llm_providers, which makes this constant a mock.
     monkeypatch.setattr(_llm_task_mod, "DEFAULT_MAX_OUTPUT_TOKENS", 10000)
     calls = {"collect": [], "submit": [], "cancel": [], "chain": 0,
-             "render": 0, "submit_user_ids": []}
+             "render": 0, "submit_user_ids": [], "delete_files": []}
+
+    # The batch's files at OpenAI, deleted once its outcome is saved
+    # (#667): recorded, never sent.
+    def _delete_files(key, batch_id):
+        calls["delete_files"].append(batch_id)
+        return 0
+    monkeypatch.setattr(llm_batch, "delete_openai_batch_files_by_id",
+                        _delete_files)
 
     def _cancel(key, batch_id):
         calls["cancel"].append((key, batch_id))
@@ -257,12 +265,14 @@ def test_poll_error_keeps_the_node_processing_and_polls_again(app, monkeypatch, 
     assert node.llm_task_status == "processing"
     assert node.llm_task_error is None
     assert _entry(node)["status"] == "submitted"
+    # Polled again: its files stay (#667).
+    assert calls["delete_files"] == []
 
 
 def test_provider_verdict_fails_the_node(app, monkeypatch, tmp_path):  # noqa: F811
     def expired():
         raise BatchItemFailed("OpenAI batch batch_1 expired")
-    _script(monkeypatch, tmp_path, collect=expired)
+    calls = _script(monkeypatch, tmp_path, collect=expired)
     alice, read, llm_node = _read_thread()
     task = _Task()
 
@@ -273,6 +283,8 @@ def test_provider_verdict_fails_the_node(app, monkeypatch, tmp_path):  # noqa: F
     node = _reload(llm_node.id)
     assert node.llm_task_status == "failed"
     assert node.llm_task_error == REPLY_FAILED_TEXT
+    # The verdict is saved: the batch's files go (#667).
+    assert calls["delete_files"] == ["batch_1"]
 
 
 def test_policy_block_fails_the_node_is_reported_and_not_resubmitted(
@@ -308,7 +320,8 @@ def test_policy_block_fails_the_node_is_reported_and_not_resubmitted(
 
 def test_poll_cap_fails_the_node(app, monkeypatch, tmp_path):  # noqa: F811
     """The batch still running when retry() reports the cap."""
-    _script(monkeypatch, tmp_path, collect=lambda: ("in_progress", None))
+    calls = _script(monkeypatch, tmp_path,
+                    collect=lambda: ("in_progress", None))
     alice, read, llm_node = _read_thread()
 
     with pytest.raises(_llm_task_mod.MaxRetriesExceededError):
@@ -317,6 +330,8 @@ def test_poll_cap_fails_the_node(app, monkeypatch, tmp_path):  # noqa: F811
     node = _reload(llm_node.id)
     assert node.llm_task_status == "failed"
     assert node.llm_task_error == _llm_task_mod.CA_BATCH_GAVE_UP_TEXT
+    # The batch may still be running: its files stay (#667).
+    assert calls["delete_files"] == []
 
 
 def test_poll_error_at_the_cap_fails_the_node_with_the_last_error(app, monkeypatch, tmp_path):  # noqa: F811
@@ -595,6 +610,25 @@ def test_collect_that_dies_inside_the_finalize_counts_once(app, monkeypatch, tmp
     assert item.surfaced_count == 1
 
 
+def test_soft_limit_while_deleting_the_files_leaves_the_reply_saved(app, monkeypatch, tmp_path):  # noqa: F811
+    """#667 review: the delete lets the task's soft time limit through,
+    and it runs after the error handler, so the saved reply stays
+    completed."""
+    from backend.utils.soft_limit import SoftTimeLimitExceeded
+    _script(monkeypatch, tmp_path, collect=lambda: ("completed", _batch_resp()))
+
+    def _soft_limit(key, batch_id):
+        raise SoftTimeLimitExceeded()
+    monkeypatch.setattr(llm_batch, "delete_openai_batch_files_by_id",
+                        _soft_limit)
+    alice, read, llm_node = _read_thread()
+
+    with pytest.raises(SoftTimeLimitExceeded):
+        _run(_Task(), alice, read, llm_node)
+
+    assert _reload(llm_node.id).llm_task_status == "completed"
+
+
 def test_capped_user_still_collects_an_ended_batch(app, monkeypatch, tmp_path):  # noqa: F811
     """The batch ended before a poll saw the cap: the provider processed
     and billed it, so the reply is collected and its cost row written.
@@ -610,6 +644,8 @@ def test_capped_user_still_collects_an_ended_batch(app, monkeypatch, tmp_path): 
     node = _reload(llm_node.id)
     assert node.llm_task_status == "completed"
     assert APICostLog.query.count() == 1
+    # The reply is saved: the batch's files go (#667).
+    assert calls["delete_files"] == ["batch_1"]
 
     # A first run for the capped user does not submit.
     llm_user = Node.query.get(llm_node.id).user_id
@@ -776,6 +812,8 @@ def test_withdrawn_batch_that_never_ran_is_cancelled_unbilled(app, monkeypatch, 
     assert APICostLog.query.count() == 0
     assert FeedPick.query.count() == 0
     assert ExternalItem.query.count() == 0
+    # The withdrawal is saved: the batch's files go (#667).
+    assert calls["delete_files"] == ["batch_1"]
 
 
 def test_withdrawn_batch_that_ran_anyway_is_collected_and_billed(app, monkeypatch, tmp_path):  # noqa: F811
@@ -1353,3 +1391,140 @@ def test_live_read_the_collect_cannot_use_logs_its_cost(app, monkeypatch, tmp_pa
     assert _reload(llm_node.id).llm_task_status == "failed"
     assert [(r.request_type, r.input_tokens, r.output_tokens)
             for r in _cost_rows(llm_node.id)] == [("conversation", 70, 30)]
+
+
+# ── Anthropic: the batch itself is deleted once the outcome is saved (#693)
+
+def _anthropic_read(monkeypatch, tmp_path, collect):
+    """A Read on an Anthropic one-item batch: the entry names Anthropic,
+    the collect is scripted, and the deletion is recorded with the
+    reply's state when it is asked for (never sent)."""
+    from backend.utils import anthropic_batch_deletion as abd
+    calls = _script(monkeypatch, tmp_path, collect=lambda: None)
+    alice, read, llm_node = _read_thread()
+    meta = json.loads(llm_node.tool_calls_meta)
+    for m in meta:
+        if m.get("name") == "_batch":
+            m.update(provider="anthropic", batch_id="msgbatch_1")
+    llm_node.tool_calls_meta = json.dumps(meta)
+    _db.session.commit()
+
+    def _collect(key, batch_id, custom_id):
+        calls["collect"].append((key, batch_id, custom_id))
+        return collect(llm_node)
+    monkeypatch.setattr(llm_batch, "anthropic_batch_collect_one", _collect)
+    deleted = []
+
+    def _delete_now(batch_ids, source, key_type="chat", node_id=None):
+        node = _reload(llm_node.id)
+        deleted.append((list(batch_ids), source, key_type,
+                        node.llm_task_status, _entry(node)["status"]))
+        return {}
+    monkeypatch.setattr(abd, "delete_now", _delete_now)
+    return calls, deleted, (alice, read, llm_node)
+
+
+def _anthropic_resp():
+    return dict(_batch_resp(), batch_id="msgbatch_1")
+
+
+def test_an_anthropic_read_batch_is_deleted_once_the_reply_is_saved(app, monkeypatch, tmp_path):  # noqa: F811
+    calls, deleted, thread = _anthropic_read(
+        monkeypatch, tmp_path, lambda node: ("ended", _anthropic_resp()))
+
+    _run(_Task(), *thread)
+
+    assert deleted == [(["msgbatch_1"], "read", "chat", "completed",
+                        "ended")]
+    assert calls["delete_files"] == []   # no OpenAI files
+
+
+def test_an_anthropic_read_verdict_deletes_the_batch_after_the_save(app, monkeypatch, tmp_path):  # noqa: F811
+    def expired(node):
+        raise BatchItemFailed("Batch item node-1 expired")
+    _calls, deleted, thread = _anthropic_read(monkeypatch, tmp_path, expired)
+
+    with pytest.raises(BatchItemFailed):
+        _run(_Task(), *thread)
+
+    assert deleted == [(["msgbatch_1"], "read", "chat", "failed",
+                        "submitted")]
+
+
+def test_an_anthropic_read_at_the_poll_cap_is_left_to_the_sweep(app, monkeypatch, tmp_path):  # noqa: F811
+    """The batch may still be running: no delete now; the hourly sweep
+    cancels it if it runs and deletes it once it has ended. A control:
+    passes on main too."""
+    _calls, deleted, thread = _anthropic_read(
+        monkeypatch, tmp_path, lambda node: ("in_progress", None))
+
+    with pytest.raises(_llm_task_mod.MaxRetriesExceededError):
+        _run(_Task(cap=True), *thread)
+
+    assert deleted == []
+    assert _reload(thread[2].id).llm_task_status == "failed"
+
+
+def test_a_batch_gone_after_another_run_saved_the_reply_changes_nothing(app, monkeypatch, tmp_path):  # noqa: F811
+    """Two runs polled the same batch: the one that saved the reply
+    deleted the batch, and the other finds it gone. The reply stays as
+    saved, not failed."""
+    from backend.utils.llm_batch import BatchItemGone
+
+    def gone_after_the_other_run_saved(llm_node):
+        other = _db.session.get(Node, llm_node.id)
+        _db.session.query(Node).filter(Node.id == other.id).update(
+            {"llm_task_status": "completed"})
+        _db.session.commit()
+        raise BatchItemGone("Anthropic batch msgbatch_1 is no longer "
+                            "available")
+    _calls, deleted, thread = _anthropic_read(
+        monkeypatch, tmp_path, gone_after_the_other_run_saved)
+    task = _Task()
+
+    result = _run(task, *thread)
+
+    assert result["status"] == "settled"
+    assert task.retries == []
+    node = _reload(thread[2].id)
+    assert node.llm_task_status == "completed"
+    assert node.llm_task_error is None
+    assert deleted == []
+
+
+def test_a_batch_gone_while_the_reply_waits_is_a_verdict(app, monkeypatch, tmp_path):  # noqa: F811
+    """Deleted from outside Loore: the node fails, as for any verdict. A
+    control of that behaviour (main has no BatchItemGone, and its
+    BatchItemFailed fails the node the same way)."""
+    from backend.utils.llm_batch import BatchItemGone
+
+    def gone(node):
+        raise BatchItemGone("Anthropic batch msgbatch_1 is no longer "
+                            "available")
+    _calls, _deleted, thread = _anthropic_read(monkeypatch, tmp_path, gone)
+
+    with pytest.raises(BatchItemGone):
+        _run(_Task(), *thread)
+
+    assert _reload(thread[2].id).llm_task_status == "failed"
+
+
+def test_an_anthropic_read_submit_registers_its_batch(app, monkeypatch, tmp_path):  # noqa: F811
+    """#693: recorded in the commit that records the entry, with the
+    reply node and the key type, for the sweep."""
+    from backend.models import AnthropicBatchDeletion
+    _script(monkeypatch, tmp_path, collect=lambda: None)
+    monkeypatch.setattr(llm_batch, "anthropic_batch_submit_one",
+                        lambda *a, **k: "msgbatch_9")
+    alice, read, llm_node = _read_thread(submitted=False)
+
+    with pytest.raises(_llm_task_mod.Retry):
+        _llm_task_mod._ca_batch_submit(
+            _Task(), llm_node, "gpt-5", "claude-x",
+            [{"role": "user", "content": "hi"}], "k", "train", {},
+            provider="anthropic")
+
+    row = AnthropicBatchDeletion.query.one()
+    assert (row.batch_id, row.source, row.node_id, row.key_type) == (
+        "msgbatch_9", "read", llm_node.id, "train")
+    assert _entry(_reload(llm_node.id))["batch_id"] == "msgbatch_9"

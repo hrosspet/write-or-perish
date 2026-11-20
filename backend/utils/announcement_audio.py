@@ -19,6 +19,12 @@ not encrypted. Making a clip is billed to the user whose request made it.
 When a clip can't be made (no TTS key, a provider error) the answer has no
 clip: the reply plays alone, and the dialog and the record block work as
 before.
+
+The refusals of a Voice turn are said the same way (#651): one fixed
+sentence per refusal (utils/voice_refusals), its own cached clip per
+voice (``refusal-<code>-<key>.mp3`` beside the announcements), served by
+GET /api/voice/refusal/<code>.mp3 and played by the clients when a turn
+is refused, never as part of a reply's audio.
 """
 import hashlib
 import json
@@ -39,22 +45,37 @@ ANNOUNCEMENT_TEXTS = {
 }
 
 
+# What a clip says: the approval announcement, or a refused Voice turn.
+ANNOUNCEMENT = "approval-announcement"
+REFUSAL = "voice-refusal"
+
+
+def _texts(kind):
+    if kind == REFUSAL:
+        from backend.utils.voice_refusals import SPOKEN_REFUSALS
+        return SPOKEN_REFUSALS
+    return ANNOUNCEMENT_TEXTS
+
+
 def variant_for(count):
     """The clip for *count* waiting calls."""
     return "one" if count == 1 else "several"
 
 
 class Clip:
-    def __init__(self, variant, key, path, duration):
+    def __init__(self, variant, key, path, duration, kind=ANNOUNCEMENT):
         self.variant = variant
         self.key = key
         self.path = path
         self.duration = duration
+        self.kind = kind
 
     @property
     def url(self):
         """Where the players fetch it (routes/voice.py). *v* changes with
         the clip, so a browser never plays a cached older one."""
+        if self.kind == REFUSAL:
+            return f"/api/voice/refusal/{self.variant}.mp3?v={self.key}"
         return (f"/api/voice/approval-announcement/{self.variant}.mp3"
                 f"?v={self.key}")
 
@@ -89,41 +110,53 @@ def _clip_dir():
     return root / "shared" / "announcements"
 
 
-def clip_key(variant):
+def clip_key(variant, kind=ANNOUNCEMENT):
     model, voice = _tts_settings()
-    raw = "\x00".join(["approval-announcement", model, voice,
-                       ANNOUNCEMENT_TEXTS[variant]])
+    raw = "\x00".join([kind, model, voice, _texts(kind)[variant]])
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
-def ensure_clip(variant, user_id):
+def ensure_clip(variant, user_id, kind=ANNOUNCEMENT):
     """The cached clip of *variant*, made now if there is none yet; None
     when it can't be made (logged)."""
-    if variant not in ANNOUNCEMENT_TEXTS:
+    texts = _texts(kind)
+    if variant not in texts:
         return None
-    key = clip_key(variant)
+    key = clip_key(variant, kind)
+    # The announcements keep the file names they had before the refusals.
+    if kind == ANNOUNCEMENT:
+        name = f"{variant}-{key}"
+    else:
+        name = f"refusal-{variant}-{key}"
     folder = _clip_dir()
-    path = folder / f"{variant}-{key}.mp3"
-    meta = folder / f"{variant}-{key}.json"
+    path = folder / f"{name}.mp3"
+    meta = folder / f"{name}.json"
     if path.exists() and meta.exists():
         try:
             duration = float(json.loads(meta.read_text())["duration"])
-            return Clip(variant, key, path, duration)
+            return Clip(variant, key, path, duration, kind)
         except (ValueError, KeyError, TypeError, OSError):
-            logger.warning("Announcement clip %s: unreadable duration; "
-                           "making it again", path.name)
+            logger.warning("Spoken clip %s: unreadable duration; making it "
+                           "again", path.name)
     folder.mkdir(parents=True, exist_ok=True)
     # Written aside and moved in place: two first requests at once each
     # make a whole file, and a reader never sees half of one.
-    tmp = folder / f".{variant}-{key}-{uuid.uuid4().hex}.mp3"
+    tmp = folder / f".{name}-{uuid.uuid4().hex}.mp3"
     try:
-        duration = _synthesize(ANNOUNCEMENT_TEXTS[variant], tmp)
+        duration = _synthesize(texts[variant], tmp)
     except Exception as e:  # noqa: BLE001 - the reply plays alone
         tmp.unlink(missing_ok=True)
-        logger.warning("Announcement clip %s could not be made: %s",
-                       variant, type(e).__name__)
+        logger.warning("Spoken clip %s (%s) could not be made: %s",
+                       variant, kind, type(e).__name__)
         return None
     _log_cost(user_id, duration)
     meta.write_text(json.dumps({"duration": duration}))
     os.replace(tmp, path)
-    return Clip(variant, key, path, duration)
+    return Clip(variant, key, path, duration, kind)
+
+
+def ensure_refusal_clip(code, user_id):
+    """The cached clip of the refusal *code* (utils/voice_refusals), made
+    now if there is none yet; None for an unknown code or when it can't be
+    made (the clients then say the sentence with the device's speech)."""
+    return ensure_clip(code, user_id, kind=REFUSAL)

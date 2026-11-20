@@ -655,6 +655,32 @@ def test_read_batch_of_a_node_is_cancelled(world, stubs):
     assert "read-1" in stubs.cancelled
 
 
+def test_the_purged_users_anthropic_batches_are_queued_for_deletion(
+        world, stubs):
+    """#693: a batch carrying only her requests (cancelled, or finished
+    and its job row deleted) and her Read's batch are registered, so the
+    hourly sweep deletes them at Anthropic once they have ended, also
+    when they are from before the registration existed. A batch that
+    still carries other users' requests is left to its collector."""
+    import json
+    from backend.models import AnthropicBatchDeletion
+    world.A2.tool_calls_meta = json.dumps([
+        {"name": "_batch", "status": "submitted", "batch_id": "read-ant",
+         "provider": "anthropic", "key_type": "train"}])
+    _db.session.commit()
+
+    _run_job()
+
+    rows = {r.batch_id: (r.source, r.key_type)
+            for r in AnthropicBatchDeletion.query}
+    assert rows == {
+        "b-only": ("profile_batch_job", "chat"),
+        "b-done": ("profile_batch_job", "chat"),
+        "pd-a": ("poll_draft_batch_job", "chat"),
+        "read-ant": ("purge", "train"),
+    }
+
+
 def test_the_purge_never_decrypts(world, stubs, monkeypatch):
     def boom(*a, **k):
         raise AssertionError("the purge decrypted content")

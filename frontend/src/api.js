@@ -36,10 +36,38 @@ api.interceptors.response.use(
         data && data.error === "monthly_spend_limit_reached") {
       try {
         window.dispatchEvent(new CustomEvent("loore:spend-capped", {
-          detail: { message: data.message, liftsOn: data.lifts_on },
+          detail: {
+            message: data.message,
+            liftsOn: data.lifts_on,
+            // Payments on (#438): a cap only the first payment lifts.
+            liftsWithPayment: !!data.lifts_with_payment,
+          },
         }));
       } catch (e) {
         // Ignore — CustomEvent unavailable; the rejection below still flows.
+      }
+    }
+    // Payments on (#438): the account is not let in (never had a
+    // subscription, or its first payment failed): UserContext reads the
+    // user again and the app shows the subscribe page.
+    if (error.response && error.response.status === 402 &&
+        data && data.error === "no_subscription") {
+      try {
+        window.dispatchEvent(new CustomEvent("loore:no-subscription"));
+      } catch (e) {
+        // Ignore — CustomEvent unavailable.
+      }
+    }
+    // Payments on (#438): a reply refused for an account without AI
+    // replies raises SubscriptionBanner, which links to Settings.
+    if (error.response && error.response.status === 402 &&
+        data && data.error === "subscription_required") {
+      try {
+        window.dispatchEvent(new CustomEvent("loore:subscription-required", {
+          detail: { message: data.message },
+        }));
+      } catch (e) {
+        // Ignore — CustomEvent unavailable.
       }
     }
     return Promise.reject(error);

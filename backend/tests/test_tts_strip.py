@@ -166,12 +166,49 @@ def test_node_text_with_only_an_image_is_empty():
     assert _node_spoken_text(None) == ""
 
 
+# ── Code blocks (#646) ──────────────────────────────────────────────────
+
+def test_node_text_speaks_a_code_block_as_one_phrase():
+    from backend.utils.spoken_links import CODE_BLOCK_SPOKEN
+    text = ("Use `os.path` here:\n\n```python\nimport os\n"
+            "print(os.path.join('a', 'b'))\n```\n\nThat prints a/b.")
+    assert _node_spoken_text(text) == (
+        f"Use `os.path` here:\n\n{CODE_BLOCK_SPOKEN}\n\nThat prints a/b.")
+
+
+def test_node_text_list_item_fence_keeps_the_prose_after_it():
+    from backend.utils.spoken_links import CODE_BLOCK_SPOKEN
+    text = ("Do this:\n\n1. ```bash\n   pip install x\n   ```\n2. Run it.\n\n"
+            "Then read the docs.")
+    assert _node_spoken_text(text) == (
+        f"Do this:\n\n1. {CODE_BLOCK_SPOKEN}\n2. Run it.\n\n"
+        "Then read the docs.")
+
+
+def test_node_text_proposal_reply_leaves_code_out_of_its_prose():
+    from backend.utils.spoken_links import CODE_BLOCK_SPOKEN
+    text = ("I'd file this; it fails here:\n\n```\nTraceback (most recent "
+            "call last):\n  File \"x.py\"\n```\n\n"
+            "### Issue Title\nBug\n### Description\nIt breaks.\n"
+            "### Category\nbug\nThanks.")
+    assert _node_spoken_text(text, _PROPOSAL_META) == (
+        f"I'd file this; it fails here:\n\n{CODE_BLOCK_SPOKEN}\n\nThanks.")
+
+
 @pytest.mark.parametrize("text", [
     f"A link [459]({_PR[:-3]}459) mid-sentence.",
     f"Intro.\n\n## Fix [460]({_PR})\nBody.",
     f"Merged:\n{_PR}\nThat's it.",
     "Read https://www.example.com/a/b?c=d, then rest.",
     "Autolink <https://example.org/x/y> here.",
+    # Code blocks (#646): one phrase each, no chapter from a comment.
+    # Parity only, so the first and the third are controls (before #646
+    # both paths read the code, and cut the same chapters at comments).
+    "Here:\n\n```python\n# setup\nimport os\n## not a chapter\n```\n\n"
+    "Done. Next steps follow.",
+    "Steps:\n1. Install:\n    ```bash\n    pip install x\n    ```\n2. Run.",
+    "## A\nIntro.\n\n~~~\n# x\n~~~\n\n## B\nEnd.",
+    "Steps:\n1. ```bash\n   pip install x\n   ```\n2. Run it.\n\nThen more.",
 ])
 def test_node_text_matches_the_streamed_reply(text):
     """The batch task and a reply spoken while written say the same,
