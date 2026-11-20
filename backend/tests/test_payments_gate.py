@@ -297,6 +297,11 @@ EXPECTED_OTHER_RULES = {
     # finished or forgotten here, before any account exists.
     ("POST", "/auth/invite-choice/continue"),
     ("POST", "/auth/invite-choice/cancel"),
+    # Connect X found the account prepared for this person (#714): the
+    # email account that asks is the one that is not let in yet.
+    ("GET", "/auth/prepared-account"),
+    ("POST", "/auth/prepared-account/open"),
+    ("POST", "/auth/prepared-account/stay"),
     ("GET", "/landing"), ("GET", "/login"), ("GET", "/node/<int:node_id>"),
     ("GET", "/ready"), ("GET", "/sitemap.xml"),
     ("GET", "/static/<path:filename>"), ("GET", "/vision"),

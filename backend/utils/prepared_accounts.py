@@ -62,7 +62,13 @@ OFFER_SESSION_KEY = "prepared_account_offer"
 # Why an email account stays when its person opens the prepared account.
 STAYS_WRITING = "writing"   # it holds writing of its own
 STAYS_PAID = "paid"         # it paid, or its subscription is past its trial
-STAYS_KEPT = "kept"         # admin, plan set by hand, a deletion under way
+STAYS_KEPT = "kept"         # admin, alpha tester, a plan set by hand,
+#                             a deletion under way
+
+# Plans a new account gets without an admin (as unclaimed_accounts.
+# DEFAULT_PLANS): "alpha" while payments are off, "free" while they are on.
+# Any other plan was set by hand.
+_DEFAULT_PLANS = ("alpha", "free")
 
 # UserPrompt versions a person saved (as unclaimed_accounts.PERSON_VERSIONS):
 # the "default" rows are copies a job makes.
@@ -128,7 +134,11 @@ def stays_reason(user):
     no writing and never paid), else why it stays (STAYS_*)."""
     from backend.utils.account_deletion import deletion_refusal
     from backend.utils.user_purge import active_job
-    if (user.is_admin or user.plan_set_by_hand
+    # Not User.plan_set_by_hand: that counts the "alpha" every account gets
+    # while payments are off. An alpha tester keeps the account its free
+    # month and price belong to.
+    if (user.is_admin or user.is_alpha_tester
+            or (user.plan or "alpha") not in _DEFAULT_PLANS
             or deletion_refusal(user) is not None):
         return STAYS_KEPT
     job = active_job(user.id)

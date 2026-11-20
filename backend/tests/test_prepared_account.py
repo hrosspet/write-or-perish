@@ -93,7 +93,8 @@ def _email_account(**kw):
     """The second, empty account an email sign-in made."""
     kw.setdefault("username", "anna")
     kw.setdefault("email", ANNA_EMAIL)
-    user = User(approved=True, last_seen_at=datetime.utcnow(), **kw)
+    kw.setdefault("approved", True)
+    user = User(last_seen_at=datetime.utcnow(), **kw)
     _db.session.add(user)
     _db.session.commit()
     return user
@@ -193,6 +194,35 @@ class TestTheQuestion:
         q = _call(client, "get", "/auth/prepared-account").get_json()
         assert q["deleted"] is False and q["stays_because"] == "writing"
         assert q["email_moves"] is False
+
+    @pytest.mark.parametrize("kw", [
+        {"plan": "pro"},                                   # set by hand
+        {"alpha_free_granted_at": datetime(2026, 11, 1)},  # an alpha tester
+        {"is_admin": True},
+    ])
+    def test_an_account_set_up_by_hand_stays(self, app, kw):
+        _prepared()
+        anna = _email_account(**kw)
+        client, _ = _connect(app, anna)
+        q = _call(client, "get", "/auth/prepared-account").get_json()
+        assert q["deleted"] is False and q["stays_because"] == "kept"
+
+    def test_payments_off_a_waiting_email_account_is_deleted_too(self, app):
+        """Payments off, a new account gets the "alpha" plan and waits for
+        approval: that plan is no plan set by hand."""
+        app.config["PAYMENTS_ENABLED"] = False
+        anna_x = _prepared()
+        anna = _email_account(approved=False)
+        assert anna.plan == "alpha"
+        client, _ = _connect(app, anna)
+        q = _call(client, "get", "/auth/prepared-account").get_json()
+        assert q["deleted"] is True and q["stays_because"] is None
+
+        assert _open(client).status_code == 200
+
+        assert _signed_in_id(client) == anna_x.id
+        assert _fresh(anna).deleted_at is not None
+        assert _fresh(anna_x).email == ANNA_EMAIL
 
     def test_an_account_that_paid_stays(self, app):
         _prepared()
