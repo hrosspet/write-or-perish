@@ -1153,6 +1153,131 @@ class TestUsageAtAStart:
                       _payload(WEB_CHUNK_BYTES)).status_code == 202
 
 
+def _spent(user, usd, at):
+    """A cost row of *usd* recorded at *at*."""
+    from backend.models import APICostLog
+    _db.session.add(APICostLog(
+        user_id=user.id, model_id="gpt-4o-transcribe",
+        request_type="transcription", created_at=at,
+        cost_microdollars=int(round(usd * 1_000_000))))
+    _db.session.commit()
+
+
+def _trialing(app, user, ceiling_usd, monthly_usd=50.0, started=None):
+    """A trialing subscription (payments on) whose trial may use
+    *ceiling_usd* in all, under a monthly limit of *monthly_usd* (the
+    level's); the trial started *started* (two days ago by default)."""
+    app.config.update(
+        PAYMENTS_ENABLED=True, AUDIO_PRICING=PRICE,
+        SUBSCRIPTION_TRIAL_SPEND_LIMIT_USD=ceiling_usd,
+        SUBSCRIPTION_SPEND_LIMIT_USD_STANDARD=monthly_usd)
+    user.plan = "free"
+    user.subscription_level = "standard"
+    user.subscription_status = "trialing"
+    user.subscription_trial_start = started or (
+        datetime.utcnow() - timedelta(days=2))
+    user.monthly_spend_limit_usd = None
+    _db.session.commit()
+
+
+def _alpha_free_month(app, user, ceiling_usd, start):
+    """An alpha tester (payments on) inside the free month, which started
+    at *start*: Standard's ceiling, once over the whole free month and,
+    per calendar month, as the monthly limit."""
+    app.config.update(
+        PAYMENTS_ENABLED=True, AUDIO_PRICING=PRICE,
+        SUBSCRIPTION_SPEND_LIMIT_USD_STANDARD=ceiling_usd)
+    user.plan = "free"
+    user.alpha_free_granted_at = start - timedelta(days=1)
+    user.alpha_free_start = start
+    user.alpha_free_until = datetime.utcnow() + timedelta(days=10)
+    user.monthly_spend_limit_usd = None
+    _db.session.commit()
+
+
+class TestUsageAtAStartUnderTheTrialCeiling:
+    """The trial's and an alpha tester's free month's ceiling (utils/spend.
+    trial_limit_usd, counted from its start) weigh the audio still waiting
+    for its transcript as the monthly limit does: 503 ``usage_catching_up``
+    when only that audio takes the account to the ceiling, the ceiling's
+    own 402 when the recorded cost alone reaches it."""
+
+    def _catching_up(self, resp):
+        assert resp.status_code == 503, resp.get_data(as_text=True)
+        assert resp.get_json()["code"] == limits.CATCHING_UP_CODE
+
+    def test_waiting_audio_counts_against_the_trial_ceiling(
+            self, app, client, alice):
+        # $0.05 left of the trial's $1.00, far under the month's $50; a
+        # 30-minute dictation ($0.18) still queued.
+        _trialing(app, alice, 1.00)
+        _spent(alice, 0.95, datetime.utcnow() - timedelta(hours=1))
+        _left_behind(app, alice, "dictation", timedelta(minutes=1),
+                     chunks=120)
+
+        self._catching_up(_init_recording(client))
+        self._catching_up(_init_upload(client, 8, 2))
+        # Not the ceiling itself: nothing marks the account capped.
+        _db.session.refresh(alice)
+        assert not alice.subscription_trial_capped
+        assert alice.spend_blocked_month is None
+
+    def test_the_recorded_cost_alone_is_the_trials_402(
+            self, app, client, alice):
+        from backend.utils.spend import TRIAL_CAP_MESSAGE
+        # The trial's $1.00 is spent; the out-of-band check has not set the
+        # account's flag yet.
+        _trialing(app, alice, 1.00)
+        _spent(alice, 1.00, datetime.utcnow() - timedelta(minutes=1))
+
+        resp = _init_recording(client)
+
+        assert resp.status_code == 402
+        body = resp.get_json()
+        assert body["error"] == "monthly_spend_limit_reached"
+        assert body["message"] == TRIAL_CAP_MESSAGE
+        assert body["lifts_with_payment"] is True
+        assert body["lifts_on"] is None
+
+    def test_an_alpha_testers_free_month_counts_from_its_start(
+            self, app, client, alice):
+        from backend.utils.spend import FREE_MONTH_CAP_MESSAGE, month_start
+        # The free month began before this calendar month, and $0.95 of
+        # its $1.00 went then: this month's limit has room, the free
+        # month's ceiling has $0.05 left.
+        start = month_start() - timedelta(days=5)
+        _alpha_free_month(app, alice, 1.00, start)
+        _spent(alice, 0.95, start + timedelta(days=1))
+        _left_behind(app, alice, "dictation", timedelta(minutes=1),
+                     chunks=120)
+
+        self._catching_up(_init_recording(client))
+
+        _spent(alice, 0.05, datetime.utcnow() - timedelta(minutes=1))
+        resp = _init_recording(client)
+        assert resp.status_code == 402
+        assert resp.get_json()["message"] == FREE_MONTH_CAP_MESSAGE
+
+    def test_control_spend_before_the_trial_does_not_count(
+            self, app, client, alice):
+        # $5.00 spent before the trial began (under the month's $50); the
+        # trial's own $1.00 is untouched, and a short turn waits.
+        _trialing(app, alice, 1.00)
+        _spent(alice, 5.00, datetime.utcnow() - timedelta(days=3))
+        _left_behind(app, alice, "turn", timedelta(seconds=5), chunks=1)
+
+        assert _init_recording(client).status_code == 201
+
+    def test_control_under_the_trial_ceiling_a_start_goes_through(
+            self, app, client, alice):
+        _trialing(app, alice, 1.00)
+        _spent(alice, 0.50, datetime.utcnow() - timedelta(hours=1))
+        _left_behind(app, alice, "dictation", timedelta(minutes=1),
+                     chunks=120)
+
+        assert _init_recording(client).status_code == 201
+
+
 class TestFirstAudioAtTheLimit:
     def test_control_the_recording_being_spoken_into_takes_its_first_audio(
             self, app, client, alice):

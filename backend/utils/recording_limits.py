@@ -571,16 +571,45 @@ def pending_audio_seconds(user_id, now=None):
         + float(uploads or 0)
 
 
+def _usage_ceilings(user, config):
+    """The usage ceilings on *user* at a start, each as (what counts
+    against it, the ceiling, whether only the first payment lifts it), in
+    microdollars:
+
+    - the monthly limit (utils/spend.get_user_spend_limit_usd), against
+      the carry and this month's spend;
+    - the trial's or an alpha tester's free month's ceiling
+      (spend.trial_limit_usd), against the spend since its start
+      (spend.trial_ceiling_start), as spend.enforce_trial_cap counts it.
+
+    A ceiling of 0 is none."""
+    from backend.utils import spend
+    ceilings = []
+    limit = spend._usd_to_microdollars(
+        spend.get_user_spend_limit_usd(user, config))
+    if limit > 0:
+        ceilings.append((spend.rolled_spend_carry(user, config)
+                         + spend.get_user_month_spend_microdollars(user.id),
+                         limit, False))
+    trial = spend._usd_to_microdollars(spend.trial_limit_usd(user, config))
+    since = spend.trial_ceiling_start(user)
+    if trial > 0 and since is not None:
+        ceilings.append((spend.user_spend_since_microdollars(user.id, since),
+                         trial, True))
+    return ceilings
+
+
 def usage_refusal(user_id):
     """The usage limit at a start: the 402 (utils/spend) when the account
-    is capped, or when its carry and what it spent this month reach its
-    limit; 503 ``usage_catching_up`` (CATCHING_UP_TEXT) when only the audio
-    it has stored or queued but not yet recorded as cost
-    (pending_audio_seconds, at the transcription price) takes it there,
-    which clears as the transcription catches up. None otherwise, and for
-    an account without a limit. Asked at every start; never for audio of a
-    recording that holds audio."""
-    from flask import current_app
+    is capped, or when what is recorded as cost reaches one of its
+    ceilings (_usage_ceilings: the monthly limit, and the trial's or the
+    free month's); 503 ``usage_catching_up`` (CATCHING_UP_TEXT) when only
+    the audio it has stored or queued but not yet recorded as cost
+    (pending_audio_seconds, at the transcription price) takes it to one of
+    them, which clears as the transcription catches up. None otherwise,
+    and for an account without a ceiling. Asked at every start; never for
+    audio of a recording that holds audio."""
+    from flask import current_app, jsonify
     from backend.extensions import db
     from backend.models import User
     from backend.utils import spend
@@ -588,23 +617,30 @@ def usage_refusal(user_id):
     user = db.session.get(User, user_id)
     if user is None:
         return None
-    if not spend.user_is_capped(user):
-        limit = spend._usd_to_microdollars(
-            spend.get_user_spend_limit_usd(user, current_app.config))
-        if limit <= 0:
-            return None
-        used = (spend.rolled_spend_carry(user, current_app.config)
-                + spend.get_user_month_spend_microdollars(user_id))
-        if used < limit:
-            pending = calculate_audio_cost_microdollars(
-                TRANSCRIPTION_MODEL, pending_audio_seconds(user_id))
-            if used + pending < limit:
-                return None
-            response = _refused(CATCHING_UP_TEXT, CATCHING_UP_CODE, 503)
-            response[0].headers["Retry-After"] = "60"
-            return response
-    response = spend.spend_cap_response(user)
-    db.session.rollback()
+    response = None
+    ceilings = []
+    if spend.user_is_capped(user):
+        response = spend.spend_cap_response(user)
+    else:
+        ceilings = _usage_ceilings(user, current_app.config)
+        for used, limit, until_payment in ceilings:
+            if used >= limit:
+                # The cost alone reaches it, before the out-of-band check
+                # sets the account's flag: the 402 that check will mean.
+                response = (jsonify(spend.trial_cap_payload(user)), 402) \
+                    if until_payment else spend.spend_cap_response(user)
+                break
+    if response is not None:
+        db.session.rollback()
+        return response
+    if not ceilings:
+        return None
+    pending = calculate_audio_cost_microdollars(
+        TRANSCRIPTION_MODEL, pending_audio_seconds(user_id))
+    if all(used + pending < limit for used, limit, _ in ceilings):
+        return None
+    response = _refused(CATCHING_UP_TEXT, CATCHING_UP_CODE, 503)
+    response[0].headers["Retry-After"] = "60"
     return response
 
 
