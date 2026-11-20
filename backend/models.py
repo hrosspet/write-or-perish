@@ -411,8 +411,8 @@ class User(db.Model, UserMixin):
     approved_before_block = db.Column(db.Boolean, nullable=True)
     # Last authenticated API request (throttled to one write per
     # ACTIVITY_TOUCH_INTERVAL) and its path, so "checked the profile and
-    # left" is distinguishable from "never came". Not engagement — a view
-    # is a view; engagement is writing / asking (see admin Activity).
+    # left" is distinguishable from "never came". Not activity — a view
+    # is a view; activity is writing / asking (see admin Activity).
     last_seen_at = db.Column(db.DateTime, nullable=True)
     last_seen_path = db.Column(db.String(128), nullable=True)
 

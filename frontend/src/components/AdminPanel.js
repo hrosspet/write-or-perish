@@ -316,7 +316,7 @@ export function AdminPolls() {
 // this lists items and manages their triage status.
 const FEEDBACK_STATUSES = ["new", "reviewed", "done"];
 
-// Engagement since activation, measured directly (writes / asks / voice),
+// Activity since activation, measured directly (writes / asks / voice),
 // not through spend. Active accounts only. The strip is one cell per day:
 // filled when the person wrote or asked that day; a dot marks voice.
 const relTime = (iso) => {

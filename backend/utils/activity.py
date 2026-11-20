@@ -1,4 +1,4 @@
-"""Admin Activity tab: per-user engagement since activation, measured
+"""Admin Activity tab: per-user activity since activation, measured
 directly (writes, asks, voice) rather than through spend — spend mixes in
 pre-fill, embeddings, summaries and batch profiles, none of which say
 anything about whether the person came back.
