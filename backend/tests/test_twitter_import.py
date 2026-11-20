@@ -547,7 +547,13 @@ def test_fetch_account_matches_the_username_exactly(monkeypatch):
     """The archive's ilike filter treats "_" as a wildcard and returns rows
     in no order; Loore keys X logins on the id this returns, so a
     look-alike's id would let that other X user into the account."""
+    from datetime import datetime, timezone
     from backend.utils import community_archive as ca
+    # This tests the keyless REST path's matching, so it runs as before the
+    # REST API's retirement date: after it, an empty REST answer raises
+    # CommunityArchiveRetired (tested in test_community_archive_v1.py).
+    monkeypatch.setattr(ca, "REST_RETIRED_AT",
+                        datetime(2100, 1, 1, tzinfo=timezone.utc))
     rows = {}
 
     def fake_get(table, params, timeout=None):
