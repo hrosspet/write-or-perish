@@ -470,6 +470,11 @@ class Config:
         os.environ.get("COMMUNITY_ARCHIVE_PARQUET_MIN_TWEETS") or "5000")
     COMMUNITY_ARCHIVE_SNAPSHOT_DIR = (
         os.environ.get("COMMUNITY_ARCHIVE_SNAPSHOT_DIR") or None)
+    # Where tiktoken keeps o200k_base (#717: a Glean's list is fitted with
+    # counts made on the server). Unset: <data>/tiktoken, beside the
+    # archive snapshot (utils/tokens.tiktoken_cache_dir); the first count
+    # on a machine downloads the file there once (~3.6 MB).
+    TIKTOKEN_CACHE_DIR = os.environ.get("TIKTOKEN_CACHE_DIR") or None
     # Personal key for the Community Archive API v1 (#688; created at
     # community-archive.org, settings, API keys). Set: the pre-fill and
     # archive lookups use API v1, and Glean reads the last day from it

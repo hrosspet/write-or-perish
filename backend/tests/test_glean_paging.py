@@ -398,6 +398,34 @@ def test_the_admins_batch_read_again_reads_on_too(paged, monkeypatch):
     assert _page(again.id)[0] == ["t3", "t4"]
 
 
+def test_without_a_local_count_the_list_is_fitted_by_the_estimate(paged, monkeypatch):
+    """A model with no local count (Anthropic's, or an o200k model whose
+    encoding did not load in this process): the rest of the prompt is
+    estimated as the thread limit estimates it, and the tweets at the
+    tweets prior, its upper end. The list holds fewer tweets than a count
+    would let in, still the newest, and the estimate is the size the
+    limit's check uses, so the Glean is not refused."""
+    from backend.utils import tokens
+    from backend.utils.thread_size import THREAD_TOO_LONG_CODE
+    monkeypatch.setattr(tokens, "local_token_counter", lambda model_id: None)
+    paged.config["THREAD_PROMPT_TOKEN_LIMIT"] = 20_000
+    alice, llm_user = _users()
+    read = _thread(alice)
+    gleaning = _placeholder(llm_user, alice, read.id, meta=[{"name": "_live"}])
+
+    result, request = _glean(monkeypatch, alice, read, gleaning)
+
+    assert request is not None
+    assert result.get("reason") != THREAD_TOO_LONG_CODE
+    listed = _listed(request)
+    newest = ["t1", "t2", "t3", "t4", "t5", "t6"][-len(listed):]
+    assert 1 <= len(listed) < 6 and listed == newest
+    # At the tweets prior (0.6 tokens a character on o200k) a tweet of
+    # 8,000 characters costs 4,800 tokens: three fit 19,600, not four.
+    assert len(listed) == 3
+    assert _page(gleaning.id)[0] == newest
+
+
 def test_a_thread_with_no_room_for_one_tweet_is_refused_as_too_long(paged, monkeypatch):
     """The rest of the prompt alone fills the budget: the thread itself
     is too long, and the refusal says so, as before."""
