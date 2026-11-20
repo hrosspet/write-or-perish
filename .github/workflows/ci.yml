@@ -29,7 +29,7 @@ jobs:
   test-backend:
     needs: changes
     if: needs.changes.outputs.backend == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # Python 3.9 is not available on ubuntu-latest (26.04)
     timeout-minutes: 40
 
     steps:
@@ -112,7 +112,7 @@ jobs:
   security-check:
     needs: changes
     if: needs.changes.outputs.backend == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # Python 3.9 is not available on ubuntu-latest (26.04)
     timeout-minutes: 15
 
     steps:
