@@ -21,9 +21,13 @@ export function untranscribedMessage(code) {
 // recording may hold, or it held no audio for too long and its first chunk
 // is refused as a new start would be (the usage limit, the account's open
 // recordings). Retrying cannot help; the chunks before it are kept.
+// `usage_catching_up` (503): Loore is still transcribing the account's
+// earlier audio; not the usage limit, so the banner and the capped state are
+// not set. The recording stops in the server's words, its audio kept in the
+// page; a new start goes through once the transcription caught up.
 const FINAL_CHUNK_CODES = new Set([
   'chunk_too_large', 'chunk_index_out_of_range', 'recording_too_large',
-  'too_many_recordings',
+  'too_many_recordings', 'usage_catching_up',
 ]);
 
 export const RECORDING_LIMIT_MESSAGE =
@@ -49,9 +53,12 @@ export function finalRefusalMessage(err) {
 }
 
 // A new recording refused while the account holds several open
-// recordings, or after many starts without audio: shown in the server's
-// words.
-const START_REFUSAL_CODES = new Set(['too_many_recordings', 'too_many_starts']);
+// recordings, after many starts without audio, or while Loore is still
+// transcribing the account's earlier audio (`usage_catching_up`, not the
+// usage limit): shown in the server's words; the person can try again.
+const START_REFUSAL_CODES = new Set([
+  'too_many_recordings', 'too_many_starts', 'usage_catching_up',
+]);
 
 export const TOO_MANY_RECORDINGS_MESSAGE =
   'You have several recordings that are not finished. Save, finish or '

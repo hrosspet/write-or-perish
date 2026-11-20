@@ -88,4 +88,44 @@ final class RecordingLimitsTests: StubbedAppTestCase {
         XCTAssertEqual(error.userMessage(fallback: "Could not start recording."), text)
         XCTAssertEqual(error.code, "too_many_recordings")
     }
+
+    func testAStartRefusedWhileLooreCatchesUpIsNotTheUsageLimit() {
+        // 503 usage_catching_up: shown in the server's words, never as the
+        // monthly limit (which sets the app's capped state).
+        let text = "Loore is still working through your earlier recordings. Try again in a minute."
+        let error = APIError.from(status: 503, contentType: "application/json",
+                                  data: Data(#"{"error":"\#(text)","code":"usage_catching_up"}"#.utf8))
+        if case .spendCap = error { XCTFail("shown as the usage limit") }
+        XCTAssertEqual(error.userMessage(fallback: "Could not start recording."), text)
+        XCTAssertEqual(error.code, "usage_catching_up")
+    }
+
+    func testAChunkRefusedWhileLooreCatchesUpIsSentAgain() async throws {
+        // The same answer to a chunk: retried, not given up or said as a
+        // refusal; it goes through once the queue has caught up.
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("uploads-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let uploader = ChunkUploader(root: root, useBackgroundSession: false)
+        uploader.delay = { _ in 0.001 }
+        uploader.cookieHeader = { _ in [:] }
+        var said: [String] = []
+        uploader.onRefused = { _, message in said.append(message) }
+        var attempts = 0
+        uploader.transport = { request, _ in
+            attempts += 1
+            if attempts < 3 {
+                let body = #"{"error":"Loore is still working through your earlier recordings. Try again in a minute.","code":"usage_catching_up"}"#
+                return (Data(body.utf8),
+                        HTTPURLResponse(url: request.url!, statusCode: 503, httpVersion: nil, headerFields: nil)!)
+            }
+            return (Data(#"{"status":"stored"}"#.utf8),
+                    HTTPURLResponse(url: request.url!, statusCode: 202, httpVersion: nil, headerFields: nil)!)
+        }
+        uploader.open(sessionId: "s", uploadURL: URL(string: "http://x/c")!)
+        uploader.enqueue(sessionId: "s", chunk: RecordedChunk(index: 0, data: Data(repeating: 0, count: 32), duration: 15))
+        let outcome = await uploader.settle(sessionId: "s")
+        XCTAssertEqual(outcome.failed, [])
+        XCTAssertEqual(said, [])
+        XCTAssertGreaterThanOrEqual(attempts, 3)
+    }
 }
