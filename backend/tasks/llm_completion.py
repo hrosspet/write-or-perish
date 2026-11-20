@@ -4362,8 +4362,10 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # may answer (a second read prompt attached under an earlier
             # read reply is a new read; the older prompt's placeholder
             # reads as a stub, its day was fed to the reply below it).
-            # Rendered here, outside the retry loop — it never shrinks
-            # (a day is ~250k tokens against a 1M window).
+            # Rendered here, outside the retry loop; the newest of its
+            # tweets that fit the prompt are kept once it is assembled
+            # (#717: a day is now over a million tokens, more than the
+            # thread limit lets a prompt hold).
             ca_node = None
             ca_placeholder_match = None
             ca_node_text = None
