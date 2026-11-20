@@ -428,8 +428,8 @@ class User(db.Model, UserMixin):
     approved_before_block = db.Column(db.Boolean, nullable=True)
     # Last authenticated API request (throttled to one write per
     # ACTIVITY_TOUCH_INTERVAL) and its path, so "checked the profile and
-    # left" is distinguishable from "never came". Not engagement — a view
-    # is a view; engagement is writing / asking (see admin Activity).
+    # left" is distinguishable from "never came". Not activity — a view
+    # is a view; activity is writing / asking (see admin Activity).
     last_seen_at = db.Column(db.DateTime, nullable=True)
     last_seen_path = db.Column(db.String(128), nullable=True)
 
@@ -1419,11 +1419,32 @@ class ArtifactView(db.Model):
     """One row per artifact open in the UI (admin Activity monitoring —
     e.g. "did they check their intentions?"). Written by
     POST /api/artifacts/<kind>/viewed, pinged once per kind per page
-    visit; never read by the product itself."""
+    visit; never read by the product itself.
+
+    The name of an artifact the user created is theirs: nobody else sees
+    it, admins included (Peter, 2026-11-20). So a row keeps the name only
+    for the kinds Loore defines (UserArtifact.SYSTEM_KINDS). A view of
+    any other artifact is stored as ``kind=USER_CREATED`` with
+    ``artifact_id``, which tells the artifacts apart without naming them.
+    Rows written before 2026-11-20 can still hold such a name in
+    ``kind`` (``artifact_id`` NULL); the Activity tab never sends it
+    (utils/activity.py)."""
     __tablename__ = "artifact_view"
+    # Stored in ``kind`` for a view of an artifact the user created. Can't
+    # be an artifact's name: names start with a letter or a digit
+    # (routes/artifacts._KIND_RE, the AI's update_artifact the same).
+    USER_CREATED = "_user_created"
+
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False, index=True)
     kind = db.Column(db.String(48), nullable=False)
+    # For a view of an artifact the user created: the id of the artifact's
+    # first live version (UserArtifact.first_live_id), the same for every
+    # version, so it tells two artifacts apart without naming either.
+    # NULL for the kinds Loore defines and for rows from before
+    # 2026-11-20. No foreign key: the cleanup of a deleted artifact
+    # deletes these rows with its versions (utils/artifact_deletion).
+    artifact_id = db.Column(db.Integer, nullable=True)
     viewed_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
 
 
@@ -1526,6 +1547,17 @@ class UserArtifact(db.Model):
     # can be deleted.
     UNDELETABLE_KINDS = frozenset(DEFAULT_KINDS) | {"external_digest"}
 
+    # The names Loore defines: the built-ins, the reserved names of the
+    # documents with their own models, and the saved-references digest
+    # (backend/tasks/external_digest.py DIGEST_KIND). Every other name was
+    # chosen by the user, or by the AI for them, and only the user sees
+    # it (Peter, 2026-11-20): the admin Activity tab counts views of
+    # those artifacts without naming them, and the last-seen path drops
+    # the name (utils/activity.py). An allow-list, so a name missing here
+    # is treated as the user's.
+    SYSTEM_KINDS = (frozenset(DEFAULT_KINDS) | frozenset(RESERVED_KINDS)
+                    | {"external_digest"})
+
     def set_content(self, plaintext):
         self.content = encrypt_content(plaintext)
 
@@ -1564,6 +1596,18 @@ class UserArtifact(db.Model):
     def version_count(cls, user_id, kind):
         """How many live versions the kind has: the latest one's number."""
         return cls.live().filter_by(user_id=user_id, kind=kind).count()
+
+    @classmethod
+    def first_live_id(cls, user_id, kind):
+        """The id of the kind's first live version, or None when it has
+        none. The same for every later version, so it stands for the
+        artifact where its name must not (ArtifactView.artifact_id). An
+        artifact deleted and made again under the same name gets a new
+        one: it is a new artifact."""
+        return (db.session.query(db.func.min(cls.id))
+                .filter(cls.user_id == user_id, cls.kind == kind,
+                        cls.deleted_at.is_(None))
+                .scalar())
 
     @classmethod
     def latest_per_kind(cls, user_id):

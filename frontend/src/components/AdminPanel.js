@@ -317,7 +317,7 @@ export function AdminPolls() {
 // this lists items and manages their triage status.
 const FEEDBACK_STATUSES = ["new", "reviewed", "done"];
 
-// Engagement since activation, measured directly (writes / asks / voice),
+// Activity since activation, measured directly (writes / asks / voice),
 // not through spend. Active accounts only. The strip is one cell per day:
 // filled when the person wrote or asked that day; a dot marks voice.
 const relTime = (iso) => {
@@ -330,6 +330,18 @@ const relTime = (iso) => {
   return `${Math.round(h / 24)}d ago`;
 };
 
+// One entry of the Activity tab's artifacts cell. The server sends the
+// artifacts the user created as one entry with counts only: their names
+// never reach the admin (Peter, 2026-11-20). Kinds Loore defines keep
+// their names.
+export function artifactViewLabel(v) {
+  if (v.user_created) {
+    const n = v.artifacts;
+    return `user-created x${v.count} (${n} ${n === 1 ? "artifact" : "artifacts"})`;
+  }
+  return `${v.kind} x${v.count}`;
+}
+
 const pathArea = (p) => {
   if (!p) return null;
   const seg = p.replace(/^\/api\//, "").split("/")[0];
@@ -340,7 +352,7 @@ const pathArea = (p) => {
   return seg || null;
 };
 
-function AdminActivity() {
+export function AdminActivity() {
   const [data, setData] = useState(null);
   const [cohort, setCohort] = useState("seeded");
   const [days, setDays] = useState(14);
@@ -410,7 +422,7 @@ function AdminActivity() {
                 <th style={th} title="Transcribed voice minutes since activation">voice</th>
                 <th style={th} title="Nodes imported by the user (archives) since activation">imports</th>
                 <th style={th} title="Profile versions created since activation / latest">profile</th>
-                <th style={th} title="Artifacts opened since activation (views · most recent first); hover a row for last-view times">artifacts</th>
+                <th style={th} title="Artifacts opened since activation (views · most recent first); hover a row for last-view times. The artifacts the user created are one entry: views, and how many different artifacts (their names stay private)">artifacts</th>
                 <th style={th} title="Came back the day after activation / any time in days 2–7">d1 / d7</th>
                 <th style={th} title="User-initiated spend only (conversation, transcription, TTS, search) since activation">$ own</th>
               </tr>
@@ -460,10 +472,10 @@ function AdminActivity() {
                   <td style={cell}>{u.voice_minutes ? `${u.voice_minutes}m` : "—"}</td>
                   <td style={cell}>{u.imports || "—"}</td>
                   <td style={cell} title={u.latest_profile_at || ""}>{u.profile_versions_since_activation || "—"}{u.latest_profile_at ? <span style={{ color: "var(--text-muted)" }}> · {relTime(u.latest_profile_at)}</span> : null}</td>
-                  <td style={cell} title={(u.artifact_views || []).map((v) => `${v.kind} ×${v.count} — last ${relTime(v.last)}`).join("\n")}>
+                  <td style={cell} title={(u.artifact_views || []).map((v) => `${artifactViewLabel(v)} — last ${relTime(v.last)}`).join("\n")}>
                     {(u.artifact_views || []).length === 0 ? "—" : (
                       <>
-                        {u.artifact_views.slice(0, 2).map((v) => `${v.kind} ×${v.count}`).join(", ")}
+                        {u.artifact_views.slice(0, 2).map(artifactViewLabel).join(", ")}
                         {u.artifact_views.length > 2 ? ` +${u.artifact_views.length - 2}` : ""}
                       </>
                     )}

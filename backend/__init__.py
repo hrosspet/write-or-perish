@@ -19,7 +19,8 @@ else:
 from backend.config import Config
 from backend.extensions import db
 from backend.utils.error_privacy import (
-    install_traceback_scrubbing, scrub_sentry_breadcrumb, scrub_sentry_event,
+    install_traceback_scrubbing, mask_artifact_names, scrub_sentry_breadcrumb,
+    scrub_sentry_event,
 )
 from flask_migrate import Migrate
 from flask_login import LoginManager, current_user
@@ -183,7 +184,9 @@ SENTRY_PRIVACY_OPTIONS = {
 
 
 def _without_query(url):
-    return url.split("?", 1)[0].split("#", 1)[0]
+    """*url* without its query and fragment, and without the artifact
+    name an artifact address carries (mask_artifact_names)."""
+    return mask_artifact_names(url.split("?", 1)[0].split("#", 1)[0])
 
 
 def _drop_query_strings(event):
@@ -192,9 +195,12 @@ def _drop_query_strings(event):
     sends the request's query string, the Referer header carries the
     query of the page that made the call, and outgoing-HTTP breadcrumbs
     keep each call's query in `http.query`. All are removed; the paths
-    stay, so the route is still identifiable. (Access-log lines, which
-    hold whole request lines, are kept out by ignore_logger in
-    create_app.)"""
+    stay, so the route is still identifiable, except the name of an
+    artifact, which an artifact address carries in its path
+    (mask_artifact_names). (Access-log lines, which hold whole request
+    lines, are kept out by ignore_logger in create_app.)"""
+    if isinstance(event.get("transaction"), str):
+        event["transaction"] = mask_artifact_names(event["transaction"])
     request_info = event.get("request")
     if isinstance(request_info, dict):
         request_info.pop("query_string", None)

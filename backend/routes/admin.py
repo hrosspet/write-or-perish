@@ -438,7 +438,7 @@ def block_user(user_id):
 @login_required
 @admin_required
 def activity():
-    """Per-user engagement since activation for the Activity tab —
+    """Per-user activity since activation for the Activity tab —
     writes / asks / voice per day, last seen, retention flags — measured
     directly, not via spend. ?days= (default 14, max 60)."""
     from backend.utils.activity import activity_report

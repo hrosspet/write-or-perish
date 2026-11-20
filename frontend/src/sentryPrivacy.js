@@ -18,7 +18,7 @@ import { breadcrumbsIntegration } from "@sentry/react";
 // - an error thrown in a native event listener carries the DOM event in
 //   extra, its element described with the same attribute values.
 // Queries and fragments are removed and paths kept, so the route of an
-// error stays readable. Console breadcrumbs are not recorded. An element is
+// error stays readable; an artifact's name in a path is replaced (below). Console breadcrumbs are not recorded. An element is
 // described by its tag, id and classes only. Extra is dropped.
 //
 // The SDK's default BrowserSession integration sends a session record on
@@ -28,8 +28,24 @@ import { breadcrumbsIntegration } from "@sentry/react";
 // today. The integration is left out, so none is sent if a release is
 // ever set. Error reports do not depend on it.
 
+// The name of an artifact a user created is theirs (Peter, 2026-11-20),
+// and artifact addresses carry it in the path: the page /artifacts/<name>
+// and the API calls /api/artifacts/<name>[/...]. Every name is replaced,
+// the ones Loore defines too; the route is what helps debugging. The
+// version calls (/api/artifacts/versions/<id>) carry an id and stay.
+// The server's Sentry does the same (backend/utils/error_privacy.py).
+export const ARTIFACT_NAME_REMOVED = ":kind";
+const ARTIFACT_NAME_IN_PATH = /(\/artifacts\/)(?!versions\/\d)[^/\s?#"'<>()[\]{},;]+/g;
+
+export function withoutArtifactNames(url) {
+  if (typeof url !== "string" || !url.includes("/artifacts/")) return url;
+  return url.replace(ARTIFACT_NAME_IN_PATH, `$1${ARTIFACT_NAME_REMOVED}`);
+}
+
+// An address without its query and fragment, and without an artifact's
+// name.
 export function withoutQuery(url) {
-  return url.split("?", 1)[0].split("#", 1)[0];
+  return withoutArtifactNames(url.split("?", 1)[0].split("#", 1)[0]);
 }
 
 const URL_FIELDS = ["url", "from", "to"];
