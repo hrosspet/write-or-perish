@@ -7,6 +7,11 @@ set -e  # Exit on any error
 
 PROJECT_DIR="/home/hrosspet/write-or-perish"
 CONDA_ENV="write-or-perish"
+# The Python of the conda environment. A deploy creates the environment with
+# it only when the environment does not exist; an existing one keeps its
+# Python (the deploy warns when the two differ). Keep it equal to
+# PYTHON_VERSION in .github/workflows/deploy.yml.
+PYTHON_VERSION="3.9"
 BACKEND_DIR="$PROJECT_DIR/backend"
 LOG_FILE="$PROJECT_DIR/deployment.log"
 
@@ -75,12 +80,17 @@ source ~/miniconda3/etc/profile.d/conda.sh || error "Failed to initialize conda"
 # Check if conda environment exists
 if ! conda env list | grep -q "^$CONDA_ENV "; then
     warn "Conda environment '$CONDA_ENV' not found, creating one..."
-    conda create -n "$CONDA_ENV" python=3.9 -y || error "Failed to create conda environment"
+    conda create -n "$CONDA_ENV" python="$PYTHON_VERSION" -y || error "Failed to create conda environment"
 fi
 
 # Activate conda environment
 log "Activating conda environment: $CONDA_ENV..."
 conda activate "$CONDA_ENV" || error "Failed to activate conda environment"
+
+ENV_PYTHON=$(python -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo unknown)
+if [ "$ENV_PYTHON" != "$PYTHON_VERSION" ]; then
+    warn "Conda environment '$CONDA_ENV' runs Python $ENV_PYTHON, but PYTHON_VERSION is $PYTHON_VERSION: the environment is not recreated by a deploy"
+fi
 
 # Install/update Python dependencies
 log "Installing Python dependencies..."

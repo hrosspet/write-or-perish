@@ -1,7 +1,9 @@
 # Development Dockerfile for Write or Perish Backend
 # Includes dev tools and supports hot reloading
 
-FROM python:3.9-slim
+# The image's Python; see backend/Dockerfile.
+ARG PYTHON_VERSION=3.12
+FROM python:${PYTHON_VERSION}-slim
 
 # Install system dependencies including ffmpeg for audio processing
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -16,10 +18,11 @@ WORKDIR /app
 # Copy requirements first for better layer caching
 COPY requirements.txt .
 
-# Install Python dependencies including dev tools
+# Install Python dependencies including dev tools (pytest<9: see
+# .github/workflows/ci.yml)
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir watchdog[watchmedo] pytest pytest-cov flake8
+    pip install --no-cache-dir watchdog[watchmedo] "pytest<9" pytest-cov flake8
 
 # Copy application code into backend/ to match the project-root import layout
 # (from backend.X import Y requires backend/ to exist as a package)

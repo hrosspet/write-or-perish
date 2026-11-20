@@ -83,6 +83,13 @@ class PdfImportError(Exception):
     """The PDF cannot be imported; the message is shown to the user."""
 
 
+def _type_name(data):
+    """The worker's exception type name, or "unknown" when it is missing
+    or not a plain identifier (it is logged, never anything else)."""
+    name = str(data.get("type") or "")
+    return name if _TYPE_NAME_RE.fullmatch(name) else "unknown"
+
+
 def _message(data):
     code = data.get("error")
     if code == "scanned":
@@ -97,11 +104,13 @@ def _message(data):
     if code == "too_much_text":
         return MSG_TOO_MUCH_TEXT.format(limit=PDF_MAX_TEXT_CHARS)
     if code == "memory":
+        # The type tells MemoryError from a module the loader could not
+        # map past the limit (pdf_extract_worker._loader_out_of_memory).
+        logger.warning("PDF extraction reached the memory limit: %s",
+                       _type_name(data))
         return MSG_TOO_BIG
     if code == "unreadable":
-        name = str(data.get("type") or "")
-        logger.warning("PDF extraction failed: %s",
-                       name if _TYPE_NAME_RE.fullmatch(name) else "unknown")
+        logger.warning("PDF extraction failed: %s", _type_name(data))
         return MSG_DAMAGED
     if code == "damaged":
         return MSG_DAMAGED

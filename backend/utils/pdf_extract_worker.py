@@ -468,6 +468,21 @@ def read_metadata(reader):
 
 # --- Extraction ------------------------------------------------------------
 
+def _loader_out_of_memory(exc):
+    """Whether an ImportError is the loader failing to map a module past
+    the address-space limit, which can happen before any allocation
+    raises MemoryError (which comes first varies with the build and the
+    limit). glibc says "...so: failed to map segment from shared object"
+    (seen on Python 3.9 and 3.12 on Linux); where the loader adds the
+    errno text, the message ends in ": Cannot allocate memory". Any other
+    ImportError (a library missing, packages that do not match, "cannot
+    allocate memory in static TLS block") is a broken install, not the
+    file's size."""
+    msg = str(exc).strip().lower()
+    return ("failed to map segment" in msg
+            or msg.endswith("cannot allocate memory"))
+
+
 def _open(path):
     """(reader, page count). Raises Fail for a damaged or locked file."""
     from pypdf import PdfReader
@@ -597,8 +612,12 @@ def main(argv):
             result = extract(path, max_pages, max_chars)
         except Fail as e:
             result = {"error": e.code, **e.detail}
-        except MemoryError:
-            result = {"error": "memory"}
+        except MemoryError as e:
+            result = {"error": "memory", "type": type(e).__name__}
+        except ImportError as e:
+            result = {"error": ("memory" if _loader_out_of_memory(e)
+                                else "unreadable"),
+                      "type": type(e).__name__}
         except RecursionError:
             result = {"error": "damaged"}
         except Exception as e:
