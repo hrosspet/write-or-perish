@@ -290,6 +290,29 @@ class TestRefusedEverywhere:
         assert _llm_count() == before
         task_mod.generate_llm_response.delay.assert_not_called()
 
+    def test_a_glean_is_measured_by_the_task_not_refused_here(self, limited,
+                                                              task_mod):
+        """#717: the task fits the day's tweets to the room a read's own
+        prompt leaves, and refuses only when the thread leaves none. This
+        estimate holds none of the tweets and the agentic prompt a read
+        leaves out, so a Glean in a thread it puts at the limit is not
+        refused here; a chat reply there still is."""
+        from backend.tests.test_read_context import _prompt_node
+        from backend.utils.llm_nodes import create_llm_placeholder
+        from backend.utils.thread_size import ThreadTooLong
+        alice = _user()
+        alice.is_admin = True       # inside Glean's rollout gate
+        _root, _reply_, entry = _thread(alice, measured=9_700)
+        read = _prompt_node(alice, "read_thread", parent_id=entry.id)
+        _db.session.commit()
+
+        llm_node, _task = create_llm_placeholder(
+            read.id, "gpt-5", alice.id, ai_usage="chat", read_live=True)
+
+        assert llm_node.parent_id == read.id
+        with pytest.raises(ThreadTooLong):
+            create_llm_placeholder(entry.id, "gpt-5", alice.id)
+
     def test_auto_generate_refused_the_same_way(self, limited, task_mod):
         alice = _user()
         _root, _reply_, entry = _thread(alice, measured=9_700)
