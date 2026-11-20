@@ -729,7 +729,8 @@ class LLMProvider:
                        cache_comparison_response_id: str = None,
                        listener: StreamListener = None,
                        output_schema_name: str = None,
-                       user_id: int = None) -> dict:
+                       user_id: int = None,
+                       reasoning_effort: str = None) -> dict:
         """
         Generate a completion using the specified model.
 
@@ -750,6 +751,9 @@ class LLMProvider:
             listener: Optional StreamListener that gets the reply's text
                 and tool-call starts while it streams (#367). The return
                 value is the same with or without one.
+            reasoning_effort: Optional OpenAI "reasoning.effort" (as a
+                batch merge request sends it, profile_windows._request);
+                None keeps the model's default. Ignored for Anthropic.
             user_id: The Loore user the call is made for. OpenAI calls
                 carry its safety identifier (utils/safety_identifier.py);
                 None sends the system one.
@@ -789,7 +793,7 @@ class LLMProvider:
                 output_schema=output_schema,
                 cache_comparison_response_id=cache_comparison_response_id,
                 listener=listener, output_schema_name=output_schema_name,
-                user_id=user_id)
+                user_id=user_id, reasoning_effort=reasoning_effort)
         elif provider == "anthropic":
             return LLMProvider._call_anthropic(
                 api_model, messages, api_keys["anthropic"], max_tokens,
@@ -807,7 +811,8 @@ class LLMProvider:
                      cache_comparison_response_id: str = None,
                      listener: StreamListener = None,
                      output_schema_name: str = None,
-                     user_id: int = None) -> dict:
+                     user_id: int = None,
+                     reasoning_effort: str = None) -> dict:
         """
         Call OpenAI via the Responses API (/v1/responses).
 
@@ -854,6 +859,10 @@ class LLMProvider:
         # prefix-cache routing (best-effort; no behavior change otherwise).
         if prompt_cache_key:
             kwargs["prompt_cache_key"] = prompt_cache_key
+        # Only when asked (a merge, as its batch request): every other
+        # call keeps the model's default reasoning.
+        if reasoning_effort:
+            kwargs["reasoning"] = {"effort": reasoning_effort}
 
         # Convert Anthropic-format tools to Responses format (flat, not
         # nested under "function"). strict mode would reject our schemas

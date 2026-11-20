@@ -40,6 +40,9 @@ EXPECTED_OPEN = {
     ("GET", "/api/dashboard/"),
     # The subscribe page's "Start from your tweets?" (#697).
     ("PUT", "/api/dashboard/user"),
+    # After that Yes, the card follows the load of the prepared material
+    # (#698): a status and counts only.
+    ("GET", "/api/dashboard/starting-point"),
     ("PATCH", "/api/dashboard/timezone"),
     ("POST", "/api/account/delete"),
     ("POST", "/api/account/delete/confirm"),
