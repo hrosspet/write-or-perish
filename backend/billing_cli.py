@@ -11,6 +11,12 @@
                                   day (00:00 UTC): shows the accounts and
                                   dates; --apply gives it, --change-date
                                   moves it, --undo takes it back.
+    flask stripe-forget-customer --user ID
+                                  one account's stored Stripe customer id,
+                                  which Stripe no longer has (#718): shows
+                                  the account, the id and what Stripe says
+                                  of it; --apply clears it, so the next
+                                  checkout makes a new customer.
 
 The amounts, currency, tax behaviour and tax code come from the settings
 (SUBSCRIPTION_PRICE_CENTS_*, SUBSCRIPTION_CURRENCY,
@@ -204,3 +210,71 @@ def alpha_free_month_command(start_raw, apply_, change_date, started_ok,
     n = grant_alpha_free_month(users, start)
     click.echo(f"Done: {n} account(s) moved to the free plan with this "
                "free month.")
+
+
+def _what_stripe_says(customer_id):
+    """Print what Stripe says of *customer_id*, and return it
+    (stripe_billing.customer_state; None when Stripe can't be asked)."""
+    key = current_app.config.get("STRIPE_SECRET_KEY") or ""
+    try:
+        state = stripe_billing.customer_state(stripe_billing.get_gateway(),
+                                              customer_id)
+        said = {"deleted": "deleted",
+                "missing": "no customer with this id",
+                "exists": "the customer exists"}[state]
+    except Exception as e:  # noqa: BLE001 - said, and --apply refuses
+        state, said = None, f"could not be asked ({type(e).__name__})"
+    click.echo(f"  at Stripe ({_mode(key) if key else 'no'} key): {said}")
+    return state
+
+
+@click.command("stripe-forget-customer")
+@click.option("--user", "user_id", type=int, required=True,
+              help="The account id (the Sentry error names it).")
+@click.option("--apply", "apply_", is_flag=True,
+              help="Clear the stored id; without it, only show what would "
+                   "change.")
+@with_appcontext
+def stripe_forget_customer_command(user_id, apply_):
+    """Clear the Stripe customer id stored on one account when Stripe no
+    longer has that customer (#718: deleted in the Dashboard or by a test
+    cleanup), so the account's next checkout makes a new one. Nothing is
+    made at Stripe. Shows what it would do unless --apply is given.
+
+    Refuses while Stripe still has the customer, when Stripe can't be
+    asked, and while the account has a live subscription recorded
+    (trialing, active or past due): clearing the id would part that
+    subscription from the account."""
+    from backend.extensions import db
+    from backend.models import User
+    user = db.session.get(User, user_id)
+    if user is None:
+        raise click.ClickException(f"No account {user_id}.")
+    stored = user.stripe_customer_id
+    click.echo(f"Account {user.id} ({user.username})")
+    click.echo(f"  stored Stripe customer: {stored or 'none'}")
+    if not stored:
+        click.echo("Nothing to clear.")
+        return
+    state = _what_stripe_says(stored)
+    sub = user.subscription_status or "none"
+    if user.stripe_subscription_id:
+        sub = f"{sub} ({user.stripe_subscription_id})"
+    click.echo(f"  subscription recorded: {sub}")
+    refusal = stripe_billing.forget_refusal(user, state)
+    if refusal:
+        if apply_:
+            raise click.ClickException(f"{refusal} Nothing changed.")
+        click.echo(f"--apply would refuse: {refusal}")
+        return
+    if not apply_:
+        click.echo("--apply clears the stored id; the account's next "
+                   "checkout makes a new customer. Nothing changed. Run "
+                   "again with --apply.")
+        return
+    try:
+        stripe_billing.forget_customer(user, stored, state)
+    except stripe_billing.ForgetRefused as e:
+        raise click.ClickException(f"{e} Nothing changed.")
+    click.echo("Done: the stored id is cleared; the account's next checkout "
+               "makes a new customer.")

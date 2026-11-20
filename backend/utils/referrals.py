@@ -611,7 +611,9 @@ def _grant_side(gateway, referral, side, user, config=None, invoice=None):
     fixed referral_credit. The inviter's is at most what the friend paid
     on *invoice* (inviter_cap). A refusal Stripe would repeat is recorded
     as "failed" and logged, so the friend's subscription event still
-    applies; anything else raises, and the event is sent again."""
+    applies (a customer Stripe no longer has too, and its owner is told:
+    _held_for_missing_customer); anything else raises, and the event is
+    sent again."""
     if user is None:
         setattr(referral, f"{side}_reward", "skipped_no_account")
         return False
@@ -636,13 +638,10 @@ def _grant_side(gateway, referral, side, user, config=None, invoice=None):
                  "metadata": {"loore_referral": _marker(referral, side)}},
                 idempotency_key=_credit_key(referral, side))
     except Exception as e:  # noqa: BLE001
-        if not _permanent(e):
+        from backend.utils.stripe_billing import customer_missing
+        if not (customer_missing(e) or _permanent(e)):
             raise
-        logger.error("Referral %s: the %s's free week was refused by Stripe "
-                     "(%s); give it by hand in the Dashboard", referral.id,
-                     side, type(e).__name__)
-        setattr(referral, f"{side}_reward", "failed")
-        return False
+        return _not_granted(e, referral, side, user, config)
     setattr(referral, f"{side}_reward", "granted")
     setattr(referral, f"{side}_credit_cents", -int(txn.get("amount") or 0))
     setattr(referral, f"{side}_credit_currency",
@@ -657,6 +656,45 @@ INVITER_NOTICE = ("A free week, with thanks",
 FRIEND_NOTICE = ("A free week",
                  "You joined Loore through an invitation, so a free week is "
                  "taken off your next payment.")
+# Stripe no longer has the account's customer (#718): the free week is
+# theirs, but could not be added.
+HELD_NOTICES = {
+    "inviter": ("A free week, with thanks",
+                "Thank you for inviting a friend to Loore. A free week is "
+                "yours, but it could not be added."),
+    "friend": ("A free week",
+               "You joined Loore through an invitation, so a free week is "
+               "yours, but it could not be added."),
+}
+
+
+def _not_granted(exc, referral, side, user, config=None):
+    """A credit Stripe refused for good (*exc*), recorded as "failed".
+    When Stripe no longer has the account's customer, its owner is told
+    too (#718)."""
+    from backend.utils.stripe_billing import customer_missing
+    if customer_missing(exc):
+        return _held_for_missing_customer(referral, side, user, config)
+    logger.error("Referral %s: the %s's free week was refused by Stripe "
+                 "(%s); give it by hand in the Dashboard", referral.id,
+                 side, type(exc).__name__)
+    setattr(referral, f"{side}_reward", "failed")
+    return False
+
+
+def _held_for_missing_customer(referral, side, user, config=None):
+    """Stripe has no customer for the id stored on *user* (#718): one ERROR
+    names the account, the side is recorded as "failed" (the admin gives
+    it by hand, as any refused credit, once the account has a customer
+    again), and the person is told plainly to write to us. No customer is
+    made in its place."""
+    from backend.utils.stripe_billing import (
+        billing_record_message, report_customer_missing)
+    report_customer_missing(user.id, f"referral credit, {side}")
+    setattr(referral, f"{side}_reward", "failed")
+    title, body = HELD_NOTICES[side]
+    _notify(user.id, (title, f"{body} {billing_record_message(config)}"))
+    return False
 
 
 def _notify(user_id, notice):

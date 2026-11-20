@@ -178,6 +178,17 @@ class StripeGateway:
     def delete_customer(self, customer_id):
         return plain(self.client.v1.customers.delete(customer_id))
 
+    def retrieve_customer(self, customer_id):
+        """The customer ({"id", "deleted": True} for one deleted), or None
+        when Stripe has no customer with this id (#718)."""
+        import stripe
+        try:
+            return plain(self.client.v1.customers.retrieve(customer_id))
+        except stripe.InvalidRequestError as e:
+            if customer_missing(e):
+                return None
+            raise
+
     def create_portal_session(self, params):
         return plain(self.client.v1.billing_portal.sessions.create(
             params=params))
@@ -539,9 +550,11 @@ def create_checkout(gateway, user, level, config=None, code=None):
     if completed:
         db.session.commit()
         raise CheckoutAlreadyCompleted()
-    session = gateway.create_checkout_session(checkout_session_params(
-        user, level, price_id, config,
-        code_id=code.id if code is not None else None))
+    session = call_with_customer(
+        user, "checkout", gateway.create_checkout_session,
+        checkout_session_params(
+            user, level, price_id, config,
+            code_id=code.id if code is not None else None))
     db.session.add(CheckoutSession(
         id=session["id"], user_id=user.id, level=level,
         code_id=code.id if code is not None else None, state="open"))
@@ -604,7 +617,133 @@ def create_portal(gateway, user, config=None):
     config_id = portal_configuration_id(gateway)
     if config_id:
         params["configuration"] = config_id
-    return gateway.create_portal_session(params)
+    return call_with_customer(user, "billing portal",
+                              gateway.create_portal_session, params)
+
+
+# ── A customer Stripe no longer has (#718) ──────────────────────────────
+# The customer id stored on an account can stop working: the customer was
+# deleted in the Dashboard, or by a test cleanup in a shared sandbox, and
+# every call with it fails with Stripe's "No such customer". The person is
+# told plainly to write to us, an ERROR names the account (not the
+# customer id, nor anything about the person), and nothing is made in its
+# place: a customer may have been deleted on purpose. The admin clears
+# the stored id with `flask stripe-forget-customer --user ID`, and the
+# account's next checkout makes a new customer.
+
+BILLING_RECORD_MESSAGE = ("Something is wrong with your billing record. "
+                          "Write to {email} and we'll fix it.")
+
+
+def billing_record_message(config=None):
+    """What the person is told when Stripe no longer has their customer."""
+    email = (_config(config).get("SUBSCRIPTION_CONTACT_EMAIL")
+             or "info@loore.org")
+    return BILLING_RECORD_MESSAGE.format(email=email)
+
+
+class CustomerMissing(Exception):
+    """Stripe has no customer for the id stored on the account (reported
+    already: report_customer_missing)."""
+
+    def __init__(self, user_id, where):
+        super().__init__(f"user {user_id}: {where}")
+        self.user_id = user_id
+        self.where = where
+
+
+def customer_missing(exc):
+    """Stripe's answer for a customer id it does not know, or no longer
+    knows: "No such customer" (code ``resource_missing``), about the
+    ``customer`` parameter or a customer in the request's path. Another
+    missing object (a price, a session) is not it."""
+    if getattr(exc, "code", None) != "resource_missing":
+        return False
+    if getattr(exc, "param", None) == "customer":
+        return True
+    message = getattr(exc, "user_message", None)
+    return isinstance(message, str) and message.startswith("No such customer")
+
+
+def report_customer_missing(user_id, where):
+    """The ERROR for Sentry: the account id and the call (*where*), never
+    the customer id or anything about the person."""
+    logger.error("Stripe has no customer for the id stored on user %s "
+                 "(%s); nothing was made in its place. Check in the "
+                 "Dashboard, then: flask stripe-forget-customer --user %s",
+                 user_id, where, user_id)
+
+
+def call_with_customer(user, where, call, *args, **kwargs):
+    """*call*, a Stripe call made with the customer id stored on *user*.
+    Stripe's "No such customer" is reported once and raised as
+    CustomerMissing; anything else is raised as it is."""
+    try:
+        return call(*args, **kwargs)
+    except Exception as e:  # noqa: BLE001 - re-raised unless it is that
+        if not customer_missing(e):
+            raise
+    # Out of the except block: Stripe's text, which quotes the customer
+    # id, does not travel on as the new exception's context.
+    report_customer_missing(user.id, where)
+    raise CustomerMissing(user.id, where)
+
+
+def customer_state(gateway, customer_id):
+    """What Stripe says of *customer_id*: "deleted", "missing" (no customer
+    with this id in this Stripe account) or "exists"."""
+    customer = gateway.retrieve_customer(customer_id)
+    if customer is None:
+        return "missing"
+    return "deleted" if customer.get("deleted") else "exists"
+
+
+def forget_refusal(user, state):
+    """Why the stored customer id of *user* must not be cleared, given what
+    Stripe says of it (*state*: customer_state, or None when Stripe could
+    not be asked); None when it may be."""
+    if state == "exists":
+        return ("Stripe still has this customer. Clearing the id would part "
+                "it from the account, with its invoices and any credit on "
+                "it, and the next checkout would make a second customer.")
+    if state is None:
+        return "Stripe could not be asked. Run it again when it can be."
+    if user.subscription_status in SUBSCRIPTION_GRANTING_STATUSES:
+        return (f"The account has a live subscription recorded "
+                f"({user.subscription_status}, "
+                f"{user.stripe_subscription_id or 'no id'}); clearing the "
+                "customer would part it from the account. Stripe cancels a "
+                "deleted customer's subscriptions: once its event has "
+                "reached Loore (or is resent from the Dashboard's webhook "
+                "page) the account shows it ended, and this can run.")
+    return None
+
+
+class ForgetRefused(Exception):
+    """The stored customer id may not be cleared (forget_refusal)."""
+
+
+def forget_customer(user, customer_id, state):
+    """Clear *customer_id*, the customer id stored on *user*, which Stripe
+    no longer has (*state*: "deleted" or "missing"). Nothing is made at
+    Stripe; the account's next checkout makes a new customer. Read again
+    under the account's lock: raises ForgetRefused when the stored id
+    changed meanwhile or forget_refusal objects. Commits."""
+    db.session.query(User).filter(User.id == user.id).with_for_update().one()
+    db.session.refresh(user)
+    if user.stripe_customer_id != customer_id:
+        db.session.rollback()
+        raise ForgetRefused("The stored customer id changed meanwhile. "
+                            "Run it again.")
+    refusal = forget_refusal(user, state)
+    if refusal:
+        db.session.rollback()
+        raise ForgetRefused(refusal)
+    user.stripe_customer_id = None
+    db.session.commit()
+    logger.info("Stripe customer id of user %s cleared by the admin "
+                "(Stripe: %s)", user.id, state)
+    return True
 
 
 # ── The subscription on the account ─────────────────────────────────────
@@ -726,7 +865,11 @@ def apply_subscription(sub, config=None):
         user.subscription_trial_used = True
         if not user.subscription_trial_sub_id:
             user.subscription_trial_sub_id = sub.get("id")
-    if not user.stripe_customer_id:
+    if not user.stripe_customer_id and granting:
+        # Only a subscription that gives access brings its customer onto
+        # an account without one: a late event about a deleted customer's
+        # ended subscription must not put back the id the admin cleared
+        # (#718), nor a purged account's.
         customer = sub.get("customer")
         user.stripe_customer_id = (customer.get("id")
                                    if isinstance(customer, dict) else customer)
