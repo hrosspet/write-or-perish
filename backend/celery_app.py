@@ -175,6 +175,16 @@ celery.conf.update(
             'task': 'backend.tasks.user_purge.process_user_data_purges',
             'schedule': 60.0,  # every minute
         },
+        # Pre-filled accounts nobody claimed within UNCLAIMED_ACCOUNT_DAYS
+        # (#685): a dry run that only logs unless
+        # UNCLAIMED_ACCOUNT_DELETION_ENABLED; on, it schedules at most a
+        # few account deletions, which the purge beat above runs. A fixed
+        # time (#614); 02:41 UTC is away from the :00 and :07 hourly jobs
+        # and the 03:17 cleanup.
+        'delete-unclaimed-accounts': {
+            'task': 'backend.tasks.unclaimed_accounts.delete_unclaimed_accounts',
+            'schedule': schedules.crontab(hour=2, minute=41),  # daily, 02:41 UTC
+        },
         # Import stashes (an analyzed ChatGPT/Claude export, encrypted, or
         # a Twitter archive's tweets) that nobody confirmed within their
         # 24 h TTL. A directory listing when there is nothing to remove.
@@ -189,6 +199,22 @@ celery.conf.update(
         'resume-stalled-imports': {
             'task': 'backend.tasks.chat_imports.resume_stalled_imports',
             'schedule': 60.0,  # every minute
+        },
+        # Anthropic Message Batches Loore no longer needs (#693): most
+        # are deleted right after their results are saved; this deletes
+        # the rest (a crash or a failed delete, batches given up on).
+        # A fixed minute, so a deploy does not restart its countdown.
+        # One indexed query when nothing is left.
+        'sweep-anthropic-batches': {
+            'task': 'backend.tasks.anthropic_batch_deletion.sweep_anthropic_batches',
+            'schedule': schedules.crontab(minute=43),  # hourly, at :43 UTC
+        },
+        # Invites (#439): an unused one expires after INVITE_EXPIRY_DAYS,
+        # and the handle or address in it is deleted. One indexed query
+        # when nothing is due.
+        'expire-invites': {
+            'task': 'backend.tasks.invites.expire_invites',
+            'schedule': 3600.0,  # hourly
         },
     },
 )
@@ -247,3 +273,6 @@ from backend.tasks import imports  # noqa: F401
 from backend.tasks import chat_imports  # noqa: F401
 from backend.tasks import intentions  # noqa: F401
 from backend.tasks import user_purge  # noqa: F401
+from backend.tasks import unclaimed_accounts  # noqa: F401
+from backend.tasks import anthropic_batch_deletion  # noqa: F401
+from backend.tasks import invites  # noqa: F401

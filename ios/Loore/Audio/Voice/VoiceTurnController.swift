@@ -55,7 +55,7 @@ final class VoiceTurnController {
     private(set) var aiBlock: VoiceAIBlock?
     /// The thread is getting long (#648): a calm line above the record button.
     private(set) var lengthNotice = false
-    /// The refusal's sentence being said (#648), and which one is the latest.
+    /// The refusal's sentence being said (#648, #651), and which one is the latest.
     @ObservationIgnored private var speechTask: Task<Void, Never>?
     @ObservationIgnored private var speechToken = 0
     /// Between an interim node's audio and its continuation's first chunk.
@@ -429,30 +429,31 @@ final class VoiceTurnController {
                         self.notices.spendCapped()
                         self.notices.toast(SpendCap.toastMessage(.record), duration: 8)
                         self.state = .idle
-                        self.audio.deactivate()
                         self.audio.refreshNowPlaying()
+                        // ...and said aloud (#651): the user may not be looking.
+                        self.speakThenDeactivate(.usageLimit)
                     } else if let block = VoiceAIBlock.from(
                         error, fallback: self.threadParentId == nil ? .account : .thread) {
                         // AI usage is `none`, or the thread is too long for another
                         // reply (#648): no draft exists and the mic never opens. The
-                        // screen explains instead of a toast and the red dot; a thread
-                        // too long is also said aloud. (Where a change also waits, the
+                        // screen explains instead of a toast and the red dot, and the
+                        // refusal is said aloud (#651). (Where a change also waits, the
                         // server answers `approval_pending` first: the branch below.)
                         if block.isThreadTooLong {
                             self.threadTooLong(block)
                         } else {
                             self.aiBlock = block
                             self.state = .idle
-                            self.audio.deactivate()
                             self.audio.refreshNowPlaying()
+                            self.speakThenDeactivate(.aiUsage)
                         }
                     } else if VoiceApproval.isRefusal(error) {
                         // A change in this thread waits for approval that this phone
                         // did not know of (made on another device): no session exists
                         // and the mic never opened. The list comes, and the dialog
                         // with it once the turn is back to ready. Not a failure: no
-                        // sound and no red dot. Unlisted (offline), the server's words
-                        // say why.
+                        // sound and no red dot, but said aloud (#651). Unlisted
+                        // (offline), the server's words say why.
                         await self.refreshApprovals(nodeId: parentId, openDialog: true)
                         guard gen == self.generation else { return }
                         if !self.approvalWaiting {
@@ -461,8 +462,8 @@ final class VoiceTurnController {
                                                duration: 8)
                         }
                         self.state = .idle
-                        self.audio.deactivate()
                         self.audio.refreshNowPlaying()
+                        self.speakThenDeactivate(.approvalWaiting)
                     } else {
                         self.failStart((error as? APIError)?.userMessage(fallback: "Could not start recording. Please try again.")
                                        ?? "Could not start recording. Please try again.")
@@ -793,6 +794,13 @@ final class VoiceTurnController {
                 // This recording took the thread past its limit (#648): said
                 // aloud, then the screen offers a new thread.
                 threadTooLong(.threadTooLong())
+            } else if let refusal = SpokenRefusal(code: status.warningCode) {
+                // Any other refusal (the usage limit, AI usage, a waiting change)
+                // is said too (#651); a waiting change also brings its dialog.
+                if refusal == .approvalWaiting {
+                    Task { [weak self] in await self?.refreshApprovals(openDialog: true) }
+                }
+                refused(refusal)
             } else {
                 finishQuietly()
             }
@@ -825,8 +833,27 @@ final class VoiceTurnController {
                     if (error as? APIError)?.body?.extra["user_node_id"]?.intValue != nil { entrySaved() }
                     threadTooLong(block)
                 } else {
-                    // A blocked state with its own screen, not a failure: no sound.
+                    // A blocked state with its own screen, not a failure: no error
+                    // sound, but said aloud (#651).
                     aiBlock = block
+                    refused(.aiUsage)
+                }
+            } else if SpendCap.isSpendCapError(error) {
+                // The monthly usage limit (the banner says when it resets): said.
+                notices.spendCapped()
+                refused(.usageLimit)
+            } else if VoiceApproval.isRefusal(error) {
+                // A change waits for approval in this thread: its dialog, and said.
+                Task { [weak self] in await self?.refreshApprovals(openDialog: true) }
+                refused(.approvalWaiting)
+            } else if case APIError.subscriptionRequired(let message) = error {
+                // Payments on, no AI replies (#438; the banner says why). When the
+                // access ended while this turn was recorded, the server kept the
+                // turn and its message is the sentence said here. Not a failure.
+                if let refusal = SpokenRefusal(keptRecordingMessage: message) {
+                    entrySaved()
+                    refused(refusal)
+                } else {
                     finishQuietly()
                 }
             } else if let apiError = error as? APIError, apiError.status == 400 {
@@ -968,6 +995,16 @@ final class VoiceTurnController {
                 nodes[nodeId]?.failureHandled = true
                 closeStream()
                 threadTooLong(.threadTooLong(message: status.error))
+                return true
+            }
+            if let refusal = SpokenRefusal(code: status.errorCode), refusal.isAccessEnded,
+               !track.failureHandled {
+                // Refused before any model call: the account's access ended after
+                // this turn's recording was saved (#438). The toast above says so;
+                // the sentence is said instead of the error sound.
+                nodes[nodeId]?.failureHandled = true
+                closeStream()
+                refused(refusal)
                 return true
             }
             replyFailed(nodeId, gen)
@@ -1728,13 +1765,12 @@ final class VoiceTurnController {
         audio.refreshNowPlaying()
     }
 
-    // MARK: Thread too long (#648)
+    // MARK: Refusals said aloud (#648, #651)
 
     /// The thread is too long for another AI reply (a refused start, a recording
     /// whose reply was skipped, a reply the server refused): the turn ends, the
-    /// sentence is said aloud on the device (no request), and the screen shows
-    /// the block with a way to start a new thread. Not a failure: no error sound
-    /// and no red dot. Other refusals (the monthly limit) stay a toast.
+    /// sentence is said aloud, and the screen shows the block with a way to start
+    /// a new thread. Not a failure: no error sound and no red dot.
     private func threadTooLong(_ block: VoiceAIBlock) {
         [llmTask, sseTask, reconcileTask, tickTask].forEach { $0?.cancel() }
         cueOff()
@@ -1742,7 +1778,19 @@ final class VoiceTurnController {
         aiBlock = block
         state = .idle
         audio.refreshNowPlaying()
-        speakThenDeactivate(ThreadLength.spokenText)
+        speakThenDeactivate(.threadTooLong)
+    }
+
+    /// A turn the server refused after the recording (a recording saved without a
+    /// reply, the legacy reply request): the turn ends quietly, as before, and the
+    /// refusal's sentence says why (#651). Not a failure: no error sound.
+    private func refused(_ refusal: SpokenRefusal) {
+        [llmTask, sseTask, reconcileTask, tickTask].forEach { $0?.cancel() }
+        cueOff()
+        audio.queue.generatingTTS = false
+        state = .idle
+        audio.refreshNowPlaying()
+        speakThenDeactivate(refusal)
     }
 
     /// A record press where Voice mode is already known to be closed for a thread
@@ -1752,13 +1800,44 @@ final class VoiceTurnController {
     /// intent keeps the app running only until it returns.
     func announceBlock() async {
         guard let block = aiBlock, block.isThreadTooLong, phase == .ready || phase == .playback else { return }
+        await announce(.threadTooLong)
+    }
+
+    /// A record press refused for the monthly usage limit already known on this
+    /// phone (#651): the Voice screen's Record and Continue, the lock screen's
+    /// Record. Said aloud as `announceBlock` says the thread's length, the reply
+    /// stopped first as Continue stops it; returns once it has been said.
+    func announceUsageLimit() async {
+        guard phase == .ready || phase == .playback, !isGleaning else { return }
+        await announce(.usageLimit)
+    }
+
+    /// The lock screen's Record while a change waits for approval (a card not
+    /// yet updated, #651): said aloud when nothing plays. A reply that plays goes
+    /// on (replaying it stays possible, Peter, 2026-11-12), and its own
+    /// announcement says it at its end. Returns once it has been said.
+    func announceApprovalWaiting() async {
+        guard approvalWaiting, state == .idle || state == .done,
+              !(audio.queue.hasAudio && audio.queue.isPlaying) else { return }
+        speakThenDeactivate(.approvalWaiting)
+        await untilSpoken()
+    }
+
+    /// The refusal's sentence for a press refused on the phone. Never over a
+    /// reply (review of #675): a turn in progress ends, as Continue ends it, and
+    /// a finished reply being replayed (the turn stays `.done` then) stops, still
+    /// loaded and replayable.
+    private func announce(_ refusal: SpokenRefusal) async {
         if state != .idle && state != .done {
             timing.endTurn()
             resetTurn(keepQueue: false)
             state = .idle
             audio.refreshNowPlaying()
+        } else if audio.queue.hasAudio && audio.queue.isPlaying {
+            audio.queue.stop()
+            audio.refreshNowPlaying()
         }
-        speakThenDeactivate(ThreadLength.spokenText)
+        speakThenDeactivate(refusal)
         await untilSpoken()
     }
 
@@ -1775,13 +1854,13 @@ final class VoiceTurnController {
     /// session: a second refusal's sentence starts while the first is said, and
     /// the first one's end must not cut it off. A new turn meanwhile keeps the
     /// session.
-    private func speakThenDeactivate(_ text: String) {
+    private func speakThenDeactivate(_ refusal: SpokenRefusal) {
         speechToken += 1
         let token = speechToken
         let gen = generation
         speechTask = Task { [weak self] in
             guard let self else { return }
-            await self.audio.speak(text)
+            await self.audio.speak(refusal)
             guard token == self.speechToken else { return }
             self.speechTask = nil
             guard gen == self.generation, self.state == .idle || self.state == .done else { return }

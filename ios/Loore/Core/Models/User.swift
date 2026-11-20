@@ -29,6 +29,10 @@ struct CurrentUser: Decodable, Equatable, Sendable {
     var prefilledHandle: String?
     var timezone: String
     var spendBlocked: Bool
+    /// Payments on (#438): the cap is the trial's or the free month's, which
+    /// only the first payment lifts, not the month (`spend_cap_lifts_with_payment`,
+    /// sent only then).
+    var spendCapLiftsWithPayment: Bool
     var shareV1Enabled: Bool
     var shareV1Available: Bool
     var publicSharingEnabled: Bool
@@ -46,6 +50,13 @@ struct CurrentUser: Decodable, Equatable, Sendable {
     /// Circles: every Circles screen and the Circles choice in the pickers
     /// show only when this is true. Absent (an older server): off.
     var circlesEnabled: Bool
+    /// Payments (#438): true only while the server has them on; `subscription`
+    /// is sent with it. Settings shows the state; the app sells nothing.
+    var paymentsEnabled: Bool
+    var subscription: SubscriptionState?
+    /// Payments on (#697): the admin blocked this account. Nobody else waits for
+    /// approval then, so it gets `AccountNotActiveView`, not the waitlist.
+    var accountBlocked: Bool
 
     enum CodingKeys: String, CodingKey {
         case id, username, email, plan, timezone
@@ -67,6 +78,7 @@ struct CurrentUser: Decodable, Equatable, Sendable {
         case prefillConsent = "prefill_consent"
         case prefilledHandle = "prefilled_handle"
         case spendBlocked = "spend_blocked"
+        case spendCapLiftsWithPayment = "spend_cap_lifts_with_payment"
         case shareV1Enabled = "share_v1_enabled"
         case shareV1Available = "share_v1_available"
         case publicSharingEnabled = "public_sharing_enabled"
@@ -77,6 +89,9 @@ struct CurrentUser: Decodable, Equatable, Sendable {
         case gleanAvailable = "glean_available"
         case gleanEnabled = "glean_enabled"
         case circlesEnabled = "circles_enabled"
+        case paymentsEnabled = "payments_enabled"
+        case subscription
+        case accountBlocked = "account_blocked"
     }
 
     init(from decoder: Decoder) throws {
@@ -104,6 +119,7 @@ struct CurrentUser: Decodable, Equatable, Sendable {
         prefilledHandle = c.tolerant(.prefilledHandle)
         timezone = c.tolerant(.timezone, default: "UTC")
         spendBlocked = c.tolerant(.spendBlocked, default: false)
+        spendCapLiftsWithPayment = c.tolerant(.spendCapLiftsWithPayment, default: false)
         shareV1Enabled = c.tolerant(.shareV1Enabled, default: false)
         shareV1Available = c.tolerant(.shareV1Available, default: false)
         publicSharingEnabled = c.tolerant(.publicSharingEnabled, default: false)
@@ -114,6 +130,23 @@ struct CurrentUser: Decodable, Equatable, Sendable {
         gleanAvailable = c.tolerant(.gleanAvailable, default: false)
         gleanEnabled = c.tolerant(.gleanEnabled, default: false)
         circlesEnabled = c.tolerant(.circlesEnabled, default: false)
+        paymentsEnabled = c.tolerant(.paymentsEnabled, default: false)
+        subscription = c.tolerant(.subscription)
+        accountBlocked = c.tolerant(.accountBlocked, default: false)
+    }
+
+    /// Payments on and no AI replies on this account (#438): Voice refuses a
+    /// recording before it starts, as it does for the spend cap.
+    var aiRepliesPaused: Bool { paymentsEnabled && subscription?.aiReplies == false }
+
+    /// Payments on and the account never had a subscription (or its first
+    /// payment failed): it is not let in, and gets `NoSubscriptionView` only.
+    var notLetIn: Bool { approved && paymentsEnabled && subscription?.state == "none" }
+
+    /// Payments on, a payment failed on an account that paid before: it keeps
+    /// its writing, and the app says so on load (no way to pay here).
+    var paymentFailed: Bool {
+        paymentsEnabled && subscription?.status == "past_due" && subscription?.state == "lapsed"
     }
 
     /// Applies an email-state answer from any `/api/dashboard/email*` call

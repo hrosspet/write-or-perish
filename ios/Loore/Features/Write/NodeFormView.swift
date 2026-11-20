@@ -62,7 +62,8 @@ private struct NodeFormBody: View {
                 PrivacySelectorView(privacy: $model.privacy, aiUsage: $model.aiUsage, disabled: model.loading,
                                     lockPrivacy: model.lockPrivacy, audience: model.audience,
                                     threadAudience: model.threadAudienceNames, lockPublic: model.lockPublic,
-                                    hidePublic: model.hidePublic, onlyMe: model.onlyMe)
+                                    hidePublic: model.hidePublic, onlyMe: model.onlyMe,
+                                    trainRefused: config.edit?.trainRefused ?? false)
                     // The "nobody could read this" refusal goes as soon as
                     // somebody can: it must not stand beside "Share with 3 people".
                     .onChange(of: model.audience.readers) { _, readers in

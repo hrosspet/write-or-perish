@@ -138,6 +138,30 @@ def test_an_anthropic_token_count_still_falls_back_on_other_errors(
         "claude-x", [{"role": "user", "content": "hi"}], KEYS) is None
 
 
+def test_an_anthropic_token_count_closes_its_client(monkeypatch, providers):
+    """Each count closes its HTTP client when it is done, counted or not
+    (#633): a profile pass counts many windows, and every client left to
+    the garbage collector kept its connection open until then."""
+    clients = []
+
+    def counted(self, request, *a, **k):
+        clients.append(self)
+        return httpx.Response(200, json={"input_tokens": 7}, request=request)
+    monkeypatch.setattr(httpx.Client, "send", counted)
+    assert providers.LLMProvider.count_tokens(
+        "claude-x", [{"role": "user", "content": "hi"}], KEYS) == 7
+
+    def refused(self, request, *a, **k):
+        clients.append(self)
+        raise httpx.ConnectError("refused", request=request)
+    monkeypatch.setattr(httpx.Client, "send", refused)
+    assert providers.LLMProvider.count_tokens(
+        "claude-x", [{"role": "user", "content": "hi"}], KEYS) is None
+
+    assert len(clients) == 2
+    assert all(client.is_closed for client in clients)
+
+
 def test_an_openai_token_count_raises_the_soft_limit(monkeypatch, providers):
     fake = types.ModuleType("tiktoken")
 

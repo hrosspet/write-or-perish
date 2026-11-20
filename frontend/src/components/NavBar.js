@@ -7,6 +7,7 @@ import CraftIcon from "./CraftIcon";
 import CraftModeDialog from "./CraftModeDialog";
 import { useToast } from "../contexts/ToastContext";
 import api from "../api";
+import { downloadAccountData, EXPORT_FAILED_MESSAGE } from "../utils/dataExport";
 
 const backendUrl = process.env.REACT_APP_BACKEND_URL;
 
@@ -89,25 +90,12 @@ function NavBar({ onNewEntryClick }) {
     }
   };
 
-  // Export data: the browser's own download of the file, which the server
-  // sends while it builds it (#591). It starts at once, shows in the
-  // browser's download list with its progress, and is never held in this
-  // page's memory. A HEAD request first checks that it can start (signed
-  // in, server reachable); the server builds nothing for it.
+  // Export data: the browser's own download of the file (utils/dataExport).
   const handleExportData = async () => {
     setOverflowOpen(false);
-    try {
-      await api.head("/export/threads");
-    } catch (err) {
-      addToast("The export couldn't start. Please try again.", 5000);
-      return;
+    if (!(await downloadAccountData())) {
+      addToast(EXPORT_FAILED_MESSAGE, 5000);
     }
-    const a = document.createElement("a");
-    a.href = `${api.defaults.baseURL}/export/threads`;
-    a.download = ""; // the server names the file (loore-export-YYYY-MM-DD.txt)
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
   };
 
   const currentPath = location.pathname;

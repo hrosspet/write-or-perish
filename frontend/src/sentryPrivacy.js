@@ -20,6 +20,13 @@ import { breadcrumbsIntegration } from "@sentry/react";
 // Queries and fragments are removed and paths kept, so the route of an
 // error stays readable. Console breadcrumbs are not recorded. An element is
 // described by its tag, id and classes only. Extra is dropped.
+//
+// The SDK's default BrowserSession integration sends a session record on
+// each page load (#666): no content, but the request carries the visitor's
+// IP address. It feeds Sentry's release-health numbers, which need a
+// release name; the build sets none, so the SDK discards those records
+// today. The integration is left out, so none is sent if a release is
+// ever set. Error reports do not depend on it.
 
 export function withoutQuery(url) {
   return url.split("?", 1)[0].split("#", 1)[0];
@@ -111,8 +118,13 @@ export function sentryPrivacyOptions() {
     sendDefaultPii: false,
     beforeSend: scrubEvent,
     beforeBreadcrumb: scrubBreadcrumb,
-    // Don't instrument the console at all; scrubBreadcrumb drops any
-    // console breadcrumb that still arrives.
-    integrations: [breadcrumbsIntegration({ console: false })],
+    // The SDK's defaults without BrowserSession (see the top), and the
+    // breadcrumbs without the console: scrubBreadcrumb drops any console
+    // breadcrumb that still arrives. This instance replaces the default
+    // Breadcrumbs one (the SDK keeps the instance that is not a default).
+    integrations: (defaults) => [
+      ...defaults.filter((integration) => integration.name !== "BrowserSession"),
+      breadcrumbsIntegration({ console: false }),
+    ],
   };
 }

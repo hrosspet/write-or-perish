@@ -1084,11 +1084,13 @@ class LLMProvider:
             try:
                 # No SDK retries: this is a sizing aid — better to return
                 # None fast (callers keep their overflow backstops) than
-                # stall a build behind connection-error backoff.
-                with soft_limit.passes():
-                    client = Anthropic(api_key=api_keys["anthropic"],
-                                       max_retries=0,
-                                       **soft_limit.client_kwargs(anthropic))
+                # stall a build behind connection-error backoff. The
+                # client is closed after the count: a profile pass counts
+                # many windows, and each unclosed client kept its
+                # connection open until garbage collection (#633).
+                with soft_limit.passes(), Anthropic(
+                        api_key=api_keys["anthropic"], max_retries=0,
+                        **soft_limit.client_kwargs(anthropic)) as client:
                     system_param, anthropic_messages = \
                         LLMProvider._to_anthropic_params(messages)
                     return client.messages.count_tokens(

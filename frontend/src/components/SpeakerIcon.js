@@ -34,7 +34,7 @@ const extractMarkdownHeader = (content) => {
  * user's approval; its audio is then followed by the spoken announcement
  * while they wait (asked when it plays).
  */
-const SpeakerIcon = ({ nodeId, profileId, itemId, content, isPublic, aiUsage, onTtsGenerated, buttonStyle, announce = false }) => {
+const SpeakerIcon = ({ nodeId, profileId, itemId, content, isPublic, aiUsage, onTtsGenerated, buttonStyle, ownRecording, announce = false }) => {
   const { user } = useUser();
   const { loadAudio, loadAudioQueue, updateChapters, appendChunkToQueue, appendAnnouncement, setGeneratingTTS, currentAudio, isPlaying, warmup, waitingForChunks, queueFinishedCount } = useAudio();
   const { addToast } = useToast();
@@ -312,7 +312,7 @@ const SpeakerIcon = ({ nodeId, profileId, itemId, content, isPublic, aiUsage, on
   }, [ttsStatus, ttsData, ttsError, entityType, id, loadAudio, fullTitle, onTtsGenerated]);
 
   // Show for voice-mode users, or for any authenticated user on public posts
-  if (!user || (!user.voice_mode_enabled && !isPublic)) {
+  if (!user || (!user.voice_mode_enabled && !isPublic && !ownRecording)) {
     return null;
   }
 

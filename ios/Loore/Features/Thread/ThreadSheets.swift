@@ -25,7 +25,8 @@ struct ThreadSheets: ViewModifier {
                         edit: .init(nodeId: target.id, initialContent: target.content, initialPrivacy: target.privacy,
                                     initialAIUsage: target.aiUsage, detachPrompt: target.hasPromptArtifact,
                                     hasGeneratedTTS: target.hasTTS, hasChildren: target.hasChildren,
-                                    isAIReply: target.isAIReply))) { result in
+                                    isAIReply: target.isAIReply,
+                                    trainRefused: target.trainRefused))) { result in
                         Task { await model.editSaved(result, autoGenerate: $autoGenerate) }
                     } onClose: {
                         model.showEditForm = false
@@ -143,10 +144,12 @@ struct NodeAudioControls: View {
     let hasTTS: Bool
     /// New TTS was generated from the speaker (web sets `has_tts` on the node).
     var onTtsGenerated: (() -> Void)?
+    /// The user's own recording, playable without voice mode (#438).
+    var ownRecording = false
 
     var body: some View {
         SpeakerButton(target: .node(nodeId), content: content, isPublic: isPublic, aiUsage: aiUsage,
-                      onTtsGenerated: onTtsGenerated)
-        DownloadAudioButton(nodeId: nodeId, isPublic: isPublic, aiUsage: aiUsage)
+                      ownRecording: ownRecording, onTtsGenerated: onTtsGenerated)
+        DownloadAudioButton(nodeId: nodeId, isPublic: isPublic, aiUsage: aiUsage, ownRecording: ownRecording)
     }
 }

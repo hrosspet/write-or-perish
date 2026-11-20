@@ -1,0 +1,615 @@
+"""Referrals (#439): a free week for both on the friend's first payment,
+given once, and the admin list. The invites themselves (one personal
+invite a month) are in test_invites.py, which shares these harnesses.
+
+Two harnesses: the payments test app (test_payments.py: billing, webhook,
+admin and dashboard blueprints, Stripe replaced by a stub gateway) for the
+reward and the admin list; and an app with the sign-in routes and the real
+X blueprint (as test_x_login_linking.py) for the signup paths.
+"""
+import os
+import sys
+from datetime import datetime
+from unittest.mock import MagicMock
+
+os.environ.setdefault("SECRET_KEY", "test-secret")
+os.environ.setdefault("ENCRYPTION_DISABLED", "true")
+os.environ.setdefault("TWITTER_API_KEY", "fake")
+os.environ.setdefault("TWITTER_API_SECRET", "fake")
+
+import pytest  # noqa: E402
+
+import flask_login as _real_flask_login  # noqa: E402
+import backend.models as _real_backend_models  # noqa: E402
+from backend.extensions import db as _db  # noqa: E402
+from backend.models import Referral, User, UserNotification  # noqa: E402
+from backend.tests import test_payments as tp  # noqa: E402
+from backend.tests.test_payments import (  # noqa: E402
+    _client, _event, _post_event, _user, subscription)
+from backend.utils import referrals, stripe_billing  # noqa: E402
+
+
+class StripeRefused(Exception):
+    """A client error Stripe would repeat."""
+    http_status = 400
+
+
+class ReferralGateway(tp.FakeGateway):
+    """The stub gateway with customer balance. It has no invoice preview:
+    the credit is a fixed amount (Peter, 2026-11-13), so nothing about an
+    account's next invoice is asked for."""
+
+    def __init__(self):
+        super().__init__()
+        self.balance = {}       # customer -> [transactions]
+        self.fail_credit = 0    # this many creates raise (Stripe down)
+        self.fail_after_credit = 0  # created at Stripe, then the call fails
+        self.refuse_credit_for = set()  # customers whose credit is refused
+        self._idem = {}
+
+    def list_balance_transactions(self, customer_id):
+        self._call("list_balance_transactions", customer_id)
+        return list(self.balance.get(customer_id, []))
+
+    def create_balance_transaction(self, customer_id, params,
+                                   idempotency_key=None):
+        self._call("create_balance_transaction", customer_id, params,
+                   idempotency_key)
+        if customer_id in self.refuse_credit_for:
+            raise StripeRefused("refused")
+        if self.fail_credit:
+            self.fail_credit -= 1
+            raise RuntimeError("stripe down")
+        if idempotency_key is not None and idempotency_key in self._idem:
+            return self._idem[idempotency_key]
+        txn = {"id": self._id("cbtxn"), "customer": customer_id,
+               "amount": params["amount"], "currency": params["currency"],
+               "metadata": dict(params.get("metadata") or {})}
+        self.balance.setdefault(customer_id, []).append(txn)
+        if idempotency_key is not None:
+            self._idem[idempotency_key] = txn
+        if self.fail_after_credit:
+            self.fail_after_credit -= 1
+            raise RuntimeError("connection reset after the write")
+        return txn
+
+    def credits(self):
+        return [t for txns in self.balance.values() for t in txns]
+
+
+@pytest.fixture
+def gateway(monkeypatch):
+    gw = ReferralGateway()
+    monkeypatch.setattr(stripe_billing, "get_gateway", lambda *a, **k: gw)
+    stripe_billing._price_cache.clear()
+    for level in ("standard", "supporter", "discounted"):
+        gw.prices.append({
+            "id": f"price_{level}", "active": True,
+            "lookup_key": stripe_billing.PRICE_LOOKUP_KEYS[level]})
+    return gw
+
+
+def _app(payments, secret=tp.SECRET, referrals_on=True):
+    app, ctx = tp._app_fixture(payments, secret=secret)
+    app.config["REFERRALS_ENABLED"] = referrals_on
+    from backend.routes.referrals import referrals_bp
+    app.register_blueprint(referrals_bp, url_prefix="/api/referrals")
+    yield app
+    _db.session.remove()
+    _db.drop_all()
+    ctx.pop()
+
+
+@pytest.fixture
+def app(gateway):
+    yield from _app(True)
+
+
+@pytest.fixture
+def app_off(gateway):
+    yield from _app(False, secret=None)
+
+
+@pytest.fixture
+def app_referrals_off(gateway):
+    yield from _app(True, referrals_on=False)
+
+
+def _pair(inviter_kw=None, friend_kw=None):
+    """An inviter with a live Standard subscription, and a friend it
+    invited whose subscription has just been created."""
+    inviter = _user("ines", **{
+        "stripe_customer_id": "cus_i", "stripe_subscription_id": "sub_i",
+        "subscription_status": "active", "subscription_level": "standard",
+        **(inviter_kw or {})})
+    friend = _user("fred", **{
+        "stripe_customer_id": "cus_f", "stripe_subscription_id": "sub_f",
+        "subscription_status": "trialing", "subscription_level": "standard",
+        **(friend_kw or {})})
+    _db.session.add(Referral(inviter_id=inviter.id, friend_id=friend.id))
+    _db.session.commit()
+    return inviter, friend
+
+
+def _paid(gateway, sub_id="sub_f", customer="cus_f", amount=3570,
+          invoice_id="in_1", status="active"):
+    gateway.subscriptions[sub_id] = subscription(
+        sub_id, customer=customer, status=status)
+    return {"id": invoice_id, "object": "invoice", "customer": customer,
+            "subscription": sub_id, "amount_paid": amount, "total": amount,
+            "currency": "usd", "status": "paid"}
+
+
+def _referral():
+    _db.session.expire_all()
+    return Referral.query.one()
+
+
+# ── The payload flag ──────────────────────────────────────────────────
+
+def test_the_payload_flag_on(app):
+    user = _client(app, _user()).get(
+        "/api/dashboard/?profile=0").get_json()["user"]
+    assert user["referrals_enabled"] is True
+
+
+def test_the_payload_flag_off(app_off):
+    """Control: payments off, no new key on the user object (#649's
+    rule)."""
+    user = _client(app_off, _user()).get(
+        "/api/dashboard/?profile=0").get_json()["user"]
+    assert "referrals_enabled" not in user
+
+
+# ── The reward ───────────────────────────────────────────────────────────
+
+class TestReward:
+    def test_the_first_payment_gives_both_the_same_credit(self, app, gateway):
+        """A quarter of Standard's monthly price before tax, 7.50 USD, for
+        each side (Peter, 2026-11-13: "one week, or 1/4th of the standard
+        subscription")."""
+        inviter, friend = _pair()
+        r = _post_event(app, _event("invoice.paid", _paid(gateway)))
+        assert r.status_code == 200, r.get_data(as_text=True)
+        credits = {t["customer"]: t for t in gateway.credits()}
+        assert credits["cus_f"]["amount"] == -750
+        assert credits["cus_i"]["amount"] == -750
+        assert credits["cus_f"]["currency"] == "usd"
+        assert credits["cus_i"]["currency"] == "usd"
+        ref = _referral()
+        assert ref.rewarded_at is not None
+        assert ref.reward_invoice_id == "in_1"
+        assert (ref.friend_reward, ref.inviter_reward) == ("granted",
+                                                           "granted")
+        assert ref.inviter_credit_cents == ref.friend_credit_cents == 750
+
+    def test_levels_and_tax_change_nothing(self, app, gateway):
+        """A Supporter inviter whose next invoice is 99.00 + 18.81 VAT, and
+        a friend on the reduced price who paid 12.00 + 2.28 VAT: both get
+        the same 7.50, and nobody's next invoice is asked for."""
+        _pair(inviter_kw={"subscription_level": "supporter"},
+              friend_kw={"subscription_level": "discounted"})
+        r = _post_event(app, _event("invoice.paid", _paid(
+            gateway, amount=1428)))
+        assert r.status_code == 200
+        credits = {t["customer"]: t["amount"] for t in gateway.credits()}
+        assert credits == {"cus_i": -750, "cus_f": -750}
+        assert not any("preview" in name for name in gateway.names())
+
+    def test_the_credit_is_a_share_of_the_standard_price(self, app):
+        """One setting, read against Standard's price: a price change
+        carries over, and 7 days of 30 would be 7.00."""
+        cfg = {"SUBSCRIPTION_PRICE_CENTS_STANDARD": 3000,
+               "REFERRAL_CREDIT_FRACTION": 0.25,
+               "SUBSCRIPTION_CURRENCY": "usd"}
+        assert referrals.referral_credit(cfg) == (750, "usd")
+        dearer = {**cfg, "SUBSCRIPTION_PRICE_CENTS_STANDARD": 4000}
+        assert referrals.referral_credit(dearer) == (1000, "usd")
+        assert referrals.referral_credit(
+            {**cfg, "REFERRAL_CREDIT_FRACTION": 7 / 30}) == (700, "usd")
+        # Other levels' prices play no part.
+        assert referrals.referral_credit(
+            {**cfg, "SUBSCRIPTION_PRICE_CENTS_SUPPORTER": 1}) == (750, "usd")
+
+    def test_the_default_is_a_quarter(self):
+        from backend.config import Config
+        if os.environ.get("REFERRAL_CREDIT_FRACTION") or os.environ.get(
+                "SUBSCRIPTION_PRICE_CENTS_STANDARD"):
+            pytest.skip("the referral settings are set in this environment")
+        assert Config.REFERRAL_CREDIT_FRACTION == 0.25
+        assert not hasattr(Config, "REFERRAL_REWARD_DAYS")
+        settings = {k: getattr(Config, k) for k in dir(Config) if k.isupper()}
+        assert referrals.referral_credit(settings) == (750, "usd")
+
+    def test_a_credit_made_under_the_old_amount_is_not_made_again(
+            self, app, gateway):
+        """Control (the exactly-once machinery, unchanged): a delivery
+        before the change made the friend's credit at the old amount
+        (8.33) and its answer was lost. The resent event finds it by its
+        mark and makes only the inviter's, under the same key as before."""
+        _pair()
+        ref = Referral.query.one()
+        gateway.balance["cus_f"] = [{
+            "id": "cbtxn_old", "customer": "cus_f", "amount": -833,
+            "currency": "usd",
+            "metadata": {"loore_referral": f"{ref.id}:friend"}}]
+        r = _post_event(app, _event("invoice.paid", _paid(gateway)))
+        assert r.status_code == 200
+        made = [c for c in gateway.calls
+                if c[0] == "create_balance_transaction"]
+        assert [c[1] for c in made] == ["cus_i"]
+        stamp = int(ref.created_at.timestamp())
+        assert made[0][3] == f"loore-referral-{ref.id}-{stamp}-inviter"
+        ref = _referral()
+        assert ref.friend_credit_cents == 833     # what Stripe holds
+        assert ref.friend_credit_txn == "cbtxn_old"
+        assert ref.inviter_credit_cents == 750
+
+    def test_the_notices_name_nobody(self, app, gateway):
+        inviter, friend = _pair()
+        _post_event(app, _event("invoice.paid", _paid(gateway)))
+        notes = {n.user_id: n for n in UserNotification.query.all()}
+        assert set(notes) == {inviter.id, friend.id}
+        for n in notes.values():
+            assert n.type == "referral_reward"
+            text = f"{n.title} {n.body}".lower()
+            assert "fred" not in text and "ines" not in text
+            assert "paid" not in text and "subscri" not in text
+
+    def test_a_trial_start_gives_nothing(self, app, gateway):
+        """Control: a 0.00 trial invoice is not a payment."""
+        _pair()
+        invoice = _paid(gateway, amount=0, status="trialing")
+        r = _post_event(app, _event("invoice.paid", invoice))
+        assert r.status_code == 200
+        assert gateway.credits() == []
+        assert _referral().rewarded_at is None
+
+    def test_a_replayed_event_gives_nothing_more(self, app, gateway):
+        _pair()
+        event = _event("invoice.paid", _paid(gateway), event_id="evt_p")
+        _post_event(app, event)
+        r = _post_event(app, event)
+        assert r.get_json()["status"] == "duplicate"
+        assert len(gateway.credits()) == 2
+
+    def test_both_payment_events_of_one_invoice_give_it_once(
+            self, app, gateway):
+        _pair()
+        invoice = _paid(gateway)
+        _post_event(app, _event("invoice.paid", invoice, event_id="evt_a"))
+        _post_event(app, _event("invoice.payment_succeeded", invoice,
+                                event_id="evt_b"))
+        assert len(gateway.credits()) == 2
+        assert UserNotification.query.count() == 2
+        assert gateway.names().count("create_balance_transaction") == 2
+
+    def test_a_retry_after_stripe_failed_part_way(self, app, gateway):
+        """The friend's credit is made, then Stripe fails on the
+        inviter's: the event answers 503 and records nothing; the resent
+        event finds the friend's credit and makes only the inviter's."""
+        _pair()
+        invoice = _paid(gateway)
+        gateway.fail_credit = 0
+        calls = {"n": 0}
+        real = gateway.create_balance_transaction
+
+        def second_fails(customer, params, idempotency_key=None):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise RuntimeError("stripe down")
+            return real(customer, params, idempotency_key)
+        gateway.create_balance_transaction = second_fails
+        r = _post_event(app, _event("invoice.paid", invoice, event_id="e1"))
+        assert r.status_code == 503
+        assert _referral().rewarded_at is None
+        r = _post_event(app, _event("invoice.paid", invoice, event_id="e1"))
+        assert r.status_code == 200
+        credits = gateway.credits()
+        assert sorted(t["customer"] for t in credits) == ["cus_f", "cus_i"]
+        assert _referral().rewarded_at is not None
+
+    def test_a_retry_after_a_lost_answer(self, app, gateway):
+        """Stripe made the credit but the answer was lost: the resent event
+        finds it by its mark and makes no second one."""
+        _pair()
+        invoice = _paid(gateway)
+        gateway.fail_after_credit = 1
+        assert _post_event(app, _event("invoice.paid", invoice,
+                                       event_id="e1")).status_code == 503
+        gateway._idem.clear()   # past Stripe's idempotency window
+        assert _post_event(app, _event("invoice.paid", invoice,
+                                       event_id="e1")).status_code == 200
+        assert len(gateway.credits()) == 2
+
+    def test_a_later_payment_gives_nothing(self, app, gateway):
+        _pair()
+        _post_event(app, _event("invoice.paid", _paid(gateway),
+                                event_id="e1"))
+        _post_event(app, _event("invoice.paid", _paid(
+            gateway, invoice_id="in_2"), event_id="e2"))
+        assert len(gateway.credits()) == 2
+        assert UserNotification.query.count() == 2
+        assert gateway.names().count("create_balance_transaction") == 2
+
+    def test_a_refund_after_the_reward_takes_nothing_back(
+            self, app, gateway):
+        inviter, friend = _pair()
+        invoice = _paid(gateway)
+        _post_event(app, _event("invoice.paid", invoice, event_id="e1"))
+        # The friend's first payment is refunded in full.
+        sub = gateway.subscriptions["sub_f"]
+        sub["latest_invoice"] = "in_1"
+        gateway.invoices["in_1"] = {
+            "id": "in_1", "amount_paid": 3570,
+            "payments": {"data": [{"payment": {"payment_intent": "pi_1"}}]}}
+        charge = {"id": "ch_1", "customer": "cus_f", "payment_intent": "pi_1",
+                  "amount": 3570, "amount_refunded": 3570, "refunded": True}
+        r = _post_event(app, _event("charge.refunded", charge,
+                                    event_id="e2"))
+        assert r.status_code == 200
+        assert _db.session.get(User, friend.id).subscription_revoked == \
+            "refund"
+        # No clawback: both credits stay, the referral stays rewarded.
+        assert len(gateway.credits()) == 2
+        assert "delete_balance_transaction" not in gateway.names()
+        assert _referral().inviter_reward == "granted"
+        # A later paid invoice gives nothing more.
+        _post_event(app, _event("invoice.paid", _paid(
+            gateway, invoice_id="in_9"), event_id="e3"))
+        assert len(gateway.credits()) == 2
+        assert UserNotification.query.count() == 2
+
+    def test_a_dispute_after_the_reward_takes_nothing_back(
+            self, app, gateway):
+        _pair()
+        _post_event(app, _event("invoice.paid", _paid(gateway),
+                                event_id="e1"))
+        gateway.charges["ch_1"] = {"id": "ch_1", "customer": "cus_f",
+                                   "payment_intent": "pi_1", "amount": 3570}
+        r = _post_event(app, _event("charge.dispute.created",
+                                    {"id": "dp_1", "charge": "ch_1"},
+                                    event_id="e2"))
+        assert r.status_code == 200
+        assert len(gateway.credits()) == 2
+        assert _referral().friend_reward == "granted"
+
+    def test_the_inviters_credit_is_at_most_what_the_friend_paid(
+            self, app, gateway):
+        """A friend who paid 5.00 on the first invoice (a deep discount
+        code): the inviter's credit is 5.00, not 7.50; the friend's own is
+        the full 7.50."""
+        _pair(inviter_kw={"subscription_level": "supporter"},
+              friend_kw={"subscription_level": "discounted"})
+        r = _post_event(app, _event("invoice.paid", _paid(gateway,
+                                                          amount=500)))
+        assert r.status_code == 200
+        credits = {t["customer"]: t["amount"] for t in gateway.credits()}
+        assert credits["cus_i"] == -500
+        assert credits["cus_f"] == -750
+        assert _referral().inviter_credit_cents == 500
+
+    def test_another_currency_gives_the_fixed_credit(self, app, gateway):
+        """The friend paid in another currency (impossible while every
+        price is in USD): no comparison, and the fixed credit stands."""
+        _pair(inviter_kw={"subscription_level": "supporter"})
+        _post_event(app, _event("invoice.paid", dict(
+            _paid(gateway, amount=3200), currency="eur")))
+        credits = {t["customer"]: t["amount"] for t in gateway.credits()}
+        assert credits["cus_i"] == -750
+
+    def test_the_credit_key_differs_between_databases(self, app):
+        """Two databases sharing the sandbox have the same referral ids:
+        the key carries the referral's creation time."""
+        from backend.utils.referrals import _credit_key
+        a = Referral(id=3, created_at=datetime(2026, 11, 1))
+        b = Referral(id=3, created_at=datetime(2026, 11, 2))
+        assert _credit_key(a, "inviter") != _credit_key(b, "inviter")
+        assert _credit_key(a, "inviter").startswith("loore-referral-3-")
+
+    def test_an_inviter_without_a_stripe_customer(self, app, gateway):
+        """An account set by hand (alpha) never checked out: a customer is
+        made with the checkout's key, and the credit is the same 7.50."""
+        inviter = _user("ines", plan="alpha")
+        friend = _user("fred", stripe_customer_id="cus_f",
+                       stripe_subscription_id="sub_f",
+                       subscription_status="trialing",
+                       subscription_level="standard")
+        _db.session.add(Referral(inviter_id=inviter.id, friend_id=friend.id))
+        _db.session.commit()
+        _post_event(app, _event("invoice.paid", _paid(gateway)))
+        made = [c for c in gateway.calls if c[0] == "create_customer"]
+        assert made and made[0][2] == \
+            stripe_billing.customer_idempotency_key(inviter)
+        assert made[0][2].startswith(f"loore-customer-{inviter.id}-")
+        cus = _db.session.get(User, inviter.id).stripe_customer_id
+        credit = [t for t in gateway.credits() if t["customer"] == cus][0]
+        assert credit["amount"] == -750
+        assert credit["currency"] == "usd"
+
+    def test_a_deleted_inviter_gets_nothing_the_friend_does(
+            self, app, gateway):
+        _pair(inviter_kw={"deleted_at": datetime.utcnow()})
+        _post_event(app, _event("invoice.paid", _paid(gateway)))
+        assert [t["customer"] for t in gateway.credits()] == ["cus_f"]
+        assert _referral().inviter_reward == "skipped_deleted"
+
+    def test_a_refused_credit_does_not_hold_the_event(self, app, gateway):
+        """Stripe refuses the inviter's credit for good: recorded as
+        failed and logged; the friend's subscription event still applies."""
+        inviter, friend = _pair()
+        gateway.refuse_credit_for.add("cus_i")
+        r = _post_event(app, _event("invoice.paid", _paid(gateway)))
+        assert r.status_code == 200
+        ref = _referral()
+        assert (ref.friend_reward, ref.inviter_reward) == ("granted",
+                                                           "failed")
+        assert _db.session.get(User, friend.id).subscription_ever_paid
+
+    def test_a_self_referral_row_gives_nothing(self, app, gateway):
+        """Control (defence): a row naming one account twice is never
+        paid out; record_invite never writes one."""
+        u = _user("solo", stripe_customer_id="cus_f",
+                  stripe_subscription_id="sub_f",
+                  subscription_status="active",
+                  subscription_level="standard")
+        _db.session.add(Referral(inviter_id=u.id, friend_id=u.id))
+        _db.session.commit()
+        _post_event(app, _event("invoice.paid", _paid(gateway)))
+        assert gateway.credits() == []
+
+    def test_no_referral_no_credit(self, app, gateway):
+        """Control: a first payment of an account nobody invited."""
+        _user("fred", stripe_customer_id="cus_f",
+              stripe_subscription_id="sub_f", subscription_status="trialing",
+              subscription_level="standard")
+        r = _post_event(app, _event("invoice.paid", _paid(gateway)))
+        assert r.status_code == 200
+        assert gateway.credits() == []
+
+
+class TestCustomerKey:
+    def test_two_databases_never_share_a_customer(self, app):
+        """Staging and local development share the Stripe sandbox and
+        have the same account ids: the key of the customer-creating call
+        tells them apart, so Stripe never hands one the other's customer
+        (it did in the sandbox, 2026-11-12, before this)."""
+        a = User(id=7, username="a", created_at=datetime(2026, 11, 1))
+        b = User(id=7, username="b", created_at=datetime(2026, 11, 2))
+        assert stripe_billing.customer_idempotency_key(a) != \
+            stripe_billing.customer_idempotency_key(b)
+
+    def test_checkout_and_credit_use_one_key(self, app, gateway):
+        """A checkout and a referral's credit for one account within
+        Stripe's window make one customer, not two."""
+        u = _user("ines")
+        _client(app, u).post("/api/billing/checkout",
+                             json={"level": "standard"})
+        made = [c for c in gateway.calls if c[0] == "create_customer"]
+        assert made[0][2] == stripe_billing.customer_idempotency_key(u)
+
+
+class TestPaidOnce:
+    def test_an_invoice_paid_by_credit_counts_as_paid(self, app, gateway):
+        """Credit can cover a whole invoice: it was paid, so a later failed
+        payment leaves the account lapsed, not shut out."""
+        u = _user("c", stripe_customer_id="cus_c",
+                  stripe_subscription_id="sub_c",
+                  subscription_status="active",
+                  subscription_level="discounted")
+        gateway.subscriptions["sub_c"] = subscription("sub_c",
+                                                      customer="cus_c")
+        invoice = {"id": "in_c", "subscription": "sub_c", "customer": "cus_c",
+                   "amount_paid": 0, "total": 1428, "status": "paid"}
+        _post_event(app, _event("invoice.paid", invoice))
+        assert _db.session.get(User, u.id).subscription_ever_paid
+
+    def test_a_trial_invoice_is_not_a_payment(self, app, gateway):
+        """Control: #649's rule for a 0.00 invoice."""
+        u = _user("c", stripe_customer_id="cus_c",
+                  stripe_subscription_id="sub_c",
+                  subscription_status="trialing",
+                  subscription_level="standard")
+        gateway.subscriptions["sub_c"] = subscription(
+            "sub_c", customer="cus_c", status="trialing", trial=True)
+        invoice = {"id": "in_c", "subscription": "sub_c", "customer": "cus_c",
+                   "amount_paid": 0, "total": 0, "status": "paid"}
+        _post_event(app, _event("invoice.paid", invoice))
+        assert not _db.session.get(User, u.id).subscription_ever_paid
+
+
+# ── Admin ────────────────────────────────────────────────────────────────
+
+class TestAdmin:
+    def test_who_invited_whom(self, app, gateway):
+        inviter, friend = _pair()
+        _post_event(app, _event("invoice.paid", _paid(gateway)))
+        admin = _client(app, _user("root", is_admin=True))
+        data = admin.get("/api/admin/referrals").get_json()
+        rows = data["referrals"]
+        assert len(rows) == 1
+        row = rows[0]
+        assert (row["inviter"], row["friend"]) == ("ines", "fred")
+        # A referral through the reusable link invites replaced.
+        assert row["invite_state"] is None
+        assert row["inviter_reward"] == "granted"
+        assert row["inviter_credit_cents"] == 750
+        assert row["rewarded_at"]
+        # What each side gets now, for the table and for one given by hand.
+        assert data["credit"] == {"cents": 750, "currency": "usd"}
+
+    def test_only_admins(self, app):
+        r = _client(app, _user()).get("/api/admin/referrals")
+        assert r.status_code == 403
+
+    def test_off_with_payments(self, app_off):
+        """Control: 404 while payments are off, as #649's admin lists."""
+        admin = _client(app_off, _user("root", is_admin=True))
+        assert admin.get("/api/admin/referrals").status_code == 404
+
+
+# ── Signup: the X round trip and the email link ─────────────────────────
+
+FRONTEND_URL = "http://frontend.test"
+
+
+def _signup_app():
+    from flask import Flask
+    from flask_login import LoginManager
+    from backend.config import Config
+
+    app = Flask(__name__)
+    app.config.from_object(Config)
+    app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///:memory:"
+    app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {}
+    app.config["SECRET_KEY"] = "test-secret"
+    app.config["TESTING"] = True
+    app.config["FRONTEND_URL"] = FRONTEND_URL
+    app.config["TWITTER_API_KEY"] = "fake"
+    app.config["TWITTER_API_SECRET"] = "fake"
+    app.config["PAYMENTS_ENABLED"] = True
+    app.config["REFERRALS_ENABLED"] = True
+    app.config["DEPLOY_ENV"] = "testing"
+    _db.init_app(app)
+    login_manager = LoginManager(app)
+
+    @login_manager.user_loader
+    def load_user(user_id):
+        return _db.session.get(User, int(user_id))
+
+    from backend.routes.auth import auth_bp
+    from backend.oauth import init_twitter_blueprint
+    app.register_blueprint(auth_bp, url_prefix="/auth")
+    init_twitter_blueprint(app)
+    return app
+
+
+@pytest.fixture
+def signup_app():
+    affected = lambda k: (  # noqa: E731
+        k == "flask_login" or k.startswith("backend.routes")
+        or k == "backend.models")
+    saved = {k: sys.modules[k] for k in list(sys.modules) if affected(k)}
+    sys.modules["flask_login"] = _real_flask_login
+    sys.modules["backend.models"] = _real_backend_models
+    for k in [k for k in list(sys.modules) if k.startswith("backend.routes")]:
+        del sys.modules[k]
+    app = _signup_app()
+    with app.app_context():
+        _db.create_all()
+        yield app
+        _db.session.remove()
+        _db.drop_all()
+    for k in [k for k in list(sys.modules) if affected(k)]:
+        if k not in saved:
+            del sys.modules[k]
+    for k, mod in saved.items():
+        sys.modules[k] = mod
+
+
+def _x(x_id, screen_name, authorized=True):
+    x = MagicMock()
+    x.authorized = authorized
+    x.get.return_value = MagicMock(
+        ok=True, json=lambda: {"id": x_id, "screen_name": screen_name})
+    return x

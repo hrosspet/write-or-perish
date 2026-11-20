@@ -52,6 +52,28 @@ struct PrivacySelectorView: View {
         return who.isEmpty ? "The people this thread is shared with."
             : "\(who) will see it, with your name. Nobody else can."
     }
+    /// An entry Loore fetched through the X API (`train_refused`, #689): Train
+    /// is not offered, and the note under the select says why.
+    var trainRefused = false
+
+    /// The server's words when it refuses Train (backend `TRAIN_REFUSED_MESSAGE`,
+    /// web `utils/aiUsage.js`).
+    static let trainRefusedMessage =
+        "Posts fetched from X can't be used for training, under X's rules for developers."
+
+    /// The toast after "apply to my replies" left replies off Train (web
+    /// `keptFromTrainRepliesNote`, #689).
+    static func keptFromTrainRepliesNote(_ count: Int) -> String? {
+        guard count > 0 else { return nil }
+        return "\(count) \(count == 1 ? "reply stays" : "replies stay") at Chat. \(trainRefusedMessage)"
+    }
+
+    /// The AI usage options offered: all three, or None and Chat for an X API entry.
+    static func offeredAIOptions(trainRefused: Bool) -> [(AIUsage, String)] {
+        trainRefused ? aiOptions.filter { $0.0 != .train } : aiOptions
+    }
+    /// Imports are always private (#677): no choice, this line in its place.
+    var privacyNote: String?
 
     static let privacyOptions: [(PrivacyLevel, String)] = [
         (.private, "🔒 Private · Only I can see this"),
@@ -85,7 +107,10 @@ struct PrivacySelectorView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 6) {
-                if onlyMe {
+                if let privacyNote {
+                    // Imports are always private (#677): this line, no choice.
+                    FieldDescription(text: privacyNote)
+                } else if onlyMe {
                     FieldLabel(text: Self.whoCanReadLabel)
                     FieldDescription(text: Self.onlyMeNote)
                 } else if lockPrivacy, let threadAudience {
@@ -109,8 +134,12 @@ struct PrivacySelectorView: View {
             }
             VStack(alignment: .leading, spacing: 6) {
                 FieldLabel(text: "AI Usage")
-                SelectField(options: Self.aiOptions, selection: $aiUsage, disabled: disabled)
+                SelectField(options: Self.offeredAIOptions(trainRefused: trainRefused), selection: $aiUsage,
+                            disabled: disabled)
                 FieldDescription(text: Self.aiDescription(aiUsage))
+                if trainRefused {
+                    FieldDescription(text: Self.trainRefusedMessage)
+                }
             }
         }
         .padding(.vertical, 12)
@@ -196,6 +225,9 @@ struct SelectField<Value: Hashable>: View {
     var disabled = false
     /// Options shown greyed out, not selectable (the web's `<option disabled>`).
     var unavailable: Set<Value> = []
+    /// Shown while the selection is none of the options (web: a disabled first
+    /// option such as "Not answered yet", which the menu does not offer).
+    var placeholder = ""
 
     var body: some View {
         Menu {
@@ -213,7 +245,7 @@ struct SelectField<Value: Hashable>: View {
             }
         } label: {
             HStack {
-                Text(options.first(where: { $0.0 == selection })?.1 ?? "")
+                Text(options.first(where: { $0.0 == selection })?.1 ?? placeholder)
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Spacer(minLength: 8)

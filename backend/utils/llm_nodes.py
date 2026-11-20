@@ -14,7 +14,7 @@ from backend.utils.ca_feed import (
     FEED_AI_USAGE, READ_FURTHER_MARKER, READ_PROMPT_KEYS, ca_turn,
     read_reply_ids,
 )
-from backend.utils.privacy import AI_ALLOWED
+from backend.utils.privacy import AI_ALLOWED, X_API_INPUT
 from backend.utils.client_platform import CLIENT_MARKER, request_client
 
 
@@ -609,6 +609,12 @@ def reply_ai_usage(parent_node, user, chain=None, parent_content=None):
     for i, n in enumerate(nodes):
         if i in prompts or n.id in chain.reads:
             continue
+        if (n.node_type == "llm"
+                and getattr(n, "unlicensed_input", None) == X_API_INPUT):
+            # An AI reply written from posts fetched from X is Chat by
+            # construction (#689): that describes it, not the thread, so
+            # what is written under it takes the setting above it.
+            continue
         return n.ai_usage or default
     return default
 
@@ -907,6 +913,9 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     Raises ReadOnlyModelRefused, also before any write, when a reply that
     is not a read asks for a read-only model ("chat": False).
 
+    Raises SubscriptionRequired, also before any write, while payments
+    are on and the owner has no AI replies (utils/subscriptions).
+
     Raises ThreadTooLong (utils/thread_size), also before any write, when
     the reply's prompt would be over THREAD_PROMPT_TOKEN_LIMIT (#648).
     """
@@ -918,6 +927,12 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     from backend.utils.spend import SpendCapExceeded, user_is_capped
     if user_is_capped(human_owner_id):
         raise SpendCapExceeded()
+    # Payments on (#438): no reply for an account without AI replies (no
+    # subscription, or one that ended), also before any write. Off: a
+    # no-op without a query.
+    from backend.utils.subscriptions import check_ai_replies, payments_enabled
+    if payments_enabled():
+        check_ai_replies(db.session.get(User, human_owner_id))
 
     # Race A guard: lock the parent row and reject if soft-deleted. The
     # locking is what closes the create-vs-soft-delete race under READ

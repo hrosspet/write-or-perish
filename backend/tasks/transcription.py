@@ -28,6 +28,9 @@ from backend.utils.cost import calculate_audio_cost_microdollars
 from backend.utils.error_privacy import (
     REPLY_NOT_STARTED_TEXT, TRANSCRIPTION_FAILED_TEXT, describe_exception,
 )
+from backend.utils.recording_ai_usage import (
+    mark_not_transcribed, may_transcribe, voice_note_content,
+)
 
 logger = get_task_logger(__name__)
 
@@ -56,6 +59,12 @@ UPLOAD_REPLY_SKIPPED_SPEND_CAP = (
     "Your entry is saved. Loore didn't reply because you've reached your "
     "monthly usage limit, which resets at the start of next month."
 )
+# The same for a ceiling only the first payment lifts (#438: the trial's,
+# an alpha tester's free month's), which does not reset with the month.
+UPLOAD_REPLY_SKIPPED_SPEND_CAP_UNTIL_PAYMENT = (
+    "Your entry is saved. Loore didn't reply because you've reached your "
+    "usage limit, which lifts with your first payment."
+)
 # ...and whose reply AI usage refused (llm_nodes.reply_refusal).
 UPLOAD_REPLY_SKIPPED_AI_USAGE = (
     "Your entry is saved. Loore didn't reply because AI usage is set to "
@@ -69,11 +78,23 @@ def _start_upload_reply(node, tip, model_id):
     the reply was skipped: a spend-capped user, a refused placeholder, or
     any other failure. The reason is recorded on the entry, which is
     already committed and always kept."""
-    from backend.utils.spend import user_is_capped
+    from backend.utils.spend import cap_lifts_with_payment, user_is_capped
     from backend.utils.task_warnings import record_task_warning
     if user_is_capped(node.user_id):
-        record_task_warning(node, UPLOAD_REPLY_SKIPPED_SPEND_CAP)
+        record_task_warning(
+            node, UPLOAD_REPLY_SKIPPED_SPEND_CAP_UNTIL_PAYMENT
+            if cap_lifts_with_payment(node.user_id)
+            else UPLOAD_REPLY_SKIPPED_SPEND_CAP)
         return None
+    # Payments on and no AI replies for this account (#438).
+    from backend.utils.subscriptions import (
+        ai_replies_allowed, payments_enabled, subscription_required_message)
+    if payments_enabled():
+        from backend.models import User
+        owner = db.session.get(User, node.user_id)
+        if not ai_replies_allowed(owner):
+            record_task_warning(node, subscription_required_message(owner))
+            return None
     from backend.utils.llm_nodes import (
         AIUsageRefused, ReadOnlyModelRefused, auto_generate_refusal,
         create_llm_placeholder,
@@ -132,6 +153,15 @@ def transcribe_audio(self, node_id: int, audio_file_path: str, filename: str = N
         node = Node.query.get(node_id)
         if not node:
             raise ValueError(f"Node {node_id} not found")
+
+        # No AI means no AI (#665): the entry may have been set to None
+        # since this was queued. Asked here, right before the audio would
+        # go to the provider; the audio stays with the entry.
+        if not may_transcribe(node.ai_usage):
+            mark_not_transcribed(node, filename)
+            db.session.commit()
+            logger.info("Node %s: not transcribed, AI usage is None", node_id)
+            return {'node_id': node_id, 'status': 'not_transcribed'}
 
         # Update status to processing
         node.transcription_status = 'processing'
@@ -303,16 +333,7 @@ def transcribe_audio(self, node_id: int, audio_file_path: str, filename: str = N
             self.update_state(state='PROGRESS', meta={'progress': 100, 'status': 'Complete'})
 
             # Only add title for top-level nodes, not replies
-            if node.parent_id is None and filename:
-                header, _ = os.path.splitext(filename)
-                # For recordings made via the app, use date/time instead of "recording"
-                if header == "recording":
-                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    final_content = f"# {timestamp} Voice note\n\n{transcript}"
-                else:
-                    final_content = f"# {header}\n\n{transcript}"
-            else:
-                final_content = transcript
+            final_content = voice_note_content(node, filename, transcript)
 
             final_content = final_content or node.get_content()
             node.set_content(final_content)

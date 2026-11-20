@@ -174,7 +174,8 @@ final class VoiceLimitAndApprovalAppTests: StubbedAppTestCase {
 
         let first = await app.audio.recordFromLockScreen(turn)
         XCTAssertEqual(first, VoiceApproval.recordRefusal(count: 1))
-        XCTAssertTrue(spoken.isEmpty, "the waiting change is not the length: nothing said")
+        // Said aloud as the waiting change, not as the length (#651).
+        XCTAssertEqual(spoken, [SpokenRefusal.approvalWaiting.text])
         XCTAssertEqual(turn.state, .idle)
         XCTAssertFalse(backend.log.contains { $0.hasPrefix("init") })
 
@@ -182,7 +183,7 @@ final class VoiceLimitAndApprovalAppTests: StubbedAppTestCase {
         backend.approvalLists[60] = []
         let second = await app.audio.recordFromLockScreen(turn)
         XCTAssertEqual(second, ThreadLength.limitText)
-        XCTAssertEqual(spoken, [ThreadLength.spokenText])
+        XCTAssertEqual(spoken, [SpokenRefusal.approvalWaiting.text, ThreadLength.spokenText])
         XCTAssertEqual(turn.state, .idle)
         XCTAssertFalse(backend.log.contains { $0.hasPrefix("init") }, "no session either time")
         turn.tearDown()

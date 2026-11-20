@@ -142,7 +142,8 @@ class TestStartIsRefusedWhenCapped:
         assert Draft.query.count() == 0
 
     def test_streaming_init_allowed_when_not_capped(self, client, alice):
-        resp = client.post("/drafts/streaming/init", json={})
+        resp = client.post("/drafts/streaming/init",
+                           json={"ai_usage": "chat"})
         assert resp.status_code == 201
         assert Draft.query.count() == 1
 
@@ -269,7 +270,8 @@ class TestSavedWithoutReplyDraftIsNotRestored:
         self._warning_draft(alice)
 
         # Any new session start runs the stale-draft cleanup.
-        assert client.post("/drafts/streaming/init", json={}).status_code == 201
+        assert client.post("/drafts/streaming/init",
+                           json={"ai_usage": "chat"}).status_code == 201
 
         assert Draft.query.filter_by(session_id="sess-saved").count() == 0
 
@@ -342,8 +344,9 @@ def _write(path, data):
 
 
 def _recording(user, session_id, chunk_indices, root):
+    # A recording the AI may transcribe (#665).
     draft = Draft(user_id=user.id, session_id=session_id,
-                  streaming_status="recording",
+                  streaming_status="recording", ai_usage="chat",
                   streaming_mime_type="audio/webm")
     draft.set_content("")
     _db.session.add(draft)
@@ -497,7 +500,8 @@ class TestCappedRecordingIsTranscribed:
         monkeypatch.setattr(tr, "OpenAI", fake_openai)
         user = st._test_user
         node = Node(user_id=user.id, human_owner_id=user.id,
-                    node_type="user", transcription_status="pending")
+                    node_type="user", transcription_status="pending",
+                    ai_usage="chat")
         node.set_content("[Voice note – transcription pending]")
         _db.session.add(node)
         _db.session.commit()

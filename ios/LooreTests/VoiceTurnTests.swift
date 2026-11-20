@@ -245,12 +245,13 @@ final class FakeAudio: VoiceAudio {
     func stopCue() { if cueOn { events.append("cue.stop") }; cueOn = false }
     func playErrorSound() { events.append("sound.error") }
     /// Set: a sentence is "said" until `finishSpeech()` (or a new sentence, or
-    /// `stopSpeaking()`), as `SentenceSpeaker` holds its caller. Unset: at once.
+    /// `stopSpeaking()`), as `RefusalVoice` holds its caller. Unset: at once.
+    /// Logged as its words (the clip's and the device's).
     var holdSpeech = false
     private var speechWaiter: CheckedContinuation<Void, Never>?
     var isSpeaking: Bool { speechWaiter != nil }
-    func speak(_ text: String) async {
-        events.append("speak: \(text)")
+    func speak(_ refusal: SpokenRefusal) async {
+        events.append("speak: \(refusal.text)")
         guard holdSpeech else { return }
         // Like SentenceSpeaker: a new sentence ends the one being said.
         finishSpeech()
@@ -655,6 +656,30 @@ final class VoiceTurnTests: XCTestCase {
         await wait("thinking") { turn.state == .awaitingAudio }
     }
 
+    /// Review of #682: a pause longer than the server's 45 s liveness window
+    /// (nothing is sent while paused). Nothing here depends on how long the pause
+    /// was: after Resume and Stop the turn is finalized with every chunk, so what
+    /// was recorded before and after the pause is transcribed. The server now
+    /// takes those chunks also from an account that stopped being let in during
+    /// the pause (test_not_let_in_recording_and_export, TestALongGap).
+    func testALongPauseThenStopFinalizesTheWholeRecording() async throws {
+        recorder.outcome = ChunkUploader.Outcome(produced: 4, stored: 4, failed: [], fatalMessage: nil)
+        backend.statuses = [try status("completed", llm: 101)]
+        backend.llmStatuses[101] = [try llm(101, "processing")]
+        turn.start()
+        await wait("recording") { turn.state == .recording }
+        turn.pauseRecording()
+        XCTAssertTrue(turn.isPaused)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        turn.resumeRecording()
+        XCTAssertFalse(turn.isPaused)
+        turn.stop()
+        await wait("finalized") { backend.log.contains { $0.hasPrefix("finalize total=4") } }
+        await wait("thinking") { turn.state == .awaitingAudio }
+        XCTAssertFalse(turn.hasError)
+        XCTAssertEqual(recorder.calls.filter { $0 == "pause" }.count, 1)
+    }
+
     func testLeavingDuringStopDoesNotReactivateTheSession() async throws {
         recorder.stopDelay = 0.1
         await recordAndStop()
@@ -904,9 +929,10 @@ final class VoiceTurnTests: XCTestCase {
         XCTAssertFalse(backend.log.contains("legacy"))
     }
 
-    func testOtherSkippedRepliesStayQuiet() async throws {
-        // The monthly limit (and every other skip) stays a toast: nothing is said.
-        let warning = "Your recording is saved. Loore didn't reply because you've reached your monthly usage limit."
+    func testASkipThatNamesNoRefusalStaysQuiet() async throws {
+        // A warning without a refusal's code (nothing heard, #513) stays a toast.
+        // The refusals the server names are said: VoiceRefusalSpeechTests (#651).
+        let warning = "Loore didn't hear any words in this recording. It's saved with its audio, without a reply."
         backend.statuses = [try status("completed", warning: warning)]
         await recordAndStop()
         await wait("idle") { turn.state == .idle }

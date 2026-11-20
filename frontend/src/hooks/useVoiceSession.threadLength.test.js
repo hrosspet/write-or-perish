@@ -1,7 +1,9 @@
 // #648: in Voice mode a turn refused because the thread is too long for
-// another reply is said aloud (the user may not be looking), with the
-// browser's own speech, and the page is told ('too_long') so it shows the
-// limit with the way to a new thread. Other refusals stay as they were.
+// another reply is said aloud (the user may not be looking), and the page
+// is told ('too_long') so it shows the limit with the way to a new thread.
+// Since #651 the sentence comes from its clip where the browser plays it;
+// here the browser refuses the clip (as Safari does outside a tap), so its
+// own speech says it. The other refusals: useVoiceSession.refusalSpeech.
 let mockStreamingOptions;
 jest.mock('./useStreamingTranscription', () => ({
   useStreamingTranscription: (options) => {
@@ -91,12 +93,21 @@ beforeEach(() => {
     speak: (u) => { spoken.push(u.text); },
   };
   window.SpeechSynthesisUtterance = function Utterance(text) { this.text = text; };
+  // A browser that plays no clip outside a tap (NotAllowedError, at once).
+  window.Audio = function RefusedAudio() {
+    this.addEventListener = () => {};
+    this.play = () => ({ then: (ok, bad) => bad(new Error('NotAllowedError')) });
+    this.pause = () => {};
+    this.removeAttribute = () => {};
+    this.load = () => {};
+  };
 });
 
 afterEach(() => {
   jest.useRealTimers();
   delete window.speechSynthesis;
   delete window.SpeechSynthesisUtterance;
+  delete window.Audio;
 });
 
 test('a record press refused for the thread length: the error sound, then the sentence', () => {
@@ -132,13 +143,15 @@ test('a recording whose reply was skipped for the length is saved, said and show
   expect(onAiUsageRefused.mock.calls[0][0]).toBe('too_long');
 });
 
-test('other skipped replies are not spoken (the monthly limit stays a toast)', async () => {
+test('a skipped reply whose warning names no refusal is not spoken', async () => {
+  // E.g. nothing was heard (#513): a toast only. The refusals, which the
+  // server names (warning_code), are said: useVoiceSession.refusalSpeech.
   renderSession();
 
   await finishRecording({
     content: 'my words', llmNodeId: null,
-    warning: "Your recording is saved. Loore didn't reply because you've "
-      + 'reached your monthly usage limit.',
+    warning: "Loore didn't hear any words in this recording. It's saved "
+      + 'with its audio, without a reply.',
   });
 
   expect(mockAddToast).toHaveBeenCalledTimes(1);

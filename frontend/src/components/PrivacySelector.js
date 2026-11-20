@@ -2,6 +2,7 @@ import React from 'react';
 import { useUser } from '../contexts/UserContext';
 import CircleAudiencePicker from './CircleAudiencePicker';
 import { joinNames } from '../utils/circles';
+import { TRAIN_REFUSED_MESSAGE } from '../utils/aiUsage';
 
 /**
  * PrivacySelector component for selecting privacy level and AI usage permissions.
@@ -49,6 +50,12 @@ const PrivacySelector = ({
   audienceNodeId = null,
   audienceCommitSignal = 0,
   pickerKey,
+  // An entry Loore fetched through the X API (node.train_refused, #689):
+  // Train is not offered, and the note says why.
+  trainRefused = false,
+  // Imports are always private (#677): no choice, one line in its place.
+  hidePrivacy = false,
+  privacyNote = null,
 }) => {
   // No provider in some tests and embeds: then Circles is off.
   const user = useUser()?.user;
@@ -111,7 +118,14 @@ const PrivacySelector = ({
   ];
 
   let privacyPart;
-  if (onlyMe) {
+  if (hidePrivacy) {
+    // Imports are always private (#677): no choice, one line in its place.
+    privacyPart = (
+      <div style={{ marginBottom: '12px' }}>
+        <div style={descStyle}>{privacyNote}</div>
+      </div>
+    );
+  } else if (onlyMe) {
     privacyPart = (
       <div style={{ marginBottom: '12px' }}>
         <label style={labelStyle}>Who can read this</label>
@@ -242,13 +256,18 @@ const PrivacySelector = ({
         >
           <option value="none">🚫 None · No AI access</option>
           <option value="chat">💬 Chat · AI can use for responses</option>
-          <option value="train">🧠 Train · AI can use for training</option>
+          {!trainRefused && (
+            <option value="train">🧠 Train · AI can use for training</option>
+          )}
         </select>
         <div style={descStyle}>
           {aiUsage === 'none' && 'AI will not access this note.'}
           {aiUsage === 'chat' && 'AI can read this note to generate responses, but won\'t use it for training.'}
           {aiUsage === 'train' && 'AI can use this note for training data to improve the model.'}
         </div>
+        {trainRefused && (
+          <div style={descStyle}>{TRAIN_REFUSED_MESSAGE}</div>
+        )}
       </div>
     </div>
   );

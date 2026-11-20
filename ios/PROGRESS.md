@@ -1247,3 +1247,61 @@ price, token counts or percentages anywhere; the copy is the web's (`Core/Models
   Continue, not said), and the thread page's notice or limit on the turn it is reached. Nine more tests.
   At the limit the form and Voice show the server's reason (`thread_length_message`: the thread is long, or
   an entry or what it quotes is too large) after a refused request's own words; two more tests.
+
+## Every refusal of a Voice turn said aloud (#651, Peter 2026-11-12)
+
+Peter agreed that the refusals other than the thread's length be spoken too; his rule for the approval
+announcement ("TTSed as a separate chunk ... when it's not pending, it's not voiced out anymore") sets how.
+
+- `Audio/Voice/SpokenRefusal.swift`: one sentence per refusal code (`monthly_spend_limit_reached`,
+  `ai_usage_none`, `approval_pending`, `thread_too_long`), the server's words (`backend/utils/
+  voice_refusals.py`). `RefusalVoice` asks for the clip (`GET /api/voice/refusal/<code>.mp3`, at most
+  `SpokenRefusal.clipWait` = 4 s, kept for the app run), plays it on its own (`ClipSpeaker`, an
+  `AVAudioPlayer` on a private queue, never the reply queue), and falls back to `SentenceSpeaker` when
+  there is no clip. `AudioCenter.speak(_:)` holds a background task while it fetches, so a locked phone
+  is not suspended before the sentence.
+- `VoiceTurnController`: a refused start (402, 403 `ai_usage_none`, 409 `approval_pending`, 409
+  `thread_too_long`), a recording saved without a reply (`warning_code`; a waiting change also lists the
+  changes and opens the dialog) and the legacy request's refusals are said, without the error sound or
+  the red dot. `announceUsageLimit()` (Voice screen Record and Continue, lock screen Record while capped)
+  stops a playing reply first, as `announceBlock()` does; `announceApprovalWaiting()` (a stale lock-screen
+  card) speaks only when nothing plays. `VoiceAudio.speak` takes a `SpokenRefusal`.
+- Tests: `VoiceRefusalSpeechTests.swift` (`VoiceRefusalSpeechTurnTests`, `RefusalVoiceTests`,
+  `VoiceRefusalSpeechAppTests`); the lock-screen test of the waiting change now expects its sentence. Unit
+  tests only: no clip heard on a phone, and the lock screen not tried on a device.
+- Review fix (PR #675): a finished reply being replayed leaves the turn `.done`, so `announce` (the usage
+  limit, and the length said from the lock screen) now stops a queue that plays whatever the state; the
+  reply stays loaded. Three tests.
+
+## A Voice turn whose access ends while it is recorded (#438, Peter 2026-11-13)
+
+Peter: "Voice mode shouldn't start with a subscription expired. I was talking about the edge case when
+subscription expires during user's voice recording." A turn refused at its start stays as it was (the
+banner, nothing said). A turn that started with access and loses it before its reply is kept and
+transcribed by the server, which skips only the reply.
+
+- `SpokenRefusal`: four more codes, one per reason (`subscription_required_ended`, `_past_due`,
+  `_free_month`, `_none`), whose sentence is the server's on-screen text ("Your subscription has ended, so
+  Loore doesn't reply. Your recording is saved."): it names the state, never where or how to pay.
+  `isAccessEnded`, and `init?(keptRecordingMessage:)` for a 402 whose message is one of them.
+- `VoiceTurnController`: the recording's `warning_code` is said as the other refusals are; the legacy
+  request's 402 for a kept turn marks the entry saved and says its sentence (any other 402
+  `subscription_required` there ends the turn quietly instead of with the error sound); a queued reply the
+  server refused for the same reason (`error_code`) is said instead of the error sound.
+- Tests: four more in `VoiceRefusalSpeechTurnTests`, and the sentences test. Unit tests only: nothing
+  heard on a phone.
+- An account that stops being let in during a recording (a trial whose first payment fails): the server
+  still takes that recording's chunks, finalize and status (`finishes_recording_in_progress`).
+  `AudioCenter.recordingInProgress` (a Voice turn recording, stopping or transcribing; a dictation
+  recording or finalizing, through `DictationController.state`; a chunked upload between its init and its
+  finalize, `beginUpload`/`endUpload` in `NodeFormModel.uploadInChunks`) keeps `RootView` on the app
+  until it is done (`RootView.showsNoSubscription`); then NoSubscriptionView shows.
+- NoSubscriptionView: "Download your data" (Peter, 2026-11-13: "yes, Ben should be able to export"), the
+  More menu's export, now `DataExport.download`, then the share sheet.
+- Tests: `SubscriptionTests.testARecordingInProgressKeepsItsScreenUntilItIsDone`; the nothing-to-buy test
+  covers the new label. Not tried on a device.
+- Review of #682: a Voice pause longer than 45 s sends nothing (no chunk, no transcription stream), so the
+  server's liveness check refused the chunks after it for an account no longer let in, and Stop then
+  finalized nothing. The server no longer asks for liveness there; `VoiceTurnTests.
+  testALongPauseThenStopFinalizesTheWholeRecording` pins that the app finalizes the whole recording after
+  a pause.

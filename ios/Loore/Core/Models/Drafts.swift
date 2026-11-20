@@ -237,7 +237,13 @@ struct SaveAsNodeResponse: Decodable, Sendable {
     var llmNodeId: Int?
     var taskId: String?
     var spendCapped: Bool
+    /// The cap is one only the first payment lifts (#438: the trial's, the
+    /// free month's), not the month's.
+    var spendCapLiftsWithPayment: Bool
     var llmError: String?
+    /// Payments on, no AI replies (#438): the entry is saved, the reply skipped.
+    var subscriptionRequired: Bool
+    var subscriptionMessage: String?
     /// Why the reply was skipped, as a code: `thread_too_long` (#648),
     /// `auto_generate_off`, `ai_usage_none`, `model_read_only`.
     var llmErrorCode: String?
@@ -255,7 +261,10 @@ struct SaveAsNodeResponse: Decodable, Sendable {
         case llmNodeId = "llm_node_id"
         case taskId = "task_id"
         case spendCapped = "spend_capped"
+        case spendCapLiftsWithPayment = "spend_cap_lifts_with_payment"
         case llmError = "llm_error"
+        case subscriptionRequired = "subscription_required"
+        case subscriptionMessage = "subscription_message"
     }
 
     init(from decoder: Decoder) throws {
@@ -272,7 +281,10 @@ struct SaveAsNodeResponse: Decodable, Sendable {
         llmNodeId = c.tolerant(.llmNodeId)
         taskId = c.tolerant(.taskId)
         spendCapped = c.tolerant(.spendCapped, default: false)
+        spendCapLiftsWithPayment = c.tolerant(.spendCapLiftsWithPayment, default: false)
         llmError = c.tolerant(.llmError)
+        subscriptionRequired = c.tolerant(.subscriptionRequired, default: false)
+        subscriptionMessage = c.tolerant(.subscriptionMessage)
         llmErrorCode = c.tolerant(.llmErrorCode)
     }
 }
@@ -289,7 +301,13 @@ struct TextmodeStartResponse: Decodable, Sendable {
     var llmNodeId: Int?
     var taskId: String?
     var spendCapped: Bool
+    /// The cap is one only the first payment lifts (#438: the trial's, the
+    /// free month's), not the month's.
+    var spendCapLiftsWithPayment: Bool
     var llmError: String?
+    /// Payments on, no AI replies (#438): the entry is saved, the reply skipped.
+    var subscriptionRequired: Bool
+    var subscriptionMessage: String?
     /// Why the reply was skipped, as a code: `thread_too_long` (#648),
     /// `auto_generate_off`.
     var llmErrorCode: String?
@@ -303,7 +321,10 @@ struct TextmodeStartResponse: Decodable, Sendable {
         case llmNodeId = "llm_node_id"
         case taskId = "task_id"
         case spendCapped = "spend_capped"
+        case spendCapLiftsWithPayment = "spend_cap_lifts_with_payment"
         case llmError = "llm_error"
+        case subscriptionRequired = "subscription_required"
+        case subscriptionMessage = "subscription_message"
     }
 
     init(from decoder: Decoder) throws {
@@ -315,7 +336,10 @@ struct TextmodeStartResponse: Decodable, Sendable {
         llmNodeId = c.tolerant(.llmNodeId)
         taskId = c.tolerant(.taskId)
         spendCapped = c.tolerant(.spendCapped, default: false)
+        spendCapLiftsWithPayment = c.tolerant(.spendCapLiftsWithPayment, default: false)
         llmError = c.tolerant(.llmError)
+        subscriptionRequired = c.tolerant(.subscriptionRequired, default: false)
+        subscriptionMessage = c.tolerant(.subscriptionMessage)
         llmErrorCode = c.tolerant(.llmErrorCode)
     }
 }
@@ -357,3 +381,19 @@ struct VoiceFromNodeResponse: Decodable, Sendable {
         fresh = c.tolerant(.fresh, default: false)
     }
 }
+
+/// An answer that saved the entry and may have skipped its reply because the
+/// account has no AI replies (#438): the message to show, or nil.
+protocol SubscriptionSkippable {
+    var subscriptionRequired: Bool { get }
+    var subscriptionMessage: String? { get }
+}
+
+extension SubscriptionSkippable {
+    var subscriptionNotice: String? {
+        subscriptionRequired ? (subscriptionMessage ?? APIError.defaultSubscriptionMessage) : nil
+    }
+}
+
+extension SaveAsNodeResponse: SubscriptionSkippable {}
+extension TextmodeStartResponse: SubscriptionSkippable {}

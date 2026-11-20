@@ -249,6 +249,36 @@ final class SharedEntryFormTests: StubbedAppTestCase {
         XCTAssertNil(sent?["auto_generate"])
     }
 
+    /// A recorded entry is saved with the settings the form shows when it is sent.
+    func testARecordedEntryIsSavedWithTheSettingsTheFormShows() async {
+        StubURLProtocol.install { _ in .json(201, #"{"id":30,"user_node_id":30,"privacy_level":"private"}"#) }
+        let model = writeNewEntry(agentic: true)
+        model.privacy = .private
+        model.aiUsage = .off
+        model.streamingSessionId = "s1"
+        await model.submit()
+        let sent = body(of: "POST /api/drafts/streaming/s1/save-as-node")
+        XCTAssertEqual(sent?["privacy_level"] as? String, "private")
+        XCTAssertEqual(sent?["ai_usage"] as? String, "none")
+        XCTAssertNil(sent?["agentic"])
+    }
+
+    func testTextModeSavesARecordedEntryWithTheFormsSettings() async throws {
+        StubURLProtocol.install { _ in .json(201, #"{"id":31,"user_node_id":31}"#) }
+        _ = try await TextModeView.submit(NodeFormSubmission(content: "hi", parentId: nil, privacy: .private, aiUsage: .off,
+                                                             streamingSessionId: "s2"), app: app, defaults: defaults)
+        let plain = body(of: "POST /api/drafts/streaming/s2/save-as-node")
+        XCTAssertEqual(plain?["privacy_level"] as? String, "private")
+        XCTAssertEqual(plain?["ai_usage"] as? String, "none")
+        XCTAssertNil(plain?["agentic"])
+        _ = try await TextModeView.submit(NodeFormSubmission(content: "hi", parentId: nil, privacy: .public, aiUsage: .train,
+                                                             streamingSessionId: "s3"), app: app, defaults: defaults)
+        let agentic = body(of: "POST /api/drafts/streaming/s3/save-as-node")
+        XCTAssertEqual(agentic?["privacy_level"] as? String, "public")
+        XCTAssertEqual(agentic?["ai_usage"] as? String, "train")
+        XCTAssertEqual(agentic?["agentic"] as? Bool, true)
+    }
+
     func testTextModeAsksForNoReplyForASharedEntry() async throws {
         StubURLProtocol.install { _ in .json(202, #"{"conversation_id":1,"user_node_id":2}"#) }
         defaults.set(true, forKey: DefaultsKey.autoGenerate)
@@ -447,6 +477,22 @@ final class SharedThreadModelTests: StubbedAppTestCase {
         _ = try await model.submitReadReply(NodeFormSubmission(content: "why?", parentId: 10, privacy: .circles, aiUsage: .chat),
                                             autoGenerate: true)
         XCTAssertEqual(body(of: "POST /api/textmode/from-node/10")?["auto_generate"] as? Bool, false)
+    }
+
+    func testARecordedReadReplyIsSavedWithTheFormsSettings() async throws {
+        let model = await loadedModel("private")
+        StubURLProtocol.install { _ in .json(201, #"{"id":12,"user_node_id":12}"#) }
+        _ = try await model.submitReadReply(NodeFormSubmission(content: "why?", parentId: 10, privacy: .private, aiUsage: .off,
+                                                               streamingSessionId: "s4"), autoGenerate: true)
+        let plain = body(of: "POST /api/drafts/streaming/s4/save-as-node")
+        XCTAssertEqual(plain?["privacy_level"] as? String, "private")
+        XCTAssertEqual(plain?["ai_usage"] as? String, "none")
+        XCTAssertNil(plain?["agentic"])
+        _ = try await model.submitReadReply(NodeFormSubmission(content: "why?", parentId: 10, privacy: .private, aiUsage: .chat,
+                                                               streamingSessionId: "s5"), autoGenerate: true)
+        let agentic = body(of: "POST /api/drafts/streaming/s5/save-as-node")
+        XCTAssertEqual(agentic?["ai_usage"] as? String, "chat")
+        XCTAssertEqual(agentic?["agentic"] as? Bool, true)
     }
 
     // MARK: "Only you see this reply"

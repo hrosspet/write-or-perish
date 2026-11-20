@@ -333,6 +333,7 @@ def test_log_card_for_detached_root_keeps_badge_and_preview(app, alice):
 
 
 def test_search_excludes_detached_root(app, alice):
+    alice.is_admin = True  # keyword search is the admins' tool
     prompt = _make_prompt(alice, "textmode")
     root = _make_node(alice)
     _link_prompt(root, prompt)
