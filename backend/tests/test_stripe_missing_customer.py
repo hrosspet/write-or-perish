@@ -46,8 +46,9 @@ def no_such_customer(param="customer", status=400):
 
 class Gateway(tp.FakeGateway):
     """The payments stub, with customers Stripe no longer has (*gone*; of
-    those, *deleted* ones read back as deleted), customer balance, and
-    reading a customer."""
+    those, *deleted* ones read back as deleted), customer balance, reading
+    a customer, subscriptions Stripe does not know, and idempotency keys
+    answered again the way Stripe does (its first answer, for 24 hours)."""
 
     def __init__(self):
         super().__init__()
@@ -55,6 +56,28 @@ class Gateway(tp.FakeGateway):
         self.deleted = set()
         self.balance = {}
         self.retrieve_error = None
+        self.subscription_error = None
+        self.by_key = {}
+
+    def create_customer(self, params, idempotency_key=None):
+        if idempotency_key is not None and idempotency_key in self.by_key:
+            self._call("create_customer", params, idempotency_key)
+            return dict(self.by_key[idempotency_key])
+        customer = super().create_customer(params, idempotency_key)
+        if idempotency_key is not None:
+            self.by_key[idempotency_key] = dict(customer)
+        return customer
+
+    def retrieve_subscription(self, sub_id):
+        if self.subscription_error is not None:
+            self._call("retrieve_subscription", sub_id)
+            raise self.subscription_error
+        if sub_id not in self.subscriptions:
+            self._call("retrieve_subscription", sub_id)
+            raise stripe.InvalidRequestError(
+                f"No such subscription: '{sub_id}'", "id",
+                code="resource_missing", http_status=404)
+        return super().retrieve_subscription(sub_id)
 
     def create_checkout_session(self, params):
         if params.get("customer") in self.gone:
@@ -352,12 +375,14 @@ class TestForgetCommand:
         assert "Done" in r.output
         after = _columns(u.id)
         assert after["stripe_customer_id"] is None
-        # Only the customer id changed.
+        assert after["stripe_customer_cleared_count"] == 1
+        # Only the customer id and the count of clears changed.
         assert {k for k in after if after[k] != before[k]} == {
-            "stripe_customer_id"}
+            "stripe_customer_id", "stripe_customer_cleared_count"}
         # Nothing was asked of Stripe but the customer itself.
         assert "delete_customer" not in gateway.names()
         assert "create_customer" not in gateway.names()
+        assert "retrieve_subscription" not in gateway.names()
         r = _client(app, _db.session.get(User, u.id)).post(
             "/api/billing/checkout", json={"level": "standard"})
         assert r.status_code == 200, r.get_data(as_text=True)
@@ -367,6 +392,61 @@ class TestForgetCommand:
         params = [c for c in gateway.calls
                   if c[0] == "create_checkout_session"][-1][1]
         assert params["customer"] == new
+
+    def test_within_a_day_the_next_checkout_gets_a_new_customer(
+            self, app, gateway, caplog):
+        """The customer was made by a checkout and deleted the same day:
+        Stripe would answer the same create-customer key with the deleted
+        customer for 24 hours (the stub does too). The key carries the
+        count of clears, so the checkout after a clear makes a new one,
+        and so does the one after a second clear."""
+        u = _user("bob")
+        c = _client(app, u)
+        assert c.post("/api/billing/checkout",
+                      json={"level": "standard"}).status_code == 200
+        first = _columns(u.id)["stripe_customer_id"]
+        gateway.gone.add(first)
+        gateway.deleted.add(first)
+        assert c.post("/api/billing/checkout",
+                      json={"level": "standard"}).status_code == 409
+        assert _run(app, "--user", str(u.id), "--apply").exit_code == 0
+        caplog.clear()
+        c = _client(app, _db.session.get(User, u.id))
+        r = c.post("/api/billing/checkout", json={"level": "standard"})
+        assert r.status_code == 200, r.get_data(as_text=True)
+        second = _columns(u.id)["stripe_customer_id"]
+        assert second and second != first
+        keys = [x[2] for x in gateway.calls if x[0] == "create_customer"]
+        assert len(set(keys)) == 2
+        assert keys[-1] == stripe_billing.customer_idempotency_key(
+            _db.session.get(User, u.id))
+        assert keys[-1].endswith("-r1")
+        assert _errors(caplog) == []
+        # A second clear, the same day: a third key, a third customer.
+        gateway.gone.add(second)
+        gateway.deleted.add(second)
+        assert _run(app, "--user", str(u.id), "--apply").exit_code == 0
+        c = _client(app, _db.session.get(User, u.id))
+        assert c.post("/api/billing/checkout",
+                      json={"level": "standard"}).status_code == 200
+        third = _columns(u.id)["stripe_customer_id"]
+        assert third not in (first, second)
+        keys = [x[2] for x in gateway.calls if x[0] == "create_customer"]
+        assert keys[-1].endswith("-r2")
+
+    def test_a_referral_credit_after_a_clear_makes_a_new_customer(
+            self, app, gateway):
+        """The referral's credit makes a customer with the same key as a
+        checkout: after a clear it is a new one too."""
+        from backend.utils.referrals import _customer_for
+        u = _user("ines")
+        first = _customer_for(gateway, u)
+        _db.session.commit()
+        gateway.gone.add(first)
+        gateway.deleted.add(first)
+        assert _run(app, "--user", str(u.id), "--apply").exit_code == 0
+        u = _db.session.get(User, u.id)
+        assert _customer_for(gateway, u) != first
 
     def test_a_customer_stripe_never_had(self, app, gateway):
         """An id Stripe has no customer for at all (not even deleted) is
@@ -380,20 +460,86 @@ class TestForgetCommand:
         assert _columns(u.id)["stripe_customer_id"] is None
 
     @pytest.mark.parametrize("status", ["trialing", "active", "past_due"])
-    def test_refuses_with_a_live_subscription_recorded(self, app, gateway,
-                                                       status):
+    def test_a_cancellation_that_never_arrived(self, app, gateway, status):
+        """The customer was deleted, Stripe cancelled its subscription, and
+        the event never reached Loore: the account still records it live.
+        The command reads it from Stripe, records it as ended through the
+        cancellation event's own path, then clears the id."""
+        u = _gone_user(gateway, stripe_subscription_id="sub_1",
+                       subscription_status=status,
+                       subscription_level="supporter")
+        gateway.subscriptions["sub_1"] = subscription(
+            "sub_1", customer="cus_gone", status="canceled",
+            level="supporter", user_id=u.id)
+        before = _columns(u.id)
+        r = _run(app, "--user", str(u.id))
+        assert r.exit_code == 0, r.output
+        assert f"subscription recorded: {status} (sub_1)" in r.output
+        assert "at Stripe the subscription is canceled" in r.output
+        assert "--apply would refuse" not in r.output
+        assert _columns(u.id) == before
+        r = _run(app, "--user", str(u.id), "--apply")
+        assert r.exit_code == 0, r.output
+        assert "recorded as ended" in r.output
+        after = _columns(u.id)
+        assert after["subscription_status"] == "ended"
+        assert after["stripe_subscription_id"] == "sub_1"
+        assert after["subscription_level"] == "supporter"
+        assert after["stripe_customer_id"] is None
+        # Nothing was changed at Stripe.
+        assert "cancel_subscription" not in gateway.names()
+        assert "update_subscription" not in gateway.names()
+
+    def test_a_subscription_stripe_does_not_know(self, app, gateway):
+        """An id Stripe never had (another Stripe account or mode): no
+        event will ever come, and Stripe has no such subscription. It is
+        taken as ended, as an account deletion takes it."""
+        gateway.gone.add("cus_other")
+        period_end = datetime(2026, 12, 20, 10, 0)
+        u = _user(stripe_customer_id="cus_other",
+                  stripe_subscription_id="sub_other",
+                  subscription_status="active", subscription_level="standard",
+                  subscription_period_end=period_end)
+        r = _run(app, "--user", str(u.id))
+        assert "Stripe has no such subscription" in r.output
+        r = _run(app, "--user", str(u.id), "--apply")
+        assert r.exit_code == 0, r.output
+        after = _columns(u.id)
+        assert after["subscription_status"] == "ended"
+        assert after["subscription_level"] == "standard"
+        assert after["subscription_period_end"] == period_end
+        assert after["subscription_cancel_at_period_end"] is False
+        assert after["stripe_customer_id"] is None
+
+    @pytest.mark.parametrize("status", ["trialing", "active", "past_due"])
+    def test_refuses_while_stripe_runs_the_subscription(
+            self, app, gateway, status):
         u = _gone_user(gateway, stripe_subscription_id="sub_live",
                        subscription_status=status,
                        subscription_level="standard")
+        gateway.subscriptions["sub_live"] = subscription(
+            "sub_live", customer="cus_gone", status=status, user_id=u.id)
         before = _columns(u.id)
         r = _run(app, "--user", str(u.id))
         assert r.exit_code == 0
         assert "--apply would refuse" in r.output
-        assert f"({status}, sub_live)" in r.output
+        assert f"sub_live as {status}" in r.output
         r = _run(app, "--user", str(u.id), "--apply")
         assert r.exit_code != 0
-        assert "live subscription recorded" in r.output
+        assert "still runs" in r.output
         assert "Nothing changed." in r.output
+        assert _columns(u.id) == before
+
+    def test_refuses_when_the_subscription_cannot_be_read(
+            self, app, gateway):
+        u = _gone_user(gateway, stripe_subscription_id="sub_1",
+                       subscription_status="active",
+                       subscription_level="standard")
+        gateway.subscription_error = stripe.APIConnectionError("down")
+        before = _columns(u.id)
+        r = _run(app, "--user", str(u.id), "--apply")
+        assert r.exit_code != 0
+        assert "could not be asked about the subscription" in r.output
         assert _columns(u.id) == before
 
     def test_refuses_while_stripe_has_the_customer(self, app, gateway):
@@ -415,13 +561,22 @@ class TestForgetCommand:
         assert r.exit_code != 0
         assert _columns(u.id)["stripe_customer_id"] == "cus_gone"
 
-    def test_refuses_when_the_id_changed_meanwhile(self, app, gateway):
-        """Read again under the lock: a checkout that stored another id
-        between the check and the clear keeps it."""
+    def test_refuses_when_something_changed_meanwhile(self, app, gateway):
+        """Read again under the lock: a checkout that stored another id,
+        or a subscription that started, between the check and the clear
+        keeps the account as it is."""
         u = _gone_user(gateway)
+        check = stripe_billing.check_forget(gateway, u)
         with pytest.raises(stripe_billing.ForgetRefused):
-            stripe_billing.forget_customer(u, "cus_earlier", "deleted")
-        assert _columns(u.id)["stripe_customer_id"] == "cus_gone"
+            stripe_billing.forget_customer(gateway, u, "cus_earlier", check)
+        u.subscription_status = "active"
+        u.stripe_subscription_id = "sub_new"
+        _db.session.commit()
+        with pytest.raises(stripe_billing.ForgetRefused):
+            stripe_billing.forget_customer(gateway, u, "cus_gone", check)
+        after = _columns(u.id)
+        assert after["stripe_customer_id"] == "cus_gone"
+        assert after["subscription_status"] == "active"
 
     def test_nothing_to_clear(self, app, gateway):
         u = _user()
@@ -473,3 +628,45 @@ class TestLateEvents:
         after = _columns(u.id)
         assert after["stripe_customer_id"] == "cus_new"
         assert after["subscription_status"] == "active"
+
+    def test_a_resent_checkout_brings_no_customer_back(self, app, gateway):
+        """After the admin cleared the id, the deleted customer's
+        checkout.session.completed is sent again (a resend from the
+        Dashboard, or Stripe's retries after an outage): it is applied,
+        and the cleared id stays cleared."""
+        u = _gone_user(gateway, stripe_subscription_id="sub_old",
+                       subscription_status="ended",
+                       subscription_level="standard")
+        gateway.subscriptions["sub_old"] = subscription(
+            "sub_old", customer="cus_gone", status="canceled", user_id=u.id)
+        assert _run(app, "--user", str(u.id), "--apply").exit_code == 0
+        r = _post_event(app, _event("checkout.session.completed", {
+            "id": "cs_old", "object": "checkout.session",
+            "mode": "subscription", "customer": "cus_gone",
+            "client_reference_id": str(u.id),
+            "metadata": {"loore_user_id": str(u.id)},
+            "subscription": "sub_old", "status": "complete"},
+            event_id="evt_resent"))
+        assert r.status_code == 200, r.get_data(as_text=True)
+        assert r.get_json()["status"] == "applied"
+        after = _columns(u.id)
+        assert after["stripe_customer_id"] is None
+        assert after["subscription_status"] == "ended"
+
+    def test_a_completed_checkout_for_an_account_without_a_customer(
+            self, app, gateway):
+        """Control: a completed checkout whose subscription gives access
+        stores its customer (through the subscription)."""
+        u = _user()
+        gateway.subscriptions["sub_new"] = subscription(
+            "sub_new", customer="cus_new", status="trialing", trial=True,
+            user_id=u.id)
+        r = _post_event(app, _event("checkout.session.completed", {
+            "id": "cs_new", "object": "checkout.session",
+            "mode": "subscription", "customer": "cus_new",
+            "client_reference_id": str(u.id),
+            "subscription": "sub_new", "status": "complete"}))
+        assert r.status_code == 200, r.get_data(as_text=True)
+        after = _columns(u.id)
+        assert after["stripe_customer_id"] == "cus_new"
+        assert after["subscription_status"] == "trialing"

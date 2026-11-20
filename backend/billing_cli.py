@@ -212,20 +212,35 @@ def alpha_free_month_command(start_raw, apply_, change_date, started_ok,
                "free month.")
 
 
-def _what_stripe_says(customer_id):
-    """Print what Stripe says of *customer_id*, and return it
-    (stripe_billing.customer_state; None when Stripe can't be asked)."""
+def _ask_stripe(user):
+    """(gateway or None, stripe_billing.ForgetCheck), printed."""
     key = current_app.config.get("STRIPE_SECRET_KEY") or ""
     try:
-        state = stripe_billing.customer_state(stripe_billing.get_gateway(),
-                                              customer_id)
-        said = {"deleted": "deleted",
-                "missing": "no customer with this id",
-                "exists": "the customer exists"}[state]
+        gateway = stripe_billing.get_gateway()
     except Exception as e:  # noqa: BLE001 - said, and --apply refuses
-        state, said = None, f"could not be asked ({type(e).__name__})"
+        gateway = None
+        check = stripe_billing.ForgetCheck(None, error=type(e).__name__)
+    else:
+        check = stripe_billing.check_forget(gateway, user)
+    said = {"deleted": "deleted",
+            "missing": "no customer with this id",
+            "exists": "the customer exists",
+            None: f"could not be asked ({check.error})"}[check.customer]
     click.echo(f"  at Stripe ({_mode(key) if key else 'no'} key): {said}")
-    return state
+    sub = user.subscription_status or "none"
+    if user.stripe_subscription_id:
+        sub = f"{sub} ({user.stripe_subscription_id})"
+    click.echo(f"  subscription recorded: {sub}")
+    if check.subscription == "ended":
+        click.echo(f"  at Stripe the subscription is {check.sub.get('status')}"
+                   ": its cancellation never reached Loore. --apply records "
+                   "it as ended, as that event would, then clears the id.")
+    elif check.subscription == "unknown":
+        click.echo("  Stripe has no such subscription: it is taken as ended "
+                   "(as an account deletion takes one). --apply records it "
+                   "as ended, as a cancellation event would, then clears "
+                   "the id.")
+    return gateway, check
 
 
 @click.command("stripe-forget-customer")
@@ -238,13 +253,15 @@ def _what_stripe_says(customer_id):
 def stripe_forget_customer_command(user_id, apply_):
     """Clear the Stripe customer id stored on one account when Stripe no
     longer has that customer (#718: deleted in the Dashboard or by a test
-    cleanup), so the account's next checkout makes a new one. Nothing is
-    made at Stripe. Shows what it would do unless --apply is given.
+    cleanup, or an id Stripe never had), so the account's next checkout
+    makes a new one. Nothing is made at Stripe. Shows what it would do
+    unless --apply is given.
 
-    Refuses while Stripe still has the customer, when Stripe can't be
-    asked, and while the account has a live subscription recorded
-    (trialing, active or past due): clearing the id would part that
-    subscription from the account."""
+    A live subscription still recorded (trialing, active or past due) is
+    read from Stripe: one Stripe reports as ended, or does not know, is
+    first recorded as ended, the way its cancellation event would. Refuses
+    while Stripe still has the customer or reports the subscription as
+    running, and when Stripe can't be asked."""
     from backend.extensions import db
     from backend.models import User
     user = db.session.get(User, user_id)
@@ -256,12 +273,8 @@ def stripe_forget_customer_command(user_id, apply_):
     if not stored:
         click.echo("Nothing to clear.")
         return
-    state = _what_stripe_says(stored)
-    sub = user.subscription_status or "none"
-    if user.stripe_subscription_id:
-        sub = f"{sub} ({user.stripe_subscription_id})"
-    click.echo(f"  subscription recorded: {sub}")
-    refusal = stripe_billing.forget_refusal(user, state)
+    gateway, check = _ask_stripe(user)
+    refusal = stripe_billing.forget_refusal(user, check)
     if refusal:
         if apply_:
             raise click.ClickException(f"{refusal} Nothing changed.")
@@ -273,8 +286,10 @@ def stripe_forget_customer_command(user_id, apply_):
                    "again with --apply.")
         return
     try:
-        stripe_billing.forget_customer(user, stored, state)
+        ended = stripe_billing.forget_customer(gateway, user, stored, check)
     except stripe_billing.ForgetRefused as e:
         raise click.ClickException(f"{e} Nothing changed.")
+    if ended:
+        click.echo("The subscription is recorded as ended.")
     click.echo("Done: the stored id is cleared; the account's next checkout "
                "makes a new customer.")
