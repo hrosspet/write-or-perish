@@ -1104,6 +1104,8 @@ def settle_subscription(gateway, sub, config=None, lock=True):
       subscription used: cancelled (nothing was charged yet);
     * one still in a trial whose card started a trial on another account
       (#697, utils/trial_cards): cancelled the same way;
+    * a new one for an account whose deletion is under way (#714): cancelled
+      the same way, its payment refunded if there was one;
     * the code that opened a kept subscription takes its use now.
 
     The account row is locked first (*lock*), so two events of one
@@ -1126,6 +1128,19 @@ def settle_subscription(gateway, sub, config=None, lock=True):
             == "1"):
         # A duplicate Loore cancelled: make sure its payment went back.
         refund_latest_payment(gateway, sub)
+    if (_granting(sub) and user.deleted_at is not None
+            and sub_id != user.stripe_subscription_id):
+        # A subscription that arrives for an account in deletion (a
+        # checkout page still open when the deletion was asked for) is
+        # cancelled at once, as a second trial is: nothing is charged, or
+        # what was is refunded. Recorded like that one (ended, its trial
+        # counted as used); a subscription the account had before stays
+        # current. A restore during the 30 days finds no new subscription.
+        logger.warning("User %s is being deleted: new subscription %s "
+                       "cancelled", user.id, sub_id)
+        cancelled = cancel_duplicate(gateway, sub)
+        apply_subscription(cancelled, config)
+        return user
     if _granting(sub):
         current_id = user.stripe_subscription_id
         if current_id and current_id != sub_id:

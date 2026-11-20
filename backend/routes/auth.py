@@ -126,10 +126,17 @@ def _connect_x(user, twitter_id, screen_name):
         return _account_redirect("other_x")
     holder = User.query.filter_by(twitter_id=twitter_id).first()
     if holder is not None:
-        _drop_x_token()
         # An account set up ahead of its owner (admin whitelist, pre-fill)
         # that nobody has signed in to: the owner is the person in front of
-        # us, and joining the two is a job for an admin, not an error.
+        # us (#714). The X id stays where it is, and so does this session's
+        # X token, the proof; the person chooses whether to open that
+        # account (utils/prepared_accounts).
+        from backend.utils import prepared_accounts
+        if prepared_accounts.is_prepared(holder):
+            return redirect(prepared_accounts.offer(
+                user, holder, twitter_id, screen_name))
+        _drop_x_token()
+        # One being deleted, or blocked by the admin: nothing to open now.
         from backend.utils.activity import sign_in_status
         placeholder = sign_in_status(holder) == "never"
         return _account_redirect("taken_placeholder" if placeholder else "taken")
@@ -158,6 +165,80 @@ def _connect_x(user, twitter_id, screen_name):
         # tells the old one, in case the session was not the owner's.
         send_x_connected_notice(user.email, screen_name)
     return _account_redirect("linked")
+
+
+# ── The prepared account Connect X found (#714) ──────────────────────────
+# The question behind /prepared-account: open the account prepared for the
+# X id this browser just proved, or stay. The work and its rules are in
+# utils/prepared_accounts.py. Not under /api: an account without a
+# subscription, or one still waiting for approval, reaches them too.
+
+_OFFER_EXPIRED = ("This question has expired. Use Sign in with X again to "
+                  "open the prepared account.")
+
+
+@auth_bp.route("/prepared-account", methods=["GET"])
+def prepared_account_question():
+    from backend.utils import prepared_accounts
+    found = prepared_accounts.current_offer()
+    if found is None:
+        return jsonify({"error": _OFFER_EXPIRED, "code": "expired"}), 410
+    data, user, prepared = found
+    return jsonify(prepared_accounts.describe(user, prepared, data["handle"]))
+
+
+@auth_bp.route("/prepared-account/open", methods=["POST"])
+def open_prepared_account():
+    """Open the prepared account: sign in to it as Sign in with X would,
+    deleting the email account on the way when the question said so.
+    Body: {"delete_this_account": bool}, what the question showed.
+    {"redirect": url}; 410 without the X proof, 409 when something changed,
+    503 when a trial could not be ended at Stripe."""
+    from backend.utils import prepared_accounts
+    found = prepared_accounts.current_offer()
+    if found is None:
+        return jsonify({"error": _OFFER_EXPIRED, "code": "expired"}), 410
+    data, user, prepared = found
+    body = request.get_json(silent=True)
+    body = body if isinstance(body, dict) else {}
+    try:
+        result = prepared_accounts.open_prepared(
+            user, prepared, twitter_id=data["twitter_id"],
+            delete_this_account=body.get("delete_this_account") is True)
+    except prepared_accounts.MoveRefused as e:
+        if e.code == "not_prepared":
+            prepared_accounts.forget()
+        return jsonify({"error": e.message, "code": e.code}), 409
+    except Exception as e:  # noqa: BLE001 - Stripe unreachable, mostly
+        # Ending a trial comes first, so a failure there changed nothing;
+        # a later one is rolled back, and a retry finds the trial ended.
+        db.session.rollback()
+        logger.error("Opening the prepared account %s for user %s failed: %s",
+                     prepared.id, user.id, type(e).__name__)
+        return jsonify({"error": "Could not open the prepared account now. "
+                                 "Please try again in a moment.",
+                        "code": "unavailable"}), 503
+    prepared_accounts.drop_offer()
+    logout_user()
+    # Where the email account was going is not where this sign-in goes.
+    session.pop('next_url', None)
+    redirect_to = _finish_x_sign_in(
+        prepared, False, session.pop(referrals.SESSION_KEY, None),
+        data["handle"])
+    if result["email_moved"]:
+        # A new way into the prepared account: tell the address, as
+        # Connect X does.
+        send_x_connected_notice(result["email_moved"], data["handle"])
+    return jsonify({"redirect": redirect_to})
+
+
+@auth_bp.route("/prepared-account/stay", methods=["POST"])
+def stay_in_this_account():
+    """Stay in the email account: forget the offer and the X token, so the
+    next Connect X asks X again."""
+    from backend.utils import prepared_accounts
+    prepared_accounts.forget()
+    return jsonify({"ok": True})
 
 
 def _pop_connect_intent():
@@ -237,8 +318,23 @@ def x_connect():
     session[X_CONNECT_SESSION_KEY] = {"user_id": current_user.id}
     # A token left from an earlier X sign-in in this browser would skip X
     # and connect whichever X account that was; ask X which one instead.
+    # A question about a prepared account still waiting (#714) is asked
+    # again when this round trip comes back.
+    from backend.utils import prepared_accounts
+    prepared_accounts.forget()
     _drop_x_token()
     return redirect(url_for("twitter.login"))
+
+
+def _forget_prepared_question(connecting):
+    """The question about a prepared account (#714) keeps X's token for
+    that account only for its own answer. Any way through /auth/login but
+    the Connect X return that asks it (a new sign-in starting, an old tab,
+    a link) drops both first, so that token never signs anyone in; Connect
+    X asks again from the start."""
+    from backend.utils import prepared_accounts
+    if not connecting and prepared_accounts.has_offer():
+        prepared_accounts.forget()
 
 
 @auth_bp.route("/login")
@@ -264,6 +360,7 @@ def login():
     _remember_destination(starting=not returned and not twitter.authorized)
 
     connecting = _pop_connect_intent()
+    _forget_prepared_question(connecting)
     # An invite code (#439) waits in the session through the round trip
     # to X (OAuth comes back to the browser that started it); it counts
     # when the X account that comes back is the one the invite names.
@@ -634,6 +731,8 @@ def logout():
     # back into the account that just signed out (shared devices).
     _drop_x_token()
     session.pop(X_CONNECT_SESSION_KEY, None)
+    from backend.utils.prepared_accounts import drop_offer
+    drop_offer()   # the X token went just above
     flash("Logged out successfully", "success")
     frontend_url = current_app.config.get("FRONTEND_URL")
     # "Sign out and use the other account" on /confirm-email comes back to
