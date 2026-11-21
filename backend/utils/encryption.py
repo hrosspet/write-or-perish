@@ -166,6 +166,23 @@ def _is_transient_kms_error(e):
     return bool(_TRANSIENT_STATUS_RE.match(msg)) or any(m in msg for m in _TRANSIENT_MARKERS)
 
 
+def key_service_unavailable(exc) -> bool:
+    """Whether *exc* (or the exception it was raised from) is a key-service
+    failure that _kms_call retries: the service was down, slow or out of
+    reach, which says nothing about the stored value. A pass over many
+    accounts' rows ends on such a failure, as it did before it learned to
+    skip one unreadable row: otherwise every row of the pass would wait
+    out the retries (about 30 s) on its own. Any other failure (a stored
+    value that does not decrypt) skips only that row."""
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        if _is_transient_kms_error(exc):
+            return True
+        seen.add(id(exc))
+        exc = exc.__cause__
+    return False
+
+
 def _kms_call(op, request):
     """Run a KMS ``encrypt``/``decrypt`` with bounded retry on transient
     (Google-side) errors and a reconnect on deadline/stale-connection."""
@@ -325,6 +342,13 @@ def encrypt_content(plaintext: str) -> str:
     """
     Encrypt content using envelope encryption (AES-GCM + KMS-wrapped DEK).
 
+    Every call encrypts, including text that already begins with
+    ENC:v1:/ENC:v2:. Text is text: what a person or a model writes can
+    look like a stored value, and it must read back as written. A stored
+    value with the prefix is therefore always one this module wrote.
+    Code that holds a value which may already be stored encrypted checks
+    ``is_encrypted`` first (Node.set_privacy_level, the persist check).
+
     Args:
         plaintext: The content to encrypt
 
@@ -335,10 +359,6 @@ def encrypt_content(plaintext: str) -> str:
         return plaintext
 
     if not is_encryption_enabled():
-        return plaintext
-
-    # Don't double-encrypt
-    if plaintext.startswith((ENCRYPTED_PREFIX_V1, ENCRYPTED_PREFIX_V2)):
         return plaintext
 
     try:

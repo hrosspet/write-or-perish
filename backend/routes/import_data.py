@@ -1843,6 +1843,8 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
     nodes_skipped = 0
     nodes_restored = 0
     nodes_empty = 0
+    nodes_too_long = 0
+    from backend.utils.node_split import NODE_CHAR_CAP
     matched = _Matched()  # tweets are never split: no parts
     key_index, deleted_keys = _load_source_key_index(user_id)
     parent_id = None
@@ -1873,6 +1875,13 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
             # empty string as-is. 39 of these reached prod before this
             # guard, across 8 accounts (#317).
             nodes_empty += 1
+            continue
+        if len(content) > NODE_CHAR_CAP:
+            # Above the per-entry cap every other writer splits at. No
+            # post on X comes near it (a long post holds at most 25,000
+            # characters), so this is not a tweet: left out, and
+            # counted in the result.
+            nodes_too_long += 1
             continue
 
         token_count = tweet_data.get(
@@ -1979,6 +1988,7 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
         "created": nodes_created,
         "skipped": nodes_skipped,
         "empty": nodes_empty,
+        "too_long": nodes_too_long,
         "restored": nodes_restored,
         "updated": nodes_updated,
         # Tweets of this import fetched through the X API that stay at

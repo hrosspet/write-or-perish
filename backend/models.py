@@ -1037,8 +1037,13 @@ class Node(db.Model):
 
         *dek*: a data key from encryption.new_dek() shared by a bulk
         writer (an import), so many nodes cost one KMS call instead of
-        one each. Same ENC:v2 envelope; decrypt_content reads it."""
-        if self.privacy_level == "public":
+        one each. Same ENC:v2 envelope; decrypt_content reads it.
+
+        Public text that itself begins with ENC:v1:/ENC:v2: is encrypted
+        too: reads decrypt by that prefix (public rows from before #257
+        are still stored encrypted), so storing such text as it is would
+        make it read as something else."""
+        if self.privacy_level == "public" and not is_encrypted(plaintext):
             self.content = plaintext
         elif dek is not None:
             self.content = encrypt_with_dek(plaintext, dek)
@@ -1049,13 +1054,16 @@ class Node(db.Model):
         """The one sanctioned way to change privacy_level: moves the
         stored content across the encryption boundary with it —
         leaving public encrypts, becoming public decrypts. *dek* as in
-        set_content."""
+        set_content. Text that begins with ENC:v1:/ENC:v2: stays
+        encrypted when it becomes public, as set_content stores it."""
         self.privacy_level = level
         if not self.content:
             return
         if level == "public":
             if is_encrypted(self.content):
-                self.content = decrypt_content(self.content)
+                plaintext = decrypt_content(self.content)
+                if not is_encrypted(plaintext):
+                    self.content = plaintext
         elif not is_encrypted(self.content):
             self.content = (encrypt_with_dek(self.content, dek)
                             if dek is not None

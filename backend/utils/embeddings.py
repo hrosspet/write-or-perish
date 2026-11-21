@@ -88,37 +88,84 @@ def embed_texts(texts, api_key, user_id=None, request_type="embedding"):
 
     client = OpenAI(api_key=api_key)
     # Cap by chars, then halve-and-retry if a token-dense input still exceeds
-    # the 8191-token limit. Halving re-truncates the whole batch, but only
-    # inputs longer than the new cap are actually shortened, and we only embed
-    # a prefix anyway (the head of a node is representative for retrieval).
-    cap = MAX_EMBED_CHARS
-    while True:
-        inputs = [(t or "")[:cap] for t in texts]
-        try:
-            response = client.embeddings.create(
-                model=EMBEDDING_MODEL, input=inputs)
-            break
-        except Exception as e:  # noqa: BLE001 — only the token-limit 400 retries
-            if "maximum input length" in str(e) and cap > MIN_EMBED_CHARS:
-                logger.warning(
-                    "embed_texts: input over 8191 tokens at %d chars; "
-                    "retrying at %d chars", cap, cap // 2)
-                cap //= 2
-                continue
+    # the 8191-token limit. Only the input that is over the limit is cut
+    # shorter: a failed call is split in two and each half sent again, down
+    # to the one input, whose cut is then halved. The other inputs of the
+    # call keep the full cut. We only embed a prefix anyway (the head of a
+    # node is representative for retrieval).
+    texts = [t or "" for t in texts]
+    spent = {"tokens": 0, "calls": 0}
+    try:
+        return _embed_with_cuts(
+            client, texts, [MAX_EMBED_CHARS] * len(texts), spent)
+    finally:
+        if user_id is not None and spent["calls"]:
+            # One row for all the calls of this batch that went through;
+            # written also when a later call failed, so a billed call is
+            # never left out.
+            tokens = spent["tokens"]
+            cost = int(tokens * EMBEDDING_PRICE_PER_MTOK)  # microdollars/Mtok
+            db.session.add(APICostLog(
+                user_id=user_id,
+                model_id=EMBEDDING_MODEL,
+                request_type=request_type,
+                input_tokens=tokens,
+                output_tokens=0,
+                cost_microdollars=cost,
+            ))
+
+
+def _too_long(exc):
+    return "maximum input length" in str(exc)
+
+
+def _shorter_cut(text, cut):
+    """Half the cut, halved again while the text would still be sent
+    unchanged (it is shorter than the new cut); never below
+    MIN_EMBED_CHARS."""
+    new_cut = cut // 2
+    while new_cut >= len(text) and new_cut > MIN_EMBED_CHARS:
+        new_cut //= 2
+    return max(new_cut, MIN_EMBED_CHARS)
+
+
+def _embed_with_cuts(client, texts, cuts, spent):
+    """Embed *texts*, each cut to its entry in *cuts*.
+
+    On the token-limit error only the input that is too long gets a
+    shorter cut. When one input of the call is longer than
+    MIN_EMBED_CHARS (shorter ones are within the limit for any realistic
+    text) its cut is halved and the call sent again, as before; with
+    several such inputs the call is split in two halves sent on their
+    own, down to the one input, so a call costs at most about two more
+    requests per halving of the batch size. A single input that still
+    fails at MIN_EMBED_CHARS raises. Vectors come back in input order;
+    every call that went through is counted in *spent*."""
+    try:
+        response = client.embeddings.create(
+            model=EMBEDDING_MODEL,
+            input=[t[:cut] for t, cut in zip(texts, cuts)])
+    except Exception as e:  # noqa: BLE001 — only the token-limit 400 retries
+        if not _too_long(e):
             raise
-
-    tokens = response.usage.total_tokens if response.usage else 0
-    if user_id is not None:
-        cost = int(tokens * EMBEDDING_PRICE_PER_MTOK)  # microdollars/Mtok
-        db.session.add(APICostLog(
-            user_id=user_id,
-            model_id=EMBEDDING_MODEL,
-            request_type=request_type,
-            input_tokens=tokens,
-            output_tokens=0,
-            cost_microdollars=cost,
-        ))
-
+        long_inputs = [i for i, (t, cut) in enumerate(zip(texts, cuts))
+                       if min(len(t), cut) > MIN_EMBED_CHARS]
+        if len(texts) > 1 and len(long_inputs) != 1:
+            mid = len(texts) // 2
+            return (_embed_with_cuts(client, texts[:mid], cuts[:mid], spent)
+                    + _embed_with_cuts(client, texts[mid:], cuts[mid:], spent))
+        i = long_inputs[0] if long_inputs else 0
+        if cuts[i] <= MIN_EMBED_CHARS:
+            raise
+        cuts = list(cuts)
+        new_cut = _shorter_cut(texts[i], cuts[i])
+        logger.warning(
+            "embed_texts: input over 8191 tokens at %d chars; "
+            "retrying at %d chars", cuts[i], new_cut)
+        cuts[i] = new_cut
+        return _embed_with_cuts(client, texts, cuts, spent)
+    spent["calls"] += 1
+    spent["tokens"] += response.usage.total_tokens if response.usage else 0
     # API returns embeddings in input order
     return [item.embedding for item in response.data]
 

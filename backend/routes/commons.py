@@ -10,6 +10,8 @@
 Trimmed serializers only: no emails, no privacy metadata beyond what the
 surface needs, private/deleted nodes structurally absent.
 """
+import logging
+
 from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
 from sqlalchemy import func
@@ -17,9 +19,13 @@ from sqlalchemy.orm import aliased
 
 from backend.models import Node, User
 from backend.extensions import db
+from backend.utils.encryption import key_service_unavailable
+from backend.utils.error_privacy import describe_exception
 from backend.utils.privacy import PrivacyLevel
 from backend.utils.slugs import permalink_for
 from backend.utils.timefmt import iso_utc
+
+logger = logging.getLogger(__name__)
 
 commons_bp = Blueprint("commons", __name__)
 
@@ -86,7 +92,18 @@ def feed():
                                 error_out=False)
     items = []
     for node in pagination.items:
-        content = (node.get_content() or "").strip()
+        try:
+            content = (node.get_content() or "").strip()
+        except Exception as e:  # noqa: BLE001 — one unreadable entry
+            # One entry whose stored value does not decrypt leaves the
+            # page, not the whole feed: logged by id only. A key-service
+            # outage fails the request as before, instead of every entry
+            # waiting out its own retries.
+            if key_service_unavailable(e):
+                raise
+            logger.warning("Commons feed: node %s could not be read (%s); "
+                           "left out", node.id, describe_exception(e))
+            continue
         reply_count = _public_alive(
             Node.query.filter(Node.parent_id == node.id)).count()
         items.append({
