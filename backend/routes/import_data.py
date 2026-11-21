@@ -2971,6 +2971,26 @@ def _new_conversation_state(options):
     }
 
 
+def _conversation_author(spec):
+    """The synthetic account the assistant's messages of a chat import
+    are stored under: found by its twitter_id ("llm-chatgpt", ...), which
+    no person's account carries, never by username, which a person may
+    hold. Made on the first import, under the source's username, or,
+    when a person holds that name, under one with a "-", which the
+    username rule gives to nobody."""
+    llm_user = User.query.filter_by(twitter_id=spec["llm_twitter_id"]).first()
+    if llm_user is None:
+        username = spec["llm_username"]
+        taken = User.query.filter(
+            db.func.lower(User.username) == username.lower()).first()
+        if taken is not None:
+            username = f"{username}-import"
+        llm_user = User(twitter_id=spec["llm_twitter_id"], username=username)
+        db.session.add(llm_user)
+        db.session.flush()
+    return llm_user
+
+
 def create_conversation_nodes(user_id, source, conversations, privacy_level,
                               ai_usage, on_deleted, *, state=None,
                               batch_size=CONVERSATION_BATCH_SIZE,
@@ -3002,14 +3022,7 @@ def create_conversation_nodes(user_id, source, conversations, privacy_level,
 
     key_index, deleted_keys = _load_source_key_index(user_id)
 
-    # Get or create the synthetic user for the assistant's nodes
-    llm_user = User.query.filter_by(username=spec["llm_username"]).first()
-    if not llm_user:
-        llm_user = User(
-            twitter_id=spec["llm_twitter_id"], username=spec["llm_username"]
-        )
-        db.session.add(llm_user)
-        db.session.flush()
+    llm_user = _conversation_author(spec)
 
     data_key = _ChunkDataKey(privacy_level)
     matched = _Matched()  # keyed nodes skipped or restored (#638)

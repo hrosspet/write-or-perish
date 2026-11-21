@@ -21,31 +21,227 @@ matches react-markdown-without-rehype-raw on the frontend and closes the
 XSS vector of user-authored HTML landing on the loore.org origin.
 """
 import json
+import logging
 import os
 import re
+import time
+from urllib.parse import urlsplit
 
 import mistune
 from flask import current_app
 from markupsafe import escape
+from mistune.util import striptags
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Markdown → semantic HTML
 # ---------------------------------------------------------------------------
 
-_markdown = mistune.create_markdown(
-    escape=True,
-    plugins=["table", "strikethrough", "url", "task_lists"],
+# The clock the render limits below are read on: the CPU time of the
+# thread running the render, not wall time, so other work on a busy
+# server does not shorten a body's allowance. A render does no I/O and so
+# never yields: under the gevent workers no other greenlet runs inside it,
+# and the thread's CPU time over a render is the render's own.
+_render_clock = time.thread_time
+
+# INTRODUCED CONSTANT: the longest the markdown of one body may take to
+# render on a public page, in CPU seconds. A real 100,000-character body
+# (the node size cap) renders in 50-90 ms (measured on long docs and a
+# one-paragraph transcript), so this leaves several times that on a
+# slower server CPU. Text that takes longer (long runs of unmatched
+# brackets or emphasis markers parse in quadratic time) is shown as
+# plain paragraphs instead, and a line is logged (node id and length).
+BODY_RENDER_SECONDS = 0.5
+
+# INTRODUCED CONSTANT: the markdown render time of one whole page (a
+# thread, a feed), in CPU seconds. PAGE_RENDER_CHARS of real markdown
+# takes about 1.5 s; this leaves room for a slower server. Bodies
+# rendered after it is spent are shown as plain paragraphs.
+PAGE_RENDER_SECONDS = 5.0
+
+# INTRODUCED CONSTANT: the markdown characters one page renders on the
+# server: 20 bodies at the node size cap (100,000), e.g. a full feed of
+# long pieces. A thread longer than that shows the rest in the app (the
+# SPA loads the whole thread); real public threads are far shorter.
+PAGE_RENDER_CHARS = 2_000_000
+
+
+class _OutOfTime(Exception):
+    pass
+
+
+# Loore's own media route (backend/routes/media.py), the rule the web
+# app's classifyImageSource (frontend/src/utils/markdownImages.js)
+# applies: plain path characters only, no percent-escapes.
+_OWN_MEDIA_PATH = re.compile(r"^/media/[A-Za-z0-9_\-./]+$")
+
+
+def _own_media(url):
+    """True when *url* is Loore's own media: a /media/... path, on this
+    origin or written without one."""
+    try:
+        parts = urlsplit(url or "")
+    except ValueError:
+        return False
+    if parts.scheme or parts.netloc:
+        origin = urlsplit(_base_url())
+        if (parts.scheme.lower(), parts.netloc.lower()) != (
+                origin.scheme.lower(), origin.netloc.lower()):
+            return False
+    path = parts.path
+    return (bool(_OWN_MEDIA_PATH.match(path))
+            and not any(seg in (".", "..") for seg in path.split("/")))
+
+
+class _PublicRenderer(mistune.HTMLRenderer):
+    """HTML for the public pages. An image loads only from Loore's own
+    media, as in the app; any other image is shown as its alt text, so a
+    page's markup never makes the reader's browser request another
+    address of this site, or of any other."""
+
+    def image(self, text, url, title=None):
+        if _own_media(url):
+            return super().image(text, url, title)
+        return striptags(text)
+
+
+def _check_deadline(state):
+    deadline = state.env.get("render_deadline")
+    if deadline is not None and _render_clock() > deadline:
+        raise _OutOfTime()
+
+
+class _TimedBlockParser(mistune.BlockParser):
+    def parse_method(self, m, state):
+        _check_deadline(state)
+        return super().parse_method(m, state)
+
+
+class _TimedInlineParser(mistune.InlineParser):
+    def parse_method(self, m, state):
+        _check_deadline(state)
+        return super().parse_method(m, state)
+
+
+def _create_markdown():
+    md = mistune.Markdown(
+        renderer=_PublicRenderer(escape=True),
+        block=_TimedBlockParser(),
+        inline=_TimedInlineParser(hard_wrap=False),
+        plugins=[mistune.plugins.import_plugin(name) for name in
+                 ("table", "strikethrough", "url", "task_lists")],
+    )
+    # The table plugin's header pattern for tables without a leading pipe
+    # (`\S.*\|.*`) backtracks over every pipe of a line that turns out
+    # not to start a table: quadratic in the line's length, inside one
+    # regex call the deadline cannot stop. Matching up to the line's
+    # first pipe instead accepts the same lines and captures the same
+    # header, in linear time.
+    spec = md.block.specification.get("nptable")
+    head = r"(?P<nptable_head>\S.*\|.*)"
+    if spec and head in spec:
+        md.block.specification["nptable"] = spec.replace(
+            head, r"(?P<nptable_head>\S[^|\n]*\|.*)")
+    # The same shape inline: a processing instruction, a declaration and
+    # a CDATA section each scan to their closing marker, so with none in
+    # the text every opener scans to the paragraph's end, inside the one
+    # search of the inline pattern. Each scan now ends at the next opener
+    # of its kind: linear, and the same spans for text that closes what
+    # it opens (inline HTML is shown escaped either way).
+    spec = md.inline.specification.get("inline_html")
+    if spec:
+        for unbounded, bounded in _BOUNDED_INLINE_HTML:
+            spec = spec.replace(unbounded, bounded)
+        md.inline.specification["inline_html"] = spec
+    return md
+
+
+_BOUNDED_INLINE_HTML = (
+    (r"<\?[\s\S]+?\?>", r"<\?(?:(?!<\?)[\s\S])+?\?>"),
+    (r"<![A-Z][\s\S]+?>", r"<![A-Z](?:(?!<!)[\s\S])+?>"),
+    (r"<!\[CDATA[\s\S]+?\]\]>", r"<!\[CDATA(?:(?!<!\[CDATA)[\s\S])+?\]\]>"),
 )
 
 
-def render_markdown(text):
+_markdown = _create_markdown()
+
+_H1 = re.compile(r"<(/?)h1>")
+_BLANK_LINES = re.compile(r"\n\s*\n")
+
+
+class RenderBudget:
+    """What one public page may still spend on markdown: seconds of
+    render time and characters of input (PAGE_RENDER_SECONDS,
+    PAGE_RENDER_CHARS)."""
+
+    def __init__(self, seconds=None, chars=None):
+        self.seconds = PAGE_RENDER_SECONDS if seconds is None else seconds
+        self.chars = PAGE_RENDER_CHARS if chars is None else chars
+        # Whether a body has been logged as left unrendered because the
+        # page's time was spent: one line per page, not one per body.
+        self.spent_logged = False
+
+    def take(self, text):
+        """Count *text* against the page's characters: False (and none
+        left for anything after it) when it does not fit."""
+        n = len(text or "")
+        if n > self.chars:
+            self.chars = 0
+            return False
+        self.chars -= n
+        return True
+
+
+def _plain_paragraphs(text):
+    """*text* as escaped paragraphs, line breaks kept: the fallback for a
+    body whose markdown would take too long. Linear in its length."""
+    paragraphs = [p.strip("\n") for p in _BLANK_LINES.split(text)]
+    return "".join(
+        "<p>" + str(escape(p)).replace("\n", "<br />\n") + "</p>\n"
+        for p in paragraphs if p.strip())
+
+
+def render_markdown(text, budget=None, node_id=None):
     """User markdown → HTML with raw HTML escaped, h1s demoted to h2.
 
     The page reserves its single <h1> for the article title, so headings
     inside bodies shift down one notch (only h1→h2; deeper levels keep
-    their authored hierarchy)."""
-    html = _markdown(text or "")
-    return re.sub(r"<(/?)h1>", r"<\1h2>", html)
+    their authored hierarchy).
+
+    The render stops after BODY_RENDER_SECONDS, or what is left of the
+    page's *budget* (a RenderBudget), and the body is then shown as plain
+    paragraphs; a line naming *node_id* and the body's length (never its
+    text) is logged."""
+    text = text or ""
+    allowed = BODY_RENDER_SECONDS
+    if budget is not None:
+        allowed = min(allowed, budget.seconds)
+    started = _render_clock()
+    html = None
+    if allowed > 0:
+        state = _markdown.block.state_cls()
+        state.env["render_deadline"] = started + allowed
+        try:
+            html = _markdown.parse(text, state)[0]
+        except _OutOfTime:
+            reason = "render time"
+        except RecursionError:
+            # Quotes and lists nested in turn without end.
+            reason = "nesting depth"
+    else:
+        reason = "the page's render time was spent"
+    if html is None:
+        html = _plain_paragraphs(text)
+        if allowed > 0 or budget is None or not budget.spent_logged:
+            logger.warning(
+                "Public page: node %s (%d characters) shown as plain "
+                "paragraphs (%s)", node_id, len(text), reason)
+        if allowed <= 0 and budget is not None:
+            budget.spent_logged = True
+    if budget is not None:
+        budget.seconds -= _render_clock() - started
+    return _H1.sub(r"<\1h2>", html)
 
 
 def split_title(content):
@@ -74,11 +270,13 @@ def plain_excerpt(markdown_text, limit=200):
     text = markdown_text or ""
     text = re.sub(r"```.*?```", " ", text, flags=re.S)
     text = re.sub(r"`([^`]*)`", r"\1", text)
-    text = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", text)
-    text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)
+    # The bracket and tag patterns stop at the next opener, so a long run
+    # of unmatched "[" or "<" costs linear time, not quadratic.
+    text = re.sub(r"!\[[^\[\]]*\]\([^)\[]*\)", " ", text)
+    text = re.sub(r"\[([^\[\]]*)\]\([^)\[]*\)", r"\1", text)
     text = re.sub(r"^[#>\s|*-]+", "", text, flags=re.M)
     text = re.sub(r"[*_~]{1,3}", "", text)
-    text = re.sub(r"<[^>]*>", " ", text)
+    text = re.sub(r"<[^<>]*>", " ", text)
     text = _WS.sub(" ", text).strip()
     if len(text) > limit:
         text = text[:limit].rsplit(" ", 1)[0] + "…"
@@ -161,7 +359,11 @@ def _meta_block(meta):
     social_title = meta.get("og_title") or title
     m.append(f"<title>{escape(title)}</title>")
     tag('<meta name="description" content="{v}"/>', meta.get("description"))
-    if meta.get("noindex"):
+    # "robots" sets the directive itself ("noindex, follow"); "noindex"
+    # alone is the plain noindex of not-found and gone pages.
+    if meta.get("robots"):
+        tag('<meta name="robots" content="{v}"/>', meta["robots"])
+    elif meta.get("noindex"):
         m.append('<meta name="robots" content="noindex"/>')
     tag('<link rel="canonical" href="{v}"/>', meta.get("canonical"))
 

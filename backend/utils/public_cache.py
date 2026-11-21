@@ -20,6 +20,13 @@ from flask import current_app
 TTL_SECONDS = 300
 _PREFIX = "public_html:"
 
+# INTRODUCED CONSTANT: the largest entry stored. A page renders at most
+# public_html.PAGE_RENDER_CHARS (2,000,000) of markdown, about 2.5 MB of
+# HTML for ordinary text, so every real page fits; a larger body (text
+# that grows a lot when escaped) is rendered again on each request
+# instead of filling the Redis that is also the task broker.
+MAX_ENTRY_BYTES = 4 * 1024 * 1024
+
 _client = None
 
 
@@ -51,25 +58,53 @@ def get(path):
 
 
 def put(path, status, content_type, body, ttl=TTL_SECONDS):
+    """Store a rendered page; one above MAX_ENTRY_BYTES is not stored."""
     try:
         r = _redis()
         if r:
-            r.setex(_PREFIX + path, ttl, json.dumps({
+            entry = json.dumps({
                 "status": status,
                 "content_type": content_type,
                 "body": body,
-            }))
+            })
+            if len(entry) > MAX_ENTRY_BYTES:
+                return
+            r.setex(_PREFIX + path, ttl, entry)
     except redis.RedisError:
         pass
+
+
+# Keys per Redis DELETE: a thread's drop can name tens of thousands.
+_DELETE_BATCH = 1000
 
 
 def invalidate(*paths):
     try:
         r = _redis()
         if r and paths:
-            r.delete(*[_PREFIX + p for p in paths])
+            keys = [_PREFIX + p for p in paths]
+            for start in range(0, len(keys), _DELETE_BATCH):
+                r.delete(*keys[start:start + _DELETE_BATCH])
     except redis.RedisError:
         pass
+
+
+def _thread_node_paths(root_ids):
+    """/node/<id> for every node in the threads under *root_ids*, in one
+    id-only recursive query. Each of those URLs serves its thread's page
+    from a cache entry of its own, so a change anywhere in a thread must
+    drop them all. Chosen by thread, not by privacy: a node that has just
+    gone private, or sits under a deleted one, still has its page cached
+    from before."""
+    from backend.extensions import db
+    from backend.utils.thread_tree import subtree_walk
+
+    root_ids = list({int(i) for i in root_ids})
+    if not root_ids:
+        return set()
+    walk = subtree_walk(root_ids, name="public_cache_thread_walk")
+    return {f"/node/{node_id}"
+            for (node_id,) in db.session.query(walk.c.id).all()}
 
 
 def _roots_of(nodes):
@@ -116,13 +151,15 @@ def _paths_for_root(root, also=None):
 
 def invalidate_in_thread(member_id, node_ids):
     """Drop every cached page that nodes of ONE thread can appear on:
-    each id's own URL, and the pages of the thread root they live under
+    each id's own URL, the pages of the thread root they live under
     (a reply edit/delete must refresh the cached thread page, which is
-    keyed by the root). `member_id` is any node of that thread; the root
-    is found with one walk up from it. Walking up from every id costs
-    the sum of their depths, which is quadratic in the length of a
-    public chain. Takes ids, not rows: a cascade delete passes a whole
-    subtree's ids, and only the root's path columns are read."""
+    keyed by the root), and the id URL of every other node of the thread,
+    each of which serves the same thread page. `member_id` is any node of
+    that thread; the root is found with one walk up from it. Walking up
+    from every id costs the sum of their depths, which is quadratic in
+    the length of a public chain. Takes ids, not rows: a cascade delete
+    passes a whole subtree's ids, and only the root's path columns and
+    the thread's ids are read."""
     from backend.extensions import db
     from backend.models import Node
     from backend.utils.thread_tree import thread_root_of
@@ -135,20 +172,22 @@ def invalidate_in_thread(member_id, node_ids):
     ).filter(Node.id == root_id).first()
     if root is not None:
         paths.update(_paths_for_root(root))
+        paths.update(_thread_node_paths([root.id]))
     invalidate(*paths)
 
 
 def invalidate_for_node(node):
-    """Drop every cached page *node* can appear on: its own id URL and
-    the pages of its thread root."""
+    """Drop every cached page *node* can appear on: its own id URL, the
+    pages of its thread root and the id URLs of the thread's nodes."""
     invalidate_in_thread(node.id, [node.id])
 
 
 def invalidate_for_nodes(node_ids):
     """invalidate_for_node for many nodes, which may sit in different
     threads (an import changes the settings of entries across many):
-    each id URL and the pages of each thread root, with one root query
-    per 1,000 ids. Reads only the columns the paths need.
+    each id URL, the pages of each thread root and the id URLs of the
+    threads' other nodes, with one root query and one thread walk per
+    1,000 ids. Reads only the columns the paths need.
 
     Never raises: the change is already committed when this runs, so a
     failure is logged, the session is rolled back so later statements on
@@ -173,6 +212,7 @@ def invalidate_for_nodes(node_ids):
                 roots[root.id] = root
             for root in roots.values():
                 paths.update(_paths_for_root(root))
+            paths.update(_thread_node_paths(roots))
         invalidate(*paths)
     except Exception:
         db.session.rollback()
@@ -233,9 +273,10 @@ def invalidate_for_user(user, former_handle=None):
     their posts AND their replies in other people's threads at once, and
     after a rename, when the same pages sit in the cache under the old
     handle and carry it in their bylines: pass it as *former_handle* and
-    its URL variants are dropped too. Reads only the columns the paths
-    need — a public archive can be large, and its content is not the
-    point here."""
+    its URL variants are dropped too. The id URLs of every node in those
+    threads go as well: each serves the thread's page. Reads only the
+    columns the paths need — a public archive can be large, and its
+    content is not the point here."""
     from backend.extensions import db
     from backend.models import Node
 
@@ -251,7 +292,10 @@ def invalidate_for_user(user, former_handle=None):
         ((Node.human_owner_id == user.id) | (Node.user_id == user.id)),
         Node.privacy_level == "public",
     ).all()
+    root_ids = set()
     for node, root in zip(rows, _roots_of(rows)):
         paths.add(f"/node/{node.id}")
         paths.update(_paths_for_root(root, also))
+        root_ids.add(root.id)
+    paths.update(_thread_node_paths(root_ids))
     invalidate(*paths)

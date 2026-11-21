@@ -4058,7 +4058,8 @@ def _prewarm_anthropic_cache(system_node_id, user_id, model_id,
             )
             render_variant = _system_render_variant(system_node, user_id)
             cached = get_cached_render(
-                flask_app.config, system_node, render_variant)
+                flask_app.config, system_node, render_variant,
+                user_id=user_id)
             if cached is not None:
                 sys_text, unlicensed = cached.text, cached.unlicensed
             else:
@@ -4073,7 +4074,8 @@ def _prewarm_anthropic_cache(system_node_id, user_id, model_id,
                              render_variant, unlicensed=unlicensed,
                              rows=usage.rows(sys_content),
                              references=usage.named_references,
-                             inputs=usage.inputs(sys_content))
+                             inputs=usage.inputs(sys_content),
+                             user_id=user_id)
 
             key_type = determine_api_key_type([system_node], logger=logger)
             # The render carries the user's own rows, each licensed by
@@ -4643,7 +4645,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     system_node, user_id, tools=chain_tools)
                 if system_render_cacheable:
                     _cached = get_cached_render(
-                        flask_app.config, system_node, render_variant)
+                        flask_app.config, system_node, render_variant,
+                        user_id=user_id)
                     if _cached is not None:
                         cached_system_render = _cached.text
                         cached_system_unlicensed = _cached.unlicensed
@@ -5546,7 +5549,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                     context_usage.named_references
                                     if USER_RECENT_RAW_PLACEHOLDER
                                     in _verdict_text else ()),
-                                inputs=context_usage.inputs(_verdict_text))
+                                inputs=context_usage.inputs(_verdict_text),
+                                user_id=user_id)
                     if role == "assistant":
                         last_assistant_index = len(messages)
                     messages.append({

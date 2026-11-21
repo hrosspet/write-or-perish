@@ -389,15 +389,24 @@ def public_shares(username):
     user, moved = resolve_public_handle(username)
     if not user:
         return jsonify({"error": "Not found"}), 404
-    # ALL the user's living public roots — shares are enriched with their
+    # The user's living public roots — shares are enriched with their
     # type/publish date; direct-created public roots (craft path) appear
-    # too, so everything public has a home page (#228).
+    # too, so everything public has a home page (#228). One page of them
+    # (?page=N, PUBLIC_LISTING_PAGE_SIZE), as the Commons feed pages:
+    # pinned pieces lead (newest pin first), then publish date.
+    from backend.routes.commons import (
+        PUBLIC_LISTING_PAGE_SIZE, listing_page, public_root_order)
+    page = listing_page()
+    size = PUBLIC_LISTING_PAGE_SIZE
     nodes = Node.query.filter(
         Node.parent_id.is_(None),
         Node.deleted_at.is_(None),
         Node.privacy_level == "public",
         (Node.human_owner_id == user.id) | (Node.user_id == user.id),
-    ).all()
+    ).order_by(*public_root_order()).offset((page - 1) * size).limit(
+        size + 1).all()
+    has_more = len(nodes) > size
+    nodes = nodes[:size]
     if moved == "former" and not nodes:
         # A former handle only ever leads to a page that renders (the
         # server-rendered profile 404s without public roots): an empty
@@ -406,16 +415,12 @@ def public_shares(username):
         return jsonify({"error": "Not found"}), 404
     share_by_node = {
         s.public_node_id: s
-        for s in ShareDraft.query.filter_by(
-            user_id=user.id, status="published").all()
-        if s.public_node_id
-    }
-    # Pinned pieces lead the page (newest pin first), then publish date.
-    nodes.sort(key=lambda n: (
-        n.pinned_at is None,
-        -(n.pinned_at.timestamp() if n.pinned_at else 0),
-        -(n.created_at.timestamp() if n.created_at else 0),
-    ))
+        for s in ShareDraft.query.filter(
+            ShareDraft.user_id == user.id,
+            ShareDraft.status == "published",
+            ShareDraft.public_node_id.in_([n.id for n in nodes]),
+        ).all()
+    } if nodes else {}
     items = []
     for node in nodes:
         share = share_by_node.get(node.id)
@@ -433,7 +438,8 @@ def public_shares(username):
                 share.published_at if share and share.published_at
                 else node.created_at),
         })
-    body = {"username": user.username, "shares": items}
+    body = {"username": user.username, "shares": items,
+            "has_more": has_more, "page": page}
     if moved:
         # The SPA swaps the address bar to the canonical URL (#253).
         body["canonical"] = f"/@{user.username}"

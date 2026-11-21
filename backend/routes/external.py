@@ -15,6 +15,7 @@ import json
 import re
 import secrets
 from datetime import datetime, timedelta
+from urllib.parse import urlsplit
 
 import requests
 from flask import (
@@ -463,6 +464,30 @@ def fetch_community_archive_route():
     return jsonify({"task_id": task.id, "status": "pending"}), 202
 
 
+# The hosts a bookmarked tweet's own link is on (X and its old name).
+_TWEET_HOSTS = frozenset({
+    "twitter.com", "www.twitter.com", "mobile.twitter.com",
+    "x.com", "www.x.com", "mobile.x.com",
+})
+# ExternalItem.url's column size.
+_URL_MAX_CHARS = 512
+
+
+def _bookmark_link(url, tweet_id):
+    """The link a bookmarked tweet is stored with: the export's own when
+    it is an http(s) link to the tweet's site that fits the column, else
+    the tweet's link built from its id."""
+    if isinstance(url, str) and len(url) <= _URL_MAX_CHARS:
+        try:
+            parts = urlsplit(url)
+        except ValueError:
+            parts = None
+        if (parts is not None and parts.scheme in ("http", "https")
+                and (parts.hostname or "") in _TWEET_HOSTS):
+            return url
+    return f"https://twitter.com/i/status/{tweet_id}"
+
+
 @external_bp.route("/bookmarks/import", methods=["POST"])
 @login_required
 def import_bookmarks_json():
@@ -552,7 +577,7 @@ def import_bookmarks_json():
             "external_id": str(tweet_id),
             "author_handle": handle,
             "content": text,
-            "url": url or f"https://twitter.com/i/status/{tweet_id}",
+            "url": _bookmark_link(url, tweet_id),
             "posted_at": posted_at,
         }
 

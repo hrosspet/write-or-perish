@@ -1676,10 +1676,11 @@ def test_cache_step_after_a_cascade_asks_the_database_on_ids(app, alice, monkeyp
     assert len(with_the_ids) == 1
     where = with_the_ids[0].split("WHERE", 1)[1]
     assert "public_slug IS NOT NULL" in where and "privacy_level =" in where
-    # The public reply's page and the root's pages go; a private
-    # reply's does not.
+    # The public reply's page and the root's pages go, and with them the
+    # id URL of every node of the thread (an id-only walk down from the
+    # root: each of those URLs serves the thread's page).
     assert {f"/node/{replies[1].id}", f"/node/{root.id}", "/@alice"} <= set(dropped)
-    assert f"/node/{replies[0].id}" not in dropped
+    assert f"/node/{replies[0].id}" in dropped
 
     # A repeated DELETE tombstones nothing. The step still asks about
     # the target, whose pages may be cached yet, so the id list is never
@@ -1739,7 +1740,9 @@ def test_cascade_from_a_public_tombstone_drops_the_targets_page_too(
     r = client.delete(f"/nodes/{target.id}", query_string={"delete_descendants": "true"})
     assert r.status_code == 200 and r.json["scheduled"] == 1
     assert f"/node/{target.id}" in dropped
-    assert f"/node/{reply.id}" not in dropped
+    # The thread's other id URLs go too (an id-only walk down from the
+    # root), the private reply's among them.
+    assert f"/node/{reply.id}" in dropped
 
 
 def test_cache_step_walks_up_the_thread_once_however_much_the_cascade_took(
