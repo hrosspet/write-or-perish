@@ -1224,9 +1224,12 @@ def activate_and_welcome(user_id):
 def prefill_from_community_archive(user_id):
     """Bootstrap a (typically whitelisted, not-yet-signed-in) account with its
     public tweets from the Community Archive, then queue a BATCH profile
-    build. Body: {"handle": "...", "include_replies": bool}; handle
-    defaults to the user's username. Returns {"task_id"} — poll
-    /admin/prefill/status/<task_id>."""
+    build. Body: {"handle": "...", "include_replies": bool,
+    "force_parquet": bool}; handle defaults to the user's username.
+    force_parquet reads the archive's latest export only: with an API key
+    the pre-fill reads the export first and then the newer tweets through
+    the API (#712), and force_parquet leaves out the API part. Returns
+    {"task_id"} — poll /admin/prefill/status/<task_id>."""
     user = User.query.get_or_404(user_id)
     refusal = _prefill_refusal_response(user)
     if refusal:
@@ -1273,9 +1276,9 @@ def prefill_check():
                                  f"({type(e).__name__})."}), 502
     if summary is None:
         return jsonify({"error": f"@{handle} is not in the Community Archive."}), 404
-    # The pre-fill reads every account from API v1
-    # (prefill_community_archive_impl, #688).
-    summary["import_source"] = "api-v1"
+    # The pre-fill reads the latest export first, then only the newer
+    # tweets from API v1 (_prefill_export_then_newer, #712).
+    summary["import_source"] = "export, then newer tweets via api-v1"
     # The first step of the provisional ladder: what a fresh account must
     # hold for the seeder to build anything at all.
     from backend.utils.chunk_plan import next_build_threshold

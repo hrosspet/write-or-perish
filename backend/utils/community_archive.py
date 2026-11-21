@@ -301,15 +301,17 @@ def _v1_pages(path, params, timeout=None, on_request=None):
 
 
 def v1_account_tweets_page(account_id, cursor=None, order="asc",
-                           limit=V1_TWEET_PAGE_LIMIT, timeout=None):
+                           limit=V1_TWEET_PAGE_LIMIT, timeout=None,
+                           on_request=None):
     """One page of an account's v1 timeline: (rows, next_cursor). The
     ``limit`` is the same on every page of one read (whether a cursor takes
     another limit is not documented). An account v1 does not know is an
-    empty last page, like an unknown id on REST."""
+    empty last page, like an unknown id on REST. ``on_request`` as in
+    _v1_get (called before every HTTP request, retries included)."""
     try:
         page = _v1_get(f"/accounts/{_v1_account_path(account_id)}/tweets",
                        {"order": order, "limit": limit, "cursor": cursor},
-                       timeout=timeout)
+                       timeout=timeout, on_request=on_request)
     except urllib.error.HTTPError as e:
         if e.code == 404 and cursor is None:
             return [], None
@@ -637,6 +639,13 @@ def fetch_account_parquet(handle, snapshot_dir):
         return None
     return dict(zip(
         ["account_id", "username", "account_display_name", "num_tweets"], row))
+
+
+def snapshot_read_lock(snapshot_dir):
+    """Hold the cached export still while it is read (the readers' shared
+    lock, _snapshot_lock): a swap to a newer export waits until the read is
+    done. The pre-fill's scan of one account holds it (#712)."""
+    return _snapshot_lock(snapshot_dir, shared=True)
 
 
 def iter_tweets_parquet(account_id, snapshot_dir, batch=1000, on_page=None):
@@ -1417,73 +1426,117 @@ def ensure_v1_day(snapshot_dir, now=None, timeout=None, on_request=None):
     return window_id, True
 
 
-# ── a pre-fill's read of one account, resumable (#688) ────────────────────
+# ── a pre-fill's read of one account, resumable (#688, #712) ──────────────
 
 # What a pre-fill keeps of each tweet: what to_export_entry reads.
 _V1_PREFILL_COLUMNS = (
     "tweet_id", "created_at", "full_text", "favorite_count", "retweet_count",
     "reply_to_tweet_id", "reply_to_user_id", "reply_to_username")
 
+# A pre-fill reads an account's timeline newest first (#712), the
+# interface's default order: it has read the latest export already, so the
+# read can stop where the export's tweets begin.
+PREFILL_V1_ORDER = "desc"
+# Why a pre-fill's timeline read ended (stage_newer_tweets_v1).
+STOP_KNOWN_PAGE = "known_page"  # a page of tweets the account already has
+STOP_END = "end"                # the timeline's last page
 
-def stage_account_tweets_v1(account_id, stash_dir, run_seconds=None,
-                            on_page=None, clock=time.monotonic):
-    """Page an account's v1 timeline, oldest first, into
-    ``stash_dir/tweets.jsonl``, with the cursor saved in
-    ``stash_dir/progress.json`` after every page. A stash left by an
-    earlier run for the same account (one that failed, or stopped at its
-    time budget) is resumed from its cursor, so no page is read twice; a
-    stash of another account is discarded. After ``run_seconds`` of paging
-    (at least one page) it stops with the progress saved. Returns (done,
-    fetched): done is True once the timeline's last page is staged. A
-    stored cursor the API no longer takes (400) starts the read over,
-    once. ``on_page(fetched)`` after each page."""
+
+def _stage_result(state):
+    return {"done": bool(state.get("done")),
+            "fetched": int(state.get("fetched") or 0),
+            "pages": int(state.get("pages") or 0),
+            "requests": int(state.get("requests") or 0),
+            "stopped": state.get("stopped")}
+
+
+def stage_newer_tweets_v1(account_id, stash_dir, is_known=None,
+                          run_seconds=None, on_page=None,
+                          clock=time.monotonic):
+    """Page an account's v1 timeline newest first into
+    ``stash_dir/tweets.jsonl`` until the first page on which
+    ``is_known(tweet_id)`` holds for every tweet (#712: the pre-fill read
+    the latest export first and assumes everything older is in it), or
+    until the timeline's last page. An empty page proves nothing and never
+    stops the read. Without ``is_known`` the whole timeline is read.
+
+    The cursor and the count of HTTP requests sent (retries included) are
+    saved in ``stash_dir/progress.json`` after every page, and when a
+    request fails. A stash left by an earlier run for the same account and
+    order (one that failed, or stopped at its time budget) is resumed from
+    its cursor, so no page is read twice; any other stash is discarded:
+    another account's, or one left by the oldest-first read before #712,
+    whose cursor belongs to that order. After ``run_seconds`` of paging (at
+    least one page) it stops with the progress saved. A stored cursor the
+    API no longer takes (400) starts the read over, once.
+    ``on_page(fetched)`` is called after each page, its progress saved; it
+    may raise to stop the read.
+
+    Returns {done, fetched, pages, requests, stopped}: done once the read
+    ended; fetched = rows staged; requests over every run of this stash;
+    stopped = STOP_KNOWN_PAGE or STOP_END once done, else None."""
     d = pathlib.Path(stash_dir)
     state = _load_progress(d)
-    if not state or state.get("account_id") != str(account_id):
+    if (not state or state.get("account_id") != str(account_id)
+            or state.get("order") != PREFILL_V1_ORDER):
         shutil.rmtree(d, ignore_errors=True)
         d.mkdir(parents=True)
-        state = {"account_id": str(account_id), "cursor": None,
-                 "fetched": 0, "done": False}
+        state = {"account_id": str(account_id), "order": PREFILL_V1_ORDER,
+                 "cursor": None, "fetched": 0, "pages": 0, "requests": 0,
+                 "done": False, "stopped": None}
         _save_progress(d, state)
     if state.get("done"):
-        return True, int(state.get("fetched") or 0)
+        return _stage_result(state)
     resumed = state.get("cursor")
     started = clock()
+
+    def count_request():
+        state["requests"] = int(state.get("requests") or 0) + 1
+
     with open(d / "tweets.jsonl", "a") as out:
         while True:
             try:
                 rows, next_cursor = v1_account_tweets_page(
-                    account_id, cursor=state.get("cursor"))
-            except urllib.error.HTTPError as e:
-                if e.code == 400 and resumed and state.get("cursor") == resumed:
+                    account_id, cursor=state.get("cursor"),
+                    order=PREFILL_V1_ORDER, on_request=count_request)
+            except BaseException as e:
+                if (isinstance(e, urllib.error.HTTPError) and e.code == 400
+                        and resumed and state.get("cursor") == resumed):
                     log.info("Community Archive API: the stored cursor for "
                              "account %s was refused; reading it again",
                              account_id)
                     out.seek(0)
                     out.truncate()
-                    state.update(cursor=None, fetched=0)
+                    state.update(cursor=None, fetched=0, pages=0)
                     resumed = None
                     _save_progress(d, state)
                     continue
+                _save_progress(d, state)  # the requests it sent count
                 raise
             for row in rows:
                 out.write(json.dumps(
                     {k: row.get(k) for k in _V1_PREFILL_COLUMNS}) + "\n")
             out.flush()
             state["fetched"] = int(state.get("fetched") or 0) + len(rows)
+            state["pages"] = int(state.get("pages") or 0) + 1
             state["cursor"] = next_cursor
-            state["done"] = not next_cursor
+            if (rows and is_known is not None
+                    and all(is_known(str(row.get("tweet_id")))
+                            for row in rows)):
+                state.update(done=True, stopped=STOP_KNOWN_PAGE)
+            elif not next_cursor:
+                state.update(done=True, stopped=STOP_END)
             _save_progress(d, state)
             if on_page:
                 on_page(state["fetched"])
             if state["done"]:
-                return True, state["fetched"]
+                return _stage_result(state)
             if run_seconds is not None and clock() - started >= run_seconds:
-                return False, state["fetched"]
+                return _stage_result(state)
 
 
 def iter_staged_tweets(stash_dir):
-    """The rows stage_account_tweets_v1 staged, in the order read."""
+    """The rows stage_newer_tweets_v1 staged, in the order read."""
     with open(pathlib.Path(stash_dir) / "tweets.jsonl") as f:
         for line in f:
             line = line.strip()

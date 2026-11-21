@@ -517,12 +517,18 @@ def _ca_row(i, text, created="2026-08-24T10:00:00+00:00", reply=None):
 
 
 def _stub_ca_tweets(monkeypatch, rows):
-    """The pre-fill reads an account through API v1's stash (#688); these
-    tests fake what the stash holds. ``rows`` is called with no arguments
-    and returns an iterator of archive rows."""
+    """The pre-fill reads the latest export, then the newer tweets through
+    API v1's stash (#688, #712); these tests have no export to be had (the
+    archive's manifest cannot be fetched, none is cached) and fake what the
+    stash holds. ``rows`` is called with no arguments and returns an
+    iterator of archive rows."""
+    import urllib.error
     from backend.utils import community_archive as ca
-    monkeypatch.setattr(ca, "stage_account_tweets_v1",
-                        lambda *a, **k: (True, 0))
+    monkeypatch.setattr(ca, "fetch_latest_manifest", MagicMock(
+        side_effect=urllib.error.URLError("no export in these tests")))
+    monkeypatch.setattr(ca, "stage_newer_tweets_v1", lambda *a, **k: {
+        "done": True, "fetched": 0, "pages": 1, "requests": 1,
+        "stopped": ca.STOP_END})
     monkeypatch.setattr(ca, "iter_staged_tweets", lambda stash: rows())
 
 
@@ -553,8 +559,8 @@ def test_prefill_parquet_keeps_the_verified_account(app, tmp_path, monkeypatch):
     # since the snapshot, which still lists alice → A1).
     monkeypatch.setattr(ca, "fetch_account", lambda h, timeout=None: {
         "account_id": "B2", "username": "alice", "num_tweets": 1})
-    monkeypatch.setattr(ca, "stage_account_tweets_v1", MagicMock(
-        side_effect=AssertionError("API v1 must not be read for a forced snapshot")))
+    monkeypatch.setattr(ca, "stage_newer_tweets_v1", MagicMock(
+        side_effect=AssertionError("API v1 must not be read for a forced export")))
     monkeypatch.setattr(ca, "ensure_snapshot", lambda d, on_progress=None, **k: "2026-08-27T07-03-56Z")
     monkeypatch.setattr(ca, "fetch_account_parquet", MagicMock(
         side_effect=AssertionError("the snapshot's profile row must not decide identity")))
@@ -564,7 +570,7 @@ def test_prefill_parquet_keeps_the_verified_account(app, tmp_path, monkeypatch):
     result = imports_mod.prefill_community_archive_impl(
         u.id, "alice", {"force_parquet": True})
 
-    assert result["source"] == "parquet" and result["created"] == 1
+    assert result["source"] == "export" and result["created"] == 1
     nodes = Node.query.filter_by(human_owner_id=u.id).all()
     assert [n.get_content() for n in nodes] == ["bobs tweet"]  # B2's tweets, not A1's
     assert User.query.get(u.id).twitter_id == "B2"
@@ -954,11 +960,15 @@ def test_prefill_impl_forced_snapshot_uses_parquet(app, tmp_path, monkeypatch):
     _db.session.commit()
     monkeypatch.setattr(ca, "fetch_account", lambda h, timeout=None: {
         "account_id": "A1", "username": "alice", "num_tweets": 3})
-    monkeypatch.setattr(ca, "stage_account_tweets_v1", MagicMock(
-        side_effect=AssertionError("API v1 must not be read for a forced snapshot")))
+    monkeypatch.setattr(ca, "stage_newer_tweets_v1", MagicMock(
+        side_effect=AssertionError("API v1 must not be read for a forced export")))
     ensured = []
-    monkeypatch.setattr(ca, "ensure_snapshot", lambda d, on_progress=None, **k: (
-        ensured.append(str(d)) or "2026-08-27T07-03-56Z"))
+
+    def ensure(d, on_progress=None, **k):
+        ensured.append(str(d))
+        on_progress("tweets.parquet", 1 << 20, 2 << 20)  # a download
+        return "2026-08-27T07-03-56Z"
+    monkeypatch.setattr(ca, "ensure_snapshot", ensure)
     import backend.tasks.exports as ex
     monkeypatch.setattr(ex, "maybe_trigger_profile_update", MagicMock())
     states = []
@@ -968,8 +978,9 @@ def test_prefill_impl_forced_snapshot_uses_parquet(app, tmp_path, monkeypatch):
         update_state=lambda **kw: states.append(kw["meta"]))
 
     assert ensured == [str(snap)]
-    assert result["source"] == "parquet" and result["created"] == 3
-    assert states[0]["stage"] == "downloading"
+    assert result["source"] == "export" and result["created"] == 3
+    assert result["api_requests"] == 0
+    assert states[0]["stage"] == "downloading tweets.parquet"
     nodes = Node.query.filter_by(human_owner_id=u.id).order_by(Node.created_at).all()
     assert [n.get_content() for n in nodes] == ["first", "second", "reply to bob"]
 
@@ -986,10 +997,11 @@ def test_coverage_summary_parquet(tmp_path, monkeypatch):
     assert s["detail_source"] == "parquet" and "archived_live" not in s
 
 
-def test_forced_snapshot_without_the_account_reads_api_v1(app, tmp_path, monkeypatch):
-    """The admin forces the snapshot, but the account was ingested after the
-    export (the snapshot holds none of it) → the pre-fill reads API v1
-    instead of failing with 'no own tweets found'."""
+def test_forced_export_without_the_account_says_so(app, tmp_path, monkeypatch):
+    """"Force the export" is export only (#712): an account ingested after
+    the export (the export holds none of it) is not read through the API;
+    the pre-fill fails with a message saying the export lacks the account,
+    and imports nothing."""
     from backend.tasks import imports as imports_mod
     from backend.utils import community_archive as ca
     snap = tmp_path / "snap"
@@ -1000,14 +1012,13 @@ def test_forced_snapshot_without_the_account_reads_api_v1(app, tmp_path, monkeyp
     monkeypatch.setattr(ca, "fetch_account", lambda h, timeout=None: {
         "account_id": "909", "username": "MarvinKeilbach", "num_tweets": 13762})
     monkeypatch.setattr(ca, "ensure_snapshot", lambda d, on_progress=None, **k: "E1")
-    _stub_ca_tweets(monkeypatch, lambda: iter([
-        _ca_row(1, "first"), _ca_row(2, "second", "2026-08-25T10:00:00+00:00")]))
-    import backend.tasks.exports as ex
-    monkeypatch.setattr(ex, "maybe_trigger_profile_update", MagicMock())
-    result = imports_mod.prefill_community_archive_impl(
-        u.id, "MarvinKeilbach", {"force_parquet": True})
-    assert result["source"] == "api-v1" and result["created"] == 2
-    assert result["account_num_tweets"] == 13762
+    monkeypatch.setattr(ca, "stage_newer_tweets_v1", MagicMock(
+        side_effect=AssertionError("API v1 must not be read for a forced export")))
+    with pytest.raises(ca.CommunityArchiveError,
+                       match="export E1 does not hold this account"):
+        imports_mod.prefill_community_archive_impl(
+            u.id, "MarvinKeilbach", {"force_parquet": True})
+    assert Node.query.filter_by(human_owner_id=u.id).count() == 0
 
 
 def test_import_revert_walks_the_current_chain_not_all_history(app, monkeypatch):
@@ -1056,8 +1067,10 @@ def test_import_revert_walks_the_current_chain_not_all_history(app, monkeypatch)
 
 def test_prefill_reads_api_v1_with_a_key(app, monkeypatch, tmp_path):
     """#688: with COMMUNITY_ARCHIVE_API_KEY set the pre-fill resolves the
-    handle and reads every tweet through API v1 (no count in v1, so not the
-    snapshot even for a large account); nothing reaches the network."""
+    handle through API v1 and reads the tweets the export lacks through it
+    (#712; here no export can be had, so the whole account); nothing
+    reaches the network."""
+    import urllib.error
     import urllib.parse
     import urllib.request
     from backend.tasks import imports as imports_mod
@@ -1071,20 +1084,21 @@ def test_prefill_reads_api_v1_with_a_key(app, monkeypatch, tmp_path):
     fake = FakeV1()
     fake.routes["/accounts"] = [page([v1_account(77, "vee", num_tweets=50000)])]
     fake.routes["/accounts/77/tweets"] = [
-        page([v1_tweet(1, "vee", "first thought", "2026-11-01T10:00:00.000Z", 77)], "c1"),
-        page([v1_tweet(2, "vee", "RT @x: theirs", "2026-11-02T10:00:00.000Z", 77,
-                       retweeted_tweet_id="5"),
-              v1_tweet(3, "vee", "second thought", "2026-11-03T10:00:00.000Z", 77)])]
+        page([v1_tweet(3, "vee", "second thought", "2026-11-03T10:00:00.000Z", 77),
+              v1_tweet(2, "vee", "RT @x: theirs", "2026-11-02T10:00:00.000Z", 77,
+                       retweeted_tweet_id="5")], "c1"),
+        page([v1_tweet(1, "vee", "first thought", "2026-11-01T10:00:00.000Z", 77)])]
     monkeypatch.setattr(urllib.request, "urlopen", fake)
     monkeypatch.setattr(ca, "_v1_not_before", 0.0)
-    for name in ("ensure_snapshot", "iter_tweets_parquet", "count_parquet"):
-        monkeypatch.setattr(ca, name, MagicMock(side_effect=AssertionError(name)))
+    monkeypatch.setattr(ca, "fetch_latest_manifest", MagicMock(
+        side_effect=urllib.error.URLError("the export bucket is unreachable")))
     u = _make_user("vee")
     _db.session.commit()
 
     result = imports_mod.prefill_community_archive_impl(u.id, "vee", {})
 
-    assert result["source"] == "api-v1" and result["created"] == 2
+    assert result["source"] == "export+api-v1" and result["created"] == 2
+    assert result["export_id"] is None and result["from_api"] == 3
     assert result["retweets_skipped"] == 1 and result["archived"] == 3
     assert result["account_num_tweets"] == 50000
     assert sorted(n.get_content() for n in Node.query.filter_by(
@@ -1100,6 +1114,7 @@ def test_prefill_v1_continues_in_a_next_run_from_its_cursor(app, monkeypatch, tm
     """#690 review: a long API v1 read stops at its run's time with the
     cursor stored and continues in the task's next run, never from page 1;
     past the allowed runs it fails with what to do."""
+    import urllib.error
     import urllib.request
     from backend.tasks import imports as imports_mod
     from backend.tests.test_community_archive_v1 import (
@@ -1108,6 +1123,9 @@ def test_prefill_v1_continues_in_a_next_run_from_its_cursor(app, monkeypatch, tm
     import backend.tasks.exports as ex
     monkeypatch.setattr(ex, "maybe_trigger_profile_update", MagicMock())
     app.config["COMMUNITY_ARCHIVE_API_KEY"] = "cak_test_only"
+    # No export to be had (#712): the whole account comes through the API.
+    monkeypatch.setattr(ca, "fetch_latest_manifest", MagicMock(
+        side_effect=urllib.error.URLError("the export bucket is unreachable")))
     fake = FakeV1()
     fake.routes["/accounts"] = [page([v1_account(77, "vee")])]
 
@@ -1127,10 +1145,12 @@ def test_prefill_v1_continues_in_a_next_run_from_its_cursor(app, monkeypatch, tm
             imports_mod.prefill_community_archive_impl(u.id, "vee", {})
     assert Node.query.filter_by(human_owner_id=u.id).count() == 0
     result = imports_mod.prefill_community_archive_impl(u.id, "vee", {})
-    assert result["created"] == 3 and result["source"] == "api-v1"
+    assert result["created"] == 3 and result["source"] == "export+api-v1"
     cursors = [r["params"].get("cursor") for r in fake.requests
                if r["path"] == "/accounts/77/tweets"]
     assert cursors == [None, "c1", "c2"]
+    # The request count covers every run of the pre-fill.
+    assert result["api_requests"] == 3 and result["api_stop"] == ca.STOP_END
 
     # The task: a stop sends the next run; past the allowed runs it fails.
     task = MagicMock()

@@ -567,7 +567,8 @@ class TestPrefillCheck:
         _login(client, admin.id)
         r = client.get(f"/api/admin/prefill/check?handle=@cedcolas&user_id={target.id}")
         assert r.status_code == 200, r.json
-        assert r.json["archived"] == 6 and r.json["import_source"] == "api-v1"
+        assert r.json["archived"] == 6
+        assert r.json["import_source"] == "export, then newer tweets via api-v1"
         assert r.json["already_imported"] == 1
         assert r.json["profile_threshold_tokens"] == 5000  # first ladder step
         monkeypatch.setattr(ca, "coverage_summary", lambda h, snapshot_dir=None: None)

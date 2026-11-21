@@ -745,17 +745,22 @@ def test_an_account_read_resumes_from_its_stash(v1, tmp_path):
     ticks = iter(range(0, 10_000, 10))
     clock = lambda: next(ticks)  # noqa: E731 - each call 10 s later
     # A run with 15 s of paging reads two pages and stops with its cursor.
-    assert ca.stage_account_tweets_v1("42", stash, run_seconds=15,
-                                      clock=clock) == (False, 4)
+    r = ca.stage_newer_tweets_v1("42", stash, run_seconds=15, clock=clock)
+    assert (r["done"], r["fetched"], r["requests"], r["stopped"]) == (
+        False, 4, 2, None)
     # The next run (or a later pre-fill) continues from that cursor.
     n = len(v1.requests)
-    assert ca.stage_account_tweets_v1("42", stash, clock=clock) == (True, 8)
+    r = ca.stage_newer_tweets_v1("42", stash, clock=clock)
+    assert (r["done"], r["fetched"], r["pages"], r["requests"]) == (True, 8, 4, 4)
+    assert r["stopped"] == ca.STOP_END  # nothing known: read to the end
     assert [r["params"].get("cursor") for r in v1.requests[n:]] == ["c2", "c3"]
+    # Newest first (#712), on every page.
+    assert {r["params"]["order"] for r in v1.requests} == {"desc"}
     assert [r["tweet_id"] for r in ca.iter_staged_tweets(stash)] == [
         "0", "1", "10", "11", "20", "21", "30", "31"]
     # Done: no request at all.
     n = len(v1.requests)
-    assert ca.stage_account_tweets_v1("42", stash) == (True, 8)
+    assert ca.stage_newer_tweets_v1("42", stash)["fetched"] == 8
     assert len(v1.requests) == n
 
 
@@ -772,7 +777,94 @@ def test_a_failed_account_read_keeps_its_stash(v1, tmp_path):
     v1.routes["/accounts/42/tweets"] = [answer]
     stash = tmp_path / "stash"
     with pytest.raises(urllib.error.HTTPError):
-        ca.stage_account_tweets_v1("42", stash)
+        ca.stage_newer_tweets_v1("42", stash)
     assert calls == [None, "c1", "c1", "c1"]
-    assert ca.stage_account_tweets_v1("42", stash) == (True, 3)
+    r = ca.stage_newer_tweets_v1("42", stash)
+    assert (r["done"], r["fetched"]) == (True, 3)
     assert calls[4:] == ["c1", "c2"]
+    # Every request sent counts, the failed tries included (#712).
+    assert r["requests"] == 6
+
+
+# ── a pre-fill's newest-first read stops where the export begins (#712) ──
+
+def _desc_pages(*pages):
+    """A timeline served newest first: page i holds the given tweet ids;
+    its cursor leads to page i + 1."""
+    def answer(params):
+        i = int((params.get("cursor") or "p0")[1:])
+        ids = pages[i]
+        return page([v1_tweet(t, "big", f"t{t}", "2026-01-01T00:00:00.000Z", 42)
+                     for t in ids],
+                    f"p{i + 1}" if i + 1 < len(pages) else None)
+    return answer
+
+
+def test_a_newest_first_read_stops_at_the_first_page_of_known_tweets(v1, tmp_path):
+    """Page 1 is all new, page 2 mixes new and known, page 3 is all known:
+    the read stops there; page 4 is never requested."""
+    v1.routes["/accounts/42/tweets"] = [_desc_pages(
+        [60, 59], [58, 50], [49, 48], [47, 46])]
+    known = {"50", "49", "48", "47", "46"}
+    pages = []
+    r = ca.stage_newer_tweets_v1("42", tmp_path / "stash",
+                                 is_known=known.__contains__,
+                                 on_page=pages.append)
+    assert (r["done"], r["stopped"], r["pages"], r["requests"]) == (
+        True, ca.STOP_KNOWN_PAGE, 3, 3)
+    assert [q["params"].get("cursor") for q in v1.requests] == [None, "p1", "p2"]
+    assert pages == [2, 4, 6]
+    assert [t["tweet_id"] for t in ca.iter_staged_tweets(tmp_path / "stash")] == [
+        "60", "59", "58", "50", "49", "48"]
+
+
+def test_a_first_page_of_known_tweets_is_one_request(v1, tmp_path):
+    v1.routes["/accounts/42/tweets"] = [_desc_pages([9, 8], [7, 6])]
+    r = ca.stage_newer_tweets_v1("42", tmp_path / "stash",
+                                 is_known=lambda t: True)
+    assert (r["stopped"], r["requests"]) == (ca.STOP_KNOWN_PAGE, 1)
+    assert len(v1.requests) == 1
+
+
+def test_an_empty_page_never_stops_the_read(v1, tmp_path):
+    """Withdrawn tweets can leave a page empty: it proves nothing."""
+    v1.routes["/accounts/42/tweets"] = [_desc_pages([9], [], [8], [7])]
+    r = ca.stage_newer_tweets_v1("42", tmp_path / "stash",
+                                 is_known={"8"}.__contains__)
+    assert (r["stopped"], r["requests"]) == (ca.STOP_KNOWN_PAGE, 3)
+
+
+def test_a_stash_of_the_oldest_first_read_is_not_resumed(v1, tmp_path):
+    """A stash #690's oldest-first read left holds a cursor of that order:
+    the newest-first read starts over instead of following it."""
+    stash = tmp_path / "stash"
+    stash.mkdir()
+    (stash / "progress.json").write_text(json.dumps({
+        "account_id": "42", "cursor": "asc-cursor", "fetched": 1,
+        "done": False}))
+    (stash / "tweets.jsonl").write_text(json.dumps({"tweet_id": "1"}) + "\n")
+    v1.routes["/accounts/42/tweets"] = [_desc_pages([9, 8])]
+    r = ca.stage_newer_tweets_v1("42", stash)
+    assert (r["done"], r["fetched"]) == (True, 2)
+    assert v1.requests[0]["params"].get("cursor") is None
+    assert [t["tweet_id"] for t in ca.iter_staged_tweets(stash)] == ["9", "8"]
+
+
+def test_a_refused_stored_cursor_reads_the_account_again_once(v1, tmp_path):
+    stash = tmp_path / "stash"
+    ticks = iter(range(0, 10_000, 10))
+    v1.routes["/accounts/42/tweets"] = [_desc_pages([9, 8], [7, 6])]
+    r = ca.stage_newer_tweets_v1("42", stash, run_seconds=5,
+                                 clock=lambda: next(ticks))
+    assert (r["done"], r["fetched"]) == (False, 2)
+
+    def refuse_old_cursor(params):
+        if params.get("cursor") == "p1":
+            return V1Error(400, "invalid_cursor")
+        return _desc_pages([9, 8], [7, 6])(params)
+    v1.routes["/accounts/42/tweets"] = [refuse_old_cursor]
+    with pytest.raises(urllib.error.HTTPError):
+        # the fresh read's own cursor is refused too: not started over again
+        ca.stage_newer_tweets_v1("42", stash)
+    assert [q["params"].get("cursor") for q in v1.requests[1:]] == [
+        "p1", None, "p1"]
