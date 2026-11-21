@@ -288,6 +288,18 @@ def refuse_x_callback():
     return _back_to_sign_in("x_try_again")
 
 
+def refuse_x_start():
+    """Response for a Sign in with X or Connect X start over the
+    per-client limit (backend/oauth.py, before anything is asked of X):
+    Connect X goes back to the Account page ("wait"), a sign-in to the
+    sign-in page ("x_wait"), still on the way to where it started; both
+    pages say to wait a few minutes. An invite code waiting in the
+    session stays."""
+    if session.pop(X_CONNECT_SESSION_KEY, None) is not None:
+        return _account_redirect("wait")
+    return _back_to_sign_in("x_wait")
+
+
 def _back_to_sign_in(error):
     """The sign-in page again, with *error* and the page this browser's
     X sign-in started on (#704), which waited in the session: the next try

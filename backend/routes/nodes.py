@@ -60,6 +60,12 @@ from backend.utils.llm_nodes import (
 )
 from backend.utils.placeholders import UserExportValidationError
 from backend.utils.thread_size import ThreadTooLong, thread_too_long_response
+from backend.utils.recording_limits import (
+    FORM_OVERHEAD_BYTES, MAX_STREAMING_CHUNK_BYTES, MAX_UPLOAD_CHUNK_BYTES,
+)
+from backend.utils.request_size import (
+    LONG_TEXT_MAX_BODY_BYTES, UPLOAD_MAX_BODY_BYTES, body_limit,
+)
 
 # ---------------------------------------------------------------------------
 # Voice‑Mode helpers
@@ -532,6 +538,7 @@ def approximate_token_count(text):
 
 
 @nodes_bp.route("/", methods=["POST"])
+@body_limit(LONG_TEXT_MAX_BODY_BYTES, form=UPLOAD_MAX_BODY_BYTES)
 @login_required
 def create_node():
     """Create a new node.
@@ -2958,6 +2965,7 @@ def init_chunked_upload():
 
 
 @nodes_bp.route("/upload/chunk", methods=["POST"])
+@body_limit(MAX_UPLOAD_CHUNK_BYTES + FORM_OVERHEAD_BYTES)
 @login_required
 def upload_chunk():
     """Receive and store a single chunk.
@@ -3427,6 +3435,7 @@ def init_streaming_transcription():
 
 
 @nodes_bp.route("/<int:node_id>/audio-chunk", methods=["POST"])
+@body_limit(MAX_STREAMING_CHUNK_BYTES + FORM_OVERHEAD_BYTES)
 @login_required
 def upload_audio_chunk(node_id):
     """Upload an audio chunk for streaming transcription.

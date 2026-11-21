@@ -204,6 +204,8 @@ final class AccountModelTests: StubbedAppTestCase {
         XCTAssertEqual(message?.kind, .info)
         XCTAssertEqual(AccountModel.xLoginMessages["taken_placeholder"]?.text,
                        "An account was set up for that X account, but it can't be opened now. Write to info@loore.org.")
+        XCTAssertEqual(AccountModel.xLoginMessages["wait"]?.text,
+                       "Connect X was started many times from this network. Please wait a few minutes, then try again.")
     }
 
     func testDisconnectXCallsTheServerAndForgetsTheHandle() async throws {

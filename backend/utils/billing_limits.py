@@ -9,7 +9,8 @@ idiom as the discount-code field (utils/discount_codes): one row per
 request, who and when only (models.BillingRequest), counted over the last
 hour. Every request that reaches Stripe counts, also one that then fails
 there, and a checkout that reuses the account's open session for the same
-level (stripe_billing.create_checkout) too.
+level (stripe_billing.create_checkout) too. Opening the billing page
+(Stripe's portal) is held to BILLING_PORTALS_PER_HOUR the same way.
 
 Calls to the paid X API that an account starts are counted the same way,
 over a day (Peter's rule for money: paid per use as it comes, never
@@ -40,10 +41,14 @@ X_INVITE_LOOKUPS_PER_DAY = 10
 KINDS = {
     "checkout": "CHECKOUT_STARTS_PER_HOUR",
     "sync": "BILLING_SYNCS_PER_HOUR",
+    "portal": "BILLING_PORTALS_PER_HOUR",
     "x_bookmark_sync": None,
     "x_invite_lookup": None,
 }
-_DEFAULTS = {"checkout": 10, "sync": 20,
+# HEURISTIC (portal): Stripe's billing page opened 20 times an hour. Its
+# sessions last minutes, so each press makes a new one; a person changing
+# a card or cancelling opens it a few times.
+_DEFAULTS = {"checkout": 10, "sync": 20, "portal": 20,
              "x_bookmark_sync": X_BOOKMARK_SYNCS_PER_DAY,
              "x_invite_lookup": X_INVITE_LOOKUPS_PER_DAY}
 # The time a kind's requests are counted over; an hour when not named.
@@ -52,6 +57,8 @@ _WINDOWS = {"x_bookmark_sync": timedelta(days=1),
 
 TOO_MANY_CHECKOUTS_MESSAGE = ("You started checkout many times in the last "
                               "hour. Please try again in an hour.")
+TOO_MANY_PORTALS_MESSAGE = ("You opened the billing page many times in the "
+                            "last hour. Please try again in an hour.")
 TOO_MANY_X_SYNCS_MESSAGE = ("You synced X bookmarks by hand many times in "
                             "the last day. They still sync every night; "
                             "please try again later.")

@@ -43,6 +43,7 @@ from backend.utils.spend import require_spend_headroom
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.audio_storage import clear_tts_artifacts
 from backend.utils.external_content import x_exchange_code
+from backend.utils.request_size import UPLOAD_MAX_BODY_BYTES, body_limit
 
 # Same root as the nodes blueprint and the TTS task.
 AUDIO_STORAGE_ROOT = pathlib.Path(
@@ -449,19 +450,131 @@ def set_item_feedback(item_id):
     }), 200
 
 
+# ── Community Archive fetches (heuristics, listed in the PR) ──────────────
+# One fetch of an account is queued or running at a time: the key (a run
+# lock, utils/run_locks) names its task and handle, and the job frees it
+# when it ends. The route takes it for CA_FETCH_QUEUED_TTL, while the job
+# waits on the background queue behind imports and profile jobs (a job
+# still waiting after it lets another fetch through). The job holds it
+# with CA_FETCH_RUNNING_TTL and refreshes it every CA_FETCH_BEAT_SECONDS
+# from a thread, through every page and the saving after them; a job that
+# was stopped frees the account CA_FETCH_RUNNING_TTL after its last beat,
+# and a new press frees it at once when Celery says the job ended, or when
+# it started and has not beaten for three beats (run_locks.job_over).
+CA_FETCH_LOCK_KEY = "loore:ca_fetch:{user_id}"
+CA_FETCH_QUEUED_TTL = 15 * 60
+CA_FETCH_RUNNING_TTL = 2 * 60
+CA_FETCH_BEAT_SECONDS = 20
+# Fetches one account may start a day: a person looks up several handles
+# in one sitting, and fetches one again later for its new tweets.
+CA_FETCHES_PER_DAY = 20
+CA_FETCH_COUNT_KEY = "loore:ca_fetch_count:{user_id}"
+CA_FETCH_DEFAULT_ITEMS = 2000
+CA_FETCH_MAX_ITEMS = 10000
+CA_FETCH_RUNNING_MESSAGE = (
+    "Loore is still fetching @{handle} from the Community Archive. Try "
+    "another handle when it has finished; its tweets appear below as they "
+    "arrive.")
+CA_FETCHES_PER_DAY_MESSAGE = (
+    "You fetched from the Community Archive many times today. Please try "
+    "again tomorrow.")
+
+
+def ca_fetch_token(task_id, username):
+    """The fetch key's value: the task and the handle it fetches."""
+    return f"{task_id}:{(username or '').strip().lstrip('@').lower()}"
+
+
+def ca_fetch_key(user_id, task_id, username):
+    """The account's fetch key as the job *task_id* holds it (from its
+    start on, with CA_FETCH_RUNNING_TTL)."""
+    from backend.utils import run_locks
+    lock = run_locks.RunLock(CA_FETCH_LOCK_KEY.format(user_id=user_id),
+                             ca_fetch_token(task_id, username),
+                             CA_FETCH_RUNNING_TTL)
+    lock.adopt()
+    return lock
+
+
+def release_ca_fetch(user_id, task_id, username):
+    """Free the account's fetch key, when it is this job's (another's
+    value stays). Without Redis there is nothing to free."""
+    ca_fetch_key(user_id, task_id, username).release()
+
+
+def _ca_fetch_running_response(held, username):
+    """A fetch while another of this account is queued or running: the
+    same handle answers as its first press did (the apps then show the
+    counts as they grow), another is refused."""
+    task_id, _, handle = held.partition(":")
+    if handle == username.lower():
+        return jsonify({"task_id": task_id, "status": "pending",
+                        "already_running": True}), 202
+    return jsonify({"error": CA_FETCH_RUNNING_MESSAGE.format(handle=handle),
+                    "code": "fetch_running"}), 409
+
+
 @external_bp.route("/community-archive/fetch", methods=["POST"])
 @login_required
 def fetch_community_archive_route():
-    data = request.get_json() or {}
-    username = (data.get("username") or "").strip().lstrip("@")
+    """Queue a fetch of a handle's tweets from the Community Archive.
+    One fetch of an account at a time, CA_FETCHES_PER_DAY a day;
+    max_items a whole number, at most CA_FETCH_MAX_ITEMS."""
+    import uuid
+    from backend.utils import run_locks
+
+    data = request.get_json(silent=True)
+    data = data if isinstance(data, dict) else {}
+    username = data.get("username")
+    username = (username if isinstance(username, str) else "")
+    username = username.strip().lstrip("@")
     if not username:
         return jsonify({"error": "username is required"}), 400
+    max_items = data.get("max_items", CA_FETCH_DEFAULT_ITEMS)
+    if (isinstance(max_items, bool) or not isinstance(max_items, int)
+            or max_items < 1):
+        return jsonify({"error": "max_items must be a whole number from 1 "
+                        f"to {CA_FETCH_MAX_ITEMS:,}"}), 400
+    max_items = min(max_items, CA_FETCH_MAX_ITEMS)
 
+    key = CA_FETCH_LOCK_KEY.format(user_id=current_user.id)
+    held = run_locks.holder(key)
+    if held and run_locks.job_over(key, held.partition(":")[0],
+                                   CA_FETCH_RUNNING_TTL,
+                                   3 * CA_FETCH_BEAT_SECONDS):
+        # Its job ended or was stopped without freeing it (a deploy).
+        run_locks.free_if_held_by(key, held)
+        held = None
+    if held:
+        return _ca_fetch_running_response(held, username)
+    started = run_locks.count(
+        CA_FETCH_COUNT_KEY.format(user_id=current_user.id), 24 * 3600)
+    if started is not None and started > CA_FETCHES_PER_DAY:
+        return jsonify({"error": CA_FETCHES_PER_DAY_MESSAGE,
+                        "code": "too_many_fetches"}), 429
+
+    task_id = str(uuid.uuid4())
+    lock = run_locks.RunLock(key, ca_fetch_token(task_id, username),
+                             CA_FETCH_QUEUED_TTL)
+    if not lock.acquire():  # another press got there first
+        held = run_locks.holder(key)
+        if held:
+            return _ca_fetch_running_response(held, username)
+        return jsonify({"error": CA_FETCH_RUNNING_MESSAGE.format(
+            handle=username.lower()), "code": "fetch_running"}), 409
     from backend.tasks.external_sync import fetch_community_archive
-    task = fetch_community_archive.delay(
-        current_user.id, username,
-        max_items=min(int(data.get("max_items", 2000)), 10000))
-    return jsonify({"task_id": task.id, "status": "pending"}), 202
+    try:
+        fetch_community_archive.apply_async(
+            args=(current_user.id, username),
+            kwargs={"max_items": max_items}, task_id=task_id)
+    except Exception as e:
+        lock.release()
+        current_app.logger.exception(
+            "Could not queue the Community Archive fetch: %s",
+            describe_exception(e))
+        return jsonify({"error": "Could not start the fetch. Please try "
+                        "again."}), 500
+    return jsonify({"task_id": task_id, "status": "pending"}), 202
 
 
 # The hosts a bookmarked tweet's own link is on (X and its old name).
@@ -489,6 +602,7 @@ def _bookmark_link(url, tweet_id):
 
 
 @external_bp.route("/bookmarks/import", methods=["POST"])
+@body_limit(UPLOAD_MAX_BODY_BYTES)
 @login_required
 def import_bookmarks_json():
     """JSON import fallback for X bookmarks (no API credits needed).

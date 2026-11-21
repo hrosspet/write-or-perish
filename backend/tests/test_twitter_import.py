@@ -264,6 +264,10 @@ def _fake_task_module(monkeypatch):
     mod = types.ModuleType("backend.tasks.imports")
     task = MagicMock()
     task.delay.return_value = MagicMock(id="task-123")
+    # The confirm queues under its own task id (the id the account's
+    # import key names); recorded as a delay call for the checks below.
+    task.apply_async.side_effect = (
+        lambda args, task_id: task.delay(*args))
     mod.import_twitter_archive = task
     monkeypatch.setitem(sys.modules, "backend.tasks.imports", mod)
     return task
@@ -281,7 +285,9 @@ def test_confirm_dispatches_task(app, monkeypatch):
         "include_replies": False, "privacy_level": "private", "ai_usage": "none",
     })
     assert resp.status_code == 202, resp.get_json()
-    assert resp.get_json() == {"task_id": "task-123", "status": "queued", "total": 3}
+    body = resp.get_json()
+    assert body == {"task_id": body["task_id"], "status": "queued", "total": 3}
+    assert task.apply_async.call_args.kwargs["task_id"] == body["task_id"]
     args, _ = task.delay.call_args
     assert args[0] == u.id and args[1] == token
     assert args[2]["include_replies"] is False and args[2]["on_deleted"] is None
@@ -474,8 +480,9 @@ def test_confirm_records_the_tasks_owner(app, monkeypatch, owners):
     resp = client.post("/api/import/twitter/confirm",
                        json={"import_token": token})
     assert resp.status_code == 202, resp.get_json()
-    assert task_owned_by("task-123", u.id, {})
-    assert not task_owned_by("task-123", u.id + 1, {})
+    task_id = resp.get_json()["task_id"]
+    assert task_owned_by(task_id, u.id, {})
+    assert not task_owned_by(task_id, u.id + 1, {})
 
 
 def test_a_failed_import_answers_its_owner_only_without_raw_text(

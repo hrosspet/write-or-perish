@@ -35,63 +35,105 @@ def import_twitter_archive(self, user_id, token, options):
     """options: import_type, include_replies, privacy_level, ai_usage,
     on_deleted (already resolved by the confirm request)."""
     return import_twitter_archive_impl(
-        lambda **meta: self.update_state(**meta), user_id, token, options)
+        lambda **meta: self.update_state(**meta), user_id, token, options,
+        task_id=self.request.id)
 
 
-def import_twitter_archive_impl(update_state, user_id, token, options):
+def _held_import_key(user_id, token, task_id):
+    """The account's import key the confirm took for this job
+    (twitter_archive.IMPORT_LOCK_KEY), held by this run from now on with
+    the running TTL; an unlocked stand-in for a job queued before the
+    key existed (no task id)."""
+    from backend.utils import run_locks
+    from backend.utils import twitter_archive as ta
+    lock = run_locks.RunLock(ta.import_lock_key(user_id),
+                             ta.import_lock_token(task_id, token),
+                             ta.IMPORT_RUNNING_TTL)
+    if task_id:
+        lock.adopt()
+    return lock
+
+
+def _beat(lock):
+    """Refresh the job's key. Another confirm took it after it expired
+    (the job waited past IMPORT_QUEUED_TTL): this job goes on without it."""
+    from backend.utils import run_locks
+    try:
+        lock.beat()
+    except run_locks.RunLockLost:
+        logger.warning("Twitter import key was taken by another confirm")
+
+
+def import_twitter_archive_impl(update_state, user_id, token, options,
+                                task_id=None):
     """The task's work, with ``update_state`` passed in so it can run
-    without a worker."""
+    without a worker. The account's import key is refreshed from a thread
+    while it runs and freed however it ends."""
+    from backend.utils import run_locks
+    from backend.utils import twitter_archive as ta
+    with flask_app.app_context():
+        lock = _held_import_key(user_id, token, task_id)
+        try:
+            with run_locks.heartbeat(lock, ta.IMPORT_BEAT_SECONDS):
+                return _import_from_stash(update_state, user_id, token,
+                                          options, lock)
+        finally:
+            lock.release()
+
+
+def _import_from_stash(update_state, user_id, token, options, lock):
     from backend.extensions import db
     from backend.routes.import_data import (
         PROVENANCE_ARCHIVE_UPLOAD, _queued_privacy, create_twitter_nodes)
     from backend.utils import twitter_archive as ta
     from backend.utils.task_owner import UserFacingTaskError
 
-    with flask_app.app_context():
-        path = ta.stash_path(user_id, token)
-        if path is None or not path.exists():
-            # Written for the user: /import/status returns it as it is.
-            raise UserFacingTaskError(
-                "Import data expired — please upload the archive again.")
+    _beat(lock)
+    path = ta.stash_path(user_id, token)
+    if path is None or not path.exists():
+        # Written for the user: /import/status returns it as it is.
+        raise UserFacingTaskError(
+            "Import data expired — please upload the archive again.")
 
-        total = ta.stash_count(path)
-        from backend.tasks.profile_batch import mark_import_activity
+    total = ta.stash_count(path)
+    from backend.tasks.profile_batch import mark_import_activity
 
-        def progress(done):
-            update_state(state="PROGRESS", meta={
-                "user_id": user_id, "done": done, "total": total,
-            })
-            # A running import holds the profile build back (#598): at the
-            # start and after every committed batch.
-            mark_import_activity(user_id)
+    def progress(done):
+        update_state(state="PROGRESS", meta={
+            "user_id": user_id, "done": done, "total": total,
+        })
+        # A running import holds the profile build back (#598): at the
+        # start and after every committed batch.
+        mark_import_activity(user_id)
+        _beat(lock)
 
-        progress(0)
-        privacy_level, private_note = _queued_privacy(options)
-        try:
-            result = create_twitter_nodes(
-                user_id=user_id,
-                rows=ta.stash_iter(path),
-                total=total,
-                import_type=options.get("import_type", "separate_nodes"),
-                include_replies=bool(options.get("include_replies", False)),
-                privacy_level=privacy_level,
-                ai_usage=options.get("ai_usage", "none"),
-                on_deleted=options.get("on_deleted"),
-                provenance=PROVENANCE_ARCHIVE_UPLOAD,
-                batch_size=BATCH_SIZE,
-                on_progress=progress,
-            )
-        except Exception:
-            db.session.rollback()
-            logger.exception("Twitter import failed for user %s", user_id)
-            raise
-        finally:
-            ta.stash_delete(path)
+    progress(0)
+    privacy_level, private_note = _queued_privacy(options)
+    try:
+        result = create_twitter_nodes(
+            user_id=user_id,
+            rows=ta.stash_iter(path),
+            total=total,
+            import_type=options.get("import_type", "separate_nodes"),
+            include_replies=bool(options.get("include_replies", False)),
+            privacy_level=privacy_level,
+            ai_usage=options.get("ai_usage", "none"),
+            on_deleted=options.get("on_deleted"),
+            provenance=PROVENANCE_ARCHIVE_UPLOAD,
+            batch_size=BATCH_SIZE,
+            on_progress=progress,
+        )
+    except Exception:
+        db.session.rollback()
+        logger.exception("Twitter import failed for user %s", user_id)
+        raise
+    finally:
+        ta.stash_delete(path)
 
-        result["user_id"] = user_id
-        if private_note:
-            result["private_note"] = private_note
-        return result
+    result["user_id"] = user_id
+    if private_note:
+        result["private_note"] = private_note
+    return result
 
 
 def snapshot_dir_for(config):

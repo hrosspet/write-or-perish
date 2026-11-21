@@ -16,6 +16,7 @@ from backend.extensions import db
 from backend.utils.share import save_share_drafts_from_node
 from backend.utils.tool_meta import update_tool_meta, get_tool_meta_entry
 from backend.utils.timefmt import iso_utc
+from backend.utils.request_size import LONG_TEXT_MAX_BODY_BYTES, body_limit
 from backend.utils.slugs import permalink_for
 from backend.utils.privacy import (
     AIUsage, PrivacyLevel, can_user_access_node)
@@ -81,6 +82,7 @@ def list_shares():
 
 
 @share_bp.route("", methods=["POST"])
+@body_limit(LONG_TEXT_MAX_BODY_BYTES)
 @login_required
 def create_share():
     """Manually create a share draft from the Share page."""
@@ -102,6 +104,7 @@ def create_share():
 
 
 @share_bp.route("/<int:share_id>", methods=["PATCH"])
+@body_limit(LONG_TEXT_MAX_BODY_BYTES)
 @login_required
 def update_share(share_id):
     """Edit a draft's content/type. Published items must be revoked first —

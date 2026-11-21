@@ -9,6 +9,7 @@ from backend.utils.privacy import (
 )
 from backend.utils.proposals import find_own_pending_proposal
 from backend.utils.timefmt import iso_utc
+from backend.utils.request_size import LONG_TEXT_MAX_BODY_BYTES, body_limit
 from backend.utils.todo_lock import (
     TODO_BUSY_CODE, TODO_BUSY_MESSAGE, TodoBusy, lock_user_todo)
 from backend.utils.tool_meta import get_tool_meta_entry
@@ -95,6 +96,7 @@ def get_todo():
 
 
 @todo_bp.route("/", methods=["PATCH"])
+@body_limit(LONG_TEXT_MAX_BODY_BYTES)
 @login_required
 def patch_todo():
     """Update the latest todo version in place (checkbox toggles, the row
@@ -145,6 +147,7 @@ def patch_todo():
 
 
 @todo_bp.route("/", methods=["PUT"])
+@body_limit(LONG_TEXT_MAX_BODY_BYTES)
 @login_required
 def update_todo():
     """Create a new todo version (the editor's Save, and Create).

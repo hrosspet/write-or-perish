@@ -3119,9 +3119,10 @@ class DiscountCodeAttempt(db.Model):
 
 
 class BillingRequest(db.Model):
-    """A checkout started or a subscription synced by an account (#697),
-    for the hourly limits on both (CHECKOUT_STARTS_PER_HOUR,
-    BILLING_SYNCS_PER_HOUR; utils/billing_limits), or a call to the paid
+    """A checkout started, a subscription synced or the billing page
+    (Stripe's portal) opened by an account (#697), for the hourly limits
+    on each (CHECKOUT_STARTS_PER_HOUR, BILLING_SYNCS_PER_HOUR,
+    BILLING_PORTALS_PER_HOUR; utils/billing_limits), or a call to the paid
     X API it started (a bookmark sync by hand, an invite's handle lookup),
     for the daily limits on those. Only who, which and when."""
     __tablename__ = "billing_request"
@@ -3129,7 +3130,8 @@ class BillingRequest(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
                         nullable=False, index=True)
-    # "checkout", "sync", "x_bookmark_sync" or "x_invite_lookup".
+    # "checkout", "sync", "portal", "x_bookmark_sync" or "x_invite_lookup"
+    # (at most 16 characters).
     kind = db.Column(db.String(16), nullable=False)
     created_at = db.Column(db.DateTime, nullable=False,
                            default=datetime.utcnow, index=True)

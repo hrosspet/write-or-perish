@@ -1,6 +1,18 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { onPageReturn } from '../utils/pageReturn';
 
+// A stream the server refused (it answered 400, 404, or 429 when the account
+// holds the most open streams) is asked for again after reconnectDelay, then
+// twice as long after each refusal in a row, up to this; a stream that opens
+// starts over at reconnectDelay.
+export const RECONNECT_MAX_DELAY_MS = 60000;
+
+/** The wait before the next try after `failures` refusals in a row. */
+export function reconnectWait(reconnectDelay, failures) {
+  return Math.min(reconnectDelay * 2 ** Math.max(failures - 1, 0),
+    RECONNECT_MAX_DELAY_MS);
+}
+
 /**
  * useSSE hook for subscribing to Server-Sent Events.
  *
@@ -12,7 +24,9 @@ import { onPageReturn } from '../utils/pageReturn';
  * @param {boolean} options.enabled - Whether to connect (default: false)
  * @param {Function} options.onMessage - Callback for generic messages
  * @param {Object} options.eventHandlers - Map of event names to handlers
- * @param {number} options.reconnectDelay - Delay between reconnection attempts (default: 3000ms)
+ * @param {number} options.reconnectDelay - Delay before the first reconnection
+ *   attempt (default: 3000ms); it doubles with each refusal in a row, up to
+ *   RECONNECT_MAX_DELAY_MS
  * @param {boolean} options.reconnectOnReturn - Open a fresh connection each
  *   time the user returns to the page (default: false). Only for a stream
  *   that sends what the page already has again on connect, and whose
@@ -34,6 +48,8 @@ export function useSSE(url, options = {}) {
   const eventSourceRef = useRef(null);
   const reconnectTimeoutRef = useRef(null);
   const connectRef = useRef(null);
+  // Refused connections in a row (reconnectWait); an open one resets it.
+  const failuresRef = useRef(0);
 
   const disconnect = useCallback(() => {
     if (reconnectTimeoutRef.current) {
@@ -61,6 +77,7 @@ export function useSSE(url, options = {}) {
       eventSourceRef.current = eventSource;
 
       eventSource.onopen = () => {
+        failuresRef.current = 0;
         setIsConnected(true);
         setError(null);
       };
@@ -74,13 +91,15 @@ export function useSSE(url, options = {}) {
         if (eventSource.readyState === EventSource.CLOSED) {
           setError('Connection closed');
 
-          // Attempt to reconnect after delay
-          // Use connectRef.current to get the latest connect function with current URL
+          // Attempt to reconnect after a delay that grows with each refusal
+          // in a row. Use connectRef.current to get the latest connect
+          // function with current URL
+          failuresRef.current += 1;
           reconnectTimeoutRef.current = setTimeout(() => {
             if (connectRef.current) {
               connectRef.current();
             }
-          }, reconnectDelay);
+          }, reconnectWait(reconnectDelay, failuresRef.current));
         }
       };
 
@@ -125,6 +144,11 @@ export function useSSE(url, options = {}) {
   useEffect(() => {
     connectRef.current = connect;
   }, [connect]);
+
+  // Another stream starts with the first delay again.
+  useEffect(() => {
+    failuresRef.current = 0;
+  }, [url]);
 
   // Connect/disconnect based on enabled state
   useEffect(() => {

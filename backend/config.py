@@ -253,6 +253,11 @@ class Config:
         os.environ.get("CHECKOUT_STARTS_PER_HOUR") or "10")
     BILLING_SYNCS_PER_HOUR = int(
         os.environ.get("BILLING_SYNCS_PER_HOUR") or "20")
+    # INTRODUCED HEURISTIC: Stripe's billing page (the portal) opened per
+    # account per hour; each press makes a session there. A person
+    # changing a card or cancelling opens it a few times.
+    BILLING_PORTALS_PER_HOUR = int(
+        os.environ.get("BILLING_PORTALS_PER_HOUR") or "20")
     # One trial per card (#697, utils/trial_cards): the key of the card
     # fingerprint's hash. Unset: SECRET_KEY. Changing it (or SECRET_KEY
     # while it is unset) forgets every card that had a trial.
