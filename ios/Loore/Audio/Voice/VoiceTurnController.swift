@@ -641,7 +641,7 @@ final class VoiceTurnController {
                 if !self.longRecordingWarned && self.elapsed >= self.timings.longRecording {
                     self.longRecordingWarned = true
                     self.audio.playLongRecordingWarning()
-                    self.notices.toast("You’ve been recording for 59 minutes — consider stopping soon and continuing in a new recording.", duration: 10)
+                    self.notices.toast(RecordingLimits.longRecordingWarning, duration: 10)
                     self.notices.notify(.longRecording)
                 }
                 let whole = Int(self.elapsed)

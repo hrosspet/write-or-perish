@@ -176,6 +176,45 @@ final class SSEClientTests: XCTestCase {
         XCTAssertEqual(second?.queryItems, [URLQueryItem(name: "last_chunk", value: "0")])
     }
 
+    func testTheDictationStreamContinuesAfterTheServersTwoHourClose() async {
+        // The server ends one transcription-stream connection after two hours
+        // with `close` (backend/routes/sse.py), recording or not. The dictation
+        // reconnects from its last chunk, so a recording past two hours still
+        // gets its live text and the two-hour `chunk_error` (Peter, 2026-11-21).
+        final class Counter: @unchecked Sendable { var n = 0; let lock = NSLock()
+            func next() -> Int { lock.lock(); defer { lock.unlock() }; n += 1; return n } }
+        let counter = Counter()
+        StubURLProtocol.install { _ in
+            if counter.next() == 1 {
+                return .eventStream("event: chunk_complete\ndata: {\"chunk_index\": 479, \"text\": \"hi\", \"status\": \"completed\"}\n\nevent: close\ndata: {\"message\": \"Connection timeout\"}\n\n")
+            }
+            return .eventStream("event: chunk_error\ndata: {\"chunk_index\": 480, \"error\": \"Saved as audio\", \"status\": \"failed\", \"code\": \"recording_too_long\"}\n\nevent: all_complete\ndata: {\"content\": \"hi\"}\n\n")
+        }
+        let tracker = LastChunkTracker()
+        var options = DictationController.streamOptions
+        XCTAssertFalse(options.terminalEvents.contains("close"))
+        XCTAssertTrue(options.terminalEvents.contains("all_complete"))
+        XCTAssertTrue(options.terminalEvents.contains(RecordingDevice.takenOverCode))
+        options.reconnectDelay = 0.05
+        let sse = SSEClient(api: makeStubbedClient())
+        var events: [String] = []
+        do {
+            for try await message in sse.subscribe(path: APIPath.sseDraftTranscription("s"), options: options,
+                                                   resumeQuery: { tracker.resumeQuery() }) {
+                if case .event(let e) = message {
+                    tracker.observe(e)
+                    events.append(e.event)
+                }
+            }
+        } catch {
+            XCTFail("\(error)")
+        }
+        XCTAssertEqual(events, ["chunk_complete", "close", "chunk_error", "all_complete"])
+        XCTAssertEqual(StubURLProtocol.requests.count, 2)
+        let second = StubURLProtocol.requests[1].url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false) }
+        XCTAssertEqual(second?.queryItems, [URLQueryItem(name: "last_chunk", value: "479")])
+    }
+
     func testStallTriggersReconnect() async {
         final class Counter: @unchecked Sendable { var n = 0; let lock = NSLock()
             func next() -> Int { lock.lock(); defer { lock.unlock() }; n += 1; return n } }

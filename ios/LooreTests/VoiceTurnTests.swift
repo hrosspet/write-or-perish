@@ -1601,6 +1601,12 @@ final class VoiceTurnTests: XCTestCase {
         await wait("warned") { notices.notified.contains(.longRecording) }
         XCTAssertTrue(audio.events.contains("sound.59"))
         XCTAssertEqual(audio.events.filter { $0 == "sound.59" }.count, 1)
+        // Nothing ends at an hour: the words name the two-hour transcription
+        // limit (Peter, 2026-11-21), not a stop.
+        XCTAssertTrue(notices.toasts.contains(RecordingLimits.longRecordingWarning), "\(notices.toasts)")
+        XCTAssertTrue(RecordingLimits.longRecordingWarning.contains("up to two hours"))
+        XCTAssertFalse(RecordingLimits.longRecordingWarning.contains("stopping soon"))
+        XCTAssertEqual(LocalNotice.longRecording.body, RecordingLimits.longRecordingAdvice)
     }
 
     func testResumingAnInterruptedDraftContinuesItsNumbering() async throws {

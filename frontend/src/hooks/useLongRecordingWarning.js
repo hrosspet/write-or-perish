@@ -1,8 +1,14 @@
 import { useCallback, useEffect, useRef } from 'react';
 import { useToast } from '../contexts/ToastContext';
 
-// #127: recordings run into a cliff at ~60 minutes. Warn a minute before.
+// #127 reported a recording cut at about 60 minutes; the warning came at 59.
+// Nothing ends a recording at an hour now: one recording is turned into text
+// up to two hours (backend MAX_TRANSCRIBED_SECONDS, Peter 2026-11-21), and
+// the warning says so.
 export const LONG_RECORDING_WARNING_SEC = 59 * 60;
+export const LONG_RECORDING_WARNING_TEXT =
+  'You’ve been recording for 59 minutes. One recording is turned into text '
+  + 'up to two hours; for longer, continue in a new recording.';
 
 /**
  * Play a rising two-note "wrap up soon" chime via the Web Audio API.
@@ -76,9 +82,7 @@ export function useLongRecordingWarning(duration, active) {
     if (duration >= LONG_RECORDING_WARNING_SEC && !warnedRef.current) {
       warnedRef.current = true;
       playWarningSound(alertRef.current?.ctx);
-      addToast(
-        'You’ve been recording for 59 minutes — consider stopping '
-        + 'soon and continuing in a new recording.', 10000);
+      addToast(LONG_RECORDING_WARNING_TEXT, 10000);
     }
   }, [duration, addToast]);
 

@@ -112,10 +112,10 @@ describe('audio kept without its text', () => {
       const { result } = await startRecording({ onError });
 
       act(() => {
-        for (let i = 1440; i < 1460; i += 1) {
+        for (let i = 480; i < 500; i += 1) {
           mockSse.opts.onError({
             chunk_index: i, status: 'failed', code: 'recording_too_long',
-            error: 'Saved as audio, not turned into text: the recording is longer than six hours.',
+            error: 'Saved as audio, not turned into text: the recording is longer than two hours.',
           });
         }
       });
@@ -275,7 +275,7 @@ describe('a chunk past what one recording may hold', () => {
       });
 
       await act(async () => {
-        mockRecorderOpts.onChunkReady(new Blob(['a']), 2880);
+        mockRecorderOpts.onChunkReady(new Blob(['a']), 960);
         await flush();
       });
 

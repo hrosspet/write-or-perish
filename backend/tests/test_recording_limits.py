@@ -374,32 +374,36 @@ class TestStreamingChunkLimits:
             self, app, client, alice, tasks):
         # Control (passes on main too): the apps' chunk sizes, two full
         # batches, the largest chunk measured, and the last chunk index of
-        # a six-hour recording at 15 s a chunk.
+        # a four-hour recording at 15 s a chunk.
         _draft, folder = _session(app, alice)
         for index in range(1, 41):
             resp = _chunk(client, "sess-1", index, _payload(WEB_CHUNK_BYTES))
             assert resp.status_code == 202, (index, resp.get_data(as_text=True))
         assert _chunk(client, "sess-1", 41, _payload(
             LARGEST_APP_CHUNK_BYTES)).status_code == 202
-        six_hours = limits.MAX_TRANSCRIBED_SECONDS // \
-            limits.STREAMING_CHUNK_SECONDS
-        assert _chunk(client, "sess-1", six_hours - 1,
+        four_hours = 4 * 60 * 60 // limits.STREAMING_CHUNK_SECONDS
+        assert _chunk(client, "sess-1", four_hours - 1,
                       _payload(WEB_CHUNK_BYTES)).status_code == 202
         assert tasks.transcribe_chunk_batch.delay.call_count == 2
 
-    def test_the_bounds_hold_a_six_hour_recording_with_room(self):
-        # Control: the numbers themselves, against the measured apps.
-        six_hours = 6 * 60 * 60
-        assert limits.MAX_TRANSCRIBED_SECONDS >= six_hours
-        assert limits.MAX_STREAMING_CHUNKS >= 2 * six_hours // 15
-        # Twelve hours of the web's measured chunks.
+    def test_the_bounds_are_peters_and_hold_a_four_hour_recording(self):
+        # Control: the numbers themselves (Peter, 2026-11-21), against the
+        # measured apps.
+        two_hours, four_hours = 2 * 60 * 60, 4 * 60 * 60
+        assert limits.MAX_TRANSCRIBED_SECONDS == two_hours
+        assert limits.MAX_STREAMING_CHUNKS == four_hours // 15 == 960
+        assert limits.MAX_UPLOAD_TRANSCRIBED_SECONDS == four_hours
+        # The bytes follow from the four hours at 192 kbps, about 346 MB:
+        # room for four hours of the web's measured chunks.
+        assert limits.MAX_STREAMING_SESSION_BYTES == 345_600_000
         assert limits.MAX_STREAMING_SESSION_BYTES >= \
-            2 * six_hours // 15 * WEB_CHUNK_BYTES
+            limits.MAX_STREAMING_CHUNKS * WEB_CHUNK_BYTES
         assert limits.MAX_STREAMING_CHUNK_BYTES >= 16 * LARGEST_APP_CHUNK_BYTES
 
 
 class TestFinalizeCount:
-    @pytest.mark.parametrize("total", ["5", 10**9, -1, 2.5, True])
+    @pytest.mark.parametrize("total", ["5", 10**9, -1, 2.5, True,
+                                       limits.MAX_STREAMING_CHUNKS + 1])
     def test_a_count_no_recording_can_have_is_refused(
             self, app, client, alice, tasks, total):
         draft, _folder = _session(app, alice)
@@ -414,8 +418,9 @@ class TestFinalizeCount:
     def test_control_a_real_count_finalizes(self, app, client, alice, tasks):
         _session(app, alice)
 
+        # The count of a four-hour recording at 15 s a chunk.
         resp = client.post("/api/drafts/streaming/sess-1/finalize",
-                           json={"total_chunks": 1440})
+                           json={"total_chunks": 960})
 
         assert resp.status_code == 202, resp.get_data(as_text=True)
         tasks.finalize_draft_streaming.delay.assert_called_once()
@@ -2618,7 +2623,7 @@ def _uploaded(st, tr, name="upload.m4a", audio=None):
 @pytest.fixture
 def short_bound(tr, monkeypatch):
     """The upload bound at 25 s in pieces of 10 s (sent whole up to 10 s),
-    so a 30-second file stands for one past eight hours."""
+    so a 30-second file stands for one past four hours."""
     monkeypatch.setattr(tr, "MAX_UPLOAD_TRANSCRIBED_SECONDS", 25,
                         raising=False)
     monkeypatch.setattr(tr, "CHUNK_DURATION_SEC", 10, raising=False)

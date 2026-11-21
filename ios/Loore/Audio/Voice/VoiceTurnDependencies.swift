@@ -151,7 +151,7 @@ enum LocalNotice: String {
     var title: String {
         switch self {
         case .recordingPaused: return "Recording paused — tap to resume"
-        case .longRecording: return "You’ve been recording for 59 minutes"
+        case .longRecording: return RecordingLimits.longRecordingTitle
         case .resumeFailed: return "The recording could not resume"
         case .recordFailed: return "Loore could not start recording"
         case .gleanFailed: return "Loore could not start the glean"
@@ -163,7 +163,7 @@ enum LocalNotice: String {
         case .recordingPaused:
             return "The microphone stopped (a call, or another app or device took it). Everything up to the interruption is saved."
         case .longRecording:
-            return "Consider stopping soon and continuing in a new recording."
+            return RecordingLimits.longRecordingAdvice
         case .resumeFailed:
             return "The microphone did not restart. Open Loore and press Resume; everything up to the pause is saved."
         case .recordFailed, .gleanFailed:

@@ -184,6 +184,15 @@ final class DictationController {
         }
     }
 
+    /// The transcription stream's options. Ends on `all_complete` and on
+    /// `session_taken_over` (#388). Not on `close`: the server ends one
+    /// connection after two hours (`backend/routes/sse.py`), recording or not,
+    /// so the stream reconnects from the last chunk, as the web does; a
+    /// dictation past two hours keeps its live text and hears the two-hour
+    /// message (`RecordingLimits`).
+    nonisolated static let streamOptions = SSEClient.Options(stallTimeout: 45, reconnectDelay: 3, maxReconnects: 20,
+                                                 terminalEvents: ["all_complete", RecordingDevice.takenOverCode])
+
     /// The draft's transcription stream: live `content_update`, then `all_complete`.
     private func listen(_ sid: String, _ gen: Int) {
         guard let app else { return }
@@ -192,9 +201,7 @@ final class DictationController {
         // `session_taken_over` and ends the stream.
         let stream = app.sse.subscribe(path: APIPath.sseDraftTranscription(sid),
                                        query: [URLQueryItem(name: "device_key", value: RecordingDevice.key)],
-                                       options: .init(stallTimeout: 45, reconnectDelay: 3, maxReconnects: 20,
-                                                      terminalEvents: ["all_complete", "close",
-                                                                       RecordingDevice.takenOverCode]),
+                                       options: Self.streamOptions,
                                        resumeQuery: { tracker.resumeQuery() })
         sseTask = Task { [weak self] in
             do {
@@ -247,7 +254,7 @@ final class DictationController {
                 if !self.warned && self.elapsed >= 59 * 60 {
                     self.warned = true
                     self.app?.audio.sounds.playLongRecordingWarning()
-                    self.app?.toasts.show("You’ve been recording for 59 minutes — consider stopping soon and continuing in a new recording.", duration: 10)
+                    self.app?.toasts.show(RecordingLimits.longRecordingWarning, duration: 10)
                     LocalNotifier.post(.longRecording)
                 }
                 try? await Task.sleep(nanoseconds: 250_000_000)

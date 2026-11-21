@@ -2,14 +2,14 @@
 // (backend/utils/recording_limits.py).
 //
 // Audio kept without its text: past the length one recording may have
-// transcribed, the server stores the rest of a recording as audio and does
-// not turn it into text. Its transcription stream says so with a
-// `chunk_error` that carries this code; the recording goes on, and its text
-// ends with a note. Not a failure: no error sound, one message per
-// recording.
+// transcribed (two hours, MAX_TRANSCRIBED_SECONDS; Peter, 2026-11-21), the
+// server stores the rest of a recording as audio and does not turn it into
+// text. Its transcription stream says so with a `chunk_error` that carries
+// this code; the recording goes on, and its text ends with a note. Not a
+// failure: no error sound, one message per recording.
 export const UNTRANSCRIBED_MESSAGES = {
   recording_too_long:
-    'This recording is longer than six hours. The rest of it is saved as '
+    'This recording is longer than two hours. The rest of it is saved as '
     + 'audio, but not turned into text.',
 };
 

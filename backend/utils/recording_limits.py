@@ -10,10 +10,13 @@ Audio reaches the server in two ways:
   to ``POST /api/nodes/``) arrives whole or in 5 MB pieces, after an init
   that names its size and its piece count.
 
-Every number below is far above what the web and iPhone apps send, so a
-real recording never meets one, and each is checked by the routes and
-tasks themselves, for every account. What the apps send (measured
-2026-11-13):
+The lengths are Peter's (2026-11-21): one recording is turned into text up
+to two hours (MAX_TRANSCRIBED_SECONDS) and takes audio up to four
+(MAX_STREAMING_CHUNKS), and an uploaded file is turned into text up to four
+hours (MAX_UPLOAD_TRANSCRIBED_SECONDS); a long recording reaches them. Every
+other number below is far above what the web and iPhone apps send, so a
+real recording never meets one. Each is checked by the routes and tasks
+themselves, for every account. What the apps send (measured 2026-11-13):
 
 - iPhone: AAC at 64 kbps, 48 kHz mono (FMP4SegmentWriter), one chunk
   per 15 s: about 120 KB a chunk, 8 KB a second.
@@ -37,10 +40,10 @@ limits apply:
   end ``failed`` with NOT_TRANSCRIBED_TEXT, so the finalize waits for them
   no longer, and the recording's text ends with a note
   (untranscribed_note).
-- Its audio is refused only past bounds no recording made in the apps
-  reaches: a chunk over MAX_STREAMING_CHUNK_BYTES, a chunk index from
-  MAX_STREAMING_CHUNKS on, or more than MAX_STREAMING_SESSION_BYTES in
-  all. Audio accepted before stays.
+- Its audio is refused from chunk index MAX_STREAMING_CHUNKS on (four
+  hours at 15 s a chunk), and past bounds no recording made in the apps
+  reaches: a chunk over MAX_STREAMING_CHUNK_BYTES, or more than
+  MAX_STREAMING_SESSION_BYTES in all. Audio accepted before stays.
 
 An account holds at most MAX_OPEN_RECORDINGS open recordings that hold
 audio (open_recordings); a new start beyond them is refused. A recording
@@ -108,22 +111,26 @@ BOUND_BYTES_PER_SECOND = 192_000 // 8
 # web's rate in case a browser holds slices back and hands them over at once.
 MAX_STREAMING_CHUNK_BYTES = 8 * 1024 * 1024
 
-# INTRODUCED HEURISTIC: the most audio of one recording that is turned into
-# text. The apps set no maximum; they warn at 59 minutes (#127, which
-# reports a recording of 62 minutes). Six hours is far past that and bounds
-# what one recording can cost to transcribe.
-MAX_TRANSCRIBED_SECONDS = 6 * 60 * 60
+# Peter's decision (2026-11-21, "make it 2"; it was six hours): the most
+# audio of one recording that is turned into text, two hours. It bounds what
+# one recording costs to transcribe. The audio past it is stored without its
+# text, the apps say so once while recording, and the entry ends with a
+# note. The apps also warn at 59 minutes (#127).
+MAX_TRANSCRIBED_SECONDS = 2 * 60 * 60
 
-# INTRODUCED HEURISTIC: chunks one recording may have (a chunk_index must be
-# below it): twice the chunks of the longest transcribed recording, so the
-# shorter chunks that pausing, a locked phone or a resume cut never reach it,
-# and a recording that runs past six hours keeps its audio. 2,880 chunks;
-# 12 hours at 15 s a chunk.
+# Peter's decision (2026-11-21, "make the limit 4 hours"; it was twelve):
+# chunks one recording may have (a chunk_index must be below it), twice the
+# chunks of the longest transcribed recording: 960, four hours at 15 s a
+# chunk. The shorter chunks that pausing, a locked phone or a resume cut
+# count too, so a recording with many of them reaches it a little before
+# four hours of audio.
 MAX_STREAMING_CHUNKS = 2 * MAX_TRANSCRIBED_SECONDS // STREAMING_CHUNK_SECONDS
 
-# INTRODUCED HEURISTIC: audio bytes one recording may store: all its chunks
-# (12 hours) at BOUND_BYTES_PER_SECOND, about 1 GB. Twelve hours from the
-# web app are about 700 MB, from the iPhone about 350 MB.
+# INTRODUCED HEURISTIC (derived): audio bytes one recording may store: all
+# its chunks (four hours) at BOUND_BYTES_PER_SECOND, about 346 MB. Peter
+# (2026-11-21) found 1 GB too much and left the size open; it follows from
+# the four hours rather than being a number of its own. Four hours from the
+# web app are about 230 MB, from the iPhone about 115 MB.
 MAX_STREAMING_SESSION_BYTES = (
     MAX_STREAMING_CHUNKS * STREAMING_CHUNK_SECONDS * BOUND_BYTES_PER_SECOND)
 
@@ -201,13 +208,14 @@ PENDING_COUNTS_FOR = timedelta(hours=24)
 # The model the transcription is recorded at (utils/cost prices it).
 TRANSCRIPTION_MODEL = "gpt-4o-transcribe"
 
-# INTRODUCED HEURISTIC: the most audio of one uploaded file that is turned
-# into text, as decoded. A 200 MB file (the largest upload) at the iPhone's
-# 64 kbps is about 7 hours; eight leaves room. A longer file is transcribed
-# to this length (the audio is cut there before it is sent, so the bound
-# holds also when the length cannot be measured); the whole file stays with
-# its entry, and its text ends with UPLOAD_NOTE_PART.
-MAX_UPLOAD_TRANSCRIBED_SECONDS = 8 * 60 * 60
+# Peter's decision (2026-11-21, "make it 4 hours"; it was eight): the most
+# audio of one uploaded file that is turned into text, as decoded. A 200 MB
+# file (the largest upload, which stays) at the iPhone's 64 kbps holds about
+# 7 hours, so a file of the largest size can be longer. A longer file is
+# transcribed to this length (the audio is cut there before it is sent, so
+# the bound holds also when the length cannot be measured); the whole file
+# stays with its entry, and its text ends with UPLOAD_NOTE_PART.
+MAX_UPLOAD_TRANSCRIBED_SECONDS = 4 * 60 * 60
 
 # At the count, when recovery offers some of the open recordings, and when
 # it offers none (they are being recorded elsewhere or saved).
@@ -232,7 +240,7 @@ TOO_MANY_UPLOADS_TEXT = (
 UPLOAD_EXPIRED_TEXT = ("This upload stopped arriving more than a day ago. "
                        "Please upload the file again.")
 UPLOAD_FAILED_TEXT = "The upload did not finish. Please upload the file again."
-UPLOAD_NOTE_PART = ("*Note: The file is longer than eight hours, so the "
+UPLOAD_NOTE_PART = ("*Note: The file is longer than four hours, so the "
                     "rest of it was not turned into text. Its audio is "
                     "saved.*")
 RECORDINGS_BUSY_TEXT = ("Loore is busy starting another recording of "
@@ -269,7 +277,7 @@ MAX_CHUNK_AUDIO_SECONDS = 2 * 60
 
 # NodeTranscriptChunk.error of a chunk kept without its text.
 NOT_TRANSCRIBED_TEXT = ("Saved as audio, not turned into text: the "
-                        "recording is longer than six hours.")
+                        "recording is longer than two hours.")
 NOT_READ_TEXT = ("Saved as audio, not turned into text: this part of the "
                  "recording could not be read.")
 NOT_VALID_TEXT = ("Saved as audio, not turned into text: this part of the "
@@ -279,9 +287,9 @@ _ERROR_TEXTS = {TOO_LONG: NOT_TRANSCRIBED_TEXT, UNREADABLE: NOT_READ_TEXT,
 
 # The note at the end of a recording's text: some of it was transcribed,
 # none of it was; part of it could not be read.
-NOTE_PART = ("*Note: The recording is longer than six hours, so the rest "
+NOTE_PART = ("*Note: The recording is longer than two hours, so the rest "
              "of it was not turned into text. Its audio is saved.*")
-NOTE_ALL = ("*Note: The recording is longer than six hours, so it was not "
+NOTE_ALL = ("*Note: The recording is longer than two hours, so it was not "
             "turned into text. Its audio is saved.*")
 NOTE_UNREADABLE = ("*Note: Part of this recording could not be read, so it "
                    "was not turned into text. Its audio is saved.*")

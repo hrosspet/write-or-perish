@@ -53,10 +53,10 @@ export default function StreamingMicButton({
     onError,
   });
 
-  // #127: warn just before the ~60-minute cliff so a long recording can be
-  // wrapped up deliberately instead of silently dropping content. Fires once
-  // per recording, with a sound as well as a toast — these sessions often run
-  // with the screen off, so a visual-only warning would go unnoticed.
+  // #127: at 59 minutes, say that one recording is turned into text up to
+  // two hours (useLongRecordingWarning). Fires once per recording, with a
+  // sound as well as a toast — these sessions often run with the screen off,
+  // so a visual-only warning would go unnoticed.
   const { armAlertContext } = useLongRecordingWarning(
     duration, !['idle', 'complete', 'error'].includes(sessionState));
 
