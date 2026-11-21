@@ -252,6 +252,45 @@ def test_a_load_under_way_stops_before_its_next_part(world, monkeypatch):
         assert _snapshot(user_id)[0] == straight[0]
 
 
+def test_a_load_a_no_cut_short_ends_as_the_no_ends_it(world, monkeypatch):
+    """Yes, part of the load, No (the run links what it loaded), then the
+    mark: the load ends stopped by the No, not held, so it can never
+    finish as "done" with part of the entries. Unmarked, a Yes again
+    loads the rest in a new load, as after any No."""
+    _bundle(world, monkeypatch)
+    prod = world.prod()
+    with prod.app_context():
+        _payments_on(prod)
+        user_id = _let_in_user().id
+        client = prod.test_client()
+        _login(client, user_id)
+        _yes(client)
+        first = world.dispatched[-1]
+        assert pbl.run_load(first, dispatch=lambda *a, **k: None,
+                            max_chunks=1) == "continuing"
+        _login(client, user_id)
+        client.put("/api/dashboard/user", json={"prefill_consent": "no"})
+        assert pbl.run_load(first, dispatch=lambda *a, **k: None,
+                            max_chunks=1) == "continuing"
+        cut = db.session.get(PrefillBundleLoad, first)
+        assert (cut.stage, cut.error) == ("links", "prefill_declined")
+        _set_spam(user_id, True)
+        touched = _watch_storage(monkeypatch)
+        assert pbl.run_load(first, dispatch=lambda *a, **k: None) == "stopped"
+        assert touched == [] and world.calls == []
+        stopped = db.session.get(PrefillBundleLoad, first)
+        assert (stopped.status, stopped.error) == ("stopped", "prefill_declined")
+        _set_spam(user_id, False)
+        _visit(client, user_id)
+        assert world.dispatched == [first]
+        _login(client, user_id)
+        _yes(client)
+        second = world.dispatched[-1]
+        assert second != first
+        assert _run_until_done(second) == "done"
+        assert Node.query.filter_by(human_owner_id=user_id).count() == 7
+
+
 def test_a_load_waiting_for_its_merge_makes_no_call(world, monkeypatch):
     """Marked as spam while the load waits for its final merge: the merge
     is skipped before its model call (also when the mark lands while it

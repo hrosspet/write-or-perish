@@ -1138,6 +1138,24 @@ def _finish(load, token, dispatch):
     return "stopped" if declined else "done"
 
 
+def _stop_status(load_id, code):
+    """How a BundleError ``code`` ends the load: (status, error). A no
+    before anything was loaded stops it: nothing to show the person. The
+    spam hold keeps it where it is until the account is no longer held
+    (#732), except a load a no already cut short (it was linking what it
+    had loaded): that one ends as the no ends it, stopped, and a later
+    Yes loads the rest in a new load. Anything else is a failure the
+    admin sees."""
+    if code == "prefill_declined":
+        return "stopped", code
+    if code != HELD_AS_SPAM:
+        return "failed", code
+    db.session.rollback()
+    declined = db.session.query(PrefillBundleLoad.error).filter(
+        PrefillBundleLoad.id == load_id).scalar() == "prefill_declined"
+    return ("stopped", "prefill_declined") if declined else (HELD, code)
+
+
 def _stop_reason(load, user, storage):
     """Why the load must stop now (a code), or None. A no is not a stop
     here: _work links what was loaded first."""
@@ -1243,13 +1261,8 @@ def run_load(load_id, *, budget=RUN_SECONDS, dispatch=None, max_chunks=None):
         db.session.rollback()
         return "lost"
     except pb.BundleError as e:
-        # A no before anything was loaded stops the load: nothing to show
-        # the person. The spam hold keeps it where it is until the account
-        # is no longer held (#732). Anything else is a failure the admin
-        # sees.
-        status = {"prefill_declined": "stopped",
-                  HELD_AS_SPAM: HELD}.get(e.code, "failed")
-        _fail(load_id, token, e.code, status=status)
+        status, code = _stop_status(load_id, e.code)
+        _fail(load_id, token, code, status=status)
         return status
     except Exception as e:  # noqa: BLE001 - storage errors included: retried
         db.session.rollback()
