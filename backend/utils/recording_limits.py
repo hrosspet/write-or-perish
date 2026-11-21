@@ -55,7 +55,8 @@ recording without audio does not count there: at most MAX_EMPTY_STARTS of
 them are started within EMPTY_SESSION_EXPIRES_AFTER, and one older than
 that is a new start when its first audio comes. A recording left untouched
 for OPEN_COUNTS_FOR is treated as a new start too when it takes audio
-again (audio_refusal): the usage limit, then the count. Its audio is kept
+again (audio_refusal): the paid set, as at an init, then the usage limit,
+then the count. Its audio is kept
 either way and can be saved. Each start takes the account's lock and
 counts again inside it (lock_account), so two starts at once cannot both
 pass. Recordings without audio older than EMPTY_SESSION_REMOVED_AFTER are
@@ -743,10 +744,17 @@ def audio_refusal(draft, now=None):
       the account's most recently started recording, the one being spoken
       into. After that time its first audio is a new start: the usage
       limit (402), then the count.
+    A new start (the two cases above that ask the usage limit
+    unconditionally) also needs what a recording's init needs: an account
+    that may make a billed call (402 ``subscription_required``,
+    utils/subscriptions.refuse_billed_call). A recording under way, or an
+    empty one within its EMPTY_SESSION_EXPIRES_AFTER, is not asked: it was
+    accepted at its start and is transcribed to its end.
     Under the account's lock when a check runs (held until the caller
     commits)."""
     from backend.extensions import db
-    from backend.models import Draft, NodeTranscriptChunk
+    from backend.models import Draft, NodeTranscriptChunk, User
+    from backend.utils.subscriptions import refuse_billed_call
     now = now or datetime.utcnow()
     has_audio = db.session.query(NodeTranscriptChunk.id).filter(
         NodeTranscriptChunk.session_id == draft.session_id).first() is not None
@@ -761,6 +769,10 @@ def audio_refusal(draft, now=None):
         return recording_start_refusal(
             draft.user_id, exclude_draft_id=draft.id,
             usage=not _newest_recording(draft))
+    refused = refuse_billed_call(db.session.get(User, draft.user_id),
+                                 "transcribe")
+    if refused is not None:
+        return refused
     return recording_start_refusal(draft.user_id, exclude_draft_id=draft.id,
                                    usage=True)
 

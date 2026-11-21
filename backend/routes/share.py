@@ -163,6 +163,14 @@ def publish_share(share_id):
     share = _get_own_share_or_404(share_id)
     if not share:
         return jsonify({"error": "Not found"}), 404
+    # Read again with the row locked to the commit (PostgreSQL): a second
+    # publish of the same share at the same moment waits here, then finds
+    # it published.
+    share = db.session.get(ShareDraft, share_id, with_for_update=True,
+                           populate_existing=True)
+    if share is None:
+        # Deleted in the meantime (the user's own delete).
+        return jsonify({"error": "Not found"}), 404
     if share.status == "published":
         return jsonify(_serialize(share)), 200
 
@@ -173,6 +181,19 @@ def publish_share(share_id):
     refusal = publish_refusal(content or "", current_user.id)
     if refusal is not None:
         return refusal
+
+    # The publish is claimed before its node is made: one conditional
+    # UPDATE in this transaction, so of two publishes only one makes a
+    # public node (also where the row lock above is not taken).
+    claimed = ShareDraft.query.filter(
+        ShareDraft.id == share.id, ShareDraft.status != "published",
+    ).update({ShareDraft.status: "published"}, synchronize_session=False)
+    if not claimed:
+        db.session.rollback()
+        share = db.session.get(ShareDraft, share.id, populate_existing=True)
+        if share is None:
+            return jsonify({"error": "Not found"}), 404
+        return jsonify(_serialize(share)), 200
 
     # Identity follows content: republishing UNCHANGED content restores the
     # same node (deleted_at cleared) so an existing discussion reattaches —

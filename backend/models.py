@@ -1349,6 +1349,9 @@ class UserProfile(db.Model):
     tts_task_id = db.Column(db.String(255), nullable=True)
     tts_task_status = db.Column(db.String(20), nullable=True)
     tts_task_progress = db.Column(db.Integer, default=0)
+    # When the current speech run was started by the route
+    # (utils/audio_storage.claim_tts_start, PROFILE_TTS_START_HELD_FOR).
+    tts_requested_at = db.Column(db.DateTime, nullable=True)
 
     # Relationship back to user
     user = db.relationship("User", backref="profiles")
@@ -2324,6 +2327,10 @@ class PollResponse(db.Model):
     generated_by = db.Column(db.String(64), nullable=True)
     draft_task_id = db.Column(db.String(255), nullable=True)
     draft_requested_at = db.Column(db.DateTime, nullable=True)
+    # How many drafts the user asked for on this answer (routes/updates
+    # MAX_DRAFTS_PER_ANSWER).
+    draft_count = db.Column(db.Integer, nullable=False, default=0,
+                            server_default="0")
     sent_at = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow,
@@ -3114,14 +3121,15 @@ class DiscountCodeAttempt(db.Model):
 class BillingRequest(db.Model):
     """A checkout started or a subscription synced by an account (#697),
     for the hourly limits on both (CHECKOUT_STARTS_PER_HOUR,
-    BILLING_SYNCS_PER_HOUR; utils/billing_limits). Only who, which and
-    when."""
+    BILLING_SYNCS_PER_HOUR; utils/billing_limits), or a call to the paid
+    X API it started (a bookmark sync by hand, an invite's handle lookup),
+    for the daily limits on those. Only who, which and when."""
     __tablename__ = "billing_request"
 
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
                         nullable=False, index=True)
-    # "checkout" or "sync".
+    # "checkout", "sync", "x_bookmark_sync" or "x_invite_lookup".
     kind = db.Column(db.String(16), nullable=False)
     created_at = db.Column(db.DateTime, nullable=False,
                            default=datetime.utcnow, index=True)

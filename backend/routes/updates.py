@@ -25,6 +25,16 @@ logger = logging.getLogger(__name__)
 
 updates_bp = Blueprint("updates_bp", __name__)
 
+# Drafts one answer may ask for. The web and iPhone apps offer "Draft with
+# AI" once per answer, and again only after a draft that did not work
+# (draft_failed), so a real answer asks for one or two; five leaves room
+# for a few failures in a row. Writing the answer by hand stays possible
+# past it. Each draft is a billed model call on the polls system account.
+MAX_DRAFTS_PER_ANSWER = 5
+TOO_MANY_DRAFTS_TEXT = ("This answer has had as many AI drafts as Loore "
+                        "offers. You can still write your own answer.")
+DRAFT_IN_PROGRESS_TEXT = "Draft still generating."
+
 
 def _updates_enabled():
     return current_app.config.get("DEV_UPDATES_V1", True)
@@ -254,7 +264,9 @@ def request_draft(poll_id):
     """Opt-in 1: the user asks the LLM to draft an answer from their
     archive. Refused when their global AI-usage setting opts out. No
     spend-cap check: draft costs land on the polls system account, not
-    the user (they're answering OUR question)."""
+    the user (they're answering OUR question). One draft at a time, and
+    at most MAX_DRAFTS_PER_ANSWER per answer (then 429
+    ``too_many_drafts``; the answer can still be written by hand)."""
     from backend.utils.privacy import AI_ALLOWED
     # Payments on (#438): a draft is a billed model call, so none without
     # the paid set. Writing an answer by hand stays.
@@ -272,17 +284,47 @@ def request_draft(poll_id):
                      "still write an answer yourself."}), 403
 
     resp = _get_or_create_response(poll)
-    if resp.status == "sent":
-        return jsonify({"error": "Already sent."}), 409
-    if resp.status == "drafting":
-        return jsonify({"response": _serialize_response(resp)}), 200
-
-    resp.status = "drafting"
-    resp.draft_requested_at = datetime.utcnow()
+    if resp.id is None:
+        db.session.flush()
+    # The move into 'drafting' is one conditional UPDATE: of two requests
+    # at once only one matches, and only that one queues a draft. It also
+    # counts the draft against MAX_DRAFTS_PER_ANSWER.
+    claimed = PollResponse.query.filter(
+        PollResponse.id == resp.id,
+        PollResponse.status.notin_(("drafting", "sent")),
+        PollResponse.draft_count < MAX_DRAFTS_PER_ANSWER,
+    ).update({
+        PollResponse.status: "drafting",
+        PollResponse.draft_requested_at: datetime.utcnow(),
+        PollResponse.draft_count: PollResponse.draft_count + 1,
+    }, synchronize_session=False)
     db.session.commit()
+    if not claimed:
+        db.session.refresh(resp)
+        if resp.status == "sent":
+            return jsonify({"error": "Already sent."}), 409
+        if resp.status == "drafting":
+            return jsonify({"response": _serialize_response(resp)}), 200
+        return jsonify({"error": TOO_MANY_DRAFTS_TEXT,
+                        "code": "too_many_drafts"}), 429
 
     from backend.tasks.poll_draft import submit_poll_draft
-    submit_poll_draft.delay(resp.id)
+    try:
+        submit_poll_draft.delay(resp.id)
+    except Exception:
+        # Nothing was queued: the answer leaves 'drafting' as a draft that
+        # did not work (the person can write it or ask again), and the
+        # request is not counted.
+        db.session.rollback()
+        PollResponse.query.filter(
+            PollResponse.id == resp.id,
+            PollResponse.status == "drafting",
+        ).update({
+            PollResponse.status: "draft_failed",
+            PollResponse.draft_count: PollResponse.draft_count - 1,
+        }, synchronize_session=False)
+        db.session.commit()
+        raise
     return jsonify({"response": _serialize_response(resp)}), 202
 
 
@@ -298,8 +340,18 @@ def save_response(poll_id):
         return jsonify({"error": "Answer is empty."}), 400
 
     resp = _get_or_create_response(poll)
+    if resp.id is not None:
+        # Read again with the row locked to the commit (PostgreSQL), so a
+        # draft request at the same moment either comes first (and this is
+        # refused below) or after this answer is saved.
+        resp = PollResponse.query.filter_by(id=resp.id).with_for_update() \
+            .populate_existing().one()
     if resp.status == "sent":
         return jsonify({"error": "Already sent."}), 409
+    if resp.status == "drafting":
+        # The answer is not changed while its draft is being written; the
+        # apps show the draft first and save the text after.
+        return jsonify({"error": DRAFT_IN_PROGRESS_TEXT}), 409
     # Keep AI provenance only when the text is the LLM draft verbatim —
     # the send flow always PUTs before /send, so an unconditional clear
     # here would strip the (AI-drafted) marker off every sent draft.
@@ -324,7 +376,7 @@ def send_response(poll_id):
     if resp is None or not (resp.content and resp.get_content().strip()):
         return jsonify({"error": "Nothing to send yet."}), 400
     if resp.status == "drafting":
-        return jsonify({"error": "Draft still generating."}), 409
+        return jsonify({"error": DRAFT_IN_PROGRESS_TEXT}), 409
     if resp.status == "sent":
         return jsonify({"response": _serialize_response(resp)}), 200
 
