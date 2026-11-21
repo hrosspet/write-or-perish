@@ -1427,8 +1427,9 @@ class ArtifactView(db.Model):
     any other artifact is stored as ``kind=USER_CREATED`` with
     ``artifact_id``, which tells the artifacts apart without naming them.
     Rows written before 2026-11-20 can still hold such a name in
-    ``kind`` (``artifact_id`` NULL); the Activity tab never sends it
-    (utils/activity.py)."""
+    ``kind`` (``artifact_id`` NULL) until ``flask artifact-names-cleanup
+    --apply`` has run (utils/artifact_name_cleanup.py); the Activity tab
+    never sends it (utils/activity.py)."""
     __tablename__ = "artifact_view"
     # Stored in ``kind`` for a view of an artifact the user created. Can't
     # be an artifact's name: names start with a letter or a digit
@@ -1444,6 +1445,10 @@ class ArtifactView(db.Model):
     # NULL for the kinds Loore defines and for rows from before
     # 2026-11-20. No foreign key: the cleanup of a deleted artifact
     # deletes these rows with its versions (utils/artifact_deletion).
+    # The clean-up of the rows from before 2026-11-20 also stores a
+    # deleted version's id, and, for a name with no artifact left, a
+    # negative number (no artifact's id) that only tells such names apart
+    # (utils/artifact_name_cleanup.py).
     artifact_id = db.Column(db.Integer, nullable=True)
     viewed_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
 
