@@ -1950,7 +1950,11 @@ def _fit_read_list(messages, tweets_text, stats, refs, model_id, config,
     as LLMProvider.count_tokens counts it; on any other model the rest is
     *estimate*d as the thread limit estimates a prompt (a function
     messages -> thread_size.Size) and the tweets at the tweets prior, the
-    upper end of what was measured, so the list errs short."""
+    upper end of what was measured, so the list errs short. On Haiku 5.5
+    that estimate is what keeps a Glean under its 100k price step (the
+    budget there, #733): the claude_new prior counts a character of the
+    list at 0.775 tokens, 1.5 to 2.2 times what Claude's tokenizer is
+    expected to make of it (test_glean_price_step has the numbers)."""
     from backend.llm_providers import message_text
     from backend.utils import community_archive as ca
     from backend.utils.thread_size import CHARS_PER_UNIT
