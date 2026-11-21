@@ -161,12 +161,10 @@ def prefill_community_archive_impl(user_id, handle, options, update_state=None,
     so a bootstrapped corpus never triggers a synchronous (full-price)
     build. Runs inside an app context; testable without Celery.
 
-    With COMMUNITY_ARCHIVE_API_KEY set (#712): the latest daily export
-    first, then only the newer tweets through API v1
-    (_prefill_export_then_newer). Without it: REST for small accounts, the
-    nightly parquet snapshot for large ones (the REST API retired on
-    2026-11-19: from then on a keyless pre-fill stops at the account
-    lookup with a message naming the key)."""
+    The latest daily export first, then only the newer tweets through API
+    v1 (_prefill_export_then_newer, #712). Needs COMMUNITY_ARCHIVE_API_KEY
+    (#721): without it the account lookup fails with the message naming
+    the key."""
     from backend.models import User
     from backend.utils import community_archive as ca
 
@@ -179,7 +177,6 @@ def prefill_community_archive_impl(user_id, handle, options, update_state=None,
                 "total": total, "handle": handle,
             })
 
-    from flask import current_app
     user = User.query.get(user_id)
     if not user:
         raise RuntimeError(f"User {user_id} not found")
@@ -202,64 +199,8 @@ def prefill_community_archive_impl(user_id, handle, options, update_state=None,
     # handle after this (a stale snapshot can map it to a former holder).
     account = resolved.account
     _check_x_id_conflict(user, account["account_id"], account["username"])
-    if ca.v1_enabled():
-        return _prefill_export_then_newer(user, account, options, state,
-                                          seed_now, started)
-    # Keyless, through the REST API. Size by what the archive actually
-    # holds (exact live count) — NOT all_account.num_tweets, the account's
-    # lifetime counter: an extension-ingested account can "report 13k
-    # tweets" while the archive holds 1k and the nightly snapshot none.
-    try:
-        archived = ca.count_archived(account["account_id"])
-    except Exception as e:  # header lookup failed → fall back to the counter
-        logger.warning("Community Archive count failed for @%s: %s", handle, e)
-        archived = None
-    expected = archived if archived is not None else (account.get("num_tweets") or 0)
-
-    # Small accounts page through the REST API; large ones read the nightly
-    # parquet snapshot (downloaded once per export into the data dir) —
-    # unless the snapshot holds fewer rows than the live archive (account
-    # ingested/updated after the export), in which case REST is complete
-    # and parquet is not.
-    min_parquet = current_app.config.get("COMMUNITY_ARCHIVE_PARQUET_MIN_TWEETS", 5000)
-    use_parquet = bool(options.get("force_parquet")) or expected >= min_parquet
-    if use_parquet:
-        snapshot_dir = snapshot_dir_for(current_app.config)
-        state("downloading", 0, None)
-        ca.ensure_snapshot(snapshot_dir, on_progress=lambda name, done, total: state(
-            f"downloading {name}", done >> 20, (total >> 20) if total else None))
-        in_snapshot = ca.count_parquet(account["account_id"], snapshot_dir)
-        if in_snapshot == 0 or (archived is not None and in_snapshot < archived):
-            logger.info("@%s: snapshot holds %s rows vs %s live — using REST",
-                        handle, in_snapshot, archived)
-            use_parquet = False
-    if use_parquet:
-        source = ca.iter_tweets_parquet(
-            account["account_id"], snapshot_dir,
-            on_page=lambda n: state("fetching", n, expected))
-    else:
-        source = ca.iter_tweets(
-            account["account_id"], on_page=lambda n: state("fetching", n, expected))
-    state("fetching", 0, expected)
-
-    collected = _CollectedTweets()
-    for raw in source:
-        collected.add(raw)
-    from backend.routes.import_data import PROVENANCE_PREFILL_CA
-    result = _import_prefill_rows(user_id, account["username"], collected.rows,
-                                  options, state, seed_now,
-                                  no_rows_error=ca.CommunityArchiveError,
-                                  x_id=account.get("account_id"),
-                                  provenance=PROVENANCE_PREFILL_CA)
-    result.update({
-        "source": "parquet" if use_parquet else "rest",
-        # What the archive actually holds vs. the account's self-reported
-        # lifetime counter (uploads are often partial) — so a low node
-        # count reads as "partial archive", not "import bug".
-        "archived": len(collected.seen), "retweets_skipped": collected.retweets,
-        "account_num_tweets": account.get("num_tweets") or 0,
-    })
-    return result
+    return _prefill_export_then_newer(user, account, options, state,
+                                      seed_now, started)
 
 
 class _CollectedTweets:
