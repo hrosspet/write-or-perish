@@ -13,6 +13,8 @@ sharing read from the audience lists alone.
 
 anna writes; ben and chidi read; dana is in nobody's circle. Through the
 routes, with the LLM task module mocked: no model is ever called."""
+import pytest
+
 from backend.tests.test_circles import (  # noqa: F401 (fixtures)
     app, _no_redis, _user, _client, _circle, _share, _reply, _can_read,
     _put, _db, Node, SECRET,
@@ -141,6 +143,71 @@ def test_an_ai_reply_closed_to_its_owner_is_not_his_to_change(app):  # noqa: F81
     assert _text(aid) == "BENS AI REPLY"
     assert _client(app, "chidi").get(f"/api/nodes/{aid}").get_json()[
         "content"] == "BENS AI REPLY"
+
+
+def _reply_under_his_public_node(app):  # noqa: F811
+    """ben's public node X; anna's entry under it, shared with ben and
+    chidi; ben's reply R in her thread, taken back to Only me. Returns
+    (X, entry, R)."""
+    r = _client(app, "ben").post("/api/nodes/", json={
+        "content": "ben public", "privacy_level": "public", "ai_usage": "chat"})
+    assert r.status_code == 201, r.get_json()
+    x = r.get_json()["id"]
+    r = _reply(app, "anna", x, SECRET, privacy="public")
+    assert r.status_code == 201, r.get_json()
+    entry = r.get_json()["id"]
+    assert _put(app, "anna", entry, privacy_level="circles",
+                circle_usernames=["ben", "chidi"]).status_code == 200
+    rid = _reply(app, "ben", entry, "BEN AS WRITTEN").get_json()["id"]
+    assert _put(app, "ben", rid, privacy_level="private").status_code == 200
+    assert _db.session.get(Node, rid).audience_root_id == entry
+    return x, entry, rid
+
+
+@pytest.mark.parametrize("how", ["removed", "hid_author", "still_reads"])
+def test_a_cascade_from_above_the_entry_leaves_his_reply_where_it_is(
+        app, how):  # noqa: F811
+    """"Apply to my replies" on ben's node above anna's entry keeps the
+    privacy level of what ben wrote into her thread, whether or not he
+    still reads it. Putting it back is the reply's own edit, which checks
+    that he reads the thread. Its AI usage follows the cascade."""
+    x, entry, rid = _reply_under_his_public_node(app)
+    if how == "removed":
+        assert _put(app, "anna", entry, privacy_level="circles",
+                    circle_usernames=["chidi"]).status_code == 200
+    elif how == "hid_author":
+        _mute(app, "ben", "anna")
+    assert _put(app, "ben", rid, content="WORDS WRITTEN LATER",
+                privacy_level="private").status_code == 200
+    r = _put(app, "ben", x, privacy_level="circles",
+             circle_usernames=["dana"], ai_usage="none",
+             apply_to_descendants=True)
+    assert r.status_code == 200, r.get_json()
+    _db.session.expire_all()
+    reply = _db.session.get(Node, rid)
+    assert (reply.privacy_level, reply.audience_root_id) == ("private", entry)
+    assert reply.ai_usage == "none"
+    for who in ("anna", "chidi", "dana"):
+        assert not _can_read(app, who, rid), who
+    tree = _client(app, "anna").get(f"/api/nodes/{entry}").get_json()
+    assert rid not in [c["id"] for c in tree["children"]]
+    if how == "still_reads":
+        # The reply's own edit puts it back while he reads the thread.
+        assert _put(app, "ben", rid, privacy_level="circles").status_code == 200
+        assert _can_read(app, "chidi", rid)
+    else:
+        _closed(_put(app, "ben", rid, privacy_level="circles"))
+
+
+def test_a_cascade_to_only_me_still_takes_his_reply_back(app):  # noqa: F811
+    x, entry, rid = _reply_under_his_public_node(app)
+    assert _put(app, "ben", rid, privacy_level="circles").status_code == 200
+    assert _can_read(app, "chidi", rid)
+    assert _put(app, "ben", x, privacy_level="private",
+                apply_to_descendants=True).status_code == 200
+    _db.session.expire_all()
+    assert _db.session.get(Node, rid).privacy_level == "private"
+    assert not _can_read(app, "chidi", rid)
 
 
 def test_with_circles_off_for_everyone_an_old_reply_edits_as_on_main(app):  # noqa: F811

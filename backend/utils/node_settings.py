@@ -134,8 +134,12 @@ def apply_settings_to_descendants(root, user_id, *, privacy_level=None,
         prefetch_deks(n.content for n in editable if n.ai_usage != ai_usage)
     from backend.utils.llm_nodes import reply_in_progress
     # Circles: what the user wrote into someone else's thread (a reply,
-    # an AI reply they asked for) is never made public and never moved to
-    # another audience by a cascade either; it can be taken back.
+    # an AI reply they asked for) keeps its privacy level through a
+    # cascade: it is never made public, never moved to another audience
+    # and never put back into the thread by one. It can be taken back to
+    # Only me. Putting it back is the node's own edit, which checks that
+    # the user still reads the thread (circles.thread_write_refusal).
+    # Its AI usage follows the cascade as for any other node.
     changed = []
     for n in editable:
         touched = False
@@ -145,12 +149,11 @@ def apply_settings_to_descendants(root, user_id, *, privacy_level=None,
         n.settings_before = (n.privacy_level, n.audience_root_id)
         foreign = (privacy_level is not None
                    and written_into_someone_elses_thread(n, user_id))
-        if foreign and privacy_level == "public":
-            continue
+        level_kept = foreign and privacy_level != "private"
         kept_out = privacy_level == "circles" and n.id in under_prompt
         # An AI reply still being written keeps its privacy: its owner
         # shares it once it is written (Peter, 2026-11-12).
-        if (privacy_level is not None and not kept_out
+        if (privacy_level is not None and not kept_out and not level_kept
                 and n.privacy_level != privacy_level
                 and not (privacy_level != "private"
                          and reply_in_progress(n))):
