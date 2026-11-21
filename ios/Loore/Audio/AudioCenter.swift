@@ -650,12 +650,16 @@ extension AudioCenter: VoiceNotices {
         return app?.toasts.show(text, duration: duration) ?? 0
     }
 
+    func lastingToast(_ text: String) {
+        app?.toasts.showLasting(text)
+    }
+
     func dismissToast(_ id: Int) {
         app?.toasts.dismiss(id)
     }
 
-    func notify(_ notice: LocalNotice) {
-        LocalNotifier.post(notice)
+    func notify(_ notice: LocalNotice, body: String?) {
+        LocalNotifier.post(notice, body: body)
     }
 
     func withdraw(_ notice: LocalNotice) {
