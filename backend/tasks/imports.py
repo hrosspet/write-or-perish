@@ -183,7 +183,13 @@ def prefill_community_archive_impl(user_id, handle, options, update_state=None,
     user = User.query.get(user_id)
     if not user:
         raise RuntimeError(f"User {user_id} not found")
-    _raise_if_prefill_refused(user)
+    try:
+        _raise_if_prefill_refused(user)
+    except PrefillRefused:
+        # A no given while this pre-fill's follow-up run waited: what the
+        # earlier run staged goes too (#712).
+        _delete_prefill_stashes(user_id)
+        raise
     from backend.utils.x_identity import resolve_x_id, XIdUnresolved
     try:
         # A background task, not a request: the archive's own timeout, not
@@ -282,18 +288,46 @@ class _CollectedTweets:
         self.__init__()
 
 
-def _imported_tweet_ids(user_id):
+def _archive_covered_tweet_ids(user_id):
     """The tweet ids the account already holds as entries (source key
-    ``twitter:<id>``, from any import or pre-fill), soft-deleted ones
-    included: the import skips those too. Scoped like the importer's dedup
-    (_load_source_key_index): on the importing human."""
+    ``twitter:<id>``, soft-deleted ones included) that came from a read
+    covering everything older than them: a Community Archive pre-fill
+    (provenance prefill_ca, read to the timeline's end or down to an
+    export) or the person's own archive upload (archive_upload). Only those
+    may stop the newest-first read (#712: "everything older is in the
+    export"). Entries from the X API pre-fill (prefill_x, only the newest
+    ~3,200 posts of that day) and entries with no provenance are left out:
+    a page of them would stop the read with the older history unread. The
+    import still deduplicates them by tweet id. Scoped like the importer's
+    dedup (_load_source_key_index): on the importing human."""
     from backend.extensions import db
     from backend.models import Node
+    from backend.routes.import_data import (
+        PROVENANCE_ARCHIVE_UPLOAD, PROVENANCE_PREFILL_CA)
     prefix = "twitter:"
     keys = db.session.query(Node.source_key).filter(
         Node.human_owner_id == user_id,
-        Node.source_key.like(prefix + "%"))
+        Node.source_key.like(prefix + "%"),
+        Node.provenance.in_((PROVENANCE_PREFILL_CA, PROVENANCE_ARCHIVE_UPLOAD)))
     return {key[len(prefix):] for (key,) in keys}
+
+
+def _delete_prefill_stashes(user_id, account_id=None):
+    """Delete the tweets a Community Archive pre-fill staged for this user
+    (all of the user's stashes when the account is not known yet): a no to
+    the tweet seed deletes them at once, also when it comes between two
+    runs of one pre-fill."""
+    import shutil
+    from backend.utils.twitter_archive import STASH_ROOT
+    root = STASH_ROOT.parent / "ca-prefill"
+    if not root.is_dir():
+        return
+    if account_id is not None:
+        shutil.rmtree(_prefill_stash_dir(user_id, account_id),
+                      ignore_errors=True)
+        return
+    for stash in root.glob(f"{int(user_id)}-*"):
+        shutil.rmtree(stash, ignore_errors=True)
 
 
 def _latest_export(snapshot_dir, handle, state):
@@ -328,18 +362,22 @@ def _prefill_export_then_newer(user, account, options, state, seed_now,
        scan, ``batch`` rows in memory at a time).
     2. The newer ones through API v1, newest first, until the first page
        on which every tweet is already known: in the export (retweets and
-       empty tweets included, which never become entries) or already an
-       entry of this account. Everything older is assumed to be in the
-       export. An account the export does not hold is read whole. The
-       read is staged on disk with its cursor, resumable as in #690.
-       ``options["force_parquet"]`` ("export only") skips this step.
-    3. One import of both, deduplicated by tweet id.
+       empty tweets included, which never become entries) or an entry of
+       this account from a Community Archive pre-fill or the person's own
+       archive upload (_archive_covered_tweet_ids; not the X API pull's).
+       Everything older is assumed to be in the export. An account the
+       export does not hold is read whole. The read is staged on disk
+       with its cursor, resumable as in #690. ``options["force_parquet"]``
+       ("export only") skips this step.
+    3. One import of both, deduplicated by tweet id. A tweet the account
+       already holds stays that one entry with its provenance: one from
+       the X API pull keeps prefill_x, its text and Chat at most.
 
     The owner's no to the tweet seed is asked again before the first
     request and after every page: it stops the read, sends no further
-    request and deletes what was staged. Every tweet comes from the
-    Community Archive, so all of them carry its provenance (prefill_ca),
-    as before."""
+    request and deletes what was staged. New entries come from the
+    Community Archive, so they carry its provenance (prefill_ca), as
+    before."""
     import shutil
     from flask import current_app
     from backend.extensions import db
@@ -377,12 +415,20 @@ def _prefill_export_then_newer(user, account, options, state, seed_now,
         # A no given while the export was read sends no request.
         db.session.refresh(user)
         _raise_if_prefill_refused(user)
+        if export_only and not from_export:
+            raise ca.CommunityArchiveError(
+                f"@{handle}: the Community Archive export {export_id} does "
+                "not hold this account; without \"export only\" the "
+                "pre-fill reads it through the API" if export_id else
+                f"@{handle}: no Community Archive export is available for "
+                "\"export only\"")
         if not export_only:
             stash = _prefill_stash_dir(user.id, account_id)
             # Known: the export's tweets for this account (collected.seen
             # holds exactly those until the staged rows are added below)
-            # and the account's own entries.
-            in_account = _imported_tweet_ids(user.id)
+            # and the account's entries from a read that covered everything
+            # older (_archive_covered_tweet_ids).
+            in_account = _archive_covered_tweet_ids(user.id)
 
             def is_known(tweet_id):
                 return tweet_id in collected.seen or tweet_id in in_account
@@ -406,8 +452,9 @@ def _prefill_export_then_newer(user, account, options, state, seed_now,
             no_rows_error=ca.CommunityArchiveError, x_id=account_id,
             provenance=PROVENANCE_PREFILL_CA)
     except PrefillRefused:
-        if stash is not None:
-            shutil.rmtree(stash, ignore_errors=True)
+        # Also a stash an earlier run of this pre-fill left (a no given
+        # while the follow-up run waited).
+        _delete_prefill_stashes(user.id, account_id)
         raise
     requests = stage["requests"] if stage else 0
     result.update({

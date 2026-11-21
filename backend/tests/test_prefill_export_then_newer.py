@@ -15,7 +15,7 @@ import pytest
 from sqlalchemy import update
 
 from backend.tests.test_twitter_import import app, _make_user, _db  # noqa: F401
-from backend.tests.test_community_archive_v1 import (
+from backend.tests.test_community_archive_v1 import (  # noqa: F401
     FakeV1, page, v1_account, v1_tweet)
 from backend.models import Node, User
 from backend.utils import community_archive as ca
@@ -267,6 +267,93 @@ def test_a_deleted_entry_counts_as_known(v1, imports_mod):
     assert again["created"] == 0
 
 
+def _seed_entries(imports_mod, user, ids, provenance):
+    """Entries of tweets *ids* already in the account, as an earlier import
+    with *provenance* made them (prefill_x: the X API pull)."""
+    from backend.utils import twitter_archive as ta
+    rows = [ta.compact_row(ca.to_export_entry(_tweet(i))["tweet"]) for i in ids]
+    imports_mod._import_prefill_rows(
+        user.id, "vee", rows, {}, lambda *a: None, False,
+        provenance=provenance)
+
+
+def test_entries_from_the_x_api_prefill_do_not_stop_the_read(v1, imports_mod):
+    """Review of #742: the X API pull holds only the newest ~3,200 posts, so
+    a page of its entries says nothing about what is older. The read goes
+    on to the end; tweets 3 and 4 stay one entry each and keep the X API's
+    marks (provenance prefill_x, Chat at most, the X API input mark), also
+    when this import asks for Train."""
+    from backend.utils.privacy import unlicensed_input
+    _write_export(v1.snap, [])  # the export does not hold the account
+    u = _user()
+    _seed_entries(imports_mod, u, [4, 3], "prefill_x")
+    v1.routes[TIMELINE] = [_timeline([6, 5], [4, 3], [2, 1])]
+
+    result = imports_mod.prefill_community_archive_impl(
+        u.id, "vee", {"ai_usage": "train"})
+
+    assert len(_timeline_requests(v1)) == 3
+    assert result["api_stop"] == ca.STOP_END
+    assert _contents(u) == [f"thought {i}" for i in range(1, 7)]
+    assert Node.query.filter_by(human_owner_id=u.id).count() == 6
+    for i in (3, 4):
+        [n] = Node.query.filter_by(human_owner_id=u.id,
+                                   source_key=f"twitter:{i}").all()
+        assert (n.provenance, n.ai_usage) == ("prefill_x", "chat")
+        assert unlicensed_input(n) == "x_api"
+    others = Node.query.filter(Node.human_owner_id == u.id,
+                               Node.provenance != "prefill_x").all()
+    assert {(n.provenance, n.ai_usage) for n in others} == {("prefill_ca", "train")}
+    assert len(others) == 4
+
+
+def test_entries_from_the_persons_own_archive_stop_the_read(v1, imports_mod):
+    """The person's own archive upload holds everything older: a page of
+    its tweets is known."""
+    _write_export(v1.snap, [])
+    u = _user()
+    _seed_entries(imports_mod, u, [4, 3, 2, 1], "archive_upload")
+    v1.routes[TIMELINE] = [_timeline([6, 5], [4, 3], [2, 1])]
+
+    result = imports_mod.prefill_community_archive_impl(u.id, "vee", {})
+
+    assert len(_timeline_requests(v1)) == 2
+    assert (result["api_stop"], result["created"]) == (ca.STOP_KNOWN_PAGE, 2)
+
+
+def test_ids_as_json_numbers_match_the_exports_ids(v1, imports_mod):
+    _write_export(v1.snap, [(i, ACCOUNT, f"exported {i}") for i in (101, 102)])
+    u = _user()
+
+    def answer(params):
+        n = int((params.get("cursor") or "p0")[1:])
+        rows = []
+        for i in [[103, 102], [101]][n]:
+            t = _tweet(i)
+            t["tweet_id"] = i  # a JSON number
+            rows.append(t)
+        return page(rows, "p1" if n == 0 else None)
+    v1.routes[TIMELINE] = [answer]
+
+    result = imports_mod.prefill_community_archive_impl(u.id, "vee", {})
+
+    assert (result["api_requests"], result["api_stop"]) == (2, ca.STOP_KNOWN_PAGE)
+    assert Node.query.filter_by(human_owner_id=u.id).count() == 3
+
+
+def test_export_only_for_an_account_the_export_does_not_hold(v1, imports_mod):
+    _write_export(v1.snap, [])
+    v1.routes[TIMELINE] = [AssertionError("no timeline request")]
+    u = _user()
+
+    with pytest.raises(ca.CommunityArchiveError,
+                       match="export 2026-11-03T07-00-00Z does not hold this account"):
+        imports_mod.prefill_community_archive_impl(
+            u.id, "vee", {"force_parquet": True})
+
+    assert _timeline_requests(v1) == []
+
+
 def test_export_only_sends_no_timeline_request(v1, imports_mod):
     """The admin's "force the export" option is now "export only"."""
     _write_export(v1.snap, [(101, ACCOUNT, "first"), (102, ACCOUNT, "second")])
@@ -341,6 +428,29 @@ def test_a_no_during_the_read_stops_it_and_deletes_the_stash(v1, imports_mod):
     assert Node.query.filter_by(human_owner_id=u.id).count() == 0
     assert User.query.get(u.id).prefilled_handle is None
     assert not (v1.stash / f"{u.id}-{ACCOUNT}").exists()
+
+
+def test_a_no_between_two_runs_deletes_the_stash(v1, monkeypatch, imports_mod):
+    """Review of #742: the no comes while the follow-up run waits; that run
+    stops at its first check and the first run's staged tweets go too."""
+    _write_export(v1.snap, [])
+    v1.routes[TIMELINE] = [_timeline([6, 5], [4, 3], [2, 1])]
+    monkeypatch.setattr(imports_mod, "PREFILL_V1_RUN_SECONDS", 0)
+    u = _user()
+    with pytest.raises(imports_mod.PrefillContinues):
+        imports_mod.prefill_community_archive_impl(u.id, "vee", {})
+    stash = v1.stash / f"{u.id}-{ACCOUNT}"
+    assert stash.exists()
+    other = v1.stash / f"{u.id + 100}-{ACCOUNT}"  # another user's: kept
+    other.mkdir()
+    _say_no(u)
+    _db.session.commit()
+
+    with pytest.raises(imports_mod.PrefillRefused):
+        imports_mod.prefill_community_archive_impl(u.id, "vee", {})
+
+    assert not stash.exists() and other.exists()
+    assert len(_timeline_requests(v1)) == 1
 
 
 # ── a resumed pre-fill ───────────────────────────────────────────────────
