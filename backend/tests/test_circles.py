@@ -604,6 +604,42 @@ def test_one_note_per_shared_entry_per_reader(app):
     assert [n["node_id"] for n in _notes(app, "ben")] == [first]
 
 
+def test_notes_of_closed_entries_leave_the_other_notifications_shown(app):
+    """anna shares 25 entries with ben and takes them back; chidi shares
+    one. ben's two older notifications and chidi's note are all shown;
+    the 25 notes stay unread and show again when an entry opens again."""
+    from backend.utils.notifications import notify_user
+    ben = _user("ben").id
+    notify_user(ben, "profile_ready", "Profile updated")
+    notify_user(ben, "x_disconnected", "X was disconnected")
+    UserNotification.query.filter_by(user_id=ben).update(
+        {"created_at": datetime.utcnow() - timedelta(hours=1)})
+    _db.session.commit()
+    chidis = _share(app, owner="chidi", names=["ben"], content="from chidi")
+    UserNotification.query.filter_by(user_id=ben, node_id=chidis).update(
+        {"created_at": datetime.utcnow() - timedelta(minutes=30)})
+    _db.session.commit()
+    taken_back = [_share(app, names=["ben"], content=f"e{i}")
+                  for i in range(25)]
+    for nid in taken_back:
+        assert _put(app, "anna", nid, content="x",
+                    privacy_level="private").status_code == 200
+
+    def shown():
+        return _client(app, "ben").get("/api/updates").get_json()[
+            "notifications"]
+
+    assert [(n["type"], n.get("node_id")) for n in shown()] == [
+        ("circle_share", chidis), ("profile_ready", None),
+        ("x_disconnected", None)]
+    assert UserNotification.query.filter_by(
+        user_id=ben, type="circle_share", status="unread").count() == 26
+    assert _put(app, "anna", taken_back[0], content="x",
+                privacy_level="circles",
+                circle_usernames=["ben"]).status_code == 200
+    assert [n.get("node_id") for n in shown()][:2] == [taken_back[0], chidis]
+
+
 def test_hiding_a_person_stops_notes_and_entries_and_can_be_undone(app):
     nid = _share(app, names=["ben", "chidi"])
     ben = _client(app, "ben")

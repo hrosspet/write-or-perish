@@ -26,6 +26,10 @@ logger = logging.getLogger(__name__)
 updates_bp = Blueprint("updates_bp", __name__)
 
 CIRCLE_NOTE_TYPE = "circle_share"
+# The newest unread notifications served, and as many newest notes about
+# shared entries (Circles), each list on its own: the notes about entries
+# shared with the user never take the place of their other notifications.
+UNREAD_SHOWN = 20
 
 
 def _updates_enabled():
@@ -71,6 +75,27 @@ def _profile_meta(user):
     if version is None:
         return None
     return {"version": version, "created_at": iso_utc(created_at)}
+
+
+def _open_circle_note_rows():
+    """The user's newest unread notes about shared entries whose entry is
+    open to them now (CircleSets.readable), at most UNREAD_SHOWN. A note
+    whose entry is closed is not read here, so it never takes the place
+    of a note that can be shown; it stays unread and shows again if the
+    entry opens again. None while Circles is off for the user."""
+    from backend.utils.circles import circles_enabled
+    from backend.utils.privacy import readable_entry_ids
+    if not circles_enabled(current_user):
+        return []
+    readable = readable_entry_ids(current_user.id)
+    if not readable:
+        return []
+    return UserNotification.query.filter(
+        UserNotification.user_id == current_user.id,
+        UserNotification.status == "unread",
+        UserNotification.type == CIRCLE_NOTE_TYPE,
+        UserNotification.node_id.in_(readable),
+    ).order_by(UserNotification.created_at.desc()).limit(UNREAD_SHOWN).all()
 
 
 def _circle_notes(rows):
@@ -159,9 +184,12 @@ def get_updates():
         for s in unread_sections_for(current_user, read_states)
     ]
 
-    unread = UserNotification.query.filter_by(
-        user_id=current_user.id, status="unread"
-    ).order_by(UserNotification.created_at.desc()).limit(20).all()
+    unread = UserNotification.query.filter(
+        UserNotification.user_id == current_user.id,
+        UserNotification.status == "unread",
+        UserNotification.type != CIRCLE_NOTE_TYPE,
+    ).order_by(UserNotification.created_at.desc()).limit(
+        UNREAD_SHOWN).all()
     # One lookup for the whole batch, and only when it's needed — the
     # notification's own created_at can't carry it (notify_user updates an
     # unread row in place and leaves created_at at the first announcement).
@@ -180,10 +208,9 @@ def get_updates():
             "created_at": iso_utc(n.created_at),
             "meta": profile_meta if n.type == "profile_ready" else None,
         }
-        for n in unread if n.type != CIRCLE_NOTE_TYPE
+        for n in unread
     ]
-    notifications.extend(_circle_notes(
-        [n for n in unread if n.type == CIRCLE_NOTE_TYPE]))
+    notifications.extend(_circle_notes(_open_circle_note_rows()))
     notifications.sort(key=lambda n: n["created_at"] or "", reverse=True)
 
     return jsonify({
