@@ -986,7 +986,9 @@ function AdminPanel() {
       fetchUsers();
     } catch (err) {
       console.error(err);
-      setError("Error updating email.");
+      // The server says why: an account someone has signed in to, an
+      // address another account holds, an address that is not valid.
+      setError(err.response?.data?.error || "Error updating email.");
     }
   };
 

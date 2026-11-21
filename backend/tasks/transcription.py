@@ -104,8 +104,8 @@ def _start_upload_reply(node, tip, model_id):
             record_task_warning(node, subscription_required_message(owner))
             return None
     from backend.utils.llm_nodes import (
-        AIUsageRefused, ReadOnlyModelRefused, auto_generate_refusal,
-        create_llm_placeholder,
+        AIUsageRefused, ReadOnlyModelRefused, TooManyReplies,
+        auto_generate_refusal, create_llm_placeholder,
     )
     # The entry may have been made public (or shared with circles) while
     # it was transcribed: no automatic reply there (Peter, 2026-11-12).
@@ -132,8 +132,9 @@ def _start_upload_reply(node, tip, model_id):
             message = UPLOAD_REPLY_SKIPPED_AI_USAGE
         elif isinstance(e, ReadOnlyModelRefused):
             message = f"Your entry is saved. {e.message}"
-        elif isinstance(e, ThreadTooLong):
-            # The thread's next prompt would be over the limit (#648).
+        elif isinstance(e, (ThreadTooLong, TooManyReplies)):
+            # The thread's next prompt would be over the limit (#648), or
+            # the account's replies in progress are at their bound.
             message = e.entry_message
         else:
             message = REPLY_NOT_STARTED_TEXT

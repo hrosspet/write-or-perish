@@ -629,6 +629,21 @@ def create_app():
         db.session.rollback()
         return thread_too_long_response(exc)
 
+    # A reply while the account already has MAX_REPLIES_IN_PROGRESS replies
+    # waiting or being written: create_llm_placeholder raises TooManyReplies
+    # before the reply is written. Routes that keep the user's entry answer
+    # it themselves; any that lets it escape gets 429 {"error", "code":
+    # "too_many_replies"}, and whatever it flushed before the call is not
+    # kept (a Glean's prompt node).
+    from backend.utils.llm_nodes import TooManyReplies
+
+    @app.errorhandler(TooManyReplies)
+    def _handle_too_many_replies(exc):
+        from backend.extensions import db
+        from backend.utils.llm_nodes import too_many_replies_response
+        db.session.rollback()
+        return too_many_replies_response(exc)
+
     # --------------------------------------------------------------------
     # Health checks – liveness/readiness for monitoring (no auth).
     # --------------------------------------------------------------------

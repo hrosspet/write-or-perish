@@ -1967,8 +1967,8 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     from backend.models import Node, User
     from backend.utils.prompts import get_user_prompt_record
     from backend.utils.llm_nodes import (
-        AIUsageRefused, ReadOnlyModelRefused, create_llm_placeholder,
-        enqueue_reply_job, reply_ai_usage,
+        AIUsageRefused, ReadOnlyModelRefused, TooManyReplies,
+        create_llm_placeholder, enqueue_reply_job, reply_ai_usage,
     )
     from backend.utils.context_artifacts import attach_context_artifacts
     from backend.tasks.llm_completion import generate_llm_response
@@ -2091,6 +2091,8 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     # ThreadTooLong the same way (#648): the thread grew past the limit
     # with this recording; it is kept, and the Voice screen says aloud why
     # no reply follows (the warning's code, thread_size.skipped_reply_code).
+    # TooManyReplies the same way: the account's replies in progress are
+    # at their bound; the recording is kept and its text says why.
     from backend.utils.placeholders import UserExportValidationError
     from backend.utils.node_deletion import ParentDeletedError
     from backend.utils.spend import SpendCapExceeded
@@ -2105,7 +2107,7 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
         )
     except (UserExportValidationError, ParentDeletedError,
             SpendCapExceeded, AIUsageRefused, ReadOnlyModelRefused,
-            SubscriptionRequired, ThreadTooLong) as e:
+            SubscriptionRequired, ThreadTooLong, TooManyReplies) as e:
         if isinstance(e, SpendCapExceeded):
             message = voice_reply_skipped_spend_cap(user_id)
         elif isinstance(e, SubscriptionRequired):
@@ -2114,7 +2116,7 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
             message = VOICE_REPLY_SKIPPED_AI_USAGE
         elif isinstance(e, ReadOnlyModelRefused):
             message = VOICE_REPLY_SKIPPED_READ_ONLY.format(model=e.model_name)
-        elif isinstance(e, ThreadTooLong):
+        elif isinstance(e, (ThreadTooLong, TooManyReplies)):
             message = e.recording_message
         else:
             message = str(e)

@@ -952,14 +952,31 @@ def toggle_user_spam(user_id):
     return jsonify({"message": "Spam flag updated", "spam": user.spam}), 200
 
 
+# The admin sets a sign-in address only on an account nobody has signed
+# into (activity.sign_in_status "never": a whitelisted or pre-filled
+# account before its owner's first sign-in, or a waitlist signup whose
+# link never arrived). Whoever holds the address signs in to the account,
+# and admins never read users' content (Peter, 2026-10-01), so an account
+# someone has used, or one older than the sign-in record ("unknown"),
+# changes its address only through its owner's own confirmed change in
+# Account settings.
+EMAIL_SET_REFUSED_MESSAGE = (
+    "Someone has signed in to this account, or it is older than Loore's "
+    "sign-in record, so only its owner can change its email address, in "
+    "Account settings.")
+
+
 @admin_bp.route("/users/<int:user_id>/update_email", methods=["PUT"])
 @login_required
 @admin_required
 def update_user_email(user_id):
-    """Set (or, with an empty string, clear) a user's email directly. The
-    one path that binds an address without the owner confirming it (#260):
-    the admin vouches for it, e.g. to fix a mistyped waitlist address so
-    Activate & Welcome can reach the person."""
+    """Set (or, with an empty string, clear) the email of an account
+    nobody has signed into. The one path that binds an address without
+    the owner confirming it (#260): the admin vouches for it, e.g. to fix
+    a mistyped waitlist address or to add the address of a pre-filled
+    account so Activate & Welcome can reach the person. 409 with
+    EMAIL_SET_REFUSED_MESSAGE for any other account."""
+    from backend.utils.activity import sign_in_status
     data = request.get_json()
     email = data.get("email")
     if not isinstance(email, str):
@@ -971,6 +988,9 @@ def update_user_email(user_id):
     if email and not is_valid_email(email):
         return jsonify({"error": "That is not a valid email address."}), 400
     user = User.query.get_or_404(user_id)
+    if sign_in_status(user) != "never":
+        return jsonify({"error": EMAIL_SET_REFUSED_MESSAGE,
+                        "code": "account_signed_in"}), 409
     user.email = email or None
     # A change the user left pending must not replace the admin's address
     # when its link is confirmed later.
@@ -982,6 +1002,9 @@ def update_user_email(user_id):
     except IntegrityError:
         db.session.rollback()
         return jsonify({"error": "That email already belongs to another account."}), 409
+    # Ids only: no address in the logs.
+    logger.warning("Admin %s set the email of user %s", current_user.id,
+                   user_id)
     return jsonify({"message": "Email updated", "email": user.email}), 200
 
 @admin_bp.route("/users/<int:user_id>/update_plan", methods=["PUT"])

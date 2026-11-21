@@ -727,6 +727,33 @@ def require_spend_headroom(fn):
     return wrapper
 
 
+def _per_user_cap_on(config):
+    """Whether a per-user ceiling can apply: the global default is set,
+    or payments are on (#438: a subscription has a ceiling of its own even
+    when the global default is 0)."""
+    return ((config.get("PER_USER_MONTHLY_LIMIT_USD") or 0) > 0
+            or bool(config.get("PAYMENTS_ENABLED")))
+
+
+def refresh_user_cap(user_id, config):
+    """Set the account's block from the spend recorded so far
+    (enforce_user_spend_cap, in the caller's run), when a per-user ceiling
+    can apply. The reply task asks it when it starts, before it reads the
+    flag: a reply queued behind others of the same account then sees what
+    they cost, not only the block the deferred check
+    (_dispatch_user_cap_check) sets later, behind the same queue. A
+    failure is logged and the flag is left as it was."""
+    if not _per_user_cap_on(config):
+        return None
+    try:
+        return enforce_user_spend_cap(user_id, config)
+    except Exception:
+        db.session.rollback()
+        logger.exception("Per-user spend cap check failed for user %s",
+                         user_id)
+        return None
+
+
 @event.listens_for(APICostLog, "after_insert")
 def _dispatch_user_cap_check(mapper, connection, target):
     """After any cost row is written, schedule a (deferred, out-of-band)
@@ -736,10 +763,7 @@ def _dispatch_user_cap_check(mapper, connection, target):
         from flask import current_app, has_app_context
         if not has_app_context():
             return
-        # Payments on (#438): a subscription has a ceiling of its own even
-        # when the global default is 0.
-        if ((current_app.config.get("PER_USER_MONTHLY_LIMIT_USD") or 0) <= 0
-                and not current_app.config.get("PAYMENTS_ENABLED")):
+        if not _per_user_cap_on(current_app.config):
             return
         if target.user_id is None:
             return
