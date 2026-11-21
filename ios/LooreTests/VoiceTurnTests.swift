@@ -497,7 +497,11 @@ final class VoiceTurnTests: XCTestCase {
         backend.streams[101]?.yield(.response(status: 200, body: Data(#"{"status":"completed","tts_url":"/media/full.mp3"}"#.utf8)))
         await wait("delivered") { audio.fakeQueue.urls == ["/media/full.mp3"] }
         XCTAssertEqual(turn.state, .playing)
-        XCTAssertFalse(audio.fakeQueue.generatingTTS)
+        // Nothing more comes once the approval announcement's answer is in
+        // (`finishReply` waits for it in its own task).
+        await wait("done generating") { !audio.fakeQueue.generatingTTS }
+        XCTAssertEqual(turn.state, .playing)
+        XCTAssertEqual(audio.fakeQueue.urls, ["/media/full.mp3"])
     }
 
     func testPostTTSReadyDeliversWhenTheStreamIsNotAttached() async throws {
