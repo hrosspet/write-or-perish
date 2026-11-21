@@ -1,7 +1,8 @@
 // The server's limits on one recording (utils/recordingLimits): audio kept
 // without its text (past the length one recording may have transcribed) is
 // said once, with no error sound, and the recording goes on; a chunk past
-// what one recording may hold is not retried, and the recording stops; a
+// what one recording may hold is not retried, and the recording stops as on
+// Stop, finalized with the chunks the server took; a
 // start refused while other recordings are in progress says so plainly.
 const mockStartRecording = jest.fn(() => Promise.resolve());
 const mockStopRecording = jest.fn(() => Promise.resolve());
@@ -64,7 +65,7 @@ jest.mock('../api', () => ({
 import { renderHook, act } from '@testing-library/react';
 import { useStreamingTranscription } from './useStreamingTranscription';
 import {
-  RECORDING_LIMIT_MESSAGE, UNTRANSCRIBED_MESSAGES,
+  LONGEST_RECORDING_MESSAGE, RECORDING_LIMIT_MESSAGE, UNTRANSCRIBED_MESSAGES,
 } from '../utils/recordingLimits';
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
@@ -112,10 +113,10 @@ describe('audio kept without its text', () => {
       const { result } = await startRecording({ onError });
 
       act(() => {
-        for (let i = 1440; i < 1460; i += 1) {
+        for (let i = 480; i < 500; i += 1) {
           mockSse.opts.onError({
             chunk_index: i, status: 'failed', code: 'recording_too_long',
-            error: 'Saved as audio, not turned into text: the recording is longer than six hours.',
+            error: 'Saved as audio, not turned into text: the recording is longer than two hours.',
           });
         }
       });
@@ -261,10 +262,11 @@ describe('Loore still transcribing earlier audio', () => {
 
 describe('a chunk past what one recording may hold', () => {
   test.each(['recording_too_large', 'chunk_index_out_of_range', 'chunk_too_large'])(
-    '%s is not retried, and the recording stops with its audio kept',
+    '%s is not retried, said once, and the recording stops as on Stop',
     async (code) => {
       const onError = jest.fn();
-      const { result } = await startRecording({ onError });
+      const onLimitReached = jest.fn();
+      const { result } = await startRecording({ onError, onLimitReached });
       mockPost.mockImplementation((url) => {
         if (url.endsWith('/audio-chunk')) {
           const err = new Error('Request failed');
@@ -275,20 +277,91 @@ describe('a chunk past what one recording may hold', () => {
       });
 
       await act(async () => {
-        mockRecorderOpts.onChunkReady(new Blob(['a']), 2880);
+        mockRecorderOpts.onChunkReady(new Blob(['a']), 960);
+        await flush();
+      });
+      // A chunk after it is not sent.
+      await act(async () => {
+        mockRecorderOpts.onChunkReady(new Blob(['b']), 961);
         await flush();
       });
 
       expect(callsTo('/audio-chunk')).toHaveLength(1);
-      // Stopped, not reset: the audio stays for "Save audio".
-      expect(mockStopRecording).toHaveBeenCalledTimes(1);
+      // The caller stops as on Stop, so the recording is finalized with the
+      // chunks the server took; nothing here ends it as an error.
+      const said = code === 'chunk_index_out_of_range'
+        ? LONGEST_RECORDING_MESSAGE : RECORDING_LIMIT_MESSAGE;
+      expect(onLimitReached).toHaveBeenCalledTimes(1);
+      expect(onLimitReached).toHaveBeenCalledWith(said);
+      expect(mockAddToast).toHaveBeenCalledWith(said, 10000);
+      expect(mockPlayErrorSound).toHaveBeenCalledTimes(1);
+      expect(onError).not.toHaveBeenCalled();
       expect(mockResetRecording).not.toHaveBeenCalled();
-      expect(onError).toHaveBeenCalledTimes(1);
-      expect(onError.mock.calls[0][0].fatal).toBe(true);
-      expect(result.current.sessionState).toBe('error');
-      expect(result.current.errorMessage).toBe(RECORDING_LIMIT_MESSAGE);
+      expect(result.current.sessionState).toBe('recording');
     },
   );
+
+  test("the finalize announces the chunks the server took, after the server's words", async () => {
+    const words = 'This recording has reached the longest Loore takes, about four hours, '
+      + 'and has stopped. Everything before this is saved.';
+    const onLimitReached = jest.fn();
+    const hook = await startRecording({ onLimitReached });
+    mockPost.mockImplementation((url) => {
+      if (url.endsWith('/audio-chunk')) {
+        const err = new Error('Request failed');
+        err.response = { status: 400, data: { error: words, code: 'chunk_index_out_of_range' } };
+        return Promise.reject(err);
+      }
+      return Promise.resolve({ data: {} });
+    });
+    // Two chunks recorded (getTotalChunks); the server refuses the second.
+    await act(async () => {
+      mockRecorderOpts.onChunkReady(new Blob(['a']), 1);
+      await flush();
+    });
+    expect(onLimitReached).toHaveBeenCalledWith(words);
+    expect(mockAddToast).toHaveBeenCalledWith(words, 10000);
+
+    await act(async () => { await hook.result.current.stopStreaming(); });
+
+    const finalize = callsTo('/finalize');
+    expect(finalize).toHaveLength(1);
+    expect(finalize[0][1].total_chunks).toBe(1);
+    expect(hook.result.current.sessionState).toBe('finalizing');
+    expect(hook.result.current.errorMessage).toBeNull();
+  });
+
+  test('a chunk after the finalize (chunk_not_announced) is not the bound: dropped, nothing said', async () => {
+    const onError = jest.fn();
+    const onLimitReached = jest.fn();
+    const { result } = await startRecording({ onError, onLimitReached });
+    mockPost.mockImplementation((url) => {
+      if (url.endsWith('/audio-chunk')) {
+        const err = new Error('Request failed');
+        err.response = {
+          status: 400,
+          data: {
+            error: 'This recording was already finished, so this part was not added to it.',
+            code: 'chunk_not_announced',
+          },
+        };
+        return Promise.reject(err);
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    await act(async () => {
+      mockRecorderOpts.onChunkReady(new Blob(['a']), 5);
+      await flush();
+    });
+
+    expect(callsTo('/audio-chunk')).toHaveLength(1);
+    expect(onLimitReached).not.toHaveBeenCalled();
+    expect(mockAddToast).not.toHaveBeenCalled();
+    expect(mockPlayErrorSound).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+    expect(result.current.sessionState).toBe('recording');
+  });
 });
 
 describe('a recording refused more audio', () => {

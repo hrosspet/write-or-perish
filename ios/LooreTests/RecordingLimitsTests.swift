@@ -10,8 +10,8 @@ import XCTest
 final class RecordingLimitsTests: StubbedAppTestCase {
     func testChunkErrorCarriesTheCode() {
         let kept = TranscriptionStreamEvent(SSEEvent(event: "chunk_error",
-            data: #"{"chunk_index":1440,"error":"Saved as audio","status":"failed","code":"recording_too_long"}"#))
-        XCTAssertEqual(kept, .chunkError(chunkIndex: 1440, error: "Saved as audio", code: "recording_too_long"))
+            data: #"{"chunk_index":480,"error":"Saved as audio","status":"failed","code":"recording_too_long"}"#))
+        XCTAssertEqual(kept, .chunkError(chunkIndex: 480, error: "Saved as audio", code: "recording_too_long"))
 
         // A failure carries no code (and an older server sends none).
         let failed = TranscriptionStreamEvent(SSEEvent(event: "chunk_error",
@@ -20,7 +20,9 @@ final class RecordingLimitsTests: StubbedAppTestCase {
     }
 
     func testMessages() {
-        XCTAssertNotNil(RecordingLimits.untranscribedMessage("recording_too_long"))
+        // Two hours: Peter, 2026-11-21 (backend MAX_TRANSCRIBED_SECONDS).
+        XCTAssertTrue(RecordingLimits.untranscribedMessage("recording_too_long")?
+            .contains("longer than two hours") == true)
         XCTAssertNil(RecordingLimits.untranscribedMessage(nil))
         XCTAssertNil(RecordingLimits.untranscribedMessage("init_parse_failed"))
         // The usage limit does not stop a recording's transcription (#341).

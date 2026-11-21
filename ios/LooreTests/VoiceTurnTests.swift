@@ -148,6 +148,7 @@ final class FakeRecorder: VoiceRecording {
     var elapsed: Double = 0
     var onSourceEnded: (() -> Void)?
     var onFatal: ((String) -> Void)?
+    var onLimit: ((String) -> Void)?
     var onSourceFailed: (() -> Void)?
     var outcome = ChunkUploader.Outcome(produced: 2, stored: 2, failed: [], fatalMessage: nil)
     var startError: Error?
@@ -1229,6 +1230,30 @@ final class VoiceTurnTests: XCTestCase {
         XCTAssertFalse(audio.cueOn)
     }
 
+    // The server took no more of the recording (past what one recording may
+    // hold, four hours; backend/utils/recording_limits): the turn stops at once,
+    // says it in the server's words, and is finalized with the chunks the server
+    // holds, never with the ones it refused, and without the "no connection?" text.
+    func testReachingTheRecordingsLimitStopsAndFinalizesWhatTheServerHolds() async throws {
+        let words = "This recording has reached the longest Loore takes, about four hours, and has stopped. Everything before this is saved."
+        recorder.outcome = .init(produced: 962, stored: 960, failed: [], fatalMessage: nil, beyond: 2)
+        backend.statuses = [try status("completed", llm: 101)]
+        backend.llmStatuses[101] = [try llm(101, "processing")]
+        turn.start()
+        await wait("recording") { turn.state == .recording }
+
+        recorder.onLimit?(words)
+
+        XCTAssertEqual(turn.state, .stopping)
+        await wait("finalized") { backend.log.contains { $0.hasPrefix("finalize") } }
+        XCTAssertTrue(recorder.calls.contains("stop"))
+        XCTAssertTrue(backend.log.contains { $0.hasPrefix("finalize total=960") }, "\(backend.log)")
+        await wait("thinking") { turn.state == .awaitingAudio }
+        XCTAssertEqual(notices.toasts, [words])
+        XCTAssertFalse(notices.toasts.contains(VoiceTurnController.missingChunksMessage))
+        XCTAssertFalse(turn.hasError)
+    }
+
     func testRetriedFinalizeAnsweringNotRecordingCountsAsSuccess() async throws {
         backend.finalizeError = APIError.server(status: 400,
                                                 body: ServerErrorBody(error: "Streaming session is not in recording state"))
@@ -1601,6 +1626,12 @@ final class VoiceTurnTests: XCTestCase {
         await wait("warned") { notices.notified.contains(.longRecording) }
         XCTAssertTrue(audio.events.contains("sound.59"))
         XCTAssertEqual(audio.events.filter { $0 == "sound.59" }.count, 1)
+        // Nothing ends at an hour: the words name the two-hour transcription
+        // limit (Peter, 2026-11-21), not a stop.
+        XCTAssertTrue(notices.toasts.contains(RecordingLimits.longRecordingWarning), "\(notices.toasts)")
+        XCTAssertTrue(RecordingLimits.longRecordingWarning.contains("up to two hours"))
+        XCTAssertFalse(RecordingLimits.longRecordingWarning.contains("stopping soon"))
+        XCTAssertEqual(LocalNotice.longRecording.body, RecordingLimits.longRecordingAdvice)
     }
 
     func testResumingAnInterruptedDraftContinuesItsNumbering() async throws {

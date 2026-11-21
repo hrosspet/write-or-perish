@@ -18,6 +18,9 @@ from backend.utils.audio_storage import (
 )
 from backend.utils.encryption import stage_encrypted_file
 from backend.utils.client_platform import request_client
+from backend.utils.recording_limits import (
+    LONGEST_RECORDING_TEXT, NOT_ANNOUNCED_TEXT,
+)
 from backend.utils.recording_device import (
     SessionBusy, claim_session, is_taken_over, is_taken_over_locked,
     lock_writer_key, request_device_key, session_busy_response,
@@ -883,9 +886,12 @@ _CHUNK_TOO_LARGE = (
     {"error": "This part of the recording is larger than Loore accepts.",
      "code": "chunk_too_large"}, 413)
 _CHUNK_INDEX_OUT_OF_RANGE = (
-    {"error": ("This recording has more parts than Loore accepts. "
-               "Everything before this part is saved."),
+    {"error": LONGEST_RECORDING_TEXT,
      "code": "chunk_index_out_of_range"}, 400)
+# A chunk past the count a finalizing recording announced: not the bound,
+# so a code of its own.
+_CHUNK_NOT_ANNOUNCED = (
+    {"error": NOT_ANNOUNCED_TEXT, "code": "chunk_not_announced"}, 400)
 _RECORDING_TOO_LARGE = (
     {"error": ("This recording is larger than Loore accepts. Everything "
                "before this part is saved."),
@@ -954,10 +960,12 @@ def upload_streaming_chunk(session_id):
     - device_key: optional, the recording device's key (#388); 409
       session_taken_over when another device continued the session.
 
-    Limits on one recording (utils/recording_limits), which the apps
-    never reach: a chunk over MAX_STREAMING_CHUNK_BYTES gets 413
-    ``chunk_too_large``, a chunk_index below 0 or from
-    MAX_STREAMING_CHUNKS on 400 ``chunk_index_out_of_range``, and a chunk
+    Limits on one recording (utils/recording_limits; a recording of four
+    hours reaches MAX_STREAMING_CHUNKS, and the apps then stop and finalize
+    with the chunks taken): a chunk over MAX_STREAMING_CHUNK_BYTES gets 413
+    ``chunk_too_large``, a chunk_index from MAX_STREAMING_CHUNKS on 400
+    ``chunk_index_out_of_range`` (LONGEST_RECORDING_TEXT; below 0, 400
+    "Invalid chunk_index"), and a chunk
     that would take the recording past MAX_STREAMING_SESSION_BYTES 413
     ``recording_too_large``. Nothing of it is stored; the chunks accepted
     before stay. A copy of a stored chunk is answered as before, and a
@@ -967,7 +975,8 @@ def upload_streaming_chunk(session_id):
     released) is a new start: 402 at the usage limit, 429 past the count;
     a recording with audio inactive for a day must fit under the count
     again (utils/recording_limits.audio_refusal). Once finalizing, only
-    the chunks it announced are taken (400 ``chunk_index_out_of_range``).
+    the chunks it announced are taken (400 ``chunk_not_announced``, which
+    the apps do not treat as the bound).
 
     Returns: { "chunk_index": 0, "task_id": "celery-task-id" }
     """
@@ -1034,13 +1043,15 @@ def upload_streaming_chunk(session_id):
         chunk_index = int(chunk_index)
     except ValueError:
         return jsonify({"error": "Invalid chunk_index"}), 400
-    if not 0 <= chunk_index < recording_limits.MAX_STREAMING_CHUNKS:
+    if chunk_index < 0:
+        return jsonify({"error": "Invalid chunk_index"}), 400
+    if chunk_index >= recording_limits.MAX_STREAMING_CHUNKS:
         return _limit_response(_CHUNK_INDEX_OUT_OF_RANGE)
     # Once finalizing, a recording takes only the chunks it announced.
     if (draft.streaming_status == "finalizing"
             and draft.streaming_total_chunks is not None
             and chunk_index >= draft.streaming_total_chunks):
-        return _limit_response(_CHUNK_INDEX_OUT_OF_RANGE)
+        return _limit_response(_CHUNK_NOT_ANNOUNCED)
 
     # Normalize the chunk's mime to a family prefix; older frontends
     # without the field send WebM by definition.

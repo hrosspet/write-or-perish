@@ -2,14 +2,14 @@
 // (backend/utils/recording_limits.py).
 //
 // Audio kept without its text: past the length one recording may have
-// transcribed, the server stores the rest of a recording as audio and does
-// not turn it into text. Its transcription stream says so with a
-// `chunk_error` that carries this code; the recording goes on, and its text
-// ends with a note. Not a failure: no error sound, one message per
-// recording.
+// transcribed (two hours, MAX_TRANSCRIBED_SECONDS; Peter, 2026-11-21), the
+// server stores the rest of a recording as audio and does not turn it into
+// text. Its transcription stream says so with a `chunk_error` that carries
+// this code; the recording goes on, and its text ends with a note. Not a
+// failure: no error sound, one message per recording.
 export const UNTRANSCRIBED_MESSAGES = {
   recording_too_long:
-    'This recording is longer than six hours. The rest of it is saved as '
+    'This recording is longer than two hours. The rest of it is saved as '
     + 'audio, but not turned into text.',
 };
 
@@ -36,6 +36,40 @@ export const RECORDING_LIMIT_MESSAGE =
 
 export function isRecordingLimitCode(code) {
   return FINAL_CHUNK_CODES.has(code);
+}
+
+// Past what one recording may hold: about four hours
+// (`chunk_index_out_of_range`, backend MAX_STREAMING_CHUNKS), its bytes
+// (`recording_too_large`), or one chunk's size (`chunk_too_large`). Every
+// chunk before it is on the server. For the first two the server takes no
+// later chunk either; for `chunk_too_large` it would take a smaller one, but
+// the recording stops all the same. The recording stops and is finalized
+// with the chunks taken (iPhone `ChunkUploader.limitCodes`). Keyed on the
+// code, never the words.
+const BOUND_CHUNK_CODES = new Set([
+  'chunk_too_large', 'chunk_index_out_of_range', 'recording_too_large',
+]);
+
+// The server's words at the four-hour bound (backend LONGEST_RECORDING_TEXT),
+// for an answer that carries none.
+export const LONGEST_RECORDING_MESSAGE =
+  'This recording has reached the longest Loore takes, about four hours, and '
+  + 'has stopped. Everything before this is saved.';
+
+// The server's words for a chunk past the recording's bound, or null.
+export function boundRefusalMessage(err) {
+  const data = err?.response?.data;
+  if (!data || !BOUND_CHUNK_CODES.has(data.code)) return null;
+  if (data.error) return data.error;
+  return data.code === 'chunk_index_out_of_range'
+    ? LONGEST_RECORDING_MESSAGE : RECORDING_LIMIT_MESSAGE;
+}
+
+// A chunk past the count a finalizing recording announced
+// (`chunk_not_announced`): the recording was finished without it. Not the
+// bound: nothing is said or stopped, and it is not sent again.
+export function isNotAnnouncedChunk(err) {
+  return err?.response?.data?.code === 'chunk_not_announced';
 }
 
 const SPEND_CAP_ERROR = 'monthly_spend_limit_reached';
