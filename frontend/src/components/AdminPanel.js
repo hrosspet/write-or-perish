@@ -1116,7 +1116,6 @@ function AdminPanel() {
     if (c.timeline_cap != null) return xCheckLabel(c);
     const n = (v) => (v == null ? "?" : v.toLocaleString());
     const parts = [`${n(c.archived)} archived`];
-    if (c.archived_live != null) parts.push(`(${n(c.archived_live)} live)`);
     if (c.retweets != null) parts.push(`${n(c.retweets)} RT`);
     if (c.replies != null) parts.push(`${n(c.replies)} replies`);
     if (c.originals != null) parts.push(`${n(c.originals)} originals`);

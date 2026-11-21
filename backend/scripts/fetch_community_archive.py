@@ -2,9 +2,9 @@
 as a Twitter/X data-export-shaped zip that Loore's Twitter importer accepts.
 
 Community Archive (https://www.community-archive.org) is an opt-in public
-corpus of user-uploaded Twitter archives. This pulls the ``enriched_tweets``
-view through its public Supabase REST API (anon key is published in their
-docs) and re-serialises each row into the native export format
+corpus of user-uploaded Twitter archives. This pulls an account's tweets
+through its API v1 (a personal key in the ``COMMUNITY_ARCHIVE_API_KEY``
+environment variable; without one the script says so) and re-serialises each row into the native export format
 (``data/tweets.js`` = ``window.YTD.tweets.part0 = [...]``), so the result
 can be uploaded via Loore's "Import Twitter/X archive" flow as-is.
 
@@ -15,8 +15,8 @@ backend/utils/community_archive.py, which the admin pre-fill uses too):
 
 Writes ``<output_dir>/community-archive-<handle>.zip``.
 
-Big accounts (tens of thousands of tweets) are slow through the REST API
-(1000-row keyset pages). Point ``--parquet`` at a local nightly
+Big accounts (tens of thousands of tweets) are slow through the API
+(200-tweet pages, 60 requests a minute). Point ``--parquet`` at a local nightly
 snapshot directory (``tweets.parquet`` + ``profiles.parquet``; download
 one with ``--parquet DIR --refresh``, or see ``latest.json`` in their public
 bucket) to read from disk instead — needs ``duckdb`` in the env:
@@ -32,7 +32,7 @@ import zipfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 from backend.utils.community_archive import (  # noqa: E402
-    fetch_account, iter_tweets, to_export_entry,
+    CommunityArchiveRetired, fetch_account, iter_tweets, to_export_entry,
     fetch_account_parquet, iter_tweets_parquet)
 
 
@@ -77,7 +77,7 @@ def main():
     parser.add_argument("handle", help="Twitter handle (with or without @)")
     parser.add_argument("output_dir", help="Directory to write community-archive-<handle>.zip into")
     parser.add_argument("--parquet", metavar="SNAPSHOT_DIR", default=None,
-                        help="read from a local Parquet snapshot dir instead of the REST API")
+                        help="read from a local Parquet snapshot dir instead of the API")
     parser.add_argument("--refresh", action="store_true",
                         help="with --parquet: download the latest nightly export into SNAPSHOT_DIR first")
     args = parser.parse_args()
@@ -88,8 +88,11 @@ def main():
             on_progress=lambda name, done, total: print(
                 f"  {name}: {done >> 20} / {(total or 0) >> 20} MB", file=sys.stderr, end="\r"))
         print(f"snapshot {export_id} ready", file=sys.stderr)
-    build_zip(args.handle.lstrip("@"), args.output_dir,
-              os.path.expanduser(args.parquet) if args.parquet else None)
+    try:
+        build_zip(args.handle.lstrip("@"), args.output_dir,
+                  os.path.expanduser(args.parquet) if args.parquet else None)
+    except CommunityArchiveRetired as e:
+        sys.exit(str(e))
 
 
 if __name__ == "__main__":
