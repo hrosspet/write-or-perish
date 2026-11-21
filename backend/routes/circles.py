@@ -127,14 +127,17 @@ def delete_circle(circle_id):
 # ── People ──────────────────────────────────────────────────────────────
 
 def _lookup(username):
-    """(person, error response) for one typed name."""
+    """(person, error response) for one typed name. A name nobody has is
+    counted before the answer says so (circles.record_lookup_miss)."""
+    def limited():
+        return (jsonify({"error": cz.LOOKUP_LIMIT,
+                         "code": "circle_lookup_limit"}), 429)
     if cz.lookup_blocked(current_user.id):
-        return None, (jsonify({
-            "error": "Too many names that nobody has. Try again in an "
-                     "hour.", "code": "circle_lookup_limit"}), 429)
+        return None, limited()
     person = cz.find_person(username, current_user.id)
     if person is None:
-        cz.record_lookup_miss(current_user.id)
+        if cz.over_lookup_limit(cz.record_lookup_miss(current_user.id)):
+            return None, limited()
         return None, (jsonify({"error": cz.NO_SUCH_NAME,
                                "code": "circle_unknown_name"}), 404)
     return person, None

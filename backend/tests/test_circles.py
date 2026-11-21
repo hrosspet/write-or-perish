@@ -52,6 +52,13 @@ from backend.models import (                     # noqa: E402
 import backend.models as _real_backend_models    # noqa: E402
 # With the real flask_login, before a sibling test module can mock it.
 import backend.utils.privacy  # noqa: E402,F401
+from backend.utils import circles as _circles_module  # noqa: E402
+
+# The name lookup's own counting, before _no_redis stands in for it.
+_REAL_LOOKUP_COUNTING = {
+    "lookup_blocked": _circles_module.lookup_blocked,
+    "record_lookup_miss": _circles_module.record_lookup_miss,
+}
 
 PEOPLE = ("anna", "ben", "chidi", "dana")
 SECRET = "ANNAS-SHARED-WORDS"
@@ -151,7 +158,7 @@ def _no_redis(monkeypatch):
     from backend.utils import privacy
     privacy._pointers_seen["at"] = 0.0
     monkeypatch.setattr(cz, "lookup_blocked", lambda uid: False)
-    monkeypatch.setattr(cz, "record_lookup_miss", lambda uid: None)
+    monkeypatch.setattr(cz, "record_lookup_miss", lambda uid, count=1: None)
 
 
 def _user(name):
@@ -271,8 +278,9 @@ def test_ai_and_hidden_accounts_cannot_be_added(app):
 def test_the_name_lookup_is_limited(app, monkeypatch):
     from backend.utils import circles as cz
     misses = {"n": 0}
-    monkeypatch.setattr(cz, "record_lookup_miss",
-                        lambda uid: misses.__setitem__("n", misses["n"] + 1))
+    monkeypatch.setattr(
+        cz, "record_lookup_miss",
+        lambda uid, count=1: misses.__setitem__("n", misses["n"] + count))
     monkeypatch.setattr(
         cz, "lookup_blocked",
         lambda uid: misses["n"] >= cz.LOOKUP_MISSES_PER_HOUR)
@@ -283,6 +291,58 @@ def test_the_name_lookup_is_limited(app, monkeypatch):
                       json={"username": f"nobody{i}"}).status_code == 404
     r = c.post(f"/api/circles/{cid}/members/preview", json={"username": "ben"})
     assert r.status_code == 429
+
+
+@pytest.mark.parametrize("with_redis", [True, False])
+def test_unknown_names_are_counted_before_they_are_answered(
+        app, monkeypatch, with_redis):
+    """The hour's limit on names nobody has holds for a list of names as
+    for one: a list whose unknown names would pass it is refused whole,
+    naming none. Names that are found are not counted. With Redis, and
+    without it (each process counts on its own)."""
+    from types import SimpleNamespace
+    import time as _time
+    from backend.tests import fake_redis
+    from backend.utils import circles as cz
+    for name, real in _REAL_LOOKUP_COUNTING.items():
+        monkeypatch.setattr(cz, name, real)
+    fake = fake_redis.install(monkeypatch) if with_redis else None
+    cid = _circle(app, "anna", "Close friends")
+    c = _client(app, "anna")
+    limit = cz.LOOKUP_MISSES_PER_HOUR
+
+    def one(name):
+        return c.post(f"/api/circles/{cid}/members/preview",
+                      json={"username": name})
+
+    def many(*names):
+        return c.post("/api/circles/audience-preview",
+                      json={"usernames": list(names)})
+
+    for i in range(limit - 3):
+        assert one(f"nobody{i}").status_code == 404
+    for _ in range(limit + 5):
+        assert one("ben").status_code == 200
+    r = many("ben", "x1", "x2")              # within the limit: answered
+    assert r.status_code == 400 and r.get_json()["unknown"] == ["x1", "x2"]
+    r = many("ben", "y1", "y2")              # would pass it: refused whole
+    assert r.status_code == 429, r.get_json()
+    assert r.get_json() == {"error": cz.LOOKUP_LIMIT,
+                            "code": "circle_lookup_limit"}
+    assert one("ben").status_code == 429
+    r = _client(app, "anna").post("/api/nodes/", json={
+        "content": "x", "privacy_level": "circles", "ai_usage": "chat",
+        "circle_usernames": ["ben"]})
+    assert r.status_code == 429
+    # An hour later.
+    if fake is not None:
+        fake.advance(cz.LOOKUP_WINDOW_SECONDS + 1)
+    else:
+        later = _time.monotonic() + cz.LOOKUP_WINDOW_SECONDS + 1
+        monkeypatch.setattr(cz, "time", SimpleNamespace(
+            monotonic=lambda: later))
+    assert one("ben").status_code == 200
+    assert one("nobody").status_code == 404
 
 
 def test_the_routes_need_a_login_and_the_flag(app):

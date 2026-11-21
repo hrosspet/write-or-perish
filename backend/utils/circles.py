@@ -20,6 +20,8 @@ and the per-reader mute of a sender. Ids, usernames and timestamps only:
 nothing here decrypts content.
 """
 import logging
+import threading
+import time
 from datetime import datetime, timedelta
 
 from sqlalchemy import and_, func, or_, select
@@ -58,6 +60,7 @@ SHARE_NOTES_PER_WINDOW = 5000
 SHARE_NOTES_WINDOW_HOURS = 24
 
 NO_SUCH_NAME = "No one on Loore has that name"
+LOOKUP_LIMIT = "Too many names that nobody has. Try again in an hour."
 NO_READERS = ("Nobody could read this entry yet. Choose a circle with "
               "people in it, or name a person.")
 REPLY_AUDIENCE = ("Replies in a shared thread are read by the people the "
@@ -155,39 +158,84 @@ def _miss_key(user_id):
     return f"loore:circle-lookup-miss:{user_id}"
 
 
+# The failed lookups counted in this process while Redis is unreachable:
+# key -> (window ends, monotonic seconds; count). Per app, so every test
+# app starts from zero.
+_LOCAL_MISSES_KEY = "circle_lookup_misses"
+_local_misses_lock = threading.Lock()
+
+
+def _local_misses(key, add):
+    """Add *add* to *key*'s count in this process and return the count
+    in its window (Redis is not there)."""
+    from flask import current_app
+    now = time.monotonic()
+    with _local_misses_lock:
+        counts = current_app.extensions.setdefault(_LOCAL_MISSES_KEY, {})
+        if len(counts) > 10000:
+            for stale in [k for k, (until, _) in counts.items()
+                          if until <= now]:
+                del counts[stale]
+        until, n = counts.get(key, (0.0, 0))
+        if until <= now:
+            if add <= 0:
+                return 0
+            until, n = now + LOOKUP_WINDOW_SECONDS, 0
+        n += add
+        counts[key] = (until, n)
+        return n
+
+
 def lookup_blocked(user_id) -> bool:
-    """The user has used up the hour's failed name lookups. Without
-    Redis the limit is not enforced (logged once per call site)."""
+    """The user has used up the hour's failed name lookups. Without Redis
+    each process counts on its own (logged), as the email limits do
+    (send_limits): an outage neither lifts the limit nor stops sharing."""
+    key = _miss_key(user_id)
     try:
         from backend.utils.run_locks import _client
-        value = _client().get(_miss_key(user_id))
-        return value is not None and int(value) >= LOOKUP_MISSES_PER_HOUR
+        value = _client().get(key)
+        count = int(value) if value is not None else 0
     except Exception as e:  # noqa: BLE001
-        logger.warning("circle lookup limit not read (%s)", type(e).__name__)
-        return False
-
-
-def record_lookup_miss(user_id):
-    try:
-        from backend.utils.run_locks import _client
-        client = _client()
-        key = _miss_key(user_id)
-        if client.incr(key) == 1:
-            client.expire(key, LOOKUP_WINDOW_SECONDS)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("circle lookup miss not counted (%s)",
+        logger.warning("circle lookup limit read in this process (%s)",
                        type(e).__name__)
+        count = _local_misses(key, 0)
+    return count >= LOOKUP_MISSES_PER_HOUR
 
 
-def resolve_names(names, asking_user_id, count_misses=True):
-    """(users, unknown names) for typed Loore names."""
+def record_lookup_miss(user_id, count=1):
+    """Count *count* failed lookups for the user and return the hour's
+    count after them. The caller answers which names are unknown only
+    when it is within LOOKUP_MISSES_PER_HOUR. In Redis the count is one
+    atomic step (SET NX EX, then INCRBY, in one transaction), so requests
+    running at once never answer more misses together than the limit.
+    Without Redis each process counts on its own."""
+    key = _miss_key(user_id)
+    try:
+        from backend.utils.run_locks import _client
+        pipe = _client().pipeline()
+        pipe.set(key, 0, ex=LOOKUP_WINDOW_SECONDS, nx=True)
+        pipe.incrby(key, count)
+        return int(pipe.execute()[1])
+    except Exception as e:  # noqa: BLE001
+        logger.warning("circle lookup miss counted in this process (%s)",
+                       type(e).__name__)
+    return _local_misses(key, count)
+
+
+def over_lookup_limit(total):
+    """*total*, a count record_lookup_miss returned, is past the hour's
+    limit (None: nothing was counted)."""
+    return total is not None and total > LOOKUP_MISSES_PER_HOUR
+
+
+def resolve_names(names, asking_user_id):
+    """(users, unknown names) for typed Loore names. Counts nothing: the
+    caller counts the unknown ones before it answers."""
     users, unknown = [], []
     for name in split_names(names):
         user = find_person(name, asking_user_id)
         if user is None:
             unknown.append(name)
-            if count_misses:
-                record_lookup_miss(asking_user_id)
         elif user.id not in {u.id for u in users}:
             users.append(user)
     return users, unknown
@@ -373,10 +421,15 @@ def resolve_audience(user, circle_ids, usernames):
             f"You can name up to {MAX_ONE_OFF_NAMES} people for one entry. "
             "For more, make a circle.", code="circle_too_many_names")
     if names and lookup_blocked(user.id):
-        raise AudienceError(
-            "Too many names that nobody has. Try again in an hour.",
-            code="circle_lookup_limit", status=429)
+        raise AudienceError(LOOKUP_LIMIT, code="circle_lookup_limit",
+                            status=429)
     people, unknown = resolve_names(names, user.id)
+    # The unknown names are counted before the answer names them: a
+    # request whose names would pass the hour's limit is refused whole.
+    if unknown and over_lookup_limit(
+            record_lookup_miss(user.id, len(unknown))):
+        raise AudienceError(LOOKUP_LIMIT, code="circle_lookup_limit",
+                            status=429)
     if unknown:
         raise AudienceError(
             NO_SUCH_NAME + ": " + ", ".join("@" + n for n in unknown),

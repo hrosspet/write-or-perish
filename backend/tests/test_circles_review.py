@@ -77,7 +77,7 @@ def app(monkeypatch):
     }
     from backend.utils import circles as cz
     monkeypatch.setattr(cz, "lookup_blocked", lambda uid: False)
-    monkeypatch.setattr(cz, "record_lookup_miss", lambda uid: None)
+    monkeypatch.setattr(cz, "record_lookup_miss", lambda uid, count=1: None)
     with app.app_context():
         _db.create_all()
         users = [User(username=n, default_ai_usage="chat", approved=True,

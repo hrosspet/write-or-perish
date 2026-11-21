@@ -114,7 +114,7 @@ def _no_redis(monkeypatch):
     from backend.utils import privacy
     privacy._pointers_seen["at"] = 0.0
     monkeypatch.setattr(cz, "lookup_blocked", lambda uid: False)
-    monkeypatch.setattr(cz, "record_lookup_miss", lambda uid: None)
+    monkeypatch.setattr(cz, "record_lookup_miss", lambda uid, count=1: None)
 
 
 def _user(name):
