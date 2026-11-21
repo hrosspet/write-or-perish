@@ -42,6 +42,15 @@ merge goes on in the background, MAX_MERGE_ATTEMPTS times at most, a final
 failure reported as an error. A merge that lands after the person saved
 a version of their own is not saved (the user's edit wins); its cost row
 is.
+
+A merge that goes on after the person was let in (``late_merge``, #731)
+is followed by the app's usual profile watcher, as a profile build: the
+user payload's ``profile_merge_pending`` and /export/profile-progress
+report it while it runs, and when it saves its version the person gets
+the notice a usual build gives ("Your profile has been updated ✓"). One
+that ends without a version says nothing: the person keeps the profile
+they have. A merge that ended within the wait gives no notice: the
+merged profile is the first one the person reads.
 """
 import logging
 from datetime import datetime, timedelta
@@ -72,6 +81,8 @@ RETRY_COUNTDOWNS = (60, 300)
 MERGE_STALE = timedelta(minutes=65)
 
 TERMINAL = ("done", "skipped", "superseded", "failed")
+# A merge that has not ended.
+IN_FLIGHT = ("due", "running", "retry")
 
 # The cost row of a merge whose output cannot be saved (cut off, refused,
 # or not a profile): a request type outside refusal_backoff's
@@ -112,6 +123,42 @@ def merge_waiting_over(load, now=None):
         return True
     started = load.merge_started_at
     return started is None or (now or _now()) - started >= MERGE_WAIT
+
+
+def late_merge(user_id, now=None):
+    """The load whose final merge goes on after the person was let in
+    (#731), or None: the load is done (its wait, MERGE_WAIT, ended without
+    the merge) and the merge has not ended and showed a sign of life
+    within MERGE_STALE, the time after which ``_claim`` counts a running
+    merge as over. So a merge whose worker died where no beat sends it
+    again (or with bundles switched off) is not followed for ever. Known
+    limit: the beat sets such a merge back to "retry" and sends it again
+    (it marks it "failed" only after MAX_MERGE_ATTEMPTS), so a later
+    attempt that saves its version lands without the notice. Rare: a
+    worker has to stop during the one-to-two-minute call.
+
+    While the load waits, a merge is not late: the person still sees
+    "Preparing your starting point…" and first reads the merged profile.
+    Metadata only."""
+    from backend.utils import prefill_bundles as pb
+    if not pb.bundles_enabled():
+        return None
+    now = now or _now()
+    return PrefillBundleLoad.query.filter(
+        PrefillBundleLoad.user_id == user_id,
+        PrefillBundleLoad.status == "done",
+        PrefillBundleLoad.merge_status.in_(IN_FLIGHT),
+        PrefillBundleLoad.merge_heartbeat_at > now - MERGE_STALE,
+    ).order_by(PrefillBundleLoad.id.desc()).first()
+
+
+def merge_status_of(load_id, user_id):
+    """The merge status of the account's own load ``load_id``, or None for
+    a load that is not the account's (or not there)."""
+    row = db.session.query(PrefillBundleLoad.merge_status).filter(
+        PrefillBundleLoad.id == load_id,
+        PrefillBundleLoad.user_id == user_id).first()
+    return row[0] if row is not None else None
 
 
 def _claim(load_id):

@@ -24,6 +24,11 @@ const MAX_CONSECUTIVE_ERRORS = 10;
  * says a build is running and stops when the endpoint says it is not, so
  * it needs no duration cap: a long chunked build is followed to the end.
  *
+ * It also follows a pre-fill load's final merge that goes on after the
+ * person was let in (#731, `profile_merge_pending`, source "merge"): when
+ * the merge saves its version the person gets the usual "updated"
+ * notice; when it ends without one, nothing is said.
+ *
  * Broadcasts 'loore_profile_progress' (ProfilePage renders its inline
  * label from it) and 'loore_profile_done' on terminal states. Renders
  * nothing.
@@ -42,9 +47,15 @@ export default function ProfileGenerationWatcher() {
   // before we can observe the terminal state, so the endpoint resolves
   // the outcome from this id once nothing is in flight.
   const [syncTaskId, setSyncTaskId] = useState(null);
+  // The late final merge last seen running (#731): once it ends, the
+  // endpoint says from this id whether it saved a version.
+  const [mergeId, setMergeId] = useState(null);
   // Newest saved version when polling started; a batch chain has no
   // terminal task state, so "a new version landed" is its success signal.
   const startVersionRef = useRef(undefined);
+  // A batch or sync build was seen running during this watch: a late
+  // merge that then ends without a version does not hide its outcome.
+  const sawBuildRef = useRef(false);
 
   // Pre-#258 the task id was mirrored here; the backend payload is the
   // only source now.
@@ -55,7 +66,8 @@ export default function ProfileGenerationWatcher() {
   // Adopt a build the backend reports as running (fresh load,
   // cross-browser continuation).
   useEffect(() => {
-    if (user?.profile_generation_task_id || user?.profile_batch_pending) {
+    if (user?.profile_generation_task_id || user?.profile_batch_pending
+        || user?.profile_merge_pending) {
       setActive(true);
     }
   }, [user]);
@@ -67,8 +79,12 @@ export default function ProfileGenerationWatcher() {
     return () => window.removeEventListener('loore_profile_started', handler);
   }, []);
 
+  const query = [
+    syncTaskId && `task_id=${encodeURIComponent(syncTaskId)}`,
+    mergeId && `merge_id=${encodeURIComponent(mergeId)}`,
+  ].filter(Boolean).join('&');
   const endpoint = active
-    ? `/export/profile-progress${syncTaskId ? `?task_id=${encodeURIComponent(syncTaskId)}` : ''}`
+    ? `/export/profile-progress${query ? `?${query}` : ''}`
     : null;
   const { data, error } = useAsyncTaskPolling(endpoint, {
     interval: effectiveSource === 'batch' ? BATCH_INTERVAL_MS : SYNC_INTERVAL_MS,
@@ -81,11 +97,18 @@ export default function ProfileGenerationWatcher() {
     setActive(false);
     setSource(null);
     setSyncTaskId(null);
+    setMergeId(null);
     startVersionRef.current = undefined;
+    sawBuildRef.current = false;
     // Drop the running flags from the cached user so this build is not
     // re-adopted (re-fetched flags reflect any new one).
     setUser((prev) => (prev
-      ? { ...prev, profile_generation_task_id: null, profile_batch_pending: false }
+      ? {
+        ...prev,
+        profile_generation_task_id: null,
+        profile_batch_pending: false,
+        profile_merge_pending: false,
+      }
       : prev));
   };
 
@@ -106,8 +129,14 @@ export default function ProfileGenerationWatcher() {
 
     if (data.running) {
       if (data.source !== source) setSource(data.source);
+      if (data.source === 'batch' || data.source === 'sync') {
+        sawBuildRef.current = true;
+      }
       if (data.source === 'sync' && data.task_id && data.task_id !== syncTaskId) {
         setSyncTaskId(data.task_id);
+      }
+      if (data.source === 'merge' && data.merge_id && data.merge_id !== mergeId) {
+        setMergeId(data.merge_id);
       }
       if (startVersionRef.current === undefined) {
         startVersionRef.current = data.latest_profile?.id ?? null;
@@ -125,20 +154,29 @@ export default function ProfileGenerationWatcher() {
       return;
     }
 
-    // Terminal. `status` is authoritative for the sync task. A batch
-    // chain ends as `idle`: its last step failed (the backend says so),
-    // or it finished — a version landed since the watch began.
+    // Terminal. `status` is authoritative for the sync task and for a
+    // late merge (`completed` or `unchanged`). A batch chain ends as
+    // `idle`: its last step failed (the backend says so), or it finished
+    // — a version landed since the watch began.
     const sawRunning = startVersionRef.current !== undefined;
     const newVersion = sawRunning
       && (data.latest_profile?.id ?? null) !== startVersionRef.current;
+    // `unchanged`: the late merge ended without a version. A build seen
+    // during this watch keeps its own outcome (read as `idle`, as when no
+    // merge ran); with none, nothing is said.
+    const status = data.status === 'unchanged' && sawBuildRef.current
+      ? 'idle' : data.status;
     let outcome = null;
-    if (data.status === 'failed') {
+    if (status === 'unchanged') {
+      // The person keeps the profile they have.
+      outcome = null;
+    } else if (status === 'failed') {
       outcome = 'failed';
-    } else if (data.status === 'stalled' || (data.status === 'idle' && sawRunning && data.batch_step_failed)) {
+    } else if (status === 'stalled' || (status === 'idle' && sawRunning && data.batch_step_failed)) {
       outcome = 'stalled';
-    } else if (data.status === 'completed' || (data.status === 'idle' && newVersion)) {
+    } else if (status === 'completed' || (status === 'idle' && newVersion)) {
       outcome = 'completed';
-    } else if (data.status === 'idle' && sawRunning) {
+    } else if (status === 'idle' && sawRunning) {
       outcome = 'stalled';
     }
 
@@ -150,7 +188,9 @@ export default function ProfileGenerationWatcher() {
       }));
     }
     window.dispatchEvent(new Event('loore_profile_done'));
-    if (!outcome) return; // nothing was running (stale cached flag)
+    // Nothing was running (stale cached flag), or a late merge ended
+    // without a version.
+    if (!outcome) return;
     if (outcome === 'completed') {
       addToast('Your profile has been updated ✓', 6000);
     } else if (outcome === 'failed') {
