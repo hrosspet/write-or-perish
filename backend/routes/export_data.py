@@ -3450,6 +3450,25 @@ def _batch_progress(user):
     }
 
 
+def _merge_progress(user, load):
+    """A pre-fill load's final merge going on after the person was let in
+    (#731, prefill_bundle_merge.late_merge): one live call, shown as a
+    usual build's final merge step. ``merge_id`` names it, so the client
+    asks with it once it has ended (as with ``task_id`` for a sync task)
+    and learns whether it saved a version."""
+    return {
+        "running": True,
+        "source": "merge",
+        "status": "progress",
+        "progress": 95,
+        "message": "Integrating profile versions",
+        "task_id": None,
+        "merge_id": load.id,
+        "error": None,
+        "latest_profile": _latest_profile_snapshot(user),
+    }
+
+
 def _sync_progress(user):
     """Progress of the synchronous Celery task the guard points at, with
     the same staleness rule the dispatchers apply (_is_task_stale:
@@ -3520,11 +3539,23 @@ def get_profile_progress():
     user's own task (the task records its owner, utils/task_owner);
     any other id is ignored. A failure says only text written for the
     user, else a fixed line.
+
+    A pre-fill load's final merge that goes on after the person was let in
+    (#731) is reported too, as source "merge", after the two builds. Query
+    `merge_id`: the merge the client last saw running. Once it has ended,
+    the answer is `completed` when it saved a version and `unchanged` when
+    it ended without one (the person keeps the profile they have, and
+    nothing is said). Only for the user's own load; any other id is
+    ignored.
     """
+    from backend.utils.prefill_bundle_merge import late_merge, merge_status_of
     if current_user.profile_batch_pending:
         return jsonify(_batch_progress(current_user)), 200
     if current_user.profile_generation_task_id:
         return jsonify(_sync_progress(current_user)), 200
+    merge = late_merge(current_user.id)
+    if merge is not None:
+        return jsonify(_merge_progress(current_user, merge)), 200
 
     status, error = "idle", None
     last_task_id = request.args.get("task_id")
@@ -3539,6 +3570,11 @@ def get_profile_progress():
             # SUCCESS, or PENDING for an id Celery no longer knows: the
             # task finished (the guard is gone).
             status = "completed"
+    last_merge_id = request.args.get("merge_id", type=int)
+    if status == "idle" and last_merge_id is not None:
+        merged = merge_status_of(last_merge_id, current_user.id)
+        if merged is not None:
+            status = "completed" if merged == "done" else "unchanged"
     return jsonify({
         "running": False,
         "source": None,

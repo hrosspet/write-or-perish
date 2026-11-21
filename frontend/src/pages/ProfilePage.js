@@ -59,7 +59,8 @@ export default function ProfilePage() {
   const [failMessage, setFailMessage] = useState('');
 
   useEffect(() => {
-    if (user?.profile_generation_task_id || user?.profile_batch_pending) {
+    if (user?.profile_generation_task_id || user?.profile_batch_pending
+        || user?.profile_merge_pending) {
       setGenerating(true);
     }
   }, [user]);
@@ -283,11 +284,12 @@ export default function ProfilePage() {
       animation: generating ? 'pulse 2s ease-in-out infinite' : 'none',
     }}>
       {failMessage || (genData?.message
-        // A batch step has no within-step percentage; its label
-        // already reads "Chunk n of ~N".
-        ? (genData.source === 'batch'
-          ? genData.message
-          : `${genData.message} \u00b7 ${genProgress || 0}%`)
+        // Only the sync task reports a within-step percentage; a batch
+        // step's label already reads "Chunk n of ~N", and a late final
+        // merge (#731) is one call.
+        ? (genData.source === 'sync'
+          ? `${genData.message} \u00b7 ${genProgress || 0}%`
+          : genData.message)
         : 'Starting generation...')}
     </span>
   );

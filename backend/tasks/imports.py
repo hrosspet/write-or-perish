@@ -15,6 +15,7 @@ the task's owner (utils/task_owner), so the status endpoint answers for
 the user's own import only, a failed one included.
 """
 import json
+import time
 from datetime import datetime, timezone
 
 from sqlalchemy.exc import IntegrityError
@@ -138,27 +139,36 @@ def refresh_community_archive_snapshot(first_copy=False):
     return {"export_id": export_id, "api_v1_day": v1_day}
 
 
+class PrefillRefused(RuntimeError):
+    """The account may not be pre-filled: its owner said no to the tweet
+    seed, or set AI usage to None (utils.privacy.prefill_refusal)."""
+
+
 def _raise_if_prefill_refused(user):
     """Checked again when the task runs, not only by the admin route: the
     account setting or the consent can change while it is queued (#346)."""
     from backend.utils.privacy import prefill_refusal
     refusal = prefill_refusal(user)
     if refusal:
-        raise RuntimeError(refusal[1])
+        raise PrefillRefused(refusal[1])
 
 
 def prefill_community_archive_impl(user_id, handle, options, update_state=None,
                                    seed_now=True):
-    """Fetch @handle's tweets from the Community Archive (REST for small
-    accounts, the nightly parquet snapshot for large ones; API v1 for every
-    account when COMMUNITY_ARCHIVE_API_KEY is set) into the user's
+    """Fetch @handle's tweets from the Community Archive into the user's
     account (origin="twitter", private, AI-readable) and pin the user to
     the BATCH profile pipeline before the import's profile handoff runs,
     so a bootstrapped corpus never triggers a synchronous (full-price)
-    build. Runs inside an app context; testable without Celery."""
+    build. Runs inside an app context; testable without Celery.
+
+    The latest daily export first, then only the newer tweets through API
+    v1 (_prefill_export_then_newer, #712). Needs COMMUNITY_ARCHIVE_API_KEY
+    (#721): without it the account lookup fails with the message naming
+    the key."""
     from backend.models import User
-    from backend.utils import twitter_archive as ta
     from backend.utils import community_archive as ca
+
+    started = time.monotonic()
 
     def state(stage, done, total):
         if update_state:
@@ -167,11 +177,16 @@ def prefill_community_archive_impl(user_id, handle, options, update_state=None,
                 "total": total, "handle": handle,
             })
 
-    from flask import current_app
     user = User.query.get(user_id)
     if not user:
         raise RuntimeError(f"User {user_id} not found")
-    _raise_if_prefill_refused(user)
+    try:
+        _raise_if_prefill_refused(user)
+    except PrefillRefused:
+        # A no given while this pre-fill's follow-up run waited: what the
+        # earlier run staged goes too (#712).
+        _delete_prefill_stashes(user_id)
+        raise
     from backend.utils.x_identity import resolve_x_id, XIdUnresolved
     try:
         # A background task, not a request: the archive's own timeout, not
@@ -184,97 +199,240 @@ def prefill_community_archive_impl(user_id, handle, options, update_state=None,
     # handle after this (a stale snapshot can map it to a former holder).
     account = resolved.account
     _check_x_id_conflict(user, account["account_id"], account["username"])
-    # Size by what the archive actually holds (exact live count) — NOT
-    # all_account.num_tweets, the account's lifetime counter: an
-    # extension-ingested account can "report 13k tweets" while the
-    # archive holds 1k and the nightly snapshot none at all.
-    try:
-        archived = ca.count_archived(account["account_id"])
-    except Exception as e:  # header lookup failed → fall back to the counter
-        logger.warning("Community Archive count failed for @%s: %s", handle, e)
-        archived = None
-    expected = archived if archived is not None else (account.get("num_tweets") or 0)
+    return _prefill_export_then_newer(user, account, options, state,
+                                      seed_now, started)
 
-    # Small accounts page through the REST API; large ones read the nightly
-    # parquet snapshot (downloaded once per export into the data dir) —
-    # unless the snapshot holds fewer rows than the live archive (account
-    # ingested/updated after the export), in which case REST is complete
-    # and parquet is not.
-    min_parquet = current_app.config.get("COMMUNITY_ARCHIVE_PARQUET_MIN_TWEETS", 5000)
-    use_parquet = bool(options.get("force_parquet")) or expected >= min_parquet
-    if ca.v1_enabled() and not options.get("force_parquet"):
-        # API v1 (#688) has no count, so whether the snapshot holds all of
-        # the account (the check below) cannot be known; its cursor paging
-        # reads a large account whole, live, at 200 tweets a request.
-        use_parquet = False
-    if use_parquet:
-        snapshot_dir = snapshot_dir_for(current_app.config)
-        state("downloading", 0, None)
-        ca.ensure_snapshot(snapshot_dir, on_progress=lambda name, done, total: state(
-            f"downloading {name}", done >> 20, (total >> 20) if total else None))
-        in_snapshot = ca.count_parquet(account["account_id"], snapshot_dir)
-        if in_snapshot == 0 or (archived is not None and in_snapshot < archived):
-            logger.info("@%s: snapshot holds %s rows vs %s live — using REST",
-                        handle, in_snapshot, archived)
-            use_parquet = False
-    stash = None
-    if use_parquet:
-        source = ca.iter_tweets_parquet(
-            account["account_id"], snapshot_dir,
-            on_page=lambda n: state("fetching", n, expected))
-    elif ca.v1_enabled():
-        # Paged into a stash on disk with its cursor (#688): a run that
-        # fails, or stops at PREFILL_V1_RUN_SECONDS, leaves what it read,
-        # and the next run (the task's follow-up, or the admin's next
-        # pre-fill of the same account) continues from the cursor.
-        stash = _prefill_stash_dir(user_id, account["account_id"])
-        state("fetching", 0, expected)
-        done, fetched = ca.stage_account_tweets_v1(
-            account["account_id"], stash, run_seconds=PREFILL_V1_RUN_SECONDS,
-            on_page=lambda n: state("fetching", n, expected))
-        if not done:
-            raise PrefillContinues(fetched)
-        source = ca.iter_staged_tweets(stash)
-    else:
-        source = ca.iter_tweets(
-            account["account_id"], on_page=lambda n: state("fetching", n, expected))
-    state("fetching", 0, expected)
 
-    rows, seen, retweets = [], set(), 0
-    for raw in source:
-        if raw["tweet_id"] in seen:
-            continue
-        seen.add(raw["tweet_id"])
+class _CollectedTweets:
+    """A pre-fill's archive rows as the importer's compact rows, each tweet
+    once (by tweet id, whichever source brought it first). ``seen`` holds
+    every tweet id taken, retweets and empty tweets included; ``retweets``
+    counts the retweets compact_row dropped, like the native import."""
+
+    def __init__(self):
+        self.rows, self.seen, self.retweets = [], set(), 0
+
+    def add(self, raw):
+        from backend.utils import community_archive as ca
+        from backend.utils import twitter_archive as ta
+        tweet_id = str(raw["tweet_id"])
+        if tweet_id in self.seen:
+            return
+        self.seen.add(tweet_id)
         row = ta.compact_row(ca.to_export_entry(raw)["tweet"])
         if row is None:
-            retweets += 1  # compact_row drops retweets, like the native import
+            self.retweets += 1
         else:
-            rows.append(row)
+            self.rows.append(row)
+
+    def reset(self):
+        self.__init__()
+
+
+def _archive_covered_tweet_ids(user_id):
+    """The tweet ids the account already holds as entries (source key
+    ``twitter:<id>``, soft-deleted ones included) that came from a read
+    covering everything older than them: a Community Archive pre-fill
+    (provenance prefill_ca, read to the timeline's end or down to an
+    export) or the person's own archive upload (archive_upload). Only those
+    may stop the newest-first read (#712: "everything older is in the
+    export"). Entries from the X API pre-fill (prefill_x, only the newest
+    ~3,200 posts of that day) and entries with no provenance are left out:
+    a page of them would stop the read with the older history unread. The
+    import still deduplicates them by tweet id. Scoped like the importer's
+    dedup (_load_source_key_index): on the importing human."""
+    from backend.extensions import db
+    from backend.models import Node
+    from backend.routes.import_data import (
+        PROVENANCE_ARCHIVE_UPLOAD, PROVENANCE_PREFILL_CA)
+    prefix = "twitter:"
+    keys = db.session.query(Node.source_key).filter(
+        Node.human_owner_id == user_id,
+        Node.source_key.like(prefix + "%"),
+        Node.provenance.in_((PROVENANCE_PREFILL_CA, PROVENANCE_ARCHIVE_UPLOAD)))
+    return {key[len(prefix):] for (key,) in keys}
+
+
+def _delete_prefill_stashes(user_id, account_id=None):
+    """Delete the tweets a Community Archive pre-fill staged for this user
+    (all of the user's stashes when the account is not known yet): a no to
+    the tweet seed deletes them at once, also when it comes between two
+    runs of one pre-fill."""
+    import shutil
+    from backend.utils.twitter_archive import STASH_ROOT
+    root = STASH_ROOT.parent / "ca-prefill"
+    if not root.is_dir():
+        return
+    if account_id is not None:
+        shutil.rmtree(_prefill_stash_dir(user_id, account_id),
+                      ignore_errors=True)
+        return
+    for stash in root.glob(f"{int(user_id)}-*"):
+        shutil.rmtree(stash, ignore_errors=True)
+
+
+def _latest_export(snapshot_dir, handle, state):
+    """The export a pre-fill reads first (#712): the archive's latest daily
+    export, downloaded when the archive has published one newer than the
+    cached copy (ca.ensure_snapshot; Glean's refresh normally has it
+    already). When the archive cannot be asked, the cached copy; with none
+    cached, None, and the API read covers the whole account."""
+    from backend.utils import community_archive as ca
+    from backend.utils.ca_feed import _describe_failure
+    try:
+        return ca.ensure_snapshot(
+            snapshot_dir, on_progress=lambda name, done, total: state(
+                f"downloading {name}", done >> 20,
+                (total >> 20) if total else None))
+    except Exception as e:  # noqa: BLE001 - the API read covers what it lacks
+        cached = ca.snapshot_export_id(snapshot_dir)
+        logger.warning(
+            "Community Archive pre-fill (@%s): the latest export could not "
+            "be fetched (%s); %s", handle, _describe_failure(e),
+            f"reading the cached export {cached}" if cached
+            else "reading the account through API v1 only")
+        return cached
+
+
+def _prefill_export_then_newer(user, account, options, state, seed_now,
+                               started):
+    """The pre-fill with an API key (#712, Peter 2026-11-20):
+
+    1. The account's tweets from the latest daily export (_latest_export),
+       scanned for this one account (ca.iter_tweets_parquet: a filtered
+       scan, ``batch`` rows in memory at a time).
+    2. The newer ones through API v1, newest first, until the first page
+       on which every tweet is already known: in the export (retweets and
+       empty tweets included, which never become entries) or an entry of
+       this account from a Community Archive pre-fill or the person's own
+       archive upload (_archive_covered_tweet_ids; not the X API pull's).
+       Everything older is assumed to be in the export. An account the
+       export does not hold is read whole. The read is staged on disk
+       with its cursor, resumable as in #690. ``options["force_parquet"]``
+       ("export only") skips this step.
+    3. One import of both, deduplicated by tweet id. A tweet the account
+       already holds stays that one entry with its provenance: one from
+       the X API pull keeps prefill_x, its text and Chat at most.
+
+    The owner's no to the tweet seed is asked again before the first
+    request and after every page: it stops the read, sends no further
+    request and deletes what was staged. New entries come from the
+    Community Archive, so they carry its provenance (prefill_ca), as
+    before."""
+    import shutil
+    from flask import current_app
+    from backend.extensions import db
     from backend.routes.import_data import PROVENANCE_PREFILL_CA
-    result = _import_prefill_rows(user_id, account["username"], rows, options,
-                                  state, seed_now, no_rows_error=ca.CommunityArchiveError,
-                                  x_id=account.get("account_id"),
-                                  provenance=PROVENANCE_PREFILL_CA)
+    from backend.utils import community_archive as ca
+    from backend.utils.ca_feed import _describe_failure
+
+    account_id = str(account["account_id"])
+    handle = account["username"]
+    expected = account.get("num_tweets") or None
+    export_only = bool(options.get("force_parquet"))
+    collected = _CollectedTweets()
+
+    snapshot_dir = snapshot_dir_for(current_app.config)
+    export_id = _latest_export(snapshot_dir, handle, state)
+    state("fetching", 0, expected)
+    if export_id:
+        try:
+            with ca.snapshot_read_lock(snapshot_dir):
+                for raw in ca.iter_tweets_parquet(
+                        account_id, snapshot_dir,
+                        on_page=lambda n: state("fetching", n, expected)):
+                    collected.add(raw)
+        except Exception as e:  # noqa: BLE001 - as if there were no export
+            logger.warning(
+                "Community Archive pre-fill (@%s): export %s could not be "
+                "read (%s); reading the account through API v1 only",
+                handle, export_id, _describe_failure(e))
+            collected.reset()
+            export_id = None
+    from_export = len(collected.seen)
+
+    stash, stage = None, None
+    try:
+        # A no given while the export was read sends no request.
+        db.session.refresh(user)
+        _raise_if_prefill_refused(user)
+        if export_only and not from_export:
+            raise ca.CommunityArchiveError(
+                f"@{handle}: the Community Archive export {export_id} does "
+                "not hold this account; without \"export only\" the "
+                "pre-fill reads it through the API" if export_id else
+                f"@{handle}: no Community Archive export is available for "
+                "\"export only\"")
+        if not export_only:
+            stash = _prefill_stash_dir(user.id, account_id)
+            # Known: the export's tweets for this account (collected.seen
+            # holds exactly those until the staged rows are added below)
+            # and the account's entries from a read that covered everything
+            # older (_archive_covered_tweet_ids).
+            in_account = _archive_covered_tweet_ids(user.id)
+
+            def is_known(tweet_id):
+                return tweet_id in collected.seen or tweet_id in in_account
+
+            def on_page(fetched):
+                state("fetching", from_export + fetched, expected)
+                db.session.refresh(user)
+                _raise_if_prefill_refused(user)
+
+            stage = ca.stage_newer_tweets_v1(
+                account_id, stash, is_known=is_known,
+                run_seconds=max(0.0, PREFILL_V1_RUN_SECONDS
+                                - (time.monotonic() - started)),
+                on_page=on_page)
+            if not stage["done"]:
+                raise PrefillContinues(stage["fetched"], stage["requests"])
+            for raw in ca.iter_staged_tweets(stash):
+                collected.add(raw)
+        result = _import_prefill_rows(
+            user.id, handle, collected.rows, options, state, seed_now,
+            no_rows_error=ca.CommunityArchiveError, x_id=account_id,
+            provenance=PROVENANCE_PREFILL_CA)
+    except PrefillRefused:
+        # Also a stash an earlier run of this pre-fill left (a no given
+        # while the follow-up run waited).
+        _delete_prefill_stashes(user.id, account_id)
+        raise
+    requests = stage["requests"] if stage else 0
     result.update({
-        "source": ("parquet" if use_parquet
-                   else "api-v1" if ca.v1_enabled() else "rest"),
-        # What the archive actually holds vs. the account's self-reported
-        # lifetime counter (uploads are often partial) — so a low node
-        # count reads as "partial archive", not "import bug".
-        "archived": len(seen), "retweets_skipped": retweets,
+        "source": "export" if export_only else "export+api-v1",
+        "export_id": export_id,
+        # Tweets the export held for the account, and those only the API
+        # had; retweets included (they are counted, never imported).
+        "from_export": from_export,
+        "from_api": len(collected.seen) - from_export,
+        "api_fetched": stage["fetched"] if stage else 0,
+        "api_requests": requests,
+        "api_stop": stage["stopped"] if stage else None,
+        "archived": len(collected.seen),
+        "retweets_skipped": collected.retweets,
         "account_num_tweets": account.get("num_tweets") or 0,
     })
+    logger.info(
+        "Community Archive pre-fill for user %s (@%s): %d tweets from export "
+        "%s, %d newer through API v1 in %d timeline requests (%s); %d "
+        "entries created", user.id, handle, from_export, export_id or "none",
+        result["from_api"], requests,
+        "export only" if export_only else {
+            ca.STOP_KNOWN_PAGE: "stopped at a page of known tweets",
+            ca.STOP_END: "read to the end of the timeline",
+        }.get(result["api_stop"], result["api_stop"]),
+        result.get("created") or 0)
     if stash is not None:
-        import shutil
         shutil.rmtree(stash, ignore_errors=True)
     return result
 
 
 # A pre-fill through API v1 (#688) pages for at most this long in one run,
-# then continues in a follow-up run of the same task from its stored
-# cursor. Heuristic: 30 min of paging is ~1,800 requests at the key's 60 a
-# minute (~360k tweets, the largest account in the archive), and leaves
-# the import of the rows 25 min before the 55-min soft time limit.
+# counted from the start of the run (the export step included, #712), then
+# continues in a follow-up run of the same task from its stored cursor.
+# Heuristic: 30 min of paging is ~1,800 requests at the key's 60 a minute
+# (~360k tweets, the largest account in the archive), and leaves the import
+# of the rows 25 min before the 55-min soft time limit.
 PREFILL_V1_RUN_SECONDS = 30 * 60
 # Follow-up runs one pre-fill may take; past them it fails with a message
 # saying that running it again continues where it stopped. Heuristic: 8
@@ -289,9 +447,10 @@ class PrefillContinues(Exception):
     """The pre-fill's API v1 read used its run's time; the stash holds what
     it read and the next run continues from the cursor."""
 
-    def __init__(self, fetched):
+    def __init__(self, fetched, requests=None):
         super().__init__(f"{fetched} tweets read so far; continuing")
         self.fetched = fetched
+        self.requests = requests
 
 
 def _continue_prefill(task, user_id, handle, stop):
@@ -304,7 +463,9 @@ def _continue_prefill(task, user_id, handle, stop):
             f"{PREFILL_V1_MAX_CONTINUATIONS + 1} runs and not finished; run "
             "the pre-fill again to continue where it stopped")
     logger.info("Community Archive pre-fill for user %s (@%s): %d tweets "
-                "read; continuing in a new run", user_id, handle, stop.fetched)
+                "read in %s timeline requests; continuing in a new run",
+                user_id, handle, stop.fetched,
+                "?" if stop.requests is None else stop.requests)
     raise task.retry(countdown=PREFILL_V1_CONTINUE_COUNTDOWN)
 
 

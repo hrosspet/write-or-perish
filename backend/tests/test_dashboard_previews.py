@@ -52,6 +52,7 @@ USER_FIELDS = {
     "terms_up_to_date", "approved", "email", "is_admin", "plan",
     "voice_mode_enabled", "craft_mode", "preferred_model",
     "profile_generation_task_id", "profile_batch_pending",
+    "profile_merge_pending",
     "default_privacy_level", "default_ai_usage", "twitter_login",
     "twitter_handle", "pending_email", "pending_email_expired",
     "prefill_consent", "prefilled_handle", "has_own_entries", "timezone",

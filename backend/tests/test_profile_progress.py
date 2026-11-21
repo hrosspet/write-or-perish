@@ -434,6 +434,124 @@ def test_idle_reports_a_failed_batch_step(client, user):
     assert client.get("/api/export/profile-progress").get_json()["batch_step_failed"] is False
 
 
+# ── a pre-fill load's late final merge (#731) ────────────────────────────
+
+@pytest.fixture
+def bundles(app):
+    """Pre-fill bundles switched on (prefill_bundles.bundles_enabled)."""
+    app.config["PREFILL_BUNDLES_ENABLED"] = True
+    app.config["PREFILL_BUNDLE_LOCATION"] = "/nowhere"
+    return app
+
+
+def _load(user, status="done", merge_status="running", heartbeat_ago=None):
+    """A pre-fill bundle load of `user` whose final merge is in
+    `merge_status`, its last sign of life `heartbeat_ago` before now."""
+    from backend.models import PrefillBundleLoad
+    now = datetime.utcnow()
+    load = PrefillBundleLoad(
+        user_id=user.id, x_id="1001", origin="self", bundle_sha256="",
+        status=status, stage="done" if status == "done" else "merge",
+        merge_wanted=True, merge_status=merge_status,
+        merge_started_at=now - timedelta(minutes=4),
+        merge_heartbeat_at=now - (heartbeat_ago or timedelta(seconds=30)))
+    _db.session.add(load)
+    _db.session.commit()
+    return load
+
+
+def test_a_merge_going_on_after_the_person_was_let_in_is_followed(
+        client, user, bundles):
+    """The load let the person in with the loaded profile; its final merge
+    goes on. The watcher follows it as a build's final merge step."""
+    loaded = _version(user, "integration")
+    for merge_status in ("due", "running", "retry"):
+        load = _load(user, merge_status=merge_status)
+        body = client.get("/api/export/profile-progress").get_json()
+        assert body["running"] is True
+        assert body["source"] == "merge"
+        assert body["merge_id"] == load.id
+        assert body["message"] == "Integrating profile versions"
+        assert body["task_id"] is None
+        assert body["latest_profile"]["id"] == loaded.id
+        _db.session.delete(load)
+        _db.session.commit()
+
+
+def test_a_merge_the_person_still_waits_for_is_not_reported(
+        client, user, bundles):
+    """While the load waits for its merge ("Preparing your starting
+    point…"), the merge is not late: the merged profile is the first one
+    the person reads, and no notice follows it."""
+    _load(user, status="running", merge_status="running")
+    body = client.get("/api/export/profile-progress").get_json()
+    assert body["running"] is False and body["status"] == "idle"
+
+
+@pytest.mark.parametrize("ended,expected", [
+    ("done", "completed"),
+    ("superseded", "unchanged"),   # the person's own version came first
+    ("skipped", "unchanged"),
+    ("failed", "unchanged"),
+])
+def test_the_followed_merge_says_whether_it_saved_a_version(
+        client, user, bundles, ended, expected):
+    load = _load(user, merge_status=ended)
+    body = client.get(
+        f"/api/export/profile-progress?merge_id={load.id}").get_json()
+    assert body["running"] is False
+    assert body["source"] is None
+    assert body["status"] == expected
+    # Without the id (a fresh app load after the merge ended): plain idle,
+    # as after a usual build, so no notice comes days later.
+    assert client.get("/api/export/profile-progress").get_json()["status"] == "idle"
+
+
+def test_another_accounts_merge_id_reads_as_idle(client, user, bundles):
+    other = User(username="bob", twitter_id="bob-twitter-id", approved=True)
+    _db.session.add(other)
+    _db.session.commit()
+    theirs = _load(other, merge_status="done")
+    for merge_id in (theirs.id, theirs.id + 100, "x"):
+        body = client.get(
+            f"/api/export/profile-progress?merge_id={merge_id}").get_json()
+        assert body["status"] == "idle"
+
+
+def test_a_merge_with_no_sign_of_life_is_not_followed(client, user, bundles):
+    """A merge whose worker died where nothing sends it again: past
+    MERGE_STALE it counts as over, so the watcher stops (silently)."""
+    from backend.utils.prefill_bundle_merge import MERGE_STALE
+    load = _load(user, merge_status="running",
+                 heartbeat_ago=MERGE_STALE + timedelta(minutes=1))
+    assert client.get("/api/export/profile-progress").get_json()["running"] is False
+    body = client.get(
+        f"/api/export/profile-progress?merge_id={load.id}").get_json()
+    assert body["status"] == "unchanged"
+
+
+def test_no_merge_is_reported_with_bundles_switched_off(client, user):
+    _load(user, merge_status="running")
+    assert client.get("/api/export/profile-progress").get_json()["status"] == "idle"
+
+
+def test_a_build_outranks_the_merge(client, user, bundles):
+    _load(user, merge_status="running")
+    _pending_job(user, {"kind": "chunk", "chunk_num": 1, "chunk_total": 2})
+    assert client.get("/api/export/profile-progress").get_json()["source"] == "batch"
+
+
+def test_a_sync_tasks_outcome_comes_before_the_merges(
+        client, user, owners, monkeypatch, bundles):
+    """Both were followed and both ended: a failed build is still said."""
+    owners("t-1", user.id)
+    _fake_celery(monkeypatch, {"t-1": ("FAILURE", RuntimeError("boom"))})
+    load = _load(user, merge_status="done")
+    body = client.get(
+        f"/api/export/profile-progress?task_id=t-1&merge_id={load.id}").get_json()
+    assert body["status"] == "failed"
+
+
 def test_requires_login(app):
     r = app.test_client().get("/api/export/profile-progress")
     assert r.status_code in (302, 401)

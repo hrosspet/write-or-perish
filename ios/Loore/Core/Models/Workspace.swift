@@ -148,6 +148,8 @@ struct ProfileProgress: Decodable, Equatable, Sendable {
     var progress: Double
     var message: String
     var taskId: String?
+    /// A late pre-fill merge (#731, source "merge"): asked with once it has ended.
+    var mergeId: Int?
     var error: String?
     var latestProfile: Latest?
     var batchStepFailed: Bool
@@ -155,18 +157,21 @@ struct ProfileProgress: Decodable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey {
         case running, source, status, progress, message, error
         case taskId = "task_id"
+        case mergeId = "merge_id"
         case latestProfile = "latest_profile"
         case batchStepFailed = "batch_step_failed"
     }
 
     init(running: Bool, source: String? = nil, status: String, progress: Double = 0, message: String = "",
-         taskId: String? = nil, error: String? = nil, latestProfile: Latest? = nil, batchStepFailed: Bool = false) {
+         taskId: String? = nil, mergeId: Int? = nil, error: String? = nil, latestProfile: Latest? = nil,
+         batchStepFailed: Bool = false) {
         self.running = running
         self.source = source
         self.status = status
         self.progress = progress
         self.message = message
         self.taskId = taskId
+        self.mergeId = mergeId
         self.error = error
         self.latestProfile = latestProfile
         self.batchStepFailed = batchStepFailed
@@ -180,6 +185,7 @@ struct ProfileProgress: Decodable, Equatable, Sendable {
         progress = c.tolerant(.progress, default: 0.0)
         message = c.tolerant(.message, default: "")
         taskId = c.tolerant(.taskId)
+        mergeId = c.tolerant(.mergeId)
         error = c.tolerant(.error)
         latestProfile = c.tolerant(.latestProfile)
         batchStepFailed = c.tolerant(.batchStepFailed, default: false)

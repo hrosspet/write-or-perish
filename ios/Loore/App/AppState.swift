@@ -145,11 +145,13 @@ final class AppState {
         profileWatcher.clearUserFlags = { [weak self] in
             self?.user?.profileGenerationTaskId = nil
             self?.user?.profileBatchPending = false
+            self?.user?.profileMergePending = false
         }
-        profileWatcher.fetch = { [weak self] taskId in
+        profileWatcher.fetch = { [weak self] taskId, mergeId in
             guard let api = self?.api else { throw CancellationError() }
-            let query = taskId.map { [URLQueryItem(name: "task_id", value: $0)] } ?? []
-            return try await api.get(APIPath.profileProgress, query: query, poll: true)
+            return try await api.get(APIPath.profileProgress,
+                                     query: ProfileGenerationWatcher.query(taskId: taskId, mergeId: mergeId),
+                                     poll: true)
         }
         nodeTitles.fetch = { [weak self] ids in
             guard let api = await self?.api else { throw CancellationError() }
