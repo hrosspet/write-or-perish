@@ -9,6 +9,7 @@ import os
 import pathlib
 import re
 import shutil
+from datetime import datetime, timedelta
 from typing import NamedTuple
 
 from flask import current_app
@@ -258,6 +259,92 @@ def delete_node_audio(node, root=None) -> FolderDeletion:
     """Delete *node*'s audio folders (node_audio_dirs) and every file in
     them, encrypted or plain, recordings and generated speech alike."""
     return delete_folders(node_audio_dirs(node, root), root)
+
+
+# Speech runs that hold the start of a row's speech (claim_tts_start).
+TTS_RUNNING = ("pending", "processing")
+
+# A profile's speech start older than this no longer holds the start when
+# its task never ended (a worker stopped mid-run): Celery stops a TTS task
+# at its hard limit of one hour (celery_app.TASK_TIME_LIMIT), and twice
+# that leaves room for time in the queue, so no run that is still going is
+# older.
+PROFILE_TTS_START_HELD_FOR = timedelta(hours=2)
+
+
+def claim_tts_start(model, row_id, held_for=None, now=None):
+    """Claim the start of the speech of row *row_id* of *model* (Node,
+    UserProfile, ExternalItem): one conditional UPDATE to
+    ``tts_task_status = 'pending'`` (progress 0) for a row without speech
+    whose speech is not pending or processing, committed. True when this
+    request made the claim and so queues the task; False when another run
+    holds it or the speech exists. A 'failed' or 'completed' status without
+    speech, or none, can be started again. With *held_for* (the model has
+    ``tts_requested_at``), a run started longer ago than that no longer
+    holds it."""
+    now = now or datetime.utcnow()
+    free = db.or_(model.tts_task_status.is_(None),
+                  model.tts_task_status.notin_(TTS_RUNNING))
+    values = {model.tts_task_status: "pending",
+              model.tts_task_progress: 0}
+    if held_for is not None:
+        free = db.or_(free, model.tts_requested_at.is_(None),
+                      model.tts_requested_at < now - held_for)
+        values[model.tts_requested_at] = now
+    claimed = model.query.filter(
+        model.id == row_id, model.audio_tts_url.is_(None), free,
+    ).update(values, synchronize_session=False)
+    db.session.commit()
+    return claimed == 1
+
+
+def claim_and_queue_chunks(session_id, chunks, transcribe_chunk_batch):
+    """Queue *chunks* (rows read as 'stored', in index order) of a streaming
+    session with *transcribe_chunk_batch*, in batches of at most
+    recording_limits.BATCH_CHUNKS. Each batch's chunks are first moved from
+    'stored' to 'processing' by one conditional UPDATE and committed; only
+    the chunks this caller moved are queued, so a chunk that the chunk
+    route, /transcribe-remaining and the finalize task read at the same
+    moment is queued once. The task id is written after. When queueing
+    fails, the batch's chunks go back to 'stored'. Returns the task ids
+    (none when another caller took them all)."""
+    from backend.utils.recording_limits import BATCH_CHUNKS
+    table = NodeTranscriptChunk.__table__
+    # Read once: each commit below expires the rows.
+    all_ids = [c.id for c in chunks]
+    task_ids = []
+    for start in range(0, len(all_ids), BATCH_CHUNKS):
+        ids = all_ids[start:start + BATCH_CHUNKS]
+        claimed = db.session.execute(
+            table.update()
+            .where(table.c.id.in_(ids), table.c.status == "stored")
+            .values(status="processing")
+            .returning(table.c.id, table.c.chunk_index)).all()
+        db.session.commit()
+        if not claimed:
+            continue
+        claimed = sorted(claimed, key=lambda row: row.chunk_index)
+        claimed_ids = [row.id for row in claimed]
+        try:
+            task = transcribe_chunk_batch.delay(
+                session_id=session_id,
+                chunk_indices=[row.chunk_index for row in claimed])
+        except Exception:
+            db.session.rollback()
+            NodeTranscriptChunk.query.filter(
+                NodeTranscriptChunk.id.in_(claimed_ids),
+                NodeTranscriptChunk.status == "processing",
+            ).update({NodeTranscriptChunk.status: "stored"},
+                     synchronize_session=False)
+            db.session.commit()
+            raise
+        NodeTranscriptChunk.query.filter(
+            NodeTranscriptChunk.id.in_(claimed_ids),
+        ).update({NodeTranscriptChunk.task_id: task.id},
+                 synchronize_session=False)
+        db.session.commit()
+        task_ids.append(task.id)
+    return task_ids
 
 
 def clear_tts_artifacts(entity) -> bool:

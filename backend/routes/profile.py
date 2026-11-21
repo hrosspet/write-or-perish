@@ -206,9 +206,22 @@ def generate_tts(profile_id):
     # Enqueue async TTS generation task
     from backend.tasks.tts import generate_tts_audio_for_profile
 
-    profile.tts_task_status = 'pending'
-    profile.tts_task_progress = 0
-    db.session.commit()
+    # One run at a time: the start is claimed by a conditional UPDATE, so
+    # of requests at the same moment one queues the task; the others
+    # follow the run in progress. A start whose task never ended stops
+    # holding it after PROFILE_TTS_START_HELD_FOR.
+    from backend.utils.audio_storage import (
+        PROFILE_TTS_START_HELD_FOR, claim_tts_start,
+    )
+    if not claim_tts_start(UserProfile, profile.id,
+                           held_for=PROFILE_TTS_START_HELD_FOR):
+        db.session.refresh(profile)
+        if profile.audio_tts_url:
+            return jsonify({"message": "TTS already available",
+                            "tts_url": profile.audio_tts_url}), 200
+        return jsonify({"message": "TTS generation already in progress",
+                        "task_id": profile.tts_task_id,
+                        "status": profile.tts_task_status}), 202
 
     task = generate_tts_audio_for_profile.delay(profile.id, str(AUDIO_STORAGE_ROOT), requesting_user_id=current_user.id)
 

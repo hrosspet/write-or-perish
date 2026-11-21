@@ -938,6 +938,16 @@ def _move_staged(staged):
     return final
 
 
+def _queue_stored_chunks(session_id, chunks):
+    """Queue *chunks* (rows read as 'stored') for transcription, each
+    chunk claimed before it is queued
+    (utils/audio_storage.claim_and_queue_chunks). Returns the task ids
+    (none when another request took them all)."""
+    from backend.tasks.streaming_transcription import transcribe_chunk_batch
+    from backend.utils.audio_storage import claim_and_queue_chunks
+    return claim_and_queue_chunks(session_id, chunks, transcribe_chunk_batch)
+
+
 def _chunk_already_uploaded(chunk_index, chunk):
     return jsonify({
         "message": "Chunk already uploaded",
@@ -1040,7 +1050,9 @@ def upload_streaming_chunk(session_id):
     chunk of a recording without audio past EMPTY_SESSION_EXPIRES_AFTER (or
     released) is a new start: 402 at the usage limit, 429 past the count;
     a recording with audio inactive for a day must fit under the count
-    again (utils/recording_limits.audio_refusal). Once finalizing, only
+    again (utils/recording_limits.audio_refusal). A recording's first
+    audio is asked once more right before its row is stored, under the
+    account's lock. Once finalizing, only
     the chunks it announced are taken (400 ``chunk_not_announced``, which
     the apps do not treat as the bound).
 
@@ -1270,6 +1282,20 @@ def upload_streaming_chunk(session_id):
         _discard_staged(staged)
         raise
 
+    # The first audio of a recording (or audio that counts as a new start)
+    # is asked again here: the check above ended with the stamp's commit,
+    # before the body was read and the file encrypted, and what it counts
+    # (the open recordings, the audio waiting for its transcript) is the
+    # chunk rows. Asked now, the account's lock stays held through this
+    # chunk's row and its commit below, so first chunks of several
+    # recordings that arrive together are counted one after the other.
+    # The account's lock comes before the draft row's, as in a claim. For
+    # a recording that holds audio this asks nothing and takes no lock.
+    refused = audio_refusal(draft)
+    if refused is not None:
+        _discard_staged(staged)
+        return refused
+
     # A claim may have come in since the check above. From here to the
     # chunk's commit the draft row stays locked, so this chunk is stored
     # before a claim counts the chunks, or refused here, its files never
@@ -1363,28 +1389,18 @@ def upload_streaming_chunk(session_id):
             "Session %s: %d chunk(s) not transcribed, AI usage is None",
             session_id, len(stored_chunks))
     elif len(stored_chunks) >= BATCH_SIZE:
-        # Take the first BATCH_SIZE stored chunks and queue transcription
+        # Take the first BATCH_SIZE stored chunks and queue transcription;
+        # a chunk another upload of this recording queued meanwhile is
+        # left to that one (_queue_stored_chunks).
         batch = stored_chunks[:BATCH_SIZE]
         chunk_indices = [c.chunk_index for c in batch]
-
-        from backend.tasks.streaming_transcription import transcribe_chunk_batch
-
-        task = transcribe_chunk_batch.delay(
-            session_id=session_id,
-            chunk_indices=chunk_indices
-        )
-        task_id = task.id
-
-        # Mark batch chunks as processing
-        for c in batch:
-            c.status = 'processing'
-            c.task_id = task.id
-        db.session.commit()
-
-        current_app.logger.info(
-            f"Queued batch transcription for session {session_id}, "
-            f"chunks {chunk_indices}, task {task.id}"
-        )
+        task_ids = _queue_stored_chunks(session_id, batch)
+        if task_ids:
+            task_id = task_ids[0]
+            current_app.logger.info(
+                f"Queued batch transcription for session {session_id}, "
+                f"chunks {chunk_indices}, task {task_id}"
+            )
 
     # Count total chunks in DB for this session for debugging
     total_db_chunks = NodeTranscriptChunk.query.filter_by(
@@ -1597,23 +1613,16 @@ def transcribe_remaining(session_id):
 
     chunk_indices = [c.chunk_index for c in stored_chunks]
 
-    from backend.tasks.streaming_transcription import transcribe_chunk_batch
-    from backend.utils.recording_limits import BATCH_CHUNKS
-
-    # In batches of BATCH_CHUNKS, as the chunk route queues them; marked
-    # as processing.
-    task_ids = []
-    for start in range(0, len(stored_chunks), BATCH_CHUNKS):
-        batch = stored_chunks[start:start + BATCH_CHUNKS]
-        task = transcribe_chunk_batch.delay(
-            session_id=session_id,
-            chunk_indices=[c.chunk_index for c in batch]
-        )
-        for c in batch:
-            c.status = 'processing'
-            c.task_id = task.id
-        task_ids.append(task.id)
-    db.session.commit()
+    # In batches of BATCH_CHUNKS, as the chunk route queues them; each
+    # chunk moved to processing before it is queued, so two requests at
+    # once (the web and the iPhone app opening the same draft) queue it
+    # once.
+    task_ids = _queue_stored_chunks(session_id, stored_chunks)
+    if not task_ids:
+        return jsonify({
+            "message": "No stored chunks to transcribe",
+            "chunk_count": 0
+        }), 200
 
     current_app.logger.info(
         f"Triggered transcribe-remaining for session {session_id}, "

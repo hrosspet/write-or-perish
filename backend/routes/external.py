@@ -295,9 +295,17 @@ def generate_item_tts(item_id):
         return jsonify({"error": "TTS not configured (missing API key)"}), 500
 
     from backend.tasks.tts import generate_tts_audio_for_item
-    item.tts_task_status = "pending"
-    item.tts_task_progress = 0
-    db.session.commit()
+    # A conditional UPDATE: of requests at the same moment one queues the
+    # task, the others follow the run in progress.
+    from backend.utils.audio_storage import claim_tts_start
+    if not claim_tts_start(ExternalItem, item.id):
+        db.session.refresh(item)
+        if item.audio_tts_url:
+            return jsonify({"message": "TTS already available",
+                            "tts_url": item.audio_tts_url}), 200
+        return jsonify({"message": "TTS generation already in progress",
+                        "task_id": item.tts_task_id,
+                        "status": item.tts_task_status}), 202
     task = generate_tts_audio_for_item.delay(
         item.id, str(AUDIO_STORAGE_ROOT), requesting_user_id=current_user.id)
     item.tts_task_id = task.id
@@ -703,6 +711,15 @@ def twitter_sync():
         user_id=current_user.id, provider="twitter").first()
     if account is None or not account.get_access_token():
         return jsonify({"error": "X account not connected"}), 400
+    # Each sync reads from the paid X API: at most
+    # X_BOOKMARK_SYNCS_PER_DAY by hand (utils/billing_limits); the
+    # nightly sync is not counted.
+    from backend.utils import billing_limits
+    try:
+        billing_limits.check_and_count(current_user, "x_bookmark_sync")
+    except billing_limits.TooManyBillingRequests:
+        return jsonify({"error": billing_limits.TOO_MANY_X_SYNCS_MESSAGE,
+                        "code": "too_many_syncs"}), 429
     from backend.tasks.external_sync import sync_twitter_bookmarks
     task = sync_twitter_bookmarks.delay(current_user.id)
     return jsonify({"task_id": task.id, "status": "pending"}), 202

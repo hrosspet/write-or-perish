@@ -327,7 +327,8 @@ def semantic_search():
     chunked scan in Python). Only AI-readable nodes are embedded, so
     ai_usage='none' content never appears here (keyword search still
     covers it). An account set to None is refused before anything else
-    (SEARCH_REFUSED_MESSAGE).
+    (SEARCH_REFUSED_MESSAGE); an account at its spend cap gets the spend
+    cap's 402, as for its other billed calls.
     """
     from flask import current_app
     from backend.models import NodeEmbedding
@@ -354,6 +355,12 @@ def semantic_search():
     refused = refuse_billed_call(current_user, "search")
     if refused is not None:
         return refused
+    # An account at its spend cap makes no billed call, as for its other
+    # AI use (utils/spend.require_spend_headroom): the same 402, which the
+    # web and iPhone apps show in their limit banner.
+    from backend.utils.spend import spend_cap_response, user_is_capped
+    if user_is_capped(current_user):
+        return spend_cap_response(current_user)
 
     try:
         dt_from, dt_to = _parse_date_range(

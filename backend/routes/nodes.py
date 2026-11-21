@@ -2375,10 +2375,21 @@ def generate_tts(node_id):
     # Enqueue async TTS generation task
     from backend.tasks.tts import generate_tts_audio
 
-    # Set initial task status
-    node.tts_task_status = 'pending'
-    node.tts_task_progress = 0
-    db.session.commit()
+    # Set initial task status: a conditional UPDATE, so of requests at the
+    # same moment one queues the task (the check above read the status
+    # earlier in this request).
+    from backend.utils.audio_storage import claim_tts_start
+    if not claim_tts_start(Node, node.id):
+        db.session.refresh(node)
+        if node.audio_tts_url:
+            return jsonify({"message": "TTS already available",
+                            "tts_url": node.audio_tts_url}), 200
+        return jsonify({
+            "message": "TTS generation already in progress",
+            "task_id": node.tts_task_id,
+            "status": node.tts_task_status,
+            "node_id": node.id
+        }), 202
 
     # Enqueue task
     task = generate_tts_audio.delay(node.id, str(AUDIO_STORAGE_ROOT), requesting_user_id=current_user.id)
