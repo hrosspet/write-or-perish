@@ -10,6 +10,7 @@ from backend.utils.prompts import get_user_prompt_record
 from backend.utils.placeholders import UserExportValidationError
 from backend.utils.thread_size import ThreadTooLong, reply_skipped_fields
 from backend.utils.llm_nodes import (
+    TooManyReplies,
     ai_usage_refused_response, auto_generate_refusal, create_llm_placeholder,
     pick_model_for_generation, read_only_model_refusal,
     read_only_model_response, reply_ai_usage, reply_refusal,
@@ -226,9 +227,10 @@ def start_conversation():
                 "tip_id": tip_node.id,
                 "llm_error": str(e),
             }), 202
-        except ThreadTooLong as e:
+        except (ThreadTooLong, TooManyReplies) as e:
             # A first entry so large that its reply's prompt is over the
-            # limit (#648): the entry is kept, the reply skipped.
+            # limit (#648), or the account's replies in progress at their
+            # bound: the entry is kept, the reply skipped.
             db.session.commit()
             return jsonify({
                 "conversation_id": system_node.id,
@@ -385,9 +387,10 @@ def add_message(conversation_id):
             "user_node_id": user_node.id,
             "llm_error": str(e),
         }), 202
-    except ThreadTooLong as e:
-        # The thread's next prompt would be over the limit (#648): the
-        # message is kept, the reply skipped.
+    except (ThreadTooLong, TooManyReplies) as e:
+        # The thread's next prompt would be over the limit (#648), or the
+        # account's replies in progress are at their bound: the message is
+        # kept, the reply skipped.
         db.session.commit()
         return jsonify({
             "user_node_id": user_node.id,
@@ -586,9 +589,9 @@ def continue_from_node(node_id):
                 user_node.id, describe_exception(e))
             response["llm_error"] = str(e)
             return jsonify(response), 202
-        except ThreadTooLong as e:
-            # Over the limit (#648): the message is kept, the reply
-            # skipped.
+        except (ThreadTooLong, TooManyReplies) as e:
+            # Over the limit (#648), or the account's replies in progress
+            # at their bound: the message is kept, the reply skipped.
             db.session.commit()
             response.update(reply_skipped_fields(e))
             return jsonify(response), 202

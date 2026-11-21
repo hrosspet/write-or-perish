@@ -27,8 +27,8 @@ from backend.utils.recording_device import (
     taken_over_response, valid_device_key,
 )
 from backend.utils.llm_nodes import (
-    AIUsageRefused, ReadOnlyModelRefused, ai_usage_refused_response,
-    pick_model_for_generation, voice_turn_refusal,
+    AIUsageRefused, ReadOnlyModelRefused, TooManyReplies,
+    ai_usage_refused_response, pick_model_for_generation, voice_turn_refusal,
 )
 from backend.utils.spend import require_spend_headroom
 from backend.utils.webm_utils import (
@@ -1986,11 +1986,13 @@ def save_streaming_as_node(session_id):
                 response["task_id"] = task_id
             except (UserExportValidationError, ParentDeletedError,
                     AIUsageRefused, ReadOnlyModelRefused,
-                    ThreadTooLong) as e:
+                    ThreadTooLong, TooManyReplies) as e:
                 # A thread above that keeps AI out (AIUsageRefused), a
                 # read-only model asked to reply (ReadOnlyModelRefused),
-                # or a thread too long for another reply (ThreadTooLong,
-                # #648) skips the reply the same way: the entry is saved.
+                # a thread too long for another reply (ThreadTooLong,
+                # #648), or the account's replies in progress at their
+                # bound (TooManyReplies) skips the reply the same way: the
+                # entry is saved.
                 db.session.rollback()
                 # The message is written for the user (llm_error); the
                 # log keeps the type
@@ -1999,7 +2001,7 @@ def save_streaming_as_node(session_id):
                     node.id, describe_exception(e))
                 response["llm_error"] = str(e)
                 if isinstance(e, (AIUsageRefused, ReadOnlyModelRefused,
-                                  ThreadTooLong)):
+                                  ThreadTooLong, TooManyReplies)):
                     response["llm_error_code"] = e.code
 
     return jsonify(response), 201

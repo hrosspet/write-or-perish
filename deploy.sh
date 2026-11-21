@@ -14,6 +14,10 @@ CONDA_ENV="write-or-perish"
 PYTHON_VERSION="3.9"
 BACKEND_DIR="$PROJECT_DIR/backend"
 LOG_FILE="$PROJECT_DIR/deployment.log"
+# The full output of the schema commands goes only here, on the VM: what
+# this script prints is the Actions log of a public repo, and a database
+# error's text can quote a row's values. Readable by its owner only.
+touch "$LOG_FILE" && chmod 600 "$LOG_FILE" || true
 
 # Color output
 GREEN='\033[0;32m'
@@ -133,8 +137,13 @@ export FLASK_APP="$BACKEND_DIR/app.py"
 if [ -d "migrations" ]; then
     # Auto-generate migrations if models changed (services stay up)
     log "Checking for model changes..."
-    MIGRATION_OUTPUT=$(flask db migrate -m "auto-generated migration from deployment" 2>&1) || true
-    echo "$MIGRATION_OUTPUT"
+    MIGRATE_STATUS=0
+    MIGRATION_OUTPUT=$(flask db migrate -m "auto-generated migration from deployment" 2>&1) || MIGRATE_STATUS=$?
+    # Kept on the VM only (see LOG_FILE); the lines below say what it did.
+    echo "$MIGRATION_OUTPUT" >> "$LOG_FILE"
+    if [ "$MIGRATE_STATUS" -ne 0 ]; then
+        warn "flask db migrate exited with status $MIGRATE_STATUS; its output is in deployment.log on the VM"
+    fi
 
     if echo "$MIGRATION_OUTPUT" | grep -q "Generating"; then
         log "New migration generated, committing to git..."
@@ -162,7 +171,12 @@ if [ -d "migrations" ]; then
     if [ -n "$HEAD_REV" ] && [ "$CURRENT_REV" != "$HEAD_REV" ]; then
         log "Pending migration (${CURRENT_REV:-none} -> $HEAD_REV)"
         stop_services_for_upgrade
-        flask db upgrade || error "Database migration failed"
+        # Its output (and its error, if any) goes to LOG_FILE on the VM
+        # only; the redirect keeps the command's own exit status.
+        flask db upgrade >> "$LOG_FILE" 2>&1 \
+            || error "Database migration failed; the error is in deployment.log on the VM"
+        NEW_REV=$( (flask db current 2>/dev/null || true) | grep -oE '^[a-f0-9]+' | head -1 || true)
+        log "Database now at ${NEW_REV:-unknown}"
     else
         log "Database already at head (${HEAD_REV:-unknown}); no downtime needed"
     fi

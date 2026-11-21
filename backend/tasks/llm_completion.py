@@ -4235,7 +4235,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # and billed it (a batch still queued is withdrawn by the poll
             # instead, see _ca_batch_poll), and the finalize logs the cost
             # either way. The cap gates new requests: the submit below.
-            from backend.utils.spend import user_is_capped
+            # A new run first sets the block from the spend recorded so
+            # far: replies of the same account queued together then stop
+            # once the earlier ones reach the limit, instead of all
+            # running before the deferred check queued behind them.
+            from backend.utils.spend import refresh_user_cap, user_is_capped
+            if batch_resp is None:
+                refresh_user_cap(user_id, flask_app.config)
             if batch_resp is None and user_is_capped(user_id):
                 logger.warning(
                     "User %s is spend-capped; skipping LLM completion", user_id)
