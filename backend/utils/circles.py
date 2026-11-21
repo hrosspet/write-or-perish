@@ -116,8 +116,11 @@ def find_person(username, asking_user_id=None):
     """The account with exactly this Loore name (case ignored), or None.
     None also for anyone who cannot be shared with: the asker, AI and
     system accounts, accounts that are deleted, deactivated or not
-    approved, and accounts without Circles. The caller answers every
-    None the same way, so the answer says nothing about which it was."""
+    approved (approval.counts_as_approved: payments on, an account held as
+    spam is not, #713), and accounts without Circles. The caller answers
+    every None the same way, so the answer says nothing about which it
+    was."""
+    from backend.utils.approval import counts_as_approved
     from backend.utils.system_accounts import SYSTEM_USERNAMES
     name = clean_name(username)
     if not name or len(name) > 64:
@@ -131,7 +134,7 @@ def find_person(username, asking_user_id=None):
             or (user.twitter_id or "").startswith("llm-")
             or user.deleted_at is not None
             or user.deactivated_at is not None
-            or not user.approved
+            or not counts_as_approved(user)
             or not circles_enabled(user)):
         return None
     return user
@@ -232,6 +235,22 @@ def delete_circle(circle):
         synchronize_session=False)
     db.session.delete(circle)
     forget_circle_access()
+
+
+def holds_circles(user_id) -> bool:
+    """Whether the account holds anything of Circles that would be lost
+    with it: a circle it made, a place in someone else's circle, or a
+    place among the people named for an entry. Asked before an email
+    account is deleted on the move into the account prepared for its
+    person (#714, utils/prepared_accounts.stays_reason): such an account
+    stays. Exists checks on ids only."""
+    checks = (
+        db.session.query(Circle.id).filter(Circle.user_id == user_id),
+        db.session.query(CircleMember.id).filter(
+            CircleMember.user_id == user_id),
+        db.session.query(NodeReader.id).filter(NodeReader.user_id == user_id),
+    )
+    return any(q.first() is not None for q in checks)
 
 
 # ── The audience of an entry ────────────────────────────────────────────

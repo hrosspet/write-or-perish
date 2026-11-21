@@ -550,13 +550,20 @@ def hidden_owner_filter(node_model):
 def blocked_owner_filter(node_model):
     """Query form of "the node's owner is not an account the admin turned
     off" (utils/approval.is_blocked: not approved and deactivated; the
-    Block switch while payments are on, Deactivate while they are off).
+    Block switch while payments are on, Deactivate while they are off),
+    nor, while payments are on, one held as spam (#713:
+    approval.held_as_spam; the gate treats it as blocked, not_active).
     Circles reads it: such an author's shared entries are closed to their
     readers until the account is turned on again. An uncorrelated
-    subquery over the blocked accounts, which is usually empty."""
+    subquery over those accounts, which is usually empty."""
+    from sqlalchemy import not_
     from backend.models import User
-    blocked = select(User.id).where(User.approved.is_(False),
-                                    User.deactivated_at.isnot(None))
+    from backend.utils.approval import not_held_as_spam_clause
+    turned_off = and_(User.approved.is_(False),
+                      User.deactivated_at.isnot(None))
+    # Empty while payments are off: the spam mark then holds nobody.
+    held = [not_(c) for c in not_held_as_spam_clause()]
+    blocked = select(User.id).where(or_(turned_off, *held))
     return ~func.coalesce(
         node_model.human_owner_id, node_model.user_id).in_(blocked)
 

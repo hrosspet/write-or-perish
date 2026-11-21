@@ -14,6 +14,10 @@ Circles on for everyone. Stripe is never called, no model is called.
 * A recorded reply under a shared node is "circles" when it is saved
   with the form's settings (main's save-as-node takes them), as a typed
   reply is.
+* Payments on, an author held as spam (#713) is treated as blocked: the
+  shared entry is not served, and the name cannot be shared with.
+* An email account with Circles ties stays when its person moves into
+  the account prepared for them (#714).
 
 anna shares; ben and chidi read. Every account has the "pro" plan (set by
 hand), so the subscription gate lets it in unless a test changes that.
@@ -488,3 +492,107 @@ def test_the_download_holds_a_session_started_under_someone_elses_entry(
     theirs = _download(real_app, "anna")
     assert SECRET in theirs
     assert "BEN THINKS ABOUT IT" not in theirs
+
+
+# ── Held as spam (#713, merge of train #730) ────────────────────────────
+# Payments on, an account the admin marked as spam that the gate let in by
+# itself (let_in_at) is held: the gate treats it as blocked
+# (approval.not_active). Circles does the same: its shared entries close
+# to their readers, and its name cannot be shared with. The admin's own
+# approval (no let_in_at) wins over the mark; payments off the mark holds
+# nobody.
+
+def _mark_spam(name, let_in=True):
+    user = _user(name)
+    user.spam = True
+    user.let_in_at = datetime.utcnow() if let_in else None
+    _db.session.commit()
+
+
+def test_a_spam_held_authors_shared_entry_is_not_served(real_app):
+    nid = _share(real_app)
+    _mark_spam("anna")
+    for who in ("ben", "chidi"):
+        r = _client(real_app, who).get(f"/api/nodes/{nid}")
+        assert r.status_code == 404, who
+        assert SECRET not in r.get_data(as_text=True)
+        assert _shared_ids(real_app, who) == []
+    # Activated by the admin's hand: no let_in_at, the mark holds no more.
+    _user("anna").let_in_at = None
+    _db.session.commit()
+    assert _status(real_app, "ben", f"/api/nodes/{nid}") == 200
+    assert _shared_ids(real_app, "ben") == [nid]
+
+
+def test_control_payments_off_the_spam_mark_closes_nothing(real_app):
+    real_app.config["PAYMENTS_ENABLED"] = False
+    nid = _share(real_app)
+    _mark_spam("anna")
+    assert _status(real_app, "ben", f"/api/nodes/{nid}") == 200
+    assert _shared_ids(real_app, "ben") == [nid]
+
+
+@pytest.mark.parametrize("payments,let_in,shared", [
+    (True, True, False),    # held as spam: no such name
+    (True, False, True),    # approved by the admin's hand: the mark yields
+    (False, True, True),    # payments off: the mark holds nobody
+])
+def test_a_spam_held_account_cannot_be_named(real_app, payments, let_in,
+                                             shared):
+    real_app.config["PAYMENTS_ENABLED"] = payments
+    _mark_spam("ben", let_in=let_in)
+    r = _client(real_app, "anna").post("/api/nodes/", json={
+        "content": SECRET, "privacy_level": "circles", "ai_usage": "chat",
+        "circle_ids": [], "circle_usernames": ["ben"]})
+    if shared:
+        assert r.status_code == 201, r.get_json()
+    else:
+        assert r.status_code == 400, r.get_json()
+        assert "No one on Loore has that name" in r.get_json()["error"]
+        assert Node.query.count() == 0
+
+
+# ── The move into a prepared account keeps an account Circles ties ──────
+# (#714, merge of train #730): an email account with no writing is
+# deleted when its person opens the account prepared for them; one with a
+# circle of its own, or a place in someone else's circle or entry, stays.
+
+def _empty_email_account():
+    dana = User(username="dana", approved=True, plan="free",
+                accepted_terms_version="x", default_ai_usage="chat",
+                email="dana@example.com")
+    _db.session.add(dana)
+    _db.session.commit()
+    return dana
+
+
+def test_an_account_circles_tie_stays_on_the_move(real_app):
+    from backend.models import Circle, CircleMember, NodeReader
+    from backend.utils.prepared_accounts import STAYS_KEPT, stays_reason
+    dana = _empty_email_account()
+    assert stays_reason(dana) is None            # deleted on the move
+    anna = _user("anna")
+    # A place in someone else's circle.
+    circle = Circle(user_id=anna.id, name="Friends")
+    _db.session.add(circle)
+    _db.session.flush()
+    member = CircleMember(circle_id=circle.id, user_id=dana.id)
+    _db.session.add(member)
+    _db.session.commit()
+    assert stays_reason(dana) == STAYS_KEPT
+    _db.session.delete(member)
+    _db.session.commit()
+    assert stays_reason(dana) is None
+    # Named for one entry.
+    nid = _share(real_app, names=("ben",))
+    reader = NodeReader(node_id=nid, user_id=dana.id)
+    _db.session.add(reader)
+    _db.session.commit()
+    assert stays_reason(dana) == STAYS_KEPT
+    _db.session.delete(reader)
+    _db.session.commit()
+    assert stays_reason(dana) is None
+    # A circle of its own.
+    _db.session.add(Circle(user_id=dana.id, name="Mine"))
+    _db.session.commit()
+    assert stays_reason(dana) == STAYS_KEPT
