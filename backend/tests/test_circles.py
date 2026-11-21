@@ -1913,3 +1913,116 @@ def test_a_cascade_never_puts_a_prompt_in_an_audience(app):
             assert node.privacy_level == "private", node_id
             assert node.audience_root_id is None, node_id
             assert not _can_read(app, "ben", node_id), node_id
+
+
+# ── A stream already open when the entry closes ─────────────────────────
+
+def _stream_events(resp):
+    out = []
+    for block in resp.get_data(as_text=True).strip().split("\n\n"):
+        lines = dict(line.split(": ", 1) for line in block.splitlines())
+        out.append((lines.get("event"), json.loads(lines["data"])))
+    return out
+
+
+def _sse_with_step(app, monkeypatch, between_passes):
+    """Register the stream routes; *between_passes* runs once, in the
+    first pause of a stream's loop (later pauses return at once), as
+    things happen while a real connection is open."""
+    from types import SimpleNamespace
+    import time as _time
+    import backend.routes.sse as sse
+    app.register_blueprint(sse.sse_bp, url_prefix="/api/sse")
+    state = {"done": False}
+
+    def sleep(_seconds):
+        if not state["done"]:
+            state["done"] = True
+            between_passes()
+
+    monkeypatch.setattr(
+        sse, "time", SimpleNamespace(time=_time.time, sleep=sleep))
+    return state
+
+
+LATER = "WORDS-ANNA-WROTE-LATER"
+
+
+@pytest.mark.parametrize("who, stays", [("ben", False), ("anna", True)])
+def test_an_open_speech_stream_follows_the_entrys_audience(
+        app, monkeypatch, who, stays):
+    """ben has the speech stream of anna's entry open when she removes
+    him and edits the entry: the stream ends with "not found" and sends
+    nothing written later. anna's own stream of it completes."""
+    def remove_edit_finish():
+        assert _client(app, "anna").delete(
+            f"/api/circles/{close}/members/ben").status_code == 200
+        assert _put(app, "anna", entry, content=LATER).status_code == 200
+        node = _db.session.get(Node, entry)
+        node.tts_task_status = "completed"
+        node.audio_tts_url = "/media/n/tts.mp3?v=1"
+        _db.session.commit()
+
+    state = _sse_with_step(app, monkeypatch, remove_edit_finish)
+    close = _circle(app, "anna", "Close", ["ben", "chidi"])
+    entry = _share(app, circle_ids=[close])
+    node = _db.session.get(Node, entry)
+    node.tts_task_status = "processing"
+    _db.session.commit()
+    events = _stream_events(
+        _client(app, who).get(f"/api/sse/nodes/{entry}/tts-stream"))
+    assert state["done"]
+    if stays:
+        assert events[-1][0] == "all_complete"
+        assert events[-1][1]["preview"] == LATER
+    else:
+        assert events[-1] == ("error", {"error": "Node not found"})
+        assert LATER not in json.dumps(events)
+
+
+@pytest.mark.parametrize("removed", [True, False])
+def test_an_open_reply_stream_follows_the_thread(app, monkeypatch, removed):
+    """ben watches his AI reply in anna's thread being written. Removed
+    meanwhile, his stream ends with "not found" and sends nothing more;
+    still a reader, he gets the rest and the end of the reply."""
+    import backend.routes.sse as sse
+
+    def step():
+        if removed:
+            assert _client(app, "anna").delete(
+                f"/api/circles/{close}/members/ben").status_code == 200
+        node = _db.session.get(Node, aid)
+        node.streaming_content = "first part. SECOND PART"
+        _db.session.commit()
+
+    state = _sse_with_step(app, monkeypatch, step)
+    close = _circle(app, "anna", "Close", ["ben", "chidi"])
+    entry = _share(app, circle_ids=[close])
+    mine = _reply(app, "ben", entry, "ben replies").get_json()["id"]
+    aid = _client(app, "ben").post(
+        f"/api/nodes/{mine}/llm", json={}).get_json()["node_id"]
+    node = _db.session.get(Node, aid)
+    node.llm_task_status = "processing"
+    node.streaming_content = "first part."
+    _db.session.commit()
+    real_get = _db.session.get
+    real_events = sse.text_stream_events
+    calls = {"n": 0}
+
+    def events_then_finish(sent, text):
+        calls["n"] += 1
+        if calls["n"] == 2:       # the task finishes after the second pass
+            real_get(Node, aid).llm_task_status = "completed"
+            _db.session.commit()
+        return real_events(sent, text)
+
+    monkeypatch.setattr(sse, "text_stream_events", events_then_finish)
+    events = _stream_events(
+        _client(app, "ben").get(f"/api/sse/nodes/{aid}/llm-stream"))
+    assert state["done"]
+    assert events[0] == ("snapshot", {"text": "first part."})
+    if removed:
+        assert events[1:] == [("error", {"error": "Node not found"})]
+    else:
+        assert ("delta", {"text": " SECOND PART"}) in events
+        assert events[-1][0] == "done"
