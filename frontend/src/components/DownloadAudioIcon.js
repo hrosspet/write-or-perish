@@ -2,9 +2,13 @@ import React, { useState } from 'react';
 import { FaDownload, FaSpinner } from 'react-icons/fa';
 import api from '../api';
 import { useUser } from '../contexts/UserContext';
+import { useToast } from '../contexts/ToastContext';
+
+export const DOWNLOAD_FAILED_TEXT = 'The audio could not be downloaded.';
 
 const DownloadAudioIcon = ({ nodeId, isPublic, aiUsage, ownRecording }) => {
   const { user } = useUser();
+  const { addToast } = useToast();
   const [loading, setLoading] = useState(false);
 
   // Same visibility rules as SpeakerIcon
@@ -25,11 +29,27 @@ const DownloadAudioIcon = ({ nodeId, isPublic, aiUsage, ownRecording }) => {
     URL.revokeObjectURL(url);
   };
 
+  // The file's bytes; a non-2xx answer is thrown, never saved as the file.
+  // The thrown error carries the server's words and code when its body is
+  // the usual JSON error.
   const fetchAsBlob = async (url) => {
     const fullUrl = url.startsWith('http')
       ? url
       : `${process.env.REACT_APP_BACKEND_URL}${url}`;
     const response = await fetch(fullUrl, { credentials: 'include' });
+    if (!response.ok) {
+      let body = null;
+      try {
+        body = await response.json();
+      } catch (e) {
+        // Not JSON (an HTML error page).
+      }
+      const err = new Error(`Download failed (${response.status})`);
+      err.status = response.status;
+      err.serverMessage = (body && (body.error || body.message)) || null;
+      err.code = (body && body.code) || null;
+      throw err;
+    }
     return response.blob();
   };
 
@@ -59,6 +79,7 @@ const DownloadAudioIcon = ({ nodeId, isPublic, aiUsage, ownRecording }) => {
       }
 
       // Try audio chunks (streaming recordings) — server merges with ffmpeg
+      let mergeError = null;
       if (has_audio_chunks) {
         try {
           const blob = await fetchAsBlob(`/api/nodes/${nodeId}/audio-download?format=mp3`);
@@ -67,6 +88,14 @@ const DownloadAudioIcon = ({ nodeId, isPublic, aiUsage, ownRecording }) => {
           return;
         } catch (chunksErr) {
           console.error('Error downloading merged audio:', chunksErr);
+          // A refusal with its own words (download_busy): say it, rather
+          // than save the spoken version instead of the recording.
+          if (chunksErr.code && chunksErr.serverMessage) {
+            addToast(chunksErr.serverMessage, 6000);
+            setLoading(false);
+            return;
+          }
+          mergeError = chunksErr;
         }
       }
 
@@ -78,10 +107,14 @@ const DownloadAudioIcon = ({ nodeId, isPublic, aiUsage, ownRecording }) => {
         return;
       }
 
-      // No audio available
+      // No audio available (say so when the merge failed)
+      if (mergeError) {
+        addToast(mergeError.serverMessage || DOWNLOAD_FAILED_TEXT, 6000);
+      }
       setLoading(false);
     } catch (err) {
       console.error('Error downloading audio:', err);
+      addToast(err.serverMessage || DOWNLOAD_FAILED_TEXT, 6000);
       setLoading(false);
     }
   };
