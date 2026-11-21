@@ -654,6 +654,8 @@ def create_app():
     app.cli.add_command(stripe_forget_customer_command)
     from backend.unclaimed_cli import unclaimed_accounts_command
     app.cli.add_command(unclaimed_accounts_command)
+    from backend.activity_cli import artifact_names_cleanup_command
+    app.cli.add_command(artifact_names_cleanup_command)
 
     try:
         from experiments.prompt_rct.run_rct import rct_cli
