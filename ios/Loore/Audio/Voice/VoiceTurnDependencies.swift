@@ -137,15 +137,25 @@ protocol VoiceAudio: AnyObject {
 @MainActor
 protocol VoiceNotices: AnyObject {
     @discardableResult func toast(_ text: String, duration: TimeInterval) -> Int
+    /// A message that stays until the person dismisses it (`ToastCenter.showLasting`, #736).
+    func lastingToast(_ text: String)
     func dismissToast(_ id: Int)
-    func notify(_ notice: LocalNotice)
+    /// `body`: the notification's text, else the notice's own.
+    func notify(_ notice: LocalNotice, body: String?)
     func withdraw(_ notice: LocalNotice)
     func spendCapped()
+}
+
+extension VoiceNotices {
+    func notify(_ notice: LocalNotice) { notify(notice, body: nil) }
 }
 
 enum LocalNotice: String {
     case recordingPaused = "org.loore.voice.recording-paused"
     case longRecording = "org.loore.voice.long-recording"
+    /// The server took no more of the recording, which stopped (#736; the
+    /// server's words go in the body, as on the screen).
+    case recordingStopped = "org.loore.voice.recording-stopped"
     case resumeFailed = "org.loore.voice.resume-failed"
     /// A lock-screen Record that could not start (the reason goes in the body).
     case recordFailed = "org.loore.voice.record-failed"
@@ -156,6 +166,7 @@ enum LocalNotice: String {
         switch self {
         case .recordingPaused: return "Recording paused — tap to resume"
         case .longRecording: return RecordingLimits.longRecordingTitle
+        case .recordingStopped: return "Your recording has stopped"
         case .resumeFailed: return "The recording could not resume"
         case .recordFailed: return "Loore could not start recording"
         case .gleanFailed: return "Loore could not start the glean"
@@ -168,6 +179,8 @@ enum LocalNotice: String {
             return "The microphone stopped (a call, or another app or device took it). Everything up to the interruption is saved."
         case .longRecording:
             return RecordingLimits.longRecordingAdvice
+        case .recordingStopped:
+            return ChunkUploader.longestRecordingMessage
         case .resumeFailed:
             return "The microphone did not restart. Open Loore and press Resume; everything up to the pause is saved."
         case .recordFailed, .gleanFailed:
