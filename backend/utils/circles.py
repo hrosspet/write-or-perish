@@ -20,7 +20,7 @@ and the per-reader mute of a sender. Ids, usernames and timestamps only:
 nothing here decrypts content.
 """
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import and_, func, or_, select
 
@@ -48,6 +48,14 @@ MAX_CIRCLE_NAME_CHARS = 60
 # lookup answers 429: enough for typos, too few to probe for names.
 LOOKUP_MISSES_PER_HOUR = 20
 LOOKUP_WINDOW_SECONDS = 3600
+# New "shared an entry with you" notes one person's shares may write in
+# SHARE_NOTES_WINDOW_HOURS, before a share that would write more answers
+# 429 (nothing is saved). Ordinary use is a few entries a day to a few
+# circles of up to MAX_MEMBERS_PER_CIRCLE people: 5 entries to 3 full
+# circles write 2,250 notes. Twice that is still allowed; the notes of
+# one person's shares are bounded per day instead of per request.
+SHARE_NOTES_PER_WINDOW = 5000
+SHARE_NOTES_WINDOW_HOURS = 24
 
 NO_SUCH_NAME = "No one on Loore has that name"
 NO_READERS = ("Nobody could read this entry yet. Choose a circle with "
@@ -57,6 +65,9 @@ REPLY_AUDIENCE = ("Replies in a shared thread are read by the people the "
 ONLY_AUTHOR = "Only the author of the entry can change who reads this thread."
 ONLY_ME_BRANCH = ("This stays Only me: the node it answers is not read by "
                   "the people of this thread.")
+SHARE_NOTES_LIMIT = ("You have shared with many people today. Nothing was "
+                     "shared. Share this with fewer people, or try again "
+                     "later.")
 
 
 class AudienceError(Exception):
@@ -380,6 +391,17 @@ def preview_readers(circles, people, owner_id, entry=None):
     shared with keeps the time of that share (set_audience), so a member
     added to it since with "Only new entries" does not read the entry
     and is not named; a circle newly chosen is shared from now on."""
+    ids = _audience_ids(circles, people, owner_id, entry=entry)
+    if not ids:
+        return []
+    users = (User.query.filter(User.id.in_(ids), User.deleted_at.is_(None))
+             .order_by(func.lower(User.username)).all())
+    return [u.username for u in users if circles_enabled(u)]
+
+
+def _audience_ids(circles, people, owner_id, entry=None):
+    """The ids reader_ids gives for *entry* once it is saved shared with
+    *circles* and *people* (preview_readers), without the owner."""
     ids = {u.id for u in people}
     if circles:
         cids = [c.id for c in circles]
@@ -397,11 +419,7 @@ def preview_readers(circles, people, owner_id, entry=None):
             if since is None or entries_from is None or since >= entries_from:
                 ids.add(uid)
     ids.discard(owner_id)
-    if not ids:
-        return []
-    users = (User.query.filter(User.id.in_(ids), User.deleted_at.is_(None))
-             .order_by(func.lower(User.username)).all())
-    return [u.username for u in users if circles_enabled(u)]
+    return ids
 
 
 def parent_shared_entry(node):
@@ -892,6 +910,12 @@ def set_audience(node, user, circle_ids, usernames, now=None):
 
     was_shared = is_shared_entry(node)
     before = reader_ids(node.id) if was_shared else set()
+    # Checked before anything is written: only the readers this save adds
+    # get a note, so saving the same audience again is never refused.
+    refuse_over_share_note_limit(
+        user.id, len(_note_targets(
+            node, _audience_ids(circles, people, user.id, entry=node)
+            - before)))
 
     if node.privacy_level != CIRCLES:
         node.set_privacy_level(CIRCLES)
@@ -1254,25 +1278,52 @@ def muted_ids(user_id):
         CircleMute.muted_user_id).filter_by(user_id=user_id)}
 
 
+def _note_targets(entry, user_ids):
+    """Those of *user_ids* note_shared writes a note to for *entry*: not
+    its author, not a reader who hid the author, not one who already had
+    a note about it."""
+    owner_id = entry_owner_id(entry)
+    user_ids = {u for u in user_ids if u != owner_id}
+    if not user_ids:
+        return set()
+    hid = {uid for (uid,) in db.session.query(CircleMute.user_id).filter(
+        CircleMute.muted_user_id == owner_id,
+        CircleMute.user_id.in_(user_ids))}
+    noted = set()
+    if entry.id is not None:
+        noted = {uid for (uid,) in db.session.query(
+            UserNotification.user_id).filter(
+            UserNotification.type == NOTE_TYPE,
+            UserNotification.node_id == entry.id,
+            UserNotification.user_id.in_(user_ids))}
+    return user_ids - hid - noted
+
+
+def refuse_over_share_note_limit(sender_id, new_notes):
+    """Raise AudienceError (429) when *new_notes* more notes about
+    *sender_id*'s shares would pass SHARE_NOTES_PER_WINDOW within the
+    last SHARE_NOTES_WINDOW_HOURS. A save that adds no note is never
+    refused."""
+    if new_notes <= 0:
+        return
+    since = datetime.utcnow() - timedelta(hours=SHARE_NOTES_WINDOW_HOURS)
+    written = UserNotification.query.filter(
+        UserNotification.type == NOTE_TYPE,
+        UserNotification.actor_user_id == sender_id,
+        UserNotification.created_at >= since).count()
+    if written + new_notes > SHARE_NOTES_PER_WINDOW:
+        raise AudienceError(SHARE_NOTES_LIMIT, code="circle_share_limit",
+                            status=429)
+
+
 def note_shared(entry, user_ids):
     """One note per reader for a newly shared entry (never a second one
     for the same entry, never to a reader who hid the author, never to
     the author). Adds rows; the caller commits. System text only: the
     author's name is added when the note is shown."""
     owner_id = entry_owner_id(entry)
-    user_ids = {u for u in user_ids if u != owner_id}
-    if not user_ids:
-        return 0
-    hid = {uid for (uid,) in db.session.query(CircleMute.user_id).filter(
-        CircleMute.muted_user_id == owner_id,
-        CircleMute.user_id.in_(user_ids))}
-    noted = {uid for (uid,) in db.session.query(
-        UserNotification.user_id).filter(
-        UserNotification.type == NOTE_TYPE,
-        UserNotification.node_id == entry.id,
-        UserNotification.user_id.in_(user_ids))}
     added = 0
-    for uid in sorted(user_ids - hid - noted):
+    for uid in sorted(_note_targets(entry, user_ids)):
         db.session.add(UserNotification(
             user_id=uid, type=NOTE_TYPE,
             title="An entry was shared with you.",

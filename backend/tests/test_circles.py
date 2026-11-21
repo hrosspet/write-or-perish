@@ -640,6 +640,52 @@ def test_notes_of_closed_entries_leave_the_other_notifications_shown(app):
     assert [n.get("node_id") for n in shown()][:2] == [taken_back[0], chidis]
 
 
+def test_the_notes_one_persons_shares_write_are_bounded_per_day(
+        app, monkeypatch):
+    """With the bound at 3 notes a day: anna's shares that write 3 notes
+    go through; one that would write a 4th is refused with 429 and
+    nothing is saved. Saving an entry again with the readers it has, and
+    adding a member to a circle, still work. A day later, and for
+    another person, sharing goes through."""
+    from backend.utils import circles as cz
+    monkeypatch.setattr(cz, "SHARE_NOTES_PER_WINDOW", 3)
+    close = _circle(app, "anna", "Close", ["ben"])
+    first = _share(app, circle_ids=[close], names=["chidi"], content="first")
+    _share(app, names=["dana"], content="second")
+    before = Node.query.count()
+    r = _client(app, "anna").post("/api/nodes/", json={
+        "content": "THIRD", "privacy_level": "circles", "ai_usage": "chat",
+        "circle_usernames": ["ben"]})
+    assert r.status_code == 429, r.get_json()
+    assert r.get_json()["code"] == "circle_share_limit"
+    _db.session.expire_all()
+    assert Node.query.count() == before
+    assert UserNotification.query.filter_by(type="circle_share").count() == 3
+    # The same readers again, with an edit: no new note, not refused.
+    r = _put(app, "anna", first, content="first, edited",
+             privacy_level="circles", circle_ids=[close],
+             circle_usernames=["chidi"])
+    assert r.status_code == 200, r.get_json()
+    # A reader added to an existing entry is a new note: refused.
+    r = _put(app, "anna", first, content="first, edited",
+             privacy_level="circles", circle_ids=[close],
+             circle_usernames=["chidi", "dana"])
+    assert r.status_code == 429, r.get_json()
+    assert not _can_read(app, "dana", first)
+    # Adding a member to a circle keeps its one note.
+    r = _client(app, "anna").post(f"/api/circles/{close}/members", json={
+        "username": "dana", "include_existing": True})
+    assert r.status_code == 201, r.get_json()
+    assert [n["node_id"] for n in _notes(app, "dana")][0] == first
+    # Another person's shares are their own.
+    _share(app, owner="chidi", names=["ben"], content="from chidi")
+    # A day later anna shares again.
+    UserNotification.query.update(
+        {"created_at": datetime.utcnow() - timedelta(hours=25)})
+    _db.session.commit()
+    _share(app, names=["ben"], content="THIRD")
+
+
 def test_hiding_a_person_stops_notes_and_entries_and_can_be_undone(app):
     nid = _share(app, names=["ben", "chidi"])
     ben = _client(app, "ben")
