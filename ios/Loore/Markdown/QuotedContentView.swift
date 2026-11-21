@@ -18,6 +18,10 @@ struct QuotedContentView: View {
     let content: String
     var quotes: QuoteData = .none
     var contextArtifacts: ContextArtifacts?
+    /// False for a prompt someone else shared (Circles): the artifacts are
+    /// the viewer's own, and a placeholder the viewer has no artifact for
+    /// shows as its own text.
+    var artifactsForOwner = true
     var nodeId: Int?
     var style: MarkdownStyle = .focal
     var checklist: ChecklistActions?
@@ -47,7 +51,7 @@ struct QuotedContentView: View {
                                         onFeedbackChange: onExternalFeedbackChange,
                                         onIntroVerdictChange: onExternalIntroVerdictChange)
                 case .artifact(let kind):
-                    InlineArtifactSection(kind: kind, artifacts: contextArtifacts)
+                    InlineArtifactSection(kind: kind, artifacts: contextArtifacts, forOwner: artifactsForOwner)
                 }
             }
         }
@@ -392,7 +396,38 @@ struct ReferenceFeedbackControl: View {
 struct InlineArtifactSection: View {
     let kind: ArtifactPlaceholder
     let artifacts: ContextArtifacts?
+    /// The viewer owns the prompt. A reader of a shared prompt (Circles)
+    /// gets their own artifacts from the server, without version numbers.
+    var forOwner = true
     @State private var expanded = false
+
+    /// What stands in place of a placeholder with no artifact: for the
+    /// owner the "not available" chip; for a reader of someone else's shared
+    /// prompt the placeholder itself ("{user_memory}"), as they have no such
+    /// artifact.
+    static func missingText(_ kind: ArtifactPlaceholder, forOwner: Bool) -> String {
+        forOwner ? "[\(kind.label) not available]" : kind.token
+    }
+
+    /// The artifact text the server sent for a placeholder, if any.
+    static func artifact(_ kind: ArtifactPlaceholder, in artifacts: ContextArtifacts?) -> ContextArtifacts.VersionedText? {
+        guard let artifacts else { return nil }
+        switch kind {
+        case .profile: return artifacts.profile
+        case .todo: return artifacts.todo
+        case .recent: return artifacts.recent
+        case .recentRaw: return nil
+        default: return artifacts.artifacts[kind.rawValue]
+        }
+    }
+
+    /// The card's header: the label, with the version when the server sent one.
+    static func headerLabel(_ kind: ArtifactPlaceholder, _ artifact: ContextArtifacts.VersionedText) -> String {
+        switch kind {
+        case .recent: return kind.label
+        default: return artifact.versionNumber.map { "\(kind.label) v\($0)" } ?? kind.label
+        }
+    }
 
     var body: some View {
         if kind == .recentRaw {
@@ -401,7 +436,7 @@ struct InlineArtifactSection: View {
                     header(chevron: "\u{25A0}", text: "\(kind.label) — \(rangeText(raw))")
                 }
             } else {
-                UnavailableChip(text: "[\(kind.label) not available]")
+                UnavailableChip(text: Self.missingText(kind, forOwner: forOwner))
             }
         } else if let artifact = artifact {
             container {
@@ -425,27 +460,13 @@ struct InlineArtifactSection: View {
                 }
             }
         } else {
-            UnavailableChip(text: "[\(kind.label) not available]")
+            UnavailableChip(text: Self.missingText(kind, forOwner: forOwner))
         }
     }
 
-    private var artifact: ContextArtifacts.VersionedText? {
-        guard let artifacts else { return nil }
-        switch kind {
-        case .profile: return artifacts.profile
-        case .todo: return artifacts.todo
-        case .recent: return artifacts.recent
-        case .recentRaw: return nil
-        default: return artifacts.artifacts[kind.rawValue]
-        }
-    }
+    private var artifact: ContextArtifacts.VersionedText? { Self.artifact(kind, in: artifacts) }
 
-    private func headerLabel(_ artifact: ContextArtifacts.VersionedText) -> String {
-        switch kind {
-        case .recent: return kind.label
-        default: return artifact.versionNumber.map { "\(kind.label) v\($0)" } ?? kind.label
-        }
-    }
+    private func headerLabel(_ artifact: ContextArtifacts.VersionedText) -> String { Self.headerLabel(kind, artifact) }
 
     private func rangeText(_ raw: ContextArtifacts.RecentRaw) -> String {
         guard let start = raw.coversStart, let end = raw.coversEnd else { return "Date range unavailable" }

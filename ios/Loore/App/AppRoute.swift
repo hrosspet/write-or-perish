@@ -46,6 +46,9 @@ enum AppRoute: Hashable, Sendable {
     case importData(anchor: String?)
     case share
     case commons
+    /// Circles: "Your circles" (`/circles`) and "Shared with you" (`/shared`).
+    case circles
+    case sharedWithYou
     case admin
     case welcome
     case confirmEmail(token: String?)
@@ -128,6 +131,8 @@ enum AppRoute: Hashable, Sendable {
         case ("import", 1): return .importData(anchor: anchor)
         case ("share", 1): return .share
         case ("commons", 1): return .commons
+        case ("circles", 1): return .circles
+        case ("shared", 1): return .sharedWithYou
         case ("admin", 1): return .admin
         case ("welcome", 1): return .welcome
         case ("confirm-email", 1): return .confirmEmail(token: query["token"])
@@ -150,7 +155,7 @@ enum AppRoute: Hashable, Sendable {
         case .log: return .log
         case .commons: return .commons
         case .account, .importData, .references, .reference, .prompts, .prompt, .admin, .confirmEmail,
-             .confirmAccountDeletion:
+             .confirmAccountDeletion, .circles, .sharedWithYou:
             return .more
         case .thread: return nil
         case .waitlist, .webPage, .external: return nil

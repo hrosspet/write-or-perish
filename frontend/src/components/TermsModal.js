@@ -148,7 +148,7 @@ function TermsModal({ onAccepted }) {
         <p style={text}><strong style={{ color: "var(--text-primary)" }}>Who can see your content (visibility):</strong></p>
         <ul style={{ paddingLeft: "1.2rem", listStyle: "none" }}>
           <li style={text}>Private (default) &mdash; Only you</li>
-          <li style={text}>Circles &mdash; Shared with specific groups <em>(coming soon &mdash; not yet functional)</em></li>
+          <li style={text}>Circles: shared with the people you choose.</li>
           <li style={text}>Public &mdash; Anyone can see it</li>
         </ul>
         <p style={text}><strong style={{ color: "var(--text-primary)" }}>How AI can use your content:</strong></p>

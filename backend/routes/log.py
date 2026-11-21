@@ -157,6 +157,13 @@ def get_log():
         # pages and skip another.
         Node.id.desc(),
     )
+    # Circles: an AI reply the user asked for in someone else's shared
+    # thread is in their Log like their typed replies there, while the
+    # thread is open to them. One that is closed to them now is left out.
+    from backend.utils.privacy import own_answers_filter
+    not_answers = own_answers_filter(Node, current_user.id, closed_only=True)
+    if not_answers is not None:
+        query = query.filter(not_answers)
     if cursor is not None:
         query = query.filter(or_(
             _SORT_KEY < cursor_ts,

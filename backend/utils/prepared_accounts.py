@@ -32,8 +32,9 @@ the person goes with them:
 
 An email account with writing, invitations it sent, poll answers or
 feedback, one that paid (also a trial that became paid at Stripe before
-its webhook arrived), and one the admin blocked or set up by hand stays as
-it is: opening the prepared account is then only the sign-in, and the
+its webhook arrived), one the admin blocked or set up by hand, and one
+with a circle of its own or a place in someone else's circle or entry
+(Circles) stays as it is: opening the prepared account is then only the sign-in, and the
 email account is still there for its address.
 
 Never without the X proof: the offer is written only by a completed
@@ -69,7 +70,8 @@ STAYS_WRITING = "writing"   # it holds writing of its own
 STAYS_USED = "used"         # invitations it sent, poll answers, feedback
 STAYS_PAID = "paid"         # it paid, or its subscription is past its trial
 STAYS_KEPT = "kept"         # admin, alpha tester, a plan set by hand,
-#                             blocked or deactivated, a deletion under way
+#                             blocked or deactivated, a deletion under way,
+#                             Circles it would lose (circles.holds_circles)
 
 # Plans a new account gets without an admin (as unclaimed_accounts.
 # DEFAULT_PLANS): "alpha" while payments are off, "free" while they are on.
@@ -183,6 +185,11 @@ def stays_reason(user):
         return STAYS_WRITING
     if holds_ties(user.id):
         return STAYS_USED
+    # Circles: its circles, or entries other people share with it, would be
+    # lost with it (circles.holds_circles).
+    from backend.utils.circles import holds_circles
+    if holds_circles(user.id):
+        return STAYS_KEPT
     return None
 
 

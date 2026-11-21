@@ -24,6 +24,10 @@ const COMBINED_PATTERN = /(\{quote_ext:\d+\}|\{quote:\d+\}|\{user_(?:profile|tod
  *   quotes: Object mapping quote IDs to quote data (or null if not accessible)
  *   contextArtifacts: Object with "profile" and/or "todo" keys containing artifact data
  *   onQuoteClick: Callback when a quote is clicked (receives quote ID)
+ *   barePlaceholders: the viewer is not the node's owner (a prompt shared
+ *     in a circle): an artifact placeholder whose artifact is absent from
+ *     contextArtifacts is shown as written ({user_memory}), not as
+ *     "[Memory not available]"
  *   nodeId: the node the content belongs to; external-reference bubbles
  *     log what the reader does with them against it (#352)
  *   showRecommendationFeedback: the node is LLM-authored, so its
@@ -32,7 +36,7 @@ const COMBINED_PATTERN = /(\{quote_ext:\d+\}|\{quote:\d+\}|\{user_(?:profile|tod
  *   onExternalIntroVerdictChange: (itemId, verdict) after the verdict on
  *     a gleaning pick's intro changed (#502)
  */
-const QuotedContent = ({ content, quotes, externalQuotes, contextArtifacts, onQuoteClick, onCheckboxToggle, onAddTask, onExternalReadChange, onExternalFeedbackChange, onExternalIntroVerdictChange, nodeId, showRecommendationFeedback = false, referenceBackLabel }) => {
+const QuotedContent = ({ content, quotes, externalQuotes, contextArtifacts, onQuoteClick, onCheckboxToggle, onAddTask, onExternalReadChange, onExternalFeedbackChange, onExternalIntroVerdictChange, nodeId, showRecommendationFeedback = false, referenceBackLabel, barePlaceholders = false }) => {
   if (!content) {
     return null;
   }
@@ -75,6 +79,13 @@ const QuotedContent = ({ content, quotes, externalQuotes, contextArtifacts, onQu
 
   // Parse content into segments using the combined pattern
   const segments = [];
+  // Text next to text is one segment, so a placeholder shown as written
+  // stays inside its sentence.
+  const pushText = (text) => {
+    const last = segments[segments.length - 1];
+    if (last && last.type === 'text') last.content += text;
+    else segments.push({ type: 'text', content: text });
+  };
   const parts = content.split(COMBINED_PATTERN);
 
   for (const part of parts) {
@@ -97,12 +108,19 @@ const QuotedContent = ({ content, quotes, externalQuotes, contextArtifacts, onQu
     // Check if this part is an artifact placeholder
     const artifactMatch = part.match(/^\{user_(profile|todo|recent_raw|recent|ai_preferences|memory|scratchpad|intentions)\}$/);
     if (artifactMatch) {
+      // A reader of someone else's shared prompt who has no such artifact
+      // sees the placeholder as written, in the run of the text.
+      if (barePlaceholders
+          && !(contextArtifacts && contextArtifacts[artifactMatch[1]])) {
+        pushText(part);
+        continue;
+      }
       segments.push({ type: 'artifact', artifactType: artifactMatch[1] });
       continue;
     }
 
     // Regular text
-    segments.push({ type: 'text', content: part });
+    pushText(part);
   }
 
   // Render segments

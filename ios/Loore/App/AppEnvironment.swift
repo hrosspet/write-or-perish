@@ -119,6 +119,19 @@ enum DefaultsKey {
     static let lastPrivacyLevel = "loore_last_privacy_level"
     static let lastAIUsage = "loore_last_ai_usage"
     static let publicReplyAck = "loore_public_reply_ack"
+    /// Circles, "Don't ask again in this thread": per thread and per user, on
+    /// this device (web `replyAckKey`).
+    static func circleReplyAck(entryId: Int, userId: Int?) -> String {
+        "loore_circle_reply_ack_\(userId.map(String.init) ?? "")_\(entryId)"
+    }
+    /// Circles, the same for an AI reply generated in a shared thread: its
+    /// own memory, apart from the typed reply's (web `aiReplyAckKey`). The
+    /// value is `private:<key>` of the `ai_reads_key` the dialog showed (it
+    /// counts only while the thread's key is still that one; a bare key
+    /// stored by an earlier version counts too).
+    static func circleAiReplyAck(entryId: Int, userId: Int?) -> String {
+        "loore_circle_ai_reply_ack_\(userId.map(String.init) ?? "")_\(entryId)"
+    }
     /// The Voice / Text choice of each home card by purpose ("voice" | "text";
     /// absent = Voice). Each card remembers its own (Peter, 2026-10-13).
     static let homeReflectMode = "home.reflectMode"

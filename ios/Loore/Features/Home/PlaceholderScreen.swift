@@ -64,6 +64,8 @@ extension AppRoute {
         case .importData: return "Import Data"
         case .share: return "Share"
         case .commons: return "Commons"
+        case .circles: return "Your circles"
+        case .sharedWithYou: return "Shared with you"
         case .admin: return "Admin"
         case .welcome: return "Welcome"
         case .confirmEmail: return "Confirm email"
@@ -110,6 +112,8 @@ extension AppRoute {
         case .importData(let anchor): return "/import" + (anchor.map { "#\($0)" } ?? "")
         case .share: return "/share"
         case .commons: return "/commons"
+        case .circles: return "/circles"
+        case .sharedWithYou: return "/shared"
         case .admin: return "/admin"
         case .welcome: return "/welcome"
         case .confirmEmail(let token): return "/confirm-email" + (token.map { "?token=\($0)" } ?? "")

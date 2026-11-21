@@ -217,7 +217,7 @@ final class ThreadLengthModelTests: StubbedAppTestCase {
     func testARefusedLLMResponseSwitchesTheFormToTheLimit() async {
         let model = await loadedModel(nil, llm: .json(409, tooLongJSON))
         XCTAssertNil(model.threadLength)
-        model.llmResponsePressed()
+        model.aiReplyPressed()   // LLM Response (feat/circles names it so)
         let refused = await eventually { model.threadLength == .limit }
         XCTAssertTrue(refused)
         XCTAssertTrue(model.atThreadLimit)

@@ -165,6 +165,36 @@ def test_artifact_names_do_not_reach_sentry(monkeypatch):
             "https://loore.org/artifacts/:kind")
 
 
+def test_a_name_in_a_request_body_does_not_reach_sentry(monkeypatch):
+    """Circles names another person in the request body (removing a
+    member, showing a hidden person again). A failing request of that
+    shape reaches Sentry with its route and without the name."""
+    before_send = _app_before_send(monkeypatch)
+    name = "-".join(["quill", "harbour", "zq"])
+    events = []
+    app = Flask(__name__)
+
+    @app.route("/api/circles/<int:circle_id>/members", methods=["DELETE"])
+    def remove_member(circle_id):
+        raise RuntimeError("boom")
+
+    try:
+        sentry_sdk.init(dsn="https://key@example.invalid/1",
+                        transport=lambda envelope: None,
+                        before_send=lambda e, h: events.append(
+                            before_send(e, h)),
+                        **SENTRY_PRIVACY_OPTIONS)
+        app.test_client().delete("/api/circles/3/members",
+                                 json={"username": name})
+    finally:
+        sentry_sdk.init(dsn=None)
+
+    assert events
+    for event in events:
+        assert name not in json.dumps(event, default=str)
+        assert event["request"]["url"].endswith("/api/circles/3/members")
+
+
 def test_version_addresses_and_other_paths_stay():
     """Control: the version routes carry an id, not a name."""
     event = {"request": {"url": "https://loore.org/api/artifacts/versions/12/changes"},

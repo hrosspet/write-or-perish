@@ -673,6 +673,22 @@ def init_streaming():
         return err
     privacy_level = data.get("privacy_level", "private")
     ai_usage = data.get("ai_usage", "none")
+    from backend.utils.privacy import validate_privacy_level
+    if not validate_privacy_level(privacy_level):
+        return jsonify({"error": f"Invalid privacy_level: {privacy_level}"}), 400
+    # A recording under a shared node is read by the thread's audience
+    # (Circles), as a typed reply is.
+    if parent_id:
+        from backend.utils import circles as cz
+        parent = Node.query.get(int(parent_id))
+        if cz.reply_requires_circles(parent, privacy_level,
+                                     current_user.id):
+            privacy_level = "circles"
+        # In someone else's shared thread, wherever the parent sits in it,
+        # never Everyone: refused before the session (and the mic) starts.
+        refused = cz.new_reply_refusal(parent, privacy_level, current_user)
+        if refused is not None:
+            return refused
     # Payments on (#438): no transcription without the paid set, dictation
     # included, so the mic never opens for a recording nobody would turn
     # into text. Typing works as before.
@@ -1754,6 +1770,18 @@ def save_streaming_as_node(session_id):
                 "error": "Replies under public posts are public.",
                 "code": "public_reply_required",
             }), 400
+    # The same check as a typed reply (circles.new_reply_refusal), for the
+    # level that would be stored, the form's (any level, Everyone
+    # included) or the one the recording started with (the node may have
+    # been shared since): under a shared node only "circles", and in
+    # someone else's shared thread, wherever the parent sits in it, never
+    # Everyone. Nothing is saved otherwise; the session stays.
+    if draft.parent_id:
+        from backend.utils import circles as cz
+        refused = cz.new_reply_refusal(Node.query.get(draft.parent_id),
+                                       privacy_level, current_user)
+        if refused is not None:
+            return refused
 
     # A public entry quotes only public nodes (Peter, 2026-11-12); the
     # session stays, so the text can be changed and saved again.
@@ -1835,6 +1863,11 @@ def save_streaming_as_node(session_id):
         transcription_status="completed",
         streaming_transcription=True  # Mark as having chunked audio
     )
+    # Circles: a recorded reply into a shared thread joins its audience
+    # (the explicit act; only directly under the node replied to).
+    if draft.parent_id is not None and user_parent_id == draft.parent_id:
+        from backend.utils import circles as cz
+        cz.join_reply(node, Node.query.get(draft.parent_id), current_user.id)
     from backend.utils.tokens import approximate_token_count
     node.set_content(content)
     node.token_count = approximate_token_count(content)
@@ -1846,6 +1879,17 @@ def save_streaming_as_node(session_id):
             current_user.id, content)
     db.session.add(node)
     db.session.flush()
+    # A recorded reply that joined a shared thread quotes only nodes all
+    # of the thread's people can read (Peter, 2026-11-12, as for a
+    # public entry above); the session stays, so the text can be changed
+    # and saved again.
+    if node.privacy_level == "circles":
+        from backend.utils.publish_quotes import circle_share_refusal
+        refusal = circle_share_refusal(
+            [(node, content, set(), None)], current_user.id)
+        if refusal is not None:
+            db.session.rollback()
+            return refusal
     # Per-node cap: split very long transcripts into a serial chain
     # (audio stays on this head node). An LLM reply chains after the
     # tip so its context walk sees the whole transcript (as the Voice
