@@ -26,6 +26,16 @@ wins over a snapshot). A "no" given while a load runs stops it: what was
 loaded stays and is linked (#662: a no keeps what was made), and a later
 Yes continues where it stopped.
 
+Payments on, an account the admin marked as spam and did not approve by
+hand (approval.held_as_spam, #713) gets no load and no merge (#732): its
+Yes is saved and kept as a check in "held" that reads nothing; a load
+under way stops before its next part, and its merge before the model
+call. The admin's "Make ready" refuses it, and the beat's runs stop as
+any run does. Once the account is no longer held (the mark removed, or
+Activate by hand), the person's next visit sends the held check or load
+from where it was (``resume_after_hold``), and a final merge the hold
+skipped is made then.
+
 Nothing in a bundle is trusted beyond what a pre-fill makes. Each entry
 is checked against an allow-list (``clean_entry``): a public post Loore
 fetched, by the bundle's account, with no model fields; it is stored
@@ -91,10 +101,17 @@ MAX_STALLED_RUNS = 3
 RETRY_COUNTDOWN_SECONDS = 60
 
 ACTIVE = ("queued", "running")
+# Payments on, an account the admin marked as spam and did not approve by
+# hand (approval.held_as_spam, #713) gets no load and no merge (#732). A
+# load the hold stopped, or a Yes given while it held, waits in HELD (its
+# error HELD_AS_SPAM) and goes on from where it was at the person's next
+# visit once the account is no longer held (``resume_after_hold``).
+HELD = "held"
+HELD_AS_SPAM = "held_as_spam"
 # Outcomes that are a person's or an admin's choice, not a fault: logged
 # as information, not as errors.
 EXPECTED_STOPS = ("prefill_declined", "ai_opt_out", "excluded", "deleted",
-                  "no_account", "blocked")
+                  "no_account", "blocked", HELD_AS_SPAM)
 
 # What a person's own action makes (an edit, a revert): a bundle holds
 # none of it (PERSON_VERSIONS of the unclaimed-account deletion, #685).
@@ -279,18 +296,24 @@ ACCOUNT_STOP_MESSAGES = {
     "no_account": "The account no longer exists.",
     "deleted": "The account is deleted or being deleted.",
     "blocked": "An admin deactivated the account.",
+    HELD_AS_SPAM: "The account is marked as spam and held. Remove the "
+                  "mark or activate the account first.",
 }
 
 
 def account_stop(user):
     """Why nothing may be loaded into this account and no merge made for
     it, whatever else holds: "no_account", "deleted" (deleted, or its
-    deletion or a purge of everything waits or runs: account_on_hold) or
+    deletion or a purge of everything waits or runs: account_on_hold),
     "blocked" (an admin deactivated it: Deactivate sets deactivated_at
     and clears approved, Activate sets approved again and keeps
-    deactivated_at, routes/admin.py); else None. Checked at the Yes,
-    at every run of a load before it reads storage, and by the merge
-    before its model call."""
+    deactivated_at, routes/admin.py) or HELD_AS_SPAM (payments on, the
+    admin marked it as spam and did not approve it by hand:
+    approval.held_as_spam, #713); else None. Checked at the Yes, at every
+    run of a load before it reads storage and before each part, by the
+    admin's "Make ready" before it reads storage for an account it knows,
+    and by the merge before its model call."""
+    from backend.utils.approval import held_as_spam
     from backend.utils.hidden_rows import account_on_hold
     if user is None:
         return "no_account"
@@ -298,6 +321,8 @@ def account_stop(user):
         return "deleted"
     if user.deactivated_at is not None and not user.approved:
         return "blocked"
+    if held_as_spam(user):
+        return HELD_AS_SPAM
     return None
 
 
@@ -434,13 +459,18 @@ def start_admin_load(query, admin_id, *, force=False, merge=True,
     x_id = resolve_x_id(storage, query)
     if not x_id:
         return None, ("no_bundle", "No prepared material under that handle.")
+    user = User.query.filter_by(twitter_id=str(x_id)).first()
+    # An account that may receive nothing (deactivated, deleted, held as
+    # spam) is refused before the bundle's manifest is read.
+    stop = account_stop(user) if user is not None else None
+    if stop is not None:
+        return None, (stop, ACCOUNT_STOP_MESSAGES[stop])
     manifest = pb.read_manifest(storage, x_id)
     problem = pb.manifest_problem(manifest, x_id)
     if problem:
         return None, (problem.code, problem.message)
     if pb.exclusion(storage, x_id) is not None:
         return None, ("excluded", "This X id is on the exclusion list.")
-    user = User.query.filter_by(twitter_id=str(x_id)).first()
     if user is None:
         user = _new_account(x_id, manifest.get("handle"))
     refusal = target_refusal(user, x_id, allow_signed_in=force,
@@ -477,7 +507,13 @@ def maybe_start_self_load(user, dispatch=None):
     check), the one already under way or done, or None. A failed,
     stopped or refused earlier load does not block a new Yes: the new
     load skips what is already there. Never raises: the Yes itself is
-    saved either way."""
+    saved either way.
+
+    An account held as spam (#732) gets no load: its Yes is kept as a
+    check in HELD, never sent, so nothing is read and no model is called.
+    Once the account is no longer held, a Yes or the person's next visit
+    (``resume_after_hold``) sends that check, or a load the hold stopped,
+    from where it was."""
     try:
         if not pb.bundles_enabled():
             return None
@@ -485,7 +521,8 @@ def maybe_start_self_load(user, dispatch=None):
             return None
         # A deactivated, deleted or held account can still send its Yes
         # (the approval gate lets the account update through): no load.
-        if account_stop(user) is not None:
+        stop = account_stop(user)
+        if stop is not None and stop != HELD_AS_SPAM:
             return None
         # The X id an X sign-in proved: twitter_handle is written only by
         # an X sign-in or Connect X (routes/auth.py), never by an admin.
@@ -496,6 +533,11 @@ def maybe_start_self_load(user, dispatch=None):
         current = _latest_load(user.id, x_id, ACTIVE + ("done",))
         if current is not None:
             return current
+        held = _held_self_load(user.id, x_id)
+        if stop == HELD_AS_SPAM:
+            return _keep_held_yes(user.id, x_id, held)
+        if held is not None:
+            return _resume_held(held, dispatch or _dispatch)
         now = _now()
         load = PrefillBundleLoad(
             user_id=user.id, x_id=x_id, origin="self", approve_when_done=True,
@@ -513,16 +555,115 @@ def maybe_start_self_load(user, dispatch=None):
         return None
 
 
+def _held_self_load(user_id, x_id):
+    """The newest load of the person's own Yes the spam hold stopped."""
+    return PrefillBundleLoad.query.filter(
+        PrefillBundleLoad.user_id == user_id,
+        PrefillBundleLoad.x_id == str(x_id),
+        PrefillBundleLoad.origin == "self",
+        PrefillBundleLoad.status == HELD,
+    ).order_by(PrefillBundleLoad.id.desc()).first()
+
+
+def _keep_held_yes(user_id, x_id, held):
+    """A Yes while the account is held as spam: a check in HELD that is
+    never sent, so nothing is read and no model is called until the
+    account is no longer held. One per account and X id: none is added
+    while ``held`` (one kept already) exists. Returns None: no load."""
+    if held is not None:
+        return None
+    now = _now()
+    db.session.add(PrefillBundleLoad(
+        user_id=user_id, x_id=str(x_id), origin="self",
+        approve_when_done=True, merge_wanted=True, status=HELD,
+        stage="check", error=HELD_AS_SPAM, bundle_sha256="",
+        heartbeat_at=now, created_at=now, finished_at=now))
+    db.session.commit()
+    logger.info("Pre-fill bundle check for user %s kept: the account is "
+                "held as spam", user_id)
+
+
+def _resume_held(load, dispatch):
+    """Send a load the spam hold stopped (HELD) from where it was: its
+    entries, links and place stay. A final merge the hold skipped is made
+    when the load finishes, as for any load."""
+    now = _now()
+    taken = db.session.execute(update(PrefillBundleLoad).where(
+        PrefillBundleLoad.id == load.id, PrefillBundleLoad.status == HELD,
+    ).values(status="queued", error=None, run_token=None, heartbeat_at=now,
+             stalled_runs=0, finished_at=None)).rowcount
+    if taken:
+        db.session.execute(update(PrefillBundleLoad).where(
+            PrefillBundleLoad.id == load.id,
+            PrefillBundleLoad.merge_status == "skipped",
+            PrefillBundleLoad.merge_error == HELD_AS_SPAM,
+        ).values(merge_status=None, merge_error=None))
+    db.session.commit()
+    if taken:
+        logger.info("Pre-fill bundle load %s for user %s sent again: the "
+                    "account is no longer held", load.id, load.user_id)
+        dispatch(load.id)
+    return db.session.get(PrefillBundleLoad, load.id)
+
+
+def _requeue_held_merge(load_id):
+    """A finished load whose final merge the spam hold skipped: the merge
+    is due again (one attempt as any other, under the account's lock)."""
+    from backend.utils import prefill_bundle_merge as pbm
+    taken = db.session.execute(update(PrefillBundleLoad).where(
+        PrefillBundleLoad.id == load_id,
+        PrefillBundleLoad.merge_status == "skipped",
+        PrefillBundleLoad.merge_error == HELD_AS_SPAM,
+    ).values(merge_status="due", merge_error=None,
+             merge_heartbeat_at=_now())).rowcount
+    db.session.commit()
+    if taken:
+        logger.info("Pre-fill bundle load %s: final merge due again, the "
+                    "account is no longer held", load_id)
+        pbm._dispatch(load_id)
+
+
+def resume_after_hold(user, dispatch=None):
+    """The person's next visit (GET /api/dashboard, which both apps call
+    on every start and after every sign-in) once their account is no
+    longer held as spam (#732): the Yes they gave goes on without being
+    asked again. Their newest load is a check or load the hold stopped
+    (HELD): it is sent from where it was (``maybe_start_self_load``); or
+    it is done and the hold skipped its final merge: the merge is due
+    again. Nothing while the account is still held. One indexed query
+    for an account with a Yes and an X id, none for any other. Never
+    raises: the visit goes on either way."""
+    try:
+        if not pb.bundles_enabled() or user.prefill_consent != "yes" \
+                or not user.twitter_id:
+            return None
+        newest = _latest_load(user.id)
+        if newest is None:
+            return None
+        if newest.status == HELD and newest.origin == "self":
+            return maybe_start_self_load(user, dispatch=dispatch)
+        if newest.status == "done" and newest.merge_status == "skipped" \
+                and newest.merge_error == HELD_AS_SPAM \
+                and account_stop(user) is None:
+            _requeue_held_merge(newest.id)
+        return None
+    except Exception as e:  # noqa: BLE001 - the visit must not fail
+        db.session.rollback()
+        logger.error("Could not resume a pre-fill bundle load for user %s: "
+                     "%s", getattr(user, "id", None), type(e).__name__)
+        return None
+
+
 # ── What the person and the admin see ─────────────────────────────────────
 
 def starting_point(user_id):
     """The state of the account's newest load, for the person's screen:
     None, or {"status": "checking" | "preparing" | "ready" | "failed",
-    "done", "total"}. A refused or stopped load, or no bundle, changes
-    nothing for the person."""
+    "done", "total"}. A refused or stopped load, one the spam hold
+    stopped, or no bundle, changes nothing for the person."""
     load = PrefillBundleLoad.query.filter(
         PrefillBundleLoad.user_id == user_id,
-        PrefillBundleLoad.status.notin_(("refused", "stopped")),
+        PrefillBundleLoad.status.notin_(("refused", "stopped", HELD)),
     ).order_by(PrefillBundleLoad.id.desc()).first()
     if load is None:
         return None
@@ -705,9 +846,17 @@ def _check_self_load(load, token, storage):
     that may not be loaded: the check is kept as "refused" (once per
     bundle and reason) for the admin to see. Else the load goes on. An
     account deactivated, deleted or held since its Yes: the check is
-    removed before anything is read from storage."""
+    removed before anything is read from storage; one held as spam keeps
+    its check in HELD, unread, for when it is no longer held (#732)."""
     user = db.session.get(User, load.user_id)
     stop = account_stop(user)
+    if stop == HELD_AS_SPAM:
+        _progress(load.id, token, status=HELD, error=HELD_AS_SPAM,
+                  run_token=None, finished_at=_now())
+        db.session.commit()
+        logger.info("Pre-fill bundle check %s for user %s kept unread: the "
+                    "account is held as spam", load.id, load.user_id)
+        return HELD
     if stop is not None:
         db.session.delete(load)
         db.session.commit()
@@ -1024,6 +1173,12 @@ def _work(load_id, token, storage, user, deadline, max_chunks):
     steps = 0
     while time.monotonic() < deadline and (max_chunks is None or steps < max_chunks):
         load = db.session.get(PrefillBundleLoad, load_id)
+        if load.stage in ("nodes", "links"):
+            # Deactivated, deleted or held as spam meanwhile: stopped
+            # before the next part is read, not at the next run (#732).
+            stop = account_stop(db.session.get(User, load.user_id))
+            if stop is not None:
+                raise pb.BundleError(stop, stop)
         if load.stage == "nodes":
             consent = db.session.query(User.prefill_consent).filter(
                 User.id == load.user_id).scalar()
@@ -1045,8 +1200,9 @@ def run_load(load_id, *, budget=RUN_SECONDS, dispatch=None, max_chunks=None):
     """One run of a load (the task's body). Works until the load is done
     or ``budget`` seconds have passed (or ``max_chunks`` parts, a tests
     hook), then sends the next run. Returns "done", "stopped",
-    "continuing", "failed", "refused", "no_bundle", "retrying", "busy"
-    (another run holds it), "lost" or "disabled"."""
+    "continuing", "failed", "refused", "no_bundle", "held" (the account
+    is held as spam: kept for later, #732), "retrying", "busy" (another
+    run holds it), "lost" or "disabled"."""
     dispatch = dispatch or _dispatch
     if not pb.bundles_enabled():
         return "disabled"   # the beat resumes it once switched on again
@@ -1088,10 +1244,13 @@ def run_load(load_id, *, budget=RUN_SECONDS, dispatch=None, max_chunks=None):
         return "lost"
     except pb.BundleError as e:
         # A no before anything was loaded stops the load: nothing to show
-        # the person. Anything else is a failure the admin sees.
-        stopped = e.code == "prefill_declined"
-        _fail(load_id, token, e.code, status="stopped" if stopped else "failed")
-        return "stopped" if stopped else "failed"
+        # the person. The spam hold keeps it where it is until the account
+        # is no longer held (#732). Anything else is a failure the admin
+        # sees.
+        status = {"prefill_declined": "stopped",
+                  HELD_AS_SPAM: HELD}.get(e.code, "failed")
+        _fail(load_id, token, e.code, status=status)
+        return status
     except Exception as e:  # noqa: BLE001 - storage errors included: retried
         db.session.rollback()
         logger.warning("Pre-fill bundle load %s: a run stopped (%s); "

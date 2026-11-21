@@ -211,6 +211,12 @@ def get_starting_point():
 @dashboard_bp.route("/", methods=["GET"])
 @login_required
 def get_dashboard():
+    # The person's visit after their account was held as spam (#732): a
+    # pre-fill bundle load the hold stopped, or their Yes it kept, goes on
+    # now, so the payload below already says "checking" or "preparing".
+    # Nothing for an account with no Yes or no X id; never fails.
+    from backend.utils.prefill_bundle_load import resume_after_hold
+    resume_after_hold(current_user)
     dashboard = {
         "user": _serialize_current_user(),
     }

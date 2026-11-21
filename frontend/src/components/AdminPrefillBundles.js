@@ -19,6 +19,7 @@ const ERRORS = {
   x_id_mismatch: "the account's X id is not the bundle's",
   deleted: "the account is deleted or being deleted",
   blocked: "an admin deactivated the account",
+  held_as_spam: "the account is marked as spam and held",
   no_account: "the account no longer exists",
   stalled: "stopped: three runs in a row ended without progress",
   format: "a bundle format this server does not load",
@@ -62,7 +63,7 @@ function mergeNote(l) {
   if (!l.merge_status) return "";
   if (l.merge_status === "done") return `; final merged again by ${l.merge_model}`;
   if (l.merge_status === "skipped") {
-    return l.merge_error === "current" ? "; final already by the merge model" : `; no merge (${l.merge_error})`;
+    return l.merge_error === "current" ? "; final already by the merge model" : `; no merge (${ERRORS[l.merge_error] || l.merge_error})`;
   }
   if (l.merge_status === "superseded") return "; merge not saved: the person edited their profile";
   if (l.merge_status === "failed") return `; merge failed (${l.merge_error}), the loaded profile stays`;
@@ -86,6 +87,15 @@ export function bundleLoadLabel(l) {
   }
   if (l.status === "stopped") {
     return `Stopped by the person's No: ${n(l.nodes_done)} of ${n(l.nodes_total)} entries loaded (they stay)`;
+  }
+  // The account is held as spam (#732): nothing more is read or merged.
+  // A load from the person's Yes goes on at their next visit once the
+  // account is no longer held; one from Make ready, when it is run again.
+  if (l.status === "held") {
+    return `Held: the account is marked as spam; ${n(l.nodes_done)} of ${n(l.nodes_total)} entries loaded (they stay). ` +
+      (l.origin === "self"
+        ? "It goes on at the person's next visit once the mark is removed or the account is activated."
+        : "Make ready again once the mark is removed or the account is activated.");
   }
   if (l.status === "failed") return `Failed: ${ERRORS[l.error] || l.error}`;
   if (l.status === "refused") return `Not loaded on their Yes: ${ERRORS[l.error] || l.error}`;

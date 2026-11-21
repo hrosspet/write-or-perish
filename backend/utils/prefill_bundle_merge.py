@@ -29,7 +29,9 @@ When: only when the loaded final was written by another model than that
 merge model. Never for an account set to AI usage None (no AI means no
 AI: it keeps the loaded profile), never after a "no" to starting from
 the tweets, never for an account an admin deactivated, deleted or held,
-never for an account whose current profile is a version the person
+or one held as spam (#732: a merge the hold skipped is made once the
+account is no longer held, at the person's next visit), never for an
+account whose current profile is a version the person
 wrote, and at most once per account: a merge done for any load of the
 account is never made again (a second Yes, a re-load), and while one
 load's merge is in flight no other load of the account starts one
@@ -167,9 +169,10 @@ def _set(load_id, **values):
 
 def _account_gates(user):
     """MergeStop when no merge may be made for this account now: it is
-    deactivated, deleted or held (prefill_bundle_load.account_stop), set
-    to AI usage None (no AI means no AI), or the person said no. Checked
-    when the attempt starts and again just before the model call."""
+    deactivated, deleted, held, or held as spam (#732)
+    (prefill_bundle_load.account_stop), set to AI usage None (no AI means
+    no AI), or the person said no. Checked when the attempt starts and
+    again just before the model call."""
     from backend.utils.prefill_bundle_load import account_stop
     from backend.utils.privacy import account_allows_ai
     stop = account_stop(user)
