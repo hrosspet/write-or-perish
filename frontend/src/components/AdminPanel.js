@@ -1209,8 +1209,17 @@ function AdminPanel() {
       const reported = r.account_num_tweets != null && r.account_num_tweets !== r.archived
         ? `; account reports ${r.account_num_tweets.toLocaleString()} tweets`
         : "";
+      // With an API key (#712): the latest export first, then the newer
+      // tweets through the API, and how many requests that took.
+      const n = (v) => (v || 0).toLocaleString();
+      const sourceNote = r.source === "parquet" ? " (snapshot)"
+        : r.source === "export" ? ` (${n(r.from_export)} from the export only)`
+          : r.source === "export+api-v1"
+            ? ` (${n(r.from_export)} from the export${r.export_id ? "" : ": none available"}, ` +
+              `${n(r.from_api)} newer via the API in ${n(r.api_requests)} requests)`
+            : "";
       return `Done: ${(r.created || 0).toLocaleString()} nodes${archived} from @${r.handle}` +
-        `${r.source === "parquet" ? " (snapshot)" : ""}${rts}${reported}` +
+        `${sourceNote}${rts}${reported}` +
         `${r.skipped ? `, ${r.skipped} already imported` : ""}` +
         `${r.imported_tokens != null ? `, ~${r.imported_tokens.toLocaleString()} tokens` : ""}` +
         queuedNote + idNote;
