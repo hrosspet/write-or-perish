@@ -29,7 +29,9 @@ import os
 ///   ends the session's uploads there: it and every later chunk are `beyond`,
 ///   never sent again (not at Stop, not after a relaunch), and their files are
 ///   deleted. The chunks before stay, so the caller finalizes with them
-///   (`onLimit`, `Outcome.totalForFinalize`).
+///   (`onLimit`, `Outcome.totalForFinalize`). A chunk that came after the
+///   finalize (`chunk_not_announced`) is not the bound: it alone is `beyond`,
+///   and nothing is said.
 /// - A relaunch resumes whatever is left (`resumePending()`); sign-out deletes
 ///   the whole queue (`reset()`).
 @MainActor
@@ -42,7 +44,8 @@ final class ChunkUploader: NSObject {
     /// chunk no other client is offered the session.
     static let serverLiveWindow: TimeInterval = 45
 
-    /// `beyond`: refused as past what one recording may hold; never sent again.
+    /// `beyond`: refused for good (past what one recording may hold, or after
+    /// the recording's finalize); never sent again.
     enum ChunkStatus: String, Codable { case pending, stored, failed, fatal, beyond }
 
     struct ChunkRecord: Codable, Equatable {
@@ -67,6 +70,10 @@ final class ChunkUploader: NSObject {
         /// for that chunk, so an age measured from it is never less than the
         /// server's (`mayRelease`).
         var lastUploadAt: Date?
+        /// The first chunk refused as past what one recording may hold (nil
+        /// until then, and in manifests from earlier builds): no chunk from it
+        /// on is sent.
+        var limitFrom: Int?
     }
 
     /// What `settle` reports before finalize.
@@ -193,7 +200,7 @@ final class ChunkUploader: NSObject {
         if manifest.chunks.values.contains(where: { $0.status == .fatal }) { return }
         // Past the recording's limit: the server takes no more, so nothing is
         // written or sent (dictation keeps its own copy for "Save audio").
-        if let limit = Self.limitIndex(manifest), chunk.index >= limit {
+        if let limit = manifest.limitFrom, chunk.index >= limit {
             manifest.chunks[chunk.index] = ChunkRecord(index: chunk.index, status: .beyond,
                                                        contentType: "", bytes: chunk.data.count)
             manifests[sessionId] = manifest
@@ -388,7 +395,7 @@ final class ChunkUploader: NSObject {
         return record.status != .stored
     }
 
-    private enum AttemptResult { case stored, retry, giveUp, fatal(String), refused(String), limit(String) }
+    private enum AttemptResult { case stored, retry, giveUp, fatal(String), refused(String), limit(String), dropped }
 
     private func upload(_ sessionId: String, index: Int) async {
         var attempt = 0
@@ -413,6 +420,9 @@ final class ChunkUploader: NSObject {
                 return
             case .limit(let message):
                 reachedLimit(sessionId, from: index, message)
+                return
+            case .dropped:
+                drop(sessionId, index)
                 return
             case .retry:
                 if isInit && manifests[sessionId]?.closed == false {
@@ -454,6 +464,7 @@ final class ChunkUploader: NSObject {
             manifests[sessionId]?.chunks[record.index]?.status = .beyond
             try? fileManager.removeItem(at: bodyFile(sessionId, record.index))
         }
+        manifests[sessionId]?.limitFrom = min(manifest.limitFrom ?? index, index)
         persist(sessionId)
         log.info("chunk \(index) is past the recording's limit; no later chunk is sent")
         guard !limitsSaid.contains(sessionId) else { return }
@@ -461,9 +472,11 @@ final class ChunkUploader: NSObject {
         onLimit?(sessionId, message)
     }
 
-    /// The first chunk refused as past the recording's limit, if any.
-    private static func limitIndex(_ manifest: Manifest) -> Int? {
-        manifest.chunks.values.filter { $0.status == .beyond }.map(\.index).min()
+    /// The recording was finished without this chunk (`chunk_not_announced`):
+    /// not sent again, and nothing is said.
+    private func drop(_ sessionId: String, _ index: Int) {
+        mark(sessionId, index, .beyond)
+        try? fileManager.removeItem(at: bodyFile(sessionId, index))
     }
 
     private func failFatally(_ sessionId: String, _ index: Int, _ message: String) {
@@ -499,6 +512,8 @@ final class ChunkUploader: NSObject {
                 return
             case .limit(let message):
                 reachedLimit(sessionId, from: index, message)
+            case .dropped:
+                drop(sessionId, index)
             case .giveUp, .retry, .refused:
                 mark(sessionId, index, .failed)
                 if isInit { return }
@@ -539,20 +554,31 @@ final class ChunkUploader: NSObject {
     }
 
     /// The codes for a chunk past what one recording may hold
-    /// (backend/routes/drafts.py; web `utils/recordingLimits`).
+    /// (backend/routes/drafts.py; web `utils/recordingLimits`): about four
+    /// hours, its bytes, or one chunk's size. Keyed on the code, never the words.
     static let limitCodes: Set<String> = ["chunk_index_out_of_range", "recording_too_large", "chunk_too_large"]
-    /// When the server's answer carries no words (web `RECORDING_LIMIT_MESSAGE`).
+    /// A chunk past the count a finalizing recording announced: the recording
+    /// was finished without it. Not the bound: dropped, nothing said.
+    static let notAnnouncedCode = "chunk_not_announced"
+    /// The server's words at the four-hour bound (backend `LONGEST_RECORDING_TEXT`),
+    /// for an answer that carries none (web `LONGEST_RECORDING_MESSAGE`).
+    static let longestRecordingMessage = "This recording has reached the longest Loore takes, about four hours, and has stopped. Everything before this is saved."
+    /// For the other bounds' answers without words (web `RECORDING_LIMIT_MESSAGE`).
     static let limitMessage = "This recording is larger than Loore accepts. Everything before this part is saved."
 
     /// Maps an upload answer (map C §2.3).
     private static func classify(status: Int, body: Data, index: Int) -> AttemptResult {
         if status == 400 || status == 413 {
-            // Past what one recording may hold: no later chunk is taken either.
+            // Past what one recording may hold. Every chunk before it is on the
+            // server; at the four hours and the bytes no later chunk is taken
+            // either, and at one chunk's size the recording stops all the same.
             let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
-            if let code = json?["code"] as? String, limitCodes.contains(code) {
+            let code = json?["code"] as? String
+            if let code, limitCodes.contains(code) {
                 let words = (json?["error"] as? String).flatMap { $0.contains(" ") ? $0 : nil }
-                return .limit(words ?? limitMessage)
+                return .limit(words ?? (code == "chunk_index_out_of_range" ? longestRecordingMessage : limitMessage))
             }
+            if code == notAnnouncedCode { return .dropped }
         }
         switch status {
         case 200..<300:

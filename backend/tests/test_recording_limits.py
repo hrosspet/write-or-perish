@@ -266,8 +266,7 @@ class TestStreamingChunkLimits:
         assert _rows("sess-1") == 0
         assert list(folder.iterdir()) == []
 
-    @pytest.mark.parametrize("index", [999_999, limits.MAX_STREAMING_CHUNKS,
-                                       -1])
+    @pytest.mark.parametrize("index", [999_999, limits.MAX_STREAMING_CHUNKS])
     def test_a_chunk_index_no_recording_needs_is_refused(
             self, app, client, alice, index):
         _draft, folder = _session(app, alice)
@@ -275,7 +274,24 @@ class TestStreamingChunkLimits:
         resp = _chunk(client, "sess-1", index, _payload(WEB_CHUNK_BYTES))
 
         assert resp.status_code == 400
-        assert resp.get_json()["code"] == "chunk_index_out_of_range"
+        # The words every four-hour recording ends with: it stopped, why,
+        # and that what came before is kept.
+        assert resp.get_json() == {
+            "code": "chunk_index_out_of_range",
+            "error": ("This recording has reached the longest Loore takes, "
+                      "about four hours, and has stopped. Everything before "
+                      "this is saved.")}
+        assert _rows("sess-1") == 0
+        assert list(folder.iterdir()) == []
+
+    def test_a_negative_chunk_index_is_invalid_not_the_bound(
+            self, app, client, alice):
+        _draft, folder = _session(app, alice)
+
+        resp = _chunk(client, "sess-1", -1, _payload(WEB_CHUNK_BYTES))
+
+        assert resp.status_code == 400
+        assert resp.get_json() == {"error": "Invalid chunk_index"}
         assert _rows("sess-1") == 0
         assert list(folder.iterdir()) == []
 
@@ -487,6 +503,8 @@ class TestOlderNodePath:
         resp = self._post(client, node, 999_999, _payload(WEB_CHUNK_BYTES))
 
         assert resp.status_code == 400
+        assert resp.get_json() == {"code": "chunk_index_out_of_range",
+                                   "error": limits.LONGEST_RECORDING_TEXT}
         tasks.transcribe_chunk.delay.assert_not_called()
 
     def test_control_a_normal_chunk_is_queued(self, app, client, alice, tasks):
@@ -702,8 +720,13 @@ class TestAudioIsNeverRefusedForQuietOrTheLimit:
 
         resp = _chunk(client, "fin", 6, _payload(WEB_CHUNK_BYTES))
 
+        # Its own code and words: not the four-hour bound, so the apps do
+        # not stop or say anything for it.
         assert resp.status_code == 400
-        assert resp.get_json()["code"] == "chunk_index_out_of_range"
+        assert resp.get_json() == {
+            "code": "chunk_not_announced",
+            "error": ("This recording was already finished, so this part was "
+                      "not added to it.")}
 
     def test_control_a_chunk_in_flight_when_the_page_left_is_stored(
             self, app, client, alice):

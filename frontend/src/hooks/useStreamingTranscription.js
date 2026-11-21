@@ -9,8 +9,8 @@ import { isAiUsageRefusedError, aiUsageRefusalScope } from '../utils/aiUsage';
 import { isThreadTooLong } from '../utils/threadLength';
 import { isApprovalPendingError } from '../utils/toolApprovals';
 import {
-  boundRefusalMessage, finalRefusalMessage, isStartRefusal,
-  TOO_MANY_RECORDINGS_MESSAGE, untranscribedMessage,
+  boundRefusalMessage, finalRefusalMessage, isNotAnnouncedChunk,
+  isStartRefusal, TOO_MANY_RECORDINGS_MESSAGE, untranscribedMessage,
 } from '../utils/recordingLimits';
 import { onPageReturn } from '../utils/pageReturn';
 import { playErrorSound } from '../utils/errorSound';
@@ -377,12 +377,19 @@ export function useStreamingTranscription(options = {}) {
           return { success: false, fatalError: TAKEN_OVER_MESSAGE, sessionEnded: true };
         }
         // Past what one recording may hold (utils/recordingLimits): the
-        // server takes no later chunk either, and holds every chunk before
-        // this one. The recording stops and is finalized with those.
+        // server holds every chunk before this one. The recording stops and
+        // is finalized with those.
         const bound = boundRefusalMessage(err);
         if (bound) {
           console.warn(`[StreamingTranscription] Chunk ${chunkIndex} is past the recording's limit (${code}); not retrying`);
           return { success: false, limit: bound };
+        }
+        // Past the count this recording's finalize announced: it was
+        // finished without this chunk. Not the bound; nothing to say, and
+        // not sent again.
+        if (isNotAnnouncedChunk(err)) {
+          console.warn(`[StreamingTranscription] Chunk ${chunkIndex} came after the finalize; dropped`);
+          return { success: false, dropped: true };
         }
         // A recording that had stopped and may not be continued (the
         // account's bounds, the usage limit; utils/recordingLimits):
@@ -474,6 +481,8 @@ export function useStreamingTranscription(options = {}) {
         totalChunksRef.current = Math.max(totalChunksRef.current, chunkIndex + 1);
       } else if (result.limit) {
         reachedLimitRef.current(sessionId, chunkIndex, result.limit);
+      } else if (result.dropped) {
+        // The recording was finished without it (chunk_not_announced).
       } else if (result.fatalError && sessionIdRef.current !== sessionId) {
         // A late fatal answer for a session this tab no longer records
         // (a retry that outlived cancelStreaming) must not stop the
@@ -771,6 +780,8 @@ export function useStreamingTranscription(options = {}) {
           } else if (result.limit) {
             // Past the recording's limit: not retried again.
             reachedLimitRef.current(sessionId, chunkIndex, result.limit);
+          } else if (result.dropped) {
+            // The recording was finished without it: not retried again.
           } else if (result.sessionEnded) {
             // Ended or continued elsewhere while this tab was offline
             // (#320, #388): stop recording into it, as a first upload's

@@ -65,7 +65,7 @@ jest.mock('../api', () => ({
 import { renderHook, act } from '@testing-library/react';
 import { useStreamingTranscription } from './useStreamingTranscription';
 import {
-  RECORDING_LIMIT_MESSAGE, UNTRANSCRIBED_MESSAGES,
+  LONGEST_RECORDING_MESSAGE, RECORDING_LIMIT_MESSAGE, UNTRANSCRIBED_MESSAGES,
 } from '../utils/recordingLimits';
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
@@ -289,9 +289,11 @@ describe('a chunk past what one recording may hold', () => {
       expect(callsTo('/audio-chunk')).toHaveLength(1);
       // The caller stops as on Stop, so the recording is finalized with the
       // chunks the server took; nothing here ends it as an error.
+      const said = code === 'chunk_index_out_of_range'
+        ? LONGEST_RECORDING_MESSAGE : RECORDING_LIMIT_MESSAGE;
       expect(onLimitReached).toHaveBeenCalledTimes(1);
-      expect(onLimitReached).toHaveBeenCalledWith(RECORDING_LIMIT_MESSAGE);
-      expect(mockAddToast).toHaveBeenCalledWith(RECORDING_LIMIT_MESSAGE, 10000);
+      expect(onLimitReached).toHaveBeenCalledWith(said);
+      expect(mockAddToast).toHaveBeenCalledWith(said, 10000);
       expect(mockPlayErrorSound).toHaveBeenCalledTimes(1);
       expect(onError).not.toHaveBeenCalled();
       expect(mockResetRecording).not.toHaveBeenCalled();
@@ -300,7 +302,8 @@ describe('a chunk past what one recording may hold', () => {
   );
 
   test("the finalize announces the chunks the server took, after the server's words", async () => {
-    const words = 'This recording has more parts than Loore accepts. Everything before this part is saved.';
+    const words = 'This recording has reached the longest Loore takes, about four hours, '
+      + 'and has stopped. Everything before this is saved.';
     const onLimitReached = jest.fn();
     const hook = await startRecording({ onLimitReached });
     mockPost.mockImplementation((url) => {
@@ -326,6 +329,38 @@ describe('a chunk past what one recording may hold', () => {
     expect(finalize[0][1].total_chunks).toBe(1);
     expect(hook.result.current.sessionState).toBe('finalizing');
     expect(hook.result.current.errorMessage).toBeNull();
+  });
+
+  test('a chunk after the finalize (chunk_not_announced) is not the bound: dropped, nothing said', async () => {
+    const onError = jest.fn();
+    const onLimitReached = jest.fn();
+    const { result } = await startRecording({ onError, onLimitReached });
+    mockPost.mockImplementation((url) => {
+      if (url.endsWith('/audio-chunk')) {
+        const err = new Error('Request failed');
+        err.response = {
+          status: 400,
+          data: {
+            error: 'This recording was already finished, so this part was not added to it.',
+            code: 'chunk_not_announced',
+          },
+        };
+        return Promise.reject(err);
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    await act(async () => {
+      mockRecorderOpts.onChunkReady(new Blob(['a']), 5);
+      await flush();
+    });
+
+    expect(callsTo('/audio-chunk')).toHaveLength(1);
+    expect(onLimitReached).not.toHaveBeenCalled();
+    expect(mockAddToast).not.toHaveBeenCalled();
+    expect(mockPlayErrorSound).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+    expect(result.current.sessionState).toBe('recording');
   });
 });
 

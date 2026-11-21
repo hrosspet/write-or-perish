@@ -3512,9 +3512,10 @@ def upload_audio_chunk(node_id):
         chunk_index = int(chunk_index)
     except ValueError:
         return jsonify({"error": "Invalid chunk_index"}), 400
-    if not 0 <= chunk_index < limits.MAX_STREAMING_CHUNKS:
-        return jsonify({"error": "This recording has more parts than Loore "
-                                 "accepts.",
+    if chunk_index < 0:
+        return jsonify({"error": "Invalid chunk_index"}), 400
+    if chunk_index >= limits.MAX_STREAMING_CHUNKS:
+        return jsonify({"error": limits.LONGEST_RECORDING_TEXT,
                         "code": "chunk_index_out_of_range"}), 400
 
     # Verify session ID matches

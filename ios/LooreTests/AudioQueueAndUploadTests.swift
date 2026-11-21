@@ -141,7 +141,7 @@ final class ChunkUploaderTests: XCTestCase {
     // one, are never sent again, not at Stop and not after a relaunch. The
     // recording is finalized with the chunks the server holds.
     func testAChunkPastTheRecordingsLimitEndsItsUploadsForGood() async throws {
-        let words = "This recording has more parts than Loore accepts. Everything before this part is saved."
+        let words = "This recording has reached the longest Loore takes, about four hours, and has stopped. Everything before this is saved."
         var sentIndexes: [Int] = []
         uploader.transport = { [unowned self] request, file in
             let i = self.index(of: request, file: file)
@@ -219,6 +219,53 @@ final class ChunkUploaderTests: XCTestCase {
         XCTAssertEqual(otherSaid, [])
         XCTAssertEqual(failed.failed, [0])
         XCTAssertEqual(failed.beyond, 0)
+
+        // The four-hour bound without words: the same text the server sends.
+        XCTAssertEqual(ChunkUploader.longestRecordingMessage,
+                       "This recording has reached the longest Loore takes, about four hours, and has stopped. Everything before this is saved.")
+    }
+
+    // A chunk that came after the recording's finalize (`chunk_not_announced`)
+    // is not the four-hour bound: nothing is said, it is not sent again, and
+    // the chunks after it still go (keyed on the code, not the words).
+    func testAChunkAfterTheFinalizeIsDroppedQuietlyNotTheBound() async throws {
+        var sentIndexes: [Int] = []
+        uploader.transport = { [unowned self] request, file in
+            let i = self.index(of: request, file: file)
+            sentIndexes.append(i)
+            let body = i == 1
+                ? #"{"error":"This recording was already finished, so this part was not added to it.","code":"chunk_not_announced"}"#
+                : "{}"
+            return (Data(body.utf8), HTTPURLResponse(url: request.url!, statusCode: i == 1 ? 400 : 202,
+                                                     httpVersion: nil, headerFields: nil)!)
+        }
+        var said: [String] = []
+        uploader.onLimit = { _, message in said.append(message) }
+        uploader.onRefused = { _, message in said.append(message) }
+        uploader.open(sessionId: "s23", uploadURL: URL(string: "http://x/c")!)
+        for i in 0..<2 { uploader.enqueue(sessionId: "s23", chunk: chunk(i)) }
+        let deadline = Date().addingTimeInterval(3)
+        while uploader.outcome("s23").beyond == 0 && Date() < deadline {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        // A chunk handed over after the drop is still sent.
+        uploader.enqueue(sessionId: "s23", chunk: chunk(2))
+        let outcome = await uploader.settle(sessionId: "s23")
+        XCTAssertEqual(said, [])
+        XCTAssertEqual(sentIndexes, [0, 1, 2], "sent once, not again at Stop; later chunks go")
+        XCTAssertEqual(outcome.stored, 2)
+        XCTAssertEqual(outcome.failed, [])
+
+        let relaunched = ChunkUploader(root: root, useBackgroundSession: false)
+        relaunched.delay = { _ in 0.001 }
+        var resent: [Int] = []
+        relaunched.transport = { [unowned self] request, file in
+            resent.append(self.index(of: request, file: file))
+            return (Data(), HTTPURLResponse(url: request.url!, statusCode: 202, httpVersion: nil, headerFields: nil)!)
+        }
+        relaunched.resumePending()
+        _ = await relaunched.settle(sessionId: "s23")
+        XCTAssertEqual(resent, [])
     }
 
     func testRetriesThenGivesUpAndReportsStoredCount() async throws {

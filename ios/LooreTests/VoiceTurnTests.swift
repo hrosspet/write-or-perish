@@ -1235,7 +1235,7 @@ final class VoiceTurnTests: XCTestCase {
     // says it in the server's words, and is finalized with the chunks the server
     // holds, never with the ones it refused, and without the "no connection?" text.
     func testReachingTheRecordingsLimitStopsAndFinalizesWhatTheServerHolds() async throws {
-        let words = "This recording has more parts than Loore accepts. Everything before this part is saved."
+        let words = "This recording has reached the longest Loore takes, about four hours, and has stopped. Everything before this is saved."
         recorder.outcome = .init(produced: 962, stored: 960, failed: [], fatalMessage: nil, beyond: 2)
         backend.statuses = [try status("completed", llm: 101)]
         backend.llmStatuses[101] = [try llm(101, "processing")]

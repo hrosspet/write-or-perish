@@ -146,6 +146,20 @@ MAX_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024
 # announce 40 for a 200 MB file.
 MAX_UPLOAD_CHUNKS = 200
 
+# The words for a chunk from MAX_STREAMING_CHUNKS on (``chunk_index_out_of_range``,
+# routes/drafts and the older node path): the apps stop there, show these
+# words and finalize with the chunks taken. The bound counts chunks, and
+# pauses cut shorter ones, so "about" four hours.
+LONGEST_RECORDING_TEXT = ("This recording has reached the longest Loore "
+                          "takes, about four hours, and has stopped. "
+                          "Everything before this is saved.")
+# The words for a chunk past the count a finalizing recording announced
+# (``chunk_not_announced``): the recording was finished without it. The apps
+# finalize only after their uploads settled, so they do not send one; its
+# own code keeps it apart from the four-hour bound.
+NOT_ANNOUNCED_TEXT = ("This recording was already finished, so this part "
+                      "was not added to it.")
+
 # Room for the multipart form around a chunk (its fields and boundaries)
 # when a request's Content-Length is checked before the form is read.
 FORM_OVERHEAD_BYTES = 64 * 1024
