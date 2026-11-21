@@ -242,3 +242,30 @@ def counted(key):
     except Exception as e:  # noqa: BLE001 — unreachable counts as unknown
         log.debug("counter %s unreadable (%s)", key, type(e).__name__)
         return None
+
+
+# ── Kept values: a result kept for a while, so it is not worked out again ──
+
+def kept_values(keys):
+    """The texts kept under ``keys`` (``keep_value``), in their order: None
+    for a key with none. All None when Redis cannot be reached (one
+    attempt for all of them)."""
+    if not keys:
+        return []
+    try:
+        values = _client().mget(keys)
+    except Exception as e:  # noqa: BLE001 — unreachable counts as unknown
+        log.debug("kept values unreadable (%s)", type(e).__name__)
+        return [None] * len(keys)
+    return [None if v is None else _text(v) for v in values]
+
+
+def keep_value(key, value, ttl):
+    """Keep the text ``value`` under ``key`` for ``ttl`` seconds. False
+    when Redis cannot be reached."""
+    try:
+        _client().set(key, value, ex=int(ttl))
+        return True
+    except Exception as e:  # noqa: BLE001 — kept next time, or never
+        log.debug("value %s not kept (%s)", key, type(e).__name__)
+        return False
