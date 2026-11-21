@@ -184,45 +184,29 @@ def prefill_community_archive_impl(user_id, handle, options, update_state=None,
     # handle after this (a stale snapshot can map it to a former holder).
     account = resolved.account
     _check_x_id_conflict(user, account["account_id"], account["username"])
-    # Size by what the archive actually holds (exact live count) — NOT
-    # all_account.num_tweets, the account's lifetime counter: an
-    # extension-ingested account can "report 13k tweets" while the
-    # archive holds 1k and the nightly snapshot none at all.
-    try:
-        archived = ca.count_archived(account["account_id"])
-    except Exception as e:  # header lookup failed → fall back to the counter
-        logger.warning("Community Archive count failed for @%s: %s", handle, e)
-        archived = None
-    expected = archived if archived is not None else (account.get("num_tweets") or 0)
+    # The account's lifetime counter is only a progress estimate: API v1
+    # (#688) has no count of what the archive holds.
+    expected = account.get("num_tweets") or 0
 
-    # Small accounts page through the REST API; large ones read the nightly
-    # parquet snapshot (downloaded once per export into the data dir) —
-    # unless the snapshot holds fewer rows than the live archive (account
-    # ingested/updated after the export), in which case REST is complete
-    # and parquet is not.
-    min_parquet = current_app.config.get("COMMUNITY_ARCHIVE_PARQUET_MIN_TWEETS", 5000)
-    use_parquet = bool(options.get("force_parquet")) or expected >= min_parquet
-    if ca.v1_enabled() and not options.get("force_parquet"):
-        # API v1 (#688) has no count, so whether the snapshot holds all of
-        # the account (the check below) cannot be known; its cursor paging
-        # reads a large account whole, live, at 200 tweets a request.
-        use_parquet = False
+    # The accounts read live through API v1, paged at 200 tweets a request;
+    # the nightly parquet snapshot (downloaded once per export into the data
+    # dir) only when the admin forces it.
+    use_parquet = bool(options.get("force_parquet"))
     if use_parquet:
         snapshot_dir = snapshot_dir_for(current_app.config)
         state("downloading", 0, None)
         ca.ensure_snapshot(snapshot_dir, on_progress=lambda name, done, total: state(
             f"downloading {name}", done >> 20, (total >> 20) if total else None))
         in_snapshot = ca.count_parquet(account["account_id"], snapshot_dir)
-        if in_snapshot == 0 or (archived is not None and in_snapshot < archived):
-            logger.info("@%s: snapshot holds %s rows vs %s live — using REST",
-                        handle, in_snapshot, archived)
+        if in_snapshot == 0:
+            logger.info("@%s: not in the snapshot — using API v1", handle)
             use_parquet = False
     stash = None
     if use_parquet:
         source = ca.iter_tweets_parquet(
             account["account_id"], snapshot_dir,
             on_page=lambda n: state("fetching", n, expected))
-    elif ca.v1_enabled():
+    else:
         # Paged into a stash on disk with its cursor (#688): a run that
         # fails, or stops at PREFILL_V1_RUN_SECONDS, leaves what it read,
         # and the next run (the task's follow-up, or the admin's next
@@ -235,9 +219,6 @@ def prefill_community_archive_impl(user_id, handle, options, update_state=None,
         if not done:
             raise PrefillContinues(fetched)
         source = ca.iter_staged_tweets(stash)
-    else:
-        source = ca.iter_tweets(
-            account["account_id"], on_page=lambda n: state("fetching", n, expected))
     state("fetching", 0, expected)
 
     rows, seen, retweets = [], set(), 0
@@ -256,8 +237,7 @@ def prefill_community_archive_impl(user_id, handle, options, update_state=None,
                                   x_id=account.get("account_id"),
                                   provenance=PROVENANCE_PREFILL_CA)
     result.update({
-        "source": ("parquet" if use_parquet
-                   else "api-v1" if ca.v1_enabled() else "rest"),
+        "source": "parquet" if use_parquet else "api-v1",
         # What the archive actually holds vs. the account's self-reported
         # lifetime counter (uploads are often partial) — so a low node
         # count reads as "partial archive", not "import bug".

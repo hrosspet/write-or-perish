@@ -1,9 +1,10 @@
 """Clients for external content sources (#155 component 2 / Download).
 
 Community Archive: the public open tweet database
-(https://github.com/TheExGenesis/community-archive) — a Supabase
-PostgREST API readable with a published anon key. No user credentials
-involved; only accounts that donated their archives are present.
+(https://github.com/TheExGenesis/community-archive) — its API v1,
+read with Loore's own key (COMMUNITY_ARCHIVE_API_KEY). No user
+credentials involved; only accounts that donated their archives are
+present.
 
 Twitter/X bookmarks: X API v2 (pay-per-use tier), OAuth 2.0 PKCE user
 context with bookmark.read scope. Env-gated until credentials/credits
@@ -15,18 +16,6 @@ from datetime import datetime
 import requests
 
 logger = logging.getLogger(__name__)
-
-# Public Community Archive instance (anon key is published in their docs
-# for read access — not a secret).
-CA_BASE_URL = "https://fabxmporizzqflnftavs.supabase.co"
-CA_ANON_KEY = (
-    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
-    "eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZhYnhtcG9yaXp6cWZsbmZ0YXZzIiwicm9sZSI6"
-    "ImFub24iLCJpYXQiOjE3MjIyNDQ5MTIsImV4cCI6MjAzNzgyMDkxMn0."
-    "UIEJiUNkLsW28tBHmG-RQDW-I5JNlJLt62CSk9D_qG8"
-)
-CA_PAGE_SIZE = 500
-CA_TIMEOUT = 20
 
 X_API_BASE = "https://api.twitter.com/2"
 # X bills bookmark reads per RETURNED POST (#271), so the page size is
@@ -52,39 +41,14 @@ X_BOOKMARKS_FIRST_PAGE_SIZE = 10
 X_BOOKMARKS_PAGE_SIZE = 100  # X's max_results cap for the endpoint
 
 
-def _ca_headers():
-    return {
-        "apikey": CA_ANON_KEY,
-        "Authorization": f"Bearer {CA_ANON_KEY}",
-    }
-
-
 def ca_lookup_account(username):
-    """Resolve a Community Archive username to its account_id, or None.
-    With COMMUNITY_ARCHIVE_API_KEY set, through API v1's exact username
-    lookup (community_archive.fetch_account, #688)."""
+    """Resolve a Community Archive username to its account_id, or None,
+    through API v1's exact username lookup (community_archive.fetch_account,
+    #688). Without COMMUNITY_ARCHIVE_API_KEY it raises
+    CommunityArchiveRetired (#721)."""
     from backend.utils import community_archive as ca
-    if ca.v1_enabled():
-        account = ca.fetch_account(username)
-        return account["account_id"] if account else None
-    ca._warn_if_rest_retired()
-    retired = ca.rest_retired()
-    try:
-        resp = requests.get(
-            f"{CA_BASE_URL}/rest/v1/account",
-            params={"username": f"ilike.{username}", "select": "account_id,username"},
-            headers=_ca_headers(), timeout=CA_TIMEOUT,
-        )
-        resp.raise_for_status()
-        rows = resp.json()
-    except Exception as e:
-        if retired:
-            raise ca.CommunityArchiveRetired() from e
-        raise
-    if not rows and retired:
-        # A retired API's empty answer says nothing about the handle.
-        raise ca.CommunityArchiveRetired()
-    return rows[0]["account_id"] if rows else None
+    account = ca.fetch_account(username)
+    return account["account_id"] if account else None
 
 
 def _parse_tweet_dt(value):
@@ -124,44 +88,13 @@ def normalize_ca_tweet(row, username):
 def ca_fetch_tweets(account_id, username, max_items=2000):
     """Fetch up to *max_items* tweets for a CA account, newest first.
 
-    Yields normalized item dicts; paginates via PostgREST offset, or with
-    COMMUNITY_ARCHIVE_API_KEY set through API v1's account timeline
-    (newest first, cursor pages of up to 200, #688).
+    Yields normalized item dicts, paged through API v1's account timeline
+    (newest first, cursor pages of up to 200, #688). Without
+    COMMUNITY_ARCHIVE_API_KEY it raises CommunityArchiveRetired (#721).
     """
     from backend.utils import community_archive as ca
-    if ca.v1_enabled():
-        yield from _ca_fetch_tweets_v1(account_id, username, max_items)
-        return
-    ca._warn_if_rest_retired()
-    fetched = 0
-    offset = 0
-    while fetched < max_items:
-        page_size = min(CA_PAGE_SIZE, max_items - fetched)
-        resp = requests.get(
-            f"{CA_BASE_URL}/rest/v1/tweets",
-            params={
-                "account_id": f"eq.{account_id}",
-                "select": "*",
-                "order": "created_at.desc",
-                "limit": str(page_size),
-                "offset": str(offset),
-            },
-            headers=_ca_headers(), timeout=CA_TIMEOUT,
-        )
-        resp.raise_for_status()
-        rows = resp.json()
-        if not rows:
-            break
-        for row in rows:
-            item = normalize_ca_tweet(row, username)
-            if item is not None:
-                yield item
-                fetched += 1
-                if fetched >= max_items:
-                    break
-        offset += len(rows)
-        if len(rows) < page_size:
-            break
+    ca.require_key()
+    yield from _ca_fetch_tweets_v1(account_id, username, max_items)
 
 
 def _ca_fetch_tweets_v1(account_id, username, max_items):
