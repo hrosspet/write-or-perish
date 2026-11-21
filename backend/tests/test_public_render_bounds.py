@@ -106,11 +106,21 @@ def test_render_limit_counts_cpu_time_not_waiting(app, monkeypatch):
     assert html == "<p>a <em>b</em> c <em>d</em> e <em>f</em> g</p>\n"
 
 
-def test_fallback_logs_the_node_and_length_only(app, caplog):
+def test_fallback_logs_the_node_and_length_only(app, caplog, monkeypatch):
+    import itertools
     import logging
+    from backend.utils import public_html
     from backend.utils.public_html import RenderBudget, render_markdown
-    text = "a private sentence " + "[" * 100_000
-    with caplog.at_level(logging.WARNING, logger="backend.utils.public_html"):
+    text = "a private sentence " + "[" * 1_000
+    # A render clock that moves a second at each reading, so the body's
+    # render time is spent at the parser's first check whatever the
+    # mistune release (newer ones parse bracket runs in linear time) and
+    # however fast the machine.
+    seconds = itertools.count()
+    with monkeypatch.context() as patched, caplog.at_level(
+            logging.WARNING, logger="backend.utils.public_html"):
+        patched.setattr(public_html, "_render_clock",
+                        lambda: float(next(seconds)))
         render_markdown(text, node_id=4242)
     lines = [r.getMessage() for r in caplog.records]
     assert lines == [f"Public page: node 4242 ({len(text)} characters) "
