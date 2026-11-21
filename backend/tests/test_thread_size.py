@@ -277,6 +277,97 @@ class TestThreadPage:
             f"/api/nodes/{root.id}").get_json()["thread_length"] is None
 
 
+# ── A refused Glean's row (#717) ─────────────────────────────────────────
+
+def _refused_reply(owner, under, meta, tokens, chars, at):
+    """A reply the completion task refused under *under*, as main's
+    _refuse_thread_too_long left it: the failed reply with its markers,
+    and the $0 row under the node it was asked under, counted (certain)."""
+    reply = _reply(under, owner, content="")
+    reply.llm_task_status = "failed"
+    reply.created_at = at
+    reply.tool_calls_meta = json.dumps(
+        meta + [{"name": "_refused", "code": CODE}])
+    _measure(reply.parent, owner, tokens, chars=chars,
+             request_type="thread_limit", at=at + timedelta(seconds=5))
+    _db.session.commit()
+    return reply
+
+
+class TestARefusedGleansRow:
+    """Between #650 and #717 a Glean refused for the day's size left a
+    $0 row with the whole prompt's size, a day of tweets, under the node
+    it was asked under. That size is the Glean's own prompt, never part
+    of the thread a later reply sends: the thread's length state, the
+    page's and the pre-reply check's, does not count it, so the thread
+    shows its real state and both apps offer Glean and LLM Response
+    again. The row is known by the refused reply's read marker, metadata
+    only."""
+
+    def _glean_thread(self, alice):
+        from backend.tests.test_read_context import _prompt_node
+        note = _units(_node(alice, content="a note"), 50)
+        read = _prompt_node(alice, "read_thread", parent_id=note.id)
+        _db.session.commit()
+        return note, read
+
+    def test_a_first_glean_refused_before_717_leaves_no_limit(self, limited):
+        from backend.utils.thread_size import thread_length_fields
+        alice = _user()
+        _note, read = self._glean_thread(alice)
+        at = datetime.utcnow() - timedelta(minutes=5)
+        refused = _refused_reply(alice, read, [{"name": "_live"}],
+                                 60_000, 240_000, at)
+
+        assert thread_length_fields(read, alice.id)["thread_length"] is None
+        assert thread_length_fields(refused, alice.id)[
+            "thread_length"] is None
+
+    def test_glean_again_refused_under_an_entry_leaves_no_limit(
+            self, limited, task_mod):
+        """The page (GET /api/nodes) answers no limit, so the web's
+        readActions / LLM Response and the iPhone's ThreadModel.readActions
+        show again; a chat reply on any model is judged on the thread."""
+        from backend.utils.llm_nodes import create_llm_placeholder
+        alice = _user()
+        _root, _reply_, entry = _thread(alice, measured=2_000)
+        at = datetime.utcnow() - timedelta(minutes=5)
+        _refused_reply(alice, entry, [{"name": "_read"}, {"name": "_live"}],
+                       1_400_000, 5_000_000, at)
+
+        page = _client(limited, alice).get(
+            f"/api/nodes/{entry.id}").get_json()
+        assert page["thread_length"] is None
+        assert "thread_length_message" not in page
+        for model in ("gpt-5", "claude-sonnet-4.5"):
+            llm_node, _task = create_llm_placeholder(entry.id, model,
+                                                     alice.id)
+            assert llm_node.parent_id == entry.id
+
+    def test_a_chat_reply_refused_as_too_long_still_counts(self, limited):
+        """Control: the thread really is too long; its own refusal stays
+        a base, also when a refused Glean sits under the same node."""
+        from backend.utils.thread_size import thread_length_fields
+        alice = _user()
+        _root, _reply_, entry = _thread(alice, measured=2_000)
+        early = datetime.utcnow() - timedelta(minutes=10)
+        _refused_reply(alice, entry, [{"name": "_live"}],
+                       1_400_000, 5_000_000, early)
+        _refused_reply(alice, entry, [], 12_000, 48_000,
+                       early + timedelta(minutes=5))
+
+        assert thread_length_fields(entry, alice.id)["thread_length"] \
+            == "limit"
+
+    def test_a_thread_too_long_without_any_glean_stays_at_the_limit(
+            self, limited):
+        from backend.utils.thread_size import thread_length_fields
+        alice = _user()
+        _root, _reply_, entry = _thread(alice, measured=9_700)
+        assert thread_length_fields(entry, alice.id)["thread_length"] \
+            == "limit"
+
+
 # ── Every path that asks for a reply ─────────────────────────────────────
 
 class TestRefusedEverywhere:
@@ -289,6 +380,29 @@ class TestRefusedEverywhere:
             f"/api/nodes/{entry.id}/llm", json={"model": "gpt-5"}))
         assert _llm_count() == before
         task_mod.generate_llm_response.delay.assert_not_called()
+
+    def test_a_glean_is_measured_by_the_task_not_refused_here(self, limited,
+                                                              task_mod):
+        """#717: the task fits the day's tweets to the room a read's own
+        prompt leaves, and refuses only when the thread leaves none. This
+        estimate holds none of the tweets and the agentic prompt a read
+        leaves out, so a Glean in a thread it puts at the limit is not
+        refused here; a chat reply there still is."""
+        from backend.tests.test_read_context import _prompt_node
+        from backend.utils.llm_nodes import create_llm_placeholder
+        from backend.utils.thread_size import ThreadTooLong
+        alice = _user()
+        alice.is_admin = True       # inside Glean's rollout gate
+        _root, _reply_, entry = _thread(alice, measured=9_700)
+        read = _prompt_node(alice, "read_thread", parent_id=entry.id)
+        _db.session.commit()
+
+        llm_node, _task = create_llm_placeholder(
+            read.id, "gpt-5", alice.id, ai_usage="chat", read_live=True)
+
+        assert llm_node.parent_id == read.id
+        with pytest.raises(ThreadTooLong):
+            create_llm_placeholder(entry.id, "gpt-5", alice.id)
 
     def test_auto_generate_refused_the_same_way(self, limited, task_mod):
         alice = _user()

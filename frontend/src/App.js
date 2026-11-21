@@ -18,6 +18,7 @@ import NodeOpeningSpinner from "./components/NodeOpeningSpinner";
 import useNodePrefetch from "./hooks/useNodePrefetch";
 import LoginPage from "./components/LoginPage";
 import ProtectedRoute from "./components/ProtectedRoute";
+import PendingDestination, { useRememberArrival } from "./components/PendingDestination";
 import VisionPage from "./pages/VisionPage";
 import WhyLoorePage from "./pages/WhyLoorePage";
 import HowToPage from "./pages/HowToPage";
@@ -36,6 +37,7 @@ import ConfirmEmailPage from "./pages/ConfirmEmailPage";
 import ConfirmAccountDeletionPage from "./pages/ConfirmAccountDeletionPage";
 import AccountDeletedPage from "./pages/AccountDeletedPage";
 import AccountRestorePage from "./pages/AccountRestorePage";
+import PreparedAccountPage from "./pages/PreparedAccountPage";
 import ArtifactsPage from "./pages/ArtifactsPage";
 import SharePage from "./pages/SharePage";
 import PublicSharePage from "./pages/PublicSharePage";
@@ -90,7 +92,16 @@ function PermalinkRoute({ username, slug }) {
 function NodeRoute() {
   const { user, loading } = useUser();
   if (loading) return null;
+  if (user && !user.approved) return <WaitingScreen />;
   return user ? <NodeDetailWrapper /> : <PublicThreadPage />;
+}
+
+// An account waiting for approval cannot open entries, public ones
+// included (the API refuses it): the waiting screen, as for every page the
+// app keeps from it, instead of an error. A sign-in's destination is
+// dropped there (#704).
+function WaitingScreen() {
+  return <Navigate to="/alpha-thank-you" replace />;
 }
 
 // Legacy /dashboard/<username> links (old public dashboard, now deleted)
@@ -106,9 +117,11 @@ function DashboardRedirect() {
 // all real routes rank ahead of it) and guards on the @.
 function AtRoute() {
   const { atName, slug } = useParams();
+  const { user, loading } = useUser();
   if (!atName || !atName.startsWith('@') || atName.length < 2) {
     return <Navigate to="/" replace />;
   }
+  if (!loading && user && !user.approved) return <WaitingScreen />;
   const username = atName.slice(1);
   if (slug) return <PermalinkRoute username={username} slug={slug} />;
   return <PublicSharePage usernameOverride={username} />;
@@ -132,6 +145,8 @@ function App() {
   const [showTerms, setShowTerms] = useState(false);
   const { user, setUser, markHasOwnEntries } = useUser();
   const navigate = useNavigate();
+  // The page this load arrived on, kept for a new account's steps (#704).
+  useRememberArrival();
   // A thread opened from a modal (a new entry, a search result): the modal
   // closes, and the thread opens once its node is in, with a spinner over
   // the current page meanwhile; moving elsewhere first drops it.
@@ -204,6 +219,8 @@ function App() {
           <Route path="/confirm-account-deletion" element={<ConfirmAccountDeletionPage />} />
           <Route path="/account-deleted" element={<AccountDeletedPage />} />
           <Route path="/account-restore" element={<AccountRestorePage />} />
+          {/* Connect X found the account prepared for this person (#714). */}
+          <Route path="/prepared-account" element={<PreparedAccountPage />} />
           <Route path="*" element={<SubscribePage />} />
         </Routes>
       </>
@@ -267,6 +284,7 @@ function App() {
       )}
 
         <ProfileGenerationWatcher />
+        <PendingDestination />
         <Routes>
           <Route path="/" element={<RootRoute />} />
           <Route path="/landing" element={<LandingPage />} />
@@ -288,6 +306,9 @@ function App() {
           <Route path="/confirm-account-deletion" element={<ConfirmAccountDeletionPage />} />
           <Route path="/account-deleted" element={<AccountDeletedPage />} />
           <Route path="/account-restore" element={<AccountRestorePage />} />
+          {/* Connect X found the account prepared for this person (#714).
+              Not ProtectedRoute: a waitlisted account answers it too. */}
+          <Route path="/prepared-account" element={<PreparedAccountPage />} />
           {/* Welcome - protected (for newly approved users) */}
           <Route path="/welcome" element={<ProtectedRoute><WelcomePage /></ProtectedRoute>} />
           {/* Workflow routes */}

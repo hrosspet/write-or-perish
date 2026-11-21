@@ -337,6 +337,7 @@ test('the sentences are the server\'s', () => {
     ai_usage_none: "AI usage is set to None, so Loore can't reply here.",
     approval_pending: 'A change to your data is waiting for your approval. Approve or reject it on the screen to continue.',
     thread_too_long: 'This thread is too long for another reply. Start a new thread to keep talking.',
+    glean_day_done: "You've gleaned through all of today's tweets. New ones come in once a day.",
     subscription_required_ended: "Your subscription has ended, so Loore doesn't reply. Your recording is saved.",
     subscription_required_past_due: "Your last payment didn't go through, so Loore doesn't reply. Your recording is saved.",
     subscription_required_free_month: "Your free month has ended, so Loore doesn't reply. Your recording is saved.",

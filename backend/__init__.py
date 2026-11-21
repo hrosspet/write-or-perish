@@ -19,7 +19,8 @@ else:
 from backend.config import Config
 from backend.extensions import db
 from backend.utils.error_privacy import (
-    install_traceback_scrubbing, scrub_sentry_breadcrumb, scrub_sentry_event,
+    install_traceback_scrubbing, mask_artifact_names, scrub_sentry_breadcrumb,
+    scrub_sentry_event,
 )
 from flask_migrate import Migrate
 from flask_login import LoginManager, current_user
@@ -183,7 +184,9 @@ SENTRY_PRIVACY_OPTIONS = {
 
 
 def _without_query(url):
-    return url.split("?", 1)[0].split("#", 1)[0]
+    """*url* without its query and fragment, and without the artifact
+    name an artifact address carries (mask_artifact_names)."""
+    return mask_artifact_names(url.split("?", 1)[0].split("#", 1)[0])
 
 
 def _drop_query_strings(event):
@@ -192,9 +195,12 @@ def _drop_query_strings(event):
     sends the request's query string, the Referer header carries the
     query of the page that made the call, and outgoing-HTTP breadcrumbs
     keep each call's query in `http.query`. All are removed; the paths
-    stay, so the route is still identifiable. (Access-log lines, which
-    hold whole request lines, are kept out by ignore_logger in
-    create_app.)"""
+    stay, so the route is still identifiable, except the name of an
+    artifact, which an artifact address carries in its path
+    (mask_artifact_names). (Access-log lines, which hold whole request
+    lines, are kept out by ignore_logger in create_app.)"""
+    if isinstance(event.get("transaction"), str):
+        event["transaction"] = mask_artifact_names(event["transaction"])
     request_info = event.get("request")
     if isinstance(request_info, dict):
         request_info.pop("query_string", None)
@@ -321,8 +327,9 @@ def create_app():
     #     their address before approval).
     #   - For other API requests, return a 403 JSON error.
     #   - For other (HTML) requests, redirect to "/" with the query flag ?alpha=1.
-    # While payments are on, only an account the admin blocked is held here
-    # (utils/approval.py): every other one is approved on arrival.
+    # While payments are on, only an account the admin blocked or marked as
+    # spam is held here (utils/approval.py): every other one is approved on
+    # arrival.
     @app.before_request
     def touch_last_seen_hook():
         # Admin Activity tab: who came back, and where they last were.
@@ -337,7 +344,8 @@ def create_app():
             return  # nothing to check
 
         # `approved`, except, payments off, an account the gate let in by
-        # itself while they were on (#697: approval.waiting_again).
+        # itself while they were on (#697: approval.waiting_again), and,
+        # payments on, one held as spam (#713: approval.held_as_spam).
         from backend.utils import approval
         if approval.counts_as_approved(current_user):
             return  # approved users proceed
@@ -345,8 +353,8 @@ def create_app():
         # Payments on (#697; Peter, 2026-11-13): nobody waits for approval.
         # An account never approved is approved on its first request and
         # goes on to the trial step (block_accounts_without_subscription
-        # below); one the admin blocked is refused here, with its own text.
-        # No-op while payments are off.
+        # below); one the admin blocked or marked as spam is refused here,
+        # with its own text. No-op while payments are off.
         if approval.let_in(current_user):
             db.session.commit()
             return
@@ -362,10 +370,11 @@ def create_app():
         if request.endpoint and request.endpoint.startswith("public_pages."):
             return
 
-        # Payments on (#697): an account the admin blocked reaches only who
-        # it is, its subscription and Stripe's page to cancel it, its data
-        # download, the terms and deleting itself (approval.BLOCKED_OPEN).
-        if approval.approval_waived() and approval.is_blocked(current_user):
+        # Payments on (#697): an account the admin blocked, or one held as
+        # spam (#713), reaches only who it is, its subscription and
+        # Stripe's page to cancel it, its data download, the terms and
+        # deleting itself (approval.BLOCKED_OPEN).
+        if approval.not_active(current_user):
             if approval.open_while_blocked(request.method, request.path):
                 return
             return _refuse_unapproved()
@@ -459,6 +468,11 @@ def create_app():
 
     from backend.routes.admin import admin_bp
     app.register_blueprint(admin_bp, url_prefix="/api/admin")
+
+    # Admin: pre-fill bundles from the lab (#698).
+    from backend.routes.prefill_bundles import prefill_bundles_bp
+    app.register_blueprint(prefill_bundles_bp,
+                           url_prefix="/api/admin/prefill-bundles")
 
     from backend.routes.profile import profile_bp
     app.register_blueprint(profile_bp, url_prefix="/api/profile")
@@ -633,9 +647,11 @@ def create_app():
     app.cli.add_command(pgvector_enable_command)
     app.cli.add_command(pgvector_compare_command)
     from backend.billing_cli import (
-        alpha_free_month_command, stripe_sync_catalog_command)
+        alpha_free_month_command, stripe_forget_customer_command,
+        stripe_sync_catalog_command)
     app.cli.add_command(stripe_sync_catalog_command)
     app.cli.add_command(alpha_free_month_command)
+    app.cli.add_command(stripe_forget_customer_command)
     from backend.unclaimed_cli import unclaimed_accounts_command
     app.cli.add_command(unclaimed_accounts_command)
 

@@ -4275,6 +4275,565 @@ Kinds (one per entry and per table row):
 - **Source:** issue #677, 2026-11-12; #644 (Opus 5.5)
 - **Applies to:** #644, #652, #672, #677
 
+### 2026-11-13 · Payments: a sentence about recordings read too widely
+
+- **Kind:** process
+- **Situation:** in node 201898 the coordinating builder had decided under Peter's rules that an account whose subscription ended makes no billed call: dictation and Voice are refused at the start. Peter answered with a sentence about recordings, which the builder read as overruling the whole decision, and it started a follow-up PR that let such accounts dictate again.
+- **Decision:** read the sentence as covering every recording of an account whose subscription ended, and started building on that reading without confirming it.
+- **Peter:** "User's recorded message should be stored on Loore's servers, possibly even transcribed (transcription is cheap). Just further AI use should be blocked." · asked what he meant: "Voice mode shouldn't start with a subscription expired"
+- **Score:** miss. He meant only a recording already under way when the subscription ends. The follow-up (#682) was narrowed to that case, and the start stays refused.
+- **Why it missed:** a correction was given the widest scope its words allow, and work started before one line to Peter could have confirmed which case he meant.
+- **Source:** Claude Code session 2026-11-13 (Fable 5.2)
+- **Applies to:** #649, #682
+- **Rule:** candidate: confirm the scope of a correction in one line before building on it
+
+### 2026-11-13 · Search for accounts set to None: the code, not the text
+
+- **Kind:** privacy
+- **Situation:** the review of the legal pages found that search words go to OpenAI to be embedded even for accounts whose Default AI usage is None. The morning node (201914) recommended, as the default, that the privacy text say so, with a code change as a later follow-up.
+- **Decision:** recommended describing it in the text now and changing the code later.
+- **Peter:** "just do the followup: disable search for accounts with ai_usage None, because we allow only semantic search (keyword search is costly because of KMS, and is allowed only for admins)"
+- **Score:** partial. The change was the right one; the timing was not: he wanted the code changed at once (#686).
+- **Why it missed:** a gap between the code and the hard line "no AI means no AI" was treated as something to disclose, when the rule asks for the code to follow it.
+- **Source:** Loore voice review, node 201919 answering node 201914, 2026-11-13 (Fable 5.2)
+- **Applies to:** #660, #684, #686
+
+### 2026-11-13 · Legal pages: the minimum age
+
+- **Kind:** product scope
+- **Situation:** the draft Terms and Privacy pages (#660) left seven choices to Peter, each with a recommendation as the default (node 201914). The first: the minimum age.
+- **Decision:** recommended 18.
+- **Peter:** "as for the rest of the decisions pls go with your recommendations"
+- **Score:** hit
+- **Source:** Loore voice review, node 201919 answering node 201914, 2026-11-13 (Fable 5.2)
+- **Applies to:** #440, #660
+
+### 2026-11-13 · Legal pages: the AI default described as Chat
+
+- **Kind:** privacy
+- **Situation:** as in the entry before. New accounts start at AI usage Chat in the code, while Terms 2.0 said None. The choice: the text says Chat, as the code does, or the code changes to None.
+- **Decision:** recommended that the text describe Chat, the code's default.
+- **Peter:** "as for the rest of the decisions pls go with your recommendations"
+- **Score:** hit
+- **Source:** Loore voice review, node 201919 answering node 201914, 2026-11-13 (Fable 5.2)
+- **Applies to:** #440, #660
+
+### 2026-11-13 · Legal pages: refunds
+
+- **Kind:** cost
+- **Situation:** as in the entry before. What the Terms promise when someone cancels mid-month.
+- **Decision:** recommended no refund for part of a month unless the law requires one.
+- **Peter:** "as for the rest of the decisions pls go with your recommendations"
+- **Score:** hit
+- **Source:** Loore voice review, node 201919 answering node 201914, 2026-11-13 (Fable 5.2)
+- **Applies to:** #440, #660
+
+### 2026-11-13 · Legal pages: profiles prepared before someone joins
+
+- **Kind:** privacy
+- **Situation:** as in the entry before. Profiles that Loore prepares from public posts before a person joins need a legal basis in the privacy text.
+- **Decision:** recommended legitimate interest, to be checked by whoever checks the text, and deleting prepared accounts that nobody claims after a set time.
+- **Peter:** "as for the rest of the decisions pls go with your recommendations"
+- **Score:** hit. The period became 90 days (entry "Unclaimed prepared accounts: 90 days").
+- **Source:** Loore voice review, node 201919 answering node 201914, 2026-11-13 (Fable 5.2)
+- **Applies to:** #437, #660, #685
+
+### 2026-11-13 · Legal pages: the robots file
+
+- **Kind:** privacy
+- **Situation:** as in the entry before. The site's robots file invites AI-training crawlers to public entries (#252), with no decision of Peter's on record.
+- **Decision:** recommended leaving it as it is and describing it neutrally.
+- **Peter:** "as for the rest of the decisions pls go with your recommendations"
+- **Score:** hit
+- **Source:** Loore voice review, node 201919 answering node 201914, 2026-11-13 (Fable 5.2)
+- **Applies to:** #252, #660
+
+### 2026-11-13 · Legal pages: who checks the text
+
+- **Kind:** process
+- **Situation:** as in the entry before. Recommended: Peter reads the text himself for the Beta.
+- **Prediction:** the builder drafts, Peter reads it himself, and no lawyer checks it for the Beta (60 %).
+- **Peter:** "as for the rest of the decisions pls go with your recommendations"
+- **Score:** hit
+- **Source:** Loore voice review, node 201919 answering node 201914, 2026-11-13 (Fable 5.2)
+- **Applies to:** #440, #660
+
+### 2026-11-13 · A trial that ended unpaid: the summary contradicted its node
+
+- **Kind:** process
+- **Situation:** node 201898 asked about a trial that ended without a payment and said that an account whose subscription ended can read, write and export. The morning node summarised it as "as built, that person cannot export what they wrote", meaning an account that is not let in at all, without saying so.
+- **Decision:** wrote the summary line without comparing it with the node it pointed to.
+- **Peter:** "not sure what argument you're talking about here. When I look at node 201898 I see: … this seems to contradict the line on this node..?"
+- **Score:** miss
+- **Why it missed:** two account states were mixed in one sentence. The pattern "Claims passed on without a check", here a summary of the builder's own node.
+- **Source:** Loore voice review, node 201919 answering node 201914, 2026-11-13 (Fable 5.2)
+- **Applies to:** #649, #660
+
+### 2026-11-13 · Export for an account that is not let in
+
+- **Kind:** product scope
+- **Situation:** Ben writes for two weeks in a trial, his card is declined, and his account is not let in: as built he cannot read, write or export. Recommended, and the default: open the data download alone for accounts that are not let in.
+- **Prediction:** yes (80 %); no (10 %); other (10 %).
+- **Peter:** "yes, Ben should be able to export" · "one question, though - if Ben cancels after the payment failed, that would give him more options how to use Loore … That's a little weird, but also no big deal. I wouldn't fix that for beta"
+- **Score:** hit. Built in #682.
+- **Source:** Loore voice review, node 201922 answering node 201920, 2026-11-13 (Fable 5.2)
+- **Applies to:** #649, #682
+
+### 2026-11-13 · Unclaimed prepared accounts: 90 days
+
+- **Kind:** privacy
+- **Situation:** a prepared account that nobody signs in to is deleted after a period, which the privacy text states. Recommended: 90 days from the day the profile was built.
+- **Prediction:** accepts 90 days (50 %); shorter (30 %); longer (20 %).
+- **Peter:** "are we talking about the case when Loore prod is prefilled from the cloud bucket? Then yes, 90 days makes sense to remove it from prod Loore. I wouldn't remove it from the cloud bucket, though. Technically, that's a separate entity from Loore.org."
+- **Score:** hit, for accounts in Loore. The material prepared outside Loore is not deleted by this rule.
+- **Source:** Loore voice review, node 201922 answering node 201920, 2026-11-13 (Fable 5.2)
+- **Applies to:** #660, #685, #701
+
+### 2026-11-13 · Stripe: feedback on their documentation
+
+- **Kind:** process
+- **Situation:** a builder found that a coupon type Stripe documents for Managed Payments was refused by the API. Whether to send Stripe one piece of feedback that names no account, person or Loore detail.
+- **Prediction:** send it (60 %); not worth it (40 %).
+- **Peter:** "what did they ask for and what do you suggest sending them?" · after reading the text: "good, send it"
+- **Score:** hit
+- **Source:** Loore voice review, nodes 201919 and 201922, 2026-11-13 (Fable 5.2)
+- **Applies to:** #664
+
+### 2026-11-13 · Material prepared outside Loore: what the privacy text says
+
+- **Kind:** privacy
+- **Situation:** the profiles prepared for the Beta's invitations are made outside Loore from public archives and stored there. Recommended (node 201923): Loore's privacy text discloses that material and deletes it on request, with no fixed period for the Beta.
+- **Prediction:** accepts (60 %); wants it left out of Loore's policy (30 %); sets a period (10 %).
+- **Peter:** "this is true if the profile is written based on private data, but we are now talking only profiles based on public data" · "Does this change any legal reasoning here?"
+- **Score:** miss. After two more rounds the answer was the 30 % option (entry "The privacy page covers only Loore").
+- **Why it missed:** the material was weighed as the most sensitive thing Loore holds. Peter weighs it by its source: public posts, made into profiles outside Loore.
+- **Source:** Loore voice review, node 201924 answering node 201923, 2026-11-13 (Fable 5.2)
+- **Applies to:** #660, #702
+
+### 2026-11-13 · What the archive's policy and X's terms say, argued unread
+
+- **Kind:** process
+- **Situation:** in the same discussion the coordinating builder argued twice about what people had agreed to: what uploaders to the Community Archive can expect, and that someone whose posts are fetched through X's API "has agreed to X's terms and to nothing else". It had read neither text.
+- **Decision:** reasoned about both from assumption, without reading the archive's policy or X's terms first.
+- **Peter:** "pls check out the community archive licence" · "in the examples how the data uploaded to the community archive there is explicitly written that anybody could run the data through an LLM" · "pls check X's terms"
+- **Score:** 2 × miss. The archive's privacy policy names analysis by researchers and developers and the fine-tuning of language models; X's terms say that users agree to X making their posts available to other companies through its interfaces, and bind developers to rules of their own.
+- **Why it missed:** claims about what a text says were made from intuition. The pattern "Claims passed on without a check", for legal texts.
+- **Source:** Loore voice review, nodes 201926 and 201930, 2026-11-13 (Fable 5.2)
+- **Applies to:** #660, #689, #691
+- **Rule:** candidate: read the primary terms before reasoning about what people agreed to
+
+### 2026-11-13 · The privacy page covers only Loore
+
+- **Kind:** privacy
+- **Situation:** as in the entry before last. Two options: (A) one sentence on Loore's privacy page about the material prepared outside Loore, deleted on request; (B) Loore's page covers only Loore, and the invitation says where the profile came from and how to have everything deleted. After reading the archive's policy the builder made B the default.
+- **Prediction:** B (50 %); A (35 %); other, such as asking a lawyer (15 %).
+- **Peter:** "yeah, that's what I'd like"
+- **Score:** hit
+- **Source:** Loore voice review, node 201954, 2026-11-13 (Fable 5.2)
+- **Applies to:** #660, #702
+
+### 2026-11-13 · Who tells the archive's maintainers
+
+- **Kind:** process
+- **Situation:** Glean showed the posts of 3 November for days because the Community Archive's daily export had stopped. Who reports it to the archive: Peter himself, or the builder in an issue on their repository.
+- **Prediction:** Peter tells them himself (60 %); the builder files an issue (40 %).
+- **Peter:** told the maintainers himself (in the Claude Code session; his words were not kept).
+- **Score:** hit
+- **Source:** Loore voice review, node 201932, 2026-11-13 (Fable 5.2)
+- **Applies to:** #688, #690
+
+### 2026-11-13 · A key for the archive's new interface
+
+- **Kind:** release/ops
+- **Situation:** as in the entry before. The archive's old interface was to retire on 19 November, and the pre-fill needs a personal key for the new one.
+- **Prediction:** Peter gets a key (75 %).
+- **Peter:** created one key for each environment and set them himself.
+- **Score:** hit
+- **Source:** Loore voice review, node 201932, 2026-11-13 (Fable 5.2)
+- **Applies to:** #690
+
+### 2026-11-13 · Referrals: one fixed credit for both
+
+- **Kind:** cost
+- **Situation:** #664 gave each side of a referral 7/30 of what their own next invoice charges, tax included, so the amount varied with level and country (8.33 for Standard in Germany, 27.49 for a Supporter). The train's summary node (201912) asked whether counting the week with tax was right, and the coordinating builder recommended keeping it.
+- **Decision:** 7/30 of each side's next invoice, tax included, kept as built.
+- **Peter:** "the credit from referrals should be one week, or 1/4th of the standard subscription. If the inviter or the invitee have higher level of subscription, that shouldn't change the amount they are credited"
+- **Score:** miss. #696 gives both sides 7.50 USD, a quarter of Standard's price, at any level and with any tax.
+- **Why it missed:** a week was read as a week of what each person pays. Peter wants one fixed amount: money again, where his rule is simpler than the builder's.
+- **Source:** Loore voice review, node 201939 answering node 201912, 2026-11-13; built by the #664 builder and recommended as built by the coordinating builder (Fable 5.2)
+- **Applies to:** #439, #664, #696
+
+### 2026-11-13 · Referrals: 7.50 off the total for everyone
+
+- **Kind:** cost
+- **Situation:** after the entry before. A quarter of 30 dollars is 7.50; seven days of thirty would be 7.00. Peter then asked how tax comes in; the builder explained that the credit comes off the total after tax, and proposed a flat 7.50 for everyone.
+- **Prediction:** 7.50 rather than 7.00 (65 %); after his question on tax: a flat 7.50 off the total, the same for everyone (75 %).
+- **Peter:** "could you pls explain how is tax involved? I didn't say it should be independent of tax, I don't understand the tax here" · after the explanation: "great"
+- **Score:** hit
+- **Source:** Loore voice review, nodes 201941 and 201943, 2026-11-13 (Fable 5.2)
+- **Applies to:** #696
+
+### 2026-11-13 · Referrals: a limited number of invites
+
+- **Kind:** product scope
+- **Situation:** Peter asked how many invite links a person has, whether they are tracked, and whether they should be limited (node 201939). As built in #664: one reusable link per person, no limit, for everyone let in. Recommended in node 201940: keep it.
+- **Prediction:** keep as built (50 %); paying customers only (30 %); a limited number of invites (20 %).
+- **Peter:** "I'm leaning yes, but I'm not sure how many. Leaning 1 per month" · "scarcity also has the effect that the inviter will actually think about who might be right for Loore. It's a prevention of just sending spammy invites to all contacts, or posting them on public places. That would be bad marketing. Scarcity leads to selectiveness and that we want."
+- **Score:** miss: the 20 % option.
+- **Why it missed:** limits were judged by what they did for other services, controlling growth or bounding cost, which approval and a self-limiting reward already did for Loore. Peter wanted the effect on the inviter: an invite worth choosing a person for.
+- **Source:** Loore voice review, node 201941 answering node 201940, 2026-11-13 (Fable 5.2)
+- **Applies to:** #439, #664, #696
+
+### 2026-11-13 · Referrals: unused invites are not kept
+
+- **Kind:** product scope
+- **Situation:** after the entry before, the builder proposed single-use invites, one new invite a month, unused ones kept up to three, and the reward only through an invite.
+- **Prediction:** accepts (55 %); strictly one a month with nothing kept (25 %); other (20 %).
+- **Peter:** "no keeping of invites pls" · "how do you propose to combat that? I don't see it in your proposal" · "one invite a month, no accumulation of invites"
+- **Score:** miss: the 25 % option. He also found that the proposal did not say how an invite posted in public is kept from earning.
+- **Why it missed:** saving up invites was proposed so that nobody feels pressed to spend one before the month ends. Peter keeps the scarcity strict.
+- **Source:** Loore voice review, node 201943 answering node 201942, 2026-11-13 (Fable 5.2)
+- **Applies to:** #696
+
+### 2026-11-13 · Referrals: an invite names one person
+
+- **Kind:** product scope
+- **Situation:** to keep an invite posted in public from earning a reward, the builder proposed and built invites addressed to one named person, by X handle or email address (the default).
+- **Prediction:** accepts addressed invites (60 %); a plain single-use link (30 %); other (10 %).
+- **Peter:** accepted the addressing without comment and asked for a warning (next entry).
+- **Score:** hit
+- **Source:** Loore voice review, node 201945 answering node 201944, 2026-11-13 (Fable 5.2)
+- **Applies to:** #696
+
+### 2026-11-13 · Referrals: someone else following an invite is told
+
+- **Kind:** UX
+- **Situation:** as in the entry before. As proposed, anyone other than the named person who follows the invite signs up normally, with no inviter recorded, and nothing tells them.
+- **Decision:** a visitor who is not the named person signs up without being told.
+- **Peter:** "I'd prefer if there was a warning saying the invite for sb else. Because the invite could be used by the right person, but eg. by accident use a different email, or twitter handle. They should know the invitation was for somebody else. They should still have the option to sign up without the invitation, thus also without reward"
+- **Score:** miss. #696 tells the person that the invite was for someone else and lets them continue without it.
+- **Why it missed:** silence was chosen so that the invite reveals nothing. Peter prefers telling the person plainly, since the right person may have used another address or handle.
+- **Source:** Loore voice review, node 201945 answering node 201944, 2026-11-13 (Fable 5.2)
+- **Applies to:** #696
+
+### 2026-11-13 · Referrals: the same-browser rule for emailed invites
+
+- **Kind:** privacy
+- **Situation:** after the review of #664, the coordinating builder made an invite through an email sign-in count only when the emailed link is opened in the browser that asked for it, so that nobody could attach their own code to another person's sign-in email. The cost: Ben opens Ana's invite on a laptop and the sign-in email on his phone, and no inviter is recorded.
+- **Prediction:** Peter keeps it (80 %). After his questions, with invites now limited: remove it (70 %).
+- **Peter:** "who asked for what? I don't understand this line" · after the first explanation: "sorry, why is this wrong? Mallory still invited Ben, so if Ben later pays, both are credited. What am I missing?" · after the second, which recommended removing the rule once invites are limited: "great"
+- **Score:** miss + hit. The rule was removed in #696.
+- **Why it missed:** the protection was weighed for a reusable link without limit. With one invite a month, guessing someone's address costs the guesser their only invite, and the rule's cost to honest invites weighs more. The first explanation also left out that Mallory had not invited Ben.
+- **Source:** Loore voice review, nodes 201939, 201941 and 201943, 2026-11-13 (Fable 5.2)
+- **Applies to:** #664, #696
+
+### 2026-11-13 · Referrals: ask or decide
+
+- **Kind:** escalation
+- **Situation:** the referral questions above: the amount of the credit, limits on invites, keeping unused invites, someone else following an invite, and the same-browser rule.
+- **Decision:** asked Peter instead of deciding.
+- **Peter:** his answers changed the amount, the number of invites and the warning ("one invite a month, no accumulation of invites").
+- **Score:** hit
+- **Source:** Loore voice review, nodes 201939 to 201945, 2026-11-13 (Fable 5.2)
+- **Applies to:** #664, #696
+
+### 2026-11-13 · With payments on, nobody waits for approval
+
+- **Kind:** product scope
+- **Situation:** Peter called waiting for his approval "a bad first UX" (node 201941). Proposed: with payments on, starting a pre-fill counts as the approval; people already prepared who opt in are let in when their profile is ready; everyone else goes straight to the trial step; Peter keeps a switch to block an account.
+- **Prediction:** yes (75 %).
+- **Peter:** "I agree with all 4 proposed points in the section"
+- **Score:** hit. Built in #700.
+- **Source:** Loore voice review, node 201943 answering node 201942, 2026-11-13 (Fable 5.2)
+- **Applies to:** #697, #700
+
+### 2026-11-13 · The bucket hand-off: built now
+
+- **Kind:** product scope
+- **Situation:** as in the entry before. Point 2 needs a hand-off of the prepared profiles into production, which was not built. The default: file it as its own Beta issue.
+- **Decision:** proposed filing the hand-off as an issue for later.
+- **Peter:** "pls, build the bucket hand-off, and fill the bucket with data from the lab VM"
+- **Score:** miss. Built as #702.
+- **Why it missed:** the pattern "A recommendation to defer gets 'do it now'": the hand-off was the missing piece of the flow he had just agreed to.
+- **Source:** Loore voice review, node 201943 answering node 201942, 2026-11-13 (Fable 5.2)
+- **Applies to:** #698, #702
+
+### 2026-11-13 · Imports are always private
+
+- **Kind:** privacy
+- **Situation:** Peter asked whether importing anything as public makes sense (#677). Recommended in node 201921, and the default: no import is ever public; Circles was left as it was.
+- **Prediction:** agrees to remove Public (65 %); keeps it for some path (35 %).
+- **Peter:** "imports should never be public, nor circles. Basically the drop down menu shouldn't be there, but the dialog should state that all imports are private and they can publish selected nodes manually."
+- **Score:** hit. Built in #699.
+- **Source:** Loore voice review, node 201947 answering node 201921, 2026-11-13 (Fable 5.2)
+- **Applies to:** #677, #699
+
+### 2026-11-13 · Imports: Circles left as a choice
+
+- **Kind:** privacy
+- **Situation:** as in the entry before.
+- **Decision:** left Circles as a choice on the import screens, since Circles is switched off for all but chosen accounts.
+- **Peter:** "imports should never be public, nor circles."
+- **Score:** miss. #699 removes the privacy choice from the import screens.
+- **Why it missed:** only Public was weighed. The same reason holds for Circles: old writing from other apps would reach readers without the person choosing each entry.
+- **Source:** Loore voice review, node 201947 answering node 201921, 2026-11-13 (Fable 5.2)
+- **Applies to:** #631, #677, #699
+
+### 2026-11-13 · #691: the no-Train mark widened to replies from saved references
+
+- **Kind:** privacy
+- **Situation:** #691 keeps posts fetched through X's API from ever training. The coordinating builder told its builder to extend the mark to replies written from saved references, as "the same gap for external content".
+- **Decision:** widened the fix to saved references.
+- **Score:** miss, found by the re-review of #691 and reverted before the merge. It reversed Peter's decision of 2026-09-29 that replies written from references may train: the re-review measured that a Train account with saved references would end up mostly on the chat key, without anyone seeing it.
+- **Why it missed:** the neighbouring rule's own decision was not looked up in this log before the fix was widened to it.
+- **Source:** Claude Code session 2026-11-13, the re-review of #691 (Fable 5.2)
+- **Applies to:** #689, #691
+- **Rule:** candidate: before widening a fix to a neighbouring rule, look up that rule's decision in the log
+
+### 2026-11-13 · Sign-in email limits built before Peter's go
+
+- **Kind:** product scope
+- **Situation:** the sign-in email limits of #703 came from a review finding, which went to Peter as a private note (node 201913). Before he answered, the coordinating builder had started the work and nearly finished it.
+- **Decision:** built #703 before Peter had said yes.
+- **Peter:** "I'd call the fix to this as a nice to have for Beta. Implementation shouldn't start right away, maybe in the evening if weekly limits allow, or maybe on Monday. I'd appreciate a reminder and I'll give you a yes or no for the build" · told that it was nearly done: "that's all right, feel free to finish this."
+- **Score:** hit: he kept the work, and #703 merged in train #708.
+- **Source:** Loore voice review, node 201952 answering node 201913, 2026-11-13 (Fable 5.2)
+- **Applies to:** #703
+
+### 2026-11-13 · Sign-in email limits: ask or decide
+
+- **Kind:** escalation
+- **Situation:** as in the entry before.
+- **Decision:** decided without asking Peter.
+- **Peter:** "Implementation shouldn't start right away … I'd appreciate a reminder and I'll give you a yes or no for the build"
+- **Score:** miss. The build also spent weekly budget before he could weigh it ("maybe in the evening if weekly limits allow").
+- **Source:** Loore voice review, node 201952, 2026-11-13 (Fable 5.2)
+- **Applies to:** #703
+
+### 2026-11-13 · Which model writes a prepared profile
+
+- **Kind:** cost
+- **Situation:** the profiles prepared outside Loore were written by a cheap model, while production's default for a new person is Opus 5.5 (node 201950). Options: (a) load them as they are; (b) load at once, then rebuild the final profile with the person's own model (recommended, the default); (c) rerun the final merges with a frontier model before export.
+- **Prediction:** (b) 50 %; (c) 25 %; (a) 25 %.
+- **Peter:** "for the accounts we select for reaching out, I'd rerun the merge with Opus 5.5 before we port them to prod. The window profiles generated via Luna can be reused, just the merge will use a frontier model" · for the rest he asked what each way would cost.
+- **Score:** partial: (c), for the accounts selected for outreach only, which was not offered as such.
+- **Why it missed:** the options treated every prepared account alike. Peter separates the people Loore writes to, whose first impression is made now, from the rest.
+- **Source:** Loore voice review, node 201954, 2026-11-13 (Fable 5.2)
+- **Applies to:** #702
+
+### 2026-11-13 · An Opus merge for every prepared account now
+
+- **Kind:** cost
+- **Situation:** as in the entry before. For the other prepared accounts, about 2,000, the builder estimated about 70 USD to rerun every final merge with Opus 5.5 now, against 7 to 9 cents per account when someone arrives, and recommended doing all of them now; the default was a 20-account trial run first.
+- **Prediction:** all now (55 %); at first use (35 %); other (10 %).
+- **Peter:** "no, definitely not all 2k now. Most of it would probably be wasted." · "not even that. I want to see your selection first, and then after I confirm my selection, we'd rerun the merge for just that" · "If rerunning merge on Opus 5.5 in sync mode costs 7-9 cents and is quick, I'd do it as part of the cloud bucket to prod prefill."
+- **Score:** miss. The merge runs at load on production for each person who arrives, and ahead of time only for the accounts he selects.
+- **Why it missed:** one rule for everyone and one less moving part were weighed above paying for profiles that may never be read. Peter pays per use as people arrive, not ahead for a whole population, even for a small sum.
+- **Source:** Loore voice review, node 201959 answering node 201957, 2026-11-13 (Fable 5.2)
+- **Applies to:** #702
+- **Rule:** candidate: pay per use as people arrive; don't spend ahead for a population to keep things simple
+
+### 2026-11-13 · Prepared profiles' model and cost: ask or decide
+
+- **Kind:** escalation
+- **Situation:** the two entries before.
+- **Decision:** asked Peter instead of deciding.
+- **Peter:** both answers changed the plan ("no, definitely not all 2k now").
+- **Score:** hit
+- **Source:** Loore voice review, nodes 201954 and 201959, 2026-11-13 (Fable 5.2)
+- **Applies to:** #702
+
+### 2026-11-13 · Documents left mixed by earlier re-imports: count them first
+
+- **Kind:** privacy
+- **Situation:** #672 makes a re-import apply to every chapter of a split document, but does not repair documents that earlier re-imports left with different settings on different chapters, since only the person knows which setting they meant. Peter: "I think that's fine for alpha. Should be fixed for Beta". Recommended: count them on production with the PR's script first, and propose a repair only if real users have them.
+- **Decision:** recommended counting before repairing.
+- **Peter:** "ok, why not. But the number will be negligible."
+- **Score:** hit
+- **Source:** Loore voice review, nodes 201954 and 201959, 2026-11-13 (Fable 5.2)
+- **Applies to:** #638, #672
+
+### 2026-11-13 · X account ids on the prepared accounts
+
+- **Kind:** release/ops
+- **Situation:** the prepared accounts outside Loore lacked the X account ids by which sign-in with X finds a prepared account. An agent's run to add them from the Community Archive snapshot, with the mapping checked, was refused by the permission system, so the coordinating builder asked Peter.
+- **Decision:** proposed adding the ids from the archive snapshot.
+- **Peter:** "yes pls, go with this"
+- **Score:** hit
+- **Source:** Claude Code session 2026-11-13 (Fable 5.2)
+- **Applies to:** #702
+
+### 2026-11-13 · Train #680: the spoken refusal under the payments rule
+
+- **Kind:** UX
+- **Situation:** when the payments train was combined with the fixes train, three places changed by both were merged by hand. In one, the route that plays a spoken refusal (#675) took the payments rule that an account without a subscription gets no new speech, so such an account would hear no reason.
+- **Decision:** the combined route applied the payments rule.
+- **Peter:** "is this because TTS of the refusal would cost us money? If the AI reply is skipped and only the reason is spoken out, that seems good to me, actually"
+- **Score:** miss. Each refusal clip is made once for the whole server and reused, about half a cent in all; #682 lets an account whose access ended fetch them.
+- **Why it missed:** the payments rule was applied by its letter (no new speech) and not by its reason (cost), which these clips don't have.
+- **Source:** Loore voice review, node 201941 answering node 201940, 2026-11-13; the merge was the train builder's (Opus 5.5)
+- **Applies to:** #675, #680, #682
+
+### 2026-11-13 · Train #680: the bookmark sync and the first payment
+
+- **Kind:** cost
+- **Situation:** as in the entry before, the other two places. The nightly bookmark sync: the payments train stops background jobs without a subscription, and the fixes train pauses them for accounts nobody used. The first payment: the free month lifts a usage block, and referrals grant their credit.
+- **Decision:** the subscription check runs first, then the pause; at the first payment both happen, in that order.
+- **Peter:** "good" · "good"
+- **Score:** 2 × hit
+- **Source:** Loore voice review, node 201941 answering node 201940, 2026-11-13; the merges were the train builder's (Opus 5.5)
+- **Applies to:** #659, #661, #664, #680
+
+### 2026-11-13 · Batch results at Anthropic: deleted after saving
+
+- **Kind:** privacy
+- **Situation:** #671 deletes OpenAI's batch files once Loore has saved the results. Its builder asked whether batches at Anthropic should be deleted the same way (Needs Peter 1, recommended yes).
+- **Prediction:** yes, delete them (60 %).
+- **Peter:** "they should, as a followup"
+- **Score:** hit. Built as #695.
+- **Source:** Loore voice review, node 201939 answering node 201912, 2026-11-13; the prediction was the #671 builder's, adopted by the coordinating builder (Opus 5.5)
+- **Applies to:** #667, #671, #693, #695
+
+### 2026-11-13 · Batch results at Anthropic left as built
+
+- **Kind:** privacy
+- **Situation:** as in the entry before. The train's summary node (201912) listed "Batch results at Anthropic are not deleted after saving; only OpenAI's files are" as a choice left as built, not as the open question it was.
+- **Decision:** shipped the train without it and presented it as a choice left as built.
+- **Peter:** "they should, as a followup"
+- **Score:** miss
+- **Why it missed:** a question whose recommended answer was yes reached Peter as a choice already settled the other way.
+- **Source:** Loore voice review, node 201939 answering node 201912, 2026-11-13 (Fable 5.2)
+- **Applies to:** #671, #679, #695
+
+### 2026-11-20 · #691: nothing on the Account page tells
+
+- **Kind:** UX
+- **Situation:** under X's rules for developers, an account that ever had a pre-fill through X's API keeps its profile, intentions, memory and other documents written from its writing at Chat for good (#691). Its Account page can still show Train. #691's builder left the display to Peter (Needs Peter 2) with nothing shown as the default, and the train's node (201963) listed it as a choice left as built.
+- **Decision:** nothing on screen tells the person.
+- **Peter:** in the terminal: such an account's page shows Chat, with Train disabled and a hover explanation that the pre-fill through X's API rules out training; for after the Beta (#710).
+- **Score:** miss
+- **Why it missed:** the gap between what the screen says and what Loore does was left as a question of display. Under "Problems show", the page should not say Train where Loore will not train.
+- **Source:** Claude Code session 2026-11-20, on node 201963; the default was #691's builder's (Opus 5.5)
+- **Applies to:** #689, #691, #710
+
+### 2026-11-20 · #701: a mail scanner opening the welcome link
+
+- **Kind:** privacy
+- **Situation:** a prepared account that nobody signs in to is deleted 90 days after it was prepared, and any sign of a person keeps it for good. A mail scanner that opens the welcome link records a sign-in. #701 accepted this because it errs towards keeping an account, and node 201963 listed it as a choice left as built.
+- **Decision:** a welcome link opened by a scanner makes the account count as used.
+- **Peter:** in the terminal: file it as an issue for after the Beta (#711).
+- **Score:** miss
+- **Why it missed:** keeping an account longer was taken as the safe side. For an account prepared without the person's agreement, the safe side is the 90 days the privacy page promises.
+- **Source:** Claude Code session 2026-11-20, on node 201963; the choice was #701's builder's (Opus 5.5)
+- **Applies to:** #685, #701, #711
+
+### 2026-11-20 · #690: the pre-fill reads every account through the new interface
+
+- **Kind:** reliability
+- **Situation:** before #690, large accounts were pre-filled from the Community Archive's daily export, chosen by the old interface's exact count. The new interface has no count, so #690 reads every account through it with a key set, 200 posts a request and at most 60 requests a minute. Node 201963 listed it as a choice left as built.
+- **Decision:** with a key, every account is read through the new interface.
+- **Peter:** in the terminal: the latest export first, then the new interface newest first, stopping at the first full page of posts already pre-filled (#712).
+- **Score:** miss
+- **Why it missed:** the missing count was taken as a reason to drop the export, where the export could still do most of the work and the interface read only what it lacks.
+- **Source:** Claude Code session 2026-11-20, on node 201963; the choice was #690's builder's (Opus 5.5)
+- **Applies to:** #688, #690, #712
+
+### 2026-11-20 · #700: alpha-era accounts marked as spam
+
+- **Kind:** product scope
+- **Situation:** with payments on, #700 lets in every alpha-era account that was never approved at its next visit, to the trial step (Needs Peter 1, recommended as built); accounts Peter deactivated count as blocked. Some never-approved accounts were marked as spam by the admin, a flag that only hides them in the Users table.
+- **Decision:** every never-approved alpha-era account that is not blocked is let in.
+- **Peter:** in the terminal: an account marked as spam is never let in automatically; needed before payments go on (#713).
+- **Score:** miss
+- **Why it missed:** deactivation was read as Peter's judgement on an account, and the spam flag, which records the same kind of judgement, was not looked at.
+- **Source:** Claude Code session 2026-11-20, on node 201963; the choice was #700's builder's (Opus 5.5)
+- **Applies to:** #700, #713
+
+### 2026-11-20 · #700: blocking a subscriber
+
+- **Kind:** cost
+- **Situation:** #700's Needs Peter 2: blocking a paying subscriber cancels and refunds nothing; the person can cancel and download their data. Recommended: a follow-up after the Beta in which the Block dialog asks whether to cancel now and refund the unused part, with nothing pre-selected; until then Peter cancels by hand in Stripe. The default: as built.
+- **Prediction:** agrees with a follow-up (55 %: after the Beta 35 %, for the Beta 20 %); blocking always cancels and refunds (30 %); leave it as it is (15 %).
+- **Peter:** ticked "Blocking a subscriber cancels and refunds nothing" on node 201963 and merged the train, without asking for the follow-up.
+- **Score:** miss: the 15 % option.
+- **Why it missed:** a follow-up was weighed for an action only Peter takes, rarely, and can finish in Stripe himself.
+- **Source:** Claude Code session 2026-11-20 (Opus 5.5)
+- **Applies to:** #700
+
+### 2026-11-20 · #700: an invited person who signs in by email
+
+- **Kind:** UX
+- **Situation:** a prepared account is found only through sign-in with X, so an invited person who signs in with an email link gets a second, empty account and may start the trial there. #700 left it to the invitation's wording ("sign in with X") and recommended a follow-up that adds one line to the subscribe page.
+- **Decision:** left as built, with a one-line follow-up recommended.
+- **Peter:** in the terminal: an issue needed for the Beta (#714): the line on the subscribe page, Connect X leading to the prepared account, and a way for the prepared account to still get its trial.
+- **Score:** partial. The line was proposed; he wanted the whole path fixed, and before the Beta.
+- **Why it missed:** the case was judged by how often it would happen. For an invited person it is the first thing they meet, and the Beta's invitations are where it happens.
+- **Source:** Claude Code session 2026-11-20, on node 201963; the choice was #700's builder's (Opus 5.5)
+- **Applies to:** #700, #702, #714
+
+### 2026-11-20 · #700: an email per sign-up
+
+- **Kind:** UX
+- **Situation:** with payments on there is no approval step, and #700 stops the admin's "New signup" email; new accounts are marked "new" in the Users tab for a week. Asked on 2026-11-20 with a recommendation to keep a notice during the Beta: a daily summary, or the per-signup email as information.
+- **Prediction:** keeps a per-signup email (45 %); a daily summary (25 %); as built (30 %).
+- **Peter:** in the terminal: keep the per-signup information email, with a checkbox in the admin dashboard, on by default (#715).
+- **Score:** hit
+- **Source:** Claude Code session 2026-11-20 (Opus 5.5)
+- **Applies to:** #700, #715
+
+### 2026-11-20 · #700: no email per sign-up while payments are on
+
+- **Kind:** UX
+- **Situation:** as in the entry before.
+- **Decision:** no email per sign-up while payments are on, since without approval it asks for nothing.
+- **Peter:** in the terminal: keep it as information, with a checkbox, on by default (#715).
+- **Score:** miss
+- **Why it missed:** the email was taken as part of approval. For Peter it is also how he learns that someone arrived, which matters during the Beta.
+- **Source:** Claude Code session 2026-11-20; the decision was the coordinating builder's of 2026-11-13 (Fable 5.2)
+- **Applies to:** #700, #715
+
+### 2026-11-20 · #687: a No keeps what the pre-fill made
+
+- **Kind:** privacy
+- **Situation:** #687's Needs Peter 1: after a pre-fill, a No to "Start from your tweets" keeps the imported tweets as private entries and keeps the profile and intentions in use until the person edits them. Options: keep everything (recommended, the default); delete the tweets; also clear the profile and intentions; ask in a dialog on the No.
+- **Prediction:** keep as built (60 %); delete the tweets (15 %); delete all three (10 %); a dialog (15 %).
+- **Peter:** ticked the line on node 201963 and merged the train.
+- **Score:** hit
+- **Source:** Claude Code session 2026-11-20; the prediction was written on 2026-11-13 (Fable 5.2)
+- **Applies to:** #662, #687
+
+### 2026-11-20 · #687: a loaded package stays private for the choice of profile models
+
+- **Kind:** provider
+- **Situation:** #687's Needs Peter 2: an account loaded from a prepared package that nobody has signed in to could count as public-only under #589, so that its profile builds may use either provider's models, as for accounts pre-filled through the admin routes. The default keeps it private for that choice, as on main.
+- **Prediction:** keep the default (55 %); public-only like an admin pre-fill (35 %); other (10 %).
+- **Peter:** asked what it meant; after the explanation he ticked the line on node 201963 and merged the train.
+- **Score:** hit
+- **Source:** Claude Code session 2026-11-20; the prediction was written on 2026-11-13 (Fable 5.2)
+- **Applies to:** #589, #687, #702
+
+### 2026-11-20 · Train #708: the choices left as built: ask or decide
+
+- **Kind:** escalation
+- **Situation:** node 201963 listed 25 choices left as built in the thirteen PRs of train #708 for Peter to object to, and some were asked again in the terminal with a recommendation.
+- **Decision:** asked Peter instead of deciding.
+- **Peter:** six of his answers changed the plan (#710 to #715).
+- **Score:** hit
+- **Source:** Claude Code session 2026-11-20 (Opus 5.5)
+- **Applies to:** #708, #710, #711, #712, #713, #714, #715
+
+### 2026-11-20 · The list of what comes before the Beta, said not to exist
+
+- **Kind:** process
+- **Situation:** Peter asked for the list of steps before the Beta release. The builder answered that no such list existed, after a narrow search.
+- **Decision:** reported that there was no list.
+- **Peter:** "pls search better, there should be one"
+- **Score:** miss. The steps existed in several places: the go-live sections of the payments PRs and an earlier planning node. They are now one list in Loore.
+- **Why it missed:** the same shape as "Whom to invite: 'the archive library is missing'" (2026-11-12): a claim that something does not exist, after a search too narrow to show it.
+- **Source:** Claude Code session 2026-11-20 (Opus 5.5)
+- **Applies to:** the Beta release
+- **Rule:** candidate: before telling Peter that something does not exist or can't be done, look for how the project did it before
+
 ## Decided by the builder
 
 Choices that agents flagged in PRs and that the builder decided because a rule above already covers them (Peter, 2026-10-02: decide what the log supports, raise only real judgement calls). Each is also recorded on its PR, or in the session where Peter asked. The Decided column holds only the builder's part; a rule or decision of Peter's goes in the Rule column. Questions raised to Peter instead are not listed; his answers become entries. Model is the model that wrote the PR (its Co-Authored-By line). Result is "accepted by merge (PR #N, date)" once the PR has merged and Peter didn't correct the choice, "pending" until it merges, and "corrected → entry <title>" when he overrules it; the entry is then scored as a miss.
@@ -4792,25 +5351,25 @@ Choices that agents flagged in PRs and that the builder decided because a rule a
 | 2026-11-12 | #652 | testing | Voice mode with a real microphone and real speech | Not checked before the merge (ticked on node 201887) | none: builder's judgement | Fable 5.2 | accepted by merge (PR #652, 2026-11-12) |
 | 2026-11-12 | #652 | testing | Staging | The train was not run on staging (ticked on node 201887) | none: builder's judgement | Fable 5.2 | accepted by merge (PR #652, 2026-11-12) |
 | 2026-11-12 | follow-up of #645 | UX | What Peter's Voice-mode answer covers | No new Voice turn in the thread, on the screen or the lock screen, until every waiting change is approved or rejected; the announcement is a fixed sentence added to the reply's audio, so a replay includes it | Peter, node 201891 | Fable 5.2 | corrected → entry Voice: the approval announcement is a clip of its own |
-| 2026-11-12 | #649 | product scope | Subscriptions when the payments switch is turned off | Keep counting; the webhook keeps working while its secret is set | Autonomy (reversible); Problems show | Opus 5.5 | pending |
-| 2026-11-12 | #649 | user-facing text | The refusal for an account without a subscription | Names the state, never where or how to pay: "Loore doesn't reply on an account without a subscription. Your writing is saved." / "Your subscription has ended, so Loore doesn't reply. Your writing is saved."; the web adds a link to Settings | Peter: no purchase button or link in the iPhone app; Calm over clever | Opus 5.5 | pending |
-| 2026-11-12 | #649 | data safety | Writing saved before the reply, on an account without the paid features | The entry is kept and the reply skipped; Voice refuses before a recording starts | Peter: the account keeps writing; Problems show | Opus 5.5 | pending |
+| 2026-11-12 | #649 | product scope | Subscriptions when the payments switch is turned off | Keep counting; the webhook keeps working while its secret is set | Autonomy (reversible); Problems show | Opus 5.5 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-12 | #649 | user-facing text | The refusal for an account without a subscription | Names the state, never where or how to pay: "Loore doesn't reply on an account without a subscription. Your writing is saved." / "Your subscription has ended, so Loore doesn't reply. Your writing is saved."; the web adds a link to Settings | Peter: no purchase button or link in the iPhone app; Calm over clever | Opus 5.5 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-12 | #649 | data safety | Writing saved before the reply, on an account without the paid features | The entry is kept and the reply skipped; Voice refuses before a recording starts | Peter: the account keeps writing; Problems show | Opus 5.5 | accepted by merge (PR #680, 2026-11-20) |
 | 2026-11-12 | #649 | product scope | Dictation and Glean without the paid features | Dictation stays, since it is writing; Glean stops, since it is an AI reply | Peter's answer on lapsed accounts | Opus 5.5 | not scored: replaced before the merge by the coordinating builder's decision of 2026-11-12 (row below): a lapsed account makes no billed call, dictation included |
-| 2026-11-12 | #649 | user-facing text | The spend-cap message with payments on | "You've reached your monthly usage limit.", without "for the free alpha" | none: builder's judgement | Opus 5.5 | pending |
+| 2026-11-12 | #649 | user-facing text | The spend-cap message with payments on | "You've reached your monthly usage limit.", without "for the free alpha" | none: builder's judgement | Opus 5.5 | accepted by merge (PR #680, 2026-11-20) |
 | 2026-11-12 | #649 | product scope | Checkout for accounts set by hand or with a live subscription, and level changes | Refused; a level change is a cancel and a new subscription after the period ends | Autonomy (reversible) | Opus 5.5 | not scored: the level-change part was replaced before the merge, after Peter left upgrades to the builder (row below: upgrades in Stripe's portal) |
-| 2026-11-12 | #649 | product scope | The trial | Once per account; a checkout left unfinished doesn't use it | none: builder's judgement | Opus 5.5 | pending |
-| 2026-11-12 | #649 | privacy | What Loore sends Stripe about a customer | One customer per account with only the Loore account id; name, email and address are asked for by Checkout | Seen, not surveilled; data minimisation | Opus 5.5 | pending |
-| 2026-11-12 | #649 | cost | Two checkouts or two subscriptions of one account | Opening a checkout expires the earlier open one; of two subscriptions the one created first is kept, and the other is cancelled and refunded | Nobody pays twice | Opus 5.5 | pending |
-| 2026-11-12 | #649 | cost | A later subscription that still arrives with a trial | Cancelled rather than having its trial cut short | Loore never charges on a schedule other than the one Checkout showed | Opus 5.5 | pending |
-| 2026-11-12 | #649 | UX | Discount codes | Every refusal reads "That code is not valid."; a use counts once the subscription it opened is kept; the last use expires other open checkouts with the code | none: builder's judgement | Opus 5.5 | pending |
-| 2026-11-12 | #649 | user-facing text | The discounted level's name in Settings | "Reduced", shown only to people who used a code | none: builder's judgement | Opus 5.5 | pending |
-| 2026-11-12 | #649 | privacy | Payment data of a deleted account | Loore deletes its columns with the account and keeps a code's use count without it; Stripe keeps its own records as the seller | Deletion | Opus 5.5 | pending |
-| 2026-11-12 | #649 | product scope | The iPhone app | Shows the level, the state and the date; subscribing and the code field are on the web only | Peter: no purchase button or link in the app | Opus 5.5 | pending |
-| 2026-11-12 | #649 | release/ops | The Stripe library | Pinned to one version | none: builder's judgement | Opus 5.5 | pending |
-| 2026-11-12 | #649 | reliability | Introduced numbers | 10 wrong codes per account per hour; generated codes of 8 characters without 0, O, 1, I or L; a 600 s price cache; 2 network retries per Stripe call | Every added heuristic is named | Opus 5.5 | pending |
-| 2026-11-12 | #649 | product scope | Alpha testers who want to pay | Cannot check out until the alpha free-month PR moves them to the discounted price; the #649 builder's Needs Peter item (its prediction: accepts, 70 %), given to Peter as information in node 201890 | Peter: alpha testers get a free month, then the discounted price | Fable 5.2 | pending |
-| 2026-11-12 | #649 | cost | The Supporter level's usage ceiling | 100 USD a month, as a setting; Standard and discounted keep the present 50. Proposed in node 201877, not answered | none: builder's judgement | Fable 5.2 | pending |
-| 2026-11-12 | #649 | product scope | The trial's shape | 14 days, with a card; proposed in the payments outline (node 201867), not commented on | none: builder's judgement | Fable 5.2 | pending |
+| 2026-11-12 | #649 | product scope | The trial | Once per account; a checkout left unfinished doesn't use it | none: builder's judgement | Opus 5.5 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-12 | #649 | privacy | What Loore sends Stripe about a customer | One customer per account with only the Loore account id; name, email and address are asked for by Checkout | Seen, not surveilled; data minimisation | Opus 5.5 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-12 | #649 | cost | Two checkouts or two subscriptions of one account | Opening a checkout expires the earlier open one; of two subscriptions the one created first is kept, and the other is cancelled and refunded | Nobody pays twice | Opus 5.5 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-12 | #649 | cost | A later subscription that still arrives with a trial | Cancelled rather than having its trial cut short | Loore never charges on a schedule other than the one Checkout showed | Opus 5.5 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-12 | #649 | UX | Discount codes | Every refusal reads "That code is not valid."; a use counts once the subscription it opened is kept; the last use expires other open checkouts with the code | none: builder's judgement | Opus 5.5 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-12 | #649 | user-facing text | The discounted level's name in Settings | "Reduced", shown only to people who used a code | none: builder's judgement | Opus 5.5 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-12 | #649 | privacy | Payment data of a deleted account | Loore deletes its columns with the account and keeps a code's use count without it; Stripe keeps its own records as the seller | Deletion | Opus 5.5 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-12 | #649 | product scope | The iPhone app | Shows the level, the state and the date; subscribing and the code field are on the web only | Peter: no purchase button or link in the app | Opus 5.5 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-12 | #649 | release/ops | The Stripe library | Pinned to one version | none: builder's judgement | Opus 5.5 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-12 | #649 | reliability | Introduced numbers | 10 wrong codes per account per hour; generated codes of 8 characters without 0, O, 1, I or L; a 600 s price cache; 2 network retries per Stripe call | Every added heuristic is named | Opus 5.5 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-12 | #649 | product scope | Alpha testers who want to pay | Cannot check out until the alpha free-month PR moves them to the discounted price; the #649 builder's Needs Peter item (its prediction: accepts, 70 %), given to Peter as information in node 201890 | Peter: alpha testers get a free month, then the discounted price | Fable 5.2 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-12 | #649 | cost | The Supporter level's usage ceiling | 100 USD a month, as a setting; Standard and discounted keep the present 50. Proposed in node 201877, not answered | none: builder's judgement | Fable 5.2 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-12 | #649 | product scope | The trial's shape | 14 days, with a card; proposed in the payments outline (node 201867), not commented on | none: builder's judgement | Fable 5.2 | accepted by merge (PR #680, 2026-11-20) |
 | 2026-11-12 | #650 | cost | The long-thread limit Peter left to the builder | 250,000 prompt tokens, the notice at 225,000 (90 %), measured by the prompt's size, not the number of entries; settings, and 0 turns it off | Peter: "I'll leave it up to you to decide the hard limit"; below the 272k price tier and above last month's 99th percentile | Fable 5.2 | accepted by merge (PR #658, 2026-11-12) |
 | 2026-11-12 | #650 | product scope | Admins | The same limit | The spend cap exempts nobody | Opus 5.5 | accepted by merge (PR #658, 2026-11-12) |
 | 2026-11-12 | #650 | UX | Voice mode in a thread at the limit | No turn starts and the mic never opens; dictation still records | A turn that could not get a reply is not started (Peter, 2026-10-01) | Opus 5.5 | accepted by merge (PR #658, 2026-11-12) |
@@ -4826,21 +5385,21 @@ Rows of 2026-11-12 and 2026-11-13: the afternoon's payments work and the overnig
 
 | Date | PR | Kind | Choice | Decided | Rule | Model | Result |
 |---|---|---|---|---|---|---|---|
-| 2026-11-12 | #649 | cost | What a lapsed account may still do that costs money | Nothing billed: AI replies, Glean, transcription (dictation included), audio uploads, search by meaning, todo merges, poll drafts and the X sync are refused, and background model jobs stop; a recording started while the subscription was live is finished, and a pre-fill goes on | Peter: "no AI replies and background jobs" for accounts whose subscription ended | Fable 5.2 | pending |
-| 2026-11-12 | #649 | product scope | Moving between Standard and Supporter | In Stripe's portal: an upgrade charges the prorated difference at the switch, so the button does what the page says; a downgrade waits for the period's end; a discounted subscriber can move up, not back | Peter: "depending on the difficulty of implementation pls decide" | Fable 5.2 | pending |
-| 2026-11-12 | #649 | privacy | What a lapsed account keeps | Reading, typed writing and export; its owner plays their own recordings; it may approve or reject a waiting AI change, which changes the owner's own data and calls no model | Peter: the lapsed state keeps reading, writing and export (2026-11-12) | Opus 5.5 | pending |
-| 2026-11-12 | #649 | UX | A failed renewal | A banner on every load until the card is updated or the subscription ends | Peter: "we should inform the user" | Opus 5.5 | pending |
-| 2026-11-12 | #649 | cost | Usage during the trial | Counts toward the first paid month's ceiling, since a level's ceiling is per calendar month | none: builder's judgement | Opus 5.5 | pending |
-| 2026-11-12 | #649 | product scope | The order of refusals once main was merged in | No subscription first, then a waiting change, then the thread-length limit; kept by the coordinating builder | none: builder's judgement | Opus 5.5 | pending |
-| 2026-11-12 | #649 | testing | Three tests that failed only in an unusual order (from the review of the merge) | Left in #649; the cause is fixed for every test in #674 | none: the coordinating builder's judgement | Fable 5.2 | pending |
-| 2026-11-12 | #649 | privacy | Privately reported review findings | Fixed in the PR before it was marked ready; details withheld until it merges | Security problems stay out of the log until fixed | Fable 5.2 | pending |
-| 2026-11-12 | #649 | reliability | Introduced values of the second round | The product tax code `txcd_10105001` (AI as a service, personal use); the portal set to invoice an upgrade at once and to schedule a downgrade; refund reason "duplicate", one refund per subscription | Every added heuristic is named | Opus 5.5 | pending |
-| 2026-11-12 | #659 | product scope | What counts as use of an account | Requests of the signed-in app, web or iPhone, and a clip with the Chrome clipper's token; cost rows, job rows and sent notices do not | #647: a real action of the owner | Opus 5.5 | pending |
-| 2026-11-12 | #659 | cost | A pre-filled account nobody signed into | Counts as unused, but its one pre-fill profile build is not paused | The decisions for #543 and #596: a pre-fill's build runs before the owner comes | Opus 5.5 | pending |
-| 2026-11-12 | #659 | cost | Which jobs pause | Only the two that bill an account without new writing: the nightly X bookmark sync and the saved-references digest; profile, recent context and embeddings are left alone | Autonomy (reversible) | Opus 5.5 | pending |
-| 2026-11-12 | #659 | cost | The digest of an account in use | Still rebuilt after every night whose sync brought something new | Quality first, for now; a cheaper schedule is Peter's call | Opus 5.5 | pending |
-| 2026-11-12 | #659 | UX | When the owner comes back | The bookmark catch-up runs within the hour; the digest waits for the night and the Batch API | Batch for background jobs | Opus 5.5 | pending |
-| 2026-11-12 | #659 | user-facing text | New text for the pause | None; the Import page shows the last sync time as before | No new user-facing text without Peter | Opus 5.5 | pending |
+| 2026-11-12 | #649 | cost | What a lapsed account may still do that costs money | Nothing billed: AI replies, Glean, transcription (dictation included), audio uploads, search by meaning, todo merges, poll drafts and the X sync are refused, and background model jobs stop; a recording started while the subscription was live is finished, and a pre-fill goes on | Peter: "no AI replies and background jobs" for accounts whose subscription ended | Fable 5.2 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-12 | #649 | product scope | Moving between Standard and Supporter | In Stripe's portal: an upgrade charges the prorated difference at the switch, so the button does what the page says; a downgrade waits for the period's end; a discounted subscriber can move up, not back | Peter: "depending on the difficulty of implementation pls decide" | Fable 5.2 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-12 | #649 | privacy | What a lapsed account keeps | Reading, typed writing and export; its owner plays their own recordings; it may approve or reject a waiting AI change, which changes the owner's own data and calls no model | Peter: the lapsed state keeps reading, writing and export (2026-11-12) | Opus 5.5 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-12 | #649 | UX | A failed renewal | A banner on every load until the card is updated or the subscription ends | Peter: "we should inform the user" | Opus 5.5 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-12 | #649 | cost | Usage during the trial | Counts toward the first paid month's ceiling, since a level's ceiling is per calendar month | none: builder's judgement | Opus 5.5 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-12 | #649 | product scope | The order of refusals once main was merged in | No subscription first, then a waiting change, then the thread-length limit; kept by the coordinating builder | none: builder's judgement | Opus 5.5 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-12 | #649 | testing | Three tests that failed only in an unusual order (from the review of the merge) | Left in #649; the cause is fixed for every test in #674 | none: the coordinating builder's judgement | Fable 5.2 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-12 | #649 | privacy | Privately reported review findings | Fixed in the PR before it was marked ready; details withheld until it merges | Security problems stay out of the log until fixed | Fable 5.2 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-12 | #649 | reliability | Introduced values of the second round | The product tax code `txcd_10105001` (AI as a service, personal use); the portal set to invoice an upgrade at once and to schedule a downgrade; refund reason "duplicate", one refund per subscription | Every added heuristic is named | Opus 5.5 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-12 | #659 | product scope | What counts as use of an account | Requests of the signed-in app, web or iPhone, and a clip with the Chrome clipper's token; cost rows, job rows and sent notices do not | #647: a real action of the owner | Opus 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #659 | cost | A pre-filled account nobody signed into | Counts as unused, but its one pre-fill profile build is not paused | The decisions for #543 and #596: a pre-fill's build runs before the owner comes | Opus 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #659 | cost | Which jobs pause | Only the two that bill an account without new writing: the nightly X bookmark sync and the saved-references digest; profile, recent context and embeddings are left alone | Autonomy (reversible) | Opus 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #659 | cost | The digest of an account in use | Still rebuilt after every night whose sync brought something new | Quality first, for now; a cheaper schedule is Peter's call | Opus 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #659 | UX | When the owner comes back | The bookmark catch-up runs within the hour; the digest waits for the night and the Batch API | Batch for background jobs | Opus 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #659 | user-facing text | New text for the pause | None; the Import page shows the last sync time as before | No new user-facing text without Peter | Opus 5.5 | accepted by merge (PR #679, 2026-11-13) |
 | 2026-11-12 | #660 | user-facing text | Where Terms 2.0 said what the code does not do | The draft says what the code does: the AI default is Chat; the sentence that every decryption is logged is removed; what is not encrypted and every processor are listed; export, re-acceptance and training are described as they work (more corrections after the review, by the coordinating builder's decision) | Problems show; promise only what the code does | Opus 5.5 | pending |
 | 2026-11-12 | #660 | user-facing text | Prices in the Terms | None; the Terms point to the subscribe page and checkout, so a price change needs no new Terms version | Peter: the prices are "a value to start with" | Opus 5.5 | pending |
 | 2026-11-12 | #660 | product scope | The EU withdrawal in the Terms | Worded for Link as the seller, with no button | Peter: "I'd disregard this" | Opus 5.5 | pending |
@@ -4849,61 +5408,61 @@ Rows of 2026-11-12 and 2026-11-13: the afternoon's payments work and the overnig
 | 2026-11-12 | #660 | privacy | Accepting the Terms | The server records the version the app showed and refuses any other with 409; an iPhone build that sends it must be on TestFlight before the merge | Problems show | Fable 5.2 | pending |
 | 2026-11-12 | #660 | privacy | Leaving without agreeing | Export, deletion and sign-out offered on the Terms screen, web and iPhone, through the existing flows | Deletion for every account; Terms §13 | Fable 5.2 | pending |
 | 2026-11-12 | #660 | process | Side findings of the legal review | Fixed in their own PR on main (#671: transcription for None, addresses in Sentry, OpenAI batch files) or filed (#662 the consent card, #663 the fonts); until then the draft describes each as it is | Fix the root cause; one change per PR | Fable 5.2 | pending |
-| 2026-11-12 | #661 | product scope | How the free month is given | Through Loore, not Stripe: a command sets the dates on each tester's account; no card and no Checkout; `--undo` reverses it | Peter: free, then the discounted price; Autonomy (reversible) | Opus 5.5 | pending |
-| 2026-11-12 | #661 | product scope | The 14-day trial for testers | None: the free month takes its place; a tester who subscribes during the month pays first when it ends | Peter: "free for one month …, then the discounted price" | Opus 5.5 | pending |
-| 2026-11-12 | #661 | product scope | Levels offered to testers | Reduced first, Standard and Supporter still offered; no code field | Show the choices | Opus 5.5 | pending |
-| 2026-11-12 | #661 | UX | A notice before the month ends | One, on the web only, in the last 7 days, dismissible for good | Calm over clever; Problems show | Opus 5.5 | pending |
-| 2026-11-12 | #661 | product scope | A tester who cancels a subscription started during the month | Keeps the rest of the month | none: builder's judgement (the month is Loore's, not the subscription's) | Opus 5.5 | pending |
-| 2026-11-12 | #661 | reliability | Introduced values | 30 days for the month; 00:00 UTC of the start date; 49 hours, Stripe's 48-hour minimum for a Checkout trial plus one; 7 days for the notice | Every added heuristic is named | Opus 5.5 | pending |
-| 2026-11-13 | #661 | cost | The usage limit over a tester's unpaid period | Counted once from the month's start to the first paid invoice, not once per calendar month | Peter: "the standard limit" | Fable 5.2 | pending |
-| 2026-11-13 | #661 | privacy | Privately reported review findings | Fixed in the PR before it was marked ready; details withheld until it merges | Security problems stay out of the log until fixed | Fable 5.2 | pending |
-| 2026-11-12 | #664 | cost | How the free week is given | Stripe customer credit; a coupon, a moved trial end and a paused collection were each tried in the sandbox and fit worse | #439: credit where the provider has it | Opus 5.5 | pending |
-| 2026-11-12 | #664 | product scope | The friend's week after a refund or dispute | Not taken back, as for the inviter | #439: no clawback | Opus 5.5 | pending |
-| 2026-11-12 | #664 | product scope | "Paid once" in #649's failed-payment rule | Also counts an invoice paid entirely by credit | none: builder's judgement | Opus 5.5 | pending |
-| 2026-11-12 | #664 | release/ops | A switch of its own | `REFERRALS_ENABLED`, on by default with payments, turns the link off; weeks already earned are still given | Autonomy (reversible) | Opus 5.5 | pending |
-| 2026-11-12 | #664 | user-facing text | The notices of a free week | Name nobody and offer nothing to buy | #439; no purchase pointer in the iPhone app | Opus 5.5 | pending |
-| 2026-11-12 | #664 | reliability | Introduced values | 7 days of 30; a 96-bit random code; a followed link kept 30 days in the browser; Stripe refusals other than 409 and 429 counted as final | Every added heuristic is named | Opus 5.5 | pending |
-| 2026-11-13 | #664 | privacy | An invite through an email sign-in | Counts only when the emailed link is opened in the browser that asked for it; an email opened on another device records no inviter; also listed under the PR's Needs Peter 3 | none: the coordinating builder's judgement after the review | Fable 5.2 | pending |
-| 2026-11-13 | #664 | cost | The inviter's week when the friend pays less | At most what the friend paid on the first invoice; also listed under the PR's Needs Peter 4 | none: the coordinating builder's judgement after the review | Fable 5.2 | pending |
-| 2026-11-13 | #664 | privacy | Another privately reported review finding | Fixed in the PR before it was marked ready; details withheld until it merges | Security problems stay out of the log until fixed | Fable 5.2 | pending |
-| 2026-11-12 | #668 | release/ops | A failed proxy config test during a deploy | Recorded and raised at the end: the previous config restored when a backup exists, the reload skipped, and exit 1 after the services are back; no exit mid-deploy, which could leave services stopped for a migration | A failed deploy step fails loudly (2026-07-24); the script raises its failures at the end | Fable 5.2 | pending |
-| 2026-11-12 | #668 | reliability | A failing config with no backup | Left as a known limit: the failing file stays and the next deploy skips the test | none: the coordinating builder's judgement | Fable 5.2 | pending |
-| 2026-11-12 | #668 | release/ops | `set -o pipefail` | Stays off for the whole script | none: builder's judgement | Sonnet 5.5 | pending |
-| 2026-11-12 | #669 | data safety | The profile update gate's count | Deleted writing does not count; the batch seeder and the hourly check share one query | The issue's suggestion | Sonnet 5.5 | pending |
-| 2026-11-12 | #669 | product scope | The chunk planner's count | Left alone: plan and window must change together | The issue marks it out of scope | Sonnet 5.5 | pending |
-| 2026-11-12 | #670 | user-facing text | What is spoken in place of a code block | "Code omitted.", once per block, in English whatever the text's language; inline code is read as written; a text that is only a code block says the phrase rather than having no audio | The issue's suggestion | Opus 5.5 | pending |
-| 2026-11-12 | #670 | UX | Which blocks count | Fences of three or more backticks or tildes, also after list markers and indented inside list items; where in doubt a line is read, not taken for a fence | Prose must not go silent | Opus 5.5 | pending |
-| 2026-11-12 | #670 | cost | Audio made before the change | Kept; nothing finds or regenerates old audio; a text without a fence gives byte-identical speech text | #646: existing audio is not regenerated | Opus 5.5 | pending |
-| 2026-11-12 | #670 | UX | Two rare fence shapes that still silence the rest of a text | Documented as known limits, not fixed; the general fix would hold back every block while a reply streams | none: the coordinating builder's judgement after the review | Fable 5.2 | pending |
-| 2026-11-12 | #670 | reliability | Introduced value | An ordered-list marker before a fence has at most 9 digits | Every added heuristic is named | Opus 5.5 | pending |
-| 2026-11-12 | #671 | privacy | Whose AI usage decides whether a recording is transcribed | The entry's own, not the account's default | No AI means no AI | Opus 5.5 | pending |
-| 2026-11-12 | #671 | privacy | A recording request that sends no AI usage | Keeps the default, None, so it is refused; every current web and iPhone path sends the value | No AI means no AI | Opus 5.5 | pending |
-| 2026-11-12 | #671 | data safety | A recording set to None after it started | Keeps its audio, is not transcribed and gets no reply; its entry says why | Problems show; no recording is lost | Opus 5.5 | pending |
-| 2026-11-12 | #671 | privacy | How mail log lines name a recipient | By user id, else by 8 hex characters of a keyed hash of the address; admin alert lines name no address | No user data in Sentry (#422) | Opus 5.5 | pending |
-| 2026-11-12 | #671 | privacy | The browser's Sentry session record | Left out | No user data in Sentry (#422) | Opus 5.5 | pending |
-| 2026-11-12 | #671 | data safety | When OpenAI batch files are deleted | After the caller's commit, never when the results are read; a failed delete is logged and left | Never lose a billed result | Opus 5.5 | pending |
-| 2026-11-12 | #671 | reliability | Introduced values | 8 hex characters of the keyed hash; the address pattern's bounds and 8 levels of nested data; 7 days before an upload no batch names is deleted by the clean-up snippet | Every added heuristic is named | Opus 5.5 | pending |
-| 2026-11-12 | #671 | privacy | A privately reported item | Fixed in the PR before it was marked ready; details withheld until it merges | Security problems stay out of the log until fixed | Fable 5.2 | pending |
-| 2026-11-12 | #672 | privacy | What a re-import changes | Every entry of the document or long message takes the dialog's AI usage and privacy, as its last entry already did | No AI means no AI; #593 | Opus 5.5 | pending |
-| 2026-11-12 | #672 | privacy | Which entries count as part of the item | Only those that can be proven: a token shared by the parts of new imports, and for older imports a strict check of the expected count, dates and sizes; otherwise only the last entry changes and the result says the item was updated only in part | No AI means no AI; Problems show | Fable 5.2 | pending |
-| 2026-11-12 | #672 | privacy | A chapter whose AI usage the user changed on its own | Takes the re-import's value too; to be named to Peter as a choice left as built | #593: the value the dialog shows applies to the archive's entries | Opus 5.5 | pending |
-| 2026-11-12 | #672 | privacy | Unknown privacy or AI usage values on the import confirm routes | Refused with 400, since a re-import writes both onto entries already in Loore | none: builder's judgement | Opus 5.5 | pending |
-| 2026-11-12 | #672 | process | Two problems the review found that exist on main | Filed as #676 and #677, not fixed in #672 | One change per PR | Fable 5.2 | pending |
-| 2026-11-12 | #672 | privacy | A privately reported item | Fixed in the PR before it was marked ready; details withheld until it merges | Security problems stay out of the log until fixed | Fable 5.2 | pending |
-| 2026-11-12 | #673 | cost | An import while window work is in the Batch queue | The import's oldest date waits on the user, and the profile is re-tipped from it once nothing is in flight, instead of rebuilt from scratch | Peter's #625 decision; Batch for background jobs | Opus 5.5 | pending |
-| 2026-11-12 | #673 | data safety | Several imports while work is in flight | The oldest date is kept, so one re-tip covers them all | #598; #625 | Opus 5.5 | pending |
-| 2026-11-12 | #673 | reliability | What counts as work in flight | Window, group or final items in pending batch jobs, the user's run lock held by another run, or an advance's claim on the build; a synchronous task's guard alone no longer does | Autonomy (reversible) | Opus 5.5 | pending |
-| 2026-11-12 | #673 | data safety | A first build in flight with no profile version yet | The date is recorded too, and dropped when the build still to come reads everything anyway | Problems show | Opus 5.5 | pending |
-| 2026-11-12 | #674 | testing | Outside connections in backend tests | Every one refused, not only the providers'; loopback and the hosts of database and broker URLs allowed; a test whose code caught a refusal still fails, naming the host | Problems show; fix the cause | Opus 5.5 | pending |
-| 2026-11-12 | #674 | testing | Provider keys in tests | Emptied rather than set to a fake value, so tests take CI's paths; proxy variables removed | none: builder's judgement (the issue suggested a fake key) | Opus 5.5 | pending |
-| 2026-11-12 | #674 | reliability | The token counter's HTTP client | Closed after each count rather than shared across worker threads | One of #633's two options | Opus 5.5 | pending |
-| 2026-11-12 | #675 | UX | How a Voice refusal is said | A cached clip per sentence and voice, never part of a reply's audio, stopped by a new recording; the device's own speech where the clip can't be had | Peter's rule for the approval announcement (2026-11-12) | Opus 5.5 | pending |
-| 2026-11-12 | #675 | UX | An error sound before the new sentences | None; the thread-length refusal keeps #650's sound | 2026-10-13: a refusal is not a failure | Opus 5.5 | pending |
-| 2026-11-12 | #675 | UX | A sentence while a reply plays | Never over it: on the web it waits for the turn's audio, and a refused Continue pauses or stops the reply; leaving the Voice screen stops the sentence | #651: never break a recording or playback | Opus 5.5 | pending |
-| 2026-11-12 | #675 | privacy | The clip routes | Need Voice mode on the account (403 otherwise), the approval announcement's included; the refusal clip has no spend-cap check, since the limit's sentence is for capped accounts | No clip made or billed for an account without Voice | Opus 5.5 | pending |
-| 2026-11-12 | #675 | user-facing text | The sentences | Plain words, one per refusal, with no numbers, prices or pointers to buying | Peter: no prices in notices about usage | Opus 5.5 | pending |
-| 2026-11-12 | #675 | product scope | Refusals left silent | No Voice mode on the plan, no subscription (#649), the Glean-only model, nothing heard, failures, Glean at the limit, and the screen opening on a blocked thread | #651 covers refusals, not failures | Opus 5.5 | pending |
-| 2026-11-12 | #675 | reliability | Introduced values | A refusal waits 4 s for its clip before device speech; a fetched clip is kept in memory for the app's run; `no-cache` with an ETag; the clip's length plus 2 s if the iPhone's end callback never comes | Every added heuristic is named | Opus 5.5 | pending |
+| 2026-11-12 | #661 | product scope | How the free month is given | Through Loore, not Stripe: a command sets the dates on each tester's account; no card and no Checkout; `--undo` reverses it | Peter: free, then the discounted price; Autonomy (reversible) | Opus 5.5 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-12 | #661 | product scope | The 14-day trial for testers | None: the free month takes its place; a tester who subscribes during the month pays first when it ends | Peter: "free for one month …, then the discounted price" | Opus 5.5 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-12 | #661 | product scope | Levels offered to testers | Reduced first, Standard and Supporter still offered; no code field | Show the choices | Opus 5.5 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-12 | #661 | UX | A notice before the month ends | One, on the web only, in the last 7 days, dismissible for good | Calm over clever; Problems show | Opus 5.5 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-12 | #661 | product scope | A tester who cancels a subscription started during the month | Keeps the rest of the month | none: builder's judgement (the month is Loore's, not the subscription's) | Opus 5.5 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-12 | #661 | reliability | Introduced values | 30 days for the month; 00:00 UTC of the start date; 49 hours, Stripe's 48-hour minimum for a Checkout trial plus one; 7 days for the notice | Every added heuristic is named | Opus 5.5 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-13 | #661 | cost | The usage limit over a tester's unpaid period | Counted once from the month's start to the first paid invoice, not once per calendar month | Peter: "the standard limit" | Fable 5.2 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-13 | #661 | privacy | Privately reported review findings | Fixed in the PR before it was marked ready; details withheld until it merges | Security problems stay out of the log until fixed | Fable 5.2 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-12 | #664 | cost | How the free week is given | Stripe customer credit; a coupon, a moved trial end and a paused collection were each tried in the sandbox and fit worse | #439: credit where the provider has it | Opus 5.5 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-12 | #664 | product scope | The friend's week after a refund or dispute | Not taken back, as for the inviter | #439: no clawback | Opus 5.5 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-12 | #664 | product scope | "Paid once" in #649's failed-payment rule | Also counts an invoice paid entirely by credit | none: builder's judgement | Opus 5.5 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-12 | #664 | release/ops | A switch of its own | `REFERRALS_ENABLED`, on by default with payments, turns the link off; weeks already earned are still given | Autonomy (reversible) | Opus 5.5 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-12 | #664 | user-facing text | The notices of a free week | Name nobody and offer nothing to buy | #439; no purchase pointer in the iPhone app | Opus 5.5 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-12 | #664 | reliability | Introduced values | 7 days of 30; a 96-bit random code; a followed link kept 30 days in the browser; Stripe refusals other than 409 and 429 counted as final | Every added heuristic is named | Opus 5.5 | corrected → entry Referrals: one fixed credit for both |
+| 2026-11-13 | #664 | privacy | An invite through an email sign-in | Counts only when the emailed link is opened in the browser that asked for it; an email opened on another device records no inviter; also listed under the PR's Needs Peter 3 | none: the coordinating builder's judgement after the review | Fable 5.2 | corrected → entry Referrals: the same-browser rule for emailed invites |
+| 2026-11-13 | #664 | cost | The inviter's week when the friend pays less | At most what the friend paid on the first invoice; also listed under the PR's Needs Peter 4 | none: the coordinating builder's judgement after the review | Fable 5.2 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-13 | #664 | privacy | Another privately reported review finding | Fixed in the PR before it was marked ready; details withheld until it merges | Security problems stay out of the log until fixed | Fable 5.2 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-12 | #668 | release/ops | A failed proxy config test during a deploy | Recorded and raised at the end: the previous config restored when a backup exists, the reload skipped, and exit 1 after the services are back; no exit mid-deploy, which could leave services stopped for a migration | A failed deploy step fails loudly (2026-07-24); the script raises its failures at the end | Fable 5.2 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #668 | reliability | A failing config with no backup | Left as a known limit: the failing file stays and the next deploy skips the test | none: the coordinating builder's judgement | Fable 5.2 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #668 | release/ops | `set -o pipefail` | Stays off for the whole script | none: builder's judgement | Sonnet 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #669 | data safety | The profile update gate's count | Deleted writing does not count; the batch seeder and the hourly check share one query | The issue's suggestion | Sonnet 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #669 | product scope | The chunk planner's count | Left alone: plan and window must change together | The issue marks it out of scope | Sonnet 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #670 | user-facing text | What is spoken in place of a code block | "Code omitted.", once per block, in English whatever the text's language; inline code is read as written; a text that is only a code block says the phrase rather than having no audio | The issue's suggestion | Opus 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #670 | UX | Which blocks count | Fences of three or more backticks or tildes, also after list markers and indented inside list items; where in doubt a line is read, not taken for a fence | Prose must not go silent | Opus 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #670 | cost | Audio made before the change | Kept; nothing finds or regenerates old audio; a text without a fence gives byte-identical speech text | #646: existing audio is not regenerated | Opus 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #670 | UX | Two rare fence shapes that still silence the rest of a text | Documented as known limits, not fixed; the general fix would hold back every block while a reply streams | none: the coordinating builder's judgement after the review | Fable 5.2 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #670 | reliability | Introduced value | An ordered-list marker before a fence has at most 9 digits | Every added heuristic is named | Opus 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #671 | privacy | Whose AI usage decides whether a recording is transcribed | The entry's own, not the account's default | No AI means no AI | Opus 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #671 | privacy | A recording request that sends no AI usage | Keeps the default, None, so it is refused; every current web and iPhone path sends the value | No AI means no AI | Opus 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #671 | data safety | A recording set to None after it started | Keeps its audio, is not transcribed and gets no reply; its entry says why | Problems show; no recording is lost | Opus 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #671 | privacy | How mail log lines name a recipient | By user id, else by 8 hex characters of a keyed hash of the address; admin alert lines name no address | No user data in Sentry (#422) | Opus 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #671 | privacy | The browser's Sentry session record | Left out | No user data in Sentry (#422) | Opus 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #671 | data safety | When OpenAI batch files are deleted | After the caller's commit, never when the results are read; a failed delete is logged and left | Never lose a billed result | Opus 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #671 | reliability | Introduced values | 8 hex characters of the keyed hash; the address pattern's bounds and 8 levels of nested data; 7 days before an upload no batch names is deleted by the clean-up snippet | Every added heuristic is named | Opus 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #671 | privacy | A privately reported item | Fixed in the PR before it was marked ready; details withheld until it merges | Security problems stay out of the log until fixed | Fable 5.2 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #672 | privacy | What a re-import changes | Every entry of the document or long message takes the dialog's AI usage and privacy, as its last entry already did | No AI means no AI; #593 | Opus 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #672 | privacy | Which entries count as part of the item | Only those that can be proven: a token shared by the parts of new imports, and for older imports a strict check of the expected count, dates and sizes; otherwise only the last entry changes and the result says the item was updated only in part | No AI means no AI; Problems show | Fable 5.2 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #672 | privacy | A chapter whose AI usage the user changed on its own | Takes the re-import's value too; to be named to Peter as a choice left as built | #593: the value the dialog shows applies to the archive's entries | Opus 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #672 | privacy | Unknown privacy or AI usage values on the import confirm routes | Refused with 400, since a re-import writes both onto entries already in Loore | none: builder's judgement | Opus 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #672 | process | Two problems the review found that exist on main | Filed as #676 and #677, not fixed in #672 | One change per PR | Fable 5.2 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #672 | privacy | A privately reported item | Fixed in the PR before it was marked ready; details withheld until it merges | Security problems stay out of the log until fixed | Fable 5.2 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #673 | cost | An import while window work is in the Batch queue | The import's oldest date waits on the user, and the profile is re-tipped from it once nothing is in flight, instead of rebuilt from scratch | Peter's #625 decision; Batch for background jobs | Opus 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #673 | data safety | Several imports while work is in flight | The oldest date is kept, so one re-tip covers them all | #598; #625 | Opus 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #673 | reliability | What counts as work in flight | Window, group or final items in pending batch jobs, the user's run lock held by another run, or an advance's claim on the build; a synchronous task's guard alone no longer does | Autonomy (reversible) | Opus 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #673 | data safety | A first build in flight with no profile version yet | The date is recorded too, and dropped when the build still to come reads everything anyway | Problems show | Opus 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #674 | testing | Outside connections in backend tests | Every one refused, not only the providers'; loopback and the hosts of database and broker URLs allowed; a test whose code caught a refusal still fails, naming the host | Problems show; fix the cause | Opus 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #674 | testing | Provider keys in tests | Emptied rather than set to a fake value, so tests take CI's paths; proxy variables removed | none: builder's judgement (the issue suggested a fake key) | Opus 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #674 | reliability | The token counter's HTTP client | Closed after each count rather than shared across worker threads | One of #633's two options | Opus 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #675 | UX | How a Voice refusal is said | A cached clip per sentence and voice, never part of a reply's audio, stopped by a new recording; the device's own speech where the clip can't be had | Peter's rule for the approval announcement (2026-11-12) | Opus 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #675 | UX | An error sound before the new sentences | None; the thread-length refusal keeps #650's sound | 2026-10-13: a refusal is not a failure | Opus 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #675 | UX | A sentence while a reply plays | Never over it: on the web it waits for the turn's audio, and a refused Continue pauses or stops the reply; leaving the Voice screen stops the sentence | #651: never break a recording or playback | Opus 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #675 | privacy | The clip routes | Need Voice mode on the account (403 otherwise), the approval announcement's included; the refusal clip has no spend-cap check, since the limit's sentence is for capped accounts | No clip made or billed for an account without Voice | Opus 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #675 | user-facing text | The sentences | Plain words, one per refusal, with no numbers, prices or pointers to buying | Peter: no prices in notices about usage | Opus 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #675 | product scope | Refusals left silent | No Voice mode on the plan, no subscription (#649), the Glean-only model, nothing heard, failures, Glean at the limit, and the screen opening on a blocked thread | #651 covers refusals, not failures | Opus 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-12 | #675 | reliability | Introduced values | A refusal waits 4 s for its clip before device speech; a fetched clip is kept in memory for the app's run; `no-cache` with an ETag; the clip's length plus 2 s if the iPhone's end callback never comes | Every added heuristic is named | Opus 5.5 | accepted by merge (PR #679, 2026-11-13) |
 | 2026-11-12 | #631 | privacy | AI replies in circle threads under Peter's rule of 2026-11-12 | Created private and shared through Edit once written (409 while still being written); no automatic reply in a circle thread; "apply to my replies" never shares a prompt | Peter, 2026-11-12 | Opus 5.5 | pending |
 | 2026-11-12 | #631 | product scope | When a circle thread counts as shared | Wherever its sharing shows in a node's privacy; a person's own Only-me branch in someone else's thread is private, and auto-generate is not refused there | Peter, 2026-11-12, as #644 applies it | Opus 5.5 | pending |
 | 2026-11-12 | #631 | privacy | A quote of another person's circle entry in the requester's own entry | Counts for the approval of AI writes exactly when the model is shown its text | Peter: "including quotes of public / circles nodes in private entries" | Opus 5.5 | pending |
@@ -5791,3 +6350,93 @@ Builder decisions listed in PRs that merged without Peter correcting them, backf
 | 2026-11-12 | #658 | testing | The combined Voice behaviour was not checked in a running app, only by tests (ticked on node 201899) | Fable 5.2 | accepted by merge (PR #658, 2026-11-12) |
 | 2026-11-12 | #658 | testing | The lock screen and the spoken sentences were not checked on a real iPhone (ticked on node 201899) | Fable 5.2 | accepted by merge (PR #658, 2026-11-12) |
 | 2026-11-12 | #658 | testing | No real speech call was made for the announcement clip before the merge (ticked on node 201899) | Fable 5.2 | accepted by merge (PR #658, 2026-11-12) |
+| 2026-11-13 | #675 | UX | "Loore didn't hear any words" stays a written notice, not a spoken sentence (ticked on node 201912) | Opus 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-13 | #671 | privacy | A recording saved as Public also makes its audio public, including words later cut from the transcript, also when Public is chosen after recording (ticked on node 201912) | Opus 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-13 | #671 | privacy | A batch cancelled for a purge can still leave one file at OpenAI until a manual clean-up; no daily sweep (ticked on node 201912) | Opus 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-13 | #671 | privacy | Usernames and X handles still appear in a few log lines (ticked on node 201912) | Opus 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-13 | #679 | UX | A Voice turn in a thread switched to no AI before anything was transcribed gives the "nothing could be transcribed" notice, without the spoken sentence about AI usage (ticked on node 201912) | Opus 5.5 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-13 | #679 | testing | Not checked on a real iPhone: the spoken refusals on the lock screen, on Bluetooth and CarPlay, and the dictation save (ticked on node 201912) | Fable 5.2 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-13 | #679 | testing | No real speech or provider call before the merge (ticked on node 201912) | Fable 5.2 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-13 | #679 | testing | The deploy script was run only against stand-in commands, not on a server (ticked on node 201912) | Fable 5.2 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-13 | #679 | testing | Mobile Safari, where the device's own voice usually says the refusal, was not checked (ticked on node 201912) | Fable 5.2 | accepted by merge (PR #679, 2026-11-13) |
+| 2026-11-20 | #661 | product scope | Every approved account on the alpha plan on the day the command runs counts as a tester, pre-filled accounts included (ticked on node 201912) | Opus 5.5 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-20 | #661 | product scope | A tester needs no card until they subscribe; after the month they can read and export but get no new AI replies (ticked on node 201912) | Opus 5.5 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-20 | #661 | product scope | A tester who first signs in after the month ended gets no free month (ticked on node 201912) | Opus 5.5 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-20 | #664 | cost | An inviter who does not pay keeps the earned credit until their first payment (ticked on node 201912) | Opus 5.5 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-20 | #680 | UX | The "no subscription" refusal at the start of a Voice turn is not spoken (ticked on node 201912) | Fable 5.2 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-20 | #680 | testing | No real Stripe payment outside the sandbox before the merge (ticked on node 201912) | Fable 5.2 | accepted by merge (PR #680, 2026-11-20) |
+| 2026-11-20 | #681 | release/ops | CI jobs get time limits (backend 30 min, changes 5, frontend 20, security check 15) and the apt step 5 min with 3 retries and 20 s timeouts; the apt commands themselves are unchanged, since a flaky step is re-run, never weakened | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #681 | testing | Parallel backend tests left out: they are not reliably green, because test files replace modules at import time | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #683 | privacy | Glean's text font (Newsreader) is served from Loore too, since it came in the same request to Google | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #683 | release/ops | Font files committed to the repository from the official packages, not added as npm dependencies; weights, styles and subsets as Google served them; the two most used weights preloaded | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #683 | UX | Glean's text font ships as the regular cut, not the variant that adjusts to text size (ticked on node 201963) | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #686 | privacy | The account's Default AI usage turns search off, not an entry's own setting; an entry set to None on an account that allows AI is never embedded, so it never comes back as a result | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #686 | privacy | For such an account the AI's search tool answers that search is off, with no embedding call; the tool stays in the list so that the prompt's cached prefix does not change | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #686 | product scope | Keyword search is refused on the server for everyone but admins, not only hidden in the apps; admins set to None keep it | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #686 | user-facing text | "Search needs AI to find things by meaning. Your Default AI usage is set to None, so Loore keeps your entries away from AI. You can change it in Account settings.", with a link to the setting, as Voice mode words it | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #687 | UX | "Start from your tweets" sits on the Account page below Default AI usage, shows "Not answered yet" until answered, and appears for X sign-ins, pre-filled accounts and anyone who answered | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #687 | privacy | A No stops every pre-fill, also one under way, and the load script refuses an account that said No | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #687 | privacy | After a No, the tweets already brought in are left out of every AI read of the writing as a whole (profile, intentions, recent context, a reply's background, archive search); a thread the person opens still reads its own entries | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #687 | privacy | A first build under way when the No comes: windows read from the tweets are kept but not AI-readable, and no final merge goes out over them; merges already at the provider are collected | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #687 | data safety | The person's own archive upload wins over the pre-fill's copy of a tweet | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #687 | user-facing text | The card's No line on an account already pre-filled says the profile and intentions stay in use until edited, instead of "You'll start from a blank page" | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #687 | product scope | A Yes after a No starts nothing by itself; starting the pre-fill stays with Peter (ticked on node 201963) | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #691 | privacy | One mechanism, #326's per-call licence: posts fetched through X's API, and AI replies, artifact versions and todo versions written from them, read as Chat in the licence and on screen | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #691 | privacy | An account that ever had a pre-fill through X's API keeps its profile, intentions, memory and other documents written from its writing at Chat for good, pages typed by hand included; only deleting all its writing lifts it (ticked on node 201963) | Fable 5.2 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #691 | privacy | An AI reply written from such posts is stored at Chat and never offered Train; a reply under it starts at the thread's setting | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #691 | data safety | A pre-filled post that the person's own upload also holds takes the upload's text, since a post's id proves nothing; a post the person edited in Loore keeps the edit | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #691 | privacy | Older posts with no record of their source are labelled where the pre-fill's own file exists; on accounts someone signed in to and without such a file they are only listed (ticked on node 201963) | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #690 | reliability | A failed refresh and an export that stays old both log at ERROR, at most once a day per problem | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #690 | UX | Glean's sentence about old posts is computed from each read (newest post more than 36 h older than the read), not stored, so reads of 4 to 13 November show it too | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #690 | reliability | A Glean never waits for the archive: the new interface is read in the background and only for one-day reads; longer windows stay on the export | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #690 | reliability | Long reads resume from their cursor after a failure; a pre-fill pages at most 30 minutes a run and continues in later runs | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #690 | cost | Glean's background reading is capped at 1,000 requests a day, so pre-fills keep at least 19,000 of the key's 20,000 | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #690 | reliability | Without a key, the old interface until 19 November, then a plain error naming the setting; an empty answer from the retired interface is never read as "not in the archive" | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #690 | reliability | Introduced values: an export older than 36 h counts as stale; a day ends at 07:00 UTC; 3 days kept; the admin check scans 2,000 posts; 5 tries, Retry-After capped at 60 s, 30 s timeouts; a failed day waits 1 h; 8 continuations per pre-fill; unfinished pre-fill files kept 7 days | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #701 | privacy | An unclaimed prepared account is deleted through #269's account deletion and its purge; cost records are kept, detached from the person; nothing is decrypted | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #701 | data safety | The purge checks again just before deleting: a sign-in or a Keep that arrives after the account was hidden wins | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #701 | privacy | No email to the person before or after, and the handle is not held back for 365 days | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #701 | product scope | Activate & Welcome keeps the account for the link's 30 days | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #701 | UX | Keep in bulk in the admin box and on the command line; the dry-run list says why each account is due and where its 90 days count from | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #701 | product scope | Deleted on day 90 directly, without the 30-day restore window of a normal account deletion (ticked on node 201963) | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #701 | product scope | Preparing an account again restarts its 90 days (ticked on node 201963) | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #701 | reliability | Introduced values: at most 10 deletions a night, at 02:41 UTC; accounts prepared before the new date column count from their first pre-filled entry; a Keep date given as a day lasts to its end, UTC (ticked on node 201963) | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #703 | reliability | At most 60 sign-in requests per 15 minutes and 200 a day from one network, sized for a workshop; both are settings (ticked on node 201963) | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #703 | UX | A sign-in link works until it expires, however often it is opened; a page with a Continue button, which would allow true single-use links, is not built (ticked on node 201963) | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #703 | reliability | Without Redis the limits count per process, so sign-in never stops because Redis is down | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #695 | data safety | A batch is deleted only after the caller's commit, so a crash leads to a later delete, never to a lost result | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #695 | reliability | "No longer needed" is read from the job's committed state, not from a hook at each place a job ends; failed, expired and cancelled batches are deleted too, a running one cancelled first | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #695 | reliability | A failed delete never fails the job and is retried hourly; after 5 failures in a row, one ERROR and then one try a day | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #695 | privacy | The record of each batch (ids and times) is kept after the batch is deleted | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #695 | data safety | A paid result that came back but was not saved keeps its batch for 29 days, Anthropic's documented availability | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #695 | release/ops | The clean-up script for old batches reads only batch ids recorded in Loore's database, prints counts only and is a dry run by default | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #695 | reliability | Introduced values: an hourly sweep at :43 looks at 100 rows; the script pauses 0.3 s per batch | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #699 | data safety | An import queued before the deploy with Public or Circles runs as private, so nothing is lost | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #699 | privacy | A re-import changes only the AI usage and never privacy, so it can no longer lower an entry the person made public | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #699 | privacy | Imported entries already public or shared are left as they are | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #699 | privacy | When a conversation published by hand is imported again, its new messages arrive private under the public copy (ticked on node 201963) | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #682 | data safety | A recording under way when the account stops being let in is finished and transcribed; no new recording, upload or reply starts | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #682 | UX | The apps stay on the recording's screen until it is done, then show the subscribe page or the not-let-in screen | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #682 | user-facing text | The spoken sentence is the entry's own text, one per reason, naming the state and never where or how to pay | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #682 | privacy | The data download includes unsaved drafts that hold text, for every account (ticked on node 201963) | Fable 5.2 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #682 | reliability | Introduced values: a shut-out account can finish a recording for up to 3 hours after it started (ticked on node 201963); the web waits at most 15 s for a refusal sentence | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #696 | product scope | The invite's month is the month it was made in: withdrawn or expired frees it, used ends it, one open at a time | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #696 | product scope | Accounts whose subscription ended may invite; accounts never let in may not | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #696 | privacy | An invite to an address that already has an account is accepted without a word, so no answer tells whether an address has an account | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #696 | privacy | The invited handle or address is kept only while the invite is open, and is deleted in the purge | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #696 | cost | The inviter's credit stays capped at what the friend paid; the friend's credit is not capped | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #696 | user-facing text | The trial's and the free month's limit texts say the limit lifts at the first payment; the spoken sentence is unchanged | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #696 | cost | An X invite looks up the handle's account, the archive first and then one X read of about one cent, counted against the inviter's usage (ticked on node 201963) | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #696 | product scope | An unused invite expires after 30 days (ticked on node 201963) | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #696 | cost | A tester who used the whole usage ceiling in the calendar month of the first payment stays capped until the next month | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #700 | product scope | An account is let in on its first request and marked approved; accounts Peter deactivated during the alpha count as blocked | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #700 | product scope | An alpha plan becomes free when an account is let in automatically or by a whitelist or pre-fill; Activate by hand keeps its effect (the testers' free month) | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #700 | UX | No welcome email from a whitelist or pre-fill, since the outreach is Peter's own | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #700 | privacy | A blocked account can download its data and, on the web, cancel its subscription | Fable 5.2 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #700 | cost | Blocking a subscriber cancels and refunds nothing (ticked on node 201963) | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #700 | UX | Block works on any account, and Unblock restores the account exactly as it was | Fable 5.2 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #700 | product scope | If payments are switched off again, accounts let in automatically that never paid go back to waiting (ticked on node 201963) | Fable 5.2 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #700 | UX | "Start from your tweets?" also on the subscribe page, the first screen a new account now sees | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #700 | cost | One free trial per card as well as per account; the testers' free month is exempt (ticked on node 201963) | Fable 5.2 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #700 | reliability | No background job runs for a blocked account | Fable 5.2 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-20 | #700 | reliability | Introduced value: new accounts are marked "new" in the Users tab for 7 days | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |

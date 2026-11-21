@@ -20,6 +20,9 @@ The refusals, by the code the clients get (the HTTP answer's ``code`` or
 - a change the AI proposed waiting for the user's approval (409
   ``approval_pending``),
 - a thread too long for another reply (409 ``thread_too_long``, #648),
+- a Glean with nothing of the day's tweets left to read in its thread
+  (llm-status ``error_code`` ``glean_day_done``, #717): the Voice screen
+  says it and stays, instead of opening the refused gleaning,
 - payments on and the account's access ended while the turn was recorded
   (#438; Peter, 2026-11-13): the recording is kept and transcribed, only
   the reply is skipped. One code per reason (``subscription_required_``
@@ -33,6 +36,7 @@ The refusals, by the code the clients get (the HTTP answer's ``code`` or
 Plain words: no numbers, no prices, nothing about buying. The web and the
 iPhone app keep the same sentences for their fallback.
 """
+from backend.utils.ca_feed import GLEAN_DAY_DONE_CODE, GLEAN_DAY_DONE_MESSAGE
 from backend.utils.subscriptions import PAUSED_REASONS, paused_message
 
 SPEND_CAP_CODE = "monthly_spend_limit_reached"   # utils/spend
@@ -50,6 +54,8 @@ SPOKEN_REFUSALS = {
     # #648's sentence, unchanged.
     THREAD_TOO_LONG_CODE: ("This thread is too long for another reply. "
                            "Start a new thread to keep talking."),
+    # The refused Glean's own text, said as written (#717).
+    GLEAN_DAY_DONE_CODE: GLEAN_DAY_DONE_MESSAGE,
 }
 
 # A recording kept without its reply because the account's access ended

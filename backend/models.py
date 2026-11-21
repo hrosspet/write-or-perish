@@ -61,6 +61,15 @@ class User(db.Model, UserMixin):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     accepted_terms_at = db.Column(db.DateTime, nullable=True)
     accepted_terms_version = db.Column(db.String(16), nullable=True)
+    # Admin accounts only (#715): whether this admin wants the "New signup"
+    # email. On by default, so existing admin accounts keep getting it.
+    notify_new_signups = db.Column(
+        db.Boolean, nullable=False, default=True,
+        server_default=db.text("true"))
+    # When the admin was told about this account's sign-up (#715): the
+    # claim that keeps it to one email per account across a terms update
+    # and a retried request. Null until then.
+    signup_notice_sent_at = db.Column(db.DateTime, nullable=True)
     # NEW: Approval status for our alpha (whitelisting) and optional email.
     approved = db.Column(db.Boolean, default=False, nullable=False)
     email = db.Column(db.String(128), nullable=True, unique=True)
@@ -153,6 +162,12 @@ class User(db.Model, UserMixin):
     # keeps the ids and the state, no payment details.
     stripe_customer_id = db.Column(db.String(255), nullable=True,
                                    unique=True)
+    # How many times the admin cleared stripe_customer_id because Stripe
+    # no longer had that customer (#718, `flask stripe-forget-customer`).
+    # Part of the create-customer idempotency key: Stripe answers a key's
+    # first request again for 24 hours, which would give back the deleted
+    # customer. NULL: never cleared.
+    stripe_customer_cleared_count = db.Column(db.Integer, nullable=True)
     stripe_subscription_id = db.Column(db.String(255), nullable=True,
                                        index=True)
     # SUBSCRIPTION_LEVELS, from the subscription's price; NULL: none.
@@ -391,8 +406,10 @@ class User(db.Model, UserMixin):
     # moves an existing Keep earlier).
     unclaimed_keep_until = db.Column(db.DateTime, nullable=True)
     # Admin-flagged spam signup. Hidden from the admin Users table by
-    # default (eye toggle); nothing else changes — the account keeps
-    # whatever approved/plan state it had.
+    # default (eye toggle). While payments are on, an account so marked
+    # that the admin did not approve by hand is not active: never let in
+    # by the approval gate, no background jobs (#713,
+    # utils/approval.held_as_spam). It keeps its approved/plan state.
     spam = db.Column(db.Boolean, nullable=False, default=False,
                      server_default=db.text("false"))
     # When the account was (last) approved — the "since activation" origin
@@ -411,8 +428,8 @@ class User(db.Model, UserMixin):
     approved_before_block = db.Column(db.Boolean, nullable=True)
     # Last authenticated API request (throttled to one write per
     # ACTIVITY_TOUCH_INTERVAL) and its path, so "checked the profile and
-    # left" is distinguishable from "never came". Not engagement — a view
-    # is a view; engagement is writing / asking (see admin Activity).
+    # left" is distinguishable from "never came". Not activity — a view
+    # is a view; activity is writing / asking (see admin Activity).
     last_seen_at = db.Column(db.DateTime, nullable=True)
     last_seen_path = db.Column(db.String(128), nullable=True)
 
@@ -580,9 +597,14 @@ class User(db.Model, UserMixin):
         * A deleted account in its grace period (#269) is left out: it
           is hidden, and nothing runs for it unless it is restored.
 
+        * Payments on: an account held as spam (#713) is left out, as a
+          blocked one is by ``approved``; it may still be approved, when
+          the gate let it in before the admin marked it.
+
         Shared helper (not an inline filter) so the profile and
         recent-context tasks can't drift apart again.
         """
+        from backend.utils.approval import not_held_as_spam_clause
         from backend.utils.hidden_rows import account_on_hold_user_ids
         from backend.utils.privacy import AI_ALLOWED
         llm_authors = db.session.query(Node.user_id).filter(
@@ -601,6 +623,7 @@ class User(db.Model, UserMixin):
             ~cls.id.in_(llm_authors),
             ~cls.id.in_(purging),
             cls.deleted_at.is_(None),
+            *not_held_as_spam_clause(),
         )
 
 
@@ -788,6 +811,17 @@ class Node(db.Model):
     transcription_progress = db.Column(db.Integer, default=0)  # 0-100%
     transcription_started_at = db.Column(db.DateTime, nullable=True)
     transcription_completed_at = db.Column(db.DateTime, nullable=True)
+    # When an audio upload last received a piece (or was handed to
+    # transcription): how long it counts among the account's uploads in
+    # progress, and whether it still takes pieces
+    # (utils/recording_limits.UPLOAD_COUNTS_FOR). NULL for entries
+    # that are not uploads, and for uploads from before it was kept.
+    upload_activity_at = db.Column(db.DateTime, nullable=True)
+    # An audio upload's seconds, while it waits for its transcript: from its
+    # size at its start, then as the transcription task measures it. It
+    # counts toward the account's usage at a start
+    # (utils/recording_limits.pending_audio_seconds). NULL for other entries.
+    audio_pending_seconds = db.Column(db.Float, nullable=True)
 
     # LLM completion task tracking
     llm_task_id = db.Column(db.String(255), nullable=True)
@@ -1385,11 +1419,32 @@ class ArtifactView(db.Model):
     """One row per artifact open in the UI (admin Activity monitoring —
     e.g. "did they check their intentions?"). Written by
     POST /api/artifacts/<kind>/viewed, pinged once per kind per page
-    visit; never read by the product itself."""
+    visit; never read by the product itself.
+
+    The name of an artifact the user created is theirs: nobody else sees
+    it, admins included (Peter, 2026-11-20). So a row keeps the name only
+    for the kinds Loore defines (UserArtifact.SYSTEM_KINDS). A view of
+    any other artifact is stored as ``kind=USER_CREATED`` with
+    ``artifact_id``, which tells the artifacts apart without naming them.
+    Rows written before 2026-11-20 can still hold such a name in
+    ``kind`` (``artifact_id`` NULL); the Activity tab never sends it
+    (utils/activity.py)."""
     __tablename__ = "artifact_view"
+    # Stored in ``kind`` for a view of an artifact the user created. Can't
+    # be an artifact's name: names start with a letter or a digit
+    # (routes/artifacts._KIND_RE, the AI's update_artifact the same).
+    USER_CREATED = "_user_created"
+
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False, index=True)
     kind = db.Column(db.String(48), nullable=False)
+    # For a view of an artifact the user created: the id of the artifact's
+    # first live version (UserArtifact.first_live_id), the same for every
+    # version, so it tells two artifacts apart without naming either.
+    # NULL for the kinds Loore defines and for rows from before
+    # 2026-11-20. No foreign key: the cleanup of a deleted artifact
+    # deletes these rows with its versions (utils/artifact_deletion).
+    artifact_id = db.Column(db.Integer, nullable=True)
     viewed_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
 
 
@@ -1492,6 +1547,17 @@ class UserArtifact(db.Model):
     # can be deleted.
     UNDELETABLE_KINDS = frozenset(DEFAULT_KINDS) | {"external_digest"}
 
+    # The names Loore defines: the built-ins, the reserved names of the
+    # documents with their own models, and the saved-references digest
+    # (backend/tasks/external_digest.py DIGEST_KIND). Every other name was
+    # chosen by the user, or by the AI for them, and only the user sees
+    # it (Peter, 2026-11-20): the admin Activity tab counts views of
+    # those artifacts without naming them, and the last-seen path drops
+    # the name (utils/activity.py). An allow-list, so a name missing here
+    # is treated as the user's.
+    SYSTEM_KINDS = (frozenset(DEFAULT_KINDS) | frozenset(RESERVED_KINDS)
+                    | {"external_digest"})
+
     def set_content(self, plaintext):
         self.content = encrypt_content(plaintext)
 
@@ -1530,6 +1596,18 @@ class UserArtifact(db.Model):
     def version_count(cls, user_id, kind):
         """How many live versions the kind has: the latest one's number."""
         return cls.live().filter_by(user_id=user_id, kind=kind).count()
+
+    @classmethod
+    def first_live_id(cls, user_id, kind):
+        """The id of the kind's first live version, or None when it has
+        none. The same for every later version, so it stands for the
+        artifact where its name must not (ArtifactView.artifact_id). An
+        artifact deleted and made again under the same name gets a new
+        one: it is a new artifact."""
+        return (db.session.query(db.func.min(cls.id))
+                .filter(cls.user_id == user_id, cls.kind == kind,
+                        cls.deleted_at.is_(None))
+                .scalar())
 
     @classmethod
     def latest_per_kind(cls, user_id):
@@ -1661,6 +1739,18 @@ class NodeTranscriptChunk(db.Model):
     task_id = db.Column(db.String(255), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     completed_at = db.Column(db.DateTime, nullable=True)
+    # Seconds of audio its transcription covered (as measured; 15 s a chunk
+    # when the length could not be read): on the row that carries a batch's
+    # text, the batch's. Their sum is how much of the recording was
+    # transcribed (utils/recording_limits.MAX_TRANSCRIBED_SECONDS). NULL for
+    # rows transcribed before it was kept, and for the other rows of a batch.
+    audio_seconds = db.Column(db.Float, nullable=True)
+    # Seconds of audio this chunk is sent with, once the transcription task
+    # has measured it (the part's length on its first chunk, 0 on the
+    # others); NULL before. While the chunk waits for its transcript it
+    # counts toward the account's usage at a start
+    # (utils/recording_limits.pending_audio_seconds).
+    pending_seconds = db.Column(db.Float, nullable=True)
 
     # Relationship back to node
     node = db.relationship("Node", backref="transcript_chunks")
@@ -2409,23 +2499,30 @@ class FeedRender(db.Model):
     # UTC bounds of the window the tweets were taken from.
     window_start = db.Column(db.DateTime, nullable=True)
     window_end = db.Column(db.DateTime, nullable=True)
+    # A read of part of the window (#717: the newest tweets that fit the
+    # prompt, or the next older ones after the thread's earlier reads):
+    # when its oldest and newest tweet were posted (UTC). Null when the
+    # read had the whole window (every read before #717).
+    page_start = db.Column(db.DateTime, nullable=True)
+    page_end = db.Column(db.DateTime, nullable=True)
     tweet_count = db.Column(db.Integer, nullable=False, default=0)
     account_count = db.Column(db.Integer, nullable=False, default=0)
     # Tweets in the window the reader had already marked read (any row
-    # of the tweet, #352) and that therefore never reached the model. A
-    # read again that keeps the list of the read before it (#511) leaves
-    # out the same tweets; the ones read since stay in its list, and a
-    # note tells the model they are not candidates.
+    # of the tweet, #352) and that therefore never reached the model.
+    # (From #511 until #717 a read again on the same export kept the list
+    # of the read before it; its rows count that list's exclusions.)
     excluded_count = db.Column(db.Integer, nullable=False, default=0)
     # Comma-joined tweet ids in render order: index i (0-based) is the
-    # tweet the model saw as #i+1. ~100 KB for a day of the archive.
+    # tweet the model saw as #i+1. ~100 KB for a day of the archive. The
+    # next read in the thread leaves these out (#717,
+    # ca_feed.gleaned_tweet_ids).
     tweet_ids = db.Column(db.Text, nullable=False, default="")
     # How many of the model's picks the collect could not show
     # (ca_feed.count_dropped_picks, on the batch collect and the admin's
     # live rerun alike; 2026-10-02): the tweet behind the number is no
     # longer in the archive snapshot, or the number is outside the render,
-    # or (a live read again that kept the earlier list, #511) the reader
-    # has read the tweet since that list was made. Each number once; a
+    # or (a live read again that kept the earlier list, #511 until #717)
+    # the reader had read the tweet since that list was made. Each number once; a
     # number cited only in the verdict is no pick. With no FeedPick row on the reply, a positive count means
     # every pick was dropped, and 0 means the model picked nothing.
     # Replies collected before the column existed read 0 either way.
@@ -2716,6 +2813,119 @@ class UserDataPurgeHidden(db.Model):
     __table_args__ = (
         db.Index("ix_user_data_purge_hidden_kind_row", "kind", "row_id"),
     )
+
+
+class PrefillBundleLoad(db.Model):
+    """One load of a pre-fill bundle from the lab into an account (#698,
+    backend/utils/prefill_bundle_load.py; docs/PREFILL-BUNDLES.md).
+
+    A bundle is the lab's prepared material for one Community Archive
+    member, keyed by their X id: their public tweets and the profile (and
+    intentions, where built) drafted from them. The load writes it into
+    the account whose X id is the bundle's, in committed chunks, and
+    records here where it got to, so a run that stops (a deploy, a crash)
+    is continued by the next one from the same place.
+
+    origin: "admin" (the admin's "Make ready from prepared material") or
+    "self" (the person's Yes on "Start from your tweets").
+    status: queued -> running -> done | failed | stopped (a "no" given
+    while it ran: what was loaded stays, linked); "refused" records an
+    automatic load that found a bundle but did not start (``error`` says
+    why), so the admin sees it.
+    stage: check (a Yes: is there a bundle?) -> header -> nodes -> links
+    -> finish -> (merge ->) done.
+
+    Nothing here is content: counts, the bundle's checksum and dates, the
+    X id and the handle the bundle was made under, and ``error`` (a code
+    or an exception class, never a message that could quote content).
+    A loaded account is recognisable without this table too: the load
+    sets ``User.prefilled_handle``, as every pre-fill does.
+    """
+    __tablename__ = "prefill_bundle_load"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=False, index=True)
+    x_id = db.Column(db.String(64), nullable=False, index=True)
+    # The handle the bundle was made under (the manifest's), for the admin.
+    handle = db.Column(db.String(64), nullable=True)
+    origin = db.Column(db.String(8), nullable=False)
+    requested_by_id = db.Column(db.Integer, nullable=True)
+    # The admin loaded over an owner's sign-in or own writing.
+    forced = db.Column(db.Boolean, nullable=False, default=False,
+                       server_default=db.text("false"))
+    # Let the person in (approve the account) when the load is done.
+    approve_when_done = db.Column(db.Boolean, nullable=False, default=False,
+                                  server_default=db.text("false"))
+    status = db.Column(db.String(16), nullable=False, default="queued")
+    stage = db.Column(db.String(16), nullable=False, default="check")
+    error = db.Column(db.String(255), nullable=True)
+    # The bundle object's sha256 from its manifest, checked after every
+    # download; the formats and dates the manifest gave.
+    bundle_sha256 = db.Column(db.String(64), nullable=False)
+    bundle_format = db.Column(db.Integer, nullable=True)
+    dump_format = db.Column(db.Integer, nullable=True)
+    exported_at = db.Column(db.DateTime, nullable=True)
+    newest_entry_at = db.Column(db.DateTime, nullable=True)
+    # The bundle's parts as the manifest gave them ([{offset, length,
+    # lines, sha256}], the header first): a run reads the next part by its
+    # byte range and checks its sha256.
+    members = db.Column(db.JSON, nullable=True)
+    # Progress: entries in the bundle, entries read by the first pass
+    # (created or found already there) and by the link pass.
+    nodes_total = db.Column(db.Integer, nullable=False, default=0)
+    nodes_done = db.Column(db.Integer, nullable=False, default=0)
+    links_done = db.Column(db.Integer, nullable=False, default=0)
+    created_count = db.Column(db.Integer, nullable=False, default=0)
+    skipped_count = db.Column(db.Integer, nullable=False, default=0)
+    relinked_count = db.Column(db.Integer, nullable=False, default=0)
+    profiles_count = db.Column(db.Integer, nullable=False, default=0)
+    artifacts_count = db.Column(db.Integer, nullable=False, default=0)
+    # The run that holds the load (claim token) and its last sign of life.
+    run_token = db.Column(db.String(32), nullable=True)
+    heartbeat_at = db.Column(db.DateTime, nullable=True)
+    # Runs started since the last committed chunk: a run that is killed
+    # again and again by the same chunk stops the load.
+    stalled_runs = db.Column(db.Integer, nullable=False, default=0)
+    # The final merge run again on production (Peter, 2026-11-13): when the
+    # bundle's final profile was written by another model than this
+    # account's merge model, one live call merges the loaded windows again
+    # (backend/utils/prefill_bundle_merge.py). merge_wanted: the load asks
+    # for it (the person's Yes; the admin's option, on by default).
+    # merge_status: None (not asked) | due | running | retry | done |
+    # skipped | superseded | failed; merge_error a code. The person waits
+    # for it ("Preparing your starting point…") at most MERGE_WAIT from
+    # merge_started_at; the attempts are bounded.
+    merge_wanted = db.Column(db.Boolean, nullable=False, default=False,
+                             server_default=db.text("false"))
+    merge_status = db.Column(db.String(16), nullable=True)
+    merge_attempts = db.Column(db.Integer, nullable=False, default=0)
+    merge_started_at = db.Column(db.DateTime, nullable=True)
+    merge_heartbeat_at = db.Column(db.DateTime, nullable=True)
+    merge_model = db.Column(db.String(64), nullable=True)
+    merge_error = db.Column(db.String(64), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    started_at = db.Column(db.DateTime, nullable=True)
+    finished_at = db.Column(db.DateTime, nullable=True)
+
+
+class PrefillBundleNodeMap(db.Model):
+    """Which entry a load created (or found) for each entry id of the
+    bundle (#698): the link pass reads it to point replies and
+    continuations at the new rows, and a resumed run reads it instead of
+    holding the map in memory. Deleted when the load is done. Ids only;
+    ``new_id`` is a plain id (the purge deletes nodes before these
+    rows)."""
+    __tablename__ = "prefill_bundle_node_map"
+
+    load_id = db.Column(db.Integer, primary_key=True, autoincrement=False)
+    old_id = db.Column(db.BigInteger, primary_key=True, autoincrement=False)
+    new_id = db.Column(db.Integer, nullable=False)
+    # False when the entry was already in the account (dedup on its key):
+    # the link pass leaves such rows as they are.
+    created = db.Column(db.Boolean, nullable=False, default=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=False, index=True)
 
 
 class StripeEvent(db.Model):

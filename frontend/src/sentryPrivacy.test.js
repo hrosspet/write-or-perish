@@ -132,6 +132,46 @@ describe('withoutQuery', () => {
   });
 });
 
+// A.112: the name of an artifact the user created stays out of Sentry.
+describe('artifact names', () => {
+  it('replaces the name in the page address, Referer, transaction and stack frames', () => {
+    const event = scrubEvent({
+      request: {
+        url: 'https://example.org/artifacts/garden-plans-xq',
+        headers: { Referer: 'https://example.org/artifacts/garden-plans-xq?create=1' },
+      },
+      transaction: '/artifacts/garden-plans-xq',
+      exception: { values: [{ type: 'TypeError', stacktrace: { frames: [
+        { filename: 'https://example.org/artifacts/garden-plans-xq', lineno: 1 },
+      ] } }] },
+    });
+    expect(JSON.stringify(event)).not.toContain('garden-plans-xq');
+    expect(event.request.url).toBe('https://example.org/artifacts/:kind');
+    expect(event.request.headers.Referer).toBe('https://example.org/artifacts/:kind');
+    expect(event.transaction).toBe('/artifacts/:kind');
+  });
+
+  it('replaces the name in API calls and navigation breadcrumbs', () => {
+    const call = scrubBreadcrumb({
+      category: 'xhr',
+      data: { method: 'POST', url: '/api/artifacts/garden-plans-xq/revert/12', status_code: 500 },
+    });
+    expect(call.data.url).toBe('/api/artifacts/:kind/revert/12');
+    const nav = scrubBreadcrumb({
+      category: 'navigation',
+      data: { from: '/artifacts/garden-plans-xq', to: '/artifacts/tax-letters-qz' },
+    });
+    expect(nav.data).toEqual({ from: '/artifacts/:kind', to: '/artifacts/:kind' });
+  });
+
+  it('control: version calls carry an id and stay; other paths stay', () => {
+    expect(withoutQuery('/api/artifacts/versions/12/changes')).toBe('/api/artifacts/versions/12/changes');
+    expect(withoutQuery('/api/artifacts/')).toBe('/api/artifacts/');
+    expect(withoutQuery('/artifacts')).toBe('/artifacts');
+    expect(withoutQuery('/node/42')).toBe('/node/42');
+  });
+});
+
 // The options wired into the real browser SDK: the events that reach the
 // transport while `activity` runs.
 async function sentEvents(options, activity) {

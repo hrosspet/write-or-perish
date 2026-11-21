@@ -6,6 +6,7 @@ import AdminUnclaimedAccounts from "./AdminUnclaimedAccounts";
 import ProfileBuildConfirmDialog from "./ProfileBuildConfirmDialog";
 import IntentionsReplaceDialog from "./IntentionsReplaceDialog";
 import AdminRefusalDialog, { REFUSAL_TITLES } from "./AdminRefusalDialog";
+import AdminPrefillBundles from "./AdminPrefillBundles";
 import { offeredModels } from "./ModelSelector";
 import { FaTimesCircle, FaFilter, FaCaretDown, FaCaretUp, FaEye, FaEyeSlash } from "react-icons/fa";
 import api from "../api";
@@ -316,7 +317,7 @@ export function AdminPolls() {
 // this lists items and manages their triage status.
 const FEEDBACK_STATUSES = ["new", "reviewed", "done"];
 
-// Engagement since activation, measured directly (writes / asks / voice),
+// Activity since activation, measured directly (writes / asks / voice),
 // not through spend. Active accounts only. The strip is one cell per day:
 // filled when the person wrote or asked that day; a dot marks voice.
 const relTime = (iso) => {
@@ -329,6 +330,18 @@ const relTime = (iso) => {
   return `${Math.round(h / 24)}d ago`;
 };
 
+// One entry of the Activity tab's artifacts cell. The server sends the
+// artifacts the user created as one entry with counts only: their names
+// never reach the admin (Peter, 2026-11-20). Kinds Loore defines keep
+// their names.
+export function artifactViewLabel(v) {
+  if (v.user_created) {
+    const n = v.artifacts;
+    return `user-created x${v.count} (${n} ${n === 1 ? "artifact" : "artifacts"})`;
+  }
+  return `${v.kind} x${v.count}`;
+}
+
 const pathArea = (p) => {
   if (!p) return null;
   const seg = p.replace(/^\/api\//, "").split("/")[0];
@@ -339,7 +352,7 @@ const pathArea = (p) => {
   return seg || null;
 };
 
-function AdminActivity() {
+export function AdminActivity() {
   const [data, setData] = useState(null);
   const [cohort, setCohort] = useState("seeded");
   const [days, setDays] = useState(14);
@@ -409,7 +422,7 @@ function AdminActivity() {
                 <th style={th} title="Transcribed voice minutes since activation">voice</th>
                 <th style={th} title="Nodes imported by the user (archives) since activation">imports</th>
                 <th style={th} title="Profile versions created since activation / latest">profile</th>
-                <th style={th} title="Artifacts opened since activation (views · most recent first); hover a row for last-view times">artifacts</th>
+                <th style={th} title="Artifacts opened since activation (views · most recent first); hover a row for last-view times. The artifacts the user created are one entry: views, and how many different artifacts (their names stay private)">artifacts</th>
                 <th style={th} title="Came back the day after activation / any time in days 2–7">d1 / d7</th>
                 <th style={th} title="User-initiated spend only (conversation, transcription, TTS, search) since activation">$ own</th>
               </tr>
@@ -459,10 +472,10 @@ function AdminActivity() {
                   <td style={cell}>{u.voice_minutes ? `${u.voice_minutes}m` : "—"}</td>
                   <td style={cell}>{u.imports || "—"}</td>
                   <td style={cell} title={u.latest_profile_at || ""}>{u.profile_versions_since_activation || "—"}{u.latest_profile_at ? <span style={{ color: "var(--text-muted)" }}> · {relTime(u.latest_profile_at)}</span> : null}</td>
-                  <td style={cell} title={(u.artifact_views || []).map((v) => `${v.kind} ×${v.count} — last ${relTime(v.last)}`).join("\n")}>
+                  <td style={cell} title={(u.artifact_views || []).map((v) => `${artifactViewLabel(v)} — last ${relTime(v.last)}`).join("\n")}>
                     {(u.artifact_views || []).length === 0 ? "—" : (
                       <>
-                        {u.artifact_views.slice(0, 2).map((v) => `${v.kind} ×${v.count}`).join(", ")}
+                        {u.artifact_views.slice(0, 2).map(artifactViewLabel).join(", ")}
                         {u.artifact_views.length > 2 ? ` +${u.artifact_views.length - 2}` : ""}
                       </>
                     )}
@@ -615,11 +628,13 @@ export function purgeLabel(job) {
 }
 
 // The Users tab's Status cell. Payments on (#697): "Blocked" for an
-// account the admin blocked; "Inactive" is then one that has not come back
-// since payments went on (it is let in at its next visit).
+// account the admin blocked; "Held (spam)" for one the spam mark holds
+// (#713: not let in, Activate lets it in); "Inactive" is then one that has
+// not come back since payments went on (it is let in at its next visit).
 export function statusLabel(u, letInWithoutApproval) {
   if (u.approved) return "Active";
   if (letInWithoutApproval && u.blocked) return "Blocked";
+  if (letInWithoutApproval && u.held_as_spam) return "Held (spam)";
   return "Inactive";
 }
 
@@ -732,6 +747,24 @@ function AdminPanel() {
   useEffect(() => {
     fetchUsers();
   }, []);
+
+  // "Email me about new signups" (#715): this admin's own setting, on by
+  // default; null until the first response.
+  const [signupEmail, setSignupEmail] = useState(null);
+  useEffect(() => {
+    api.get("/admin/signup_email")
+      .then((r) => setSignupEmail(!!r.data.enabled))
+      .catch((err) => console.error(err));
+  }, []);
+  const changeSignupEmail = async (enabled) => {
+    try {
+      const r = await api.put("/admin/signup_email", { enabled });
+      setSignupEmail(!!r.data.enabled);
+    } catch (err) {
+      console.error(err);
+      setError("Error saving the signup email setting.");
+    }
+  };
 
   const toggleApproved = async (userId) => {
     try {
@@ -1292,6 +1325,7 @@ function AdminPanel() {
         {newHandleError && <div style={{ color: "var(--error)" }}>{newHandleError}</div>}
         {newHandleNotice && <div style={{ color: "var(--text-secondary)" }}>{newHandleNotice}</div>}
       </div>
+      <AdminPrefillBundles onLoaded={fetchUsers} />
       <AdminUnclaimedAccounts />
       <XLookupConfirmDialog
         open={!!xLookupAsk}
@@ -1331,6 +1365,16 @@ function AdminPanel() {
       <AdminDeleteAccountDialog user={deleteAsk} onClose={closeDelete} onStarted={() => fetchUsers()} />
 
       {error && <div style={{ color: "var(--error)" }}>{error}</div>}
+      {signupEmail !== null && (
+        <label style={{ display: "block", margin: "8px 0", color: "var(--text-primary)" }}>
+          <input
+            type="checkbox"
+            checked={signupEmail}
+            onChange={(e) => changeSignupEmail(e.target.checked)}
+          />{" "}
+          Email me about new signups
+        </label>
+      )}
       <table style={{ width: "100%", borderCollapse: "collapse", color: "var(--text-primary)" }}>
         <thead>
           <tr>
@@ -1699,7 +1743,12 @@ function AdminPanel() {
                 </span>{" "}
                 <button
                   onClick={() => toggleSpam(u.id)}
-                  title={u.spam ? "Unmark as spam" : "Mark as spam (hides the row behind the eye toggle; does not deactivate)"}
+                  title={u.spam
+                    ? "Unmark as spam"
+                    : letInWithoutApproval
+                      // Payments on (#713): the mark also holds the account.
+                      ? "Mark as spam: hides the row behind the eye toggle, and an account you did not approve by hand is not active from now on, until you Activate it or unmark it"
+                      : "Mark as spam (hides the row behind the eye toggle; does not deactivate)"}
                   style={u.spam ? { color: "var(--error)" } : undefined}
                 >
                   {u.spam ? "Not spam" : "Spam"}

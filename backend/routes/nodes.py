@@ -178,12 +178,15 @@ def _upload_reply_options(values, parent_id, ai_usage, privacy_level=None):
     return agentic, model_id, None, auto_off
 
 
-def _save_audio_file(file_storage, user_id: int, node_id: int, variant: str) -> str:
+def _save_audio_file(file_storage, user_id: int, node_id: int, variant: str,
+                     before_encrypt=None) -> str:
     """Save an uploaded (or generated) audio file and return its relative URL
     (under /media) so that the front‑end can stream it.
 
     variant – either "original" or "tts".  The function ensures that the
     directory structure `user/{user_id}/node/{node_id}/` exists before saving.
+    before_encrypt – called with the saved file's path before it is
+    encrypted at rest (an upload is measured there).
     """
     filename = secure_filename(file_storage.filename or f"{variant}")
     ext = filename.rsplit(".", 1)[-1] if "." in filename else "webm"
@@ -191,6 +194,8 @@ def _save_audio_file(file_storage, user_id: int, node_id: int, variant: str) -> 
     target_dir.mkdir(parents=True, exist_ok=True)
     target_path = target_dir / f"{variant}.{ext}"
     file_storage.save(target_path)
+    if before_encrypt is not None:
+        before_encrypt(target_path)
     # Encrypt the audio file at rest (URL stored without .enc)
     encrypt_file(str(target_path))
     # Produce URL to be consumed externally, routed via /media endpoint.
@@ -766,6 +771,12 @@ def create_node():
         content_length = request.content_length or 0
         if content_length > MAX_AUDIO_BYTES:
             return jsonify({"error": "File too large"}), 413
+        # Other uploads of the account still wait for their transcript
+        # (utils/recording_limits).
+        from backend.utils.recording_limits import too_many_uploads_response
+        too_many = too_many_uploads_response(current_user.id)
+        if too_many is not None:
+            return too_many
 
         parent_id = request.form.get("parent_id")
         node_type = request.form.get("node_type", "user")
@@ -827,18 +838,34 @@ def create_node():
             parent_id=system_node.id if system_node else parent_id,
             node_type=node_type,
             transcription_status='pending',  # Set initial status
+            upload_activity_at=datetime.utcnow(),
             privacy_level=privacy_level,
             ai_usage=ai_usage,
             token_count=_atc2(placeholder_text),
         )
         node.set_content(placeholder_text)
+        # Counted again under the account's lock right before the insert
+        # (utils/recording_limits).
+        from backend.utils.recording_limits import upload_start_refusal
+        refused = upload_start_refusal(current_user.id)
+        if refused is not None:
+            return refused
         db.session.add(node)
         db.session.commit()  # Need node.id for the file path.
 
-        # Save the audio file now that we know node.id
-        url = _save_audio_file(file, current_user.id, node.id, "original")
+        # Save the audio file now that we know node.id; measured before it
+        # is encrypted: its seconds count toward the account's usage at a
+        # start until its cost is recorded
+        # (utils/recording_limits.pending_audio_seconds).
+        from backend.utils.recording_limits import finalized_upload_seconds
+        waiting = []
+        url = _save_audio_file(
+            file, current_user.id, node.id, "original",
+            before_encrypt=lambda path: waiting.append(
+                finalized_upload_seconds(path)))
         node.audio_original_url = url
         node.audio_mime_type = file.mimetype
+        node.audio_pending_seconds = waiting[0] if waiting else None
         db.session.add(node)
         db.session.commit()
 
@@ -2731,6 +2758,100 @@ def _invalid_upload_id():
     return jsonify({"error": "Invalid upload_id"}), 400
 
 
+def _upload_declaration_error(filesize, total_chunks):
+    """The answer for an init whose file size or piece count no upload can
+    have (utils/recording_limits), or None."""
+    from backend.utils.recording_limits import (
+        MAX_UPLOAD_CHUNK_BYTES, MAX_UPLOAD_CHUNKS, int_in_range,
+    )
+    if isinstance(filesize, bool) or not isinstance(filesize, int) \
+            or filesize < 1:
+        return jsonify({"error": "Invalid filesize",
+                        "code": "invalid_upload_size"}), 400
+    if filesize > MAX_AUDIO_BYTES:
+        return jsonify({"error": "File too large",
+                        "code": "file_too_large"}), 413
+    fewest = -(-filesize // MAX_UPLOAD_CHUNK_BYTES)
+    if int_in_range(total_chunks, fewest,
+                    min(filesize, MAX_UPLOAD_CHUNKS)) is None:
+        return jsonify({"error": "Invalid total_chunks",
+                        "code": "invalid_upload_size"}), 400
+    return None
+
+
+def _fail_unfinished_upload(chunk_dir):
+    """The app reports an upload failed (/upload/cleanup): its entry, still
+    waiting for its file, ends ``failed``, so it no longer counts among the
+    account's uploads in progress (utils/recording_limits)."""
+    import json
+    from backend.utils.recording_limits import UPLOAD_FAILED_TEXT
+    try:
+        with open(chunk_dir / "metadata.json") as f:
+            node_id = json.load(f).get("node_id")
+        node = db.session.get(Node, int(node_id))
+    except (OSError, ValueError, TypeError):
+        return
+    if (node is None or node.user_id != current_user.id
+            or node.transcription_status != "pending"
+            or node.audio_original_url is not None):
+        return
+    node.transcription_status = "failed"
+    node.transcription_error = UPLOAD_FAILED_TEXT
+    db.session.commit()
+
+
+def _hand_upload_to_transcription(node):
+    """A finalized upload is handed to transcription: renewed, so it counts
+    until its transcript is in (utils/recording_limits.UPLOAD_COUNTS_FOR).
+    Its measured seconds were set with its file (pending_audio_seconds). An
+    upload accepted at its start is transcribed, as a recording is
+    (#341)."""
+    node.upload_activity_at = datetime.utcnow()
+    db.session.commit()
+
+
+def _upload_chunk_too_large():
+    return jsonify({"error": "This piece of the file is larger than Loore "
+                             "accepts.",
+                    "code": "chunk_too_large"}), 413
+
+
+def _uploaded_bytes(chunk_dir, leave_out=None):
+    """Bytes of the pieces an upload has stored (chunk_NNNN), without the
+    piece *leave_out* (the copy a re-sent piece replaces)."""
+    total = 0
+    for path in chunk_dir.glob("chunk_*"):
+        if path.name == leave_out:
+            continue
+        try:
+            total += path.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+# The entry's transcription error when its upload did not arrive as its
+# init announced.
+UPLOAD_SIZE_MISMATCH_TEXT = (
+    "The file did not arrive complete. Please upload it again.")
+
+
+def _upload_size_mismatch(chunk_dir, node, upload_id):
+    """Refuse a finalize whose pieces do not add up to the announced file:
+    the pieces and their folder go, and the entry's transcription ends
+    failed with UPLOAD_SIZE_MISMATCH_TEXT."""
+    import shutil
+    current_app.logger.warning(
+        "Upload %s refused at finalize: its pieces do not match the size "
+        "its init announced", upload_id)
+    shutil.rmtree(chunk_dir, ignore_errors=True)
+    node.transcription_status = "failed"
+    node.transcription_error = UPLOAD_SIZE_MISMATCH_TEXT
+    db.session.commit()
+    return jsonify({"error": UPLOAD_SIZE_MISMATCH_TEXT,
+                    "code": "upload_size_mismatch"}), 400
+
+
 @nodes_bp.route("/upload/init", methods=["POST"])
 @login_required
 @require_spend_headroom
@@ -2740,6 +2861,15 @@ def init_chunked_upload():
     Creates a placeholder node and prepares for chunk reception. A capped
     user gets 402 before the node exists (#341); the chunks and finalize of
     an upload accepted here are not cap-checked.
+
+    ``filesize`` must be a whole number of bytes up to MAX_AUDIO_BYTES (413
+    ``file_too_large`` above it), and ``total_chunks`` a count its pieces
+    can come in: at least the pieces of MAX_UPLOAD_CHUNK_BYTES the file
+    needs, at most MAX_UPLOAD_CHUNKS and never more than the file has
+    bytes (400 ``invalid_upload_size`` otherwise; utils/recording_limits).
+    The chunks and finalize hold the upload to both.
+    429 ``too_many_uploads`` while MAX_UPLOADS_IN_PROGRESS uploads of the
+    account wait for their transcript.
 
     Request body:
     {
@@ -2782,9 +2912,16 @@ def init_chunked_upload():
     if not _allowed_file(filename):
         return jsonify({"error": "Unsupported file type"}), 415
 
-    # Validate file size
-    if filesize > MAX_AUDIO_BYTES:
-        return jsonify({"error": "File too large"}), 413
+    # Validate file size and the pieces it is sent in
+    err = _upload_declaration_error(filesize, total_chunks)
+    if err is not None:
+        return err
+    # Other uploads of the account still wait for their transcript
+    # (utils/recording_limits).
+    from backend.utils.recording_limits import too_many_uploads_response
+    too_many = too_many_uploads_response(current_user.id)
+    if too_many is not None:
+        return too_many
 
     # Validate privacy settings
     if not validate_privacy_level(privacy_level):
@@ -2819,6 +2956,7 @@ def init_chunked_upload():
 
     # Create placeholder node
     placeholder_text = "[Voice note – upload in progress]"
+    from backend.utils.recording_limits import upload_start_refusal
     from backend.utils.tokens import approximate_token_count as _atc3
     node = Node(
         user_id=current_user.id,
@@ -2826,11 +2964,16 @@ def init_chunked_upload():
         parent_id=system_node.id if system_node else parent_id,
         node_type=node_type,
         transcription_status='pending',
+        upload_activity_at=datetime.utcnow(),
         privacy_level=privacy_level,
         ai_usage=ai_usage,
         token_count=_atc3(placeholder_text),
     )
     node.set_content(placeholder_text)
+    # Counted again under the account's lock right before the insert.
+    refused = upload_start_refusal(current_user.id)
+    if refused is not None:
+        return refused
     db.session.add(node)
     db.session.commit()
 
@@ -2880,7 +3023,22 @@ def upload_chunk():
     - chunk_index: integer
     - upload_id: string
     - node_id: integer
+
+    Held to what the init announced (utils/recording_limits): the index
+    must be one of its pieces (400 ``chunk_index_out_of_range``) and the
+    node its entry (400 ``upload_mismatch``); a piece over
+    MAX_UPLOAD_CHUNK_BYTES (413 ``chunk_too_large``), or one that would take
+    the pieces past the announced file size (413 ``upload_too_large``), is
+    not stored. A re-sent piece replaces its earlier copy. An upload
+    with no activity for UPLOAD_COUNTS_FOR takes no more pieces (410
+    ``upload_expired``).
     """
+    from backend.utils.recording_limits import (
+        MAX_UPLOAD_CHUNK_BYTES, body_too_large,
+    )
+    # Larger than a piece can be: refused before the body is read.
+    if body_too_large(MAX_UPLOAD_CHUNK_BYTES):
+        return _upload_chunk_too_large()
     if "chunk" not in request.files:
         return jsonify({"error": "Missing chunk file"}), 400
 
@@ -2909,16 +3067,51 @@ def upload_chunk():
     # Save chunk
     if not chunk_dir.exists():
         return jsonify({"error": "Upload session not found"}), 404
+    # An upload that no longer counts takes no more pieces
+    # (utils/recording_limits.UPLOAD_COUNTS_FOR).
+    from backend.utils.recording_limits import (
+        UPLOAD_EXPIRED_TEXT, upload_expired,
+    )
+    if upload_expired(node):
+        return jsonify({"error": UPLOAD_EXPIRED_TEXT,
+                        "code": "upload_expired"}), 410
 
-    chunk_path = chunk_dir / f"chunk_{chunk_index:04d}"
-    chunk_file.save(chunk_path)
-
-    # Update metadata
     import json
     metadata_path = chunk_dir / "metadata.json"
     with open(metadata_path, "r") as f:
         metadata = json.load(f)
+    if metadata.get("node_id") != node_id:
+        return jsonify({"error": "This piece belongs to another upload",
+                        "code": "upload_mismatch"}), 400
+    if not 0 <= chunk_index < metadata["total_chunks"]:
+        return jsonify({"error": "This upload has no such piece",
+                        "code": "chunk_index_out_of_range"}), 400
 
+    # Stored under a name of its own, measured, then moved into place: a
+    # piece too large never replaces a good copy, and a re-sent piece's
+    # earlier copy is not counted twice.
+    import uuid
+    chunk_name = f"chunk_{chunk_index:04d}"
+    staged = chunk_dir / f"upload-{uuid.uuid4().hex}"
+    chunk_file.save(staged)
+    size = staged.stat().st_size
+    if size > MAX_UPLOAD_CHUNK_BYTES:
+        staged.unlink(missing_ok=True)
+        return _upload_chunk_too_large()
+    if _uploaded_bytes(chunk_dir, leave_out=chunk_name) + size \
+            > metadata["filesize"]:
+        staged.unlink(missing_ok=True)
+        return jsonify({
+            "error": "The pieces are larger than the file announced",
+            "code": "upload_too_large",
+        }), 413
+    os.replace(staged, chunk_dir / chunk_name)
+    # A piece renews the upload (utils/recording_limits.touch_upload).
+    from backend.utils.recording_limits import touch_upload
+    touch_upload(node.id)
+    db.session.commit()
+
+    # Update metadata
     if chunk_index not in metadata["uploaded_chunks"]:
         metadata["uploaded_chunks"].append(chunk_index)
         metadata["uploaded_chunks"].sort()
@@ -2951,6 +3144,16 @@ def finalize_chunked_upload():
     }
 
     Returns: node info (same as create_node endpoint)
+
+    An upload whose pieces do not add up to the size its init announced
+    is refused (400 ``upload_size_mismatch``): its pieces and the
+    assembled file are deleted, and its entry's transcription ends
+    ``failed`` (UPLOAD_SIZE_MISMATCH_TEXT). 400 ``upload_mismatch`` for a
+    node that is not the upload's entry.
+
+    An upload accepted at its start (where the monthly usage limit is
+    asked) is transcribed, as a recording is (#341); one with no activity
+    for UPLOAD_COUNTS_FOR is not finalized (410 ``upload_expired``).
     """
     data = request.get_json() or {}
     upload_id = data.get("upload_id")
@@ -2980,6 +3183,18 @@ def finalize_chunked_upload():
     metadata_path = chunk_dir / "metadata.json"
     with open(metadata_path, "r") as f:
         metadata = json.load(f)
+    if metadata.get("node_id") != node_id:
+        return jsonify({"error": "This entry belongs to another upload",
+                        "code": "upload_mismatch"}), 400
+    # An upload with no activity for a day is not finalized either
+    # (utils/recording_limits.UPLOAD_COUNTS_FOR): its start was checked
+    # against the usage limit a day ago.
+    from backend.utils.recording_limits import (
+        UPLOAD_EXPIRED_TEXT, upload_expired,
+    )
+    if upload_expired(node):
+        return jsonify({"error": UPLOAD_EXPIRED_TEXT,
+                        "code": "upload_expired"}), 410
 
     # Verify all chunks received
     expected_chunks = list(range(metadata["total_chunks"]))
@@ -2989,6 +3204,10 @@ def finalize_chunked_upload():
             "error": "Incomplete upload",
             "missing_chunks": list(missing)
         }), 400
+    # The pieces must hold the file the init announced, no more, no less;
+    # checked before anything is assembled.
+    if _uploaded_bytes(chunk_dir) != metadata["filesize"]:
+        return _upload_size_mismatch(chunk_dir, node, upload_id)
 
     # Reassemble chunks
     filename = metadata["filename"]
@@ -3007,14 +3226,23 @@ def finalize_chunked_upload():
             with open(chunk_path, "rb") as infile:
                 outfile.write(infile.read())
 
-    # Verify file size
+    # Verify file size (a piece re-sent while it was assembled)
     final_size = target_path.stat().st_size
     if final_size != metadata["filesize"]:
-        current_app.logger.error(
-            f"File size mismatch for upload {upload_id}: "
-            f"expected {metadata['filesize']}, got {final_size}"
-        )
-        # Don't fail - continue with transcription
+        target_path.unlink(missing_ok=True)
+        return _upload_size_mismatch(chunk_dir, node, upload_id)
+
+    # Measured before it is encrypted: its seconds count toward the
+    # account's usage at a start until its cost is recorded
+    # (utils/recording_limits.pending_audio_seconds).
+    # Written in this transaction (an UPDATE, so a re-read of the entry
+    # keeps it) and committed below with the file's URL, before the
+    # transcription is queued; `updated_at` stays (not an edit).
+    from backend.utils.recording_limits import finalized_upload_seconds
+    Node.query.filter(Node.id == node.id).update(
+        {Node.audio_pending_seconds: finalized_upload_seconds(target_path),
+         Node.updated_at: Node.updated_at},
+        synchronize_session=False)
 
     # Encrypt the assembled audio file at rest (URL stored without .enc)
     encrypt_file(str(target_path))
@@ -3048,6 +3276,7 @@ def finalize_chunked_upload():
         current_app.logger.warning(
             "Failed to clean up chunks for upload %s: %s",
             upload_id, describe_exception(e))
+    _hand_upload_to_transcription(node)
 
     # Enqueue transcription task
     api_key = get_openai_chat_key(current_app.config)
@@ -3078,7 +3307,10 @@ def finalize_chunked_upload():
 @nodes_bp.route("/upload/cleanup", methods=["POST"])
 @login_required
 def cleanup_chunked_upload():
-    """Clean up a failed/cancelled chunked upload.
+    """Clean up a failed/cancelled chunked upload. Its entry, still waiting
+    for its file, ends ``failed`` (UPLOAD_FAILED_TEXT), so it no longer
+    counts among the account's uploads in progress
+    (utils/recording_limits).
 
     Request body:
     {
@@ -3096,6 +3328,7 @@ def cleanup_chunked_upload():
 
     if chunk_dir.exists():
         import shutil
+        _fail_unfinished_upload(chunk_dir)
         try:
             shutil.rmtree(chunk_dir)
             current_app.logger.info(f"Cleaned up failed upload {upload_id}")
@@ -3163,6 +3396,14 @@ def init_streaming_transcription():
     err = assert_parent_alive(parent_id)
     if err is not None:
         return err
+    # This path's recordings wait for their transcript as entries, counted
+    # with the uploads (utils/recording_limits).
+    from backend.utils.recording_limits import (
+        too_many_uploads_response, upload_start_refusal,
+    )
+    too_many = too_many_uploads_response(current_user.id)
+    if too_many is not None:
+        return too_many
 
     # Generate session ID
     import uuid
@@ -3177,6 +3418,7 @@ def init_streaming_transcription():
         parent_id=parent_id,
         node_type=node_type,
         transcription_status='processing',
+        upload_activity_at=datetime.utcnow(),
         streaming_transcription=True,
         streaming_session_id=session_id,
         streaming_total_chunks=None,  # Unknown until recording stops
@@ -3186,6 +3428,10 @@ def init_streaming_transcription():
         token_count=_atc4(placeholder_text),
     )
     node.set_content(placeholder_text)
+    # Counted again under the account's lock right before the insert.
+    refused = upload_start_refusal(current_user.id)
+    if refused is not None:
+        return refused
     db.session.add(node)
     db.session.commit()
 
@@ -3236,6 +3482,19 @@ def upload_audio_chunk(node_id):
     if not node.streaming_transcription:
         return jsonify({"error": "Node is not in streaming transcription mode"}), 400
 
+    # The limits on one recording (utils/recording_limits), as on the
+    # draft path.
+    from backend.utils import recording_limits as limits
+    if limits.body_too_large(limits.MAX_STREAMING_CHUNK_BYTES):
+        return jsonify({"error": "This part of the recording is larger than "
+                                 "Loore accepts.",
+                        "code": "chunk_too_large"}), 413
+    # A recording on this path idle for UPLOAD_COUNTS_FOR
+    # takes no more audio.
+    if limits.upload_expired(node):
+        return jsonify({"error": "This recording has ended.",
+                        "code": "recording_expired"}), 410
+
     # Get form data
     if "chunk" not in request.files:
         return jsonify({"error": "Missing chunk file"}), 400
@@ -3253,6 +3512,11 @@ def upload_audio_chunk(node_id):
         chunk_index = int(chunk_index)
     except ValueError:
         return jsonify({"error": "Invalid chunk_index"}), 400
+    if chunk_index < 0:
+        return jsonify({"error": "Invalid chunk_index"}), 400
+    if chunk_index >= limits.MAX_STREAMING_CHUNKS:
+        return jsonify({"error": limits.LONGEST_RECORDING_TEXT,
+                        "code": "chunk_index_out_of_range"}), 400
 
     # Verify session ID matches
     if node.streaming_session_id != session_id:
@@ -3266,7 +3530,24 @@ def upload_audio_chunk(node_id):
 
     chunk_filename = f"chunk_{chunk_index:04d}.webm"
     chunk_path = chunk_dir / chunk_filename
-    chunk_file.save(chunk_path)
+    import uuid
+    staged = chunk_dir / f"upload-{uuid.uuid4().hex}.webm"
+    chunk_file.save(staged)
+    size = staged.stat().st_size
+    if size > limits.MAX_STREAMING_CHUNK_BYTES or (
+            limits.stored_bytes(chunk_dir, {chunk_filename,
+                                            f"{chunk_filename}.enc"}) + size
+            > limits.MAX_STREAMING_SESSION_BYTES):
+        staged.unlink(missing_ok=True)
+        too_large = size > limits.MAX_STREAMING_CHUNK_BYTES
+        return jsonify({
+            "error": ("This part of the recording is larger than Loore "
+                      "accepts." if too_large else
+                      "This recording is larger than Loore accepts."),
+            "code": "chunk_too_large" if too_large else "recording_too_large",
+        }), 413
+    os.replace(staged, chunk_path)
+    limits.touch_upload(node.id)
 
     # Encrypt the audio chunk at rest
     encrypted_path = encrypt_file(str(chunk_path))

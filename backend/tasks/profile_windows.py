@@ -899,7 +899,7 @@ def final_inputs_to_send(plan):
     return plan._sent
 
 
-def merge_plan(user, state, grouped=None):
+def merge_plan(user, state, grouped=None, redo_final=False):
     """The merges due now. Groups are fixed slices of the windows by time
     (1-30, 31-60, ...): a full slice that ends inside the leading run of
     saved windows (before the first gap or window in flight) is final, so
@@ -912,7 +912,12 @@ def merge_plan(user, state, grouped=None):
     and the same version of the user's. A final whose inputs are all
     skipped windows (a one-window build whose window was given up) is not
     sent: there is nothing to merge, and a merge of the skip note alone
-    would be saved as the user's profile (``nothing_read``)."""
+    would be saved as the user's profile (``nothing_read``).
+
+    ``redo_final``: plan the final even when the set's newest final is
+    current over these inputs (a pre-fill bundle's final written by another
+    model is merged again with this account's merge model, #698). Nothing
+    else changes: the same inputs, the user's versions, the same checks."""
     plan = MergePlan()
     from backend.utils.profile_versions import latest_set_final
     final = latest_set_final(user.id, state.set_id)
@@ -973,7 +978,8 @@ def merge_plan(user, state, grouped=None):
     tip = windows[-1]
     # The older rounds of the user's edits are older than ``version``, so
     # the version alone tells whether the final is current.
-    if (final is not None and final.parent_profile_id == tip.id
+    if (not redo_final and final is not None
+            and final.parent_profile_id == tip.id
             and final.merged_profile_id == (version.id if version else None)
             and all(final.created_at > p.created_at
                     for p in inputs + newest)):

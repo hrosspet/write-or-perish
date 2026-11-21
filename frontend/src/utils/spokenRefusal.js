@@ -23,6 +23,10 @@ export const SPEND_CAP_REFUSAL = 'monthly_spend_limit_reached';
 export const AI_USAGE_REFUSAL = 'ai_usage_none';
 export const APPROVAL_REFUSAL = 'approval_pending';
 export const LENGTH_REFUSAL = 'thread_too_long';
+// A Glean in a thread that has gleaned all of today's tweets (#717): the
+// refused gleaning's llm-status `error_code`. The Voice screen says it and
+// stays (pages/VoicePage).
+export const GLEAN_DAY_DONE_REFUSAL = 'glean_day_done';
 
 // Said aloud in Voice mode when a turn is refused for the thread's length.
 export const THREAD_LIMIT_SPOKEN = 'This thread is too long for another '
@@ -51,6 +55,8 @@ export const REFUSAL_SENTENCES = {
   [APPROVAL_REFUSAL]: 'A change to your data is waiting for your approval. '
     + 'Approve or reject it on the screen to continue.',
   [LENGTH_REFUSAL]: THREAD_LIMIT_SPOKEN,
+  [GLEAN_DAY_DONE_REFUSAL]: "You've gleaned through all of today's tweets. "
+    + 'New ones come in once a day.',
   ...ACCESS_ENDED_SENTENCES,
 };
 

@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
+import { signInPath } from "../utils/destination";
 
 // An invite followed, then a sign-in as someone it was not made for (#439;
 // Peter, 2026-11-13: "They should know the invitation was for somebody
@@ -76,12 +77,14 @@ export default function InviteMismatchPage() {
 
   const signInDifferently = async () => {
     setBusy(true);
+    let next = null;
     try {
-      await post("/auth/invite-choice/cancel");
+      const { data } = await post("/auth/invite-choice/cancel");
+      next = data.next_url;
     } catch (e) {
       // Nothing was made; the sign-in page is the way on either way.
     }
-    navigate("/login", { replace: true });
+    navigate(signInPath(next), { replace: true });
   };
 
   return (

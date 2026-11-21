@@ -990,9 +990,13 @@ class TestFailedCredentialsCheck:
             def get(self, *a, **k):
                 return self.resp
 
+        from backend.oauth import X_AUTHORIZED_SESSION_KEY
         client = app.test_client()
         with client.session_transaction() as sess:
+            # What X's callback leaves: the token, and the note that the
+            # next /auth/login is X's return.
             sess["twitter_oauth_token"] = {"oauth_token": "t", "oauth_token_secret": "s"}
+            sess[X_AUTHORIZED_SESSION_KEY] = True
         failing = SessionX(MagicMock(ok=False, status_code=401))
         with patch("backend.routes.auth.twitter", failing):
             first = client.get("/auth/login")
@@ -1118,8 +1122,11 @@ class TestConnectX:
         # someone signs in to it (e.g. the duplicate an earlier "Sign in
         # with X" made for this very person)
         ({"last_seen_at": "now"}, "taken"),
-        # set up ahead of its owner (whitelist / pre-fill), never signed in
-        ({}, "taken_placeholder"),
+        # set up ahead of its owner (whitelist / pre-fill), never signed in,
+        # but being deleted or blocked by the admin. One that is neither
+        # is offered to its owner (#714, test_prepared_account.py).
+        ({"deleted_at": "now"}, "taken_placeholder"),
+        ({"deactivated_at": "now"}, "taken_placeholder"),
         # predates the last-seen record: may be an early X signup
         ({"created_at": "2026-08-01"}, "taken"),
     ])

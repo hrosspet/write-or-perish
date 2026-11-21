@@ -753,6 +753,34 @@ def test_payments_on_a_blocked_account_is_not_synced(app, monkeypatch):
     assert dispatched == [user.id]
 
 
+def test_payments_on_an_account_marked_as_spam_is_not_synced(
+        app, monkeypatch):
+    """#713: while payments are on, the nightly sync skips an account the
+    gate let in that the admin then marked as spam, whatever its paid
+    set. Control: payments off, it is synced as before."""
+    from datetime import datetime
+    user = User.query.first()
+    user.timezone = _tz_at_hour(_sync_mod.NIGHTLY_SYNC_LOCAL_HOUR)
+    user.plan = "alpha"   # the paid set, by hand
+    user.approved = True
+    user.let_in_at = datetime.utcnow()   # let in by the gate, not by hand
+    user.spam = True
+    _db.session.commit()
+    _mk_account(user.id)
+    dispatched = []
+    fake_task = MagicMock()
+    fake_task.apply_async = lambda args, countdown: dispatched.append(args[0])
+    monkeypatch.setattr(_sync_mod, "sync_twitter_bookmarks", fake_task)
+
+    monkeypatch.setitem(_app.config, "PAYMENTS_ENABLED", True)
+    assert _sync_mod.sync_all_twitter_bookmarks() == {
+        "status": "ok", "dispatched": 0}
+    monkeypatch.setitem(_app.config, "PAYMENTS_ENABLED", False)
+    assert _sync_mod.sync_all_twitter_bookmarks() == {
+        "status": "ok", "dispatched": 1}
+    assert dispatched == [user.id]
+
+
 def test_successful_sync_logs_api_cost(app, monkeypatch):
     """X bills per returned POST, not per page (#271): one bookmark over
     two pages (the second empty) costs one post read, logged to

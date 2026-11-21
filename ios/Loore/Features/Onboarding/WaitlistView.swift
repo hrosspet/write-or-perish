@@ -275,7 +275,13 @@ struct PrefillConsentCard: View {
     @State private var error: String?
 
     var body: some View {
-        if let user = app.user, answered != nil || (user.twitterLogin && user.prefillConsent == nil) {
+        if let user = app.user, let point = user.startingPoint, point.isUnderWay {
+            // After a Yes the server looks for material Loore prepared for
+            // this X account (#698); while it looks or loads, the card
+            // follows it, also after a relaunch.
+            StartingPointCard(initial: point.status,
+                              noted: AccountModel.tweetSeedNoted(user, answer: .yes))
+        } else if let user = app.user, answered != nil || (user.twitterLogin && user.prefillConsent == nil) {
             VStack(alignment: .leading, spacing: 0) {
                 Eyebrow(text: eyebrow).padding(.bottom, 16)
                 if let answered {
@@ -330,6 +336,126 @@ struct PrefillConsentCard: View {
                 self.error = "Couldn't save your answer. Please try again."
             }
             busy = nil
+        }
+    }
+}
+
+/// "Preparing your starting point…" (web `StartingPointProgress`, #698). After a
+/// Yes the server looks, in the background, for material Loore prepared for the
+/// person's X account (their public tweets and the profile drafted from them):
+/// while it looks, the card shows its usual line; while it loads, it says so; when
+/// it is ready the app reloads who the person is (now let in) and opens their
+/// profile, without a relaunch.
+struct StartingPointCard: View {
+    let noted: String?
+    @Environment(AppState.self) private var app
+    @State private var model: StartingPointModel?
+    private let initial: String
+
+    init(initial: String, noted: String?) {
+        self.initial = initial
+        self.noted = noted
+    }
+
+    var body: some View {
+        let status = model?.status ?? initial
+        Group {
+            if status == "checking" || status == "none" {
+                if let noted {
+                    Text(noted)
+                        .font(LooreFont.body)
+                        .foregroundStyle(LooreColor.textSecondary)
+                        .lineSpacing(5)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .looreCard(padding: EdgeInsets(top: 32, leading: 30, bottom: 32, trailing: 30))
+                        .frame(maxWidth: 460)
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(StartingPointModel.title(status))
+                        .font(LooreFont.serif(21.6, .light))
+                        .foregroundStyle(LooreColor.textPrimary)
+                        .padding(.bottom, 13)
+                    Text(StartingPointModel.text(status))
+                        .font(LooreFont.body)
+                        .foregroundStyle(LooreColor.textSecondary)
+                        .lineSpacing(5)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .looreCard(padding: EdgeInsets(top: 32, leading: 30, bottom: 32, trailing: 30))
+                .frame(maxWidth: 460)
+                .accessibilityElement(children: .combine)
+            }
+        }
+        .task {
+            let watcher = StartingPointModel(app: app, initial: initial)
+            model = watcher
+            await watcher.run()
+        }
+    }
+}
+
+/// The polling behind `StartingPointCard`: `GET /api/dashboard/starting-point`
+/// every few seconds until the material is ready (reload the user, open the
+/// profile), failed, or not there.
+@MainActor
+@Observable
+final class StartingPointModel {
+    /// How often the card asks (web `STARTING_POINT_POLL_MS`).
+    static let pollSeconds: Double = 3
+
+    private(set) var status: String
+    private let app: AppState
+
+    init(app: AppState, initial: String) {
+        self.app = app
+        status = initial
+    }
+
+    static func title(_ status: String) -> String {
+        switch status {
+        case "failed": return "Your starting point isn't ready yet."
+        case "ready": return "Your starting point is ready."
+        default: return "Preparing your starting point…"
+        }
+    }
+
+    static func text(_ status: String) -> String {
+        switch status {
+        case "failed":
+            return "Something went wrong while bringing it in. We've been alerted and will set it up for you."
+        case "ready":
+            return "Your public tweets and the profile drafted from them are in your Loore."
+        default:
+            return "Your public tweets and the profile drafted from them are on their way into your Loore. "
+                + "This can take a few minutes; your profile opens here when it's ready."
+        }
+    }
+
+    /// One check. False when there is nothing more to wait for.
+    func checkOnce() async -> Bool {
+        guard let answer: StartingPointResponse = try? await app.api.get(APIPath.startingPoint, poll: true) else {
+            return true   // a missed check is retried on the next tick
+        }
+        let next = answer.startingPoint?.status ?? "none"
+        if next == "ready" && answer.approved {
+            status = "ready"
+            // Who am I: the person is let in now, so the app leaves the
+            // waitlist; then their profile.
+            await app.loadUser()
+            app.open(.profile)
+            return false
+        }
+        status = next
+        return next == "checking" || next == "preparing"
+    }
+
+    func run() async {
+        while !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: UInt64(Self.pollSeconds * 1_000_000_000))
+            if Task.isCancelled { return }
+            let more = await checkOnce()
+            if !more { return }
         }
     }
 }

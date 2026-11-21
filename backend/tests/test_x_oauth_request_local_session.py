@@ -39,13 +39,18 @@ def _x_response(payload):
 def test_overlapping_x_logins_do_not_share_a_token(app, b_has_token):
     v_user = _add(username="v", twitter_id="1001", approved=True)
     b_user = _add(username="b", twitter_id="2002", approved=True)
+    from backend.oauth import X_AUTHORIZED_SESSION_KEY
     v = app.test_client()
     b = app.test_client()
+    # Each just back from X: the token X's callback stored, and its note
+    # that the next /auth/login is X's return.
     with v.session_transaction() as s:
         s["twitter_oauth_token"] = {"oauth_token": "ACCESS-V", "oauth_token_secret": "sv"}
+        s[X_AUTHORIZED_SESSION_KEY] = True
     if b_has_token:
         with b.session_transaction() as s:
             s["twitter_oauth_token"] = {"oauth_token": "ACCESS-B", "oauth_token_secret": "sb"}
+            s[X_AUTHORIZED_SESSION_KEY] = True
     state = {"nested": False, "calls": []}
 
     def fake_send(self, prep, **kw):

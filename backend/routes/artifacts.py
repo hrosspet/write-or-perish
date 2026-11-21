@@ -152,13 +152,28 @@ def get_artifact(kind):
 def artifact_viewed(kind):
     """View ping from the artifacts page (once per kind per visit) — feeds
     the admin Activity tab. Fire-and-forget on the client; errors here
-    must never surface to the user."""
+    must never surface to the user.
+
+    Only a name Loore defines is stored (UserArtifact.SYSTEM_KINDS). A
+    view of an artifact the user created is stored by its id, never its
+    name, and a name the user has no artifact under is not stored at
+    all (Peter, 2026-11-20: only the user sees the names of the
+    artifacts they create)."""
     from backend.models import ArtifactView
     kind = (kind or "").strip()[:48]
     if not kind:
         return "", 204
     try:
-        db.session.add(ArtifactView(user_id=current_user.id, kind=kind))
+        if kind in UserArtifact.SYSTEM_KINDS:
+            view = ArtifactView(user_id=current_user.id, kind=kind)
+        else:
+            artifact_id = UserArtifact.first_live_id(current_user.id, kind)
+            if artifact_id is None:
+                return "", 204
+            view = ArtifactView(user_id=current_user.id,
+                                kind=ArtifactView.USER_CREATED,
+                                artifact_id=artifact_id)
+        db.session.add(view)
         db.session.commit()
     except Exception:
         db.session.rollback()

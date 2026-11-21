@@ -6,6 +6,8 @@ from sqlalchemy.exc import IntegrityError
 from backend.models import User
 from backend.extensions import db
 from flask_dance.contrib.twitter import twitter
+from backend.oauth import X_AUTHORIZED_SESSION_KEY, X_RETURN_SESSION_KEY
+from backend.utils.destination import safe_destination
 from flask import session
 from backend.utils.magic_link import (
     generate_magic_link_token, verify_magic_link_token,
@@ -24,21 +26,10 @@ auth_bp = Blueprint("auth_bp", __name__)
 
 
 def is_safe_redirect_url(target):
-    """
-    Validate that the redirect URL is safe (relative path only).
-    Prevents open redirect vulnerabilities.
-    """
-    if not target:
-        return False
-    # Must start with / and not // (which would be protocol-relative)
-    if not target.startswith('/') or target.startswith('//'):
-        return False
-    # Parse the URL to check for any tricks
-    parsed = urlparse(target)
-    # Ensure no scheme or netloc (hostname)
-    if parsed.scheme or parsed.netloc:
-        return False
-    return True
+    """True when *target* is a page inside Loore that a sign-in (or a sign-
+    out) may send the browser to: backend/utils/destination.py, the one
+    check for every such path, with its twin on the web (#704)."""
+    return safe_destination(target) is not None
 
 
 def _confirm_email_flow_redirect(next_url):
@@ -135,10 +126,17 @@ def _connect_x(user, twitter_id, screen_name):
         return _account_redirect("other_x")
     holder = User.query.filter_by(twitter_id=twitter_id).first()
     if holder is not None:
-        _drop_x_token()
         # An account set up ahead of its owner (admin whitelist, pre-fill)
         # that nobody has signed in to: the owner is the person in front of
-        # us, and joining the two is a job for an admin, not an error.
+        # us (#714). The X id stays where it is, and so does this session's
+        # X token, the proof; the person chooses whether to open that
+        # account (utils/prepared_accounts).
+        from backend.utils import prepared_accounts
+        if prepared_accounts.is_prepared(holder):
+            return redirect(prepared_accounts.offer(
+                user, holder, twitter_id, screen_name))
+        _drop_x_token()
+        # One being deleted, or blocked by the admin: nothing to open now.
         from backend.utils.activity import sign_in_status
         placeholder = sign_in_status(holder) == "never"
         return _account_redirect("taken_placeholder" if placeholder else "taken")
@@ -167,6 +165,80 @@ def _connect_x(user, twitter_id, screen_name):
         # tells the old one, in case the session was not the owner's.
         send_x_connected_notice(user.email, screen_name)
     return _account_redirect("linked")
+
+
+# ── The prepared account Connect X found (#714) ──────────────────────────
+# The question behind /prepared-account: open the account prepared for the
+# X id this browser just proved, or stay. The work and its rules are in
+# utils/prepared_accounts.py. Not under /api: an account without a
+# subscription, or one still waiting for approval, reaches them too.
+
+_OFFER_EXPIRED = ("This question has expired. Use Sign in with X again to "
+                  "open the prepared account.")
+
+
+@auth_bp.route("/prepared-account", methods=["GET"])
+def prepared_account_question():
+    from backend.utils import prepared_accounts
+    found = prepared_accounts.current_offer()
+    if found is None:
+        return jsonify({"error": _OFFER_EXPIRED, "code": "expired"}), 410
+    data, user, prepared = found
+    return jsonify(prepared_accounts.describe(user, prepared, data["handle"]))
+
+
+@auth_bp.route("/prepared-account/open", methods=["POST"])
+def open_prepared_account():
+    """Open the prepared account: sign in to it as Sign in with X would,
+    deleting the email account on the way when the question said so.
+    Body: {"delete_this_account": bool}, what the question showed.
+    {"redirect": url}; 410 without the X proof, 409 when something changed,
+    503 when a trial could not be ended at Stripe."""
+    from backend.utils import prepared_accounts
+    found = prepared_accounts.current_offer()
+    if found is None:
+        return jsonify({"error": _OFFER_EXPIRED, "code": "expired"}), 410
+    data, user, prepared = found
+    body = request.get_json(silent=True)
+    body = body if isinstance(body, dict) else {}
+    try:
+        result = prepared_accounts.open_prepared(
+            user, prepared, twitter_id=data["twitter_id"],
+            delete_this_account=body.get("delete_this_account") is True)
+    except prepared_accounts.MoveRefused as e:
+        if e.code == "not_prepared":
+            prepared_accounts.forget()
+        return jsonify({"error": e.message, "code": e.code}), 409
+    except Exception as e:  # noqa: BLE001 - Stripe unreachable, mostly
+        # Ending a trial comes first, so a failure there changed nothing;
+        # a later one is rolled back, and a retry finds the trial ended.
+        db.session.rollback()
+        logger.error("Opening the prepared account %s for user %s failed: %s",
+                     prepared.id, user.id, type(e).__name__)
+        return jsonify({"error": "Could not open the prepared account now. "
+                                 "Please try again in a moment.",
+                        "code": "unavailable"}), 503
+    prepared_accounts.drop_offer()
+    logout_user()
+    # Where the email account was going is not where this sign-in goes.
+    session.pop('next_url', None)
+    redirect_to = _finish_x_sign_in(
+        prepared, False, session.pop(referrals.SESSION_KEY, None),
+        data["handle"])
+    if result["email_moved"]:
+        # A new way into the prepared account: tell the address, as
+        # Connect X does.
+        send_x_connected_notice(result["email_moved"], data["handle"])
+    return jsonify({"redirect": redirect_to})
+
+
+@auth_bp.route("/prepared-account/stay", methods=["POST"])
+def stay_in_this_account():
+    """Stay in the email account: forget the offer and the X token, so the
+    next Connect X asks X again."""
+    from backend.utils import prepared_accounts
+    prepared_accounts.forget()
+    return jsonify({"ok": True})
 
 
 def _pop_connect_intent():
@@ -198,8 +270,37 @@ def refuse_x_callback():
     exchanges it). Nothing is stored and a pending Connect X is dropped."""
     if _pop_connect_intent():
         return _account_redirect("failed")
+    return _back_to_sign_in("x_try_again")
+
+
+def _back_to_sign_in(error):
+    """The sign-in page again, with *error* and the page this browser's
+    X sign-in started on (#704), which waited in the session: the next try
+    (with X or by email) still returns there."""
     frontend_url = current_app.config.get("FRONTEND_URL", "")
-    return redirect(f"{frontend_url}/login?error=x_try_again")
+    url = f"{frontend_url}/login?error={error}"
+    next_url = session.pop('next_url', None)
+    if is_safe_redirect_url(next_url):
+        url += f"&returnUrl={quote(next_url, safe='')}"
+    return redirect(url)
+
+
+def _remember_destination(starting):
+    """The X sign-in's destination (#704), kept in the session through the
+    round trip to X. A request that names one (`next`, from the sign-in
+    page) replaces what an earlier sign-in left; one that is not a page
+    inside Loore is dropped. A sign-in *starting* without one forgets an
+    earlier one, which an abandoned trip to X would otherwise hand to the
+    next sign-in in this browser. X's callback names none, and must keep
+    it."""
+    if 'next' in request.args:
+        next_url = request.args.get('next')
+        if is_safe_redirect_url(next_url):
+            session['next_url'] = next_url
+            return
+        session.pop('next_url', None)
+    elif starting:
+        session.pop('next_url', None)
 
 
 @auth_bp.route("/x/connect")
@@ -217,18 +318,49 @@ def x_connect():
     session[X_CONNECT_SESSION_KEY] = {"user_id": current_user.id}
     # A token left from an earlier X sign-in in this browser would skip X
     # and connect whichever X account that was; ask X which one instead.
+    # A question about a prepared account still waiting (#714) is asked
+    # again when this round trip comes back.
+    from backend.utils import prepared_accounts
+    prepared_accounts.forget()
     _drop_x_token()
     return redirect(url_for("twitter.login"))
 
 
+def _forget_prepared_question(connecting):
+    """The question about a prepared account (#714) keeps X's token for
+    that account only for its own answer. Any way through /auth/login but
+    the Connect X return that asks it (a new sign-in starting, an old tab,
+    a link) drops both first, so that token never signs anyone in; Connect
+    X asks again from the start."""
+    from backend.utils import prepared_accounts
+    if not connecting and prepared_accounts.has_offer():
+        prepared_accounts.forget()
+
+
 @auth_bp.route("/login")
 def login():
-    # Capture the 'next' parameter for post-login redirect
-    next_url = request.args.get('next')
-    if next_url and is_safe_redirect_url(next_url):
-        session['next_url'] = next_url
+    # X sent the browser back here without a token: Cancel on X's page, or
+    # an error (backend/oauth.py). A sign-in started from a page names
+    # `next`; a return from X never does.
+    returned = session.pop(X_RETURN_SESSION_KEY, None)
+    # X's callback stored a token for this return (backend/oauth.py).
+    from_x = session.pop(X_AUTHORIZED_SESSION_KEY, None)
+    if 'next' in request.args:
+        returned = from_x = None
+    if not from_x:
+        # Anything else starts a sign-in, and Sign in with X always starts
+        # a fresh round trip to X: a token an earlier X sign-in in this
+        # browser left in the session is dropped, never reused, and so is
+        # an unanswered offer from an earlier sign-in. Before anything
+        # reads twitter.authorized: flask-dance keeps a token it has loaded
+        # for the rest of the request.
+        _drop_x_token()
+        _forget_unanswered_offers()
+    # Where the sign-in started (#704), kept through the round trip to X.
+    _remember_destination(starting=not returned and not twitter.authorized)
 
     connecting = _pop_connect_intent()
+    _forget_prepared_question(connecting)
     # An invite code (#439) waits in the session through the round trip
     # to X (OAuth comes back to the browser that started it); it counts
     # when the X account that comes back is the one the invite names.
@@ -242,6 +374,11 @@ def login():
             # here without a token means X sent the person back without one
             # (they cancelled). Starting over would open X's page again.
             return _account_redirect("cancelled")
+        if returned:
+            # Starting over would open X's page again (#704): back to the
+            # sign-in page, still on the way to where it started.
+            return _back_to_sign_in(
+                "x_cancelled" if returned == "cancelled" else "x_failed")
         # If not authorized, start the OAuth flow.
         return redirect(url_for("twitter.login"))
 
@@ -307,7 +444,28 @@ def _counts_as_new(user):
 # this browser's session, for as long as a sign-in link lasts, until the
 # person chooses: sign in differently (nothing was made) or continue
 # without the invitation (the account is made then, with no inviter).
+# Starting another sign-in in this browser forgets it, as signing in
+# differently does.
 INVITE_CHOICE_KEY = "invite_choice"
+
+
+def _forget_held_choice():
+    """Forget the sign-in held at the invite question; an X one's token
+    goes with it. What was held, or None."""
+    pending = session.pop(INVITE_CHOICE_KEY, None)
+    if isinstance(pending, dict) and pending.get("method") == "x":
+        _drop_x_token()
+    return pending
+
+
+def _forget_unanswered_offers():
+    """A new sign-in starts in this browser: what an earlier sign-in here
+    left waiting for an answer is forgotten. The question at the invite
+    (as "Sign in differently" does) and the offer to restore a deleted
+    account; going Back to either page finds nothing to answer."""
+    from backend.utils.account_deletion import RESTORE_SESSION_KEY
+    session.pop(RESTORE_SESSION_KEY, None)
+    _forget_held_choice()
 
 
 def _ask_about_invite(kind, pending):
@@ -368,6 +526,10 @@ def magic_link_send():
 
     if not is_valid_email(email):
         return jsonify({"error": "Please enter a valid email address."}), 400
+
+    # A new sign-in starts in this browser: an unanswered offer from an
+    # earlier sign-in here is forgotten.
+    _forget_unanswered_offers()
 
     if next_url and not is_safe_redirect_url(next_url):
         next_url = None
@@ -552,10 +714,12 @@ def invite_choice_cancel():
     while referrals are off."""
     if not referrals.referrals_enabled():
         return jsonify({"error": "Not found"}), 404
-    pending = session.pop(INVITE_CHOICE_KEY, None)
-    if isinstance(pending, dict) and pending.get("method") == "x":
-        _drop_x_token()
-    return jsonify({"ok": True})
+    pending = _forget_held_choice()
+    # The page the sign-in started on goes back with the answer, so the
+    # next sign-in still returns to it (#704).
+    held = pending.get("next_url") if isinstance(pending, dict) else None
+    return jsonify({"ok": True,
+                    "next_url": held if is_safe_redirect_url(held) else None})
 
 
 @auth_bp.route("/logout")
@@ -567,6 +731,8 @@ def logout():
     # back into the account that just signed out (shared devices).
     _drop_x_token()
     session.pop(X_CONNECT_SESSION_KEY, None)
+    from backend.utils.prepared_accounts import drop_offer
+    drop_offer()   # the X token went just above
     flash("Logged out successfully", "success")
     frontend_url = current_app.config.get("FRONTEND_URL")
     # "Sign out and use the other account" on /confirm-email comes back to

@@ -8,6 +8,10 @@ import { isSubscriptionRequiredError } from '../utils/subscription';
 import { isAiUsageRefusedError, aiUsageRefusalScope } from '../utils/aiUsage';
 import { isThreadTooLong } from '../utils/threadLength';
 import { isApprovalPendingError } from '../utils/toolApprovals';
+import {
+  boundRefusalMessage, finalRefusalMessage, isNotAnnouncedChunk,
+  isStartRefusal, TOO_MANY_RECORDINGS_MESSAGE, untranscribedMessage,
+} from '../utils/recordingLimits';
 import { onPageReturn } from '../utils/pageReturn';
 import { playErrorSound } from '../utils/errorSound';
 import { RECORDING_DEVICE_KEY, TAKEN_OVER_CODE } from '../utils/recordingDevice';
@@ -105,7 +109,10 @@ async function claimSession(sessionId, listedChunkCount) {
   } catch (err) {
     const code = err.response?.data?.code;
     console.warn('[StreamingTranscription] Claim refused:', code || err.message);
-    const refused = new Error(CLAIM_REFUSED_MESSAGES[code] || CLAIM_FAILED_MESSAGE);
+    // Continuing a recording that had stopped is checked as a start is
+    // (utils/recordingLimits): the server's words say why.
+    const refused = new Error(CLAIM_REFUSED_MESSAGES[code]
+      || finalRefusalMessage(err) || CLAIM_FAILED_MESSAGE);
     refused.fatal = true;
     throw refused;
   }
@@ -132,6 +139,11 @@ async function claimSession(sessionId, listedChunkCount) {
  * @param {Function} options.onTranscriptUpdate - Called with updated transcript text
  * @param {Function} options.onComplete - Called when transcription is complete
  * @param {Function} options.onError - Called on errors
+ * @param {Function} options.onLimitReached - Called once when the server
+ *   takes no more of the recording (past what one recording may hold,
+ *   utils/recordingLimits): the caller stops as on Stop, and the recording
+ *   is finalized with the chunks the server took. The server's words are
+ *   shown here.
  */
 export function useStreamingTranscription(options = {}) {
   const {
@@ -143,7 +155,10 @@ export function useStreamingTranscription(options = {}) {
     onTranscriptUpdate = null,
     onComplete = null,
     onError = null,
+    onLimitReached = null,
   } = options;
+  const onLimitReachedRef = useRef(onLimitReached);
+  onLimitReachedRef.current = onLimitReached;
 
   // State
   const [sessionState, setSessionState] = useState('idle'); // idle, initializing, recording, finalizing, complete, error
@@ -179,6 +194,9 @@ export function useStreamingTranscription(options = {}) {
   const totalChunksRef = useRef(0);
   const pendingUploadsRef = useRef([]); // Track in-flight upload promises
   const failedChunksRef = useRef([]); // Track chunks that failed all retries
+  // The first chunk the server refused as past what one recording may hold
+  // ({ sessionId, index }): the finalize announces no chunk from it on.
+  const limitRef = useRef(null);
   const onCompleteRef = useRef(onComplete);
   onCompleteRef.current = onComplete;
   // #320: true once this tab asked the server to finalize the session.
@@ -201,6 +219,9 @@ export function useStreamingTranscription(options = {}) {
   // names (`shift` from the listed chunk count); `settled` resolves false
   // when it was refused. Null for a session this tab started.
   const claimRef = useRef(null);
+  // "<session>:<code>" of the notices already shown that a recording's
+  // audio is kept without its text (utils/recordingLimits): once each.
+  const untranscribedNoticesRef = useRef(new Set());
 
   // #320: this tab stops recording a session it never finalized (reload,
   // close, navigating away, cancel): tell the server, so the session can
@@ -355,6 +376,30 @@ export function useStreamingTranscription(options = {}) {
           console.warn(`[StreamingTranscription] Session continued elsewhere: chunk ${chunkIndex} refused, not retrying`);
           return { success: false, fatalError: TAKEN_OVER_MESSAGE, sessionEnded: true };
         }
+        // Past what one recording may hold (utils/recordingLimits): the
+        // server holds every chunk before this one. The recording stops and
+        // is finalized with those.
+        const bound = boundRefusalMessage(err);
+        if (bound) {
+          console.warn(`[StreamingTranscription] Chunk ${chunkIndex} is past the recording's limit (${code}); not retrying`);
+          return { success: false, limit: bound };
+        }
+        // Past the count this recording's finalize announced: it was
+        // finished without this chunk. Not the bound; nothing to say, and
+        // not sent again.
+        if (isNotAnnouncedChunk(err)) {
+          console.warn(`[StreamingTranscription] Chunk ${chunkIndex} came after the finalize; dropped`);
+          return { success: false, dropped: true };
+        }
+        // A recording that had stopped and may not be continued (the
+        // account's bounds, the usage limit; utils/recordingLimits):
+        // retrying cannot help. The server keeps every chunk before this
+        // one; the recording stops here and can be recovered.
+        const refusal = finalRefusalMessage(err);
+        if (refusal) {
+          console.warn(`[StreamingTranscription] Chunk ${chunkIndex} refused (${code || err.response?.status}); not retrying`);
+          return { success: false, fatalError: refusal, sessionEnded: true };
+        }
 
         // Server rejected chunk 0 because it couldn't parse the format's
         // init segment. Retrying will yield the exact same bytes, so
@@ -385,6 +430,27 @@ export function useStreamingTranscription(options = {}) {
     return { success: false };
   }, []);
 
+  // The server refused chunk `chunkIndex` as past what one recording may
+  // hold: no chunk from it on is sent or announced at the finalize. Said
+  // once in the server's words; the caller stops as on Stop (unless Stop is
+  // under way), so the recording is finalized with the chunks the server took.
+  const reachedLimit = useCallback((sessionId, chunkIndex, message) => {
+    if (sessionIdRef.current !== sessionId) return;
+    const current = limitRef.current;
+    const first = !current || current.sessionId !== sessionId;
+    if (first || chunkIndex < current.index) {
+      limitRef.current = { sessionId, index: chunkIndex };
+    }
+    if (!first) return;
+    playErrorSound();
+    addToast(message, 10000);
+    if (!finalizeRequestedRef.current && onLimitReachedRef.current) {
+      onLimitReachedRef.current(message);
+    }
+  }, [addToast]);
+  const reachedLimitRef = useRef(reachedLimit);
+  reachedLimitRef.current = reachedLimit;
+
   // Handle chunk upload
   const uploadChunk = useCallback(async (blob, recorderIndex) => {
     if (!sessionIdRef.current) {
@@ -404,11 +470,19 @@ export function useStreamingTranscription(options = {}) {
         if (!(await claim.settled)) return;
         chunkIndex += claim.shift;
       }
+      // Past the recording's limit: the server takes no more (the page
+      // keeps the audio for "Save audio").
+      const limit = limitRef.current;
+      if (limit && limit.sessionId === sessionId && chunkIndex >= limit.index) return;
       const result = await uploadChunkWithRetry(blob, chunkIndex, sessionId);
 
       if (result.success) {
         setUploadedChunks(prev => prev + 1);
         totalChunksRef.current = Math.max(totalChunksRef.current, chunkIndex + 1);
+      } else if (result.limit) {
+        reachedLimitRef.current(sessionId, chunkIndex, result.limit);
+      } else if (result.dropped) {
+        // The recording was finished without it (chunk_not_announced).
       } else if (result.fatalError && sessionIdRef.current !== sessionId) {
         // A late fatal answer for a session this tab no longer records
         // (a retry that outlived cancelStreaming) must not stop the
@@ -565,6 +639,19 @@ export function useStreamingTranscription(options = {}) {
       }
     },
     onError: (data) => {
+      // Audio kept without its text (a recording past the length one
+      // recording may have transcribed): the recording goes on and its
+      // text ends with a note. Said once per recording, with no error
+      // sound (utils/recordingLimits).
+      const keptMessage = untranscribedMessage(data?.code);
+      if (keptMessage) {
+        const key = `${sessionIdRef.current}:${data.code}`;
+        if (!untranscribedNoticesRef.current.has(key)) {
+          untranscribedNoticesRef.current.add(key);
+          addToast(keptMessage, 10000);
+        }
+        return;
+      }
       console.error('Transcription error:', data);
       playErrorSound();
       if (onError) {
@@ -690,6 +777,11 @@ export function useStreamingTranscription(options = {}) {
           if (result.success) {
             setUploadedChunks(prev => prev + 1);
             totalChunksRef.current = Math.max(totalChunksRef.current, chunkIndex + 1);
+          } else if (result.limit) {
+            // Past the recording's limit: not retried again.
+            reachedLimitRef.current(sessionId, chunkIndex, result.limit);
+          } else if (result.dropped) {
+            // The recording was finished without it: not retried again.
           } else if (result.sessionEnded) {
             // Ended or continued elsewhere while this tab was offline
             // (#320, #388): stop recording into it, as a first upload's
@@ -841,6 +933,16 @@ export function useStreamingTranscription(options = {}) {
         if (onError) onError(err);
         throw err;
       }
+      if (isStartRefusal(err)) {
+        // The account holds several open recordings (the server's limit,
+        // utils/recordingLimits):
+        // refused before any draft existed and before the mic opened. Shown
+        // in the server's words, by the parent as a start that failed.
+        try {
+          err.message = err.response.data.error || TOO_MANY_RECORDINGS_MESSAGE;
+          err.fatal = true;
+        } catch (_) { /* sealed error object */ }
+      }
       setSessionState('error');
       setErrorMessage(err.message);
       if (onError) {
@@ -877,25 +979,23 @@ export function useStreamingTranscription(options = {}) {
       // Always land in a terminal state. The error path here means recording
       // never started, so the session must not be left in 'recording' or
       // 'initializing' (which would strand the parent UI). 'error' is set
-      // below; permission denials with an orphaned draft are cleaned up first.
-      const name = err?.name || err?.error?.name;
-      const isPermissionDenial =
-        name === 'NotAllowedError' || name === 'PermissionDeniedError';
+      // below; an orphaned draft is cleaned up first.
 
-      // If initSession created a draft but recording could not start because
-      // the mic permission was denied, the draft is a dead streaming session
-      // (streaming_status='recording', zero chunks). Best-effort discard it so
-      // the "resume interrupted session" recovery banner — which lists drafts
-      // with streaming_status='recording' — doesn't later offer this empty,
-      // doomed session. The discard endpoint is keyed by session_id (not
-      // draft_id) and removes the draft, its chunk records, and audio dir.
-      // Failures here are non-fatal (network/permissions).
-      if (isPermissionDenial && initSucceeded && sessionIdRef.current) {
+      // If initSession created a draft but recording could not start (the
+      // mic permission denied, no microphone, the microphone held by
+      // another app, any other failure), the draft is a dead streaming
+      // session (streaming_status='recording', zero chunks): discard it, so
+      // the recovery banner doesn't later offer it and it doesn't count
+      // among the account's recent starts (backend/utils/recording_limits).
+      // The discard endpoint is keyed by session_id (not draft_id) and
+      // removes the draft, its chunk records, and audio dir. Failures here
+      // are non-fatal (network/permissions).
+      if (initSucceeded && sessionIdRef.current) {
         try {
           await api.delete(`/drafts/streaming/${sessionIdRef.current}/discard`);
-          console.log('[StreamingTranscription] Discarded orphaned draft after permission denial (session):', sessionIdRef.current);
+          console.log('[StreamingTranscription] Discarded orphaned draft after a failed start (session):', sessionIdRef.current);
         } catch (delErr) {
-          console.warn('[StreamingTranscription] Failed to discard orphaned draft after permission denial (non-fatal):', delErr?.message);
+          console.warn('[StreamingTranscription] Failed to discard orphaned draft after a failed start (non-fatal):', delErr?.message);
         }
       }
 
@@ -1019,8 +1119,14 @@ export function useStreamingTranscription(options = {}) {
       claimShift = claim.shift;
     }
 
-    // Get total chunks — should now include the final chunk
-    const totalChunks = getTotalChunks() + claimShift;
+    // Get total chunks — should now include the final chunk. Past the
+    // recording's limit, only the chunks the server took (it refuses a
+    // larger count).
+    let totalChunks = getTotalChunks() + claimShift;
+    const limit = limitRef.current;
+    if (limit && limit.sessionId === sessionIdRef.current) {
+      totalChunks = Math.min(totalChunks, limit.index);
+    }
     console.log(`[StreamingTranscription] All uploads settled. totalChunks=${totalChunks}, uploadedChunks=${totalChunksRef.current}`);
 
     // An upload came back saying the session was ended or continued
@@ -1110,6 +1216,7 @@ export function useStreamingTranscription(options = {}) {
     totalChunksRef.current = 0;
     pendingUploadsRef.current = [];
     failedChunksRef.current = [];
+    limitRef.current = null;
     claimRef.current = null;
     setClaimPending(false);
   }, [disconnectSSE, resetMediaRecorder, resetSSE, releaseIfAbandoned]);

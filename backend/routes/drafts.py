@@ -18,6 +18,9 @@ from backend.utils.audio_storage import (
 )
 from backend.utils.encryption import stage_encrypted_file
 from backend.utils.client_platform import request_client
+from backend.utils.recording_limits import (
+    LONGEST_RECORDING_TEXT, NOT_ANNOUNCED_TEXT,
+)
 from backend.utils.recording_device import (
     SessionBusy, claim_session, is_taken_over, is_taken_over_locked,
     lock_writer_key, request_device_key, session_busy_response,
@@ -606,8 +609,15 @@ def init_streaming():
     NO node is created until the user explicitly saves.
 
     A capped user gets 402 here, before the frontend opens the mic (#341).
-    Resuming an interrupted session never calls init, and its chunks
-    (audio-chunk, transcribe-remaining, finalize) are not cap-checked.
+    Resuming an interrupted session never calls init, and a session that
+    holds audio is never refused more audio for quiet time or the cap
+    (utils/recording_limits.audio_refusal).
+
+    429 ``too_many_recordings`` and no draft while the account holds
+    MAX_OPEN_RECORDINGS open recordings, counted under the account's lock
+    right before the draft is inserted (utils/recording_limits). A
+    recording accepted here is transcribed to its end, within the limits
+    on one recording.
 
     A Voice recording (label "Voice") where AI may not read gets 403
     ``{"error", "code": "ai_usage_none", "scope"}`` and no draft, so the
@@ -729,6 +739,13 @@ def init_streaming():
         streaming_device_key=device_key,
     )
     draft.set_content("")  # Will be populated as chunks are transcribed
+    # Counted under the account's lock right before the insert, so two
+    # starts at once cannot both pass (utils/recording_limits).
+    from backend.utils.recording_limits import recording_start_refusal
+    refused = recording_start_refusal(current_user.id, new=True,
+                                      usage=True)
+    if refused is not None:
+        return refused
     db.session.add(draft)
     db.session.commit()
 
@@ -762,6 +779,9 @@ def claim_streaming(session_id):
     409 session_live while another device or tab is recording the session,
     400 session_not_active once it is no longer recording, 404
     session_not_found. The same device may claim again (a retried claim).
+    A session without audio past EMPTY_SESSION_EXPIRES_AFTER (or
+    released), and one with audio inactive for a day, are continued only
+    past the checks of a start (utils/recording_limits.audio_refusal).
 
     Request body: { "device_key": "..." }
 
@@ -787,6 +807,15 @@ def claim_streaming(session_id):
             "code": "session_not_found",
         }), 404
     draft_id = draft.id
+
+    # A recording without audio whose time ran out, or one inactive for a
+    # day, is continued only past the checks of a start
+    # (utils/recording_limits.audio_refusal). Before the row lock below:
+    # the account's lock is always taken first, as a chunk upload does.
+    from backend.utils.recording_limits import audio_refusal
+    refused = audio_refusal(draft)
+    if refused is not None:
+        return refused
 
     # Locked: a keyed chunk upload being stored now finishes first, so the
     # count below includes it (recording_device.is_taken_over_locked). The
@@ -851,6 +880,68 @@ def _chunk_already_uploaded(chunk_index, chunk):
     }), 200
 
 
+# Answers for a chunk past the limits on one recording
+# (utils/recording_limits); audio accepted before stays.
+_CHUNK_TOO_LARGE = (
+    {"error": "This part of the recording is larger than Loore accepts.",
+     "code": "chunk_too_large"}, 413)
+_CHUNK_INDEX_OUT_OF_RANGE = (
+    {"error": LONGEST_RECORDING_TEXT,
+     "code": "chunk_index_out_of_range"}, 400)
+# A chunk past the count a finalizing recording announced: not the bound,
+# so a code of its own.
+_CHUNK_NOT_ANNOUNCED = (
+    {"error": NOT_ANNOUNCED_TEXT, "code": "chunk_not_announced"}, 400)
+_RECORDING_TOO_LARGE = (
+    {"error": ("This recording is larger than Loore accepts. Everything "
+               "before this part is saved."),
+     "code": "recording_too_large"}, 413)
+
+
+def _limit_response(answer):
+    body, status = answer
+    return jsonify(body), status
+
+
+def _recording_size_error(chunk_dir, chunk_index, size):
+    """The answer when *size* more bytes would take a recording past the
+    bytes one recording may store, else None. A re-sent chunk replaces its
+    earlier copy, which is not counted (utils/recording_limits)."""
+    from backend.utils import recording_limits as limits
+    replaced = {f"chunk_{chunk_index:04d}{ext}{enc}"
+                for ext in (".webm", ".mp4") for enc in ("", ".enc")}
+    if (limits.stored_bytes(chunk_dir, replaced) + size
+            > limits.MAX_STREAMING_SESSION_BYTES):
+        return _limit_response(_RECORDING_TOO_LARGE)
+    return None
+
+
+def _stored_chunk_size_error(upload_path, chunk_dir, chunk_index):
+    """The answer for a stored upload that is larger than a chunk may be,
+    or that would take its recording past the bytes one recording may
+    store; None when it fits. The quick check before the chunk is
+    encrypted; the recording's bytes are checked again under the draft
+    row's lock, right before its files are moved into place
+    (_staged_size_error)."""
+    from backend.utils import recording_limits as limits
+    size = upload_path.stat().st_size
+    if size > limits.MAX_STREAMING_CHUNK_BYTES:
+        return _limit_response(_CHUNK_TOO_LARGE)
+    return _recording_size_error(chunk_dir, chunk_index, size)
+
+
+def _staged_size_error(staged, chunk_dir, chunk_index):
+    """_recording_size_error for the files an upload staged (the chunk, and
+    its init segment when it carries one). Asked under the draft row's
+    lock, which every chunk of the recording takes before its files are
+    moved into place, so the chunks of one recording are counted one after
+    the other."""
+    size = 0
+    for encrypted, _final in staged:
+        size += pathlib.Path(encrypted).stat().st_size
+    return _recording_size_error(chunk_dir, chunk_index, size)
+
+
 @drafts_bp.route("/streaming/<session_id>/audio-chunk", methods=["POST"])
 @login_required
 def upload_streaming_chunk(session_id):
@@ -869,8 +960,32 @@ def upload_streaming_chunk(session_id):
     - device_key: optional, the recording device's key (#388); 409
       session_taken_over when another device continued the session.
 
+    Limits on one recording (utils/recording_limits; a recording of four
+    hours reaches MAX_STREAMING_CHUNKS, and the apps then stop and finalize
+    with the chunks taken): a chunk over MAX_STREAMING_CHUNK_BYTES gets 413
+    ``chunk_too_large``, a chunk_index from MAX_STREAMING_CHUNKS on 400
+    ``chunk_index_out_of_range`` (LONGEST_RECORDING_TEXT; below 0, 400
+    "Invalid chunk_index"), and a chunk
+    that would take the recording past MAX_STREAMING_SESSION_BYTES 413
+    ``recording_too_large``. Nothing of it is stored; the chunks accepted
+    before stay. A copy of a stored chunk is answered as before, and a
+    re-sent chunk is not counted twice. A recording that holds audio is
+    never refused a chunk for quiet time or the usage limit. The first
+    chunk of a recording without audio past EMPTY_SESSION_EXPIRES_AFTER (or
+    released) is a new start: 402 at the usage limit, 429 past the count;
+    a recording with audio inactive for a day must fit under the count
+    again (utils/recording_limits.audio_refusal). Once finalizing, only
+    the chunks it announced are taken (400 ``chunk_not_announced``, which
+    the apps do not treat as the bound).
+
     Returns: { "chunk_index": 0, "task_id": "celery-task-id" }
     """
+    from backend.utils import recording_limits
+    # Larger than a chunk can be: refused before the body is read.
+    if recording_limits.body_too_large(
+            recording_limits.MAX_STREAMING_CHUNK_BYTES):
+        return _limit_response(_CHUNK_TOO_LARGE)
+
     # Find the draft by session_id
     draft = Draft.query.filter_by(
         session_id=session_id,
@@ -899,6 +1014,14 @@ def upload_streaming_chunk(session_id):
             "code": "session_not_active",
         }), 400
 
+    # A recording that holds audio takes more whatever the gap (#341); the
+    # first audio of one without audio whose time ran out is a new start
+    # (utils/recording_limits.audio_refusal).
+    from backend.utils.recording_limits import audio_refusal
+    refused = audio_refusal(draft)
+    if refused is not None:
+        return refused
+
     # A chunk is the recording tab's sign of life (#320) — unless the tab
     # already released the session: an upload still in flight when the
     # tab left must not make it live again.
@@ -920,6 +1043,15 @@ def upload_streaming_chunk(session_id):
         chunk_index = int(chunk_index)
     except ValueError:
         return jsonify({"error": "Invalid chunk_index"}), 400
+    if chunk_index < 0:
+        return jsonify({"error": "Invalid chunk_index"}), 400
+    if chunk_index >= recording_limits.MAX_STREAMING_CHUNKS:
+        return _limit_response(_CHUNK_INDEX_OUT_OF_RANGE)
+    # Once finalizing, a recording takes only the chunks it announced.
+    if (draft.streaming_status == "finalizing"
+            and draft.streaming_total_chunks is not None
+            and chunk_index >= draft.streaming_total_chunks):
+        return _limit_response(_CHUNK_NOT_ANNOUNCED)
 
     # Normalize the chunk's mime to a family prefix; older frontends
     # without the field send WebM by definition.
@@ -969,6 +1101,11 @@ def upload_streaming_chunk(session_id):
     # lists those.)
     upload_path = chunk_dir / f"upload-{uuid.uuid4().hex}{ext}"
     chunk_file.save(upload_path)
+    # Measured once stored: a request may carry no Content-Length.
+    too_large = _stored_chunk_size_error(upload_path, chunk_dir, chunk_index)
+    if too_large is not None:
+        upload_path.unlink(missing_ok=True)
+        return too_large
 
     # The files this upload puts in place, as (encrypted file under a name
     # of its own, final path): the init segment when the chunk carries one,
@@ -1071,9 +1208,13 @@ def upload_streaming_chunk(session_id):
     # chunk's commit the draft row stays locked, so this chunk is stored
     # before a claim counts the chunks, or refused here, its files never
     # put in place (#388). Only quick steps until the commit: no KMS call
-    # or other network wait (recording_device.lock_writer_key).
+    # or other network wait (recording_device.lock_writer_key). A chunk
+    # without a device key takes the lock too: the recording's bytes are
+    # checked under it (below).
     try:
         taken_over = is_taken_over_locked(draft_id, device_key)
+        if device_key is None:
+            lock_writer_key(draft_id)
     except SessionBusy:
         _discard_staged(staged)
         return session_busy_response()
@@ -1093,6 +1234,13 @@ def upload_streaming_chunk(session_id):
         # stays, files included.
         _discard_staged(staged)
         return _chunk_already_uploaded(chunk_index, existing_chunk)
+
+    # The recording's bytes, counted again under the lock with the chunks
+    # moved into place since the check before encrypting.
+    too_large = _staged_size_error(staged, chunk_dir, chunk_index)
+    if too_large is not None:
+        _discard_staged(staged)
+        return too_large
 
     encrypted_path = _move_staged(staged)
     if session_mime:
@@ -1128,7 +1276,7 @@ def upload_streaming_chunk(session_id):
             return _chunk_already_uploaded(chunk_index, existing_chunk)
 
     # Check if we have enough stored chunks for a batch (20 × 15s = 5min)
-    BATCH_SIZE = 20
+    from backend.utils.recording_limits import BATCH_CHUNKS as BATCH_SIZE
     stored_chunks = NodeTranscriptChunk.query.filter_by(
         session_id=session_id,
         status='stored'
@@ -1258,6 +1406,11 @@ def finalize_streaming(session_id):
 
     if total_chunks is None:
         return jsonify({"error": "Missing total_chunks"}), 400
+    # A count no recording can have would keep the finalize task waiting
+    # for chunks that never come (utils/recording_limits).
+    from backend.utils.recording_limits import MAX_STREAMING_CHUNKS, int_in_range
+    if int_in_range(total_chunks, 0, MAX_STREAMING_CHUNKS) is None:
+        return jsonify({"error": "Invalid total_chunks"}), 400
 
     draft_id = draft.id
     # Locked from here to the commit, so a claim cannot slip in between the
@@ -1379,25 +1532,31 @@ def transcribe_remaining(session_id):
     chunk_indices = [c.chunk_index for c in stored_chunks]
 
     from backend.tasks.streaming_transcription import transcribe_chunk_batch
+    from backend.utils.recording_limits import BATCH_CHUNKS
 
-    task = transcribe_chunk_batch.delay(
-        session_id=session_id,
-        chunk_indices=chunk_indices
-    )
-
-    # Mark as processing
-    for c in stored_chunks:
-        c.status = 'processing'
-        c.task_id = task.id
+    # In batches of BATCH_CHUNKS, as the chunk route queues them; marked
+    # as processing.
+    task_ids = []
+    for start in range(0, len(stored_chunks), BATCH_CHUNKS):
+        batch = stored_chunks[start:start + BATCH_CHUNKS]
+        task = transcribe_chunk_batch.delay(
+            session_id=session_id,
+            chunk_indices=[c.chunk_index for c in batch]
+        )
+        for c in batch:
+            c.status = 'processing'
+            c.task_id = task.id
+        task_ids.append(task.id)
     db.session.commit()
 
     current_app.logger.info(
         f"Triggered transcribe-remaining for session {session_id}, "
-        f"chunks {chunk_indices}, task {task.id}"
+        f"chunks {chunk_indices}, tasks {task_ids}"
     )
 
     return jsonify({
-        "task_id": task.id,
+        "task_id": task_ids[0],
+        "task_ids": task_ids,
         "chunk_count": len(chunk_indices),
         "chunk_indices": chunk_indices
     }), 202

@@ -516,8 +516,9 @@ Max width 600 px. H2 "Account", a section "Settings" (h3). Deep-link anchors `#e
      - `failed` "Could not read your X account. Please try again."
      - `other_x` "This account is already connected to a different X account."
      - `taken` "That X account already signs in to another Loore account, so it can't be connected here. If that account was made by accident, write to info@loore.org and we'll remove it so you can connect X here."
-     - `taken_placeholder` "An account was already set up for that X account, and no one has signed in to it yet. Write to info@loore.org and we'll join it with this one."
+     - `taken_placeholder` "An account was set up for that X account, but it can't be opened now. Write to info@loore.org." (one being deleted, or blocked by the admin)
      - Unknown values show nothing. The query parameter is then removed from the URL.
+   - An X id that belongs to a prepared account nobody has signed in to (#714) does not come back here: the flow ends on `{FRONTEND_URL}/prepared-account`, the web's question whether to open that account (`GET /auth/prepared-account`, `POST /auth/prepared-account/open` or `/stay`). Its answer needs the X proof held in the web session. The app's Connect X sheet closes on that page and says "Loore prepared an account for that X account. To open it, use Connect X in Settings on the Loore website."
    - Helper when not connected: "Lets you sign in with X as well. X will ask you to allow Loore."
    - **iOS:** this OAuth flow depends on the Flask session cookie (`session['x_connect']`, then flask-dance). `ASWebAuthenticationSession` does not share the app's `URLSession` cookies. Options:
      - (a) Copy the session cookie into the auth session. Not possible with ASWebAuthenticationSession.

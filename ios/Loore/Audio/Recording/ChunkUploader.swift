@@ -24,6 +24,14 @@ import os
 ///   deleted at once); so is `session_taken_over` (#388: another device
 ///   continued the session, which no longer takes this phone's chunks). Other
 ///   4xx answers are given up without retry.
+/// - A chunk past what one recording may hold (`chunk_index_out_of_range`,
+///   `recording_too_large`, `chunk_too_large`; backend/utils/recording_limits)
+///   ends the session's uploads there: it and every later chunk are `beyond`,
+///   never sent again (not at Stop, not after a relaunch), and their files are
+///   deleted. The chunks before stay, so the caller finalizes with them
+///   (`onLimit`, `Outcome.totalForFinalize`). A chunk that came after the
+///   finalize (`chunk_not_announced`) is not the bound: it alone is `beyond`,
+///   and nothing is said.
 /// - A relaunch resumes whatever is left (`resumePending()`); sign-out deletes
 ///   the whole queue (`reset()`).
 @MainActor
@@ -36,7 +44,9 @@ final class ChunkUploader: NSObject {
     /// chunk no other client is offered the session.
     static let serverLiveWindow: TimeInterval = 45
 
-    enum ChunkStatus: String, Codable { case pending, stored, failed, fatal }
+    /// `beyond`: refused for good (past what one recording may hold, or after
+    /// the recording's finalize); never sent again.
+    enum ChunkStatus: String, Codable { case pending, stored, failed, fatal, beyond }
 
     struct ChunkRecord: Codable, Equatable {
         var index: Int
@@ -60,6 +70,10 @@ final class ChunkUploader: NSObject {
         /// for that chunk, so an age measured from it is never less than the
         /// server's (`mayRelease`).
         var lastUploadAt: Date?
+        /// The first chunk refused as past what one recording may hold (nil
+        /// until then, and in manifests from earlier builds): no chunk from it
+        /// on is sent.
+        var limitFrom: Int?
     }
 
     /// What `settle` reports before finalize.
@@ -67,16 +81,21 @@ final class ChunkUploader: NSObject {
         var produced: Int
         var stored: Int
         /// Chunks the server does not have (given up, or held back behind a
-        /// missing chunk 0). Non-empty = do not finalize.
+        /// missing chunk 0). Non-empty = do not finalize. Chunks refused past
+        /// the recording's limit are not among them (`beyond`).
         var failed: [Int]
         var fatalMessage: String?
         /// Chunks stored before this recording resumed the session (web `existingChunkCount`).
         var prior = 0
+        /// Chunks refused as past what one recording may hold: never sent, and
+        /// not counted at finalize.
+        var beyond = 0
 
         /// `total_chunks` for finalize: the session's chunk count, counting only
         /// the stored ones when some were given up (otherwise the server waits
-        /// 10 minutes for them, C §10.4).
-        var totalForFinalize: Int { prior + (failed.isEmpty ? produced : stored) }
+        /// 10 minutes for them, C §10.4) or refused past the recording's limit
+        /// (the server takes no count above it).
+        var totalForFinalize: Int { prior + (failed.isEmpty ? produced - beyond : stored) }
     }
 
     /// Sends one prepared upload; injectable for tests.
@@ -94,6 +113,18 @@ final class ChunkUploader: NSObject {
     var now: () -> Date = Date.init
     /// Called once when a session hits a fatal error.
     var onFatal: ((String, String) -> Void)?
+    /// Called once per session when the server refuses its audio for the
+    /// usage limit or the account's open recordings (402, 429; a recording
+    /// that held no audio for too long, backend/utils/recording_limits),
+    /// with the server's words. The audio stays on the phone and is sent
+    /// again later (a relaunch, the next chunk of a continued recording).
+    var onRefused: ((String, String) -> Void)?
+    private var refusalsSaid: Set<String> = []
+    /// Called once per session when the server refuses a chunk as past what one
+    /// recording may hold, with its words (session id, message). The chunks
+    /// before it are on the server; the caller stops and finalizes.
+    var onLimit: ((String, String) -> Void)?
+    private var limitsSaid: Set<String> = []
     /// Called when a background relaunch finished its events.
     var backgroundCompletionHandler: (() -> Void)?
 
@@ -167,6 +198,15 @@ final class ChunkUploader: NSObject {
         }
         // A dead session (fatal answer): its audio is not kept.
         if manifest.chunks.values.contains(where: { $0.status == .fatal }) { return }
+        // Past the recording's limit: the server takes no more, so nothing is
+        // written or sent (dictation keeps its own copy for "Save audio").
+        if let limit = manifest.limitFrom, chunk.index >= limit {
+            manifest.chunks[chunk.index] = ChunkRecord(index: chunk.index, status: .beyond,
+                                                       contentType: "", bytes: chunk.data.count)
+            manifests[sessionId] = manifest
+            persist(sessionId)
+            return
+        }
         var form = MultipartFormData()
         form.addFile("chunk", filename: "chunk_\(chunk.index).mp4", mimeType: "audio/mp4", data: chunk.data)
         form.addField("chunk_index", String(chunk.index))
@@ -213,9 +253,11 @@ final class ChunkUploader: NSObject {
         let fatal = chunks.contains { $0.status == .fatal }
         return Outcome(produced: chunks.count,
                        stored: chunks.filter { $0.status == .stored }.count,
-                       failed: chunks.filter { $0.status != .stored }.map(\.index).sorted(),
+                       failed: chunks.filter { $0.status != .stored && $0.status != .beyond }
+                           .map(\.index).sorted(),
                        fatalMessage: fatal ? fatalMessages[sessionId] : nil,
-                       prior: manifests[sessionId]?.firstIndex ?? 0)
+                       prior: manifests[sessionId]?.firstIndex ?? 0,
+                       beyond: chunks.filter { $0.status == .beyond }.count)
     }
 
     /// Forgets a session and deletes its files (after finalize, or on discard).
@@ -225,6 +267,7 @@ final class ChunkUploader: NSObject {
         manifests[sessionId] = nil
         fatalMessages[sessionId] = nil
         degraded.remove(sessionId)
+        limitsSaid.remove(sessionId)
         try? fileManager.removeItem(at: directory(for: sessionId))
     }
 
@@ -304,6 +347,8 @@ final class ChunkUploader: NSObject {
         workers = [:]
         manifests = [:]
         fatalMessages = [:]
+        refusalsSaid = []
+        limitsSaid = []
         degraded = []
         if useBackgroundSession {
             backgroundSession.getAllTasks { tasks in tasks.forEach { $0.cancel() } }
@@ -350,7 +395,7 @@ final class ChunkUploader: NSObject {
         return record.status != .stored
     }
 
-    private enum AttemptResult { case stored, retry, giveUp, fatal(String) }
+    private enum AttemptResult { case stored, retry, giveUp, fatal(String), refused(String), limit(String), dropped }
 
     private func upload(_ sessionId: String, index: Int) async {
         var attempt = 0
@@ -368,6 +413,16 @@ final class ChunkUploader: NSObject {
                 return
             case .giveUp:
                 mark(sessionId, index, .failed)
+                return
+            case .refused(let message):
+                mark(sessionId, index, .failed)
+                sayRefusal(sessionId, message)
+                return
+            case .limit(let message):
+                reachedLimit(sessionId, from: index, message)
+                return
+            case .dropped:
+                drop(sessionId, index)
                 return
             case .retry:
                 if isInit && manifests[sessionId]?.closed == false {
@@ -394,6 +449,36 @@ final class ChunkUploader: NSObject {
         try? fileManager.removeItem(at: bodyFile(sessionId, index))
     }
 
+    private func sayRefusal(_ sessionId: String, _ message: String) {
+        guard !refusalsSaid.contains(sessionId) else { return }
+        refusalsSaid.insert(sessionId)
+        onRefused?(sessionId, message)
+    }
+
+    /// The server refused chunk `index` as past what one recording may hold: it
+    /// and every later chunk not stored are `beyond` (their files deleted, never
+    /// sent again), and the caller hears it once.
+    private func reachedLimit(_ sessionId: String, from index: Int, _ message: String) {
+        guard let manifest = manifests[sessionId] else { return }
+        for record in manifest.chunks.values where record.index >= index && record.status != .stored {
+            manifests[sessionId]?.chunks[record.index]?.status = .beyond
+            try? fileManager.removeItem(at: bodyFile(sessionId, record.index))
+        }
+        manifests[sessionId]?.limitFrom = min(manifest.limitFrom ?? index, index)
+        persist(sessionId)
+        log.info("chunk \(index) is past the recording's limit; no later chunk is sent")
+        guard !limitsSaid.contains(sessionId) else { return }
+        limitsSaid.insert(sessionId)
+        onLimit?(sessionId, message)
+    }
+
+    /// The recording was finished without this chunk (`chunk_not_announced`):
+    /// not sent again, and nothing is said.
+    private func drop(_ sessionId: String, _ index: Int) {
+        mark(sessionId, index, .beyond)
+        try? fileManager.removeItem(at: bodyFile(sessionId, index))
+    }
+
     private func failFatally(_ sessionId: String, _ index: Int, _ message: String) {
         mark(sessionId, index, .fatal)
         fatalMessages[sessionId] = message
@@ -409,9 +494,11 @@ final class ChunkUploader: NSObject {
     private func finalPass(_ sessionId: String) async {
         guard let manifest = manifests[sessionId],
               !manifest.chunks.values.contains(where: { $0.status == .fatal }) else { return }
-        let missing = manifest.chunks.values.filter { $0.status != .stored }.map(\.index).sorted()
+        let missing = manifest.chunks.values.filter { $0.status != .stored && $0.status != .beyond }
+            .map(\.index).sorted()
         for index in missing {
-            guard !Task.isCancelled, manifests[sessionId]?.chunks[index]?.status != .stored else { continue }
+            let status = manifests[sessionId]?.chunks[index]?.status
+            guard !Task.isCancelled, status != .stored, status != .beyond else { continue }
             let isInit = index == manifest.firstIndex
             guard fileManager.fileExists(atPath: bodyFile(sessionId, index).path) else {
                 if isInit { return }
@@ -423,7 +510,11 @@ final class ChunkUploader: NSObject {
             case .fatal(let message):
                 failFatally(sessionId, index, message)
                 return
-            case .giveUp, .retry:
+            case .limit(let message):
+                reachedLimit(sessionId, from: index, message)
+            case .dropped:
+                drop(sessionId, index)
+            case .giveUp, .retry, .refused:
                 mark(sessionId, index, .failed)
                 if isInit { return }
             }
@@ -462,8 +553,33 @@ final class ChunkUploader: NSObject {
         }
     }
 
+    /// The codes for a chunk past what one recording may hold
+    /// (backend/routes/drafts.py; web `utils/recordingLimits`): about four
+    /// hours, its bytes, or one chunk's size. Keyed on the code, never the words.
+    static let limitCodes: Set<String> = ["chunk_index_out_of_range", "recording_too_large", "chunk_too_large"]
+    /// A chunk past the count a finalizing recording announced: the recording
+    /// was finished without it. Not the bound: dropped, nothing said.
+    static let notAnnouncedCode = "chunk_not_announced"
+    /// The server's words at the four-hour bound (backend `LONGEST_RECORDING_TEXT`),
+    /// for an answer that carries none (web `LONGEST_RECORDING_MESSAGE`).
+    static let longestRecordingMessage = "This recording has reached the longest Loore takes, about four hours, and has stopped. Everything before this is saved."
+    /// For the other bounds' answers without words (web `RECORDING_LIMIT_MESSAGE`).
+    static let limitMessage = "This recording is larger than Loore accepts. Everything before this part is saved."
+
     /// Maps an upload answer (map C §2.3).
     private static func classify(status: Int, body: Data, index: Int) -> AttemptResult {
+        if status == 400 || status == 413 {
+            // Past what one recording may hold. Every chunk before it is on the
+            // server; at the four hours and the bytes no later chunk is taken
+            // either, and at one chunk's size the recording stops all the same.
+            let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+            let code = json?["code"] as? String
+            if let code, limitCodes.contains(code) {
+                let words = (json?["error"] as? String).flatMap { $0.contains(" ") ? $0 : nil }
+                return .limit(words ?? (code == "chunk_index_out_of_range" ? longestRecordingMessage : limitMessage))
+            }
+            if code == notAnnouncedCode { return .dropped }
+        }
         switch status {
         case 200..<300:
             return .stored
@@ -483,6 +599,15 @@ final class ChunkUploader: NSObject {
             return .retry
         case 401, 403, 404, 413, 422:
             return .giveUp
+        case 402, 429:
+            // A recording that held no audio for too long, refused as a new
+            // start would be: the usage limit, or the account's open
+            // recordings (backend/utils/recording_limits). Retrying now
+            // cannot help; the chunk stays on the phone.
+            let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+            let words = (json?["message"] as? String) ?? (json?["error"] as? String)
+            return .refused(words.flatMap { $0.contains(" ") ? $0 : nil }
+                            ?? "Loore can't take this recording right now. It is kept on this phone.")
         default:
             return .retry
         }

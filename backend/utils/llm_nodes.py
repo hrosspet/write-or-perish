@@ -900,12 +900,17 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
     # A thread whose next prompt would be over the limit gets no reply
     # (#648; Peter, 2026-11-12), before anything is written. The measure
     # reads no content (utils/thread_size); the task measures the
-    # assembled prompt again before its first call.
-    from backend.utils.thread_size import thread_length_refusal
-    too_long = thread_length_refusal(parent, human_owner_id, model_id,
-                                     chain=chain, user=owner)
-    if too_long is not None:
-        raise too_long
+    # assembled prompt again before its first call. Not for a read (#717):
+    # the task fits the day's tweets to the room its own prompt leaves and
+    # refuses only when the thread leaves none. This estimate holds none
+    # of those tweets but the agentic prompt a read leaves out, and a
+    # refusal recorded for a read before #717 counted a whole day.
+    if not is_read_turn:
+        from backend.utils.thread_size import thread_length_refusal
+        too_long = thread_length_refusal(parent, human_owner_id, model_id,
+                                         chain=chain, user=owner)
+        if too_long is not None:
+            raise too_long
 
     llm_user = User.query.filter_by(username=model_id).first()
     if not llm_user:

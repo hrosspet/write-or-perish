@@ -14,28 +14,15 @@ import InviteSection from "../components/InviteSection";
 import BothProvidersDialog, { ownProviderName } from "../components/BothProvidersDialog";
 import { noteBothProvidersLater } from "../hooks/useBothProvidersQuestion";
 import { showsTweetSeed, tweetSeedHelp } from "../utils/tweetSeed";
+import StartingPointProgress from "../components/StartingPointProgress";
 import {
   formatDeletionDate, reloadUser, restoreWriting, writingRestorable,
   X_REMOVE_ACCESS_STEPS,
 } from "../utils/dataDeletion";
+// Where Connect X (#311) comes back to: /account?x_login=<outcome>#x.
+import { X_LOGIN_MESSAGES } from "../utils/xLogin";
 
 const backendUrl = process.env.REACT_APP_BACKEND_URL || "";
-
-// Where Connect X (#311) comes back to: /account?x_login=<outcome>#x.
-const X_LOGIN_MESSAGES = {
-  linked: { type: "success", text: "X connected. Sign in with X now opens this account." },
-  cancelled: { type: "info", text: "X was not connected." },
-  failed: { type: "error", text: "Could not read your X account. Please try again." },
-  other_x: { type: "error", text: "This account is already connected to a different X account." },
-  taken: {
-    type: "error",
-    text: "That X account already signs in to another Loore account, so it can't be connected here. If that account was made by accident, write to info@loore.org and we'll remove it so you can connect X here.",
-  },
-  taken_placeholder: {
-    type: "error",
-    text: "An account was already set up for that X account, and no one has signed in to it yet. Write to info@loore.org and we'll join it with this one.",
-  },
-};
 
 // What Disconnect X (#494) did, from the server's answer: whether X
 // confirmed that Loore's access is gone, and what became of the bookmark
@@ -937,6 +924,16 @@ export default function AccountPage() {
             </div>
           )}
           <div style={helperStyle}>{tweetSeedHelp(user)}</div>
+          {user.starting_point && ["checking", "preparing"].includes(user.starting_point.status) && (
+            // After a Yes the server looks for material Loore prepared for
+            // this X account (#698): nothing shows while it looks; if it
+            // finds some, it says so and opens the profile when ready.
+            <StartingPointProgress
+              key={user.starting_point.status}
+              initial={user.starting_point.status}
+              style={{ marginTop: "0.8rem", maxWidth: "none" }}
+            />
+          )}
         </div>
       )}
 

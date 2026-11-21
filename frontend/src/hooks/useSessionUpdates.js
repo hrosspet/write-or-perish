@@ -5,11 +5,14 @@ import api from '../api';
 // here). The updates modal never opens over it (#392).
 export const WELCOME_PATH = '/welcome';
 
-// The account deletion confirmation (emailed link) and the restore offer.
-// The updates modal never opens over them either, nor over the page after:
-// a restore signs in with a full page load, so the next page is a new
-// session and only this flag, kept for the tab, carries the decision over.
-export const QUIET_PATHS = ['/confirm-account-deletion', '/account-restore'];
+// The account deletion confirmation (emailed link), the restore offer and
+// the question about a prepared account (#714). The updates modal never
+// opens over them either, nor over the page after: a restore, or opening
+// the prepared account, signs in with a full page load, so the next page
+// is a new session and only this flag, kept for the tab, carries the
+// decision over.
+export const QUIET_PATHS = [
+  '/confirm-account-deletion', '/account-restore', '/prepared-account'];
 export const QUIET_FLAG = 'loore.skipUpdatesOnce';
 
 // Call right before a full page load that must not open the modal (a

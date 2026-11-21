@@ -1,4 +1,4 @@
-"""Admin Activity tab: engagement since activation measured directly
+"""Admin Activity tab: activity since activation measured directly
 (writes / asks / voice per day, last seen, retention), the throttled
 last-seen touch, and approved_at stamping on activation."""
 from datetime import datetime, timedelta

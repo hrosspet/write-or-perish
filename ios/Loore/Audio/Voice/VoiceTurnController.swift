@@ -297,6 +297,7 @@ final class VoiceTurnController {
         timing = VoiceTiming(backend: backend)
         recorder.onSourceEnded = { [weak self] in self?.stop() }
         recorder.onFatal = { [weak self] message in self?.uploadFailedFatally(message) }
+        recorder.onLimit = { [weak self] message in self?.reachedLimit(message) }
         recorder.onSourceFailed = { [weak self] in self?.microphoneFailed() }
     }
 
@@ -641,7 +642,7 @@ final class VoiceTurnController {
                 if !self.longRecordingWarned && self.elapsed >= self.timings.longRecording {
                     self.longRecordingWarned = true
                     self.audio.playLongRecordingWarning()
-                    self.notices.toast("You’ve been recording for 59 minutes — consider stopping soon and continuing in a new recording.", duration: 10)
+                    self.notices.toast(RecordingLimits.longRecordingWarning, duration: 10)
                     self.notices.notify(.longRecording)
                 }
                 let whole = Int(self.elapsed)
@@ -728,6 +729,16 @@ final class VoiceTurnController {
 
     static func isAlreadyFinalizing(_ error: APIError) -> Bool {
         error.status == 400 && (error.userMessage(fallback: "").contains("not in recording state"))
+    }
+
+    /// The server took no more of this recording (past what one recording may
+    /// hold, `ChunkUploader.onLimit`): said in its words, then the turn goes on
+    /// as after Stop, finalized with the chunks the server holds. Found at Stop,
+    /// it is only said.
+    private func reachedLimit(_ message: String) {
+        guard state == .recording || state == .stopping else { return }
+        notices.toast(message, duration: 10)
+        if state == .recording { stop() }
     }
 
     private func uploadFailedFatally(_ message: String) {
@@ -1551,12 +1562,14 @@ final class VoiceTurnController {
         gleanTask = Task { [weak self] in
             guard let self else { return }
             var outcome: TaskStatus?
+            var answer: LLMStatus?
             while !Task.isCancelled, self.gleanPhase == .waiting(nodeId: id) {
                 do {
                     let status = try await self.backend.llmStatus(nodeId: id)
                     self.gleanLastAnswer = Date()
                     if let s = status.status, s.isTerminal {
                         outcome = s
+                        answer = status
                         break
                     }
                 } catch {
@@ -1571,10 +1584,30 @@ final class VoiceTurnController {
                let s = last.status, s.isTerminal {
                 // One more question before giving up: the gleaning may be in.
                 outcome = s
+                answer = last
             }
             guard !Task.isCancelled, self.gleanPhase == .waiting(nodeId: id) else { return }
+            if outcome == .failed, let refusal = SpokenRefusal(code: answer?.errorCode),
+               refusal == .gleanedThrough {
+                self.gleanRefused(refusal, message: answer?.error)
+                return
+            }
             self.gleaningLanded(id, outcome)
         }
+    }
+
+    /// The thread has gleaned all of today's tweets (#717): the server refused the
+    /// Glean before any model call. Said aloud and shown, as the other refusals
+    /// are (web: VoicePage); the Voice screen stays, as there is no gleaning to
+    /// open, and the conversation stays where it was, Glean under the same message.
+    private func gleanRefused(_ refusal: SpokenRefusal, message: String?) {
+        gleanPhase = .idle
+        gleanTask = nil
+        gleanInactiveSince = nil
+        gleaningDone = false
+        audio.refreshNowPlaying()
+        notices.toast(message ?? refusal.text, duration: 8)
+        speakThenDeactivate(refusal)
     }
 
     /// The wait's limits (`llmGiveUp` in all, `llmErrorGiveUp` without an

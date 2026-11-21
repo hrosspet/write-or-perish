@@ -1,6 +1,7 @@
 import re
 import smtplib
 import logging
+from datetime import datetime
 from html import escape
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -519,6 +520,40 @@ def send_admin_signup_notification(username, user_email):
     _send(admin_email, f"New signup: {username}", text_body, html_body,
           f"Admin signup notification sent for user {username}",
           f"Failed to send admin signup notification for user {username}",
+          best_effort=True)
+
+
+def send_admin_signup_info(user):
+    """Information email for a new signup while payments are on (#715):
+    nobody waits for approval, so it asks for nothing. It holds only the
+    username, how the person signed in, whether the account was prepared
+    in advance, and the time: no address, no content the person wrote."""
+    username = user.username
+    method = "X" if user.twitter_id else "email"
+    prepared = "yes" if (user.prefilled_handle or user.prefilled_at) else "no"
+    when = (user.accepted_terms_at or datetime.utcnow()).strftime(
+        "%Y-%m-%d %H:%M UTC")
+    admin_url = "https://loore.org/admin"
+    text_body = (
+        f"New signup on Loore\n\n"
+        f"Username: {username}\n"
+        f"Signed in with: {method}\n"
+        f"Prepared in advance: {prepared}\n"
+        f"Time: {when}\n\n"
+        f"No approval is needed. You can turn this email off in the admin "
+        f"dashboard:\n{admin_url}\n"
+    )
+    html_body = _card(
+        "New signup",
+        [f'<strong style="color: #ede8dd;">{escape(str(username))}</strong> just accepted the terms.',
+         f"Signed in with: {method}",
+         f"Prepared in advance: {prepared}",
+         f"Time: {when}",
+         "No approval is needed."],
+        "Open admin dashboard", admin_url)
+    _send("signup@loore.org", f"New signup: {username}", text_body, html_body,
+          f"Admin signup info sent for user {user.id}",
+          f"Failed to send admin signup info for user {user.id}",
           best_effort=True)
 
 

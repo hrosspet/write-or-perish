@@ -85,8 +85,10 @@ def purge_deleted_artifacts(cutoff):
     poison the rest. The sessions' pins to those versions
     (NodeContextArtifact, which has no foreign key to the rows) go first,
     so no session keeps a pin to a row that is gone. The rows go with
-    their content. When no live version of the kind is left, its view
-    pings (ArtifactView, admin Activity) go too: they name the artifact.
+    their content. The artifact's view pings (ArtifactView, admin
+    Activity) go too: those stored by the id of a purged version, and,
+    when no live version of the kind is left, the older ones that name
+    it.
 
     Rows a waiting "Delete all my content" hid (#268) are the purge's:
     the hidden-rows hook leaves them out of the SELECT below.
@@ -112,12 +114,20 @@ def purge_deleted_artifacts(cutoff):
                     NodeContextArtifact.artifact_type == "user_artifact",
                     NodeContextArtifact.artifact_id.in_(chunk),
                 ).delete(synchronize_session=False)
+                # Views stored by the artifact's id (since 2026-11-20).
+                ArtifactView.query.filter(
+                    ArtifactView.user_id == user_id,
+                    ArtifactView.artifact_id.in_(chunk),
+                ).delete(synchronize_session=False)
                 gone += UserArtifact.query.filter(
                     UserArtifact.id.in_(chunk),
                 ).delete(synchronize_session=False)
             if UserArtifact.version_count(user_id, kind) == 0:
-                ArtifactView.query.filter_by(
-                    user_id=user_id, kind=kind,
+                # Views stored by name, from before 2026-11-20.
+                ArtifactView.query.filter(
+                    ArtifactView.user_id == user_id,
+                    ArtifactView.kind == kind,
+                    ArtifactView.artifact_id.is_(None),
                 ).delete(synchronize_session=False)
             db.session.commit()
             purged += gone
