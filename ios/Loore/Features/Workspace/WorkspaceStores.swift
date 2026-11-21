@@ -93,7 +93,10 @@ final class ArtifactsStore {
 /// map E §10). Polls `/api/export/profile-progress` while a build runs (60 s
 /// for the batch pipeline, 5 s for the synchronous task, no duration cap,
 /// stops after 10 consecutive errors), publishes progress for the Profile page
-/// and toasts the outcome.
+/// and toasts the outcome. It also follows a pre-fill load's final merge that
+/// goes on after the person was let in (#731, `profile_merge_pending`, source
+/// "merge"): its version gets the usual "updated" toast; an end without one
+/// (`unchanged`) says nothing.
 @MainActor
 @Observable
 final class ProfileGenerationWatcher {
@@ -121,6 +124,9 @@ final class ProfileGenerationWatcher {
 
     private var source: String?
     private var syncTaskId: String?
+    /// The late merge last seen running (#731); once it ends, the endpoint says
+    /// from this id whether it saved a version.
+    private(set) var mergeId: Int?
     /// nil = never saw it running (`undefined` on the web); .some(nil) = running with no profile yet.
     private var startVersion: Int??
     private var batchPendingHint = false
@@ -128,13 +134,27 @@ final class ProfileGenerationWatcher {
 
     /// Side effects, wired by `AppState`.
     var showToast: (String, TimeInterval) -> Void = { _, _ in }
-    /// Clears `profile_generation_task_id` / `profile_batch_pending` in the cached user.
+    /// Clears `profile_generation_task_id` / `profile_batch_pending` /
+    /// `profile_merge_pending` in the cached user.
     var clearUserFlags: () -> Void = {}
-    var fetch: (String?) async throws -> ProfileProgress = { _ in throw CancellationError() }
+    /// One poll, with the sync task and the late merge last seen running.
+    var fetch: (_ taskId: String?, _ mergeId: Int?) async throws -> ProfileProgress = { _, _ in
+        throw CancellationError()
+    }
+
+    /// The poll's query: `task_id` and `merge_id` when known (web: the endpoint string).
+    nonisolated static func query(taskId: String?, mergeId: Int?) -> [URLQueryItem] {
+        var items: [URLQueryItem] = []
+        if let taskId { items.append(URLQueryItem(name: "task_id", value: taskId)) }
+        if let mergeId { items.append(URLQueryItem(name: "merge_id", value: String(mergeId))) }
+        return items
+    }
 
     /// The user payload says a build is running (web: `user` effect).
     func userLoaded(_ user: CurrentUser) {
-        guard user.profileGenerationTaskId != nil || user.profileBatchPending else { return }
+        guard user.profileGenerationTaskId != nil || user.profileBatchPending || user.profileMergePending else {
+            return
+        }
         batchPendingHint = user.profileBatchPending
         start()
     }
@@ -153,6 +173,7 @@ final class ProfileGenerationWatcher {
         active = false
         source = nil
         syncTaskId = nil
+        mergeId = nil
         startVersion = nil
         progress = nil
     }
@@ -166,7 +187,7 @@ final class ProfileGenerationWatcher {
         var lastStatus: String?
         while active && !Task.isCancelled {
             do {
-                let data = try await fetch(syncTaskId)
+                let data = try await fetch(syncTaskId, mergeId)
                 guard !Task.isCancelled, active else { return }
                 errors = 0
                 lastStatus = data.status
@@ -191,6 +212,7 @@ final class ProfileGenerationWatcher {
         if data.running {
             source = data.source
             if data.source == "sync", let task = data.taskId, task != syncTaskId { syncTaskId = task }
+            if data.source == "merge", let merge = data.mergeId, merge != mergeId { mergeId = merge }
             if startVersion == nil { startVersion = .some(data.latestProfile?.id) }
             progress = Progress(running: true, status: data.status, progress: data.progress, message: data.message,
                                 source: data.source, latestProfileId: data.latestProfile?.id)
@@ -199,7 +221,11 @@ final class ProfileGenerationWatcher {
         let sawRunning = startVersion != nil
         let newVersion = sawRunning && data.latestProfile?.id != startVersion!
         var outcome: Outcome?
-        if data.status == "failed" {
+        if data.status == "unchanged" {
+            // The late merge ended without a version: the person keeps the
+            // profile they have, and nothing is said.
+            outcome = nil
+        } else if data.status == "failed" {
             outcome = .failed
         } else if data.status == "stalled" || (data.status == "idle" && sawRunning && data.batchStepFailed) {
             outcome = .stalled
@@ -233,6 +259,7 @@ final class ProfileGenerationWatcher {
         active = false
         source = nil
         syncTaskId = nil
+        mergeId = nil
         startVersion = nil
         batchPendingHint = false
         clearUserFlags()

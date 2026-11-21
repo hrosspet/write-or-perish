@@ -19,6 +19,9 @@ struct CurrentUser: Decodable, Equatable, Sendable {
     var preferredModel: String?
     var profileGenerationTaskId: String?
     var profileBatchPending: Bool
+    /// A pre-fill load's final merge still running after the person was let in
+    /// (#731): the profile watcher follows it as it follows a build.
+    var profileMergePending: Bool
     var defaultPrivacyLevel: PrivacyLevel
     var defaultAIUsage: AIUsage
     var twitterLogin: Bool
@@ -69,6 +72,7 @@ struct CurrentUser: Decodable, Equatable, Sendable {
         case preferredModel = "preferred_model"
         case profileGenerationTaskId = "profile_generation_task_id"
         case profileBatchPending = "profile_batch_pending"
+        case profileMergePending = "profile_merge_pending"
         case defaultPrivacyLevel = "default_privacy_level"
         case defaultAIUsage = "default_ai_usage"
         case twitterLogin = "twitter_login"
@@ -109,6 +113,7 @@ struct CurrentUser: Decodable, Equatable, Sendable {
         preferredModel = c.tolerant(.preferredModel)
         profileGenerationTaskId = c.tolerant(.profileGenerationTaskId)
         profileBatchPending = c.tolerant(.profileBatchPending, default: false)
+        profileMergePending = c.tolerant(.profileMergePending, default: false)
         defaultPrivacyLevel = c.tolerant(.defaultPrivacyLevel, default: .private)
         defaultAIUsage = c.tolerant(.defaultAIUsage, default: .chat)
         twitterLogin = c.tolerant(.twitterLogin, default: false)
