@@ -301,6 +301,34 @@ def test_the_key_is_never_logged_nor_in_an_error(v1, caplog):
     assert KEY not in caplog.text and "unauthorized" in caplog.text
 
 
+def test_fetch_account_never_takes_a_look_alike_nor_counts_one_account_twice(v1):
+    """Loore keys X logins on the id fetch_account returns: a look-alike's
+    id must never come back, and the same account listed twice is one
+    match, not "several"."""
+    v1.routes["/accounts"] = [page([v1_account(2, "jane1doe"),
+                                    v1_account(3, "janeXdoe")])]
+    assert ca.fetch_account("jane_doe") is None
+    v1.routes["/accounts"] = [page([v1_account(1, "janedoe"),
+                                    v1_account(1, "JaneDoe")])]
+    assert ca.fetch_account("janedoe")["account_id"] == "1"
+
+
+def test_the_coverage_check_counts_a_tweet_listed_twice_once(v1):
+    v1.routes["/accounts"] = [page([v1_account(42, "dup")])]
+
+    def t(i, text, **kw):
+        return v1_tweet(i, "dup", text, "2026-01-01T00:00:00.000Z",
+                        account_id=42, **kw)
+    v1.routes["/accounts/42/tweets"] = [page([
+        t(1, "a" * 40), t(1, "a" * 40), t(2, "RT @x: y"), t(2, "RT @x: y"),
+        t(3, "reply" * 8, reply_to_tweet_id="1"),
+        t(3, "reply" * 8, reply_to_tweet_id="1")])]
+    out = ca.coverage_summary("dup")
+    assert (out["archived"], out["retweets"], out["replies"],
+            out["originals"]) == (3, 1, 1, 1)
+    assert out["est_tokens"] == (40 + 40) // 4
+
+
 def test_the_check_scan_is_capped(v1, monkeypatch):
     v1.routes["/accounts"] = [page([v1_account(42, "big")])]
     full = [v1_tweet(i, "big", "t", "2026-01-01T00:00:00.000Z", account_id=42)
