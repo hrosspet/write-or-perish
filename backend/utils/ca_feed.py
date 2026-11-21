@@ -116,6 +116,20 @@ GLEAN_DAY_DONE_CODE = "glean_day_done"
 GLEAN_DAY_DONE_MESSAGE = ("You've gleaned through all of today's tweets. "
                           "New ones come in once a day.")
 
+# A Glean with no room for one tweet because its model's price step sets
+# its budget (#733: Haiku 5.5's 100k), in a thread the thread limit still
+# leaves room in: a Glean on another model, or a reply, still works here,
+# so the thread-length sentences (which say none does) would be untrue.
+# Refused before any call, nothing billed, with this text (the reply's
+# error; both apps show the server's words for a code they do not know:
+# a toast on the thread page, the failed gleaning's page from Voice) and
+# this code (REFUSED_MARKER entry; llm-status ``error_code``), which no
+# app reads as the thread's limit.
+GLEAN_TOO_LONG_FOR_MODEL_CODE = "glean_too_long_for_model"
+GLEAN_TOO_LONG_FOR_MODEL_MESSAGE = (
+    "This thread is too long for a Glean on {model}. Pick another model "
+    "for this Glean, or start a new thread.")
+
 # Heuristic (#717): the share of a Glean's token budget kept free for
 # what its count can miss: the provider's own tokenizer drifting from
 # tiktoken's o200k_base, and the message framing. 2 % of the 250k limit
@@ -393,6 +407,10 @@ def glean_prompt_budget(model_id, config):
     models' 272k is above the limit and changes nothing; a model with no
     step in the table (Sonnet 5.5, flat across its 1M window) has the
     thread limit. None when neither is known."""
+    return _glean_budget(model_id, config, price_tier=True)
+
+
+def _glean_budget(model_id, config, price_tier):
     from backend.llm_providers import model_input_cap
     from backend.utils.thread_size import prompt_limit
     limits = []
@@ -401,10 +419,30 @@ def glean_prompt_budget(model_id, config):
         limits.append(limit)
     cfg = (config.get("SUPPORTED_MODELS") or {}).get(model_id)
     if cfg:
-        limits.append(model_input_cap(cfg, price_tier=True))
+        limits.append(model_input_cap(cfg, price_tier=price_tier))
     if not limits:
         return None
     return int(min(limits) * (1 - GLEAN_BUDGET_MARGIN))
+
+
+def glean_too_long_for_model(model_id, config, rest_tokens):
+    """The refusal text for a Glean that has no room for one tweet because
+    its model's price step sets its budget (#733), or None. *rest_tokens*:
+    the prompt without the list, as _fit_read_list measured it. The text
+    applies only while the budget without the step (the thread limit, or
+    the model's window) would still leave the rest room: then a Glean on
+    another model, or a reply, works in this thread. When the rest fills
+    that budget too, the thread itself is too long and the thread-length
+    sentences hold (None)."""
+    stepped = _glean_budget(model_id, config, price_tier=True)
+    unstepped = _glean_budget(model_id, config, price_tier=False)
+    if not stepped or not unstepped or stepped >= unstepped:
+        return None
+    if rest_tokens is None or rest_tokens >= unstepped:
+        return None
+    cfg = (config.get("SUPPORTED_MODELS") or {}).get(model_id) or {}
+    return GLEAN_TOO_LONG_FOR_MODEL_MESSAGE.format(
+        model=cfg.get("display_name") or model_id)
 
 
 def record_feed_render(node, stats, refs, days=1, scope="all"):

@@ -8,8 +8,11 @@ tokens on Haiku 5.5. Haiku has no local token count, so its list of
 tweets is sized by the estimate (the claude_new tweets prior); the tests
 show with numbers that the estimate keeps a Haiku Glean under the step,
 how many tweets the Glean then holds and how many Gleans a 46,000-tweet
-day takes. Every other model's step is above the thread limit or absent,
-and the list it sends is byte for byte what it was.
+day takes at least. Every other model's step is above the thread limit
+or absent, and the list it sends is byte for byte what it was. A Haiku
+Glean with no room under its step, in a thread the thread limit still
+leaves room in, is refused with a sentence that names the model and the
+way on (another model, or a new thread), not the thread-length one.
 """
 import copy
 import json
@@ -29,11 +32,18 @@ from backend.tests.test_glean_paging import (
 )
 from backend.config import Config
 from backend.llm_providers import message_text, model_input_cap
-from backend.models import FeedRender
+from backend.models import APICostLog, FeedRender, User
 from backend.utils import community_archive as ca
-from backend.utils.ca_feed import GLEAN_BUDGET_MARGIN, glean_prompt_budget
-from backend.utils.thread_size import CHARS_PER_UNIT, Size, prompt_limit
+from backend.utils.ca_feed import (
+    GLEAN_BUDGET_MARGIN, GLEAN_DAY_DONE_CODE, GLEAN_TOO_LONG_FOR_MODEL_CODE,
+    GLEAN_TOO_LONG_FOR_MODEL_MESSAGE, glean_prompt_budget,
+    glean_too_long_for_model,
+)
+from backend.utils.thread_size import (
+    CHARS_PER_UNIT, REFUSED_MARKER, THREAD_TOO_LONG_CODE, Size, prompt_limit,
+)
 from backend.utils.tokens import TOKENS_PER_UNIT_PRIOR, tokenizer_family
+from backend.utils.voice_refusals import SPOKEN_REFUSALS
 
 HAIKU = "claude-haiku-5.5"
 SONNET = "claude-sonnet-5.5"
@@ -277,13 +287,18 @@ def archive_day(priced, monkeypatch, tmp_path):
     return tmp_path
 
 
-def _glean_on(monkeypatch, model_id):
-    """One Glean on *model_id* as the task runs it (live), with what the
-    task estimated the whole prompt at (the #648 check's size). Returns
-    (result, request, size, gleaning)."""
-    alice = _mk_user("alice", approved=True, plan="alpha", is_admin=True)
-    llm_user = _mk_user(model_id, twitter_id=f"llm-{model_id}")
-    read = _thread(alice)
+def _glean_on(monkeypatch, model_id, alice=None, read=None):
+    """One Glean on *model_id* under *read* (a new thread when None) as
+    the task runs it (live), with what the task estimated the whole
+    prompt at (the #648 check's size). Returns (result, request, size,
+    gleaning); request and size are None when nothing was sent."""
+    if alice is None:
+        alice = _mk_user("alice", approved=True, plan="alpha", is_admin=True)
+    llm_user = (_mk_user(model_id, twitter_id=f"llm-{model_id}")
+                if not User.query.filter_by(username=model_id).first()
+                else User.query.filter_by(username=model_id).first())
+    if read is None:
+        read = _thread(alice)
     gleaning = _placeholder(llm_user, alice, read.id, meta=[{"name": "_live"}])
     sizes = []
     measure = _llm_task_mod.assembled_prompt_size
@@ -300,8 +315,9 @@ def _glean_on(monkeypatch, model_id):
     result = generate_llm_response(_FakeSelf(), read.id, gleaning.id,
                                    model_id, alice.id, source_mode=None)
     sent = _RecordingProvider.requests
-    assert len(sent) == 1 and len(sizes) == 1
-    return result, sent[0], sizes[0], _fresh(gleaning.id)
+    assert len(sent) == len(sizes) <= 1
+    return (result, sent[0] if sent else None, sizes[0] if sizes else None,
+            _fresh(gleaning.id))
 
 
 def test_a_haiku_glean_stays_under_its_price_step(archive_day, monkeypatch):
@@ -310,6 +326,7 @@ def test_a_haiku_glean_stays_under_its_price_step(archive_day, monkeypatch):
     Glean is not refused."""
     result, request, size, gleaning = _glean_on(monkeypatch, HAIKU)
 
+    assert request is not None
     assert result.get("status") != "refused"
     assert gleaning.llm_task_status == "completed"
     assert not size.certain
@@ -323,17 +340,84 @@ def test_a_haiku_glean_stays_under_its_price_step(archive_day, monkeypatch):
     assert f"This list holds the newest {row.tweet_count} of them" in text
 
 
-def test_a_sonnet_glean_on_the_same_day_reads_it_whole_as_before(archive_day, monkeypatch):
-    """Sonnet 5.5 has no price step: the same day fits its 245,000-token
-    budget whole, as it did before #733."""
-    result, request, size, gleaning = _glean_on(monkeypatch, SONNET)
+def _long_thread(chars):
+    """A Glean prompt under an entry of *chars* characters."""
+    alice = _mk_user("alice", approved=True, plan="alpha", is_admin=True)
+    return alice, _thread(alice, "pacing the mornings " * (chars // 20))
 
-    assert gleaning.llm_task_status == "completed"
+
+def test_a_haiku_glean_with_no_room_under_its_step_names_the_model_and_the_way_on(archive_day, monkeypatch):
+    """A thread whose rest alone is past Haiku's 98,000 but well under the
+    thread limit's 245,000: the Haiku Glean is refused before any call,
+    nothing billed, with a sentence that names the model and what works,
+    and a code no app reads as the thread's limit. A Glean on Sonnet 5.5
+    in the same place then reads the day: the thread was never too long
+    for it."""
+    alice, read = _long_thread(208_000)
+
+    result, request, size, gleaning = _glean_on(
+        monkeypatch, HAIKU, alice=alice, read=read)
+
+    assert request is None
+    assert result["status"] == "refused"
+    assert result["reason"] == GLEAN_TOO_LONG_FOR_MODEL_CODE
+    assert gleaning.llm_task_status == "failed"
+    assert gleaning.llm_task_error == (
+        "This thread is too long for a Glean on Haiku 5.5. Pick another "
+        "model for this Glean, or start a new thread.")
+    meta = json.loads(gleaning.tool_calls_meta)
+    assert {"name": REFUSED_MARKER,
+            "code": GLEAN_TOO_LONG_FOR_MODEL_CODE} in meta
+    # Not the thread limit's code, nor one the Voice screens say in a fixed
+    # sentence: both apps show the server's words for it.
+    assert GLEAN_TOO_LONG_FOR_MODEL_CODE not in (
+        THREAD_TOO_LONG_CODE, GLEAN_DAY_DONE_CODE)
+    assert GLEAN_TOO_LONG_FOR_MODEL_CODE not in SPOKEN_REFUSALS
+    assert FeedRender.query.filter_by(node_id=gleaning.id).count() == 0
+    assert APICostLog.query.filter_by(
+        request_ref=f"node:{gleaning.id}").count() == 0
+    assert APICostLog.query.filter(
+        APICostLog.cost_microdollars > 0).count() == 0
+
+    result, request, size, other = _glean_on(
+        monkeypatch, SONNET, alice=alice, read=read)
+
+    assert request is not None
+    assert other.llm_task_status == "completed"
     assert 98_000 < size.tokens <= 245_000
-    row = FeedRender.query.filter_by(node_id=gleaning.id).one()
-    assert row.tweet_count == DAY_TWEETS
-    text = "".join(message_text(m) for m in request["messages"])
-    assert "This list holds" not in text
+    assert FeedRender.query.filter_by(node_id=other.id).one().tweet_count > 0
+
+
+def test_a_thread_too_long_for_any_glean_keeps_the_thread_length_sentence(archive_day, monkeypatch):
+    """Past the thread limit's 245,000 too, the thread itself is too long:
+    the Haiku Glean gets the thread-length code and sentence as before."""
+    from backend.utils.thread_size import _MESSAGES
+    alice, read = _long_thread(460_000)
+
+    result, request, size, gleaning = _glean_on(
+        monkeypatch, HAIKU, alice=alice, read=read)
+
+    assert request is None
+    assert result["reason"] == THREAD_TOO_LONG_CODE
+    assert gleaning.llm_task_error in _MESSAGES.values()
+    assert {"name": REFUSED_MARKER, "code": THREAD_TOO_LONG_CODE} \
+        in json.loads(gleaning.tool_calls_meta)
+
+
+def test_the_model_s_sentence_only_where_its_step_refused(priced):
+    """glean_too_long_for_model: the sentence while the rest fits the
+    budget the thread limit alone gives (245,000), none past it, and none
+    on a model whose budget the step does not set."""
+    config = priced.config
+    assert glean_too_long_for_model(HAIKU, config, 98_000) \
+        == GLEAN_TOO_LONG_FOR_MODEL_MESSAGE.format(model="Haiku 5.5")
+    assert glean_too_long_for_model(HAIKU, config, 244_999) is not None
+    assert glean_too_long_for_model(HAIKU, config, 245_000) is None
+    for model_id in (SONNET, LUNA, "gpt-5.6-luna"):
+        assert glean_too_long_for_model(model_id, config, 100_000) is None
+    # A thread limit at or below the step: the limit refuses, not the step.
+    config["THREAD_PROMPT_TOKEN_LIMIT"] = 100_000
+    assert glean_too_long_for_model(HAIKU, config, 99_000) is None
 
 
 # ── The numbers ──────────────────────────────────────────────────────────
@@ -350,25 +434,29 @@ PER_ACCOUNT = 12
 REST = 20_000
 
 
-def test_the_estimate_keeps_a_haiku_glean_under_the_step_with_room_to_spare():
-    """The numbers. With 20,000 tokens for the rest of its prompt, a Haiku
-    Glean holds 686 tweets of this day; a 46,000-tweet day takes 68
-    Gleans (24 at the thread limit's budget before #733). Its list is
-    100,642 characters, 77,998 tokens at the estimate. o200k_base makes
-    about 27,400 tokens of it, and Claude's tokenizer 1.3 to 1.9 times
-    that: the Glean bills about 56,000 to 72,000 tokens. At the extreme
-    2.56 it bills about 90,200, still under the step; crossing it would
-    take Claude making 2.92 times the o200k count of the list."""
+def test_the_estimate_keeps_a_haiku_glean_under_the_step_with_room_to_spare(priced):
+    """The numbers, at Haiku's budget as the code sets it. With 20,000
+    tokens for the rest of its prompt, a Haiku Glean holds 686 tweets of
+    this day, so a 46,000-tweet day takes at least 68 Gleans (24 at the
+    budget before #733). At least: in one thread each Glean sends the
+    earlier Glean replies again, so the rest grows and later Gleans hold
+    fewer. Its list is 100,642 characters, 77,998 tokens at the estimate.
+    o200k_base makes about 27,400 tokens of it, and Claude's tokenizer 1.3
+    to 1.9 times that: the Glean bills about 56,000 to 72,000 tokens. At
+    the extreme 2.56 it bills about 90,200, still under the step; crossing
+    it would take Claude making 2.92 times the o200k count of the list."""
+    budget = glean_prompt_budget(HAIKU, priced.config)
     entries = _entries(3_000, TEXT_CHARS, PER_ACCOUNT)
     day = _render(entries)
-    text, stats, refs = ca.newest_that_fit(*day, 98_000 - REST, _estimate)
+    text, stats, refs = ca.newest_that_fit(*day, budget - REST, _estimate)
     assert len(refs) == 686
     assert len(text) == 100_642
-    assert REST + _estimate(text) == 97_998
+    assert REST + _estimate(text) == 97_998 <= budget
     assert math.ceil(46_000 / len(refs)) == 68
 
     # Before #733: the thread limit's budget.
-    _, _, before = ca.newest_that_fit(*day, 245_000 - REST, _estimate)
+    _, _, before = ca.newest_that_fit(
+        *day, _budget_before(HAIKU, priced.config) - REST, _estimate)
     assert len(before) == 1_978
     assert math.ceil(46_000 / len(before)) == 24
 
