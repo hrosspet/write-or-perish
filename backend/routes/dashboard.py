@@ -103,6 +103,10 @@ def _serialize_current_user():
         # Batch-pipeline builds set no task id (#258); the watcher starts
         # polling /export/profile-progress on either flag.
         "profile_batch_pending": bool(current_user.profile_batch_pending),
+        # A pre-fill load's final merge still running after the person was
+        # let in (#731): the watcher follows it as it follows a build, and
+        # gives the usual notice when its version lands.
+        "profile_merge_pending": _late_merge_pending(current_user.id),
         "default_privacy_level": current_user.default_privacy_level,
         "default_ai_usage": current_user.default_ai_usage,
         "twitter_login": bool(current_user.twitter_id),
@@ -185,6 +189,11 @@ def _starting_point(user_id):
         return None
     from backend.utils.prefill_bundle_load import starting_point
     return starting_point(user_id)
+
+
+def _late_merge_pending(user_id):
+    from backend.utils.prefill_bundle_merge import late_merge
+    return late_merge(user_id) is not None
 
 
 @dashboard_bp.route("/starting-point", methods=["GET"])

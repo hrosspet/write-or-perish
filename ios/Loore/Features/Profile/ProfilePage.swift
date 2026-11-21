@@ -72,6 +72,7 @@ struct ProfilePage: View {
 
     private var hasRunningFlag: Bool {
         app.user?.profileGenerationTaskId != nil || app.user?.profileBatchPending == true
+            || app.user?.profileMergePending == true
     }
 
     @ViewBuilder private var content: some View {
@@ -132,13 +133,18 @@ struct ProfilePage: View {
         .padding(.vertical, 40)
     }
 
-    /// No message yet → "Starting generation..."; batch → the message; sync → "{message} · {n}%".
+    /// No message yet → "Starting generation..."; sync → "{message} · {n}%"; batch and a
+    /// late merge (#731, one call) → the message.
     private var indicatorText: String {
         if !failMessage.isEmpty { return failMessage }
-        guard let progress = app.profileWatcher.progress, progress.running, !progress.message.isEmpty else {
+        return Self.progressLabel(app.profileWatcher.progress)
+    }
+
+    static func progressLabel(_ progress: ProfileGenerationWatcher.Progress?) -> String {
+        guard let progress, progress.running, !progress.message.isEmpty else {
             return "Starting generation..."
         }
-        if progress.source == "batch" { return progress.message }
+        if progress.source != "sync" { return progress.message }
         return "\(progress.message) · \(Int(progress.progress.rounded()))%"
     }
 
