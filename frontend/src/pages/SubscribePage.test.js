@@ -138,3 +138,42 @@ describe('download your data', () => {
     expect(clicked).toEqual([]);
   });
 });
+
+// #714: an invited person who signed in by email may have an account Loore
+// prepared for their X account. The page says so before the trial can
+// start, with Sign in with X (Connect X for this account).
+describe('a prepared account for an email sign-in', () => {
+  const renderAt = (u, path = '/') => {
+    mockUserCtx = { user: u, setUser: jest.fn() };
+    mockGet.mockResolvedValue({ data: { subscription: sub(), levels: LEVELS } });
+    render(<MemoryRouter initialEntries={[path]}><SubscribePage /></MemoryRouter>);
+  };
+
+  test('email sign-in without X: the line and the button, above the levels', async () => {
+    renderAt(user({ twitter_login: false }));
+    const line = screen.getByText(
+      'Did someone prepare a Loore account for you? Sign in with X to open it.');
+    const button = screen.getByText('Sign in with X').closest('a');
+    expect(button.getAttribute('href')).toMatch(/\/auth\/x\/connect$/);
+    const levels = await screen.findByText(/\$30 a month/);
+    // Before the trial: the line comes first on the page.
+    expect(line.compareDocumentPosition(levels) & Node.DOCUMENT_POSITION_FOLLOWING)
+      .toBeTruthy();
+  });
+
+  test('an account with X does not show it', () => {
+    renderAt(user({ twitter_login: true, twitter_handle: 'ana' }));
+    expect(screen.queryByText(/Did someone prepare a Loore account/)).toBeNull();
+  });
+
+  test('Connect X coming back with no prepared account says so', () => {
+    renderAt(user({ twitter_login: true }), '/account?x_login=linked#x');
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'No other Loore account was prepared for that X account');
+  });
+
+  test('an unknown outcome shows nothing', () => {
+    renderAt(user({ twitter_login: false }), '/account?x_login=bogus');
+    expect(screen.queryByRole('status')).toBeNull();
+  });
+});

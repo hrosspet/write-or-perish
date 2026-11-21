@@ -131,6 +131,49 @@ def test_a_query_in_the_event_url_is_dropped_too():
     assert _drop_query_strings({}) == {}
 
 
+def test_artifact_names_do_not_reach_sentry(monkeypatch):
+    """A.112: a failing request to an artifact route, made from the
+    artifact's page. Sentry gets the route and the page with the name
+    replaced: in the request address, the Referer, and Flask's own log
+    line ("Exception on <path>"), which becomes an event too."""
+    before_send = _app_before_send(monkeypatch)
+    name = "-".join(["orchid", "ledger", "zq"])
+    events = []
+    app = Flask(__name__)
+
+    @app.route("/api/artifacts/<kind>/versions")
+    def versions(kind):
+        raise RuntimeError("boom")
+
+    try:
+        sentry_sdk.init(dsn="https://key@example.invalid/1",
+                        transport=lambda envelope: None,
+                        before_send=lambda e, h: events.append(
+                            before_send(e, h)),
+                        **SENTRY_PRIVACY_OPTIONS)
+        app.test_client().get(
+            f"/api/artifacts/{name}/versions",
+            headers={"Referer": f"https://loore.org/artifacts/{name}"})
+    finally:
+        sentry_sdk.init(dsn=None)
+
+    assert events
+    for event in events:
+        assert name not in json.dumps(event, default=str)
+        assert event["request"]["url"].endswith("/api/artifacts/:kind/versions")
+        assert event["request"]["headers"]["Referer"] == (
+            "https://loore.org/artifacts/:kind")
+
+
+def test_version_addresses_and_other_paths_stay():
+    """Control: the version routes carry an id, not a name."""
+    event = {"request": {"url": "https://loore.org/api/artifacts/versions/12/changes"},
+             "breadcrumbs": {"values": [{"data": {"url": "https://loore.org/api/nodes/4"}}]}}
+    out = _drop_query_strings(event)
+    assert out["request"]["url"] == "https://loore.org/api/artifacts/versions/12/changes"
+    assert out["breadcrumbs"]["values"][0]["data"]["url"] == "https://loore.org/api/nodes/4"
+
+
 class _Quiet(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)

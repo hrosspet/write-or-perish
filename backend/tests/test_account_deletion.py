@@ -844,6 +844,90 @@ def test_no_restore_once_the_deletion_has_started(app, world, stubs, mail):
     assert c.get("/api/account/data").status_code == 401
 
 
+# Starting a sign-in forgets an unanswered offer from an earlier one: Back
+# to the restore page after another sign-in began finds nothing to restore.
+
+def _x_answers(monkeypatch, x_id=1001, handle="alicebirds"):
+    """X's HTTP answers for a round trip through flask-dance's real
+    views: one authorization, by the X account *x_id*."""
+    import json
+    import requests
+
+    def fetch_token(self, url, **kw):
+        token = ({"oauth_token": "REQ-1", "oauth_token_secret": "rs",
+                  "oauth_callback_confirmed": "true"}
+                 if "request_token" in url
+                 else {"oauth_token": "ACCESS-1", "oauth_token_secret": "as"})
+        self._populate_attributes(token)
+        return token
+
+    def send(self, prep, **kw):
+        resp = requests.Response()
+        resp.status_code = 200
+        resp._content = json.dumps({"id": x_id, "screen_name": handle}).encode()
+        return resp
+
+    monkeypatch.setattr(
+        "requests_oauthlib.OAuth1Session._fetch_token", fetch_token)
+    monkeypatch.setattr("requests.sessions.Session.send", send)
+
+
+def _offer(c, mail, monkeypatch, by):
+    """Alice, her account deleted, signs in: the restore offer, unanswered."""
+    if by == "email":
+        r = _sign_in_by_link(c, mail)
+    else:
+        _x_answers(monkeypatch)
+        start = c.get("/auth/login?next=%2Fnode%2F5")
+        assert start.headers["Location"].endswith("/auth/twitter")
+        c.get("/auth/twitter")
+        back = c.get("/auth/twitter/authorized?oauth_token=REQ-1&oauth_verifier=V")
+        assert back.headers["Location"].endswith("/auth/login")
+        r = c.get("/auth/login")
+    assert r.headers["Location"] == f"{FRONTEND}/account-restore"
+    assert c.get("/api/account/restore").status_code == 200
+
+
+@pytest.mark.parametrize("by", ["email", "x"])
+@pytest.mark.parametrize("start", ["x", "x without a page", "email"])
+def test_a_new_sign_in_forgets_an_unanswered_restore_offer(
+        app, world, stubs, mail, monkeypatch, by, start):
+    _with_x_sign_in(app)
+    _schedule(world.alice)
+    c = app.test_client()
+    _offer(c, mail, monkeypatch, by)
+    if start == "email":
+        assert c.post("/auth/magic-link/send",
+                      json={"email": "bob@example.com"}).status_code == 200
+    else:
+        r = c.get("/auth/login?next=%2Fnode%2F6" if start == "x"
+                  else "/auth/login")
+        assert r.headers["Location"].endswith("/auth/twitter")
+    # Back to the restore page: nothing to restore, nothing signed in.
+    assert c.get("/api/account/restore").status_code == 404
+    assert c.post("/api/account/restore").status_code == 404
+    assert _db.session.get(User, world.alice.id).deleted_at is not None
+    assert c.get("/api/account/data").status_code == 401
+
+
+@pytest.mark.parametrize("by", ["email", "x"])
+def test_control_restore_right_after_the_offer(
+        app, world, stubs, mail, monkeypatch, by):
+    """Control: with no new sign-in in between, Restore restores the
+    account and signs in to it, on the way to the page the sign-in
+    started on."""
+    _with_x_sign_in(app)
+    _schedule(world.alice)
+    c = app.test_client()
+    _offer(c, mail, monkeypatch, by)
+    r = c.post("/api/account/restore")
+    assert r.status_code == 200 and r.get_json()["status"] == "restored"
+    assert r.get_json()["next"] == ("/node/5" if by == "x" else "/")
+    assert c.get("/api/account/data").status_code == 200
+    _db.session.expire_all()
+    assert _db.session.get(User, world.alice.id).deleted_at is None
+
+
 # ── The purge and the identity layer ────────────────────────────────────
 
 def test_a_stripe_customer_without_a_key_does_not_hold_the_deletion(

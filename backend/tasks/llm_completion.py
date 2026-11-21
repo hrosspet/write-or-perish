@@ -2,10 +2,12 @@
 Celery task for asynchronous LLM completion.
 """
 import json
+import math
 import sys
 import uuid
 import re
 import time
+from collections import namedtuple
 from celery import Task
 try:
     from celery.exceptions import Retry, Reject, MaxRetriesExceededError
@@ -65,14 +67,14 @@ from backend.utils.llm_batch import (
     BatchItemPolicyBlocked,
 )
 from backend.utils.ca_feed import (
-    CA_CHAT_TURN_NOTE, CA_READ_AGAIN_TURN, CA_READ_AGAIN_TURN_KEPT,
-    CA_TWEETS_CHAT_STUB,
+    CA_CHAT_TURN_NOTE, CA_READ_AGAIN_TURN, CA_READ_OLDER_TURN,
+    CA_TWEETS_CHAT_STUB, GLEAN_DAY_DONE_CODE, GLEAN_DAY_DONE_MESSAGE,
     FEED_AI_USAGE, READ_FURTHER_MARKER,
     FeedReplyError, count_dropped_picks, read_reply_ids, record_feed_render,
     ca_turn as _ca_turn,
     ArchiveNotReady, refs_from_render, render_read_reply_for_model,
-    request_snapshot_refresh, seen_tweet_ids, list_to_keep, read_numbers,
-    read_since_note, glean_source_dir,
+    request_snapshot_refresh, seen_tweet_ids, gleaned_tweet_ids,
+    glean_prompt_budget, glean_source_dir,
 )
 from backend.utils.tool_meta import (
     get_tool_meta_entry, update_tool_meta,
@@ -2014,6 +2016,91 @@ def _export_budget_for_limit(export_content, prompt_tokens, prompt_chars,
     return budget if budget > 0 else None
 
 
+# What _fit_read_list found. *text*, *stats*, *refs*: the list to send
+# (the render itself when all of it fits) and its numbering; *counted*:
+# the whole prompt's tokens when they were counted on this machine (an
+# o200k model), else None; *rest*: the Size of the prompt without the
+# list, set when not even one tweet fits (text is None then).
+ReadFit = namedtuple("ReadFit", "text stats refs counted rest")
+
+
+def _text_block_holding(messages, text):
+    """The first content block of *messages* whose text holds *text*."""
+    if not text:
+        return None
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if (isinstance(block, dict) and isinstance(block.get("text"), str)
+                    and text in block["text"]):
+                return block
+    return None
+
+
+def _fit_read_list(messages, tweets_text, stats, refs, model_id, config,
+                   estimate):
+    """Fit a read's list of tweets to its prompt (#717), in *messages* as
+    assembled: the newest of the render's tweets (*tweets_text*, *stats*,
+    *refs*) that fit glean_prompt_budget with the rest of the prompt (the
+    thread, the instructions, the profile, the intentions, the closing
+    turn). The list is replaced in its message's block when only part of
+    it fits; a list that fits whole is left byte for byte as it is.
+
+    How it counts, with no billed call: on an o200k model (GPT Luna and
+    the other OpenAI models) every part is counted with tiktoken's
+    o200k_base on this machine (tokens.local_token_counter), the framing
+    as LLMProvider.count_tokens counts it; on any other model the rest is
+    *estimate*d as the thread limit estimates a prompt (a function
+    messages -> thread_size.Size) and the tweets at the tweets prior, the
+    upper end of what was measured, so the list errs short."""
+    from backend.llm_providers import message_text
+    from backend.utils import community_archive as ca
+    from backend.utils.thread_size import CHARS_PER_UNIT
+    from backend.utils.tokens import (
+        TOKENS_PER_UNIT_PRIOR, local_token_counter, tokenizer_family,
+    )
+    unchanged = ReadFit(tweets_text, stats, refs, None, None)
+    # Matched without its final newline: the prompt's block may have lost
+    # it (system_block_text strips the end of a system block).
+    listed = (tweets_text or "").rstrip()
+    block = _text_block_holding(messages, listed)
+    budget = glean_prompt_budget(model_id, config)
+    if block is None or not budget:
+        return unchanged
+    counter = local_token_counter(model_id)
+
+    def count_messages():
+        return sum(counter(message_text(m)) + 4 for m in messages)
+
+    assembled = block["text"]
+    block["text"] = assembled.replace(listed, "", 1)
+    try:
+        rest = estimate(messages)
+        if counter is not None:
+            rest = rest._replace(tokens=count_messages(), certain=True)
+    finally:
+        block["text"] = assembled
+    if counter is not None:
+        count = counter
+    else:
+        per_char = (TOKENS_PER_UNIT_PRIOR["tweets"][tokenizer_family(model_id)]
+                    / CHARS_PER_UNIT)
+
+        def count(text):
+            return int(math.ceil(len(text or "") * per_char))
+    fitted = ca.newest_that_fit(tweets_text, stats, refs,
+                                budget - rest.tokens, count)
+    if fitted is None:
+        return ReadFit(None, None, None, None, rest)
+    text, stats, refs = fitted
+    if text is not tweets_text:
+        block["text"] = assembled.replace(listed, text.rstrip(), 1)
+    return ReadFit(text, stats, refs,
+                   count_messages() if counter is not None else None, None)
+
+
 def _counted_prompt_tokens(model_id, messages, tools, api_keys, size):
     """The prompt's tokens as the provider counts them, for a thread size
     estimate that is not certain (#648): LLMProvider.count_tokens (the
@@ -3715,21 +3802,15 @@ def _claim_failed_feed_cost(node, resp):
     return True
 
 
-def _collect_feed_reply(llm_node, resp, ca_refs, read_since=()):
+def _collect_feed_reply(llm_node, resp, ca_refs):
     """Turn the feed's JSON answer into the reply: each pick becomes a
     saved reference + FeedPick row (rank, relevance, recommend and the
     quote-tweet text, for judging the model's claims against the user's
     verdicts later), and the node text is the whole rendered feed: the
     verdict, then each quote-tweet over its {quote_ext:ID} marker. The
-    same path serves the batch collect and the admin's live rerun.
-
-    *read_since* are the numbers of a kept list (#511) whose tweet the
-    reader has read since it was made: the closing note told the model
-    they are not candidates, and a pick of one is dropped here and
-    counted with the other dropped picks, so a tweet the reader has read
-    is never picked again, as before the list was kept."""
+    same path serves the batch collect and the admin's live rerun."""
     from backend.utils.ca_feed import (
-        parse_feed_reply, pick_numbers, render_feed_reply, save_feed_picks)
+        parse_feed_reply, render_feed_reply, save_feed_picks)
     # A refusal is the provider's verdict on this request (#454): the text
     # is an apology, not JSON. Say so, naming the model, before parsing.
     # Terminal like a parse failure (the stored batch result is immutable);
@@ -3763,16 +3844,6 @@ def _collect_feed_reply(llm_node, resp, ca_refs, read_since=()):
         # (refs_from_render), so a Read of only such picks is not
         # reported as one where the model picked nothing. (A batch from
         # before renders were pinned has no row: nothing to count on.)
-        if read_since:
-            read_since = set(read_since)
-            picked_read = sorted(set(pick_numbers(resp["content"]))
-                                 & read_since)
-            if picked_read:
-                logger.warning(
-                    "Node %s: dropping picks of tweets the reader has "
-                    "read: %s", llm_node.id, picked_read)
-            ca_refs = {n: ref for n, ref in ca_refs.items()
-                       if n not in read_since}
         from backend.models import FeedRender
         render = FeedRender.query.filter_by(node_id=llm_node.id).first()
         if render is not None:
@@ -4468,8 +4539,10 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # may answer (a second read prompt attached under an earlier
             # read reply is a new read; the older prompt's placeholder
             # reads as a stub, its day was fed to the reply below it).
-            # Rendered here, outside the retry loop — it never shrinks
-            # (a day is ~250k tokens against a 1M window).
+            # Rendered here, outside the retry loop; the newest of its
+            # tweets that fit the prompt are kept once it is assembled
+            # (#717: a day is now over a million tokens, more than the
+            # thread limit lets a prompt hold).
             ca_node = None
             ca_placeholder_match = None
             ca_node_text = None
@@ -4537,9 +4610,16 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         [n.id for n in dropped])
             ca_tweets_content = None
             ca_refs = None
-            # The numbers of a kept list (#511) whose tweet the reader has
-            # read since: named in the closing note, never a pick.
-            ca_read_numbers = []
+            ca_stats = None
+            # #717: the render is fitted to the prompt once it is
+            # assembled (before the first call, below): the newest of its
+            # tweets that fit. ca_fit_render is set while that is owed;
+            # ca_gleaned holds what earlier reads in the thread read of
+            # this window (left out, so this read takes the next older
+            # tweets), and ca_counted the fitted prompt's count.
+            ca_fit_render = False
+            ca_gleaned = frozenset()
+            ca_counted = None
             if needs_ca:
                 from backend.tasks.imports import snapshot_dir_for
                 from backend.utils import community_archive as ca
@@ -4585,7 +4665,6 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     ca_tweets_content = CA_TWEETS_STUB
                 else:
                     ca_seen = set()
-                    ca_keep = frozenset()
                     if batch_resp is None:
                         # A read about to be sent reads the export in the
                         # cache and never waits for a newer one to
@@ -4599,19 +4678,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         ca_source_dir = glean_source_dir(
                             ca_snapshot_dir, ca_days)
                         ca_seen = seen_tweet_ids(user_id)
-                        if ca_live or not _read_batch_requested(llm_node):
-                            # A live read again on the export of the read
-                            # before it keeps that read's list as it was,
-                            # so the request's prefix is read from the
-                            # prompt cache (#511); what the reader has
-                            # read since goes in the closing note. Not
-                            # for the admin's batch experiments: a batch
-                            # comes back long after any cache entry has
-                            # gone, and its collect knows no note.
-                            ca_keep = list_to_keep(
-                                node_chain, ca_node, ca_reply_ids, user_id,
-                                ca.snapshot_export_id(ca_source_dir),
-                                ca_days, ca_scope)
+                        # #717: and what the earlier reads in this thread
+                        # read of this window, live or batch alike: this
+                        # read takes the next older tweets.
+                        ca_gleaned = gleaned_tweet_ids(
+                            node_chain, ca_reply_ids, user_id,
+                            ca.snapshot_export_id(ca_source_dir),
+                            ca_days, ca_scope)
                     else:
                         # A batch submitted before renders were pinned;
                         # re-render the day as it was rendered then (no
@@ -4624,7 +4697,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                                ca_owner.prefilled_handle]
                             if ca_owner else (),
                             include_usernames=ca_follows,
-                            exclude_tweet_ids=ca_seen - ca_keep)
+                            exclude_tweet_ids=ca_seen,
+                            skip_tweet_ids=ca_gleaned)
                     except ca.CommunityArchiveError as e:
                         # No export cached yet (a fresh machine or data
                         # volume): queue the first fetch, and give the
@@ -4641,12 +4715,6 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         "Rendered %s for node %s: %s (~%d tokens)",
                         ca_placeholder_match, ca_node.id, ca_stats,
                         approximate_token_count(ca_tweets_content))
-                    if ca_keep:
-                        ca_read_numbers = read_numbers(ca_refs, ca_seen)
-                        logger.info(
-                            "Node %s: kept the earlier read's list (%d "
-                            "tweets); %d of them read since",
-                            llm_node_id, len(ca_keep), len(ca_read_numbers))
                     if batch_resp is None:
                         # One run renders into a reply: a run another one
                         # has replaced since it started (the admin's
@@ -4658,10 +4726,37 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                 llm_node_id, this_task_id)
                             return {"status": "superseded",
                                     "llm_node_id": llm_node_id}
-                        # Pin the numbering this reply's picks will cite;
-                        # lands in the next commit, before any submit.
-                        record_feed_render(llm_node, ca_stats, ca_refs,
-                                           days=ca_days, scope=ca_scope)
+                        if ca_gleaned and not (ca_stats or {}).get("tweets"):
+                            # #717: the thread's earlier reads have read
+                            # all of this window. Said plainly, no model
+                            # call, nothing billed; a new window (the
+                            # next export) starts again at its newest.
+                            logger.info(
+                                "Node %s: the thread has read all %d "
+                                "tweets of export %s; refused before any "
+                                "call", llm_node_id, len(ca_gleaned),
+                                (ca_stats or {}).get("export_id"))
+                            llm_node.llm_task_status = 'failed'
+                            llm_node.llm_task_error = GLEAN_DAY_DONE_MESSAGE
+                            llm_node.llm_task_progress = 100
+                            llm_node.streaming_content = None
+                            update_tool_meta(llm_node, REFUSED_MARKER,
+                                             {"code": GLEAN_DAY_DONE_CODE},
+                                             append_if_missing=True)
+                            db.session.commit()
+                            if speech_turn is not None:
+                                speech_turn.abort()
+                            return {
+                                'parent_node_id': parent_node_id,
+                                'llm_node_id': llm_node_id,
+                                'status': 'refused',
+                                'reason': GLEAN_DAY_DONE_CODE,
+                            }
+                        # The newest of these tweets that fit the prompt
+                        # are kept once it is assembled, and that list's
+                        # numbering is pinned then (record_feed_render),
+                        # in the commit before the first call or submit.
+                        ca_fit_render = isinstance(ca_refs, dict)
 
             # Every context artifact is pinned to a per-session snapshot.
             # The node carrying a placeholder also carries a
@@ -5226,8 +5321,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 finalize writes for a collected reply (_log_api_cost). The
                 task's error handler commits it with the failure."""
                 try:
-                    return _collect_feed_reply(llm_node, resp, ca_refs,
-                                               read_since=ca_read_numbers)
+                    return _collect_feed_reply(llm_node, resp, ca_refs)
                 except FeedReplyError:
                     if (not resp.get("cut_off")
                             and _claim_failed_feed_cost(llm_node, resp)):
@@ -5747,28 +5841,25 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 # loop). Nothing to inject here.
 
                 # The user's read marks / verdicts on references quoted
-                # earlier in the thread (see _reference_marks_note), the
-                # tweets of a kept list read since it was made (#511:
-                # here, after the cached prefix, instead of out of the
-                # list), and the read thread's turn note: on a read-again
-                # the request itself, on a chat turn the reminder that the
-                # read prompt above still asks for a verdict and picks
-                # while this turn answers the user's message. A read turn
-                # is never agentic (its agentic prompts were stripped
-                # above), so these close the prompt in their own user
-                # turn; a chat turn may be (a Text-mode conversation under
-                # the read reply, #323), and then they ride with the
-                # agentic notes.
+                # earlier in the thread (see _reference_marks_note), and
+                # the read thread's turn note: on a read-again the request
+                # itself, on a chat turn the reminder that the read prompt
+                # above still asks for a verdict and picks while this turn
+                # answers the user's message. A read turn is never agentic
+                # (its agentic prompts were stripped above), so these
+                # close the prompt in their own user turn; a chat turn may
+                # be (a Text-mode conversation under the read reply,
+                # #323), and then they ride with the agentic notes.
                 reference_marks = _reference_marks_note(
                     quoted_ext_ids, user_id, labels=pick_labels,
                     intro_verdicts=_intro_verdicts(rendered_read_ids,
                                                    user_id))
-                ca_read_since = read_since_note(ca_read_numbers)
                 ca_note = None
                 if ca_turn == "read_again":
-                    # After the note naming tweets of a kept list read
-                    # since, the request says they are in it (#511).
-                    ca_note = (CA_READ_AGAIN_TURN_KEPT if ca_read_since
+                    # Reading on in a window the thread has read from
+                    # (#717): the list holds the next older tweets, and no
+                    # earlier pick is in it.
+                    ca_note = (CA_READ_OLDER_TURN if ca_gleaned
                                else CA_READ_AGAIN_TURN)
                 elif ca_turn == "chat":
                     ca_note = CA_CHAT_TURN_NOTE
@@ -5781,8 +5872,6 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     notes.append(circle_note)
                 if reference_marks:
                     notes.append(reference_marks)
-                if ca_read_since:
-                    notes.append(ca_read_since)
                 if ca_note:
                     notes.append(ca_note)
                 if is_agentic and in_others_thread:
@@ -5844,6 +5933,38 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             blocks[-1]["cache_control"] = {
                                 "type": "ephemeral"}
 
+                # #717: a read keeps the newest of its window's tweets that
+                # fit the prompt (_fit_read_list), so a day larger than the
+                # prompt may hold is read in parts instead of refused. On
+                # every assembly (a later one, after an archive was cut,
+                # finds the list fitting as it is); the list's numbering
+                # is pinned for the collect in the commit below, before
+                # any call.
+                if ca_fit_render:
+                    fit = _fit_read_list(
+                        messages, ca_tweets_content, ca_stats, ca_refs,
+                        model_id, flask_app.config,
+                        estimate=lambda msgs: assembled_prompt_size(
+                            list(reversed(node_chain)), user_id, model_id,
+                            msgs, msg_start, nodes_end, tools=agentic_tools,
+                            reads=ca_reply_ids, whole=True))
+                    if fit.text is None:
+                        # The rest of the prompt leaves no room for even
+                        # one tweet: the thread itself is too long.
+                        return _refuse_thread_too_long(fit.rest)
+                    if fit.text is not ca_tweets_content:
+                        logger.info(
+                            "Node %s: read the newest %d of %d tweets to "
+                            "fit the prompt (%s tokens counted)",
+                            llm_node_id, len(fit.refs), len(ca_refs),
+                            fit.counted if fit.counted is not None
+                            else "not")
+                    ca_tweets_content, ca_stats, ca_refs = (
+                        fit.text, fit.stats, fit.refs)
+                    ca_counted = fit.counted
+                    record_feed_render(llm_node, ca_stats, ca_refs,
+                                       days=ca_days, scope=ca_scope)
+
                 # Step 3: Call LLM API
                 self.update_state(state='PROGRESS', meta={'progress': 40, 'status': 'Generating response'})
                 llm_node.llm_task_progress = 40
@@ -5887,6 +6008,10 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                  and ca_tweets_content != CA_TWEETS_STUB
                                  else 0))
                 prompt_size["chars"] = size.chars
+                if ca_counted is not None:
+                    # A read whose list was fitted by a count on this
+                    # machine (#717): that count is the size.
+                    size = size._replace(tokens=ca_counted, certain=True)
                 if (batch_resp is None and thread_limit
                         and size.tokens >= thread_limit
                         and not size.certain):

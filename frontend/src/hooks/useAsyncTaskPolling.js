@@ -206,9 +206,13 @@ export function useAsyncTaskPolling(endpoint, options = {}) {
     setIsPolling(false);
     timedOutRef.current = false;
 
-    // Reset stale state from previous endpoint before starting new polling
+    // Reset stale state from previous endpoint before starting new polling.
+    // The error too: a caller that clears its endpoint after a failure and
+    // polls a new one would otherwise read the old failure on the new
+    // task's first render (#717: a second Glean on the Voice screen).
     setStatus(null);
     setData(null);
+    setError(null);
     setProgress(0);
 
     // Start new polling if enabled and endpoint is set

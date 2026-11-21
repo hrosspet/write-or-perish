@@ -1,6 +1,6 @@
 """A Redis stand-in for the run locks (backend/utils/run_locks.py): SET
-with NX/EX, GET, and EVAL of the two lock scripts, on a clock the test
-moves (``advance``), so a TTL can run out."""
+with NX/EX, GET, INCR, and EVAL of the two lock scripts, on a clock the
+test moves (``advance``), so a TTL can run out."""
 from backend.utils import run_locks
 
 
@@ -33,6 +33,14 @@ class FakeRedis:
     def ttl(self, key):
         entry = self._live(key)
         return None if entry is None else entry[1] - self.now
+
+    def incr(self, key):
+        """INCR: a missing key counts from 0; the key keeps its expiry."""
+        entry = self._live(key)
+        value = int(entry[0]) + 1 if entry is not None else 1
+        self.data[key] = (str(value).encode(),
+                          entry[1] if entry is not None else None)
+        return value
 
     def eval(self, script, numkeys, key, *args):
         token = str(args[0]).encode()

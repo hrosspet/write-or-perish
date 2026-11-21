@@ -598,6 +598,22 @@ def test_openai_call_sends_the_users_safety_identifier(providers,
     assert calls[1]["safety_identifier"] == SYSTEM_SAFETY_IDENTIFIER
 
 
+def test_openai_call_sends_a_reasoning_effort_only_when_asked(providers,
+                                                              monkeypatch):
+    """A merge's live call sends the effort its batch request would
+    (#698); every other call keeps the model's default."""
+    calls = []
+    monkeypatch.setattr(providers, "OpenAI", _oai_client([
+        [_event("response.completed", response=_oai_response())],
+        [_event("response.completed", response=_oai_response())],
+    ], calls))
+    providers.LLMProvider._call_openai("gpt-x", MSGS, "k",
+                                       reasoning_effort="high")
+    providers.LLMProvider._call_openai("gpt-x", MSGS, "k")
+    assert calls[0]["reasoning"] == {"effort": "high"}
+    assert "reasoning" not in calls[1]
+
+
 @pytest.mark.parametrize("script", [
     [_oai_status_error(400, "invalid_request_error", "bio_policy")],
     [_oai_failed("bio_policy")],

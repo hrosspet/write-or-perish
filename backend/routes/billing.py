@@ -76,6 +76,15 @@ def _unavailable(exc):
                     "message": UNAVAILABLE_MESSAGE}), 503
 
 
+def _billing_record_problem():
+    """Stripe no longer has the account's customer (#718). Its ERROR was
+    logged where Stripe said so (stripe_billing.call_with_customer); the
+    person is told to write to us, and nothing changes on the account."""
+    db.session.rollback()
+    return jsonify({"error": "billing_record",
+                    "message": stripe_billing.billing_record_message()}), 409
+
+
 def _state():
     cfg = current_app.config
     return {
@@ -161,6 +170,8 @@ def start_checkout():
             "error": "already_subscribed",
             "message": "Your checkout is complete; your subscription is "
                        "starting. Reload this page in a moment."}), 409
+    except stripe_billing.CustomerMissing:
+        return _billing_record_problem()
     except Exception as e:  # noqa: BLE001 - not configured, Stripe down
         db.session.rollback()
         return _unavailable(e)
@@ -179,6 +190,8 @@ def open_portal():
     try:
         session = stripe_billing.create_portal(
             stripe_billing.get_gateway(), current_user)
+    except stripe_billing.CustomerMissing:
+        return _billing_record_problem()
     except Exception as e:  # noqa: BLE001
         return _unavailable(e)
     return jsonify({"url": session.get("url")})

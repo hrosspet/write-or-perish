@@ -18,6 +18,9 @@ import { isAiAllowed } from '../utils/aiUsage';
 import {
   THREAD_LIMIT_TEXT, THREAD_NOTICE_TEXT, THREAD_TOO_LONG_CODE,
 } from '../utils/threadLength';
+import {
+  GLEAN_DAY_DONE_REFUSAL, REFUSAL_SENTENCES, primeSpeech, sayRefusal,
+} from '../utils/spokenRefusal';
 import api from '../api';
 import { entryQuestion, EVERYDAY_QUESTION } from '../utils/entryPrompt';
 
@@ -708,7 +711,9 @@ function VoiceSession({
   // The glean runs live at the provider; this page waits for it and then
   // opens it in text mode (finished or failed: the thread page shows
   // either). Never handed to the voice session, so it is never spoken.
-  const { status: gleanStatus, error: gleanPollError } = useAsyncTaskPolling(
+  const {
+    status: gleanStatus, data: gleanData, error: gleanPollError,
+  } = useAsyncTaskPolling(
     gleanNodeId ? `/nodes/${gleanNodeId}/llm-status` : null,
     { enabled: !!gleanNodeId, interval: 2000 },
   );
@@ -716,11 +721,23 @@ function VoiceSession({
   // page too, which keeps watching the glean: the Voice screen never
   // stays on "Gleaning" with its buttons disabled.
   useEffect(() => {
-    if (gleanNodeId && (gleanPollError
-        || ['completed', 'failed', 'cancelled'].includes(gleanStatus))) {
+    if (!gleanNodeId) return;
+    if (gleanStatus === 'failed'
+        && gleanData?.error_code === GLEAN_DAY_DONE_REFUSAL) {
+      // The thread has gleaned all of today's tweets (#717): refused
+      // before any model call. Said aloud like the other refusals and
+      // shown, and the Voice screen stays: there is no gleaning to open.
+      sayRefusal(GLEAN_DAY_DONE_REFUSAL);
+      addToast(gleanData.error || REFUSAL_SENTENCES[GLEAN_DAY_DONE_REFUSAL],
+        8000);
+      setGleanNodeId(null);
+      return;
+    }
+    if (gleanPollError
+        || ['completed', 'failed', 'cancelled'].includes(gleanStatus)) {
       navigate(`/node/${gleanNodeId}`);
     }
-  }, [gleanNodeId, gleanStatus, gleanPollError, navigate]);
+  }, [gleanNodeId, gleanStatus, gleanData, gleanPollError, navigate, addToast]);
 
   const gleaning = gleanStarting || !!gleanNodeId;
   const gleanReady = !!gleanAnchor && !gleaning && isOnline;
@@ -738,6 +755,8 @@ function VoiceSession({
     // The voice reply stops, its queue too (the player is global, so a
     // paused queue would follow the user to the gleaning's page).
     audio.stop();
+    // Inside the tap, so a refusal can be said when it comes (#717).
+    primeSpeech();
     setGleanStarting(true);
     api.post(`/read/from-node/${gleanAnchor}`, {})
       .then((res) => {

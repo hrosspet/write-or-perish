@@ -333,3 +333,88 @@ def test_a_dumped_x_api_tweet_never_loads_at_train(app, tmp_path):
     from backend.models import APICostLog
     assert APICostLog.query.filter_by(
         user_id=bob.id, request_type="x_prefill").count() == 1
+
+
+def _dump_with_an_x_api_tweet(tmp_path):
+    """alice's dump, with twitter:2 marked as fetched through the X API."""
+    _seed_source()
+    out = tmp_path / "alice.jsonl"
+    dump_user._run("alice", str(out))
+    lines = out.read_text(encoding="utf-8").splitlines()
+    rows = [json.loads(ln) for ln in lines[1:]]
+    for row in rows:
+        if row["source_key"] == "twitter:2":
+            row["provenance"] = "prefill_x"
+    out.write_text("\n".join([lines[0]] + [json.dumps(r) for r in rows]) + "\n",
+                   encoding="utf-8")
+    return out
+
+
+def _x_records(user_id):
+    from backend.models import APICostLog
+    return APICostLog.query.filter_by(user_id=user_id,
+                                      request_type="x_prefill").count()
+
+
+def test_load_user_writes_the_x_api_record_before_the_entries(app, tmp_path, monkeypatch):
+    """The record is written before the entries (#689), with the profiles:
+    a run stopped while it writes the entries leaves the loaded profiles
+    reading as Chat at most."""
+    from backend.utils import dump_rows
+    from backend.utils.privacy import train_refused
+    out = _dump_with_an_x_api_tweet(tmp_path)
+    real = dump_rows.new_node
+
+    def killed(nd, *a, **k):
+        if nd.get("provenance") == "prefill_x":
+            raise RuntimeError("the run stops here")
+        return real(nd, *a, **k)
+    monkeypatch.setattr(dump_rows, "new_node", killed)
+    with pytest.raises(RuntimeError):
+        load_user._run(str(out), "bob", merge=False, create_approved=False)
+    db.session.rollback()
+    bob = User.query.filter_by(username="bob").one()
+    assert _x_records(bob.id) == 1
+    profiles = UserProfile.query.filter_by(user_id=bob.id).all()
+    assert len(profiles) == 2 and all(train_refused(p) for p in profiles)
+
+
+def test_load_user_with_merge_writes_the_record_when_every_entry_is_there(app, tmp_path):
+    """A run with --merge that finds every entry already there (a record
+    an earlier run never wrote) writes it; a second run writes no second
+    one."""
+    out = _dump_with_an_x_api_tweet(tmp_path)
+    load_user._run(str(out), "bob", merge=False, create_approved=False)
+    bob = User.query.filter_by(username="bob").one()
+    from backend.models import APICostLog
+    APICostLog.query.filter_by(user_id=bob.id, request_type="x_prefill").delete()
+    db.session.commit()
+    db.session.info.pop("x_api_accounts", None)
+    load_user._run(str(out), "bob", merge=True, create_approved=False)
+    assert _x_records(bob.id) == 1
+    load_user._run(str(out), "bob", merge=True, create_approved=False)
+    assert _x_records(bob.id) == 1
+
+
+def test_the_dump_header_says_whether_the_account_holds_x_api_input(app, tmp_path):
+    """dump_user writes x_api_input: the source's X API record (its posts
+    deleted there) is enough, and load_user records it from the header
+    alone. Without either, no record (control)."""
+    from backend.models import APICostLog
+    alice, *_ = _seed_source()
+    out = tmp_path / "alice.jsonl"
+    dump_user._run("alice", str(out))
+    assert _read(out)["x_api_input"] is False
+    load_user._run(str(out), "plain", merge=False, create_approved=False)
+    assert _x_records(User.query.filter_by(username="plain").one().id) == 0
+
+    db.session.add(APICostLog(user_id=alice.id, model_id="x-api/timeline",
+                              request_type="x_prefill", input_tokens=0,
+                              output_tokens=0, cost_microdollars=0))
+    db.session.commit()
+    db.session.info.pop("x_api_accounts", None)
+    flagged = tmp_path / "flagged.jsonl"
+    dump_user._run("alice", str(flagged))
+    assert _read(flagged)["x_api_input"] is True
+    load_user._run(str(flagged), "carol", merge=False, create_approved=False)
+    assert _x_records(User.query.filter_by(username="carol").one().id) == 1

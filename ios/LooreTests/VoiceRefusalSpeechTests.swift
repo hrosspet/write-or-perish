@@ -360,6 +360,10 @@ final class VoiceRefusalSpeechTurnTests: XCTestCase {
         XCTAssertEqual(SpokenRefusal.approvalWaiting.text,
                        "A change to your data is waiting for your approval. Approve or reject it on the screen to continue.")
         XCTAssertEqual(SpokenRefusal.threadTooLong.text, ThreadLength.spokenText)
+        // A Glean with nothing of the day left (#717): ca_feed.GLEAN_DAY_DONE_MESSAGE.
+        XCTAssertEqual(SpokenRefusal.gleanedThrough.text,
+                       "You've gleaned through all of today's tweets. New ones come in once a day.")
+        XCTAssertEqual(SpokenRefusal(code: "glean_day_done"), .gleanedThrough)
         // A recording kept after the access ended (#438): the server's on-screen
         // text (subscriptions.paused_message(reason, "recording")), which names the
         // state and never where or how to pay.

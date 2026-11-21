@@ -56,6 +56,10 @@ protocol VoiceRecording: AnyObject {
     var onSourceEnded: (() -> Void)? { get set }
     /// An upload failed fatally (`init_parse_failed`): the session is dead.
     var onFatal: ((String) -> Void)? { get set }
+    /// The server refused a chunk as past what one recording may hold
+    /// (`ChunkUploader.onLimit`), with its words: no later chunk is sent; the
+    /// chunks before are on the server, so the recording stops and is finalized.
+    var onLimit: ((String) -> Void)? { get set }
     /// The microphone stopped and could not be restarted (after a route change):
     /// capture is held, as after an interruption.
     var onSourceFailed: (() -> Void)? { get set }
@@ -151,7 +155,7 @@ enum LocalNotice: String {
     var title: String {
         switch self {
         case .recordingPaused: return "Recording paused — tap to resume"
-        case .longRecording: return "You’ve been recording for 59 minutes"
+        case .longRecording: return RecordingLimits.longRecordingTitle
         case .resumeFailed: return "The recording could not resume"
         case .recordFailed: return "Loore could not start recording"
         case .gleanFailed: return "Loore could not start the glean"
@@ -163,7 +167,7 @@ enum LocalNotice: String {
         case .recordingPaused:
             return "The microphone stopped (a call, or another app or device took it). Everything up to the interruption is saved."
         case .longRecording:
-            return "Consider stopping soon and continuing in a new recording."
+            return RecordingLimits.longRecordingAdvice
         case .resumeFailed:
             return "The microphone did not restart. Open Loore and press Resume; everything up to the pause is saved."
         case .recordFailed, .gleanFailed:

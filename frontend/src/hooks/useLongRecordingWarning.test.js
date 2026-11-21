@@ -56,6 +56,10 @@ test('warns once at 59 minutes, on the context armed in the gesture', () => {
 
   expect(mockAddToast).toHaveBeenCalledTimes(1);
   expect(mockAddToast.mock.calls[0][0]).toMatch(/59 minutes/);
+  // Nothing ends at an hour: the text names the two-hour transcription
+  // limit (Peter, 2026-11-21), not a stop.
+  expect(mockAddToast.mock.calls[0][0]).toMatch(/up to two hours/);
+  expect(mockAddToast.mock.calls[0][0]).not.toMatch(/stopping soon/);
   expect(armed.createOscillator).toHaveBeenCalled();
   expect(created).toHaveLength(1); // no fresh context for the chime
 });

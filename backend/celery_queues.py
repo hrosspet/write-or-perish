@@ -99,6 +99,13 @@ TASK_QUEUES = {
     "backend.tasks.imports.import_twitter_archive": _B,
     "backend.tasks.imports.prefill_community_archive": _B,
     "backend.tasks.imports.prefill_x_api": _B,
+    # Pre-fill bundles from the lab (#698): a load's runs, and the beat
+    # that re-sends a load whose run stopped.
+    "backend.tasks.prefill_bundles.load_prefill_bundle": _B,
+    # The final merge run again after a load: one live call a person may
+    # be waiting for ("Preparing your starting point…"), at most 3 min.
+    "backend.tasks.prefill_bundles.merge_prefill_profile": _B,
+    "backend.tasks.prefill_bundles.resume_stalled_bundle_loads": _B,
     "backend.tasks.imports.refresh_community_archive_snapshot": _B,
     "backend.tasks.external_sync.fetch_community_archive": _B,
     "backend.tasks.external_sync.sync_twitter_bookmarks": _B,
@@ -109,6 +116,7 @@ TASK_QUEUES = {
     "backend.tasks.disk_monitor.check_disk_usage": _B,
     "backend.tasks.embeddings.sweep_embeddings": _B,
     "backend.tasks.node_cleanup.cleanup_deleted_nodes": _B,
+    "backend.tasks.recording_cleanup.remove_abandoned_empty_recordings": _B,
     "backend.tasks.user_purge.cancel_batches_read_before": _B,
     "backend.tasks.user_purge.process_user_data_purges": _B,
     "backend.tasks.user_purge.run_user_data_purge": _B,

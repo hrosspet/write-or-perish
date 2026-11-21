@@ -120,8 +120,17 @@ def access_state(user, config=None):
 _OPEN_EXACT = {
     ("GET", "/api/dashboard"),            # who am I (no profile in it)
     # Its own settings, as a waitlisted account always could: the
-    # subscribe page asks "Start from your tweets?" (#697). Starts nothing.
+    # subscribe page asks "Start from your tweets?" (#697). A Yes there
+    # can start one thing: when the lab prepared material for the
+    # person's X id and bundles are on (#698), a background load of it
+    # (no model call) and then one final profile merge, a live model call
+    # claimed once per account (utils/prefill_bundle_merge), which reads
+    # no subscription state: it is made for an account without one too.
     ("PUT", "/api/dashboard/user"),
+    # After that Yes, the card follows the load of the material Loore
+    # prepared for the person's X account (#698): a status and counts,
+    # no content.
+    ("GET", "/api/dashboard/starting-point"),
     ("PATCH", "/api/dashboard/timezone"),
     ("POST", "/api/account/delete"),
     ("POST", "/api/account/delete/confirm"),

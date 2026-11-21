@@ -242,6 +242,14 @@ def trial_limit_usd(user, config):
     return float(config.get("SUBSCRIPTION_TRIAL_SPEND_LIMIT_USD") or 0)
 
 
+def trial_ceiling_start(user):
+    """Where the trial's or an alpha tester's free month's ceiling
+    (trial_limit_usd) counts the spend from: the free month's start, else
+    the trial's; None for neither."""
+    return (alpha_unpaid_since(user)
+            or getattr(user, "subscription_trial_start", None))
+
+
 def trial_capped(user):
     return bool(getattr(user, "subscription_trial_capped", False)
                 and under_trial_ceiling(user))
@@ -252,8 +260,7 @@ def enforce_trial_cap(user, config, send_email=None):
     start. Commits when it changed. Returns True when the user is
     blocked by it."""
     limit = trial_limit_usd(user, config)
-    since = (alpha_unpaid_since(user)
-             or getattr(user, "subscription_trial_start", None))
+    since = trial_ceiling_start(user)
     blocked = False
     spend = 0
     if limit > 0 and since is not None:
@@ -660,13 +667,7 @@ def spend_cap_payload(user=None, now=None):
     from backend.models import User
     lifts_on = None
     if isinstance(user, User) and cap_lifts_with_payment(user, now):
-        alpha = alpha_unpaid_since(user) is not None
-        return {
-            "error": "monthly_spend_limit_reached",
-            "message": FREE_MONTH_CAP_MESSAGE if alpha else TRIAL_CAP_MESSAGE,
-            "lifts_on": None,
-            "lifts_with_payment": True,
-        }
+        return trial_cap_payload(user)
     if user is not None and isinstance(user, User):
         try:
             lifts_on = spend_cap_lift_date(user, current_app.config, now)
@@ -677,6 +678,18 @@ def spend_cap_payload(user=None, now=None):
         "error": "monthly_spend_limit_reached",
         "message": spend_cap_message(lifts_on, now),
         "lifts_on": lifts_on.isoformat() if lifts_on else None,
+    }
+
+
+def trial_cap_payload(user):
+    """The 402 body for a ceiling only the first payment lifts (the
+    trial's, an alpha tester's free month's; trial_limit_usd)."""
+    alpha = alpha_unpaid_since(user) is not None
+    return {
+        "error": "monthly_spend_limit_reached",
+        "message": FREE_MONTH_CAP_MESSAGE if alpha else TRIAL_CAP_MESSAGE,
+        "lifts_on": None,
+        "lifts_with_payment": True,
     }
 
 

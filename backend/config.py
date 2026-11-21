@@ -485,6 +485,11 @@ class Config:
         os.environ.get("COMMUNITY_ARCHIVE_PARQUET_MIN_TWEETS") or "5000")
     COMMUNITY_ARCHIVE_SNAPSHOT_DIR = (
         os.environ.get("COMMUNITY_ARCHIVE_SNAPSHOT_DIR") or None)
+    # Where tiktoken keeps o200k_base (#717: a Glean's list is fitted with
+    # counts made on the server). Unset: <data>/tiktoken, beside the
+    # archive snapshot (utils/tokens.tiktoken_cache_dir); the first count
+    # on a machine downloads the file there once (~3.6 MB).
+    TIKTOKEN_CACHE_DIR = os.environ.get("TIKTOKEN_CACHE_DIR") or None
     # Personal key for the Community Archive API v1 (#688; created at
     # community-archive.org, settings, API keys). Set: the pre-fill and
     # archive lookups use API v1, and Glean reads the last day from it
@@ -492,6 +497,18 @@ class Config:
     # the archive retires on 2026-11-19. A secret: never logged.
     COMMUNITY_ARCHIVE_API_KEY = (
         os.environ.get("COMMUNITY_ARCHIVE_API_KEY") or "").strip() or None
+
+    # Pre-fill bundles from the lab (#698, docs/PREFILL-BUNDLES.md).
+    # PREFILL_BUNDLE_LOCATION: where they are kept, "gs://<bucket>[/<prefix>]"
+    # or a local directory; the lab's export script writes there and this
+    # server reads. PREFILL_BUNDLES_ENABLED: loading them here (the admin's
+    # "Make ready from prepared material" and a Yes on "Start from your
+    # tweets"). Unset or off, nothing reads the storage and nothing loads.
+    PREFILL_BUNDLE_LOCATION = (
+        os.environ.get("PREFILL_BUNDLE_LOCATION") or "").strip()
+    PREFILL_BUNDLES_ENABLED = (
+        os.environ.get("PREFILL_BUNDLES_ENABLED") or "false"
+    ).lower() in ("1", "true", "yes")
 
     # Safety factor for prompt-too-long retries (0.99 = aim for 99% of the limit)
     RETRY_SAFETY_FACTOR = 0.99

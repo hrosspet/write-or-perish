@@ -67,7 +67,7 @@ struct AccountView: View {
         .navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: $connectingX) {
             CookieWebFlowSheet(title: "Connect X", startURL: app.environment.url(path: APIPath.xConnect)) { url in
-                Task { await model?.xLoginReturned(CookieWebFlowSheet.query(url, "x_login")) }
+                Task { await model?.xLoginReturned(AccountModel.xConnectOutcome(url)) }
             }
         }
         .sheet(isPresented: $pastingConfirmation) {

@@ -182,6 +182,59 @@ class TestNewAccountGoesToTheTrialStep:
         assert me["subscription"]["state"] == "none"
         assert _fresh(u).approved is True
 
+    @pytest.mark.parametrize("payments", [True, False])
+    @pytest.mark.parametrize("dest, landing", [
+        ("/node/5?x=1#reply-2", "/node/5?x=1#reply-2"),
+        ("//evil.example", "/dashboard"),
+        ("/%2F%2Fevil.example", "/dashboard"),
+        ("https://evil.example/node/5", "/dashboard"),
+    ])
+    def test_the_page_the_sign_in_started_on_skips_no_step(
+            self, real_app, payments, dest, landing):
+        """#704 with the payments gate (payments on and off): the link of a
+        new account goes to the page, only an ordinary page inside Loore;
+        nothing the sign-in does skips a step. The account still has the
+        terms to accept, and with payments on the subscribe step (the
+        app's, which shows the page after them); with payments off it
+        waits for approval."""
+        real_app.config["PAYMENTS_ENABLED"] = payments
+        from backend.utils.sign_in_links import make_link_token
+        c = real_app.test_client()
+        token = make_link_token("fresh@example.com", next_url=dest)
+        r = c.get(f"/auth/magic-link/verify?token={token}")
+        assert r.status_code == 302
+        assert r.headers["Location"] == f"{FRONTEND_URL}{landing}"
+        u = User.query.filter_by(email="fresh@example.com").one()
+        assert u.accepted_terms_at is None
+        me = _me(c)
+        assert me["terms_up_to_date"] is False
+        if payments:
+            assert me["approved"] is True
+            assert me["subscription"]["state"] == "none"
+        else:
+            assert me["approved"] is False
+
+    @pytest.mark.parametrize("payments", [True, False])
+    def test_x_sign_in_of_a_new_account_returns_to_the_page(
+            self, real_app, payments):
+        real_app.config["PAYMENTS_ENABLED"] = payments
+        c = real_app.test_client()
+        x = MagicMock()
+        x.authorized = True
+        x.get.return_value = MagicMock(
+            ok=True, json=lambda: {"id": 779, "screen_name": "birdy2"})
+        x.authorized = False   # the start: X is asked
+        with patch("backend.routes.auth.twitter", x):
+            c.get("/auth/login?next=/node/5%23reply-2")
+        x.authorized = True    # the return from X
+        with patch("backend.routes.auth.twitter", x):
+            r = c.get("/auth/login")
+        assert r.status_code == 302
+        assert r.headers["Location"] == f"{FRONTEND_URL}/node/5#reply-2"
+        u = User.query.filter_by(twitter_id="779").one()
+        assert u.accepted_terms_at is None
+        assert _me(c)["terms_up_to_date"] is False
+
     def test_an_alpha_signup_never_let_in_starts_at_the_trial(self, real_app):
         # Signed up during the alpha (plan "alpha", the default then),
         # never approved: let in like any new account, to the trial step,
@@ -705,8 +758,12 @@ def _notices(monkeypatch):
 
 
 class TestSignupEmail:
-    def test_none_while_payments_are_on(self, real_app, monkeypatch):
+    def test_no_approval_request_while_payments_are_on(self, real_app,
+                                                       monkeypatch):
+        # Payments on send the information email of #715 instead (tested
+        # in test_admin_signup_email.py), never an approval request.
         calls = _notices(monkeypatch)
+        _admin(real_app)
         u = _add(username="newcomer", email="n@example.com")
         assert _client(real_app, u).post("/api/terms/accept").status_code \
             == 200
@@ -726,14 +783,16 @@ class TestSignupEmail:
     def test_control_payments_off_asks_for_approval(self, payments_off,
                                                     monkeypatch):
         calls = _notices(monkeypatch)
+        _admin(payments_off)
         u = _add(username="newcomer")
         c = _client(payments_off, u)
         c.post("/api/terms/accept")
         c.post("/api/terms/accept")
-        assert calls == ["newcomer", "newcomer"]
+        # One email per account (#715), not one per acceptance.
+        assert calls == ["newcomer"]
         ok = _add(username="approved", approved=True)
         _client(payments_off, ok).post("/api/terms/accept")
-        assert calls == ["newcomer", "newcomer"]
+        assert calls == ["newcomer"]
 
     def test_control_the_email_is_the_base_one(self):
         import inspect

@@ -155,6 +155,7 @@ class TestRenderRecentTweets:
             "window_start_at": datetime(2026, 9, 12, 6, 0),
             "window_end_at": datetime(2026, 9, 13, 6, 0),
             "tweets": 4, "accounts": 3, "excluded": 0, "scope": "all",
+            "days": 1, "skipped": 0,
         }
         assert text.startswith(
             "# Community Archive — tweets from 2026-09-12 06:00 to "

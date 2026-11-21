@@ -42,6 +42,7 @@ import {
   aiReplyAckKey, aiReplyOffReason,
   sharedBannerText,
 } from "../utils/circles";
+import NotSharedNotice from "./NotSharedNotice";
 
 
 // Glean (#435) is the Community Archive read under its user-facing name.
@@ -168,6 +169,9 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   const [node, setNode] = useState(() => peekPrefetchedNode(id));
   const [loading, setLoading] = useState(node == null);
   const [error, setError] = useState("");
+  // The fetch answered 404 (or 403): an entry this account may not open,
+  // or none at all; the server never says which (#704).
+  const [notShared, setNotShared] = useState(false);
   const [showEditOverlay, setShowEditOverlay] = useState(false);
   const [selectedModel, setSelectedModel] = useState(currentUser?.preferred_model || null);
   // The Read button's own model: reads run only on the read models
@@ -349,7 +353,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
         // 404 covers missing, deleted and not-shared-with-you alike (the
         // backend never says which), so the message has to as well.
         if (err.response && (err.response.status === 404 || err.response.status === 403)) {
-          setError("This node doesn't exist, was deleted, or isn't shared with you.");
+          setNotShared(true);
         } else {
           setError("Error fetching node details.");
         }
@@ -657,6 +661,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   useLayoutEffect(() => { checkActionsStacked(); });
 
   if (loading) return <div style={{ color: "var(--text-muted)", padding: "20px" }}>Loading node...</div>;
+  if (notShared) return <NotSharedNotice />;
   if (error) return <div style={{ color: "var(--accent)", padding: "20px" }}>{error}</div>;
   if (!node) return <div style={{ color: "var(--text-muted)", padding: "20px" }}>No node found.</div>;
 

@@ -230,7 +230,7 @@ def list_users():
         user_is_capped,
     )
     from backend.utils.approval import (
-        approval_waived, counts_as_approved, is_blocked)
+        approval_waived, counts_as_approved, held_as_spam, is_blocked)
 
     config = current_app.config
     waived = approval_waived(config)
@@ -296,8 +296,11 @@ def list_users():
             # itself while they were on reads as waiting (#697).
             "approved": counts_as_approved(user, config),
             # Payments on (#697): the admin blocked it (Inactive otherwise
-            # only means it has not come back since payments went on).
-            **({"blocked": is_blocked(user)} if waived else {}),
+            # only means it has not come back since payments went on), or
+            # the spam mark holds it (#713: not let in at its next visit).
+            **({"blocked": is_blocked(user),
+                "held_as_spam": held_as_spam(user, config)}
+               if waived else {}),
             "email": user.email,
             "plan": user.plan,
             "deactivated_at": iso_utc(user.deactivated_at),
@@ -371,12 +374,14 @@ def toggle_user_status(user_id):
     an account never approved: Activate by hand, as before (an "alpha"
     account then gets the alpha testers' free month, convert_if_alpha).
     Payments off, an account the gate let in by itself while they were on
-    reads as waiting (approval.waiting_again); Activate approves it by
-    hand."""
+    reads as waiting (approval.waiting_again); payments on, one the gate
+    let in that the admin then marked as spam reads as not approved
+    (approval.held_as_spam, #713). Activate approves either by hand, and
+    the spam mark stays."""
     from backend.utils.approval import (
-        approval_waived, approved_by_hand, is_blocked, waiting_again)
+        approval_waived, approved_by_hand, counts_as_approved, is_blocked)
     user = User.query.get_or_404(user_id)
-    if waiting_again(user):
+    if user.approved and not counts_as_approved(user):
         approved_by_hand(user)
         user.approved_at = datetime.utcnow()
         db.session.commit()
@@ -433,7 +438,7 @@ def block_user(user_id):
 @login_required
 @admin_required
 def activity():
-    """Per-user engagement since activation for the Activity tab —
+    """Per-user activity since activation for the Activity tab —
     writes / asks / voice per day, last seen, retention flags — measured
     directly, not via spend. ?days= (default 14, max 60)."""
     from backend.utils.activity import activity_report
@@ -910,12 +915,37 @@ def unclaimed_keep_many():
     return jsonify({"user_ids": changed}), 200
 
 
+@admin_bp.route("/signup_email", methods=["GET"])
+@login_required
+@admin_required
+def get_signup_email_setting():
+    """This admin's "Email me about new signups" setting (#715)."""
+    return jsonify({"enabled": bool(current_user.notify_new_signups)}), 200
+
+
+@admin_bp.route("/signup_email", methods=["PUT"])
+@login_required
+@admin_required
+def set_signup_email_setting():
+    """Turn this admin's "Email me about new signups" on or off (#715).
+    Takes effect from the next signup; nothing else changes."""
+    enabled = (request.get_json(silent=True) or {}).get("enabled")
+    if not isinstance(enabled, bool):
+        return jsonify({"error": "enabled must be true or false."}), 400
+    current_user.notify_new_signups = enabled
+    db.session.commit()
+    return jsonify({"enabled": enabled}), 200
+
+
 @admin_bp.route("/users/<int:user_id>/toggle_spam", methods=["POST"])
 @login_required
 @admin_required
 def toggle_user_spam(user_id):
-    """Flip the admin spam flag. Marking spam only hides the row behind
-    the Users-table eye toggle; it does not deactivate the account."""
+    """Flip the admin spam flag. Marking spam hides the row behind the
+    Users-table eye toggle. While payments are on it also holds an
+    account the admin did not approve by hand: it is never let in by the
+    gate, and one let in already is not active from now on
+    (utils/approval.held_as_spam, #713). Unmarking approves nothing."""
     user = User.query.get_or_404(user_id)
     user.spam = not bool(user.spam)
     db.session.commit()
@@ -1118,6 +1148,16 @@ def whitelist_user():
     }), 201
 
 
+def _welcome_destination():
+    """Where the welcome email's link lands: /welcome, or the page inside
+    Loore the admin named as `next_url` (#704; none by default). A value
+    that is not such a page is dropped, as in every sign-in."""
+    from backend.utils.destination import safe_destination
+    body = request.get_json(silent=True) or {}
+    named = body.get("next_url") if isinstance(body, dict) else None
+    return safe_destination(named) or "/welcome"
+
+
 @admin_bp.route("/users/<int:user_id>/activate_and_welcome", methods=["POST"])
 @login_required
 @admin_required
@@ -1129,6 +1169,7 @@ def activate_and_welcome(user_id):
 
     # Generate magic link pointing to /welcome (30-day expiry)
     welcome_max_age = 30 * 24 * 3600  # 30 days in seconds
+    landing = _welcome_destination()
 
     # Approve the user
     user.approved = True
@@ -1149,7 +1190,7 @@ def activate_and_welcome(user_id):
     db.session.commit()
     try:
         token = generate_magic_link_token(
-            user.email, next_url="/welcome", max_age=welcome_max_age
+            user.email, next_url=landing, max_age=welcome_max_age
         )
         token_h = hash_token(token)
 

@@ -431,6 +431,8 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
   // Streaming transcription
   // Derive label from apiEndpoint: '/voice' → 'Voice'
   const workflowLabel = apiEndpoint ? apiEndpoint.replace('/', '').charAt(0).toUpperCase() + apiEndpoint.replace('/', '').slice(1) : null;
+  // handleStop (defined below), for a recording the server takes no more of.
+  const handleStopRef = useRef(null);
   const streaming = useStreamingTranscription({
     privacyLevel: 'private',
     aiUsage,
@@ -438,6 +440,9 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
     onTranscriptUpdate: (text) => {
       transcriptRef.current = text;
     },
+    // Past what one recording may hold: the turn goes on as after Stop,
+    // finalized with the chunks the server took (utils/recordingLimits).
+    onLimitReached: () => handleStopRef.current?.(),
     onError: (err) => {
       // Surface (1) startup failures (getUserMedia/MediaRecorder ctor) and
       // (2) fatal upload failures (server rejected chunk 0 with
@@ -1239,6 +1244,7 @@ export function useVoiceSession({ apiEndpoint, ttsTitle = 'Audio', onLLMComplete
       stopSilentAudio();
     });
   }, [streaming, stopSilentAudio, audio, model, entry]);
+  handleStopRef.current = handleStop;
 
   const handleContinue = useCallback((extraReset) => {
     turnRef.current += 1;

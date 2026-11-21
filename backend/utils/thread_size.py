@@ -20,7 +20,9 @@ How the size is known before the model is called:
   that turn. A Read reply (Glean) is never the base: its prompt held a
   day of tweets that later turns do not send again. Only the requesting
   user's own calls count. A refusal the completion task counted is a
-  base too (THREAD_LIMIT_REQUEST_TYPE, below).
+  base too (THREAD_LIMIT_REQUEST_TYPE, below), except one recorded for a
+  Glean (#717: its size was the Glean's own prompt; recognised by the
+  refused reply's read marker, _gleaning_refusal_ids).
 - The ratio: tokens per character. The base's own, when it was measured
   on the tokenizer of the model the reply will run on ("thread", the
   only ratio the estimate is *certain* with); else the user's latest
@@ -53,6 +55,7 @@ out byte for byte as it would with the limit off.
 import json
 import logging
 from collections import namedtuple
+from datetime import datetime
 
 from flask import current_app
 
@@ -286,6 +289,56 @@ def _changed_since(user_id, when):
         ).exists()).scalar()
 
 
+def _is_gleaning_meta(tool_calls_meta):
+    """Whether a reply's tool_calls_meta marks it as a Glean: the read
+    markers create_llm_placeholder and the Glean routes write (live, glean
+    again, the admin's batch experiments). Metadata only."""
+    from backend.utils.ca_feed import READ_FURTHER_MARKER
+    from backend.utils.glean import READ_BATCH_MARKER, READ_LIVE_MARKER
+    try:
+        meta = json.loads(tool_calls_meta or "[]") or []
+    except (TypeError, ValueError):
+        return False
+    markers = {READ_LIVE_MARKER, READ_FURTHER_MARKER, READ_BATCH_MARKER}
+    return any(isinstance(m, dict) and m.get("name") in markers
+               for m in meta)
+
+
+def _gleaning_refusal_ids(chain, refusal_rows):
+    """Ids of the refusal rows (*refusal_rows*: {chain index: rows}) that
+    the completion task recorded for a Glean (#717). A refusal row sits
+    under the node the reply was asked under; the reply it refused is that
+    node's newest reply refused (REFUSED_MARKER) no later than the row was
+    written. When that reply carries a read marker, the row measured a
+    Glean's prompt: before #717 a whole day of tweets, counted and certain,
+    which kept the thread "at the limit" for every model, and the apps hid
+    Glean and LLM Response there. One query, on node metadata only."""
+    from backend.models import Node
+    parents = {chain[i].id for i in refusal_rows}
+    refused = {}
+    for child in (db.session.query(Node.parent_id, Node.created_at,
+                                   Node.tool_calls_meta)
+                  .filter(Node.parent_id.in_(list(parents)),
+                          Node.llm_task_status == "failed",
+                          Node.tool_calls_meta.like(
+                              f'%"{REFUSED_MARKER}"%'))
+                  .all()):
+        refused.setdefault(child.parent_id, []).append(child)
+    found = set()
+    for i, rows_at in refusal_rows.items():
+        children = refused.get(chain[i].id) or []
+        for row in rows_at:
+            before = [c for c in children
+                      if c.created_at is None or row.created_at is None
+                      or c.created_at <= row.created_at]
+            if not before:
+                continue
+            last = max(before, key=lambda c: c.created_at or datetime.min)
+            if _is_gleaning_meta(last.tool_calls_meta):
+                found.add(row.id)
+    return found
+
+
 def latest_measurement(chain, user_id, reads=frozenset()):
     """The newest valid Measurement of a reply's prompt on *chain* (the
     parent of the next reply and its ancestors, nearest first), or None.
@@ -306,7 +359,7 @@ def latest_measurement(chain, user_id, reads=frozenset()):
                 APICostLog.request_ref.in_(list(refs)))
         .all())
     first_call = {}
-    refusals = {}
+    refusal_rows = {}
     for row in rows:
         i = refs.get(row.request_ref)
         if i is None or not row.input_tokens:
@@ -318,9 +371,16 @@ def latest_measurement(chain, user_id, reads=frozenset()):
             if seen is None or row.id < seen.id:
                 first_call[i] = row
         elif row.prompt_chars:
-            seen = refusals.get(i)
-            if seen is None or row.id > seen.id:
-                refusals[i] = row
+            refusal_rows.setdefault(i, []).append(row)
+    # A refused Glean's row is never a base (#717): its size was the
+    # Glean's own prompt, a day of tweets that no later reply sends.
+    gleanings = (_gleaning_refusal_ids(chain, refusal_rows)
+                 if refusal_rows else frozenset())
+    refusals = {}
+    for i, rows_at in refusal_rows.items():
+        kept = [r for r in rows_at if r.id not in gleanings]
+        if kept:
+            refusals[i] = max(kept, key=lambda r: r.id)
 
     best = None
     for i in sorted(first_call):

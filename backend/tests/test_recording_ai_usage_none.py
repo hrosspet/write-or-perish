@@ -423,8 +423,10 @@ def tasks(monkeypatch, tmp_path):
     for module in (st, tr):
         monkeypatch.setattr(module, "compress_audio_if_needed",
                             lambda p, log: p)
-        monkeypatch.setattr(module, "get_audio_duration",
-                            lambda p, log: 15.0)
+        # The tasks count the decoded audio's length
+        # (utils/audio_processing.decoded_audio_seconds, #694).
+        monkeypatch.setattr(module, "decoded_audio_seconds",
+                            lambda p, **k: 15.0)
         monkeypatch.setattr(module, "get_openai_chat_key", lambda cfg: "key")
         monkeypatch.setattr(module, "OpenAI", fake_openai)
     monkeypatch.setattr(
@@ -574,6 +576,10 @@ class TestBatchTask:
         tasks.st.transcribe_chunk_batch(MagicMock(), "s-voice-none", [0])
 
         tasks.transcribe.assert_not_called()
+        # Kept for AI usage, not because the audio could not be read.
+        chunk = NodeTranscriptChunk.query.filter_by(
+            session_id="s-voice-none", chunk_index=0).one()
+        assert (chunk.status, chunk.error) == ("failed", NOT_TRANSCRIBED_TEXT)
 
     def test_single_chunk_task_checks_too(self, tasks):
         _recording(tasks.user, "s-one", "none", [3], tasks.root)
@@ -582,6 +588,10 @@ class TestBatchTask:
         tasks.st.transcribe_draft_chunk(MagicMock(), "s-one", 3, str(path))
 
         tasks.transcribe.assert_not_called()
+        # Kept for AI usage, not because the audio could not be read.
+        chunk = NodeTranscriptChunk.query.filter_by(
+            session_id="s-one", chunk_index=3).one()
+        assert (chunk.status, chunk.error) == ("failed", NOT_TRANSCRIBED_TEXT)
 
 
 class TestDictationFinalize:

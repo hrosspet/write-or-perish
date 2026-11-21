@@ -42,6 +42,15 @@ test('a read of a stale archive says how old its newest tweets are (#688)', () =
   expect(container.textContent).not.toMatch(/newest tweets available/);
 });
 
+test('a read of part of a stale day names the archive\'s newest tweet, not its own (#717)', () => {
+  const { container } = render(<ReadWindowLine window={{
+    window_start: '2026-11-01T20:00:00Z', window_end: '2026-11-02T06:00:00Z',
+    newest_at: '2026-11-03T12:00:00Z',
+    tweets: 6000, accounts: 900, excluded: 0, export_stale: true,
+  }} />);
+  expect(container.textContent).toMatch(/: 6,000 by 900 accounts\. The newest tweets available are from 3 November;/);
+});
+
 test('the tail marks the whole list read and reports back', async () => {
   api.post.mockResolvedValue({ data: { read_at: { 5: '2026-09-19T08:00:00Z', 6: '2026-09-19T08:00:00Z' } } });
   const onMarkedAll = jest.fn();

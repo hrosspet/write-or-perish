@@ -10,24 +10,38 @@ started is transcribed to the end, even when the cap flips mid-recording
 (the block flag is set out of band, ENFORCE_CAP_DELAY_SECONDS after any
 cost row, including this module's own transcription rows). The cap blocks
 starting a recording (the streaming init endpoints) and the LLM reply.
+
+"The end" is bounded (utils/recording_limits): one recording is
+transcribed up to MAX_TRANSCRIBED_SECONDS of audio; the audio past it is
+stored and kept with the recording, not transcribed, and the recording's
+text ends with a note saying so.
 """
 from celery import Task
 from celery.utils.log import get_task_logger
 from openai import OpenAI
+import math
 import pathlib
 import os
 import shutil
+import subprocess
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from backend.celery_app import celery, flask_app
 from backend.models import Node, NodeTranscriptChunk, Draft, APICostLog
 from backend.extensions import db
-from backend.utils.audio_processing import compress_audio_if_needed, get_audio_duration
+from backend.utils.audio_processing import (
+    CHUNK_DURATION_SEC, compress_audio_if_needed, decode_timeout_seconds,
+    decoded_audio_seconds, split_audio_for_transcription,
+)
+from backend.utils import recording_limits
 from backend.utils.audio_storage import (
     move_session_audio_to_node, storage_path,
 )
-from backend.utils.webm_utils import concat_fragmented_media
+from backend.utils.webm_utils import (
+    audio_work_deadline, concat_fragmented_media,
+)
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.encryption import decrypt_file_to_temp
 from backend.utils.cost import calculate_audio_cost_microdollars
@@ -114,6 +128,238 @@ VOICE_REPLY_SKIPPED_APPROVAL = (
     "Your recording is saved. Loore didn't reply because a change to your "
     "data waits for your approval. Approve or reject it, then continue."
 )
+
+
+def _log_transcription_cost(user_id, seconds):
+    """A cost row for *seconds* of audio sent to the provider (none for 0)."""
+    if seconds <= 0:
+        return
+    db.session.add(APICostLog(
+        user_id=user_id,
+        model_id="gpt-4o-transcribe",
+        request_type="transcription",
+        audio_duration_seconds=seconds,
+        cost_microdollars=calculate_audio_cost_microdollars(
+            "gpt-4o-transcribe", seconds),
+    ))
+
+
+# INTRODUCED HEURISTIC: how much local audio work (merging, measuring and,
+# when that fails, re-encoding) one run of a transcription task may do: 20
+# minutes. The time spent waiting for the provider is not counted. Each
+# ffmpeg call gets at most the time left as its timeout. A part the run does
+# not reach in time is left for a follow-up run of the task, which starts
+# with it; a part that cannot be done within a whole budget is kept without
+# its text (recording_limits.UNREADABLE). A batch of 20 chunks is merged and
+# measured in well under a second.
+TASK_AUDIO_BUDGET_SECONDS = 20 * 60
+# INTRODUCED HEURISTIC: re-encoding a recording's audio may take at most this
+# long per chunk (twice its 15 s); it runs at hundreds of times real time.
+REENCODE_SECONDS_PER_CHUNK = 2 * recording_limits.STREAMING_CHUNK_SECONDS
+
+# A part left for a follow-up run (_LocalBudget ran out before it was done).
+_LATER = "later"
+
+# INTRODUCED HEURISTIC: follow-up runs one batch may have: 3. A batch holds at
+# most BATCH_CHUNKS chunks, at most MAX_CHUNK_AUDIO_SECONDS each (40 minutes
+# of audio at the bound, 5 minutes as the apps record); merging and
+# measuring that takes seconds even on a slow worker (an hour of Chrome's
+# Opus decodes in about 5 s on a laptop), and re-encoding it under a minute,
+# so one run of TASK_AUDIO_BUDGET_SECONDS does it many times over. After the
+# last follow-up, the parts still left are kept without their text
+# (recording_limits.UNREADABLE).
+MAX_FOLLOW_UP_RUNS = 3
+# The most parts (sub-batches, one per resume) one batch is worked on in:
+# its chunks (recording_limits.BATCH_CHUNKS), when every chunk began a
+# resume. Parts past it go to the follow-up run.
+MAX_PARTS_PER_BATCH = recording_limits.BATCH_CHUNKS
+
+
+def _now():
+    return time.monotonic()
+
+
+class _LocalBudget:
+    """TASK_AUDIO_BUDGET_SECONDS of local audio work for one task run."""
+
+    def __init__(self, seconds=None):
+        self.remaining = TASK_AUDIO_BUDGET_SECONDS if seconds is None \
+            else seconds
+        self.parts_done = 0         # parts this run worked on
+
+    def left(self):
+        return self.remaining
+
+    def deadline(self):
+        """The time.monotonic() value the budget runs out at, for code
+        that takes a deadline (webm_utils.audio_work_deadline)."""
+        return time.monotonic() + max(self.remaining, 0)
+
+    @contextmanager
+    def spending(self):
+        start = _now()
+        try:
+            yield
+        finally:
+            self.remaining -= _now() - start
+
+    def ran_out(self):
+        return self.remaining <= 0
+
+    def fresh(self):
+        """No other part has used this run's budget yet."""
+        return self.parts_done == 0
+
+
+class _Plan:
+    """What of a recording's audio goes to the provider (_plan_audio)."""
+
+    def __init__(self, files=(), seconds=0.0, reason=None, folder=None):
+        self.files = list(files)    # [(path, the name it is sent as)]
+        self.seconds = seconds      # counted: the length bound, the cost
+        self.reason = reason        # why nothing is sent (recording_limits,
+        #                             or _LATER)
+        self.folder = folder        # re-encoded pieces, removed by cleanup
+
+    def cleanup(self):
+        if self.folder:
+            shutil.rmtree(self.folder, ignore_errors=True)
+            self.folder = None
+
+
+def _plan_audio(path, name, chunk_count, room, budget):
+    """What of the audio at *path* (*chunk_count* chunks of a recording) is
+    sent to the provider, and the seconds counted for it (the length bound
+    and the cost record).
+
+    Audio that decodes is sent as it is, counted at its decoded length. Its
+    decode stops at MAX_CHUNK_AUDIO_SECONDS a chunk: a part that reaches it
+    is not re-encoded or sent (recording_limits.INVALID). Audio that cannot
+    be decoded is re-encoded on the server
+    (utils/audio_processing.split_audio_for_transcription: decoded,
+    re-timed from its samples, cut at *room* or at MAX_CHUNK_AUDIO_SECONDS
+    a chunk, in MP3 pieces); the pieces are sent, counted at their decoded
+    length, at least STREAMING_CHUNK_SECONDS a chunk. Nothing is sent when
+    the audio would take the recording past MAX_TRANSCRIBED_SECONDS (*room*:
+    the seconds it may still have transcribed; TOO_LONG), or when even the
+    re-encode fails (UNREADABLE). The audio stays with the recording either
+    way.
+
+    The work comes out of *budget* (_LocalBudget): each ffmpeg call's
+    timeout is at most the time left, the re-encode's at most
+    REENCODE_SECONDS_PER_CHUNK a chunk. When the budget runs out first, the
+    reason is _LATER: the caller leaves the part for a follow-up run, or,
+    when no other part used this run's budget, keeps it as UNREADABLE."""
+    floor = chunk_count * recording_limits.STREAMING_CHUNK_SECONDS
+    most = chunk_count * recording_limits.MAX_CHUNK_AUDIO_SECONDS
+    if budget.ran_out():
+        return _Plan(seconds=floor, reason=_LATER)
+    with budget.spending():
+        seconds = decoded_audio_seconds(
+            path, timeout_seconds=min(decode_timeout_seconds(path),
+                                      budget.left()),
+            logger=logger, stop_after=most)
+    if seconds == math.inf:
+        return _Plan(seconds=most, reason=recording_limits.INVALID)
+    if seconds is not None:
+        if seconds > room:
+            return _Plan(seconds=seconds, reason=recording_limits.TOO_LONG)
+        return _Plan(files=[(path, name)], seconds=seconds)
+    if budget.ran_out():
+        return _Plan(seconds=floor, reason=_LATER)
+    if floor > room:
+        return _Plan(seconds=floor, reason=recording_limits.TOO_LONG)
+    limit = min(room, most)
+    timeout = min(budget.left(), chunk_count * REENCODE_SECONDS_PER_CHUNK)
+    with budget.spending():
+        pieces, cut = split_audio_for_transcription(
+            path, CHUNK_DURATION_SEC, limit, timeout_seconds=timeout,
+            logger=logger, deadline=time.monotonic() + timeout)
+    plan = _Plan(files=[(piece, "audio.mp3") for piece, _ in pieces],
+                 seconds=max(sum(s for _, s in pieces), floor),
+                 folder=os.path.dirname(pieces[0][0]) if pieces else None)
+    if not pieces:
+        plan.reason = (_LATER if budget.ran_out()
+                       else recording_limits.UNREADABLE)
+    elif cut:
+        plan.reason = (recording_limits.INVALID if most <= room
+                       else recording_limits.TOO_LONG)
+    elif plan.seconds > room:
+        plan.reason = recording_limits.TOO_LONG
+    if plan.reason:
+        plan.cleanup()
+        plan.files = []
+    return plan
+
+
+def _settled_reason(plan_reason, budget):
+    """The reason a part is kept without its text, or _LATER when a
+    follow-up run takes it: a part that ran out of a budget no other part
+    used cannot be done in any run (UNREADABLE)."""
+    if plan_reason == _LATER and budget.fresh():
+        return recording_limits.UNREADABLE
+    return plan_reason
+
+
+def _queue_follow_up(session_id, chunk_indices, follow_up):
+    """Follow-up run number *follow_up* of transcribe_chunk_batch, for the
+    parts this run left (_LATER); its task id."""
+    task = transcribe_chunk_batch.delay(session_id=session_id,
+                                        chunk_indices=list(chunk_indices),
+                                        follow_up=follow_up)
+    return task.id
+
+
+def queue_batches(session_id, stored_chunks):
+    """Queue *stored_chunks* (rows, in index order) for transcription in
+    batches of at most recording_limits.BATCH_CHUNKS, marking each chunk
+    'processing' with its batch's task id. The caller commits. Returns the
+    task ids."""
+    task_ids = []
+    size = recording_limits.BATCH_CHUNKS
+    for start in range(0, len(stored_chunks), size):
+        batch = stored_chunks[start:start + size]
+        task = transcribe_chunk_batch.delay(
+            session_id=session_id,
+            chunk_indices=[c.chunk_index for c in batch])
+        for c in batch:
+            c.status = 'processing'
+            c.task_id = task.id
+        task_ids.append(task.id)
+    return task_ids
+
+
+def _note_measured(chunk_records, seconds):
+    """Chunks about to be sent: the part's measured seconds on the first,
+    0 on the others (NodeTranscriptChunk.pending_seconds), committed at
+    once, so a start meanwhile counts them as measured
+    (utils/recording_limits.pending_audio_seconds)."""
+    records = sorted((c for c in chunk_records if c is not None),
+                     key=lambda c: c.chunk_index)
+    for n, record in enumerate(records):
+        record.pending_seconds = seconds if n == 0 else 0.0
+    db.session.commit()
+
+
+def _transcribe_files(client, files):
+    """The provider's text for *files* ([(path, name)]), joined."""
+    texts = []
+    for path, name in files:
+        with open(path, "rb") as audio_file:
+            resp = client.audio.transcriptions.create(
+                model="gpt-4o-transcribe",
+                file=(name, audio_file),
+                response_format="text"
+            )
+        if hasattr(resp, "text"):
+            texts.append(resp.text)
+        elif isinstance(resp, dict):
+            texts.append(resp.get("text") or resp.get("transcript") or "")
+        else:
+            texts.append(str(resp))
+    if len(texts) == 1:
+        return texts[0]
+    return "\n\n".join(t.strip() for t in texts if t and t.strip())
 
 
 def _voice_approval_skip(user_id, parent_id):
@@ -263,26 +509,33 @@ def transcribe_chunk(self, node_id: int, chunk_index: int, chunk_path: str):
             # Compress if needed (webm -> mp3 for better compatibility)
             processed_path = compress_audio_if_needed(file_path, logger)
 
-            # Measure audio duration for cost tracking
-            chunk_duration_sec = get_audio_duration(processed_path, logger)
+            # What is sent and counted (the length bound, the cost):
+            # utils/recording_limits, _plan_audio.
+            budget = _LocalBudget()
+            plan = _plan_audio(
+                processed_path, processed_path.name, 1,
+                recording_limits.MAX_TRANSCRIBED_SECONDS
+                - recording_limits.transcribed_seconds(node_id=node_id),
+                budget)
+            chunk_duration_sec = plan.seconds
 
             try:
-                # Transcribe the chunk
-                with open(processed_path, "rb") as audio_file:
-                    resp = client.audio.transcriptions.create(
-                        model="gpt-4o-transcribe",
-                        file=audio_file,
-                        response_format="text"
-                    )
+                if plan.reason:
+                    # Kept without its text (utils/recording_limits).
+                    recording_limits.mark_untranscribed(
+                        [chunk_record], _settled_reason(plan.reason, budget))
+                    db.session.commit()
+                    logger.info(f"Node {node_id} chunk {chunk_index}: not "
+                                f"transcribed ({plan.reason})")
+                    return {'node_id': node_id, 'chunk_index': chunk_index,
+                            'status': 'not_transcribed'}
 
-                    if hasattr(resp, "text"):
-                        transcript = resp.text
-                    elif isinstance(resp, dict):
-                        transcript = resp.get("text") or resp.get("transcript") or ""
-                    else:
-                        transcript = str(resp)
+                _note_measured([chunk_record], plan.seconds)
+                # Transcribe the chunk
+                transcript = _transcribe_files(client, plan.files)
 
             finally:
+                plan.cleanup()
                 # Clean up compressed file if different from original
                 if processed_path != file_path:
                     try:
@@ -300,6 +553,7 @@ def transcribe_chunk(self, node_id: int, chunk_index: int, chunk_path: str):
             chunk_record.set_text(transcript)
             chunk_record.status = 'completed'
             chunk_record.completed_at = datetime.utcnow()
+            chunk_record.audio_seconds = chunk_duration_sec
 
             # Log transcription cost
             node = Node.query.get(node_id)
@@ -599,26 +853,32 @@ def transcribe_draft_chunk(self, session_id: str, chunk_index: int, chunk_path: 
             # Compress if needed (webm -> mp3 for better compatibility)
             processed_path = compress_audio_if_needed(file_path, logger)
 
-            # Measure audio duration for cost tracking
-            draft_chunk_duration_sec = get_audio_duration(processed_path, logger)
+            # What is sent and counted (the length bound, the cost):
+            # utils/recording_limits, _plan_audio.
+            budget = _LocalBudget()
+            plan = _plan_audio(
+                processed_path, processed_path.name, 1,
+                recording_limits.MAX_TRANSCRIBED_SECONDS
+                - recording_limits.transcribed_seconds(session_id=session_id),
+                budget)
+            draft_chunk_duration_sec = plan.seconds
 
             try:
-                # Transcribe the chunk
-                with open(processed_path, "rb") as audio_file:
-                    resp = client.audio.transcriptions.create(
-                        model="gpt-4o-transcribe",
-                        file=audio_file,
-                        response_format="text"
-                    )
+                if plan.reason:
+                    # Kept without its text (utils/recording_limits).
+                    recording_limits.mark_untranscribed(
+                        [chunk_record], _settled_reason(plan.reason, budget))
+                    db.session.commit()
+                    return {'session_id': session_id,
+                            'chunk_index': chunk_index,
+                            'status': 'not_transcribed'}
 
-                    if hasattr(resp, "text"):
-                        transcript = resp.text
-                    elif isinstance(resp, dict):
-                        transcript = resp.get("text") or resp.get("transcript") or ""
-                    else:
-                        transcript = str(resp)
+                _note_measured([chunk_record], plan.seconds)
+                # Transcribe the chunk
+                transcript = _transcribe_files(client, plan.files)
 
             finally:
+                plan.cleanup()
                 # Clean up compressed file if different from original
                 if processed_path != file_path:
                     try:
@@ -636,6 +896,7 @@ def transcribe_draft_chunk(self, session_id: str, chunk_index: int, chunk_path: 
             chunk_record.set_text(transcript)
             chunk_record.status = 'completed'
             chunk_record.completed_at = datetime.utcnow()
+            chunk_record.audio_seconds = draft_chunk_duration_sec
 
             # Log transcription cost
             draft = Draft.query.filter_by(session_id=session_id).first()
@@ -722,10 +983,15 @@ class BatchTranscriptionTask(Task):
 
 
 @celery.task(base=BatchTranscriptionTask, bind=True)
-def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
+def transcribe_chunk_batch(self, session_id: str, chunk_indices: list,
+                           follow_up: int = 0):
     """
     Transcribe a batch of audio chunks by merging them and sending to
     OpenAI's gpt-4o-transcribe.
+
+    *follow_up*: 0 for the batch's first run; a run whose local audio
+    budget runs out leaves the parts it did not reach to run follow_up + 1,
+    up to MAX_FOLLOW_UP_RUNS.
 
     Instead of transcribing each 15s chunk individually, this task:
     1. Decrypts all chunk files in the batch
@@ -797,6 +1063,11 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
         temp_files = []
         paths_by_idx = {}
         merged_by_subbatch = []  # [(sub_indices, merged_path)] (#124)
+        # Seconds of audio sent to the provider: the cost record, also when
+        # a later sub-batch fails.
+        batch_duration_sec = 0.0
+        cost_recorded = False
+        user_id = draft.user_id
 
         try:
             for idx in sorted(chunk_indices):
@@ -901,18 +1172,52 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
             client = OpenAI(api_key=api_key)
 
             transcripts = []
-            batch_duration_sec = 0.0
             # Sub-batches whose merged file holds less audio than their
             # chunks: those chunks are kept (renamed, see below).
             short_subbatches = set()
-            for sub_indices in sub_batches:
+            # Chunks kept without their text, by index: the reason
+            # (utils/recording_limits; past the length one recording may
+            # have transcribed, or audio that could not be read). Their
+            # audio is merged and stored like the rest, only the provider
+            # call is left out.
+            untranscribed = {}
+            # Chunks of the parts left for a follow-up run of this task
+            # (TASK_AUDIO_BUDGET_SECONDS): kept as they are, still waiting.
+            later = []
+            budget = _LocalBudget()
+            transcribed_before = recording_limits.transcribed_seconds(
+                session_id=session_id)
+            for part_number, sub_indices in enumerate(sub_batches):
+                # This run's local budget is spent, or the batch has more
+                # parts than one run works on: the part, and every part
+                # after it, waits for the follow-up run.
+                if (later or part_number >= MAX_PARTS_PER_BATCH
+                        or (budget.ran_out() and not budget.fresh())):
+                    later.extend(sub_indices)
+                    continue
                 merge_report = {}
-                merged_path = concat_fragmented_media(
-                    [paths_by_idx[i] for i in sub_indices],
-                    init_segment_path=_resolve_init(sub_indices),
-                    output_suffix=ext,
-                    report=merge_report,
-                )
+                deadline_token = audio_work_deadline.set(budget.deadline())
+                try:
+                    with budget.spending():
+                        merged_path = concat_fragmented_media(
+                            [paths_by_idx[i] for i in sub_indices],
+                            init_segment_path=_resolve_init(sub_indices),
+                            output_suffix=ext,
+                            report=merge_report,
+                        )
+                except subprocess.TimeoutExpired:
+                    reason = _settled_reason(
+                        _LATER if budget.ran_out()
+                        else recording_limits.UNREADABLE, budget)
+                    budget.parts_done += 1
+                    if reason == _LATER:
+                        later.extend(sub_indices)
+                    else:
+                        untranscribed.update(
+                            {idx: reason for idx in sub_indices})
+                    continue
+                finally:
+                    audio_work_deadline.reset(deadline_token)
                 merged_by_subbatch.append((sub_indices, merged_path))
                 if merge_report.get('holds_all_audio') is False:
                     short_subbatches.add(sub_indices[0])
@@ -922,32 +1227,42 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
                 processed_path = compress_audio_if_needed(
                     merge_input_path, logger)
 
-                batch_duration_sec += get_audio_duration(
-                    processed_path, logger)
+                # What is sent to the provider and counted for the length
+                # bound and the cost record (_plan_audio). The name carries
+                # `ext`, so the API infers the format from it rather than
+                # the tempfile's auto-generated suffix.
+                plan = _plan_audio(
+                    processed_path, f"audio{ext}", len(sub_indices),
+                    recording_limits.MAX_TRANSCRIBED_SECONDS
+                    - transcribed_before - batch_duration_sec, budget)
+                reason = _settled_reason(plan.reason, budget)
+                budget.parts_done += 1
 
                 try:
-                    with open(processed_path, "rb") as audio_file:
-                        # Explicit (name, file) tuple so the API infers
-                        # the format from `ext` rather than the
-                        # tempfile's auto-generated suffix.
-                        resp = client.audio.transcriptions.create(
-                            model="gpt-4o-transcribe",
-                            file=(f"audio{ext}", audio_file),
-                            response_format="text"
-                        )
-
-                        if hasattr(resp, "text"):
-                            sub_text = resp.text
-                        elif isinstance(resp, dict):
-                            sub_text = (
-                                resp.get("text")
-                                or resp.get("transcript") or ""
-                            )
-                        else:
-                            sub_text = str(resp)
+                    if reason == _LATER:
+                        # Its chunk files stay for the follow-up run.
+                        later.extend(sub_indices)
+                        merged_by_subbatch.pop()
+                        try:
+                            os.unlink(merged_path)
+                        except OSError:
+                            pass
+                        continue
+                    if reason:
+                        untranscribed.update(
+                            {idx: reason for idx in sub_indices})
+                        continue
+                    _note_measured(
+                        NodeTranscriptChunk.query.filter(
+                            NodeTranscriptChunk.session_id == session_id,
+                            NodeTranscriptChunk.chunk_index.in_(sub_indices),
+                        ).all(), plan.seconds)
+                    batch_duration_sec += plan.seconds
+                    sub_text = _transcribe_files(client, plan.files)
                     if sub_text and sub_text.strip():
                         transcripts.append(sub_text.strip())
                 finally:
+                    plan.cleanup()
                     if processed_path != merge_input_path:
                         try:
                             os.unlink(processed_path)
@@ -956,17 +1271,38 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
 
             transcript = "\n\n".join(transcripts)
 
-            # Store transcript in the first chunk of the batch;
-            # mark all batch chunks as completed
-            first_idx = min(chunk_indices)
+            # After the last follow-up run, the parts still left are kept
+            # without their text.
+            if later and follow_up >= MAX_FOLLOW_UP_RUNS:
+                logger.warning(
+                    f"Session {session_id}: parts {later} not reached in "
+                    f"{follow_up + 1} runs; kept without their text")
+                untranscribed.update({idx: recording_limits.UNREADABLE
+                                      for idx in later})
+                later = []
+
+            # Store transcript in the first transcribed chunk of the batch;
+            # mark those chunks as completed, and the ones kept without
+            # their text as failed with the reason (the finalize then
+            # waits for them no longer and notes them).
+            transcribed_indices = [
+                i for i in chunk_indices
+                if i not in untranscribed and i not in later]
+            first_idx = min(transcribed_indices, default=None)
             for idx in chunk_indices:
+                if idx in later:
+                    continue
                 chunk_record = NodeTranscriptChunk.query.filter_by(
                     session_id=session_id,
                     chunk_index=idx
                 ).first()
-                if chunk_record:
+                if chunk_record and idx in untranscribed:
+                    recording_limits.mark_untranscribed(
+                        [chunk_record], untranscribed[idx])
+                elif chunk_record:
                     if idx == first_idx:
                         chunk_record.set_text(transcript)
+                        chunk_record.audio_seconds = batch_duration_sec
                     else:
                         # Other chunks in batch don't carry text —
                         # their audio is merged into the first chunk
@@ -975,18 +1311,7 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
                     chunk_record.completed_at = datetime.utcnow()
 
             # Log transcription cost
-            if draft and batch_duration_sec > 0:
-                transcription_cost = calculate_audio_cost_microdollars(
-                    "gpt-4o-transcribe", batch_duration_sec
-                )
-                cost_log = APICostLog(
-                    user_id=draft.user_id,
-                    model_id="gpt-4o-transcribe",
-                    request_type="transcription",
-                    audio_duration_seconds=batch_duration_sec,
-                    cost_microdollars=transcription_cost,
-                )
-                db.session.add(cost_log)
+            _log_transcription_cost(user_id, batch_duration_sec)
 
             # Encrypt the merged audio and store as batch files — one
             # per subsession (#124); delete individual chunk .enc files
@@ -1036,6 +1361,19 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
                                 )
 
             db.session.commit()
+            cost_recorded = True
+
+            # The parts this run left: a follow-up run of the task takes
+            # them (their chunks stay 'processing').
+            if later:
+                follow_up_id = _queue_follow_up(session_id, later,
+                                                follow_up + 1)
+                NodeTranscriptChunk.query.filter(
+                    NodeTranscriptChunk.session_id == session_id,
+                    NodeTranscriptChunk.chunk_index.in_(later),
+                ).update({NodeTranscriptChunk.task_id: follow_up_id},
+                         synchronize_session=False)
+                db.session.commit()
 
             # Reassemble draft.content from all completed chunks
             completed_chunks = NodeTranscriptChunk.query.filter_by(
@@ -1053,13 +1391,18 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
             logger.info(
                 f"Batch transcription successful for session {session_id}, "
                 f"chunks {chunk_indices}: {len(transcript)} characters"
+                + (f"; kept without text: {sorted(untranscribed)}"
+                   if untranscribed else "")
+                + (f"; left for a follow-up run: {later}" if later else "")
             )
 
             return {
                 'session_id': session_id,
                 'chunk_indices': chunk_indices,
                 'status': 'completed',
-                'transcript_length': len(transcript)
+                'transcript_length': len(transcript),
+                'not_transcribed': sorted(untranscribed),
+                'later': later,
             }
 
         except Exception as e:
@@ -1069,6 +1412,16 @@ def transcribe_chunk_batch(self, session_id: str, chunk_indices: list):
             # and any further query/commit would raise PendingRollbackError,
             # masking the real error.
             db.session.rollback()
+
+            # The audio sent to the provider before the failure is recorded.
+            if not cost_recorded and batch_duration_sec > 0:
+                try:
+                    _log_transcription_cost(user_id, batch_duration_sec)
+                    db.session.commit()
+                except Exception:
+                    logger.warning("Could not record the transcription cost "
+                                   f"of session {session_id}", exc_info=True)
+                    db.session.rollback()
 
             # If the draft was deleted mid-batch (user discarded the session
             # while we were transcribing), there's nothing left to fail —
@@ -1287,14 +1640,9 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
                 f"{len(remaining_indices)} remaining stored chunks: "
                 f"{remaining_indices}"
             )
-            # Queue async and let the polling loop below wait for completion
-            batch_task = transcribe_chunk_batch.delay(
-                session_id=session_id,
-                chunk_indices=remaining_indices,
-            )
-            for c in stored_chunks:
-                c.status = 'processing'
-                c.task_id = batch_task.id
+            # Queue async (in batches of BATCH_CHUNKS) and let the polling
+            # loop below wait for completion
+            queue_batches(session_id, stored_chunks)
             db.session.commit()
 
         # Wait for all chunks to complete (with timeout)
@@ -1394,6 +1742,16 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
             # Nothing transcribed (#513): a chunk still pending when the wait
             # ran out is as lost as a failed one.
             failed_chunks = [c for c in chunks if c.status != 'completed']
+        # Chunks kept without their text (a recording longer than the
+        # limit; utils/recording_limits) did not fail: their audio is kept,
+        # and a note at the end of the text says why.
+        untranscribed = [c for c in failed_chunks
+                         if recording_limits.untranscribed_code(c.error)]
+        if untranscribed:
+            failed_chunks = [c for c in failed_chunks
+                             if c not in untranscribed]
+        untranscribed_note = recording_limits.untranscribed_note(
+            untranscribed, bool(full_transcript.strip()))
 
         # Title only standalone top-level voice notes. Voice-workflow turns
         # (label='Voice') are conversation messages, not journal notes — never
@@ -1434,9 +1792,12 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
         # includes it).
         if (user_id and model and label == 'Voice'
                 and chunks and not full_transcript.strip()
-                and not failed_chunks):
+                and not failed_chunks and not untranscribed):
             # Empty text from chunks that completed (#513): the entry says so.
             final_content = "*Note: No words were transcribed*"
+        if untranscribed:
+            final_content = recording_limits.with_note(
+                final_content, untranscribed_note)
         db.session.refresh(draft)
         draft.set_content(final_content)
         draft.streaming_completed_chunks = len(completed_chunks)
@@ -1464,8 +1825,9 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
         elif no_text:
             # Keep the recording (note + audio) as an entry, with no reply.
             # Chunks still pending when the wait ran out count as failed
-            # (above); empty text gets its own note.
-            if failed_chunks:
+            # (above), as do chunks past the length limit; empty text gets
+            # its own note.
+            if failed_chunks or untranscribed:
                 skip_message = VOICE_REPLY_SKIPPED_NOT_TRANSCRIBED
             else:
                 skip_message = VOICE_REPLY_SKIPPED_NO_WORDS
@@ -1487,8 +1849,12 @@ def finalize_draft_streaming(self, session_id: str, total_chunks: int,
                 db.session.commit()
         elif should_chain:
             try:
+                # Audio kept without its text: the entry's note says so
+                # (after the transcript, so a pre-warmed prefix still holds).
                 _start_server_side_llm_chain(
-                    draft, session_id, full_transcript,
+                    draft, session_id,
+                    recording_limits.with_note(full_transcript,
+                                               untranscribed_note),
                     user_id, parent_id, model, label,
                     cache_split_offset=cache_split_offset,
                     prewarm_token=prewarm_token,

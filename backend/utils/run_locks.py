@@ -79,10 +79,14 @@ _clients = {}
 
 def _client():
     """A Redis client on the broker's URL, one per URL and process (its
-    pool reconnects after a fork). Raises when there is no app context or
-    no redis package; callers treat any error as "Redis unreachable"."""
+    pool reconnects after a fork). Raises when there is no app context, no
+    redis package, or the app is a test app (TESTING: a test that wants
+    Redis installs tests/fake_redis, as utils/task_owner keeps tests off
+    a real one); callers treat any error as "Redis unreachable"."""
     import redis
     from flask import current_app
+    if current_app.config.get("TESTING"):
+        raise RuntimeError("no Redis for a test app")
     url = current_app.config.get("CELERY_BROKER_URL",
                                  "redis://localhost:6379/0")
     client = _clients.get(url)
@@ -212,3 +216,29 @@ def single_run(key, ttl):
         yield True
     finally:
         lock.release()
+
+
+# ── Counters: how often something started in a window ─────────────────────
+
+def count(key, window):
+    """Count one more start under ``key``: a counter that begins with its
+    first start and lasts ``window`` seconds. Returns the new count, or
+    None when Redis cannot be reached (callers then go ahead, as without
+    the counter)."""
+    try:
+        client = _client()
+        client.set(key, 0, nx=True, ex=int(window))
+        return int(client.incr(key))
+    except Exception as e:  # noqa: BLE001 — unreachable counts as unknown
+        log.debug("counter %s unavailable (%s)", key, type(e).__name__)
+        return None
+
+
+def counted(key):
+    """The count under ``key`` now (0 when none is running), without adding
+    to it; None when Redis cannot be reached."""
+    try:
+        return int(_text(_client().get(key)) or 0)
+    except Exception as e:  # noqa: BLE001 — unreachable counts as unknown
+        log.debug("counter %s unreadable (%s)", key, type(e).__name__)
+        return None

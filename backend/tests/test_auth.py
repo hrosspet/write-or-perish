@@ -60,7 +60,9 @@ class TestIsSafeRedirectUrl:
     def test_rejects_scheme_with_slashes_trick(self):
         """Test that URLs trying to sneak in schemes are rejected."""
         # These could be interpreted as absolute URLs by browsers
-        assert is_safe_redirect_url("/\\evil.com") is True  # This is actually a valid path
+        # Browsers read a backslash as a slash: "/\\evil.com" is "//evil.com",
+        # another host (#704).
+        assert is_safe_redirect_url("/\\evil.com") is False
         assert is_safe_redirect_url("https:/dashboard") is False  # Has scheme
 
     def test_accepts_paths_with_special_characters(self):
