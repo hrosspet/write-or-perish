@@ -56,6 +56,10 @@ protocol VoiceRecording: AnyObject {
     var onSourceEnded: (() -> Void)? { get set }
     /// An upload failed fatally (`init_parse_failed`): the session is dead.
     var onFatal: ((String) -> Void)? { get set }
+    /// The server refused a chunk as past what one recording may hold
+    /// (`ChunkUploader.onLimit`), with its words: no later chunk is sent; the
+    /// chunks before are on the server, so the recording stops and is finalized.
+    var onLimit: ((String) -> Void)? { get set }
     /// The microphone stopped and could not be restarted (after a route change):
     /// capture is held, as after an interruption.
     var onSourceFailed: (() -> Void)? { get set }

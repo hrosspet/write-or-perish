@@ -297,6 +297,7 @@ final class VoiceTurnController {
         timing = VoiceTiming(backend: backend)
         recorder.onSourceEnded = { [weak self] in self?.stop() }
         recorder.onFatal = { [weak self] message in self?.uploadFailedFatally(message) }
+        recorder.onLimit = { [weak self] message in self?.reachedLimit(message) }
         recorder.onSourceFailed = { [weak self] in self?.microphoneFailed() }
     }
 
@@ -728,6 +729,16 @@ final class VoiceTurnController {
 
     static func isAlreadyFinalizing(_ error: APIError) -> Bool {
         error.status == 400 && (error.userMessage(fallback: "").contains("not in recording state"))
+    }
+
+    /// The server took no more of this recording (past what one recording may
+    /// hold, `ChunkUploader.onLimit`): said in its words, then the turn goes on
+    /// as after Stop, finalized with the chunks the server holds. Found at Stop,
+    /// it is only said.
+    private func reachedLimit(_ message: String) {
+        guard state == .recording || state == .stopping else { return }
+        notices.toast(message, duration: 10)
+        if state == .recording { stop() }
     }
 
     private func uploadFailedFatally(_ message: String) {

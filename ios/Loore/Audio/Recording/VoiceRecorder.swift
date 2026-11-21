@@ -15,6 +15,7 @@ import os
 final class VoiceRecorder: VoiceRecording {
     var onSourceEnded: (() -> Void)?
     var onFatal: ((String) -> Void)?
+    var onLimit: ((String) -> Void)?
     var onSourceFailed: (() -> Void)?
     /// Sees every chunk in order (dictation keeps a local copy for "Save audio").
     var chunkObserver: ((RecordedChunk) -> Void)?
@@ -88,6 +89,10 @@ final class VoiceRecorder: VoiceRecording {
         uploader.onFatal = { [weak self] sid, message in
             guard let self, sid == self.sessionId else { return }
             self.onFatal?(message)
+        }
+        uploader.onLimit = { [weak self] sid, message in
+            guard let self, sid == self.sessionId else { return }
+            self.onLimit?(message)
         }
         if !holdChunks {
             uploader.open(sessionId: sessionId, uploadURL: uploadURL, firstIndex: firstChunkIndex)

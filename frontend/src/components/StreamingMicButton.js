@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useStreamingTranscription } from '../hooks/useStreamingTranscription';
 import { useLongRecordingWarning } from '../hooks/useLongRecordingWarning';
 import { useOnlineStatus } from '../hooks/useOnlineStatus';
@@ -32,6 +32,9 @@ export default function StreamingMicButton({
   disabled = false,
   disabledReason = '',
 }) {
+  // The server took no more of the recording (past what one recording may
+  // hold): stop as on Stop, so it is finalized with the chunks it took.
+  const stopRef = useRef(null);
   const {
     sessionState,
     duration,
@@ -51,7 +54,9 @@ export default function StreamingMicButton({
     onTranscriptUpdate,
     onComplete,
     onError,
+    onLimitReached: () => stopRef.current?.(),
   });
+  stopRef.current = stopStreaming;
 
   // #127: at 59 minutes, say that one recording is turned into text up to
   // two hours (useLongRecordingWarning). Fires once per recording, with a

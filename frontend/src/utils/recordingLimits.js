@@ -38,6 +38,21 @@ export function isRecordingLimitCode(code) {
   return FINAL_CHUNK_CODES.has(code);
 }
 
+// Past what one recording may hold (four hours, backend MAX_STREAMING_CHUNKS;
+// or its bytes): the server takes no later chunk either, and every chunk
+// before is on the server. The recording stops and is finalized with those
+// (iPhone `ChunkUploader.limitCodes`).
+const BOUND_CHUNK_CODES = new Set([
+  'chunk_too_large', 'chunk_index_out_of_range', 'recording_too_large',
+]);
+
+// The server's words for a chunk past the recording's bound, or null.
+export function boundRefusalMessage(err) {
+  const data = err?.response?.data;
+  if (!data || !BOUND_CHUNK_CODES.has(data.code)) return null;
+  return data.error || RECORDING_LIMIT_MESSAGE;
+}
+
 const SPEND_CAP_ERROR = 'monthly_spend_limit_reached';
 
 // The server's words for a refused chunk, start or continue that no retry

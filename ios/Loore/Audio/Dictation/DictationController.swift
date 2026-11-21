@@ -158,6 +158,7 @@ final class DictationController {
         }()
         let recorder = VoiceRecorder(debugFile: debugFile)
         recorder.onFatal = { [weak self] message in self?.fatalUpload(message) }
+        recorder.onLimit = { [weak self] message in self?.reachedLimit(message) }
         recorder.onSourceEnded = { [weak self] in self?.stop() }
         recorder.onSourceFailed = { [weak self] in
             self?.holdForInterruption("Recording paused — the microphone stopped after an audio device change. Everything up to here is saved. Press Resume to continue.")
@@ -432,6 +433,18 @@ final class DictationController {
         state = .idle
         sessionId = nil
         recorder = nil
+    }
+
+    /// The server took no more of this recording (past what one recording may
+    /// hold, `ChunkUploader.onLimit`): said in its words, then stopped and
+    /// finalized with the chunks it holds, so the text comes as after Stop (web
+    /// `useStreamingTranscription` at the same refusal). The whole recording
+    /// stays for "Save audio". Found at Stop, it is only said.
+    func reachedLimit(_ message: String) {
+        guard state == .recording || state == .finalizing, let app else { return }
+        app.audio.sounds.playError()
+        app.toasts.show(message, duration: 10)
+        if state == .recording { stop() }
     }
 
     private func fatalUpload(_ message: String) {

@@ -43,7 +43,9 @@ limits apply:
 - Its audio is refused from chunk index MAX_STREAMING_CHUNKS on (four
   hours at 15 s a chunk), and past bounds no recording made in the apps
   reaches: a chunk over MAX_STREAMING_CHUNK_BYTES, or more than
-  MAX_STREAMING_SESSION_BYTES in all. Audio accepted before stays.
+  MAX_STREAMING_SESSION_BYTES in all. Audio accepted before stays; the
+  apps then stop, say it in the server's words, and finalize with the
+  chunks the server took.
 
 An account holds at most MAX_OPEN_RECORDINGS open recordings that hold
 audio (open_recordings); a new start beyond them is refused. A recording

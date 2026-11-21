@@ -954,8 +954,9 @@ def upload_streaming_chunk(session_id):
     - device_key: optional, the recording device's key (#388); 409
       session_taken_over when another device continued the session.
 
-    Limits on one recording (utils/recording_limits), which the apps
-    never reach: a chunk over MAX_STREAMING_CHUNK_BYTES gets 413
+    Limits on one recording (utils/recording_limits; a recording of four
+    hours reaches MAX_STREAMING_CHUNKS, and the apps then stop and finalize
+    with the chunks taken): a chunk over MAX_STREAMING_CHUNK_BYTES gets 413
     ``chunk_too_large``, a chunk_index below 0 or from
     MAX_STREAMING_CHUNKS on 400 ``chunk_index_out_of_range``, and a chunk
     that would take the recording past MAX_STREAMING_SESSION_BYTES 413

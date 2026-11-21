@@ -136,6 +136,91 @@ final class ChunkUploaderTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("s1").path))
     }
 
+    // The 4-hour bound (backend/utils/recording_limits, 960 chunks): the chunk
+    // the server refuses as past what one recording may hold, and every later
+    // one, are never sent again, not at Stop and not after a relaunch. The
+    // recording is finalized with the chunks the server holds.
+    func testAChunkPastTheRecordingsLimitEndsItsUploadsForGood() async throws {
+        let words = "This recording has more parts than Loore accepts. Everything before this part is saved."
+        var sentIndexes: [Int] = []
+        uploader.transport = { [unowned self] request, file in
+            let i = self.index(of: request, file: file)
+            sentIndexes.append(i)
+            if i >= 3 {
+                let body = #"{"error":"\#(words)","code":"chunk_index_out_of_range"}"#
+                return (Data(body.utf8), HTTPURLResponse(url: request.url!, statusCode: 400, httpVersion: nil, headerFields: nil)!)
+            }
+            return (Data("{}".utf8), HTTPURLResponse(url: request.url!, statusCode: 202, httpVersion: nil, headerFields: nil)!)
+        }
+        var said: [String] = []
+        uploader.onLimit = { sid, message in said.append("\(sid): \(message)") }
+        uploader.onRefused = { _, _ in XCTFail("not a refusal to retry later") }
+        uploader.open(sessionId: "s20", uploadURL: URL(string: "http://x/c")!)
+        for i in 0..<5 { uploader.enqueue(sessionId: "s20", chunk: chunk(i)) }
+        let deadline = Date().addingTimeInterval(3)
+        while said.isEmpty && Date() < deadline { try await Task.sleep(nanoseconds: 5_000_000) }
+        // A chunk the recorder hands over after the refusal is not sent either.
+        uploader.enqueue(sessionId: "s20", chunk: chunk(5))
+        let outcome = await uploader.settle(sessionId: "s20")
+
+        XCTAssertEqual(said, ["s20: \(words)"], "said once, in the server's words")
+        XCTAssertEqual(sentIndexes, [0, 1, 2, 3], "nothing after the refused chunk, and no retry at Stop")
+        XCTAssertEqual(outcome.stored, 3)
+        XCTAssertEqual(outcome.failed, [], "no missing chunks: the recording finalizes")
+        XCTAssertEqual(outcome.beyond, 3)
+        XCTAssertEqual(outcome.produced, 6)
+        XCTAssertEqual(outcome.totalForFinalize, 3, "the chunks the server holds, not the ones recorded")
+        let files = try FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent("s20").path)
+        XCTAssertEqual(files, ["manifest.json"], "the refused chunks are not kept for another try")
+
+        // A relaunch sends nothing of it and drops what is left.
+        let relaunched = ChunkUploader(root: root, useBackgroundSession: false)
+        relaunched.delay = { _ in 0.001 }
+        var resent: [Int] = []
+        relaunched.transport = { [unowned self] request, file in
+            resent.append(self.index(of: request, file: file))
+            return (Data(), HTTPURLResponse(url: request.url!, statusCode: 202, httpVersion: nil, headerFields: nil)!)
+        }
+        relaunched.resumePending()
+        _ = await relaunched.settle(sessionId: "s20")
+        XCTAssertEqual(resent, [])
+    }
+
+    func testTheRecordingsByteLimitEndsItsUploadsTooAndOtherRefusalsDoNot() async throws {
+        // 413 recording_too_large without words: the web's default words.
+        uploader.transport = { [unowned self] request, file in
+            let i = self.index(of: request, file: file)
+            let body = i == 1 ? #"{"code":"recording_too_large"}"# : "{}"
+            return (Data(body.utf8), HTTPURLResponse(url: request.url!, statusCode: i == 1 ? 413 : 202,
+                                                     httpVersion: nil, headerFields: nil)!)
+        }
+        var said: [String] = []
+        uploader.onLimit = { _, message in said.append(message) }
+        uploader.open(sessionId: "s21", uploadURL: URL(string: "http://x/c")!)
+        for i in 0..<3 { uploader.enqueue(sessionId: "s21", chunk: chunk(i)) }
+        let outcome = await uploader.settle(sessionId: "s21")
+        XCTAssertEqual(said, [ChunkUploader.limitMessage])
+        XCTAssertEqual(outcome.stored, 1)
+        XCTAssertEqual(outcome.failed, [])
+        XCTAssertEqual(outcome.totalForFinalize, 1)
+
+        // Any other 400 is still a chunk the server does not have (not finalized).
+        let other = ChunkUploader(root: root, useBackgroundSession: false)
+        other.delay = { _ in 0.001 }
+        other.transport = { request, _ in
+            (Data(#"{"error":"Missing chunk_index"}"#.utf8),
+             HTTPURLResponse(url: request.url!, statusCode: 400, httpVersion: nil, headerFields: nil)!)
+        }
+        var otherSaid: [String] = []
+        other.onLimit = { _, message in otherSaid.append(message) }
+        other.open(sessionId: "s22", uploadURL: URL(string: "http://x/c")!)
+        other.enqueue(sessionId: "s22", chunk: chunk(0))
+        let failed = await other.settle(sessionId: "s22")
+        XCTAssertEqual(otherSaid, [])
+        XCTAssertEqual(failed.failed, [0])
+        XCTAssertEqual(failed.beyond, 0)
+    }
+
     func testRetriesThenGivesUpAndReportsStoredCount() async throws {
         var attempts: [Int: Int] = [:]
         uploader.transport = { [unowned self] request, file in

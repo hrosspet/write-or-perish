@@ -1,6 +1,6 @@
 import {
-  finalRefusalMessage, isRecordingLimitCode, isStartRefusal,
-  untranscribedMessage,
+  boundRefusalMessage, finalRefusalMessage, isRecordingLimitCode, isStartRefusal,
+  RECORDING_LIMIT_MESSAGE, untranscribedMessage,
 } from './recordingLimits';
 
 const refusal = (status, data) => ({ response: { status, data } });
@@ -32,6 +32,21 @@ describe('recordingLimits', () => {
     }))).toBe('Too many.');
     expect(finalRefusalMessage(refusal(500, { error: 'boom' }))).toBeNull();
     expect(finalRefusalMessage(new Error('Network Error'))).toBeNull();
+  });
+
+  test('past what one recording may hold: the server words, only for the bound', () => {
+    expect(boundRefusalMessage(refusal(400, {
+      error: 'This recording has more parts than Loore accepts.', code: 'chunk_index_out_of_range',
+    }))).toBe('This recording has more parts than Loore accepts.');
+    expect(boundRefusalMessage(refusal(413, { code: 'recording_too_large' })))
+      .toBe(RECORDING_LIMIT_MESSAGE);
+    expect(boundRefusalMessage(refusal(413, { code: 'chunk_too_large' })))
+      .toBe(RECORDING_LIMIT_MESSAGE);
+    // A recording refused as a new start is not past its bound.
+    expect(boundRefusalMessage(refusal(429, { error: 'Too many.', code: 'too_many_recordings' })))
+      .toBeNull();
+    expect(boundRefusalMessage(refusal(400, { error: 'Missing chunk_index' }))).toBeNull();
+    expect(boundRefusalMessage(new Error('Network Error'))).toBeNull();
   });
 
   test('the start refusals', () => {

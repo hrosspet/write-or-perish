@@ -425,6 +425,32 @@ class TestFinalizeCount:
         assert resp.status_code == 202, resp.get_data(as_text=True)
         tasks.finalize_draft_streaming.delay.assert_called_once()
 
+    def test_at_the_bound_the_chunks_taken_are_finalized(
+            self, app, client, alice, tasks, monkeypatch):
+        # The bound reached (960 chunks, four hours; 4 here): the next chunk
+        # is refused, and the apps finalize with the chunks the server took,
+        # which it accepts. The count they recorded is refused.
+        monkeypatch.setattr(limits, "MAX_STREAMING_CHUNKS", 4)
+        draft, _folder = _session(app, alice)
+        for index in (1, 2, 3):
+            assert _chunk(client, "sess-1", index,
+                          _payload(WEB_CHUNK_BYTES)).status_code == 202
+        refused = _chunk(client, "sess-1", 4, _payload(WEB_CHUNK_BYTES))
+        assert refused.status_code == 400
+        assert refused.get_json()["code"] == "chunk_index_out_of_range"
+
+        recorded = client.post("/api/drafts/streaming/sess-1/finalize",
+                               json={"total_chunks": 5})
+        assert recorded.status_code == 400
+        assert Draft.query.get(draft.id).streaming_status == "recording"
+
+        resp = client.post("/api/drafts/streaming/sess-1/finalize",
+                           json={"total_chunks": 4})
+        assert resp.status_code == 202, resp.get_data(as_text=True)
+        assert Draft.query.get(draft.id).streaming_status == "finalizing"
+        assert tasks.finalize_draft_streaming.delay.call_args.kwargs[
+            "total_chunks"] == 4
+
 
 class TestOlderNodePath:
     def _node(self, app, user):
