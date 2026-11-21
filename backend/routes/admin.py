@@ -1273,20 +1273,9 @@ def prefill_check():
                                  f"({type(e).__name__})."}), 502
     if summary is None:
         return jsonify({"error": f"@{handle} is not in the Community Archive."}), 404
-    min_parquet = config.get("COMMUNITY_ARCHIVE_PARQUET_MIN_TWEETS", 5000)
-    live = summary.get("archived_live", summary.get("archived")) or 0
-    big = live >= min_parquet
-    # The import falls back to REST when the snapshot lags the live archive
-    # (detail_source == "parquet" means the snapshot has the account).
-    snapshot_complete = (summary.get("detail_source") == "parquet"
-                         and "archived_live" not in summary)
-    summary["import_source"] = "parquet" if (big and snapshot_complete) else (
-        "parquet (if snapshot is current)" if big and summary.get("detail_source") != "parquet"
-        else "rest")
-    if ca.v1_enabled():
-        # With an API key the pre-fill reads every account from API v1
-        # (prefill_community_archive_impl, #688).
-        summary["import_source"] = "api-v1"
+    # The pre-fill reads every account from API v1
+    # (prefill_community_archive_impl, #688).
+    summary["import_source"] = "api-v1"
     # The first step of the provisional ladder: what a fresh account must
     # hold for the seeder to build anything at all.
     from backend.utils.chunk_plan import next_build_threshold

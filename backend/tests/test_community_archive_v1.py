@@ -3,8 +3,8 @@
 No test here reaches the network: every v1 request goes to FakeV1, which
 answers with bodies shaped like the OpenAPI document's schemas
 (TweetPage, Account, Error; https://analytics.community-archive.org/v1/
-openapi.json, read 2026-11-13) and fails the test on any other host. The
-REST path is faked at ``community_archive._get`` / ``requests.get``.
+openapi.json, read 2026-11-13) and fails the test on any other host. Without
+a key nothing is requested (the REST path was removed, #721).
 """
 import io
 import json
@@ -225,15 +225,6 @@ def test_fetch_account_v1_matches_exactly_and_refuses_several(v1):
     assert ca.fetch_account("ja*ne") is None and len(v1.requests) == n
 
 
-def test_fetch_account_keyless_still_uses_rest(keyless, monkeypatch):
-    """Control: without a key the REST call is made exactly as before."""
-    calls = []
-    monkeypatch.setattr(ca, "_get", lambda table, params, **kw: calls.append(
-        (table, params)) or [{"account_id": "1", "username": "bob"}])
-    assert ca.fetch_account("bob")["account_id"] == "1"
-    assert calls[0][0] == "all_account"
-
-
 # ── tweets, paging, limits ───────────────────────────────────────────────
 
 def test_iter_tweets_v1_follows_the_cursor_past_short_pages(v1):
@@ -310,8 +301,35 @@ def test_the_key_is_never_logged_nor_in_an_error(v1, caplog):
     assert KEY not in caplog.text and "unauthorized" in caplog.text
 
 
-def test_count_is_unknown_on_v1_and_the_check_scan_is_capped(v1, monkeypatch):
-    assert ca.count_archived("42") is None and v1.requests == []
+def test_fetch_account_never_takes_a_look_alike_nor_counts_one_account_twice(v1):
+    """Loore keys X logins on the id fetch_account returns: a look-alike's
+    id must never come back, and the same account listed twice is one
+    match, not "several"."""
+    v1.routes["/accounts"] = [page([v1_account(2, "jane1doe"),
+                                    v1_account(3, "janeXdoe")])]
+    assert ca.fetch_account("jane_doe") is None
+    v1.routes["/accounts"] = [page([v1_account(1, "janedoe"),
+                                    v1_account(1, "JaneDoe")])]
+    assert ca.fetch_account("janedoe")["account_id"] == "1"
+
+
+def test_the_coverage_check_counts_a_tweet_listed_twice_once(v1):
+    v1.routes["/accounts"] = [page([v1_account(42, "dup")])]
+
+    def t(i, text, **kw):
+        return v1_tweet(i, "dup", text, "2026-01-01T00:00:00.000Z",
+                        account_id=42, **kw)
+    v1.routes["/accounts/42/tweets"] = [page([
+        t(1, "a" * 40), t(1, "a" * 40), t(2, "RT @x: y"), t(2, "RT @x: y"),
+        t(3, "reply" * 8, reply_to_tweet_id="1"),
+        t(3, "reply" * 8, reply_to_tweet_id="1")])]
+    out = ca.coverage_summary("dup")
+    assert (out["archived"], out["retweets"], out["replies"],
+            out["originals"]) == (3, 1, 1, 1)
+    assert out["est_tokens"] == (40 + 40) // 4
+
+
+def test_the_check_scan_is_capped(v1, monkeypatch):
     v1.routes["/accounts"] = [page([v1_account(42, "big")])]
     full = [v1_tweet(i, "big", "t", "2026-01-01T00:00:00.000Z", account_id=42)
             for i in range(200)]
@@ -330,18 +348,44 @@ def test_count_is_unknown_on_v1_and_the_check_scan_is_capped(v1, monkeypatch):
             out["detail_source"]) == (3, 1, 1, 1, "api-v1")
 
 
-# ── the REST retirement ──────────────────────────────────────────────────
+# ── without a key (the REST path is gone, #721) ──────────────────────────
 
-def test_rest_after_the_retirement_logs_one_error(keyless, monkeypatch, caplog):
-    monkeypatch.setattr(ca, "_rest_retired_logged", False)
-    with caplog.at_level(logging.ERROR, logger=ca.log.name):
-        ca._warn_if_rest_retired(now=datetime(2026, 11, 18, tzinfo=timezone.utc))
-        assert caplog.records == []
-        ca._warn_if_rest_retired(now=datetime(2026, 11, 19, tzinfo=timezone.utc))
-        ca._warn_if_rest_retired(now=datetime(2026, 11, 20, tzinfo=timezone.utc))
-    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
-    assert len(errors) == 1
-    assert "COMMUNITY_ARCHIVE_API_KEY" in errors[0].getMessage()
+def test_without_a_key_every_lookup_asks_for_it_and_requests_nothing(
+        keyless, monkeypatch, tmp_path):
+    """The whitelist lookup, the coverage check, the pre-fill's tweets and
+    the donated-archive import each say the key is missing; no request goes
+    to any host (keyless fails the test on urllib, this on requests)."""
+    from backend.utils import external_content as content
+    from backend.utils.x_identity import XIdUnresolved, resolve_x_id
+
+    def no_requests(*a, **k):
+        raise AssertionError("unexpected requests call")
+    monkeypatch.setattr(content.requests, "get", no_requests)
+    msg = "COMMUNITY_ARCHIVE_API_KEY"
+    with pytest.raises(ca.CommunityArchiveRetired, match=msg):
+        ca.fetch_account("bob")
+    with pytest.raises(ca.CommunityArchiveRetired, match=msg):
+        ca.fetch_account("ja*ne")  # not even an invalid handle is "not found"
+    with pytest.raises(ca.CommunityArchiveRetired, match=msg):
+        list(ca.iter_tweets("42"))
+    with pytest.raises(ca.CommunityArchiveRetired, match=msg):
+        ca.coverage_summary("bob", snapshot_dir=str(tmp_path))
+    with pytest.raises(ca.CommunityArchiveRetired, match=msg):
+        content.ca_lookup_account("bob")
+    with pytest.raises(ca.CommunityArchiveRetired, match=msg):
+        list(content.ca_fetch_tweets("42", "bob"))
+    with pytest.raises(ca.CommunityArchiveRetired, match=msg):
+        ca._v1_get("/accounts")
+    # The whitelist and the pre-fill resolve through the same lookup: the
+    # admin reads the key message, never "not in the Community Archive".
+    with pytest.raises(XIdUnresolved) as err:
+        resolve_x_id("bob")
+    assert err.value.reason == "archive-error"
+    assert msg in err.value.message
+    assert "not in the Community Archive" not in err.value.message
+    with pytest.raises(XIdUnresolved) as err:
+        resolve_x_id("bob", x_lookup=False)
+    assert msg in err.value.message
 
 
 # ── the "fetch donated archive" import ───────────────────────────────────
@@ -732,60 +776,3 @@ def test_a_failed_account_read_keeps_its_stash(v1, tmp_path):
     assert calls == [None, "c1", "c1", "c1"]
     assert ca.stage_account_tweets_v1("42", stash) == (True, 3)
     assert calls[4:] == ["c1", "c2"]
-
-
-# ── without a key after the REST retirement ──────────────────────────────
-
-@pytest.fixture
-def retired(keyless, monkeypatch):
-    monkeypatch.setattr(ca, "REST_RETIRED_AT",
-                        datetime(2026, 1, 1, tzinfo=timezone.utc))
-    monkeypatch.setattr(ca, "_rest_retired_logged", True)
-
-
-def test_after_the_retirement_a_lookup_asks_for_the_key(retired, monkeypatch):
-    from backend.utils.x_identity import XIdUnresolved, resolve_x_id
-    # A retired API's empty answer is not "not in the archive".
-    monkeypatch.setattr(ca, "_get", lambda *a, **k: [])
-    with pytest.raises(ca.CommunityArchiveRetired, match="COMMUNITY_ARCHIVE_API_KEY"):
-        ca.fetch_account("bob")
-    with pytest.raises(XIdUnresolved) as err:
-        resolve_x_id("bob")
-    assert err.value.reason == "archive-error"
-    assert "retired" in err.value.message and "COMMUNITY_ARCHIVE_API_KEY" in err.value.message
-    assert "not in the Community Archive" not in err.value.message
-
-    def gone(*a, **k):
-        raise urllib.error.HTTPError("u", 404, "Not Found", {}, None)
-    monkeypatch.setattr(ca, "_get", gone)
-    with pytest.raises(XIdUnresolved) as err:
-        resolve_x_id("bob")
-    assert "COMMUNITY_ARCHIVE_API_KEY" in err.value.message
-    # The admin's coverage check gets the same message (its route shows it).
-    with pytest.raises(ca.CommunityArchiveRetired):
-        ca.coverage_summary("bob")
-    # While the old API still answers, its answer is used.
-    monkeypatch.setattr(ca, "_get", lambda *a, **k: [
-        {"account_id": "7", "username": "bob"}])
-    assert ca.fetch_account("bob")["account_id"] == "7"
-
-
-def test_after_the_retirement_the_donated_archive_import_asks_too(retired, monkeypatch):
-    from backend.utils import external_content as content
-
-    class Empty:
-        def raise_for_status(self):
-            pass
-
-        def json(self):
-            return []
-    monkeypatch.setattr(content.requests, "get", lambda *a, **k: Empty())
-    with pytest.raises(ca.CommunityArchiveRetired):
-        content.ca_lookup_account("bob")
-
-
-def test_before_the_retirement_an_empty_answer_is_not_in_the_archive(keyless, monkeypatch):
-    """Control: before 19 November an empty REST answer means what it says."""
-    monkeypatch.setattr(ca, "REST_RETIRED_AT", datetime(2099, 1, 1, tzinfo=timezone.utc))
-    monkeypatch.setattr(ca, "_get", lambda *a, **k: [])
-    assert ca.fetch_account("bob") is None

@@ -562,24 +562,12 @@ class TestPrefillCheck:
         monkeypatch.setattr(ca, "coverage_summary", lambda h, snapshot_dir=None: {
             "account_id": "9", "username": "cedcolas", "account_num_tweets": 571,
             "ingestion": "twitter_import", "archived": 6, "retweets": 0,
-            "replies": 4, "originals": 2, "est_tokens": 221, "detail_source": "rest"})
+            "replies": 4, "originals": 2, "est_tokens": 221, "detail_source": "api-v1"})
         client = app.test_client()
         _login(client, admin.id)
         r = client.get(f"/api/admin/prefill/check?handle=@cedcolas&user_id={target.id}")
         assert r.status_code == 200, r.json
-        assert r.json["archived"] == 6 and r.json["import_source"] == "rest"
-        # Big by live count but not in the snapshot → parquet only if current
-        monkeypatch.setattr(ca, "coverage_summary", lambda h, snapshot_dir=None: {
-            "account_id": "9", "username": "big", "account_num_tweets": 13762,
-            "ingestion": "twitter_import", "archived": 6000, "retweets": 0,
-            "replies": 0, "originals": 6000, "est_tokens": 90000, "detail_source": "rest"})
-        assert client.get("/api/admin/prefill/check?handle=big").json["import_source"] == "parquet (if snapshot is current)"
-        monkeypatch.setattr(ca, "coverage_summary", lambda h, snapshot_dir=None: {
-            "account_id": "9", "username": "big", "account_num_tweets": 13762,
-            "ingestion": "archive", "archived": 6000, "retweets": 0, "replies": 0,
-            "originals": 6000, "est_tokens": 90000, "detail_source": "parquet",
-            "archived_live": 6100})
-        assert client.get("/api/admin/prefill/check?handle=big").json["import_source"] == "rest"
+        assert r.json["archived"] == 6 and r.json["import_source"] == "api-v1"
         assert r.json["already_imported"] == 1
         assert r.json["profile_threshold_tokens"] == 5000  # first ladder step
         monkeypatch.setattr(ca, "coverage_summary", lambda h, snapshot_dir=None: None)
@@ -610,6 +598,22 @@ class TestPrefillCheck:
         r = client.get("/api/admin/prefill/check?handle=twin")
         assert r.status_code == 502
         assert r.json == {"error": "Community Archive lookup failed (OSError)."}
+
+    def test_check_without_a_key_says_the_key_is_missing(
+            self, app, users, monkeypatch):
+        """#721: no key, no request to the old API; the admin reads what to set."""
+        import urllib.request
+        monkeypatch.delenv("COMMUNITY_ARCHIVE_API_KEY", raising=False)
+        app.config["COMMUNITY_ARCHIVE_API_KEY"] = None
+
+        def no_network(*a, **k):
+            raise AssertionError("no request without a key")
+        monkeypatch.setattr(urllib.request, "urlopen", no_network)
+        client = app.test_client()
+        _login(client, users["renamed_admin"].id)
+        r = client.get("/api/admin/prefill/check?handle=bob")
+        assert r.status_code == 502
+        assert "COMMUNITY_ARCHIVE_API_KEY" in r.json["error"]
 
 
 class TestVoiceTimingAdmin:

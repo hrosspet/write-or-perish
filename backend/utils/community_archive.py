@@ -6,28 +6,21 @@ profile from its public tweets before the person ever writes in Loore,
 by the account lookups (the whitelist, the coverage check), and by Glean,
 which reads the archive's daily bulk export.
 
-Two ways in for accounts and tweets (#688):
+Accounts and tweets come from the Community Archive API v1
+(``API_V1_URL``), with a personal key in ``COMMUNITY_ARCHIVE_API_KEY``
+(#688). Without the key every call raises CommunityArchiveRetired, whose
+message tells the admin to set it; nothing is requested from the old
+Supabase REST API, which the archive retired on 19 November 2026 (#721).
 
-- the Community Archive API v1 (``API_V1_URL``), with a personal key in
-  ``COMMUNITY_ARCHIVE_API_KEY``. Used for every call below whenever the
-  key is set;
-- the public Supabase REST API with the published anon key, which the
-  archive retires on 19 November 2026 (REST_RETIRED_AT). Used while no
-  key is set, as before; from that date its first use in a process logs
-  an ERROR saying the key is needed.
-
-Every function returns the same shape on either path, so callers do not
-know which one answered. A failed request raises what the REST path
-raised (urllib's HTTPError / URLError); CommunityArchiveError stays the
-user-facing problem (several accounts with one username, no snapshot).
+A failed request raises urllib's HTTPError / URLError;
+CommunityArchiveError stays the user-facing problem (several accounts
+with one username, no snapshot).
 
 Stdlib only — the CLI in backend/scripts/fetch_community_archive.py reuses
 it without Loore's dependencies (outside the app the key comes from the
 environment).
 
-REST paging is keyset (``tweet_id > last``), not offset: the REST view
-500s on deep offsets, which is what made large accounts impractical
-before. v1 pages with an opaque cursor.
+v1 pages with an opaque cursor.
 """
 import contextlib
 import email.utils
@@ -48,7 +41,8 @@ from datetime import datetime, timedelta, timezone
 log = logging.getLogger(__name__)
 
 SUPABASE_URL = "https://fabxmporizzqflnftavs.supabase.co"
-# Public anon key, from
+# Public anon key, sent with the nightly export's storage downloads (not the
+# retired REST API), from
 # https://github.com/TheExGenesis/community-archive/blob/main/docs/api-doc.md
 ANON_KEY = (
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
@@ -56,7 +50,6 @@ ANON_KEY = (
     "ImV4cCI6MjAzNzgyMDkxMn0."
     "UIEJiUNkLsW28tBHmG-RQDW-I5JNlJLt62CSk9D_qG8"
 )
-PAGE_SIZE = 1000
 TIMEOUT = 60
 
 # Nightly parquet export (whole corpus: tweets.parquet ~900 MB, profiles
@@ -80,7 +73,7 @@ class CommunityArchiveError(Exception):
     """User-facing problem (unknown handle, API failure)."""
 
 
-# What the admin reads when a lookup or a pre-fill needs the key (#688).
+# What the admin reads when a lookup or a pre-fill needs the key (#688, #721).
 REST_RETIRED_MESSAGE = (
     "The Community Archive retired its old API on 19 November 2026; set "
     "COMMUNITY_ARCHIVE_API_KEY on the server to use its API v1 (see "
@@ -88,9 +81,9 @@ REST_RETIRED_MESSAGE = (
 
 
 class CommunityArchiveRetired(CommunityArchiveError):
-    """No API key, and the REST API is past its retirement date and did not
-    answer usefully: the admin is told to set the key, never that the
-    handle is not in the archive (that cannot be known)."""
+    """No API key (the old REST API is gone): the admin is told to set the
+    key, never that the handle is not in the archive (that cannot be
+    known)."""
 
     def __init__(self):
         super().__init__(REST_RETIRED_MESSAGE)
@@ -106,8 +99,6 @@ class V1BudgetSpent(CommunityArchiveError):
 
 API_V1_URL = "https://analytics.community-archive.org/v1"
 API_KEY_SETTING = "COMMUNITY_ARCHIVE_API_KEY"
-# The archive's docs: the Supabase REST API "is retired on 19 November 2026".
-REST_RETIRED_AT = datetime(2026, 11, 19, tzinfo=timezone.utc)
 V1_TIMEOUT = 30  # seconds per request (the migration guide's client uses 30)
 V1_TWEET_PAGE_LIMIT = 200  # the documented maximum for tweet listings
 # A 429 or 503 is retried after its Retry-After, up to this many tries of
@@ -133,7 +124,6 @@ _sleep = time.sleep  # tests replace it
 # (RateLimit-Remaining: 0), so the next request waits for RateLimit-Reset
 # instead of collecting a 429.
 _v1_not_before = 0.0
-_rest_retired_logged = False
 
 
 def api_key():
@@ -150,32 +140,18 @@ def api_key():
 
 
 def v1_enabled():
-    """Whether calls go to API v1 (a key is set) rather than REST."""
+    """Whether a key is set, so calls can go to API v1."""
     return api_key() is not None
 
 
-def rest_retired(now=None):
-    """No key, and the REST API is past its retirement date."""
-    now = now or datetime.now(timezone.utc)
-    return now >= REST_RETIRED_AT and not v1_enabled()
-
-
-def _warn_if_rest_retired(now=None):
-    """The REST path is about to be used: from REST_RETIRED_AT on, say once
-    per process, at ERROR (so Sentry reports it), that it is gone and the
-    pre-fill needs the key. Before that date, silent."""
-    global _rest_retired_logged
-    if _rest_retired_logged:
-        return
-    now = now or datetime.now(timezone.utc)
-    if now < REST_RETIRED_AT:
-        return
-    _rest_retired_logged = True
-    log.error(
-        "Community Archive: the archive retired its Supabase REST API on "
-        "%s and %s is not set, so the pre-fill and the archive account "
-        "lookups fail. Set the key (see docs/LOCAL-DEV.md).",
-        REST_RETIRED_AT.date().isoformat(), API_KEY_SETTING)
+def require_key():
+    """The key, or CommunityArchiveRetired (its message tells the admin to
+    set it). Every archive call starts here, so without a key nothing is
+    requested from anywhere."""
+    key = api_key()
+    if not key:
+        raise CommunityArchiveRetired()
+    return key
 
 
 def _seconds_header(headers, name, default):
@@ -239,9 +215,7 @@ def _v1_get(path, params=None, timeout=None, on_request=None):
     failure past the retries raises urllib's HTTPError or URLError (or the
     socket's error), as the REST calls did. The key travels only in the
     Authorization header and is never logged."""
-    key = api_key()
-    if not key:
-        raise CommunityArchiveError(f"{API_KEY_SETTING} is not set")
+    key = require_key()
     query = urllib.parse.urlencode(
         {k: v for k, v in (params or {}).items() if v is not None})
     url = f"{API_V1_URL}{path}" + (f"?{query}" if query else "")
@@ -370,57 +344,25 @@ def _v1_account_path(account_id):
     return account_id
 
 
-def _get(table, params, timeout=None):
-    _warn_if_rest_retired()
-    query = urllib.parse.urlencode(params)
-    req = urllib.request.Request(
-        f"{SUPABASE_URL}/rest/v1/{table}?{query}",
-        headers={"apikey": ANON_KEY, "Authorization": f"Bearer {ANON_KEY}"},
-    )
-    with urllib.request.urlopen(req, timeout=timeout or TIMEOUT) as resp:
-        return json.load(resp)
-
-
 def fetch_account(handle, timeout=None):
     """{account_id, username, account_display_name, num_tweets} for the one
     archive account whose username equals ``handle`` (case-insensitively),
-    or None. Raises CommunityArchiveError when several accounts match.
+    or None. Raises CommunityArchiveError when several accounts match, and
+    CommunityArchiveRetired without a key.
 
-    The REST filter is ``ilike``, whose ``_`` and ``%`` are wildcards, so
-    ``jane_doe`` also fetches ``jane1doe``; rows are therefore matched
-    exactly here, never taken as returned. Loore keys X logins on the id
-    this returns, so a look-alike's id would let that other X user into
-    the account. Same exact rule as fetch_account_parquet. API v1's
-    ``usernames`` lookup is exact and case-insensitive; its rows go
-    through the same check, several matches included."""
+    API v1's ``usernames`` lookup is exact and case-insensitive; its rows
+    are still matched exactly here, never taken as returned. Loore keys X
+    logins on the id this returns, so a look-alike's id would let that
+    other X user into the account. Same exact rule as
+    fetch_account_parquet."""
+    require_key()
     handle = (handle or "").strip().lstrip("@")
-    # X handles are [A-Za-z0-9_]; anything else cannot be in the archive,
-    # and "*" / "%" would be wildcards in the filter below.
+    # X handles are [A-Za-z0-9_]; anything else cannot be in the archive.
     if not _HANDLE_RE.fullmatch(handle):
         return None
-    retired = False
-    if v1_enabled():
-        rows = [_v1_account_row(a) for a in (_v1_get(
-            "/accounts", {"usernames": handle},
-            timeout=timeout).get("data") or [])]
-    else:
-        # Past the retirement date a REST failure, or no match, says the
-        # key is needed (CommunityArchiveRetired), never "not in the
-        # archive": a retired API that answers [] proves nothing.
-        retired = rest_retired()
-        try:
-            rows = _get("all_account", {
-                # "_" is ilike's single-character wildcard: escaped, or
-                # "_____" matches every five-letter username and can
-                # overrun the server's row cap, dropping the exact match
-                # or hiding a duplicate.
-                "username": "ilike." + handle.replace("_", "\\_"),
-                "select": "account_id,username,account_display_name,num_tweets,created_via",
-            }, **({"timeout": timeout} if timeout else {}))
-        except Exception as e:
-            if retired:
-                raise CommunityArchiveRetired() from e
-            raise
+    rows = [_v1_account_row(a) for a in (_v1_get(
+        "/accounts", {"usernames": handle},
+        timeout=timeout).get("data") or [])]
     exact = {}
     for row in rows:
         if (row.get("username") or "").lower() == handle.lower():
@@ -429,44 +371,19 @@ def fetch_account(handle, timeout=None):
         raise CommunityArchiveError(
             f"@{handle}: {len(exact)} Community Archive accounts have exactly "
             "that username; refusing to guess which one")
-    if not exact and retired:
-        raise CommunityArchiveRetired()
     return next(iter(exact.values()), None)
 
 
-def iter_tweets(account_id, page_size=PAGE_SIZE, on_page=None, timeout=None):
-    """Yield enriched_tweets rows for an account in tweet_id order, one page
-    at a time (memory = one page). ``on_page(fetched_so_far)`` is called
-    after each page for progress reporting. Keyed on the account id, not
-    the username: a username filter is ``ilike`` (``_`` is a wildcard) and
-    could pull a look-alike account's tweets into the wrong archive.
-
-    With an API key the rows come from v1's account timeline (oldest
-    first, ``page_size`` capped at V1_TWEET_PAGE_LIMIT), the same fields
-    under the same names; an account v1 does not know yields nothing,
-    like an unknown id on REST."""
-    if v1_enabled():
-        yield from _iter_tweets_v1(account_id, page_size, on_page, timeout)
-        return
-    last_id, fetched = None, 0
-    while True:
-        params = {
-            "account_id": f"eq.{account_id}",
-            "order": "tweet_id.asc",
-            "limit": page_size,
-        }
-        if last_id is not None:
-            params["tweet_id"] = f"gt.{last_id}"
-        rows = _get("enriched_tweets", params, **({"timeout": timeout} if timeout else {}))
-        for row in rows:
-            yield row
-        fetched += len(rows)
-        if rows:
-            last_id = rows[-1]["tweet_id"]
-        if on_page:
-            on_page(fetched)
-        if len(rows) < page_size:
-            return
+def iter_tweets(account_id, page_size=200, on_page=None, timeout=None):
+    """Yield enriched_tweets-shaped rows for an account, oldest first, one
+    page at a time (memory = one page). ``on_page(fetched_so_far)`` is
+    called after each page for progress reporting. Keyed on the account
+    id, not the username, so a look-alike account's tweets cannot land in
+    the wrong archive. ``page_size`` is capped at V1_TWEET_PAGE_LIMIT; an
+    account v1 does not know yields nothing. Raises
+    CommunityArchiveRetired without a key."""
+    require_key()
+    yield from _iter_tweets_v1(account_id, page_size, on_page, timeout)
 
 
 def _iter_tweets_v1(account_id, page_size, on_page, timeout):
@@ -757,28 +674,10 @@ def iter_tweets_parquet(account_id, snapshot_dir, batch=1000, on_page=None):
 
 # ── coverage check (before paying for an import) ──────────────────────────
 
-CHECK_SCAN_LIMIT = 20000  # rows the REST summary will walk before giving up on detail
-# Rows the v1 summary walks (V1_CHECK_SCAN_LIMIT / 200 = 10 requests): v1
+# Rows the summary walks (V1_CHECK_SCAN_LIMIT / 200 = 10 requests): v1
 # has no count, so without a cap the admin's check would page through a
 # whole large account, at 60 requests a minute, inside a web request.
 V1_CHECK_SCAN_LIMIT = 2000
-
-
-def count_archived(account_id):
-    """Exact number of tweets the archive holds for an account — from the
-    Content-Range header, independent of paging. None when unknown: API
-    v1 has no count (#688), so with a key this is always None, which every
-    caller already reads as "unknown"."""
-    if v1_enabled():
-        return None
-    _warn_if_rest_retired()
-    req = urllib.request.Request(
-        f"{SUPABASE_URL}/rest/v1/tweets?account_id=eq.{account_id}&select=tweet_id",
-        headers={"apikey": ANON_KEY, "Authorization": f"Bearer {ANON_KEY}",
-                 "Prefer": "count=exact", "Range": "0-0"})
-    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-        total = (resp.headers.get("Content-Range") or "/").split("/")[-1]
-    return int(total) if total.isdigit() else None
 
 
 def _summarize_rows(rows):
@@ -801,11 +700,11 @@ def _summarize_rows(rows):
             "est_tokens": chars // 4}
 
 
-def coverage_summary(handle, snapshot_dir=None, scan_limit=CHECK_SCAN_LIMIT):
+def coverage_summary(handle, snapshot_dir=None):
     """What the archive actually holds for a handle, so a pre-fill can be
     judged before it runs. Reads a cached parquet snapshot when one is
-    given and the account is in it; otherwise walks the REST view (up to
-    ``scan_limit`` rows — beyond that only the exact count is reported).
+    given and the account is in it; otherwise walks the account's tweets
+    through API v1 (up to V1_CHECK_SCAN_LIMIT rows — beyond that no detail).
 
     Returns None for unknown handles; else {account_id, username,
     account_num_tweets, ingestion, archived, retweets, replies, originals,
@@ -821,7 +720,6 @@ def coverage_summary(handle, snapshot_dir=None, scan_limit=CHECK_SCAN_LIMIT):
         "account_num_tweets": account.get("num_tweets") or 0,
         "ingestion": account.get("created_via"),
     }
-    archived = count_archived(account["account_id"])
     if snapshot_dir and snapshot_export_id(snapshot_dir):
         con, tweets, _ = _duckdb(snapshot_dir)
         row = con.execute(
@@ -837,37 +735,21 @@ def coverage_summary(handle, snapshot_dir=None, scan_limit=CHECK_SCAN_LIMIT):
             out.update({"archived": n, "retweets": rt, "replies": rp,
                         "originals": n - rt - rp, "est_tokens": chars // 4,
                         "detail_source": "parquet"})
-            # The live archive may hold more than the nightly snapshot.
-            if archived is not None and archived > n:
-                out["archived_live"] = archived
             return out
-    if archived is not None and archived > scan_limit:
-        out.update({"archived": archived, "retweets": None, "replies": None,
-                    "originals": None, "est_tokens": None,
-                    "detail_source": "count_only"})
-        return out
-    if v1_enabled():
-        # No count to decide by: walk at most V1_CHECK_SCAN_LIMIT rows; an
-        # account with more reports no detail, like count_only above but
-        # without the count v1 does not give.
-        limit = min(scan_limit, V1_CHECK_SCAN_LIMIT)
-        rows = []
-        for row in iter_tweets(account["account_id"],
-                               page_size=V1_TWEET_PAGE_LIMIT):
-            rows.append(row)
-            if len(rows) > limit:
-                out.update({"archived": None, "retweets": None,
-                            "replies": None, "originals": None,
-                            "est_tokens": None,
-                            "detail_source": "too_many_to_scan"})
-                return out
-        out.update(_summarize_rows(rows))
-        out["detail_source"] = "api-v1"
-        return out
-    out.update(_summarize_rows(iter_tweets(account["account_id"])))
-    out["detail_source"] = "rest"
-    if archived is not None and archived != out["archived"]:
-        out["archived_live"] = archived
+    # No count to decide by: walk at most V1_CHECK_SCAN_LIMIT rows; an
+    # account with more reports no detail.
+    rows = []
+    for row in iter_tweets(account["account_id"],
+                           page_size=V1_TWEET_PAGE_LIMIT):
+        rows.append(row)
+        if len(rows) > V1_CHECK_SCAN_LIMIT:
+            out.update({"archived": None, "retweets": None,
+                        "replies": None, "originals": None,
+                        "est_tokens": None,
+                        "detail_source": "too_many_to_scan"})
+            return out
+    out.update(_summarize_rows(rows))
+    out["detail_source"] = "api-v1"
     return out
 
 
