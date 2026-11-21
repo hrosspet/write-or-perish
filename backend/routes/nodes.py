@@ -1189,11 +1189,15 @@ def _circle_quote_refusal(node, user_id, new_text, old_text, old_readers,
     if node.privacy_level == "circles":
         changes.append((node, new_text, old_readers, old_text))
         if old_path_ids is not None and cz.is_shared_entry(node):
-            for above in cz.thread_path(node, user_id):
-                if (above.deleted_at is not None
-                        or above.privacy_level != "circles"
-                        or above.audience_root_id != node.id):
-                    continue
+            path = [above for above in cz.thread_path(node, user_id)
+                    if above.deleted_at is None
+                    and above.privacy_level == "circles"
+                    and above.audience_root_id == node.id]
+            # The path's keys are unwrapped together first, so the reads
+            # below make no key call one after another.
+            from backend.utils.encryption import prefetch_deks
+            prefetch_deks(above.content for above in path)
+            for above in path:
                 text = above.get_content()
                 if above.id in old_path_ids:
                     changes.append((above, text, old_readers, text))

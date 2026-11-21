@@ -606,3 +606,100 @@ def test_a_members_model_through_the_route(app):
     a = _db.session.get(Node, r.get_json()["node_id"])
     seen = _client(app, "ben").get(f"/api/nodes/{a.id}").get_json()
     assert a.llm_model == "gpt-5"
+
+
+# ── Keys of a shared discussion are unwrapped together ──────────────────
+
+class _CountingKms:
+    """A local stand-in for the key service: counts the unwraps made on
+    the request's own thread (one after another) and those made by the
+    unwrap pool (together)."""
+
+    def __init__(self):
+        import threading
+        self.lock = threading.Lock()
+        self.on_request_thread = 0
+        self.in_pool = 0
+
+    def encrypt(self, request):
+        from types import SimpleNamespace
+        return SimpleNamespace(ciphertext=b"W" + request["plaintext"])
+
+    def decrypt(self, request):
+        import threading
+        from types import SimpleNamespace
+        with self.lock:
+            if threading.current_thread().name.startswith("dek-unwrap"):
+                self.in_pool += 1
+            else:
+                self.on_request_thread += 1
+        return SimpleNamespace(plaintext=request["ciphertext"][1:])
+
+
+def _encrypted_thread(monkeypatch, owner, length):
+    """*owner*'s private thread of *length* nodes, each with its own key.
+    Returns (the key service stand-in, the thread's node ids from the
+    top, a function that empties the process's key cache as after a
+    restart and zeroes the counts)."""
+    from backend.utils import encryption as enc
+    kms = _CountingKms()
+    monkeypatch.setenv("ENCRYPTION_DISABLED", "false")
+    monkeypatch.setenv("GCP_KMS_KEY_NAME", "projects/x/test-key")
+    monkeypatch.setattr(enc, "_kms_encrypt", kms.encrypt)
+    monkeypatch.setattr(enc, "_kms_decrypt", kms.decrypt)
+    uid = _user(owner).id
+    ids, parent_id = [], None
+    for i in range(length):
+        n = Node(user_id=uid, human_owner_id=uid, parent_id=parent_id,
+                 privacy_level="private", node_type="user", ai_usage="chat")
+        n.set_content(f"entry {i}")
+        _db.session.add(n)
+        _db.session.flush()
+        ids.append(n.id)
+        parent_id = n.id
+    _db.session.commit()
+
+    def cold():
+        with enc._dek_cache_lock:
+            enc._dek_cache.clear()
+            del enc._dek_cache_order[:]
+        _db.session.expire_all()
+        kms.on_request_thread = kms.in_pool = 0
+    cold()
+    return kms, ids, cold
+
+
+def test_the_discussion_check_unwraps_its_keys_together(app, monkeypatch):
+    """The check before saving ("Share also the discussion leading up to
+    this node?") and the save itself read the discussion's text with its
+    keys unwrapped together, not one after another."""
+    kms, ids, cold = _encrypted_thread(monkeypatch, "anna", 60)
+    c = _client(app, "anna")
+    r = c.post("/api/circles/audience-preview", json={
+        "usernames": ["ben"], "parent_id": ids[-1], "share_path": True})
+    assert r.status_code == 200, r.get_json()
+    assert r.get_json()["readers"] == ["ben"]
+    assert (kms.in_pool, kms.on_request_thread) == (60, 0)
+    cold()
+    r = c.post("/api/circles/audience-preview", json={
+        "usernames": ["ben"], "node_id": ids[-1], "share_path": True})
+    assert r.status_code == 200, r.get_json()
+    assert (kms.in_pool, kms.on_request_thread) == (59, 0)
+    # The save: the entry shared with its discussion. Only the entry's
+    # own text is read on the request's thread.
+    cold()
+    r = c.put(f"/api/nodes/{ids[-1]}/audience", json={
+        "circle_usernames": ["ben"], "share_path": True})
+    assert r.status_code == 200, r.get_json()
+    assert (kms.in_pool, kms.on_request_thread) == (59, 1)
+    assert _client(app, "ben").get(f"/api/nodes/{ids[0]}").status_code == 200
+    # An edit of the entry that widens its audience checks the discussion
+    # again; the edit itself reads the entry's text on the request's
+    # thread.
+    cold()
+    r = c.put(f"/api/nodes/{ids[-1]}", json={
+        "content": "entry, edited", "privacy_level": "circles",
+        "circle_usernames": ["ben", "chidi"], "share_path": True})
+    assert r.status_code == 200, r.get_json()
+    assert kms.in_pool == 59
+    assert kms.on_request_thread <= 2, kms.on_request_thread

@@ -307,6 +307,12 @@ def _quotes_unreadable_by(readers, content, entry, data):
                     break
                 path.append(current)
                 current = current.parent
+        # The path's keys are unwrapped together first, so the reads below
+        # make no key call one after another.
+        from backend.utils.encryption import prefetch_deks
+        prefetch_deks(above.content for above in path
+                      if above.deleted_at is None
+                      and above.privacy_level != "public")
         for above in path:
             if above.deleted_at is not None or above.privacy_level == "public":
                 continue
