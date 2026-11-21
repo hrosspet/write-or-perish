@@ -2836,7 +2836,9 @@ class PrefillBundleLoad(db.Model):
     status: queued -> running -> done | failed | stopped (a "no" given
     while it ran: what was loaded stays, linked); "refused" records an
     automatic load that found a bundle but did not start (``error`` says
-    why), so the admin sees it.
+    why), so the admin sees it; "held" (``error`` "held_as_spam") is a
+    load or a Yes's check the spam hold stopped (#732), sent again from
+    where it was once the account is no longer held.
     stage: check (a Yes: is there a bundle?) -> header -> nodes -> links
     -> finish -> (merge ->) done.
 
