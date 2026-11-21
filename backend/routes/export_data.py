@@ -620,7 +620,8 @@ def _format_node_text(node, label, user_id, embedded_quotes,
             # nodes marked 'none' like the resolver path does.
             content, quoted_ids = resolve_quotes(
                 content, user_id, for_llm=False, max_depth=1,
-                block_ai_none=filter_ai_usage, only=only, inside=inside)
+                block_ai_none=filter_ai_usage, only=only, inside=inside,
+                corpus=True)
             if licence is not None:
                 licence.note_nodes(quoted_ids, what="archive quoted entry")
     # {quote_ext:ID} (saved references) resolve inline unconditionally —

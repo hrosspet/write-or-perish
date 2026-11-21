@@ -403,7 +403,8 @@ def quotes_inside(user_id, quotable_for=None):
 
 
 def get_quote_data(node_ids: List[int], user_id: int,
-                   as_ai: bool = False) -> Dict[int, Optional[dict]]:
+                   as_ai: bool = False,
+                   corpus: bool = False) -> Dict[int, Optional[dict]]:
     """
     Fetch node data for the given IDs, checking access permissions.
 
@@ -413,6 +414,11 @@ def get_quote_data(node_ids: List[int], user_id: int,
         as_ai: the text is for a model or the user's corpus, not for the
             user's screen: another person's circle-shared entry is then
             not accessible (privacy.py, Circles)
+        corpus: the text is for the user's corpus (an export: profile
+            builds, recent context, {user_export}, the data download):
+            as *as_ai*, and other people's nodes in the user's own
+            shared threads are not accessible either, as the export
+            leaves those nodes themselves out
 
     Returns:
         Dict mapping node_id to node data dict (or None if not accessible).
@@ -438,7 +444,8 @@ def get_quote_data(node_ids: List[int], user_id: int,
         # access; otherwise None (renders as "not accessible"). A node whose
         # author deleted the account (#269) quotes as deleted, without a name.
         if node.deleted_at is not None or owner_hidden(node):
-            if can_user_view_tombstone(node, user_id, as_ai=as_ai):
+            if can_user_view_tombstone(node, user_id, as_ai=as_ai,
+                                       corpus=corpus):
                 gone = author_gone(node)
                 result[node_id] = {
                     "id": node.id,
@@ -455,7 +462,7 @@ def get_quote_data(node_ids: List[int], user_id: int,
                 result[node_id] = None
             continue
         # Alive: standard access check.
-        if can_user_access_node(node, user_id, as_ai=as_ai):
+        if can_user_access_node(node, user_id, as_ai=as_ai, corpus=corpus):
             result[node_id] = {
                 "id": node.id,
                 "content": node.get_content(),
@@ -482,6 +489,7 @@ def resolve_quotes(
     block_ai_none: Optional[bool] = None,
     only=None,
     inside=None,
+    corpus: bool = False,
 ) -> Tuple[str, List[int]]:
     """
     Replace {quote:ID} placeholders with quoted node content, recursively.
@@ -513,6 +521,11 @@ def resolve_quotes(
         block_ai_none: Replace quotes of nodes marked ai_usage='none' with a
                  placeholder. Defaults to *for_llm*; the AI-filtered export
                  sets it with the human-readable format (#340 review).
+        corpus: the text is for the user's corpus (get_quote_data): a
+                 quote of another person's node in the user's own shared
+                 thread renders as inaccessible. The export passes it; a
+                 live turn does not (there the user's model reads a quoted
+                 reply, and what it writes from it is marked).
 
     Returns:
         Tuple of (resolved_content, list_of_quoted_node_ids)
@@ -535,7 +548,8 @@ def resolve_quotes(
     # Fetch all quoted nodes. Every caller builds text for a model or an
     # export, so another person's circle-shared entry never resolves
     # here; the thread page reads its quotes through get_quote_data.
-    quote_data = get_quote_data(quote_ids, user_id, as_ai=True)
+    quote_data = get_quote_data(quote_ids, user_id, as_ai=True,
+                                corpus=corpus)
     resolved_ids = []
 
     def replace_quote(match):
@@ -599,6 +613,7 @@ def resolve_quotes(
                 block_ai_none=block_ai_none,
                 only=inner_only,
                 inside=inside,
+                corpus=corpus,
             )
             resolved_ids.extend(nested_ids)
         if inner_only is not None:
@@ -988,7 +1003,9 @@ class ExportQuoteResolver:
         """
         Get metadata for a node (tokens, quote_ids, content), or None when
         its text must not be embedded: the node is gone, the user cannot
-        access it, or (with filter_ai_usage) it is marked 'none'.
+        access it, or (with filter_ai_usage) it is marked 'none'. Access
+        is the corpus rule, as for the export's own nodes: another
+        person's node in the user's own shared thread is not embedded.
 
         The checks apply to every node, also one whose content is already
         cached (an entry added with add_node); the cache only saves
@@ -1000,7 +1017,7 @@ class ExportQuoteResolver:
 
         node = Node.query.get(node_id)
         if not node or not can_user_access_node(
-                node, self.user_id, as_ai=True):
+                node, self.user_id, as_ai=True, corpus=True):
             return None
 
         # Block nodes with ai_usage='none' when filtering is enabled

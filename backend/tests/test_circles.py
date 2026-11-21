@@ -1043,6 +1043,35 @@ def test_a_shared_entry_never_enters_the_readers_export(app):
     assert SECRET in _export(anna, filter_ai_usage=False)
 
 
+def test_a_quote_of_a_readers_reply_stays_out_of_the_authors_export(app):
+    """anna quotes ben's reply in her thread in a private entry of her
+    own. Her export (profile builds, recent context, {user_export}, the
+    data download) holds her entry with the quote shown as inaccessible,
+    like the reply itself, which it leaves out. On her screen and for a
+    model in a live turn of hers the quote still resolves."""
+    from backend.utils.quotes import get_quote_data, resolve_quotes
+    nid = _share(app, names=["ben"])
+    rid = _reply(app, "ben", nid, "BENS-REPLY-WORDS").get_json()["id"]
+    r = _client(app, "anna").post("/api/nodes/", json={
+        "content": "ANNAS-NOTE on {quote:%d}" % rid, "ai_usage": "chat",
+        "privacy_level": "private"})
+    assert r.status_code == 201, r.get_json()
+    anna = _user("anna")
+    for kw in ({"filter_ai_usage": False},
+               {"filter_ai_usage": True},
+               {"filter_ai_usage": True, "max_tokens": 10000},
+               {"filter_ai_usage": True,
+                "created_after": datetime(2020, 1, 1)}):
+        out = _export(anna, **kw)
+        assert "ANNAS-NOTE" in out, kw
+        assert "BENS-REPLY-WORDS" not in out, kw
+    assert get_quote_data([rid], anna.id, as_ai=True, corpus=True)[rid] is None
+    # A live turn of hers, and her screen: unchanged.
+    text, resolved = resolve_quotes("{quote:%d}" % rid, anna.id, for_llm=True)
+    assert "BENS-REPLY-WORDS" in text and resolved == [rid]
+    assert "BENS-REPLY-WORDS" in get_quote_data([rid], anna.id)[rid]["content"]
+
+
 
 def test_a_members_ai_reply_is_theirs(app):
     """ben's AI reply under anna's entry is ben's: in his profile builds
