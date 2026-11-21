@@ -140,8 +140,8 @@ final class CirclesModelTests: XCTestCase {
         XCTAssertEqual(AppRoute.circles.preferredTab, .more)
         XCTAssertEqual(AppRoute.sharedWithYou.webPath, "/shared")
         XCTAssertEqual(APIPath.canonical(APIPath.circles), "/api/circles")
-        XCTAssertEqual(APIPath.circleMember(3, username: "ben"), "/api/circles/3/members/ben")
-        XCTAssertEqual(APIPath.circlesMute(username: "anna"), "/api/circles/mutes/anna")
+        XCTAssertEqual(APIPath.circleMembers(3), "/api/circles/3/members")
+        XCTAssertEqual(APIPath.circlesMutes, "/api/circles/mutes")
         XCTAssertEqual(APIPath.nodeAudience(9), "/api/nodes/9/audience")
         XCTAssertEqual(DefaultsKey.circleReplyAck(entryId: 31, userId: 5), "loore_circle_reply_ack_5_31")
         // An AI reply has its own "Don't ask again" memory.
@@ -381,6 +381,39 @@ final class CirclesFormTests: StubbedAppTestCase {
 
     private var sharedParent: String {
         String(data: (try? fixture("node_audience.json")) ?? Data(), encoding: .utf8) ?? "{}"
+    }
+
+    /// Removing a person from a circle and showing a hidden person's entries
+    /// again name the person in the request body, never in the address (the
+    /// server keeps the address as the account's last-seen place).
+    func testRemovingAndShowingAgainNameThePersonInTheBody() async throws {
+        let circlesJSON = String(data: try fixture("circles.json"), encoding: .utf8) ?? "{}"
+        StubURLProtocol.install { [self] request in
+            switch (request.httpMethod ?? "", path(request)) {
+            case ("GET", "/api/circles"): return .json(200, circlesJSON)
+            case ("DELETE", "/api/circles/3/members"):
+                return .json(200, #"{"circle":{"id":3,"name":"Close friends","members":[{"username":"anna","only_new":false}],"shared_count":12}}"#)
+            case ("DELETE", "/api/circles/mutes"): return .json(200, #"{"shown":true}"#)
+            case ("GET", "/api/circles/shared-with-me"): return .json(200, #"{"people":[],"hidden":[]}"#)
+            default: return .json(404, #"{"error":"Not found"}"#)
+            }
+        }
+        let circles = CirclesModel(api: app.api)
+        await circles.load()
+        let close = try XCTUnwrap(circles.circles?.first)
+        let failure = await circles.removeMember(close, username: "ben")
+        XCTAssertNil(failure)
+        XCTAssertEqual(circles.circles?.first?.members.map(\.username), ["anna"])
+        XCTAssertEqual(body(of: "DELETE /api/circles/3/members")?["username"] as? String, "ben")
+
+        let shared = SharedWithYouModel(api: app.api)
+        await shared.show("dana")
+        XCTAssertNil(shared.error)
+        XCTAssertEqual(body(of: "DELETE /api/circles/mutes")?["username"] as? String, "dana")
+        for request in StubURLProtocol.requests {
+            let address = request.url?.absoluteString ?? ""
+            XCTAssertFalse(address.contains("ben") || address.contains("dana"), address)
+        }
     }
 
     func testANewEntryIsSharedWithItsCirclesAndNames() async {

@@ -169,7 +169,7 @@ def _world(app):
     a.llm_task_status = "completed"
     _db.session.commit()
     # chidi removed; gina hides anna.
-    assert c.delete(f"/api/circles/{close}/members/chidi").status_code == 200
+    assert c.delete(f"/api/circles/{close}/members", json={"username": "chidi"}).status_code == 200
     assert _client(app, "gina").post(
         "/api/circles/mutes", json={"username": "anna"}).status_code == 200
     control = _client(app, "anna").post("/api/nodes/", json={
@@ -408,11 +408,47 @@ def test_a_person_removed_from_one_circle_reads_on_through_another(app):
     work = _circle(app, "anna", "Work", ["ben"])
     e = _share(app, circle_ids=[close, work])
     c = _client(app, "anna")
-    assert c.delete(f"/api/circles/{close}/members/ben").status_code == 200
+    assert c.delete(f"/api/circles/{close}/members", json={"username": "ben"}).status_code == 200
     st = _client(app, "ben").get(f"/api/nodes/{e}").status_code
     assert st == 200
-    assert c.delete(f"/api/circles/{work}/members/ben").status_code == 200
+    assert c.delete(f"/api/circles/{work}/members", json={"username": "ben"}).status_code == 200
     assert _client(app, "ben").get(f"/api/nodes/{e}").status_code == 404
+
+
+def test_a_persons_name_travels_in_the_body_not_the_address(app):
+    """Removing a person from a circle and showing a hidden person's
+    entries again name the person in the request body. The address the
+    account's last-seen place keeps (and error reports carry) has the
+    circle's id at most, never the name. No Circles route takes a name
+    in its address."""
+    names = {rule.rule: rule.arguments for rule in app.url_map.iter_rules()
+             if rule.rule.startswith("/api/circles")}
+    assert names and not [r for r, args in names.items() if "username" in args]
+    close = _circle(app, "anna", "Close", ["ben", "chidi"])
+    _share(app, circle_ids=[close])
+    anna = _client(app, "anna")
+    assert anna.get("/api/circles").status_code == 200
+    r = anna.delete(f"/api/circles/{close}/members", json={"username": "ben"})
+    assert r.status_code == 200, r.get_json()
+    assert [m["username"] for m in r.get_json()["circle"]["members"]] == [
+        "chidi"]
+    _db.session.expire_all()
+    assert _user("anna").last_seen_path == f"/api/circles/{close}/members"
+    # Without a name, or a name not in the circle: not found.
+    assert anna.delete(f"/api/circles/{close}/members").status_code == 404
+    assert anna.delete(f"/api/circles/{close}/members",
+                       json={"username": "dana"}).status_code == 404
+    chidi = _client(app, "chidi")
+    assert chidi.post("/api/circles/mutes",
+                      json={"username": "anna"}).status_code == 200
+    assert chidi.get("/api/circles/shared-with-me").status_code == 200
+    r = chidi.delete("/api/circles/mutes", json={"username": "@anna"})
+    assert r.status_code == 200, r.get_json()
+    _db.session.expire_all()
+    assert _user("chidi").last_seen_path == "/api/circles/mutes"
+    assert chidi.delete("/api/circles/mutes",
+                        json={"username": "anna"}).status_code == 404
+    assert chidi.delete("/api/circles/mutes").status_code == 404
 
 
 def test_pinned_answer_stays_in_readers_log_after_entry_deleted(app):
@@ -469,7 +505,7 @@ def test_answer_after_the_reader_loses_the_entry(app, how):
     anna = _client(app, "anna")
     if how == "removed":
         assert anna.delete(
-            f"/api/circles/{close}/members/ben").status_code == 200
+            f"/api/circles/{close}/members", json={"username": "ben"}).status_code == 200
     elif how == "taken_back":
         assert anna.put(f"/api/nodes/{e}", json={
             "privacy_level": "private", "content": SECRET}).status_code == 200

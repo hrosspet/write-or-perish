@@ -50,7 +50,9 @@ final class SharedWithYouModel {
 
     func show(_ username: String) async {
         do {
-            _ = try await api.delete(APIPath.circlesMute(username: username), as: EmptyResponse.self)
+            // The name goes in the body, never in the address (APIPath.circlesMutes).
+            _ = try await api.send(.json(.delete, APIPath.circlesMutes, .object(["username": .string(username)])),
+                                   as: EmptyResponse.self)
             await load()
         } catch {
             self.error = (error as? APIError)?.userMessage(fallback: Self.failed) ?? Self.failed

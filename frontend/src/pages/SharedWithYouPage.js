@@ -4,7 +4,7 @@ import api from '../api';
 import { useUser } from '../contexts/UserContext';
 import { CircleConfirmDialog } from '../components/CircleDialogs';
 import { parseTimestamp } from '../utils/date';
-import { atName, possessive } from '../utils/circles';
+import { atName, possessive, showPersonAgainRequest } from '../utils/circles';
 
 // "Shared with you": the entries people chose to show the user, grouped
 // by person, newest first. Nothing here counts or tracks reading: no
@@ -93,7 +93,7 @@ function SharedWithYouPage() {
 
   const show = async (username) => {
     try {
-      await api.delete(`/circles/mutes/${encodeURIComponent(username)}`);
+      await showPersonAgainRequest(api, username);
       setPeople(null);
       load();
     } catch (err) {

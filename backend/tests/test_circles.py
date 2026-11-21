@@ -225,7 +225,7 @@ def test_only_the_owner_sees_a_circle(app):
     assert ben.delete(f"/api/circles/{cid}").status_code == 404
     assert ben.post(f"/api/circles/{cid}/members", json={
         "username": "dana", "include_existing": True}).status_code == 404
-    assert ben.delete(f"/api/circles/{cid}/members/chidi").status_code == 404
+    assert ben.delete(f"/api/circles/{cid}/members", json={"username": "chidi"}).status_code == 404
 
 
 def test_create_rename_delete(app):
@@ -404,7 +404,7 @@ def test_a_removed_reader_is_closed_out_at_once(app):
     nid = _share(app, circle_ids=[cid])
     reply = _reply(app, "chidi", nid, "chidi says").get_json()["id"]
     assert _can_read(app, "ben", nid) and _can_read(app, "ben", reply)
-    r = _client(app, "anna").delete(f"/api/circles/{cid}/members/ben")
+    r = _client(app, "anna").delete(f"/api/circles/{cid}/members", json={"username": "ben"})
     assert r.status_code == 200
     assert not _can_read(app, "ben", nid)
     assert not _can_read(app, "ben", reply)
@@ -767,7 +767,7 @@ def test_hiding_a_person_stops_notes_and_entries_and_can_be_undone(app):
     # The list at the bottom of Shared with you, and the undo.
     data = ben.get("/api/circles/shared-with-me").get_json()
     assert data["hidden"] == ["anna"] and data["people"] == []
-    assert ben.delete("/api/circles/mutes/anna").status_code == 200
+    assert ben.delete("/api/circles/mutes", json={"username": "anna"}).status_code == 200
     assert _can_read(app, "ben", nid) and _can_read(app, "ben", later)
     assert CircleMute.query.count() == 0
     # Hiding is no way to test a name.
@@ -1288,7 +1288,7 @@ def test_similar_nodes_list_an_ai_reply_only_while_its_thread_is_open(app):
 
     assert listed() == [aid]
     assert _client(app, "anna").delete(
-        f"/api/circles/{close}/members/ben").status_code == 200
+        f"/api/circles/{close}/members", json={"username": "ben"}).status_code == 200
     _db.session.expire_all()
     assert listed() == []
     assert NodeEmbedding.query.filter_by(node_id=aid).count() == 1
@@ -1734,7 +1734,7 @@ def test_an_answer_is_closed_to_a_removed_or_muted_reader(app):
         "/api/circles/mutes", json={"username": "anna"}).status_code == 200
     assert not _can_read(app, "chidi", a) and not _can_read(app, "chidi", r)
     assert _client(app, "chidi").delete(
-        "/api/circles/mutes/anna").status_code == 200
+        "/api/circles/mutes", json={"username": "anna"}).status_code == 200
     assert _can_read(app, "chidi", a)
     # anna removes chidi (the entry is now for ben only).
     assert _put(app, "anna", entry, privacy_level="circles",
@@ -2127,7 +2127,7 @@ def test_an_open_speech_stream_follows_the_entrys_audience(
     nothing written later. anna's own stream of it completes."""
     def remove_edit_finish():
         assert _client(app, "anna").delete(
-            f"/api/circles/{close}/members/ben").status_code == 200
+            f"/api/circles/{close}/members", json={"username": "ben"}).status_code == 200
         assert _put(app, "anna", entry, content=LATER).status_code == 200
         node = _db.session.get(Node, entry)
         node.tts_task_status = "completed"
@@ -2161,7 +2161,7 @@ def test_an_open_reply_stream_follows_the_thread(app, monkeypatch, removed):
     def step():
         if removed:
             assert _client(app, "anna").delete(
-                f"/api/circles/{close}/members/ben").status_code == 200
+                f"/api/circles/{close}/members", json={"username": "ben"}).status_code == 200
         node = _db.session.get(Node, aid)
         node.streaming_content = "first part. SECOND PART"
         _db.session.commit()

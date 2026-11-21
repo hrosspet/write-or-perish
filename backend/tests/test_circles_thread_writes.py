@@ -41,7 +41,7 @@ def _mute(app, who, author):  # noqa: F811
 
 def _unmute(app, who, author):  # noqa: F811
     assert _client(app, who).delete(
-        f"/api/circles/mutes/{author}").status_code == 200
+        "/api/circles/mutes", json={"username": author}).status_code == 200
 
 
 def _closed(r):
@@ -66,7 +66,7 @@ def test_removed_from_the_circle_his_reply_stays_as_written(app):  # noqa: F811
     entry = _share(app, circle_ids=[close])
     rid = _reply(app, "ben", entry, "BEN AS WRITTEN").get_json()["id"]
     assert _client(app, "anna").delete(
-        f"/api/circles/{close}/members/ben").status_code == 200
+        f"/api/circles/{close}/members", json={"username": "ben"}).status_code == 200
     _closed(_put(app, "ben", rid, content="BEN CHANGED LATER"))
     _closed(_put(app, "ben", rid, content="BEN CHANGED LATER",
                  privacy_level="circles"))
@@ -112,7 +112,7 @@ def test_taken_back_before_removal_it_cannot_go_back_after(app):  # noqa: F811
     rid = _reply(app, "ben", entry, "BEN AS WRITTEN").get_json()["id"]
     assert _put(app, "ben", rid, privacy_level="private").status_code == 200
     assert _client(app, "anna").delete(
-        f"/api/circles/{close}/members/ben").status_code == 200
+        f"/api/circles/{close}/members", json={"username": "ben"}).status_code == 200
     _closed(_put(app, "ben", rid, content="NEW WORDS", privacy_level="circles"))
     _closed(_client(app, "ben").put(f"/api/nodes/{rid}/audience", json={}))
     assert not _can_read(app, "chidi", rid)
@@ -132,7 +132,7 @@ def test_an_ai_reply_closed_to_its_owner_is_not_his_to_change(app):  # noqa: F81
     _db.session.commit()
     assert _put(app, "ben", aid, privacy_level="circles").status_code == 200
     assert _client(app, "anna").delete(
-        f"/api/circles/{close}/members/ben").status_code == 200
+        f"/api/circles/{close}/members", json={"username": "ben"}).status_code == 200
     # Closed to him (as GET answers): no edit of any kind.
     assert _client(app, "ben").get(f"/api/nodes/{aid}").status_code == 404
     assert _put(app, "ben", aid, content="CHANGED").status_code == 404

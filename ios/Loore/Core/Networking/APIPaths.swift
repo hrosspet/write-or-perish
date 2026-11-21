@@ -161,13 +161,14 @@ enum APIPath {
     static func circle(_ id: Int) -> String { "/api/circles/\(id)" }
     static func circleMembers(_ id: Int) -> String { "/api/circles/\(id)/members" }
     static func circleMemberPreview(_ id: Int) -> String { "/api/circles/\(id)/members/preview" }
-    static func circleMember(_ id: Int, username: String) -> String {
-        "/api/circles/\(id)/members/\(escape(username))"
-    }
     static let circlesAudiencePreview = "/api/circles/audience-preview"
     static let circlesSharedWithMe = "/api/circles/shared-with-me"
+    /// POST hides a person's entries, DELETE shows them again: both name the
+    /// person in the body (`{"username"}`), as removing a member does on
+    /// `circleMembers`. A name never goes into an address: the address is what
+    /// the server keeps as the account's last-seen place and what error
+    /// reports carry.
     static let circlesMutes = "/api/circles/mutes"
-    static func circlesMute(username: String) -> String { "/api/circles/mutes/\(escape(username))" }
     static let commonsFeed = "/api/commons/feed"
     static func commonsPermalink(username: String, slug: String) -> String {
         "/api/commons/permalink/\(escape(username))/\(escape(slug))"

@@ -149,6 +149,18 @@ export function removeMemberBody(rawName, circleName) {
     + `${name} is not told.`;
 }
 
+// The two requests that name another person to take something back. The
+// name goes in the request body, never in the address: the address is
+// what the server keeps as the account's last-seen place and what error
+// reports carry. `client` is the app's axios instance (api.js).
+export function removeMemberRequest(client, circleId, username) {
+  return client.delete(`/circles/${circleId}/members`, { data: { username } });
+}
+
+export function showPersonAgainRequest(client, username) {
+  return client.delete('/circles/mutes', { data: { username } });
+}
+
 export const NO_READERS_MESSAGE = "Nobody could read this entry yet. Choose "
   + "a circle with people in it, or name a person.";
 

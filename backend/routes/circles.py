@@ -210,19 +210,32 @@ def add_member(circle_id):
     return jsonify({"circle": _serialize_circles([circle])[0]}), 201
 
 
-@circles_bp.route("/<int:circle_id>/members/<username>", methods=["DELETE"])
+def _name_in_body():
+    """The Loore name a request names another person by: in its JSON
+    body, never in its address. The address is what the account's
+    last-seen place keeps (activity.touch_last_seen) and what error
+    reports and log lines carry."""
+    name = (request.get_json(silent=True) or {}).get("username")
+    return cz.clean_name(name if isinstance(name, str) else "")
+
+
+@circles_bp.route("/<int:circle_id>/members", methods=["DELETE"])
 @login_required
-def remove_member(circle_id, username):
-    """Remove a person: the circle's entries are closed to them from
-    this moment. Found among the circle's members only, so a removed
-    account that can no longer be looked up can still be removed."""
+def remove_member(circle_id):
+    """Remove a person, named by ``username`` in the body: the circle's
+    entries are closed to them from this moment. Found among the
+    circle's members only, so a removed account that can no longer be
+    looked up can still be removed."""
     circle = cz.own_circle(circle_id, current_user.id)
     if circle is None:
+        return jsonify({"error": "Not found"}), 404
+    username = _name_in_body()
+    if not username:
         return jsonify({"error": "Not found"}), 404
     row = (db.session.query(CircleMember)
            .join(User, User.id == CircleMember.user_id)
            .filter(CircleMember.circle_id == circle.id,
-                   func.lower(User.username) == cz.clean_name(username).lower())
+                   func.lower(User.username) == username.lower())
            .first())
     if row is None:
         return jsonify({"error": "Not found"}), 404
@@ -467,13 +480,18 @@ def add_mute():
     return jsonify({"error": "Not found"}), 404
 
 
-@circles_bp.route("/mutes/<username>", methods=["DELETE"])
+@circles_bp.route("/mutes", methods=["DELETE"])
 @login_required
-def remove_mute(username):
+def remove_mute():
+    """Show a person's entries again, named by ``username`` in the body
+    (_name_in_body), among the people the user hid."""
+    username = _name_in_body()
+    if not username:
+        return jsonify({"error": "Not found"}), 404
     row = (db.session.query(CircleMute)
            .join(User, User.id == CircleMute.muted_user_id)
            .filter(CircleMute.user_id == current_user.id,
-                   func.lower(User.username) == cz.clean_name(username).lower())
+                   func.lower(User.username) == username.lower())
            .first())
     if row is None:
         return jsonify({"error": "Not found"}), 404

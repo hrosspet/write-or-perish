@@ -346,7 +346,7 @@ def test_the_readers_sentence_names_only_who_can_read_the_entry(app):  # noqa: F
         f"/api/nodes/{entry}").get_json()["audience"]["readers"]
     assert readers == ["ben"]
     # ben leaves the circle: nobody who can read the entry is left in it.
-    r = anna.delete(f"/api/circles/{close}/members/ben")
+    r = anna.delete(f"/api/circles/{close}/members", json={"username": "ben"})
     assert r.status_code == 200, r.get_json()
     assert preview(node_id=entry)["readers"] == []
     r = anna.put(f"/api/nodes/{entry}", json={

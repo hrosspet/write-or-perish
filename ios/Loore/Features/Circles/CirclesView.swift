@@ -96,7 +96,9 @@ final class CirclesModel {
         busy = true
         defer { busy = false }
         do {
-            let answer: CircleEnvelope = try await api.delete(APIPath.circleMember(circle.id, username: username))
+            // The name goes in the body, never in the address (APIPath.circlesMutes).
+            let answer: CircleEnvelope = try await api.send(
+                .json(.delete, APIPath.circleMembers(circle.id), .object(["username": .string(username)])))
             replace(answer.circle)
             return nil
         } catch { return message(error) }

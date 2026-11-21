@@ -5,7 +5,9 @@ import { useUser } from '../contexts/UserContext';
 import {
   AddCircleMemberDialog, CircleConfirmDialog, accentButton, plainButton,
 } from '../components/CircleDialogs';
-import { atName, joinNames, removeMemberBody } from '../utils/circles';
+import {
+  atName, joinNames, removeMemberBody, removeMemberRequest,
+} from '../utils/circles';
 
 // "Your circles": the lists of people the user shares entries with.
 // Create, rename and delete a circle; add a person by their exact Loore
@@ -109,8 +111,7 @@ function CircleCard({ circle, open, onToggle, onChanged, onDeleted }) {
   const remove = async (username) => {
     setBusy(true);
     try {
-      const res = await api.delete(
-        `/circles/${circle.id}/members/${encodeURIComponent(username)}`);
+      const res = await removeMemberRequest(api, circle.id, username);
       onChanged(res.data.circle);
     } catch (err) {
       setAddError(errorText(err, 'That did not work. Try again.'));

@@ -3,7 +3,21 @@ import {
   replyAudienceNames, sharedBannerText, replyAckKey, removeMemberBody,
   atName, aiReplyAckKey, aiReplyOffReason, possessive,
   joinPlain, aiReadsPrivateSentence,
+  removeMemberRequest, showPersonAgainRequest,
 } from './circles';
+
+test('a person is named in the request body, never in the address', async () => {
+  const client = { delete: jest.fn().mockResolvedValue({ data: {} }) };
+  await removeMemberRequest(client, 3, 'ben');
+  await showPersonAgainRequest(client, 'anna');
+  expect(client.delete.mock.calls).toEqual([
+    ['/circles/3/members', { data: { username: 'ben' } }],
+    ['/circles/mutes', { data: { username: 'anna' } }],
+  ]);
+  for (const [address] of client.delete.mock.calls) {
+    expect(address).not.toMatch(/ben|anna/);
+  }
+});
 
 test('removing a person says what stays open', () => {
   expect(removeMemberBody('ben', 'Close friends')).toBe(
