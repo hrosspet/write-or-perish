@@ -1083,6 +1083,51 @@ def test_search_scope_is_the_users_own(app):
     assert "user_id" in cols
 
 
+def test_similar_nodes_list_an_ai_reply_only_while_its_thread_is_open(app):
+    """The "similar nodes" list of one of ben's nodes names his AI reply
+    in anna's thread while he reads the thread, not after anna removed
+    him, and again once he is back."""
+    from backend.models import NodeEmbedding
+    from backend.routes.search import search_bp
+    from backend.utils.embeddings import pack_vector
+    if "search_bp" not in app.blueprints:
+        app.register_blueprint(search_bp, url_prefix="/api")
+    close = _circle(app, "anna", "Close", ["ben", "chidi"])
+    entry = _share(app, circle_ids=[close])
+    mine = _reply(app, "ben", entry, "ben replies").get_json()["id"]
+    aid = _client(app, "ben").post(
+        f"/api/nodes/{mine}/llm", json={}).get_json()["node_id"]
+    node = _db.session.get(Node, aid)
+    node.set_content("AI REPLY WRITTEN FROM " + SECRET)
+    node.llm_task_status = "completed"
+    note = _client(app, "ben").post("/api/nodes/", json={
+        "content": "ben private note", "privacy_level": "private",
+        "ai_usage": "chat"}).get_json()["id"]
+    ben = _user("ben")
+    for nid in (aid, note):
+        _db.session.add(NodeEmbedding(
+            node_id=nid, user_id=ben.id, model="m", content_hash="h",
+            vector=pack_vector([1.0, 0.0, 0.0])))
+    _db.session.commit()
+
+    def listed():
+        r = _client(app, "ben").get(f"/api/search/neighbors?node_id={note}")
+        assert r.status_code == 200, r.get_json()
+        return [x["id"] for x in r.get_json()["results"]]
+
+    assert listed() == [aid]
+    assert _client(app, "anna").delete(
+        f"/api/circles/{close}/members/ben").status_code == 200
+    _db.session.expire_all()
+    assert listed() == []
+    assert NodeEmbedding.query.filter_by(node_id=aid).count() == 1
+    assert _client(app, "anna").post(
+        f"/api/circles/{close}/members",
+        json={"username": "ben", "include_existing": True}).status_code == 201
+    _db.session.expire_all()
+    assert listed() == [aid]
+
+
 # ── The flag ────────────────────────────────────────────────────────────
 
 def test_with_the_flag_off_circles_is_private(app):

@@ -547,6 +547,11 @@ def semantic_neighbors():
         if (n.user_id != current_user.id
                 and n.human_owner_id != current_user.id):
             continue
+        # Same rule as the node route: an AI reply the user asked for in
+        # someone else's shared thread is listed only while the thread is
+        # open to them. Its embedding stays, so it shows again if it opens.
+        if not can_user_access_node(n, current_user.id):
+            continue
         content = n.get_content() or ""
         results.append({
             "id": n.id,
