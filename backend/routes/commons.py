@@ -31,6 +31,31 @@ commons_bp = Blueprint("commons", __name__)
 
 MAX_THREAD_NODES = 500
 
+# INTRODUCED CONSTANT: entries per page of a person's public listing (the
+# server-rendered /@<user> and GET /api/share/public/<user>), the Commons
+# feed's page size. An account with this many public pieces or fewer gets
+# one page, as before.
+PUBLIC_LISTING_PAGE_SIZE = 20
+
+# INTRODUCED CONSTANT: the highest page number a listing reads; a larger
+# one reads as this. Far past any real listing (20 million entries); keeps
+# the OFFSET inside the database's integer range.
+MAX_LISTING_PAGE = 1_000_000
+
+
+def listing_page():
+    """The ?page= of a public listing: 1 when absent, malformed or below
+    1, at most MAX_LISTING_PAGE."""
+    page = request.args.get("page", 1, type=int)
+    return min(max(page or 1, 1), MAX_LISTING_PAGE)
+
+
+def public_root_order():
+    """ORDER BY for a person's public roots: pinned first (newest pin
+    first), then newest; the id settles ties, so pages never overlap."""
+    return (Node.pinned_at.is_(None), Node.pinned_at.desc(),
+            Node.created_at.desc().nullslast(), Node.id.desc())
+
 
 def _enabled():
     return bool(current_app.config.get("SHARE_V1", False))

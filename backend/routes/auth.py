@@ -25,6 +25,21 @@ logger = logging.getLogger(__name__)
 auth_bp = Blueprint("auth_bp", __name__)
 
 
+def _loaded_into_a_page():
+    """True when the browser says this request loads something into a
+    page (an image, a script, a fetch) rather than opening it: the
+    Sec-Fetch-Dest header is there and is not "document". Signing in
+    with a link and signing out happen only when the URL is opened.
+    Clients that send no Sec-Fetch headers (the iPhone app, mail apps
+    opening links first) are not affected."""
+    dest = request.headers.get("Sec-Fetch-Dest")
+    return dest is not None and dest != "document"
+
+
+def _not_opened_as_a_page():
+    return jsonify({"error": "Open this link in the browser."}), 403
+
+
 def is_safe_redirect_url(target):
     """True when *target* is a page inside Loore that a sign-in (or a sign-
     out) may send the browser to: backend/utils/destination.py, the one
@@ -587,6 +602,8 @@ def _link_sent_answer():
 
 @auth_bp.route("/magic-link/verify")
 def magic_link_verify():
+    if _loaded_into_a_page():
+        return _not_opened_as_a_page()
     frontend_url = current_app.config.get("FRONTEND_URL", "http://localhost:3000")
     token = request.args.get("token", "")
 
@@ -727,6 +744,8 @@ def invite_choice_cancel():
 @auth_bp.route("/logout")
 @login_required
 def logout():
+    if _loaded_into_a_page():
+        return _not_opened_as_a_page()
     logout_user()
     # Drop flask-dance's stored X token as well. Left in the session, the
     # next "Sign in with X" in this browser skipped X and went straight

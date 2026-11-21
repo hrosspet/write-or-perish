@@ -537,9 +537,10 @@ def create_node():
     """Create a new node.
 
     Two usage modes:
-    1. JSON body     – `{ content, parent_id?, node_type? }` (existing behaviour)
+    1. JSON body     – `{ content, parent_id? }` (existing behaviour)
     2. multipart/form – Field `audio_file` containing a WebM / m4a / wav file.
-       Optional fields: `parent_id`, `node_type`.
+       Optional field: `parent_id`.
+    A `node_type` in either is ignored: the node is the user's ("user").
 
     When an audio file is provided the server stores it and returns the node
     immediately.  Transcription (to populate `content`) is handled
@@ -584,7 +585,10 @@ def create_node():
             return too_many
 
         parent_id = request.form.get("parent_id")
-        node_type = request.form.get("node_type", "user")
+        # What a client creates is its own writing: "llm" and "link"
+        # nodes are made by the server (create_llm_placeholder, the /link
+        # route), whatever node_type a request names.
+        node_type = "user"
 
         # Get privacy settings from form data (with defaults)
         privacy_level = request.form.get("privacy_level", PrivacyLevel.PRIVATE)
@@ -723,8 +727,12 @@ def create_node():
     if not content:
         return jsonify({"error": "Content is required"}), 400
     parent_id = data.get("parent_id")  # May be None for a root node.
-    node_type = data.get("node_type", "user")  # default is "user"
-    linked_node_id = data.get("linked_node_id")  # For linked nodes
+    # What a client creates is its own writing: "llm" and "link"
+    # nodes are made by the server (create_llm_placeholder, the /link
+    # route), whatever node_type a request names.
+    node_type = "user"
+    # Links between nodes go through POST /<id>/link, which checks the
+    # linked node; this route sets none.
 
     # Get privacy settings from request data (with defaults)
     privacy_level = data.get("privacy_level", PrivacyLevel.PRIVATE)
@@ -779,7 +787,6 @@ def create_node():
         human_owner_id=current_user.id,
         parent_id=parent_id,
         node_type=node_type,
-        linked_node_id=linked_node_id,
         token_count=token_count,
         privacy_level=privacy_level,
         ai_usage=ai_usage
@@ -2500,12 +2507,18 @@ def get_llm_status(node_id):
                     'failed', 'cancelled'):
                 # A task that returned after marking its node failed or
                 # cancelled (spend cap, a withdrawn batch) keeps that.
-                node.llm_task_status = 'completed'
-                db.session.commit()
-                # Get the created node ID from task result
+                # Written on the owner's poll only; the task itself marks
+                # the node completed too.
+                if is_node_owner(node, current_user.id):
+                    node.llm_task_status = 'completed'
+                    db.session.commit()
+                # Get the created node ID from task result. Its text goes
+                # only to a user who may read that node itself: the final
+                # node of a multi-step reply is private until shared.
                 if task.result and 'llm_node_id' in task.result:
                     llm_node = Node.query.get(task.result['llm_node_id'])
-                    if llm_node:
+                    if llm_node and can_user_access_node(
+                            llm_node, current_user.id):
                         created_node = {
                             "id": llm_node.id,
                             "content": llm_node.get_content(),
@@ -2823,7 +2836,10 @@ def init_chunked_upload():
     total_chunks = data.get("total_chunks")
     upload_id = data.get("upload_id")
     parent_id = data.get("parent_id")
-    node_type = data.get("node_type", "user")
+    # What a client creates is its own writing: "llm" and "link"
+    # nodes are made by the server (create_llm_placeholder, the /link
+    # route), whatever node_type a request names.
+    node_type = "user"
 
     # Get privacy settings (with defaults)
     privacy_level = data.get("privacy_level", PrivacyLevel.PRIVATE)
@@ -3329,7 +3345,10 @@ def init_streaming_transcription():
     data = request.get_json() or {}
 
     parent_id = data.get("parent_id")
-    node_type = data.get("node_type", "user")
+    # What a client creates is its own writing: "llm" and "link"
+    # nodes are made by the server (create_llm_placeholder, the /link
+    # route), whatever node_type a request names.
+    node_type = "user"
     privacy_level = data.get("privacy_level", PrivacyLevel.PRIVATE)
     ai_usage = data.get("ai_usage", AIUsage.NONE)
     chunk_interval_ms = data.get("chunk_interval_ms", 300000)  # Default 5 minutes
