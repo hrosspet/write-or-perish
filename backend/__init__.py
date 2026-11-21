@@ -284,6 +284,13 @@ def create_app():
 
     app = Flask(__name__)
     app.config.from_object(Config)
+    # Request bodies: DEFAULT_MAX_BODY_BYTES unless the route allows more
+    # (utils/request_size); a larger body gets a JSON 413 before it is
+    # read.
+    from backend.utils import request_size
+    app.request_class = request_size.SizedRequest
+    app.config["MAX_CONTENT_LENGTH"] = request_size.DEFAULT_MAX_BODY_BYTES
+    app.register_error_handler(413, request_size.too_large_response)
     validate_default_model(app.config)
     # Payments (#438): never on in production with a sandbox key.
     from backend.utils.subscriptions import check_payments_config

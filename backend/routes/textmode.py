@@ -17,6 +17,7 @@ from backend.utils.llm_nodes import (
 )
 from backend.utils.context_artifacts import attach_context_artifacts
 from backend.utils.session_helpers import attach_agentic_prompt_under
+from backend.utils.request_size import LONG_TEXT_MAX_BODY_BYTES, body_limit
 from backend.utils.privacy import (
     can_user_see_node_or_placeholder, validate_ai_usage,
 )
@@ -60,6 +61,7 @@ VALID_PRIVACY_LEVELS = {"private", "anonymous", "public"}
 
 
 @textmode_bp.route("/start", methods=["POST"])
+@body_limit(LONG_TEXT_MAX_BODY_BYTES)
 @login_required
 def start_conversation():
     """

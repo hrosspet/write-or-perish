@@ -19,8 +19,10 @@ from backend.utils.audio_storage import (
 from backend.utils.encryption import stage_encrypted_file
 from backend.utils.client_platform import request_client
 from backend.utils.recording_limits import (
-    LONGEST_RECORDING_TEXT, NOT_ANNOUNCED_TEXT,
+    FORM_OVERHEAD_BYTES, LONGEST_RECORDING_TEXT, MAX_STREAMING_CHUNK_BYTES,
+    NOT_ANNOUNCED_TEXT,
 )
+from backend.utils.request_size import LONG_TEXT_MAX_BODY_BYTES, body_limit
 from backend.utils.recording_device import (
     SessionBusy, claim_session, is_taken_over, is_taken_over_locked,
     lock_writer_key, request_device_key, session_busy_response,
@@ -455,6 +457,7 @@ def get_interrupted_drafts():
 
 
 @drafts_bp.route("/", methods=["POST"])
+@body_limit(LONG_TEXT_MAX_BODY_BYTES)
 @login_required
 def save_draft():
     """
@@ -1019,6 +1022,7 @@ def _staged_size_error(staged, chunk_dir, chunk_index):
 
 
 @drafts_bp.route("/streaming/<session_id>/audio-chunk", methods=["POST"])
+@body_limit(MAX_STREAMING_CHUNK_BYTES + FORM_OVERHEAD_BYTES)
 @login_required
 def upload_streaming_chunk(session_id):
     """
@@ -1747,6 +1751,7 @@ def release_streaming(session_id):
 
 
 @drafts_bp.route("/streaming/<session_id>/save-as-node", methods=["POST"])
+@body_limit(LONG_TEXT_MAX_BODY_BYTES)
 @login_required
 def save_streaming_as_node(session_id):
     """

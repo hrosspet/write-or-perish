@@ -4,6 +4,7 @@ from backend.utils.error_privacy import describe_exception
 from backend.models import UserProfile
 from backend.extensions import db
 from backend.utils.timefmt import iso_utc
+from backend.utils.request_size import LONG_TEXT_MAX_BODY_BYTES, body_limit
 from pathlib import Path
 
 from flask import Blueprint
@@ -277,6 +278,7 @@ def get_tts_status(profile_id):
 
 
 @profile_bp.route("/", methods=["POST"])
+@body_limit(LONG_TEXT_MAX_BODY_BYTES)
 @login_required
 def create_profile():
     """Create a new profile version the user wrote (generated_by "user").
@@ -476,6 +478,7 @@ def _copy_audio(source, target):
 
 
 @profile_bp.route("/<int:profile_id>", methods=["PUT"])
+@body_limit(LONG_TEXT_MAX_BODY_BYTES)
 @login_required
 def update_profile(profile_id):
     """Update the content of a user profile."""

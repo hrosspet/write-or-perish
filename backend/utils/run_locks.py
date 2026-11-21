@@ -19,7 +19,11 @@ TTL is set when it is taken and again at every beat:
   window renderer), without passing it down every call;
 - ``holder``: the token of the run that holds a key, or None;
 - ``single_run``: a context manager for a job without a heartbeat (the
-  embedding sweep).
+  embedding sweep);
+- ``heartbeat``: beats a lock from a thread while a block runs;
+- ``job_over`` / ``free_if_held_by``: whether the job a request's key
+  names is over (Celery's state, or a job that stopped beating), and
+  freeing that key.
 
 A run that dies (killed, out of memory) stops beating, and its key
 expires after the TTL, so the job resumes at its next dispatch.
@@ -102,15 +106,15 @@ def _text(value):
     return value
 
 
-def holder(key):
+def holder(key, unreachable=None):
     """The token of the run that holds ``key`` now (its heartbeat is
-    fresh), else None. None also when Redis cannot be reached: callers
-    then decide as they did before the lock."""
+    fresh), else None. *unreachable* (None unless given) when Redis cannot
+    be reached: callers then decide as they did before the lock."""
     try:
         return _text(_client().get(key))
     except Exception as e:  # noqa: BLE001 — unreachable counts as unknown
         log.debug("run lock %s unreadable (%s)", key, type(e).__name__)
-        return None
+        return unreachable
 
 
 class RunLockLost(Exception):
@@ -143,6 +147,20 @@ class RunLock:
             return False
         self._redis, self.locked = client, True
         return True
+
+    def adopt(self):
+        """Hold a key taken for this run before it started (a request takes
+        it for the job it queues, with this run's token): its beats then
+        refresh the key, with this lock's TTL, and its release frees it.
+        Nothing is checked here: the first beat says whether the key is
+        still this run's. Without Redis the run goes ahead unlocked."""
+        try:
+            self._redis = _client()
+        except Exception as e:  # noqa: BLE001 — the job must not stop on it
+            log.warning("run lock %s unavailable (%s); running unlocked",
+                        self.key, type(e).__name__)
+            return
+        self.locked = True
 
     def holder(self):
         return holder(self.key)
@@ -216,6 +234,83 @@ def single_run(key, ttl):
         yield True
     finally:
         lock.release()
+
+
+@contextmanager
+def heartbeat(lock, every):
+    """Beat *lock* every *every* seconds from a thread while the block
+    runs: for a job one of whose steps (a fetch, a long commit) can take
+    longer than the key's TTL. It stops when the block ends, or once
+    another run holds the key. A process that is killed takes the thread
+    with it, and the key expires after its TTL."""
+    stop = threading.Event()
+
+    def run():
+        while not stop.wait(every):
+            try:
+                lock.beat()
+            except RunLockLost:
+                return
+
+    thread = threading.Thread(target=run, name="run-lock-heartbeat",
+                              daemon=True)
+    thread.start()
+    try:
+        yield lock
+    finally:
+        stop.set()
+        thread.join(every + 5)
+
+
+# ── A key whose job is over ───────────────────────────────────────────────
+#
+# A key a request takes for the job it queues lives until the job frees it
+# or its TTL runs out. A job that was killed (a deploy's SIGKILL, the memory
+# limit) frees nothing, so before refusing a second request because of the
+# key, the routes ask whether its job is over (job_over) and free it then.
+
+ENDED_STATES = ("SUCCESS", "FAILURE", "REVOKED")
+RUNNING_STATES = ("STARTED", "PROGRESS")
+
+
+def task_state(task_id):
+    """The Celery state of *task_id* in the result store, or None when it
+    cannot be read."""
+    try:
+        from backend.celery_app import celery
+        state = celery.AsyncResult(task_id).state
+    except Exception as e:  # noqa: BLE001 — unknown
+        log.debug("task %s state unreadable (%s)", task_id, type(e).__name__)
+        return None
+    return state if isinstance(state, str) else None
+
+
+def job_over(key, task_id, running_ttl, stall_seconds):
+    """True when the job *task_id*, which holds *key*, is known to be
+    over: Celery says it ended, or it started and has not refreshed the key
+    for *stall_seconds* (each of its beats sets the TTL to *running_ttl*).
+    False when it may still be queued or running, or when that cannot be
+    told (a job still queued looks like one that was lost): the key then
+    lives out its TTL."""
+    state = task_state(task_id)
+    if state in ENDED_STATES:
+        return True
+    if state not in RUNNING_STATES:
+        return False
+    try:
+        left = _client().ttl(key)
+    except Exception as e:  # noqa: BLE001 — unknown
+        log.debug("run lock %s ttl unreadable (%s)", key, type(e).__name__)
+        return False
+    return left is not None and 0 <= left < running_ttl - stall_seconds
+
+
+def free_if_held_by(key, token):
+    """Delete *key* when its value is *token* (a job that is over); a key
+    another run took meanwhile stays."""
+    lock = RunLock(key, token, 1)
+    lock.adopt()
+    lock.release()
 
 
 # ── Counters: how often something started in a window ─────────────────────

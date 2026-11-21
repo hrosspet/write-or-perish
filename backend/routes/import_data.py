@@ -6,8 +6,12 @@ from backend.extensions import db
 from backend.utils.privacy import (
     AI_ALLOWED, cap_ai_usage, validate_ai_usage,
 )
-from backend.utils import docx_import, pdf_import
+from backend.utils import archive_limits, docx_import, pdf_import
+from backend.utils import run_locks
 from backend.utils.pdf_extract_worker import MAX_CHAPTERS as MAX_PDF_CHAPTERS
+from backend.utils.request_size import (
+    IMPORT_CONFIRM_MAX_BODY_BYTES, UPLOAD_MAX_BODY_BYTES, body_limit,
+)
 from datetime import datetime, timedelta
 import hashlib
 import os
@@ -17,7 +21,6 @@ import sys
 import zipfile
 import zlib
 import io
-import shutil
 import tempfile
 import json
 import uuid
@@ -27,6 +30,67 @@ import_bp = Blueprint("import_bp", __name__)
 DOCX_UNEXPECTED_ERROR = (
     "Something went wrong while reading this file. You can try again, or "
     "save the document again as .docx and upload that copy.")
+
+# ── Limits on one notes zip (heuristics, listed in the PR) ────────────────
+# Text of the .md files in one upload, unpacked: what analyze holds and
+# sends back, and the confirm posts again and parses (each several times
+# its size in memory on a server of 4 GB). A large vault of 10,000 notes
+# of 3 KB is 30 MB, a daily journal kept for ten years about 10 MB: 64 MB
+# leaves a 40 MB vault clear room. The confirm's body limit
+# (IMPORT_CONFIRM_MAX_BODY_BYTES, 96 MB) takes this text with its JSON
+# escaping, the Word text and the files' names and dates.
+MAX_NOTES_TEXT_BYTES = 64 * 1024 * 1024
+# Everything unpacked from one upload's members (.md text and the .docx
+# files copied out to be read). The upload is at most 200 MB, and a .docx
+# is already compressed, so a zip of Word documents unpacks to little
+# more than its own size; 512 MB is over twice that.
+MAX_UNPACKED_BYTES_PER_UPLOAD = 512 * 1024 * 1024
+MSG_TOO_MANY_ENTRIES = (
+    "This zip has more than {limit:,} files and folders, more than Loore "
+    "reads at once. Split it into smaller zips and import them one after "
+    "the other.")
+MSG_DIRECTORY_TOO_LARGE = (
+    "The list of files in this zip is larger than Loore reads ({limit} MB): "
+    "its file names are very long. Split it into smaller zips and import "
+    "them one after the other.")
+MSG_TOO_MUCH_NOTES_TEXT = (
+    "The notes in this zip hold more text than Loore imports at once "
+    "({limit} MB). Split them into smaller zips and import them one after "
+    "the other.")
+MSG_TOO_MUCH_UNPACKED = (
+    "This zip unpacks to more than Loore imports at once ({limit} MB). "
+    "Split it into smaller zips and import them one after the other.")
+MSG_UNSUPPORTED_COMPRESSION = (
+    "this file is compressed in a way Loore can't read; zip it again with "
+    "your system's standard zip tool")
+
+
+class _UploadOverLimit(Exception):
+    """The whole upload is past a limit; the message is shown as is."""
+
+
+# One notes analyze of an account runs at a time (each holds up to
+# MAX_NOTES_TEXT_BYTES of text): a run lock in Redis, refreshed before
+# every file it reads; a request that stopped (its worker was restarted)
+# frees the account NOTES_ANALYZE_LOCK_TTL after its last file. A file is
+# read, or a Word document converted, in well under that.
+NOTES_ANALYZE_LOCK_KEY = "loore:notes_analyze:{user_id}"
+NOTES_ANALYZE_LOCK_TTL = 2 * 60
+
+
+# ── The notes import's confirm (heuristics, listed in the PR) ─────────────
+# Files one notes import takes (analyze lists at most this many, confirm
+# imports at most this many). A large vault has a few thousand notes;
+# each takes about 80 ms to store, so 20,000 is about half an hour.
+MAX_IMPORT_FILES = 20_000
+MSG_TOO_MANY_FILES = (
+    "This import has more files than Loore imports at once ({limit:,}). "
+    "Split them into smaller zips and import them one after the other.")
+# One notes import (confirm) of an account runs at a time. Its key is
+# refreshed before every file; a run that stops refreshing it (its worker
+# was stopped) frees the account after this long.
+FILE_IMPORT_LOCK_KEY = "loore:file_import:{user_id}"
+FILE_IMPORT_LOCK_TTL = 10 * 60
 
 # Analyzed formats that become one entry per chapter (see _file_parts).
 CHAPTER_FORMATS = ("docx", "pdf")
@@ -909,6 +973,7 @@ def _import_file_nodes(file_data, parts, parent_id, source_key, created_at,
 
 
 @import_bp.route("/import/analyze", methods=["POST"])
+@body_limit(UPLOAD_MAX_BODY_BYTES)
 @login_required
 def analyze_import():
     """
@@ -935,7 +1000,34 @@ def analyze_import():
             "total_tokens": 1500,
             "total_size": 6789
         }
+
+    One analyze of an account at a time (NOTES_ANALYZE_LOCK_KEY): another
+    meanwhile gets 409 "import_running".
     """
+    lock = run_locks.RunLock(
+        NOTES_ANALYZE_LOCK_KEY.format(user_id=current_user.id),
+        uuid.uuid4().hex, NOTES_ANALYZE_LOCK_TTL)
+    if not lock.acquire():
+        return jsonify({"error": IMPORT_RUNNING_MESSAGE,
+                        "code": "import_running"}), 409
+    try:
+        with run_locks.holding(lock):
+            return _analyze_notes_upload()
+    finally:
+        lock.release()
+
+
+def _beat_quietly():
+    """Refresh the current request's run lock (run_locks.holding). One
+    whose key another request took after it lapsed goes on without it."""
+    try:
+        run_locks.beat()
+    except run_locks.RunLockLost:
+        pass
+
+
+def _analyze_notes_upload():
+    """analyze_import's work, under the account's analyze key."""
     # Check if file is present
     if 'zip_file' not in request.files:
         return jsonify({"error": "No zip_file provided"}), 400
@@ -992,8 +1084,14 @@ def analyze_import():
         parse_budget = docx_import.ParseBudget()  # shared by all docx here
         total_tokens = 0
         total_size = 0
+        # Bytes unpacked from the members so far, and of them .md text,
+        # which may be at most MAX_NOTES_TEXT_BYTES.
+        unpacked = 0
+        notes_text = 0
+        text_message = MSG_TOO_MUCH_NOTES_TEXT.format(
+            limit=MAX_NOTES_TEXT_BYTES // (1024 * 1024))
 
-        with zipfile.ZipFile(zip_bytes, 'r') as zip_ref:
+        with archive_limits.open_zip(zip_bytes) as zip_ref:
             # Get list of all .md / .docx files in the zip (.docm, .doc
             # and .pdf are listed so that they are reported, not silently
             # ignored)
@@ -1005,8 +1103,18 @@ def analyze_import():
 
             if not md_files:
                 return jsonify({"error": "No .md or .docx files found in the zip archive"}), 400
+            if len(md_files) > MAX_IMPORT_FILES:
+                return jsonify({"error": MSG_TOO_MANY_FILES.format(
+                    limit=MAX_IMPORT_FILES)}), 400
+
+            # The sizes the zip states, before anything is unpacked; each
+            # member is held to its limit again while it is read.
+            if sum(zip_ref.getinfo(f).file_size for f in md_files
+                   if f.lower().endswith('.md')) > MAX_NOTES_TEXT_BYTES:
+                raise _UploadOverLimit(text_message)
 
             for file_path in md_files:
+                _beat_quietly()
                 # Get file info
                 zip_info = zip_ref.getinfo(file_path)
 
@@ -1038,8 +1146,17 @@ def analyze_import():
                         with tempfile.SpooledTemporaryFile(
                                 max_size=docx_import.SPOOL_MAX_MEMORY_BYTES) as tmp:
                             try:
-                                with zip_ref.open(zip_info) as src:
-                                    shutil.copyfileobj(src, tmp)
+                                unpacked += archive_limits.copy_member(
+                                    zip_ref, zip_info, tmp,
+                                    MAX_UNPACKED_BYTES_PER_UPLOAD - unpacked)
+                            except archive_limits.ArchiveTooLarge:
+                                raise _UploadOverLimit(
+                                    MSG_TOO_MUCH_UNPACKED.format(
+                                        limit=MAX_UNPACKED_BYTES_PER_UPLOAD
+                                        // (1024 * 1024)))
+                            except archive_limits.UnsupportedMember:
+                                raise docx_import.DocxImportError(
+                                    MSG_UNSUPPORTED_COMPRESSION)
                             except (RuntimeError, zipfile.BadZipFile,
                                     zlib.error, NotImplementedError):
                                 # encrypted, CRC/data error, unsupported
@@ -1054,6 +1171,8 @@ def analyze_import():
                     except docx_import.DocxImportError as e:
                         errors.append({"name": filename, "error": str(e)})
                         continue
+                    except _UploadOverLimit:
+                        raise
                     except Exception:
                         # type only: exception messages can contain names
                         current_app.logger.exception(
@@ -1073,9 +1192,22 @@ def analyze_import():
                     total_size += entry["size"]
                     continue
 
-                # Read file content
+                # Read file content, within what is left of the limits
                 try:
-                    content = zip_ref.read(file_path).decode('utf-8')
+                    raw = archive_limits.read_member(
+                        zip_ref, zip_info,
+                        min(MAX_NOTES_TEXT_BYTES - notes_text,
+                            MAX_UNPACKED_BYTES_PER_UPLOAD - unpacked))
+                except archive_limits.ArchiveTooLarge:
+                    raise _UploadOverLimit(text_message)
+                except archive_limits.UnsupportedMember:
+                    errors.append({"name": filename,
+                                   "error": MSG_UNSUPPORTED_COMPRESSION})
+                    continue
+                notes_text += len(raw)
+                unpacked += len(raw)
+                try:
+                    content = raw.decode('utf-8')
                 except UnicodeDecodeError:
                     # Skip files that can't be decoded as UTF-8
                     current_app.logger.warning("Skipping a zip entry: not valid UTF-8")
@@ -1113,6 +1245,17 @@ def analyze_import():
 
     except zipfile.BadZipFile:
         return jsonify({"error": "Invalid zip file"}), 400
+    except archive_limits.ArchiveTooLarge as e:
+        # Raised by open_zip only: the zip's list of files.
+        if e.reason == archive_limits.DIRECTORY_TOO_LARGE:
+            return jsonify({"error": MSG_DIRECTORY_TOO_LARGE.format(
+                limit=archive_limits.MAX_ARCHIVE_ENTRIES
+                * archive_limits.DIRECTORY_BYTES_PER_ENTRY
+                // (1024 * 1024))}), 400
+        return jsonify({"error": MSG_TOO_MANY_ENTRIES.format(
+            limit=archive_limits.MAX_ARCHIVE_ENTRIES)}), 400
+    except _UploadOverLimit as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         # Event reaches Sentry; only the exception type is logged
         current_app.logger.exception(
@@ -1121,6 +1264,7 @@ def analyze_import():
 
 
 @import_bp.route("/import/confirm", methods=["POST"])
+@body_limit(IMPORT_CONFIRM_MAX_BODY_BYTES)
 @login_required
 def confirm_import():
     """
@@ -1152,7 +1296,27 @@ def confirm_import():
             "nodes_created": 5,
             "thread_count": 1 or 5
         }
+
+    One notes import of an account at a time (FILE_IMPORT_LOCK_KEY), taken
+    before the body is read: another meanwhile (a retry while the first
+    still runs, which would create the same entries again) gets 409
+    "import_running".
     """
+    lock = run_locks.RunLock(
+        FILE_IMPORT_LOCK_KEY.format(user_id=current_user.id),
+        uuid.uuid4().hex, FILE_IMPORT_LOCK_TTL)
+    if not lock.acquire():
+        return jsonify({"error": IMPORT_RUNNING_MESSAGE,
+                        "code": "import_running"}), 409
+    try:
+        with run_locks.holding(lock):
+            return _confirm_notes_import()
+    finally:
+        lock.release()
+
+
+def _confirm_notes_import():
+    """confirm_import's work, under the account's import key."""
     data = request.get_json()
 
     if not data:
@@ -1172,6 +1336,9 @@ def confirm_import():
 
     if not files:
         return jsonify({"error": "No files provided"}), 400
+    if isinstance(files, list) and len(files) > MAX_IMPORT_FILES:
+        return jsonify({"error": MSG_TOO_MANY_FILES.format(
+            limit=MAX_IMPORT_FILES)}), 400
 
     if import_type not in ['single_thread', 'separate_nodes']:
         return jsonify({"error": "Invalid import_type. Must be 'single_thread' or 'separate_nodes'"}), 400
@@ -1228,6 +1395,7 @@ def confirm_import():
             parent_id = None
 
             for file_data in files_sorted:
+                run_locks.beat()
                 filename = file_data.get('filename_without_ext', 'Untitled')
                 content = file_data.get('content', '')
 
@@ -1286,6 +1454,7 @@ def confirm_import():
             # Create separate top-level threads for each file
             threads_created = 0
             for file_data in files_sorted:
+                run_locks.beat()
                 filename = file_data.get('filename_without_ext', 'Untitled')
                 content = file_data.get('content', '')
 
@@ -1370,6 +1539,7 @@ def confirm_import():
 
 
 @import_bp.route("/import/twitter/analyze", methods=["POST"])
+@body_limit(UPLOAD_MAX_BODY_BYTES)
 @login_required
 def analyze_twitter_import():
     """
@@ -1429,6 +1599,8 @@ def analyze_twitter_import():
         }), 500
 
     summary["import_token"] = token
+    # One analyzed archive waiting per account (a queued import's stays).
+    ta.drop_other_stashes(current_user.id, keep=token)
     return jsonify(summary), 200
 
 
@@ -1657,6 +1829,7 @@ def _load_chatgpt_parts(conv_files):
 
 
 @import_bp.route("/import/claude/analyze", methods=["POST"])
+@body_limit(UPLOAD_MAX_BODY_BYTES)
 @login_required
 def analyze_claude_import():
     """
@@ -1850,6 +2023,9 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
     parent_id = None
     changes = _ProfileChanges(ai_usage)
     since_commit = 0
+    # One data key per committed batch: one KMS call per batch, not one
+    # per tweet (None for a public import, which is stored as it is).
+    data_key = _ChunkDataKey(privacy_level)
     done = 0
     # Tweets fetched through the X API are created and restored at Chat at
     # most (#689); kept_from_train counts the tweets this import created or
@@ -1930,7 +2106,7 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
             origin="twitter",
             provenance=provenance,
         )
-        node.set_content(content)
+        node.set_content(content, dek=data_key.get())
         if tweet_created_at:
             node.created_at = tweet_created_at
         db.session.add(node)
@@ -1950,6 +2126,7 @@ def create_twitter_nodes(user_id, rows, total, import_type, include_replies,
         if since_commit >= batch_size:
             db.session.commit()
             since_commit = 0
+            data_key.rotate()
             if on_progress:
                 on_progress(done)
 
@@ -2354,8 +2531,14 @@ def confirm_twitter_import():
     Node creation runs in a Celery task; poll
     GET /import/status/<task_id> for progress and the final result.
 
+    One X archive import per account is queued or running at a time
+    (twitter_archive.IMPORT_LOCK_KEY): a confirm of the same archive
+    meanwhile answers with that job's id (202, "already_running"), one of
+    another archive 409 "import_running".
+
     Returns 202 {"task_id": "...", "total": N}.
     """
+    from backend.utils import run_locks
     from backend.utils import twitter_archive as ta
 
     data = request.get_json()
@@ -2386,6 +2569,15 @@ def confirm_twitter_import():
                      "Must be 'single_thread' or 'separate_nodes'"
         }), 400
 
+    token = data['import_token']
+    running = ta.running_import(current_user.id)
+    if running and ta.import_job_over(current_user.id, running):
+        # Its job ended or was stopped without freeing the key (a deploy).
+        ta.free_import_key(current_user.id, running)
+        running = None
+    if running:
+        return _running_twitter_import_response(running, token, path)
+
     _, deleted_keys = _load_source_key_index(current_user.id)
     conflict = _deleted_match_response(
         (_tweet_source_key(t) for t in ta.stash_iter(path)
@@ -2395,22 +2587,62 @@ def confirm_twitter_import():
     if conflict:
         return conflict
 
-    from backend.tasks.imports import import_twitter_archive
     from backend.utils.task_owner import record_task_owner
-    task = import_twitter_archive.delay(current_user.id, data['import_token'], {
-        "import_type": import_type,
-        "include_replies": include_replies,
-        "privacy_level": privacy_level,
-        "ai_usage": ai_usage,
-        "on_deleted": on_deleted,
-    })
+    task_id = str(uuid.uuid4())
+    lock = run_locks.RunLock(ta.import_lock_key(current_user.id),
+                             ta.import_lock_token(task_id, token),
+                             ta.IMPORT_QUEUED_TTL)
+    if not lock.acquire():  # another confirm got there first
+        running = ta.running_import(current_user.id)
+        if running:
+            return _running_twitter_import_response(running, token, path)
+        return jsonify({"error": IMPORT_RUNNING_MESSAGE,
+                        "code": "import_running"}), 409
+    try:
+        _dispatch_twitter_import(current_user.id, token, task_id, {
+            "import_type": import_type,
+            "include_replies": include_replies,
+            "privacy_level": privacy_level,
+            "ai_usage": ai_usage,
+            "on_deleted": on_deleted,
+        })
+    except Exception as e:
+        lock.release()
+        current_app.logger.exception(
+            "Could not queue the Twitter import: %s", describe_exception(e))
+        return jsonify({
+            "error": "Could not start the import. Please try again."
+        }), 500
     # /import/status answers for this task id to this user only.
-    record_task_owner(task.id, current_user.id, current_app.config)
+    record_task_owner(task_id, current_user.id, current_app.config)
     return jsonify({
-        "task_id": task.id,
+        "task_id": task_id,
         "status": "queued",
         "total": ta.stash_count(path),
     }), 202
+
+
+def _dispatch_twitter_import(user_id, token, task_id, options):
+    """Queue the X archive import under *task_id*, the id its key names."""
+    from backend.tasks.imports import import_twitter_archive
+    import_twitter_archive.apply_async(
+        args=(user_id, token, options), task_id=task_id)
+
+
+def _running_twitter_import_response(running, token, path):
+    """A confirm while this account's X archive import is queued or
+    running: the same archive answers with that job's id (a second
+    press, a retry after a lost connection); another is refused."""
+    from backend.utils import twitter_archive as ta
+    if running["token"] == token:
+        return jsonify({
+            "task_id": running["task_id"], "status": "running",
+            "total": ta.stash_count(path), "already_running": True,
+        }), 202
+    return jsonify({
+        "error": IMPORT_RUNNING_MESSAGE, "code": "import_running",
+        "task_id": running["task_id"],
+    }), 409
 
 
 @import_bp.route("/import/status/<task_id>", methods=["GET"])
@@ -2587,6 +2819,7 @@ def _linearize_chatgpt_messages(mapping, current_node=None):
 
 
 @import_bp.route("/import/chatgpt/analyze", methods=["POST"])
+@body_limit(UPLOAD_MAX_BODY_BYTES)
 @login_required
 def analyze_chatgpt_import():
     """

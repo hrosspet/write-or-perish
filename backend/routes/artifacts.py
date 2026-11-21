@@ -17,6 +17,7 @@ from backend.extensions import db
 from backend.models import NodeContextArtifact, UserArtifact
 from backend.utils.privacy import chat_at_most, shown_ai_usage, x_api_account
 from backend.utils.timefmt import iso_utc
+from backend.utils.request_size import LONG_TEXT_MAX_BODY_BYTES, body_limit
 
 # The answer for a deleted kind: the client says "This artifact was
 # deleted." instead of offering an empty artifact under its name (#603).
@@ -181,6 +182,7 @@ def artifact_viewed(kind):
 
 
 @artifacts_bp.route("/<kind>", methods=["PUT"])
+@body_limit(LONG_TEXT_MAX_BODY_BYTES)
 @login_required
 def update_artifact(kind):
     """Create a new version of an artifact (creates the kind if new)."""
@@ -239,6 +241,7 @@ def update_artifact(kind):
 
 
 @artifacts_bp.route("/<kind>", methods=["PATCH"])
+@body_limit(LONG_TEXT_MAX_BODY_BYTES)
 @login_required
 def patch_artifact(kind):
     """Save a checklist toggle or a "+" insert from the artifacts page.
