@@ -4,7 +4,9 @@
     flask artifact-names-cleanup
         how many view records and last-seen paths written before #729
         still hold a name a user gave an artifact, and what each would
-        get instead; changes nothing. Counts only.
+        get instead; changes nothing. Counts only. Accounts whose
+        content or account deletion waits or runs are skipped and
+        counted; a later run cleans them.
     flask artifact-names-cleanup --apply
         makes the change, committing in batches. Safe to stop and to run
         again; a run after it shows 0 to change.

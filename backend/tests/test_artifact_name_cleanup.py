@@ -1,14 +1,20 @@
-"""A.102: `flask artifact-names-cleanup` removes the names users gave
+"""A.113: `flask artifact-names-cleanup` removes the names users gave
 their artifacts from the records written before #729 (view rows and
-last-seen paths), and the Activity tab counts the same before and after.
+last-seen paths). The Activity tab counts the same before and after,
+except for an artifact viewed before and after #729 and deleted since:
+its old rows join its newer views and go with it, so it counts once
+where it counted twice (review of #735: deleting an artifact deletes its
+view records).
 
 Peter, 2026-11-20: nobody other than the user sees the names of the
-artifacts they create. The command prints counts only.
+artifacts they create. The command prints counts only. A user with a
+deletion of their content or account waiting is skipped until it ends.
 
 The real admin and artifacts blueprints, on sqlite, and also on a
 throwaway Postgres database when LOORE_TEST_POSTGRES_URL names one (it
 creates and drops every table in it), as test_invites_postgres.py.
 """
+import copy
 import os
 import sys
 from datetime import datetime, timedelta
@@ -35,7 +41,9 @@ for _mod in ["flask_login", "backend.models", "backend.extensions"]:
 
 import flask_login as _real_flask_login  # noqa: E402
 from backend.extensions import db as _db  # noqa: E402
-from backend.models import ArtifactView, User, UserArtifact  # noqa: E402
+from backend.models import (  # noqa: E402
+    ArtifactView, User, UserArtifact, UserDataPurge, UserDataPurgeHidden,
+)
 import backend.models as _real_backend_models  # noqa: E402
 from backend.utils import activity as act  # noqa: E402
 from backend.utils import artifact_name_cleanup as cleanup  # noqa: E402
@@ -48,11 +56,14 @@ LIVE = "orchid-ledger-zq"        # the user has it (two versions)
 DELETED = "quartz-diary-vm"      # deleted, not yet removed by the cleanup
 NEVER = "never-made-kj"          # no artifact was ever made under it
 REMADE = "amber-index-rw"        # deleted, then made again
-SEEN_NEW = "cobalt-notes-xp"     # viewed after #729, then deleted
+SEEN_NEW = "cobalt-notes-xp"     # viewed after #729 too, then deleted
 WITH_ID = "tin-atlas-qd"         # a row with an id and a name
-NAMES = (LIVE, DELETED, NEVER, REMADE, SEEN_NEW, WITH_ID)
+KEPT = "saffron-quill-bn"        # an artifact a waiting deletion hid
+LATER = "pewter-map-hc"          # made after that deletion was requested
+NAMES = (LIVE, DELETED, NEVER, REMADE, SEEN_NEW, WITH_ID, KEPT, LATER)
 
 NOW = datetime.utcnow()
+EVER = datetime(2000, 1, 1)
 
 
 def _ago(days):
@@ -118,6 +129,13 @@ def _client(app, user):
     return client
 
 
+def _user(username, **kw):
+    u = User(username=username, approved=True, approved_at=_ago(90), **kw)
+    _db.session.add(u)
+    _db.session.commit()
+    return u
+
+
 def _make(user, kind, versions=1):
     for i in range(versions):
         row = UserArtifact(user_id=user.id, kind=kind, title="T",
@@ -137,6 +155,15 @@ def _old_views(user, kind, *days):
     """View rows as the code before #729 stored them: the name in kind."""
     _db.session.add_all(ArtifactView(user_id=user.id, kind=kind,
                                      viewed_at=_ago(d)) for d in days)
+    _db.session.commit()
+
+
+def _new_view(user, kind, days_ago=0):
+    """A view row as #729 stores it: the artifact's first version's id."""
+    _db.session.add(ArtifactView(
+        user_id=user.id, kind=ArtifactView.USER_CREATED,
+        artifact_id=UserArtifact.first_live_id(user.id, kind),
+        viewed_at=_ago(days_ago)))
     _db.session.commit()
 
 
@@ -166,8 +193,8 @@ def world(app):
     _delete(reader, DELETED)
     _delete(reader, REMADE)
     _make(reader, REMADE)
-    # Views since #729, stored by id; then SEEN_NEW is deleted, so its
-    # first version's id already stands for a separately counted artifact.
+    # Views since #729, stored by id; then SEEN_NEW is deleted: its old
+    # row joins the id its newer view holds.
     client = _client(app, reader)
     for kind in (LIVE, SEEN_NEW):
         assert client.post(f"/api/artifacts/{kind}/viewed").status_code == 204
@@ -206,8 +233,19 @@ def _tab(app, world):
              for u in resp.get_json()["users"]}
     windows = {(u.username, since): act.artifact_views(u.id, since)
                for u in world.values()
-               for since in (datetime(2000, 1, 1), _ago(11), _ago(5),
-                             _ago(2))}
+               for since in (EVER, _ago(11), _ago(5), _ago(2))}
+    return shown, windows
+
+
+def _seen_new_counted_once(tab):
+    """*tab* with SEEN_NEW counted once for the reader where the tab
+    counted it twice: in the windows that hold its view from before #729
+    (9 days ago) and the one since."""
+    shown, windows = copy.deepcopy(tab)
+    for entries in (shown["reader"][0], windows[("reader", EVER)],
+                    windows[("reader", _ago(11))]):
+        own = next(v for v in entries if v.get("user_created"))
+        own["artifacts"] -= 1
     return shown, windows
 
 
@@ -229,6 +267,14 @@ def _stored_names():
             if n in kinds or any(p and n in p for p in paths)}
 
 
+def _own(user):
+    """(views, different artifacts) the tab counts for the user's own
+    artifacts, over all time."""
+    return [(v["count"], v["artifacts"])
+            for v in act.artifact_views(user.id, EVER)
+            if v.get("user_created")]
+
+
 def test_dry_run_counts_and_changes_nothing(app, world):
     views, users = _table(ArtifactView), _table(User)
     r = _run(app)
@@ -242,12 +288,15 @@ def test_dry_run_counts_and_changes_nothing(app, world):
         "  to change: 12 rows (7 names, 2 users)",
         "    5 rows (2 names): the artifact exists; stored by the id of "
         "its first version",
+        "    1 row (1 name): the artifact is deleted and waits for the "
+        "daily cleanup, and was viewed since #729 too; stored by the id "
+        "those views hold, so they are counted with their newer views "
+        "(one artifact, not two) and the cleanup removes them with it",
         "    2 rows (1 name): the artifact is deleted and waits for the "
         "daily cleanup; stored by the id of its earliest deleted version, "
         "so the cleanup removes them with it",
-        "    4 rows (3 names): no artifact is left under the name, or its "
-        "id already counts views stored since #729; stored by a negative "
-        "number, one per name",
+        "    3 rows (2 names): no version is left under the name; stored "
+        "by a negative number, one per name",
         "    1 row (1 name): already stored by id; only the name is "
         "removed",
         "  left as they are: 4 rows with a name Loore defines, 2 rows "
@@ -256,6 +305,8 @@ def test_dry_run_counts_and_changes_nothing(app, world):
         "  to change: 2 values",
         "  left as they are: 2 artifact addresses without a name a user "
         "gave",
+        "skipped: 0 users whose content or account deletion is waiting or "
+        "running (0 rows, 0 values), left as they are.",
         "Run again with --apply to make these changes.",
     ]
 
@@ -265,7 +316,7 @@ def test_apply_removes_the_names_and_keeps_the_counts(app, world):
     reader_tab = before[0]["reader"][0]
     own = next(v for v in reader_tab if v.get("user_created"))
     # 13 views of 6 artifacts: SEEN_NEW counts twice (by id since #729,
-    # by name before), as the tab counted it before the clean-up.
+    # by name before), as #729 counts old records.
     assert (own["count"], own["artifacts"]) == (13, 6)
     views_before = _table(ArtifactView)
 
@@ -275,16 +326,19 @@ def test_apply_removes_the_names_and_keeps_the_counts(app, world):
     assert "  changed: 12 rows (7 names, 2 users)" in r.output
     assert "  changed: 2 values" in r.output
     assert _stored_names() == set()
-    assert _tab(app, world) == before
+    # Equal everywhere, but SEEN_NEW now counts once: 13 views of 5.
+    after = _tab(app, world)
+    assert after == _seen_new_counted_once(before)
+    assert after != before
 
     # Rows of the names Loore defines and rows stored by id since #729
     # are exactly as they were; the others keep their user and time.
-    after = _table(ArtifactView)
+    rows_after = _table(ArtifactView)
     untouched = [v for v in views_before
                  if v[2] in UserArtifact.SYSTEM_KINDS
                  or v[2] == ArtifactView.USER_CREATED]
-    assert all(v in after for v in untouched)
-    assert ([(v[0], v[1], v[4]) for v in after]
+    assert all(v in rows_after for v in untouched)
+    assert ([(v[0], v[1], v[4]) for v in rows_after]
             == [(v[0], v[1], v[4]) for v in views_before])
     reader = world["reader"]
     assert {v.artifact_id for v in ArtifactView.query.filter_by(
@@ -350,20 +404,19 @@ def test_a_stopped_run_leaves_whole_names_and_the_next_one_finishes(
     assert set(calls[:2]).isdisjoint(remaining)
     assert {LIVE, DELETED, NEVER, REMADE, SEEN_NEW} - set(calls[:2]) <= (
         remaining)
-    assert _tab(app, world) == before
+    assert _tab(app, world) == (_seen_new_counted_once(before)
+                                if SEEN_NEW in calls[:2] else before)
 
     monkeypatch.setattr(cleanup, "key_for", real_key_for)
     r = _run(app, "--apply", "--batch-size", "1")
     assert r.exit_code == 0, r.output
     assert _stored_names() == set()
-    assert _tab(app, world) == before
+    assert _tab(app, world) == _seen_new_counted_once(before)
 
 
 def test_the_daily_cleanup_still_removes_a_deleted_artifacts_views(app):
     from backend.utils.artifact_deletion import purge_deleted_artifacts
-    reader = User(username="reader", approved=True)
-    _db.session.add(reader)
-    _db.session.commit()
+    reader = _user("reader")
     _make(reader, DELETED, versions=2)
     _make(reader, LIVE)
     _old_views(reader, DELETED, 40, 35)
@@ -376,6 +429,156 @@ def test_the_daily_cleanup_still_removes_a_deleted_artifacts_views(app):
     left = [(v.kind, v.artifact_id) for v in ArtifactView.query.all()]
     assert left == [(ArtifactView.USER_CREATED,
                      UserArtifact.first_live_id(reader.id, LIVE))]
+
+
+@pytest.mark.parametrize("versions", [1, 2])
+def test_viewed_since_729_and_deleted_goes_whole_with_the_purge(
+        app, versions):
+    """The review's case: viewed before and after #729, then deleted
+    before the clean-up. The old rows join the newer view's id, the
+    artifact counts once, and after the daily purge nothing of it is
+    left."""
+    from backend.utils.artifact_deletion import purge_deleted_artifacts
+    reader = _user("reader")
+    _make(reader, SEEN_NEW, versions=versions)
+    _old_views(reader, SEEN_NEW, 50, 45)
+    _new_view(reader, SEEN_NEW, days_ago=40)
+    first_id = UserArtifact.first_live_id(reader.id, SEEN_NEW)
+    _delete(reader, SEEN_NEW, days_ago=35)
+    assert _own(reader) == [(3, 2)]
+
+    r = _run(app, "--apply")
+    assert r.exit_code == 0, r.output
+    assert "    2 rows (1 name): the artifact is deleted and waits for the "\
+        "daily cleanup, and was viewed since #729 too" in r.output
+    assert {(v.kind, v.artifact_id) for v in ArtifactView.query.all()} == {
+        (ArtifactView.USER_CREATED, first_id)}
+    assert _own(reader) == [(3, 1)]
+
+    assert purge_deleted_artifacts(_ago(30))["errors"] == 0
+    assert ArtifactView.query.count() == 0
+    assert _own(reader) == []
+
+
+# ── A deletion of the user's content or account waiting ─────────────────
+
+def _request(user, *, status="scheduled", account=False, hide=True,
+             at=None):
+    """The records a deletion request leaves (user_purge.schedule_purge,
+    account_deletion.schedule_account_deletion): the job, and for a
+    "Delete all my content" what it hid, here the user's artifacts, which
+    the hidden-rows hook then leaves out of every query."""
+    at = at or _ago(10)
+    job = UserDataPurge(
+        user_id=user.id, source="self", status=status,
+        scope="all" if account else "hidden", delete_account=account,
+        requested_at=at, first_requested_at=at,
+        scheduled_for=at + timedelta(days=30))
+    _db.session.add(job)
+    _db.session.commit()
+    if hide:
+        ids = [i for (i,) in _db.session.query(UserArtifact.id).filter(
+            UserArtifact.user_id == user.id)]
+        _db.session.add_all(UserDataPurgeHidden(
+            job_id=job.id, kind="user_artifact", row_id=i) for i in ids)
+        _db.session.commit()
+    return job
+
+
+def _viewer(username):
+    """KEPT seen twice before #729 and once since; its address last."""
+    u = _user(username, last_seen_path=f"/api/artifacts/{KEPT}/versions")
+    _make(u, KEPT)
+    _old_views(u, KEPT, 50, 45)
+    _new_view(u, KEPT, days_ago=20)
+    return u
+
+
+def _views_of(user):
+    return sorted((v.kind, v.artifact_id) for v in
+                  ArtifactView.query.filter_by(user_id=user.id))
+
+
+@pytest.mark.parametrize("request_kind", [
+    "content deletion waiting",
+    "account deletion waiting",
+    "content deletion failed, its artifacts still hidden",
+])
+def test_a_user_with_a_waiting_deletion_is_skipped_until_it_ends(
+        app, request_kind):
+    from backend.utils.user_purge import unhide_writing
+    twin = _viewer("twin")             # no request: the result to match
+    keeper = _viewer("keeper")
+    job = _request(
+        keeper, status="failed" if "failed" in request_kind else "scheduled",
+        account="account" in request_kind,
+        hide="account" not in request_kind)
+    views, users = _views_of(keeper), keeper.last_seen_path
+
+    r = _run(app, "--apply")
+    assert r.exit_code == 0, r.output
+    _assert_no_name(r.output)
+    assert ("skipped: 1 user whose content or account deletion is waiting "
+            "or running (2 rows, 1 value), left as they are. A later run "
+            "cleans them once the deletion is done or cancelled."
+            ) in r.output
+    assert "  changed: 2 rows (1 name, 1 user)" in r.output
+    assert _views_of(keeper) == views and keeper.last_seen_path == users
+
+    # The request is cancelled (restored): the next run treats the
+    # account as any other.
+    unhide_writing([job.id])
+    job.status = "cancelled"
+    job.cancelled_at = datetime.utcnow()
+    _db.session.commit()
+    r = _run(app, "--apply")
+    assert r.exit_code == 0, r.output
+    assert "skipped: 0 users" in r.output
+    first = UserArtifact.first_live_id(keeper.id, KEPT)
+    assert _views_of(keeper) == [(ArtifactView.USER_CREATED, first)] * 3
+    assert _own(keeper) == _own(twin) == [(3, 1)]
+    assert keeper.last_seen_path == twin.last_seen_path == (
+        "/api/artifacts/user-created/versions")
+    assert _stored_names() == set()
+
+
+def test_after_the_content_deletion_the_rest_is_cleaned(app):
+    from backend.utils.hidden_rows import including_hidden_rows
+    from backend.utils.user_purge import forget_hidden
+    keeper = _viewer("keeper")
+    job = _request(keeper, at=_ago(10))
+    # After the request, still before #729: a new artifact, seen by name.
+    _make(keeper, LATER)
+    _old_views(keeper, LATER, 5)
+    keeper.last_seen_path = f"/api/artifacts/{LATER}"
+    _db.session.commit()
+    r = _run(app, "--apply")
+    assert "skipped: 1 user" in r.output and "(3 rows, 1 value)" in r.output
+
+    # The purge deletes what the request hid and the views from before
+    # it (user_purge: _DATED_USER_TABLES), then forgets the records.
+    with including_hidden_rows():
+        hidden = select(UserDataPurgeHidden.row_id).where(
+            UserDataPurgeHidden.job_id == job.id)
+        UserArtifact.query.filter(UserArtifact.id.in_(hidden)).delete(
+            synchronize_session=False)
+    ArtifactView.query.filter(
+        ArtifactView.user_id == keeper.id,
+        ArtifactView.viewed_at <= job.requested_at,
+    ).delete(synchronize_session=False)
+    forget_hidden(job.id)
+    job.status = "done"
+    _db.session.commit()
+
+    r = _run(app, "--apply")
+    assert r.exit_code == 0, r.output
+    assert "skipped: 0 users" in r.output
+    assert "  changed: 1 row (1 name, 1 user)" in r.output
+    assert _views_of(keeper) == [
+        (ArtifactView.USER_CREATED,
+         UserArtifact.first_live_id(keeper.id, LATER))]
+    assert keeper.last_seen_path == "/api/artifacts/user-created"
+    assert _stored_names() == set()
 
 
 def test_control_nothing_to_change(app):
