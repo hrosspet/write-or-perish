@@ -138,6 +138,30 @@ test('a late merge that ends without a version says nothing', () => {
   window.removeEventListener('loore_profile_done', done);
 });
 
+// A batch build saves its version while a late merge still runs, and the
+// merge then ends without one: the build's notice still comes, as it does
+// when no merge runs.
+test('a batch build seen before an unchanged merge keeps its notice', () => {
+  mockUser = { profile_batch_pending: true };
+  const { rerender } = render(<ProfileGenerationWatcher />);
+  mockPolling = {
+    data: { running: true, status: 'progress', source: 'batch',
+      message: 'Integrating profile versions', latest_profile: { id: 1 } },
+    error: null,
+  };
+  act(() => { rerender(<ProfileGenerationWatcher />); });
+  mockPolling = { data: { ...mergeRunning, latest_profile: { id: 2 } }, error: null };
+  act(() => { rerender(<ProfileGenerationWatcher />); });
+  mockPolling = {
+    data: { running: false, status: 'unchanged', latest_profile: { id: 2 } },
+    error: null,
+  };
+  act(() => { rerender(<ProfileGenerationWatcher />); });
+
+  expect(mockAddToast).toHaveBeenCalledTimes(1);
+  expect(mockAddToast).toHaveBeenCalledWith('Your profile has been updated ✓', 6000);
+});
+
 // As after a usual build: an app opened once the merge has ended gets a
 // payload with no running flag, so nothing is polled and no notice comes.
 test('no running flag in the payload: nothing is followed', () => {

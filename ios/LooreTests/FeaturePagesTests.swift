@@ -444,6 +444,19 @@ final class ProfileGenerationWatcherTests: XCTestCase {
         w.stop()
     }
 
+    /// A batch build saves its version while a late merge still runs, and the merge
+    /// then ends without one: the build's toast still comes, as when no merge runs.
+    func testABatchBuildSeenBeforeAnUnchangedMergeKeepsItsToast() {
+        let (w, toasts, _) = watcher()
+        w.handle(ProfileProgress(running: true, source: "batch", status: "progress", latestProfile: .init(id: 1)))
+        w.handle(ProfileProgress(running: true, source: "merge", status: "progress", message: "Integrating profile versions",
+                                 mergeId: 7, latestProfile: .init(id: 2)))
+        XCTAssertEqual(w.handle(ProfileProgress(running: false, status: "unchanged", latestProfile: .init(id: 2))),
+                       .completed)
+        XCTAssertEqual(toasts(), ["Your profile has been updated ✓"])
+        w.stop()
+    }
+
     /// As after a usual build: an app opened once the merge has ended gets no
     /// running flag, so nothing is followed and no toast comes.
     func testNoRunningFlagStartsNothing() throws {

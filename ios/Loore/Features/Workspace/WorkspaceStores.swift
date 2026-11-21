@@ -129,6 +129,9 @@ final class ProfileGenerationWatcher {
     private(set) var mergeId: Int?
     /// nil = never saw it running (`undefined` on the web); .some(nil) = running with no profile yet.
     private var startVersion: Int??
+    /// A batch or sync build was seen running during this watch: a late merge
+    /// that then ends without a version does not hide its outcome.
+    private var sawBuild = false
     private var batchPendingHint = false
     private var loop: Task<Void, Never>?
 
@@ -175,6 +178,7 @@ final class ProfileGenerationWatcher {
         syncTaskId = nil
         mergeId = nil
         startVersion = nil
+        sawBuild = false
         progress = nil
     }
 
@@ -211,6 +215,7 @@ final class ProfileGenerationWatcher {
         guard active else { return nil }
         if data.running {
             source = data.source
+            if data.source == "batch" || data.source == "sync" { sawBuild = true }
             if data.source == "sync", let task = data.taskId, task != syncTaskId { syncTaskId = task }
             if data.source == "merge", let merge = data.mergeId, merge != mergeId { mergeId = merge }
             if startVersion == nil { startVersion = .some(data.latestProfile?.id) }
@@ -220,18 +225,21 @@ final class ProfileGenerationWatcher {
         }
         let sawRunning = startVersion != nil
         let newVersion = sawRunning && data.latestProfile?.id != startVersion!
+        // `unchanged`: the late merge ended without a version. A build seen during
+        // this watch keeps its own outcome (read as `idle`, as when no merge ran);
+        // with none, nothing is said.
+        let status = data.status == "unchanged" && sawBuild ? "idle" : data.status
         var outcome: Outcome?
-        if data.status == "unchanged" {
-            // The late merge ended without a version: the person keeps the
-            // profile they have, and nothing is said.
+        if status == "unchanged" {
+            // The person keeps the profile they have.
             outcome = nil
-        } else if data.status == "failed" {
+        } else if status == "failed" {
             outcome = .failed
-        } else if data.status == "stalled" || (data.status == "idle" && sawRunning && data.batchStepFailed) {
+        } else if status == "stalled" || (status == "idle" && sawRunning && data.batchStepFailed) {
             outcome = .stalled
-        } else if data.status == "completed" || (data.status == "idle" && newVersion) {
+        } else if status == "completed" || (status == "idle" && newVersion) {
             outcome = .completed
-        } else if data.status == "idle" && sawRunning {
+        } else if status == "idle" && sawRunning {
             outcome = .stalled
         }
         reset()
@@ -261,6 +269,7 @@ final class ProfileGenerationWatcher {
         syncTaskId = nil
         mergeId = nil
         startVersion = nil
+        sawBuild = false
         batchPendingHint = false
         clearUserFlags()
     }

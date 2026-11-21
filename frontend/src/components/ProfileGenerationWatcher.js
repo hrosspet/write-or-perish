@@ -53,6 +53,9 @@ export default function ProfileGenerationWatcher() {
   // Newest saved version when polling started; a batch chain has no
   // terminal task state, so "a new version landed" is its success signal.
   const startVersionRef = useRef(undefined);
+  // A batch or sync build was seen running during this watch: a late
+  // merge that then ends without a version does not hide its outcome.
+  const sawBuildRef = useRef(false);
 
   // Pre-#258 the task id was mirrored here; the backend payload is the
   // only source now.
@@ -96,6 +99,7 @@ export default function ProfileGenerationWatcher() {
     setSyncTaskId(null);
     setMergeId(null);
     startVersionRef.current = undefined;
+    sawBuildRef.current = false;
     // Drop the running flags from the cached user so this build is not
     // re-adopted (re-fetched flags reflect any new one).
     setUser((prev) => (prev
@@ -125,6 +129,9 @@ export default function ProfileGenerationWatcher() {
 
     if (data.running) {
       if (data.source !== source) setSource(data.source);
+      if (data.source === 'batch' || data.source === 'sync') {
+        sawBuildRef.current = true;
+      }
       if (data.source === 'sync' && data.task_id && data.task_id !== syncTaskId) {
         setSyncTaskId(data.task_id);
       }
@@ -154,18 +161,22 @@ export default function ProfileGenerationWatcher() {
     const sawRunning = startVersionRef.current !== undefined;
     const newVersion = sawRunning
       && (data.latest_profile?.id ?? null) !== startVersionRef.current;
+    // `unchanged`: the late merge ended without a version. A build seen
+    // during this watch keeps its own outcome (read as `idle`, as when no
+    // merge ran); with none, nothing is said.
+    const status = data.status === 'unchanged' && sawBuildRef.current
+      ? 'idle' : data.status;
     let outcome = null;
-    if (data.status === 'unchanged') {
-      // The late merge ended without a version: the person keeps the
-      // profile they have, and nothing is said.
+    if (status === 'unchanged') {
+      // The person keeps the profile they have.
       outcome = null;
-    } else if (data.status === 'failed') {
+    } else if (status === 'failed') {
       outcome = 'failed';
-    } else if (data.status === 'stalled' || (data.status === 'idle' && sawRunning && data.batch_step_failed)) {
+    } else if (status === 'stalled' || (status === 'idle' && sawRunning && data.batch_step_failed)) {
       outcome = 'stalled';
-    } else if (data.status === 'completed' || (data.status === 'idle' && newVersion)) {
+    } else if (status === 'completed' || (status === 'idle' && newVersion)) {
       outcome = 'completed';
-    } else if (data.status === 'idle' && sawRunning) {
+    } else if (status === 'idle' && sawRunning) {
       outcome = 'stalled';
     }
 

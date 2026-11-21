@@ -129,9 +129,13 @@ def late_merge(user_id, now=None):
     """The load whose final merge goes on after the person was let in
     (#731), or None: the load is done (its wait, MERGE_WAIT, ended without
     the merge) and the merge has not ended and showed a sign of life
-    within MERGE_STALE, the time after which ``_claim`` and the beat count
-    it as over too. So a merge whose worker died where no beat sends it
-    again (or with bundles switched off) is not followed for ever.
+    within MERGE_STALE, the time after which ``_claim`` counts a running
+    merge as over. So a merge whose worker died where no beat sends it
+    again (or with bundles switched off) is not followed for ever. Known
+    limit: the beat sets such a merge back to "retry" and sends it again
+    (it marks it "failed" only after MAX_MERGE_ATTEMPTS), so a later
+    attempt that saves its version lands without the notice. Rare: a
+    worker has to stop during the one-to-two-minute call.
 
     While the load waits, a merge is not late: the person still sees
     "Preparing your starting point…" and first reads the merged profile.
