@@ -131,6 +131,14 @@ celery.conf.update(
             'task': 'backend.tasks.spend_monitor.roll_carries',
             'schedule': schedules.crontab(minute=7),  # hourly, at :07 UTC
         },
+        # The day's count of trials started, with an email to the admin
+        # above utils/trial_alerts.TRIALS_STARTED_ALERT. A fixed minute,
+        # so a deploy does not put the check off. Nothing while payments
+        # are off.
+        'check-trials-started': {
+            'task': 'backend.tasks.spend_monitor.check_trials',
+            'schedule': schedules.crontab(minute=22),  # hourly, at :22 UTC
+        },
         # Poll drafts ride the Batch API (#207); no-op when none pending.
         'collect-poll-draft-batches': {
             'task': 'backend.tasks.poll_draft.collect_poll_draft_batches',

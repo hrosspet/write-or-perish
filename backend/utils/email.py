@@ -384,6 +384,42 @@ def send_spend_alert_email(to_email, provider, spend_usd, limit_usd, threshold):
           "Failed to send spend alert email")
 
 
+def send_trials_started_email(to_email, trials, alert_above,
+                              trial_limit_usd=0):
+    """Tell the admin that more trials started in the last 24 hours than
+    the alert number (utils/trial_alerts). Counts only: no account is
+    named."""
+    ceiling_line = (
+        f"Each trial can use up to ${trial_limit_usd:,.2f} of model cost "
+        f"before its first payment.\n" if trial_limit_usd else "")
+    text_body = (
+        f"Trials started\n\n"
+        f"Trials started in the last 24 hours: {trials}\n"
+        f"This email is sent above: {alert_above}\n"
+        f"{ceiling_line}\n"
+        f"Nothing was stopped or cancelled. It is sent at most once a day.\n"
+        f"Review the new accounts in the admin dashboard: "
+        f"https://loore.org/admin\n"
+    )
+    paragraphs = [
+        f'<strong style="color: #c4956a;">{int(trials)}</strong> trials '
+        f'started in the last 24 hours\n'
+        f'      (this email is sent above '
+        f'<strong style="color: #ede8dd;">{int(alert_above)}</strong>).',
+        "Nothing was stopped or cancelled. It is sent at most once a day."]
+    if trial_limit_usd:
+        paragraphs.insert(1, (
+            f"Each trial can use up to ${trial_limit_usd:,.2f} of model "
+            f"cost before its first payment."))
+    html_body = _card("Trials started", paragraphs,
+                      "Open admin dashboard", "https://loore.org/admin")
+    _send(to_email,
+          f"Loore: {int(trials)} trials started in the last 24 hours",
+          text_body, html_body,
+          f"Trials-started email sent ({int(trials)})",
+          "Failed to send trials-started email")
+
+
 def send_disk_alert_email(to_email, percent, used_gb, total_gb, free_gb,
                           critical=False):
     """Alert the admin that the server disk is nearly full

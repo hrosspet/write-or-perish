@@ -3178,6 +3178,20 @@ class TrialCard(db.Model):
                            default=datetime.utcnow)
 
 
+class TrialAlert(db.Model):
+    """A UTC day on which the admin was emailed that many trials started
+    (utils/trial_alerts): one row per day, so the hourly check emails at
+    most once a day. Holds the count at the time, nothing of any account.
+    """
+    __tablename__ = "trial_alert"
+
+    id = db.Column(db.Integer, primary_key=True)
+    day = db.Column(db.String(10), nullable=False, unique=True)  # YYYY-MM-DD
+    trials = db.Column(db.Integer, nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False,
+                           default=datetime.utcnow)
+
+
 # The per-user tables whose rows a waiting "Delete all my content" hides
 # (UserDataPurgeHidden): every ORM query leaves them out until a restore
 # or the purge. Nodes are hidden by deleted_at instead, so a thread keeps

@@ -8,6 +8,7 @@ from celery.utils.log import get_task_logger
 from backend.celery_app import celery, flask_app
 from backend.utils.spend import (
     check_and_alert, enforce_user_spend_cap, roll_spend_carries)
+from backend.utils.trial_alerts import check_trials_started
 
 logger = get_task_logger(__name__)
 
@@ -48,4 +49,18 @@ def roll_carries():
             logger.warning("Spend carry: %s", result)
         else:
             logger.info("Spend carry: %s", result)
+        return result
+
+
+@celery.task(name='backend.tasks.spend_monitor.check_trials')
+def check_trials():
+    """Hourly: email the admin, at most once a day, when more trials
+    started in the last 24 hours than utils/trial_alerts allows for.
+    Nothing while payments are off."""
+    with flask_app.app_context():
+        result = check_trials_started(flask_app.config)
+        if result.get("alerted"):
+            logger.warning("Trials started: %s", result)
+        else:
+            logger.info("Trials started: %s", result)
         return result
