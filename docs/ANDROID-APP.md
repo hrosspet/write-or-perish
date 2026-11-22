@@ -106,13 +106,13 @@ Each flow lists: what the iPhone app does, the Swift files, the routes (methods 
 
 **Android**
 - `NavigationBar` with the same five items and glyphs. One back stack per tab, kept while switching tabs.
-- **System Back** pops the current tab's stack; at the root of another tab it selects Home; at Home's root it closes the Activity (a running Voice conversation continues in the service, §3.18). Predictive back is on (`android:enableOnBackInvokedCallback="true"`). Sheets and dialogs close on Back. Screens that guard unsaved changes on the iPhone (artifact, profile and todo editors) show the same guard on Back. Leaving the Voice screen with Back is the iPhone's pop (§3.10).
+- **System Back** pops the current tab's stack; at the root of another tab it selects Home; at Home's root it closes the Activity. A Voice conversation keeps running (§3.18) when the user leaves the app with the Home gesture or the app switcher while the Voice screen is open. Predictive back is on (`android:enableOnBackInvokedCallback="true"`). Sheets and dialogs close on Back. Screens that guard unsaved changes on the iPhone (artifact, profile and todo editors) show the same guard on Back. Leaving the Voice screen with Back is the iPhone's pop (§3.10).
 - Public web pages open in **Custom Tabs** (`androidx.browser`). External links from the Updates sheet open the default browser, as on the iPhone.
 - `AppRoute` and NodePrefetch are ported with their tests (`AppTests`, `NodePrefetchTests`).
-- **Links from outside the app:** App Links for the sign-in link only, if Peter agrees (§3.4, §10 item 5). No other loore.org paths are claimed.
+- **Links from outside the app:** App Links for the sign-in link only, if Peter agrees (§3.4, §10 item 3). No other loore.org paths are claimed.
 - After Android ends the process in the background, Navigation's saved state brings the stacks back and each screen reloads its data.
 
-**Differences:** Back gesture and button (platform); stacks restored after the process ends (platform); sign-in links may open the app (§10 item 5).
+**Differences:** Back gesture and button (platform); stacks restored after the process ends (platform); sign-in links may open the app (§10 item 3).
 
 ### 3.2 Environments and debug options
 
@@ -133,7 +133,7 @@ Each flow lists: what the iPhone app does, the Swift files, the routes (methods 
 - Debug: the emulator defaults to local, reaching the Mac's `localhost` as `http://10.0.2.2:5010` and `http://10.0.2.2:3001`; a physical phone defaults to production; local URLs can be overridden for a phone on the same Wi-Fi. Cleartext HTTP is allowed only in debug builds (a `network_security_config` in the debug source set).
 - Same switcher on Account's version line.
 - Launch arguments become intent extras, read only in debug builds: `adb shell am start -n org.loore.app/.MainActivity --es loore.environment local --es loore.sessionCookie "$(ios/scripts/local_backend.sh session-cookie)" --es loore.route /node/123 …`, one extra per iPhone argument. The debug audio file is decoded with `MediaExtractor` + `MediaCodec` and fed to the recorder at real time; push it with `adb push` to the app's files.
-- `ios/scripts/local_backend.sh` works unchanged for Android (it talks to the backend container). Same rule as for the iPhone: on the local backend sign in only as the test user 5 (`seowriter`); other local users hold real writing.
+- Same rule as for the iPhone: on the local backend sign in only as the test user 5 (`seowriter`).
 
 ### 3.3 Networking
 
@@ -178,12 +178,12 @@ Each flow lists: what the iPhone app does, the Swift files, the routes (methods 
 - **Invite made for someone else** (#439, #728): alert "This invitation is for someone else" with the body from `MagicLink.swift:98-106`; "Sign in differently" → `POST /auth/invite-choice/cancel {}`; "Continue without the invitation" → `POST /auth/invite-choice/continue {}` → `{redirect}`, used as the landing page (410 after 15 minutes: the server's text, else "This sign-in has expired. Please sign in again.").
 
 **Android**
-- Same screen, steps and texts, except the footnote about a link that creates an account working once, which is left out: since #703 a link signs in until it expires, however often it is opened.
+- Same screen, steps and texts, except the footnote about a link that creates an account working once: the Android app leaves it out, because it no longer matches the server since #703.
 - Paste: a "Paste" button that reads `ClipboardManager` when tapped, plus the text field.
-- **App Links** (if Peter agrees, §10 item 5): an intent filter with `android:autoVerify="true"` for `https://loore.org/auth/magic-link/verify` (and `https://staging.loore.org/…` in debug builds). The Activity receives the URL and runs the same verify as a pasted link. When the app is already signed in, it asks before using the link (wording for Peter, §10 item 5). The paste path stays.
+- **App Links** (if Peter agrees, §10 item 3): an intent filter with `android:autoVerify="true"` for `https://loore.org/auth/magic-link/verify` (and `https://staging.loore.org/…` in debug builds). The Activity receives the URL and runs the same verify as a pasted link. When the app is already signed in, it asks before using the link (wording for Peter, §10 item 3). The paste path stays.
 - Verify with OkHttp, redirects off; read `Location` and `Set-Cookie` from the 302.
 
-**Differences:** the one-time-link footnote is left out (server behaviour changed); sign-in links may open the app (§10 item 5).
+**Differences:** the one-time-link footnote is left out (it no longer matches the server since #703); sign-in links may open the app (§10 item 3).
 
 ### 3.5 Sign in with X, Connect X, and other signed-in web pages
 
@@ -209,6 +209,7 @@ Each flow lists: what the iPhone app does, the Swift files, the routes (methods 
 
 **Android**
 - `SessionStore`: an AES-256-GCM key in the Android Keystore (not exportable; one alias per environment) encrypts the same JSON, stored as a file in `noBackupFilesDir`. Jetpack Security's `EncryptedSharedPreferences` is deprecated; do not use it.
+- **The key must be usable while the phone is locked**, the counterpart of the iPhone's "after first unlock": uploads in WorkManager, the Voice turn and Record from the lock screen all need the cookies with the screen locked. So the key is created without `setUnlockedDeviceRequired(true)` and without `setUserAuthenticationRequired(true)`; the file lives in credential-encrypted storage, which Android opens at the first unlock after a restart.
 - Backup: nothing in `noBackupFilesDir` (the session file, the upload queue, the recording logs) is backed up or moved to a new phone. `loore_recording_device_key` (one per install) lives in its own preferences file, which `android:dataExtractionRules` excludes from cloud backup and device-to-device transfer, so a restored phone makes its own key.
 - Logout clears the same things, plus WebView cookies and storage (`CookieManager.removeAllCookies`, `WebStorage.deleteAllData`), the upload work in WorkManager, and the files waiting in the share folder (§3.31).
 
@@ -300,7 +301,7 @@ Each flow lists: what the iPhone app does, the Swift files, the routes (methods 
 - **Capture:** `AudioRecord` at 48 kHz, mono, PCM 16-bit, always; Android resamples when the input runs at another rate (a Bluetooth headset microphone runs at 16 kHz). Source `MIC` for the phone's microphone and `VOICE_COMMUNICATION` when a headset is the communication device (§3.17). In M5 the builder records the same test passage with each source on a device, compares the transcripts and records the choice in `android/PROGRESS.md`.
 - **Encoding:** `MediaCodec` AAC-LC (`audio/mp4a-latm`), 48 kHz, mono, 64 kbps; the codec's `csd-0` (AudioSpecificConfig) goes into the `esds` box. Presentation times from the frame count, as on the iPhone.
 - **Fragmented MP4:** an own writer in `:core` (`Fmp4Writer`), because `MediaMuxer` does not write fragments and the segments must be cut on demand (pause, interruption, stop), not on a timer. It writes `ftyp`, `moov` (`mvhd`, one `trak` with an `mp4a`/`esds` sample entry and empty sample tables, `mvex`/`trex`), then per segment `moof` (`mfhd`, `traf` with `tfhd`, `tfdt`, `trun`) + `mdat`. Timescale 48000, sample duration 1024. `SegmentPackager` is ported unchanged.
-- **Prove the chunk contract first** (M5, before anything is built on it), as the iPhone did: a 30–60 s recording against the local backend → `finalize` → the transcript appears, and the server's joined file plays to its full length. If the server refuses the chunks and no writer change fixes it, stop and report.
+- **Prove the chunk contract first** (the device spike after M1, §9, before anything is built on it), as the iPhone did: a 30–60 s recording against the local backend → `finalize` → the transcript appears, and the server's joined file plays to its full length. If the server refuses the chunks and no writer change fixes it, stop and report.
 - **Pause, interruption, writer failure, watchdog and elapsed time:** the same rules and numbers. On Android the watchdog also restarts capture when `AudioRecord.read` returns `ERROR_DEAD_OBJECT`; an encoder error makes a new encoder and writer (subsession), as a writer failure does on the iPhone.
 - **The user pause keeps `AudioRecord` running** with the samples dropped, as on the iPhone. Android would allow a restart inside the running microphone service, but keeping capture open avoids a resume that fails after a call; the microphone indicator stays on during the pause, as on the iPhone.
 - **Recording log:** the same content in `noBackupFilesDir/recording-logs/`, newest 20 kept, deleted at sign-out. Read from a debug build with `adb shell run-as org.loore.app …`; release builds give no access (on the iPhone the logs too need a build installed from Xcode).
@@ -325,7 +326,7 @@ Each flow lists: what the iPhone app does, the Swift files, the routes (methods 
   | 402, 429 | refused: kept on the phone; the server's message once per recording, 10 s toast |
   | 5xx (`session_busy`, `recordings_busy`, `usage_catching_up`), transport error | retry |
 
-- **Background:** when the app goes to the background, every pending chunk gets a background `URLSession` copy (chunk 0 only once it is stored). The system finishes them even if the app is closed; a background answer counts only when it is 2xx.
+- **Background** (`ChunkUploader.handOffPendingToBackground`): when the app goes to the background, a recording whose first chunk (the one carrying the initialization segment) is not stored yet hands only that chunk to a background `URLSession`, and its other pending chunks wait; once the first chunk is stored, every pending chunk gets a background copy. The system finishes them even if the app is closed; a background answer counts only when it is 2xx.
 - **Stop:** wait for the worker; one more attempt per missing chunk in order (stop if chunk 0 fails); `total_chunks` = earlier writers' chunks + (all produced chunks less those beyond the limit, or the stored ones when some failed). The server waits up to 10 min for announced chunks.
 - **Next launch** (`resumePending`): unreadable or fatal recordings are deleted; failed chunks with a body are sent again; a recording with nothing left to send whose recorder was still running gets `POST …/release` (5 s timeout), but only while its last upload is less than 40 s old (the server's 45 s idle window less 5 s): after that window the server offers the recording to other devices anyway, and one may have continued it. The Voice screen waits for those releases before asking for interrupted drafts. **Nothing is finalized automatically**: the user continues or discards through the recovery banner.
 - **Sign-out** deletes the whole queue.
@@ -334,7 +335,7 @@ Each flow lists: what the iPhone app does, the Swift files, the routes (methods 
 **Android**
 - The same queue, order, retry schedule, answer table, degraded mode and `total_chunks` rule, in `ChunkUploader` (one coroutine per recording). Files: `noBackupFilesDir/voice-uploads/<sid>/` (credential-encrypted storage, available after the first unlock, like the iPhone's protection class).
 - **While the audio service runs** (§3.18), uploads stay in the app's process with the screen off: a process with a foreground service keeps network access, also in Doze.
-- **Background copies become WorkManager work:** one unique `UploadWorker` per recording (`ExistingWorkPolicy.KEEP`, network required, exponential backoff starting at 30 s), enqueued when a chunk would get a background copy on the iPhone, when the app goes to the background with chunks pending and the service is not running, when the service stops with chunks pending, and at launch for queued recordings. The worker runs the same upload code; the server deduplicates by chunk index, and a per-recording lock keeps the worker and the in-process uploader from sending the same chunk at once. WorkManager survives the process ending and a reboot.
+- **Background copies become WorkManager work:** one unique `UploadWorker` per recording (`ExistingWorkPolicy.KEEP`, network required, exponential backoff starting at 30 s), enqueued when a chunk would get a background copy on the iPhone, when the app goes to the background with chunks pending and the service is not running, when the service stops with chunks pending, and at launch for queued recordings. The worker runs the same upload code and the same order rule: while a recording's first chunk is not stored, it sends only that chunk; once it is stored, every pending chunk. The server deduplicates by chunk index, and a per-recording lock keeps the worker and the in-process uploader from sending the same chunk at once. WorkManager survives the process ending and a reboot.
 - The next launch, sign-out and offline behaviour are the same.
 
 ### 3.13 Recording limits and refusal codes
@@ -458,13 +459,15 @@ This is the reason for the app; it is the part that differs most in mechanism an
 - **Voice:** the service enters the foreground with both types **at the record tap, while the Voice screen is in front** (Android grants the microphone type to a foreground service only when it starts from the foreground or from an allowed case such as a notification action). It stays in the foreground for the whole conversation, so Resume and Record from the lock screen can open the microphone again. It leaves the foreground when the user leaves the Voice screen, signs out, or after the conversation has been idle (no recording, no audio, nothing pending) for 30 minutes in the background; then the notification goes. Notification updates use `NotificationManager.notify` with the same id, not a second `startForeground`.
 - **The notification replaces the Live Activity and Now Playing,** with the same phases, texts and buttons as the Live Activity table: Pause / Resume / Stop while recording (with a chronometer), no buttons while sending or thinking, Record (and Glean) after the reply, the approval line without Record. During the reply it is a media notification (`MediaStyle` with the session), so the lock screen and the system media controls show play/pause, ±10 s, the position and the rate; Record and Glean are custom session commands. Visibility public on the lock screen. Actions work without unlocking, as on the iPhone. The session's metadata follows the iPhone's Now Playing (artist "Loore", the same titles and artwork).
 - **Thinking:** the session reports buffering with no commands; the notification says "Thinking…".
+- **Notification permission refused** (Android 13 and later then hide ordinary notifications; media notifications are excepted): the recording phase moves onto the media session, as the iPhone moves it onto Now Playing when no Live Activity shows. A small Media3 `SimpleBasePlayer` stands for the recording: title "Recording m:ss" or "Paused m:ss", play = Resume, pause = Pause, next = Stop and send. The lock screen and the system media controls then keep Pause, Resume and Stop; after the reply, Record and Glean are custom commands on the reply's media notification. The five alerts of §3.19 are not shown; the toasts in the app still are.
 - **Staying awake:** from Stop until audio plays, and while the queue waits for more audio, the service holds a partial wake lock with a 10-minute timeout per wait (the iPhone's cue limit), so polling and the SSE continue with the screen off whatever the cue setting. During playback ExoPlayer's wake mode holds the CPU and Wi-Fi. A process with a foreground service keeps network access in Doze.
 - **Record and Glean from the lock screen:** the action's `PendingIntent` reaches the service, which runs the iPhone's checks, notifications and spoken sentences, and the 15 s wait.
+- **The app swiped away from Recents during a conversation:** a foreground service keeps the process running after the task is removed, so the service handles `onTaskRemoved` and ends the conversation the way leaving the Voice screen does on the iPhone (§3.10), which is also what closing the iPhone app does: the recorder stops, a recording with no chunk yet is discarded, queued chunks go to `UploadWorker`, nothing is finalized, the service leaves the foreground and stops. The next Voice screen offers "Unfinished Voice recording" (Continue / Discard), as on the iPhone.
 - **The process ended:** the notification goes with the service. A `PendingIntent` that arrives with no conversation posts the iPhone's "Loore was closed in the meantime…" notification.
 - **Listen-aloud outside Voice:** the same service enters the foreground with the `mediaPlayback` type only, when playback starts from a tap; a media notification with the mini-player's controls; it leaves the foreground when the queue is closed.
 - **Foreground reconcile** as on the iPhone (`ON_START`).
 - **Battery:** the app does not ask to be exempted from battery optimisation (Google Play restricts that permission). Some manufacturers stop background apps more aggressively; the device checklist (§7) includes a Samsung phone.
-- **Prove first in M7** on a phone with the newest Android and one with the minimum version: a locked Voice turn whose reply plays by itself; Record from the lock screen after the reply (also after a phone call); Pause, Resume, Stop locked; an hour-long recording locked; the 30-minute idle end.
+- **Prove first:** the device spike after M1 (§9) shows a locked recording with Stop and Record from the lock screen; M7 then checks on a phone with the newest Android and one with the minimum version: a locked Voice turn whose reply plays by itself; Record from the lock screen after the reply (also after a phone call); Pause, Resume, Stop locked; an hour-long recording locked; the 30-minute idle end.
 
 **Differences:** notification instead of Live Activity (platform); the cue is not needed to stay alive, so its Off warning goes (§3.16); the conversation's notification ends after 30 idle minutes in the background (Android's and Google Play's rules expect a foreground service to stop once its task is done; on the iPhone the system removes a Live Activity after some hours).
 
@@ -481,8 +484,8 @@ This is the reason for the app; it is the part that differs most in mechanism an
 | `glean-failed` | "Loore could not start the glean" / the reason | lock-screen Glean refused or failed |
 
 **Android**
-- Two channels: "Voice conversation" (the service's ongoing notification; low importance, silent) and "Recording alerts" (these five; default importance, so they sound and show on the lock screen without a heads-up banner, matching "no banner while the app is in front"). Channel names are user-visible; final wording in M7.
-- `POST_NOTIFICATIONS` is asked at the first record tap, as on the iPhone. If it is refused, the service still runs; Android still shows the media controls during the reply.
+- Two channels: "Voice conversation" (the service's ongoing notification; low importance, silent) and "Recording alerts" (these five; high importance). To match the iPhone, an alert is silent while Loore is in front (posted with `setSilent(true)`: no sound, no banner) and shows as a banner with sound while another app is in front or the phone is locked. Channel names are user-visible; final wording in M7.
+- `POST_NOTIFICATIONS` is asked at the first record tap, as on the iPhone. If it is refused, the service still runs and the lock-screen controls fall back to the media session (§3.18).
 - A tap opens the app on the screen it was on.
 
 ### 3.20 Mini-player, listen-aloud and audio download
@@ -697,8 +700,8 @@ Only for approved users with `share_v1_enabled`; otherwise "Not available."
 | 4 | End of the conversation's lock-screen controls | the system removes the Live Activity after some hours, or when the user leaves Voice | the notification ends when the user leaves Voice, signs out, or after 30 idle minutes in the background | Android's and Google Play's rules for foreground services expect a service to stop once its task is done |
 | 5 | Back | swipe from the edge pops; sheets swipe down | system Back (gesture or button), predictive back | platform |
 | 6 | After the system ends the app in the background | starts at Home | the tab stacks come back and each screen reloads | platform convention |
-| 7 | Sign-in links | always pasted | may open the app directly (App Links), paste kept | platform; needs a server file and Peter's yes (§10 item 5) |
-| 8 | Sign-in screen footnote on one-time links | shown | left out | since #703 a link signs in until it expires |
+| 7 | Sign-in links | always pasted | may open the app directly (App Links), paste kept | platform; needs a server file and Peter's yes (§10 item 3) |
+| 8 | Sign-in screen footnote on one-time links | shown | left out | it no longer matches the server since #703 |
 | 9 | Sharing files out | temporary file deleted when the share sheet closes | deleted at the next launch, at sign-out, or when replaced | Android does not report when the receiving app has finished |
 | 10 | Picked files (import, audio upload) | read in place | copied to the app's cache first | cloud-provider files on Android can fail when read a second time |
 | 11 | Bluetooth headset microphone | audio session mode and preferred input | `setCommunicationDevice` while recording, cleared at Stop | platform; same behaviour (#423) |
@@ -713,7 +716,7 @@ Everything else (screens, texts, server calls and their order, limits, timers, r
 
 List only; this design changes no server code. None of these is needed before M7, and the app works without all but the first.
 
-1. **App Links** (only if Peter agrees, §10 item 5): serve `https://loore.org/.well-known/assetlinks.json` (and on staging), `Content-Type: application/json`, with no redirect, listing the package name and the SHA-256 fingerprints of the signing certificates that may open the link: Google Play's app signing key, and the upload or debug key for builds installed by cable. Android verifies it at install time; without it, sign-in links keep opening in the browser and the paste path works as on the iPhone.
+1. **App Links** (only if Peter agrees, §10 item 3): serve `https://loore.org/.well-known/assetlinks.json` (and on staging), `Content-Type: application/json`, with no redirect, listing the package name and the SHA-256 fingerprints of the signing certificates that may open the link: Google Play's app signing key, and the upload or debug key for builds installed by cable. Android verifies it at install time; without it, sign-in links keep opening in the browser and the paste path works as on the iPhone.
 2. **Telling the Android app apart** (`backend/utils/client_platform.py`): the server knows `ios` and `web`, from the `X-Loore-Client` header or the User-Agent (`Mozilla/…` → web; `CFNetwork/… Darwin/…` → ios). Android's OkHttp sends neither, so its requests count as "unknown": nothing breaks, but GitHub issues filed from Android get no platform label. Needed: accept `android` in `CLIENTS`, add it to `PLATFORM_LABELS` in `backend/utils/github.py`, and create the `android` label in the repository. The app sends `X-Loore-Client: android` from M1. (WebViews inside the app send a `Mozilla/…` User-Agent and count as web, which is right for those pages.)
 3. **Cookies and sessions:** nothing. The app handles the `session` and `remember_token` cookies the way the iPhone app does: taken from `Set-Cookie` (including the 302 of `/auth/magic-link/verify`, with redirects off), sent back on every request, the sign-in dropped after the cookie's expiry. Native requests send no `Origin`, so CORS does not apply. Local development sets `SESSION_COOKIE_SECURE=false`, which OkHttp's cookie handling respects over `http://`.
 4. **Recording:** nothing. The Android app sends the same `audio/mp4` chunks with its own `device_key` (one per install), and the server joins any standard fragmented MP4.
@@ -764,8 +767,8 @@ android/
 ```
 
 - **Two Gradle modules.** `:core` holds everything that can be tested on the JVM (the iPhone's unit tests mostly test such code), so the test suite runs in seconds without an emulator. `:app` holds everything that touches Android. Split `:app` further only if build times require it.
-- **Package name** `org.loore.app` (the iPhone's bundle id; §10 item 2). Version 0.1.0, version code 1, raised for every upload.
-- **minSdk 31** (Android 12; §10 item 3). The reasons: `AudioManager.setCommunicationDevice` (API 31) gives one way to use a Bluetooth headset's microphone (older versions need the deprecated `startBluetoothSco` path, a second code path to build and test on old devices); Android 12 introduced the rules for starting foreground services from the background, so the app is designed and tested against one set of rules; `isClientSilenced()` (API 29) and notification channels (API 26) are then always present.
+- **Package name** `org.loore.app` (the iPhone's bundle id; open for review in §11). Version 0.1.0, version code 1, raised for every upload.
+- **minSdk 31** (Android 12; open for review in §11). The reasons: `AudioManager.setCommunicationDevice` (API 31) gives one way to use a Bluetooth headset's microphone (older versions need the deprecated `startBluetoothSco` path, a second code path to build and test on old devices); Android 12 introduced the rules for starting foreground services from the background, so the app is designed and tested against one set of rules; `isClientSilenced()` (API 29) and notification channels (API 26) are then always present.
 - **compileSdk and targetSdk:** the newest stable API level when M1 starts; Google Play requires a recent target for every upload, so it moves with each yearly Android release.
 - **Toolchain:** the newest stable Android Gradle Plugin and Kotlin at M1; JDK 17; Kotlin 2 with the Compose compiler plugin.
 - **Dependencies:**
@@ -777,7 +780,7 @@ android/
   - Coil (images in markdown) with its OkHttp network module.
   - Tests: JUnit 4, kotlinx-coroutines-test, OkHttp MockWebServer, Robolectric, Compose ui-test-junit4, AndroidX test runner.
   - No Firebase, analytics, crash reporting or advertising SDKs. ZIP reading, the Keystore and text-to-speech come from the platform.
-- **Signing:** debug builds use the debug key. Release builds are signed with an upload key kept on Peter's Mac outside the repository (path and passwords in `~/.gradle/gradle.properties`); Google Play re-signs with the app signing key it holds (Play App Signing). Nothing secret is committed.
+- **Signing:** debug builds use the debug key. Release builds are signed with an upload key that is never committed; its path and passwords are supplied locally at build time. Google Play re-signs with the app signing key it holds (Play App Signing).
 - **`.gitignore`:** `android/.gradle/`, `android/**/build/`, `android/local.properties`, `*.jks`, `*.keystore`.
 
 ---
@@ -846,21 +849,22 @@ jobs:
 
 - No emulator in CI: unit tests run on the JVM (`:core`) and under Robolectric (`:app`); UI flows need the local backend, as on the iPhone.
 - No signing in CI (debug build only).
-- **`deploy.yml`:** add `android/**` and `.github/workflows/android.yml` to `paths-ignore`, next to `ios/**`: nothing on the server reads `android/`, and a push that touches only the Android app must not restart the server's workers. Update the comment there and the "Deploy to Production" paragraph in `CLAUDE.md`.
+- **`deploy.yml`:** add `android/**` and `.github/workflows/android.yml` to `paths-ignore`, next to `ios/**`, in the first commit that adds `android/` (or before it): nothing on the server reads `android/`, and a push that touches only the Android app must not restart the server's workers. Update the comment there and the "Deploy to Production" paragraph in `CLAUDE.md`.
 
 ---
 
 ## 9. Build order
 
-Each milestone ends with: a clean build, unit tests green, the screens it added checked on an emulator against the local backend next to the iPhone app (or the web), `android/PROGRESS.md` updated (done, differences, known gaps, how to test), commits pushed. Milestones 1–4 need no microphone.
+Each milestone ends with: a clean build, unit tests green, the screens it added checked on an emulator against the local backend next to the iPhone app (or the web), `android/PROGRESS.md` updated (done, differences, known gaps, how to test), commits pushed. Milestones 1–4 need no microphone; the spike M1b is the exception, kept small so that the reason for the app is proven before the screens are built.
 
-1. **M1 — Sign in, Log, open a thread.** Gradle project, CI workflow, `deploy.yml` paths, environments and debug extras, design tokens and fonts (dark and light), `ApiClient` with the cookie jar and error mapping, `ApiPath`, tolerant dates, models for the dashboard, log and node (with the iterative tree), `SessionStore`, email-link sign-in by paste (send, paste, verify, error texts), launch with a stored sign-in, logout, a tab bar with placeholders, the Log (paging, pull to refresh), a thread read-only (ancestors, focal card, replies, basic markdown: paragraphs, line breaks, headings, lists, emphasis, links, code). **Test:** unit tests for dates, models (`dashboard.json`, `log.json`, `node_detail.json`), `ApiPath`, magic-link parsing, the session record; on the emulator: sign in as user 5 with `ios/scripts/local_backend.sh magic-link`, see the Log, open a thread, close and reopen the app (still signed in), log out.
-2. **M2 — Shell and gates.** All tabs, `AppRoute` and link handling, NodePrefetch, the launch order and every gate (Terms, Waitlist with starting point, No subscription, Not active, restore offer, unreachable), Updates sheet, time zone, payments and spend-cap banners, toasts, More (theme, craft mode with its dialog, About in Custom Tabs, Admin web view), Account basics, Sign in with X and the cookie web views, the debug switcher. **Test:** `local_backend.sh state …` for each gate; route and prefetch unit tests.
+1. **M1 — Sign in and the Log.** Gradle project, CI workflow, and the `deploy.yml` `paths-ignore` change in the same first commit (§8); environments, chosen in debug builds by the `loore.environment` extra (the other debug extras and the switcher on Account come in M2); design tokens and fonts (dark and light), `ApiClient` with the cookie jar and error mapping, `ApiPath`, tolerant dates, models for the dashboard and the log, `SessionStore`, email-link sign-in by paste (send, paste, verify, error texts), launch with a stored sign-in, logout, a tab bar with placeholders, the Log (paging, pull to refresh). **Test:** unit tests for dates, models (`dashboard.json`, `log.json`), `ApiPath`, magic-link parsing, the session record; on the emulator: sign in as user 5 with `ios/scripts/local_backend.sh magic-link`, see the Log, close and reopen the app (still signed in), log out.
+   **M1b — Device spike** (right after M1; small, with a throwaway screen). On a real phone against the local backend: a record tap starts `AudioService`; `AudioRecord` → `MediaCodec` → `Fmp4Writer` → chunks to the local backend → finalize → the transcript appears (the chunk contract of §3.11). Then with the screen off: a recording stopped from the lock screen, and Record from the lock screen starting the next one. **Test:** the transcript is complete and the server's joined file plays to its end; the locked Stop and Record work on the phone. What the spike finds goes into `android/PROGRESS.md` before M5 and M7 build on it.
+2. **M2 — Shell, gates and reading a thread.** A thread read-only (ancestors, focal card, replies, with the node model and its iterative tree, `node_detail.json`) and the markdown basics (paragraphs, line breaks, headings, lists, emphasis, links, code); all tabs, `AppRoute` and link handling, NodePrefetch, the launch order and every gate (Terms, Waitlist with starting point, No subscription, Not active, restore offer, unreachable), Updates sheet, time zone, payments and spend-cap banners, toasts, More (theme, craft mode with its dialog, About in Custom Tabs, Admin web view), Account basics, Sign in with X and the cookie web views, the other debug extras and the switcher on Account. **Test:** `local_backend.sh state …` for each gate; route, prefetch and tree-decoding unit tests; open a thread from the Log.
 3. **M3 — Threads and writing.** The full thread (actions, pin, delete, edit, checklists), the complete markdown renderer (markers, quotes, node titles, images, selection), writing with server drafts, selectors, model picker, the send decision tree, audio file upload, AI replies (request, SSE, polling, batch, chains, errors, auto-generate), proposals, tool approvals, long and shared threads, Text mode (typed), Write New Entry, Search. **Test:** the ported writing, markdown, proposal and approval tests; UI flows for writing, drafts and the #425/#447 repros.
 4. **M4 — Glean and References.** Home cards with the Voice / Text switch (Text path), starting a glean, the gleaning page, verdicts, quote cards, References list and detail, YouTube embed. **Test:** `GleanTests`, `PickVerdictTests`, `HomeCardModeTests`; a glean on staging.
-5. **M5 — Recording and dictation.** Prove the chunk contract first (§3.11). Then the recorder, encoder, writer, packager, the upload queue with WorkManager, limits and refusals, the recording log, dictation in the editor (transcription stream, Save audio), recovered audio in the form. **Test:** `Fmp4WriterTest`, `ChunkUploaderTest`; dictation on the emulator from the debug audio file; a 2-minute dictation on a phone.
+5. **M5 — Recording and dictation.** Builds on the spike (M1b). The recorder, encoder, writer, packager, the upload queue with WorkManager, limits and refusals, the recording log, dictation in the editor (transcription stream, Save audio), recovered audio in the form. **Test:** `Fmp4WriterTest`, `ChunkUploaderTest`; dictation on the emulator from the debug audio file; a 2-minute dictation on a phone.
 6. **M6 — Voice mode with the screen on.** `VoiceTurnController` and its tests, the Voice screen, reply audio (TTS stream, queue player, chapters, rates), the thinking cue and sounds, spoken refusals, approvals in Voice, the recovery banner, continue on another device, Glean from Voice, the mini-player, listen-aloud and download. **Test:** the Voice unit tests; a billed Voice turn from the debug audio file on the emulator; a turn on a phone with the screen on.
-7. **M7 — Background and lock screen.** `AudioService`, the media session and notification, lock-screen actions (Pause, Resume, Stop, Record, Glean), audio routing and Bluetooth, interruptions, the headset-microphone hold, local notifications, wake lock, the idle end, uploads after the process ends. Prove the locked Voice turn first. **Test:** the device checklist (§7) on two phones.
+7. **M7 — Background and lock screen.** `AudioService`, the media session and notification, lock-screen actions (Pause, Resume, Stop, Record, Glean), audio routing and Bluetooth, interruptions, the headset-microphone hold, local notifications, wake lock, the idle end, the app swiped away from Recents, the permission-refused fallback, uploads after the process ends. Prove the locked Voice turn first. **Test:** the device checklist (§7) on two phones.
 8. **M8 — Workspace and account pages.** Profile (with the generation watcher), Todo, Artifacts (Intentions, create, delete), version history and diff, Prompts, the full Account page (email, X, settings, deletion and restore), Welcome, Confirm email, prefill consent, Import (all kinds, references, clipper tokens), Export, Share, Commons. **Test:** the ported page tests; UI flows as the iPhone's `M4ScreensUITests`.
 9. **M9 — Parity walk and first release.** Walk every iPhone screen against the Android app and close the gaps; TalkBack and font-size pass; release build signed with the upload key; App Links if the server file exists; Google Play internal testing; `android/README.md` complete; the design docs named in `CLAUDE.md` updated.
 
@@ -871,26 +875,16 @@ Each milestone ends with: a clean build, unit tests green, the screens it added 
 Each item: the situation, the recommendation, and what happens if Peter says nothing.
 
 1. **A Google Play developer account, and how testers get the app.**
-   Situation: without a Play Console account the app can be installed only by cable (`adb install`) or by sending the APK file, which testers must allow in their phone's settings. With an account: internal testing reaches up to 100 testers through the Play Store, usually within minutes of an upload. Google asks for a one-time registration fee and identity verification; at the time of writing, a new personal account must run a closed test with at least 12 testers for 14 days before it may publish to everyone (internal testing does not need this). Before the first release Google also asks for the app's declarations: privacy policy address, data safety form, content rating, target audience, the foreground service types (microphone, media playback) with a description of each, and the account-deletion address (§5 item 7). The builder drafts the answers in `android/README.md`.
-   Recommendation: a personal account, like the Apple membership, and Google Play internal testing for the alpha.
+   Situation: without a Play Console account the app can be installed only by cable (`adb install`) or by sending the APK file, which testers must allow in their phone's settings. With an account: internal testing reaches up to 100 testers through the Play Store, usually within minutes of an upload. Google asks for a one-time registration fee and identity verification; at the time of writing, a new personal account must run a closed test with at least 12 testers for 14 days before it may publish to everyone (internal testing does not need this). Before the first release Google also asks for the app's declarations: privacy policy address, data safety form, content rating, target audience, the foreground service types (microphone, media playback) with a description of each, and the account-deletion address (§5 item 7). The builder drafts the answers in `android/README.md`; **Peter approves the "Data safety" answers and the privacy-policy address before the first submission**, because they are public statements about which data the app sends where, including to AI providers.
+   Recommendation: a Google Play developer account and internal testing for the alpha; whether it is a personal or an organisation account is Peter's choice.
    If Peter says nothing: M1–M8 are built and tested on emulators and on phones by cable; no tester can install the app; App Links wait (they need the Play signing key's fingerprint).
 
-2. **The package name.**
-   Situation: Google Play never lets an app change its package name after the first upload.
-   Recommendation: `org.loore.app`, the same as the iPhone's bundle id.
-   If Peter says nothing: `org.loore.app`.
-
-3. **The oldest Android version the app supports.**
-   Situation: A higher minimum removes code paths and device testing; a lower one reaches more phones. Android 12 (API 31, 2021) gives one way to route a Bluetooth headset's microphone and one set of rules for starting the microphone service; Android 10 (API 29) would add the older Bluetooth path and older service rules to build and test. The builder checks the current share of each version in Android Studio's distribution chart at M1 and reports it.
-   Recommendation: Android 12 (API 31).
-   If Peter says nothing: API 31.
-
-4. **Phones for the device checklist.**
-   Situation: the emulator cannot lock like a phone, has no Bluetooth headset, no calls and no manufacturer battery rules; M7 needs real phones. Samsung phones manage background apps differently from Google's Pixel phones.
+2. **Phones for the device checklist.**
+   Situation: the emulator cannot lock like a phone, has no Bluetooth headset, no calls and no manufacturer battery rules; the spike after M1 and M7 need real phones. Samsung phones manage background apps differently from Google's Pixel phones.
    Recommendation: one recent Pixel-class phone for the builder's checklist runs (Peter's or a bought test phone), and at least one alpha tester with a Samsung phone.
-   If Peter says nothing: M7 is tested on the emulator only, and the lock-screen, Bluetooth and call items wait for a tester with an Android phone.
+   If Peter says nothing: the spike and M7 run on the emulator only, and the lock-screen, Bluetooth and call items wait for a tester with an Android phone.
 
-5. **Sign-in links that open the app (App Links).**
+3. **Sign-in links that open the app (App Links).**
    Situation: on the iPhone every sign-in link is copied from Mail and pasted. On Android, if the server serves `/.well-known/assetlinks.json` (§5 item 1), tapping the sign-in link in a mail app opens the Android app and signs in. Consequences: on a phone with the app installed, every sign-in link opens the app, also when the person wanted to sign in on loore.org in the phone's browser (they can still paste the link into the browser); when the app is already signed in it asks first. Wording candidates: (a) "You're already signed in. Use this link to sign in again?" (Sign in / Cancel); (b) "Sign in with this link? If it is for another account, you leave the one you're in now." (Sign in / Cancel). Recommended: (a). The same server file kind would also allow the iPhone to do this later (`docs/IOS-APP-DESIGN.md` §14.1); not part of this plan.
    Recommendation: yes, for the sign-in link only, with paste kept.
    If Peter says nothing: paste only, as on the iPhone; the App Links code stays off until the server file exists.
@@ -909,7 +903,7 @@ Listed for review; each can be changed before or during the build.
 6. The user pause keeps the microphone open with the samples dropped, as on the iPhone (§3.11).
 7. WorkManager for uploads that outlive the service or the process (§3.12).
 8. Session cookies encrypted with a Keystore key in a file excluded from backup; not `EncryptedSharedPreferences` (deprecated) (§3.6).
-9. App Links only for the sign-in link, if Peter agrees; paste kept (§3.4, §10 item 5).
+9. App Links only for the sign-in link, if Peter agrees; paste kept (§3.4, §10 item 3).
 10. Files picked for import or upload are copied to the cache first (§3.22, §3.31).
 11. Shared files deleted at the next launch, at sign-out or when replaced (§3.31).
 12. The iPhone's JSON fixtures shared from `ios/LooreTests/Fixtures/` rather than copied (§7).
@@ -918,6 +912,8 @@ Listed for review; each can be changed before or during the build.
 15. The system serif for reading text, as on the iPhone (§3.33).
 16. No request to be exempted from battery optimisation (§3.18).
 17. Phone layout only; tablets and foldables get the phone layout, and no device is excluded (§0).
+18. **Package name `org.loore.app`**, the same as the iPhone's bundle id (§6). Google Play never lets an app change its package name after the first upload, so it must be settled before the first upload in M9.
+19. **Oldest supported Android: Android 12 (API 31)** (§6). A higher minimum removes code paths and device testing; a lower one reaches more phones. API 31 gives one way to route a Bluetooth headset's microphone and one set of rules for starting the microphone service; Android 10 (API 29) would add the older Bluetooth path and older service rules to build and test. The builder checks the current share of each version in Android Studio's distribution chart at M1 and reports it.
 
 ---
 
@@ -927,14 +923,14 @@ Every number this document adds that the iPhone app does not already use. Number
 
 | Number | Where | Why this value |
 |---|---|---|
-| minSdk 31 (Android 12) | §6, §10 item 3 | one Bluetooth routing API and one set of foreground-service rules |
+| minSdk 31 (Android 12) | §6, §11 item 19 | one Bluetooth routing API and one set of foreground-service rules |
 | 30 minutes idle in the background before the conversation's notification ends | §3.18 | long enough to answer a reply after a pause; short enough that an idle microphone service does not stay for hours |
 | 10-minute wake-lock timeout per wait | §3.18 | the iPhone's thinking-cue limit per wait, reused |
 | 30 s first backoff, exponential, for WorkManager uploads | §3.12 | WorkManager's default; uploads are not urgent once the user has stopped |
 | 3,000 levels in the deep-tree decoding test | §3.21, §7 | well past any thread seen; enough to fail on recursive decoding |
-| Two notification channels, low and default importance | §3.19 | one silent ongoing notification; alerts that sound without a heads-up banner |
+| Two notification channels, low and high importance | §3.19 | one silent ongoing notification; alerts that show and sound over other apps and stay silent while Loore is in front, as on the iPhone |
 | JDK 17, CI timeout 30 min | §6, §8 | current Android Gradle Plugin versions need at least JDK 17; 30 min is above a full build and test run |
-| Two test phones (newest and minimum Android), one Samsung | §7, §10 item 4 | covers both ends of the supported range and the main manufacturer difference |
+| Two test phones (newest and minimum Android), one Samsung | §7, §10 item 2 | covers both ends of the supported range and the main manufacturer difference |
 
 ---
 
