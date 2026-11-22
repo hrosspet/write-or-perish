@@ -489,3 +489,50 @@ def test_the_same_event_twice_carries_once(app):
     _renew(u, PERIOD_END, NEXT_END)
     _renew(u, PERIOD_END, NEXT_END)
     assert u.spend_period_carry_microdollars == 8_000_000
+
+
+# ── Time without access, and events out of order ─────────────────────────
+
+def test_a_carry_is_kept_over_a_late_payment(app):
+    """Over the ceiling, then the payment for the next period is late
+    (the subscription gives nothing), then it is paid in that period."""
+    u = _stripe_subscriber()
+    emails, send = _mailbox()
+    _log_cost(u.id, 70.0, JAN_LATE)
+    enforce_user_spend_cap(u.id, CONFIG, now=JAN_LATE, send_email=send)
+
+    stripe_billing.apply_subscription(
+        _stripe_sub(u, PERIOD_END, NEXT_END, status="past_due"), CONFIG)
+    _db.session.commit()
+    assert ceiling_period_start(u) is None
+    assert u.spend_period_start == PAID
+
+    _renew(u, PERIOD_END, NEXT_END)
+
+    assert u.spend_period_start == PERIOD_END
+    assert u.spend_period_carry_microdollars == 20_000_000
+    assert not user_is_capped(u, now=FEB_LATE)
+    _log_cost(u.id, 30.0, FEB_LATE)
+    r = enforce_user_spend_cap(u.id, CONFIG, now=FEB_LATE, send_email=send)
+    assert r["status"] == "blocked" and r["carried_usd"] == 20.0
+
+
+def test_an_event_for_an_earlier_period_leaves_the_carry(app):
+    u = _stripe_subscriber()
+    emails, send = _mailbox()
+    _log_cost(u.id, 58.0, JAN_LATE)
+    enforce_user_spend_cap(u.id, CONFIG, now=JAN_LATE, send_email=send)
+    _renew(u, PERIOD_END, NEXT_END)
+    assert u.spend_period_carry_microdollars == 8_000_000
+
+    _renew(u, PAID, PERIOD_END)          # the earlier period's event, late
+    assert u.spend_period_start == PERIOD_END
+    assert u.spend_period_carry_microdollars == 8_000_000
+    enforce_user_spend_cap(u.id, CONFIG, now=FEB_LATE, send_email=send)
+    assert u.spend_period_start == PERIOD_END
+    assert u.spend_period_carry_microdollars == 8_000_000
+
+    _renew(u, PERIOD_END, NEXT_END)
+    assert u.spend_period_carry_microdollars == 8_000_000
+    r = enforce_user_spend_cap(u.id, CONFIG, now=FEB_LATE, send_email=send)
+    assert r["carried_usd"] == 8.0

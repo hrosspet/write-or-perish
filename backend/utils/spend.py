@@ -309,12 +309,15 @@ def enforce_trial_cap(user, config, send_email=None):
 # counts toward the next one (User.spend_period_carry_microdollars, for
 # the period starting at User.spend_period_start). The carry is taken on
 # only where the next period arrives (the subscription event,
-# carry_into_next_period), from the period that just ended and with the
-# ceiling that period ran under, and only when the account was counted
-# per period through it. A period that starts any other way (the account
-# was counted by the month before: an admin's limit removed, a plan no
-# longer set by hand) starts at 0, as a month never rolled does. The
-# admin's clear action clears it (clear_spend_carry). The block is the start
+# carry_into_next_period), from the stored period and with the ceiling
+# that period ran under. While the subscription gives nothing (a payment
+# is late, it ended) the stored period and carry stay as they are and
+# are taken on when access returns. While an admin's limit or a plan set
+# by hand decides the ceiling they are forgotten (roll_spend_carry), so
+# the period after that time starts at 0, as a month never rolled does.
+# An event for an earlier period than the stored one changes nothing.
+# The admin's clear action clears the carry (clear_spend_carry). The
+# block is the start
 # of the period it is for (User.spend_blocked_period_start), so it ends
 # by itself when Stripe starts the next period. While an account is
 # counted per period its calendar-month block is not read, and its
@@ -366,36 +369,60 @@ def rolled_period_carry(user, config, start):
 
 def roll_period_carry(user, config, start):
     """Make the period that starts at *start* the one the stored carry is
-    for: 0 unless it is already. Does not commit. Returns True when it
-    changed the row."""
-    if user.spend_period_start == start:
+    for: 0 unless it is already. A stored later period stays (an event
+    for an earlier period arrived after it). Does not commit. Returns
+    True when it changed the row."""
+    stored = user.spend_period_start
+    if stored == start or (stored is not None and stored > start):
         return False
     user.spend_period_start = start
     user.spend_period_carry_microdollars = 0
     return True
 
 
+def _forget_period_count(user):
+    """An admin's limit or a plan set by hand decides the ceiling: the
+    stored period and its carry are dropped, so nothing from that time
+    is counted per period later. Returns True when it changed the row."""
+    if (getattr(user, "monthly_spend_limit_usd", None) is None
+            and not getattr(user, "plan_set_by_hand", False)):
+        return False
+    if user.spend_period_start is None \
+            and not user.spend_period_carry_microdollars:
+        return False
+    user.spend_period_start = None
+    user.spend_period_carry_microdollars = 0
+    return True
+
+
 def carry_into_next_period(user, config, previous, limit_usd):
-    """The subscription's next period has arrived (the caller has written
-    it on *user*): what the period that started at *previous* counted
-    above *limit_usd*, the ceiling it ran under, is carried into the new
-    one, and when the carry alone reaches the ceiling now in force the
-    account is blocked for the period. Nothing is carried when the
-    account was not counted per period before (*previous* is None) or
-    the stored count is not that period's. Does not commit."""
+    """A subscription event has been written on *user*. When it brings a
+    later period than the stored one, what the stored period counted
+    above its ceiling is carried into the new one, and when the carry
+    alone reaches the ceiling now in force the account is blocked for
+    the period. The stored period's ceiling is *limit_usd* (the limit
+    before the event) when it is the period that just ended (*previous*),
+    and the ceiling now in force when the account comes back after time
+    without access (*previous* is None). Nothing changes while the
+    account is not counted per period, and for an event about an earlier
+    period than the stored one. Does not commit."""
     start = ceiling_period_start(user)
-    if start is None or start == previous:
+    stored = user.spend_period_start
+    if start is None or stored == start:
+        return
+    if stored is not None and stored > start:
         return
     carry = 0
-    limit = _usd_to_microdollars(limit_usd)
-    if (previous is not None and previous < start and limit > 0
-            and user.spend_period_start == previous):
-        carry = max(0, (user.spend_period_carry_microdollars or 0)
-                    + _user_spend_between_microdollars(
-                        user.id, previous, start) - limit)
+    now_limit = _usd_to_microdollars(get_user_spend_limit_usd(user, config))
+    if stored is not None:
+        limit = (_usd_to_microdollars(limit_usd) if previous is not None
+                 else now_limit)
+        if limit > 0:
+            carry = max(0, (user.spend_period_carry_microdollars or 0)
+                        + _user_spend_between_microdollars(
+                            user.id, stored, start) - limit)
     user.spend_period_start = start
     user.spend_period_carry_microdollars = carry
-    now_limit = _usd_to_microdollars(get_user_spend_limit_usd(user, config))
     if now_limit > 0 and carry >= now_limit:
         user.spend_blocked_period_start = start
         logger.warning(
@@ -556,7 +583,7 @@ def roll_spend_carry(user, config, now=None):
     Returns True when it changed the row."""
     month = current_month(now)
     carry = rolled_spend_carry(user, config, now)
-    changed = False
+    changed = _forget_period_count(user)
     if user.spend_carry_month != month or \
             (user.spend_carry_microdollars or 0) != carry:
         user.spend_carry_month = month
