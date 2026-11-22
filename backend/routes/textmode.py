@@ -20,6 +20,7 @@ from backend.utils.session_helpers import attach_agentic_prompt_under
 from backend.utils.request_size import LONG_TEXT_MAX_BODY_BYTES, body_limit
 from backend.utils.privacy import (
     can_user_see_node_or_placeholder, validate_ai_usage,
+    validate_privacy_level,
 )
 
 textmode_bp = Blueprint("textmode", __name__)
@@ -476,8 +477,12 @@ def continue_from_node(node_id):
     added. The text counterpart of POST /voice/from-node.
 
     Body: { content: string, model?: string, auto_generate?: bool,
-            ai_usage?: string }.
-    Privacy comes from the node. AI usage is the one the reply form sent,
+            ai_usage?: string, privacy_level?: string }.
+    Privacy is the one the reply form sent, as for a typed reply
+    (POST /nodes/) and a recorded one (save-as-node); a client that
+    sends none (an installed iPhone build, a page loaded earlier) gets
+    the node's, as before. The prompt node attached under the node keeps
+    the node's. AI usage is the one the reply form sent,
     else the thread's with the read looked through (reply_ai_usage,
     #362): a read reply is 'chat' for the tweets it quotes, which says
     nothing about what the user writes under it.
@@ -511,9 +516,23 @@ def continue_from_node(node_id):
         return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
     if ai_usage == 'none':
         return ai_usage_refused_response()
-    privacy_level = node.privacy_level or "private"
-    # A message under a public node is public: it quotes only public
-    # nodes (Peter, 2026-11-12).
+    node_privacy = node.privacy_level or "private"
+    privacy_level = node_privacy
+    if data.get("privacy_level") is not None:
+        privacy_level = data["privacy_level"]
+        if not validate_privacy_level(privacy_level):
+            return jsonify(
+                {"error": f"Invalid privacy_level: {privacy_level}"}), 400
+        if node_privacy == "public" and privacy_level != "public":
+            # As for a typed entry (#228): replies under public posts
+            # are public. The form shows the node's level as it knew it;
+            # when the node has become public since, nothing is written
+            # and the answer says so.
+            return jsonify({
+                "error": "Replies under public posts are public.",
+                "code": "public_reply_required",
+            }), 400
+    # A public message quotes only public nodes (Peter, 2026-11-12).
     if privacy_level == "public":
         from backend.utils.publish_quotes import publish_refusal
         refusal = publish_refusal(content, current_user.id)
@@ -526,9 +545,13 @@ def continue_from_node(node_id):
         if refusal is not None:
             return refusal
     auto_generate = bool(data.get("auto_generate", True))
-    # No automatic reply in a public (or circles) thread: the message is
-    # written, the answer says why (Peter, 2026-11-12).
-    auto_off = auto_generate_refusal(node) if auto_generate else None
+    # No automatic reply in a public (or circles) thread, nor to a public
+    # (or circles) message: the message is written, the answer says why
+    # (Peter, 2026-11-12).
+    auto_off = None
+    if auto_generate:
+        auto_off = (auto_generate_refusal(node)
+                    or auto_generate_refusal(privacy_level=privacy_level))
     if auto_off is not None:
         auto_generate = False
     if auto_generate:
@@ -552,7 +575,7 @@ def continue_from_node(node_id):
             return read_only_model_response(refused)
 
     prompt_node = attach_agentic_prompt_under(
-        node, current_user.id, PROMPT_KEY, privacy_level, ai_usage)
+        node, current_user.id, PROMPT_KEY, node_privacy, ai_usage)
     parent_id = prompt_node.id if prompt_node is not None else node.id
 
     from backend.utils.tokens import approximate_token_count
