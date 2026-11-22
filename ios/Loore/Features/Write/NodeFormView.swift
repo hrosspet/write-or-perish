@@ -210,7 +210,8 @@ private struct NodeFormBody: View {
             if !model.content.jsTrimmed.isEmpty {
                 if model.drafts.isSaving {
                     Text("Saving...").foregroundStyle(LooreColor.accent)
-                } else if let saved = model.drafts.lastSaved {
+                } else if let saved = model.drafts.lastSaved, model.hasDraft || model.olderDraft == nil {
+                    // Not for an older edit on offer (#761): the box says when it was saved.
                     Text("Draft saved \(DraftAutosaver.timeAgo(saved))").foregroundStyle(LooreColor.textMuted)
                 }
             }
