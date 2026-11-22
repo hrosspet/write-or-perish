@@ -3,7 +3,10 @@ import os
 
 /// The live recorder: a PCM source (microphone, or the Debug file) → converter →
 /// fMP4 writer → persisted upload queue. Used by voice mode and, from M2's
-/// writing form, by dictation (design doc §8 "Dictation").
+/// writing form, by dictation (design doc §8 "Dictation"). Stop, leave and
+/// cancel end a recording: Stop queues everything and settles the uploads for
+/// finalize; leave queues everything for recovery (#753); cancel drops the
+/// segment not yet cut.
 ///
 /// Pauses keep the capture running and drop the samples (map C §8.5: the audio
 /// session stays alive, so a lock-screen resume works); a system interruption
@@ -29,7 +32,9 @@ final class VoiceRecorder: VoiceRecording {
     private var elapsedOffset: Double = 0
     private var secondsBeforeWriter: Double = 0
     private let gate = SampleGate()
-    private let inbox = ChunkInbox()
+    /// One per recording (`begin`, `leave`): a recording left behind finishes
+    /// its own chunks while the next one starts (#753).
+    private var inbox = ChunkInbox()
     private let log = Logger(subsystem: "org.loore.app", category: "recorder")
     private let recordingLog: RecordingLog
     /// #388: a continued recording keeps its chunks on the phone until its claim
@@ -52,9 +57,6 @@ final class VoiceRecorder: VoiceRecording {
     }
 
     var isRecording: Bool { source != nil }
-
-    /// A fresh session starts at chunk 0, a resumed one after its stored chunks.
-    var hasProducedChunks: Bool { nextIndex > 0 }
 
     func start(sessionId: String, uploadURL: URL, firstChunkIndex: Int, elapsedOffset: Double) throws {
         try begin(sessionId: sessionId, uploadURL: uploadURL, firstChunkIndex: firstChunkIndex,
@@ -79,6 +81,7 @@ final class VoiceRecorder: VoiceRecording {
     private func begin(sessionId: String, uploadURL: URL, firstChunkIndex: Int, elapsedOffset: Double,
                        holdChunks: Bool) throws {
         cancel()
+        inbox = ChunkInbox()
         self.sessionId = sessionId
         self.uploadURL = uploadURL
         self.elapsedOffset = elapsedOffset
@@ -219,6 +222,60 @@ final class VoiceRecorder: VoiceRecording {
             holdingChunks = false
         }
         if let sessionId { uploader.close(sessionId: sessionId) }
+    }
+
+    /// Leaving mid-recording (the Voice screen or the writing form went away,
+    /// #753): capture stops, and the unfinished segment is cut and queued with
+    /// the others, as Stop does, so recovery gets everything that was said.
+    /// Nothing is finalized. `cancel()` dropped that segment: up to 15 s.
+    ///
+    /// The recorder is free for a new recording at once; the returned task
+    /// finishes this one (its writer, inbox and session go with it) and says
+    /// what became of it. A continued recording still held for its claim sends
+    /// nothing (#388), and nothing running is only cancelled: `.nothing`.
+    @discardableResult
+    func leave() -> Task<RecordingLeft, Never> {
+        guard source != nil, !holdingChunks, let sessionId else {
+            cancel()
+            return Task { .nothing }
+        }
+        recordingLog.note("recorder leave: the unfinished segment is queued")
+        gate.set(open: false)
+        source?.stop()
+        source = nil
+        let writer = writer
+        let inbox = inbox
+        let shift = indexShift
+        let uploader = uploader
+        let recordingLog = recordingLog
+        // The session has audio: a chunk (a continued session numbers after
+        // its stored ones), or samples not cut yet. Without any, finishing
+        // would make a chunk of the encoder's padding alone.
+        let hasAudio = (writer?.nextChunkIndex ?? 0) > 0 || (writer?.secondsWritten ?? 0) > 0
+        // Detached: a chunk the writer hands over from now on lands in its own
+        // inbox, never in the next recording's.
+        self.writer = nil
+        currentWriterUnsafe = nil
+        self.inbox = ChunkInbox()
+        self.sessionId = nil
+        return Task { @MainActor in
+            guard hasAudio else {
+                uploader.close(sessionId: sessionId)
+                recordingLog.note("recorder left: no audio")
+                return .empty(sessionId: sessionId)
+            }
+            if let writer { await writer.finish() }
+            for var chunk in inbox.popAll() {
+                chunk.index += shift
+                recordingLog.note("chunk \(chunk.index): \(String(format: "%.1f", chunk.duration)) s, \(chunk.data.count / 1024) KB (left)")
+                uploader.enqueue(sessionId: sessionId, chunk: chunk)
+            }
+            let outcome = await uploader.settle(sessionId: sessionId)
+            recordingLog.note("recorder left: \(outcome.produced) chunks produced, \(outcome.stored) stored, failed \(outcome.failed)")
+            // Nothing queued at all: the queue was deleted meanwhile (sign-out).
+            if outcome.fatalMessage != nil || outcome.produced == 0 { return .nothing }
+            return outcome.failed.isEmpty ? .stored(sessionId: sessionId) : .pending(sessionId: sessionId)
+        }
     }
 
     func forget(sessionId: String) {

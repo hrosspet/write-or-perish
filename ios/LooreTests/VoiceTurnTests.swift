@@ -33,8 +33,11 @@ final class FakeVoiceBackend: VoiceBackend {
     /// `next_chunk_index` nil: the turn continues from the listed chunk count.
     var claimResult: Result<StreamingClaimResponse, Error> = .success(StreamingClaimResponse(nextChunkIndex: nil))
     var claimed: [String] = []
+    /// Seconds the claim takes.
+    var claimDelay: Double = 0
     func claimSession(sessionId: String) async throws -> StreamingClaimResponse {
         claimed.append(sessionId)
+        if claimDelay > 0 { try await Task.sleep(nanoseconds: UInt64(claimDelay * 1_000_000_000)) }
         return try claimResult.get()
     }
 
@@ -111,6 +114,12 @@ final class FakeVoiceBackend: VoiceBackend {
         discarded.append(sessionId)
     }
 
+    var released: [String] = []
+    func release(sessionId: String) async {
+        log.append("release")
+        released.append(sessionId)
+    }
+
     /// `GET /api/tool-approvals?node=`: the waiting calls per node asked (none
     /// listed: nothing waits). Not in `log`, so the turn sequences stay as they were.
     var approvalLists: [Int: [ToolApproval]] = [:]
@@ -155,18 +164,30 @@ final class FakeRecorder: VoiceRecording {
     weak var audio: FakeAudio?
     var calls: [String] = []
 
+    /// The session recording now (nil: nothing runs), and whether its chunks
+    /// wait for the claim.
+    private var running: String?
+    private var holding = false
+
     func start(sessionId: String, uploadURL: URL, firstChunkIndex: Int, elapsedOffset: Double) throws {
         calls.append("start \(sessionId) from \(firstChunkIndex)")
         if let startError { throw startError }
         elapsed = elapsedOffset + 3
+        running = sessionId
+        holding = false
     }
     func startHoldingChunks(sessionId: String, uploadURL: URL, firstChunkIndex: Int,
                             elapsedOffset: Double) throws {
         calls.append("start \(sessionId) holding from \(firstChunkIndex)")
         if let startError { throw startError }
         elapsed = elapsedOffset + 3
+        running = sessionId
+        holding = true
     }
-    func releaseHeldChunks(firstChunkIndex: Int) { calls.append("release from \(firstChunkIndex)") }
+    func releaseHeldChunks(firstChunkIndex: Int) {
+        calls.append("release from \(firstChunkIndex)")
+        holding = false
+    }
     var resumeError: Error?
     func pause() { calls.append("pause") }
     func resume() throws {
@@ -178,16 +199,35 @@ final class FakeRecorder: VoiceRecording {
     var stopDelay: Double = 0
     func stop() async -> ChunkUploader.Outcome {
         calls.append("stop")
+        running = nil
         audio?.events.append("recorder.stop")
         if stopDelay > 0 { try? await Task.sleep(nanoseconds: UInt64(stopDelay * 1_000_000_000)) }
         return outcome
     }
     func cancel() {
         calls.append("cancel")
-        hasProducedChunks = false  // the real recorder drops its writer
+        running = nil
     }
-    func forget(sessionId: String) { calls.append("forget") }
+    /// Whether the recording so far reached a chunk (after the leave's flush).
     var hasProducedChunks = true
+    /// What a leave of a recording with chunks reports (default: all stored).
+    var leaveResult: RecordingLeft?
+    func leave() -> Task<RecordingLeft, Never> {
+        calls.append("leave")
+        let result: RecordingLeft
+        if let sid = running, !holding {
+            result = hasProducedChunks ? leaveResult ?? .stored(sessionId: sid) : .empty(sessionId: sid)
+        } else {
+            result = .nothing
+        }
+        running = nil
+        return Task { result }
+    }
+    var forgotten: [String] = []
+    func forget(sessionId: String) {
+        calls.append("forget")
+        forgotten.append(sessionId)
+    }
 }
 
 @MainActor
@@ -1147,21 +1187,71 @@ final class VoiceTurnTests: XCTestCase {
     // MARK: Leaving the screen (Peter, 2026-10-06: a session left before its
     // first chunk stayed in 'recording' and came back in Text mode)
 
-    func testLeavingBeforeTheFirstChunkDiscardsTheSession() async throws {
+    // #753: even after the leave's flush no audio reached a chunk.
+    func testLeavingBeforeAnyAudioDiscardsTheSession() async throws {
         recorder.hasProducedChunks = false
         turn.start()
         await wait("recording") { turn.state == .recording }
         turn.tearDown()
         await wait("discard") { backend.log.contains("discard") }
-        XCTAssertTrue(recorder.calls.contains("forget"))
+        XCTAssertEqual(backend.discarded, ["sid-1"])
+        XCTAssertEqual(recorder.forgotten, ["sid-1"])
+        XCTAssertEqual(backend.released, [])
     }
 
-    func testLeavingWithAudioKeepsTheSessionForTheBanner() async throws {
+    // #753: leaving mid-recording queues the unfinished piece (the recorder's
+    // leave, not cancel) and, once the server has every chunk, releases the
+    // session so the next Voice screen offers it at once.
+    func testLeavingMidRecordingKeepsEverythingAndReleasesTheSession() async throws {
+        turn.start()
+        await wait("recording") { turn.state == .recording }
+        turn.tearDown()
+        XCTAssertEqual(recorder.calls.first { $0 == "leave" || $0 == "cancel" }, "leave")
+        XCTAssertEqual(turn.state, .idle)
+        await wait("released") { backend.released == ["sid-1"] }
+        XCTAssertEqual(recorder.forgotten, ["sid-1"])
+        XCTAssertFalse(backend.log.contains("discard"))
+        XCTAssertFalse(backend.log.contains { $0.hasPrefix("finalize") }, "left, not finished")
+    }
+
+    func testLeavingWhilePausedKeepsEverythingToo() async throws {
+        turn.start()
+        await wait("recording") { turn.state == .recording }
+        turn.pauseRecording()
+        turn.tearDown()
+        await wait("released") { backend.released == ["sid-1"] }
+        XCTAssertTrue(recorder.calls.contains("leave"))
+    }
+
+    // #753: pieces still on the phone (offline) stay queued; released before
+    // they land, the session could be continued over their numbers.
+    func testLeavingWithPiecesStillOnThePhoneDoesNotReleaseTheSession() async throws {
+        recorder.leaveResult = .pending(sessionId: "sid-1")
         turn.start()
         await wait("recording") { turn.state == .recording }
         turn.tearDown()
         try await Task.sleep(nanoseconds: 100_000_000)
-        XCTAssertFalse(backend.log.contains("discard"))
+        XCTAssertEqual(backend.released, [])
+        XCTAssertEqual(backend.discarded, [])
+        XCTAssertEqual(recorder.forgotten, [], "its queued pieces stay")
+    }
+
+    // #753 with #388: a continue still waiting for its claim sends nothing,
+    // releases nothing and discards nothing (the session has audio).
+    func testLeavingAContinueWaitingForItsClaimSendsNothing() async throws {
+        backend.claimDelay = 0.3
+        let draft = try decode(InterruptedDraft.self,
+            #"{"id":3,"session_id":"old","parent_id":9,"label":"Voice","content":"","chunk_count":4,"has_stored_chunks":true,"streaming_mime_type":"audio/mp4"}"#)
+        turn.resumeInterrupted(draft)
+        await wait("claiming") { backend.claimed == ["old"] }
+        XCTAssertEqual(turn.state, .starting)
+        turn.tearDown()
+        try await Task.sleep(nanoseconds: 400_000_000)
+        XCTAssertTrue(recorder.calls.contains("leave"))
+        XCTAssertFalse(recorder.calls.contains { $0.hasPrefix("release from") }, "the held chunks never go")
+        XCTAssertEqual(backend.released, [])
+        XCTAssertEqual(backend.discarded, [])
+        XCTAssertEqual(recorder.forgotten, [])
     }
 
     func testLeavingWhileTheSessionIsCreatedDiscardsIt() async throws {

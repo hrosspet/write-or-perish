@@ -31,6 +31,9 @@ protocol VoiceBackend: AnyObject {
     /// highest chunk seen.
     func ttsStream(nodeId: Int, lastChunk: Int?) -> AsyncThrowingStream<SSEMessage, Error>
     func discard(sessionId: String) async
+    /// `POST …/release`: this phone no longer records the session, so the
+    /// server offers it for recovery now (the web's pagehide beacon, #320).
+    func release(sessionId: String) async
     /// `GET /api/tool-approvals?node=<id>`: the write tool calls waiting for the
     /// user's approval in that node's thread (Peter, 2026-11-12).
     func pendingApprovals(nodeId: Int) async throws -> [ToolApproval]
@@ -78,13 +81,33 @@ protocol VoiceRecording: AnyObject {
     func interrupt()
     /// Stops capture, uploads everything, reports what the server stored.
     func stop() async -> ChunkUploader.Outcome
-    /// Abandons the recording (uploads already stored stay on the server).
+    /// Abandons the recording (uploads already stored stay on the server; the
+    /// segment not yet cut is dropped).
     func cancel()
-    /// The session has a chunk: stored, queued, or from before a resume.
-    /// Read before `cancel()`, which drops the unfinished segment.
-    var hasProducedChunks: Bool { get }
+    /// Leaving mid-recording (#753): capture stops, the unfinished segment is
+    /// queued with the others, nothing is finalized. Free for a new recording
+    /// at once; the task says what became of the session.
+    @discardableResult
+    func leave() -> Task<RecordingLeft, Never>
     /// The session is finished: forget its local upload state.
     func forget(sessionId: String)
+}
+
+/// What became of a recording left mid-way (`VoiceRecording.leave()`, #753).
+enum RecordingLeft: Equatable {
+    /// Nothing was recording, or a continued recording still waited for its
+    /// claim (nothing of it was sent, #388).
+    case nothing
+    /// Nothing was recorded into the session: it will never have audio (the
+    /// caller discards it).
+    case empty(sessionId: String)
+    /// The server has every chunk: the caller releases the session, so it is
+    /// offered for recovery at once instead of after the server's live window.
+    case stored(sessionId: String)
+    /// Chunks are still on the phone (offline, refused): they stay queued and
+    /// the session is not released (a continue before they land would reuse
+    /// their numbers).
+    case pending(sessionId: String)
 }
 
 /// The queue player as the turn sees it (live: `ChunkQueuePlayer`).
@@ -280,6 +303,10 @@ final class LiveVoiceBackend: VoiceBackend {
         _ = try? await api().data(for: APIRequest(.delete, APIPath.streamingDiscard(sessionId)))
     }
 
+    func release(sessionId: String) async {
+        _ = try? await api().data(for: .streamingRelease(sessionId))
+    }
+
     func pendingApprovals(nodeId: Int) async throws -> [ToolApproval] {
         let list: ToolApprovalList = try await api().get(APIPath.toolApprovals, query: [
             URLQueryItem(name: "node", value: String(nodeId)),
@@ -312,4 +339,17 @@ final class LiveVoiceBackend: VoiceBackend {
 
 private extension JSONValue {
     static func double(_ value: Double) -> JSONValue { .number(value) }
+}
+
+extension APIRequest {
+    /// `POST …/release` for a recording this phone left mid-way (#753), with
+    /// its device key: a session another device continued meanwhile is that
+    /// device's, and the server releases nothing (#388, as the web).
+    @MainActor
+    static func streamingRelease(_ sessionId: String) -> APIRequest {
+        var request = APIRequest.json(.post, APIPath.streamingRelease(sessionId),
+                                      .object(["device_key": .string(RecordingDevice.key)]))
+        request.timeout = AudioCenter.releaseTimeout
+        return request
+    }
 }
