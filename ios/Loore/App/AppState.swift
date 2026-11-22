@@ -212,6 +212,7 @@ final class AppState {
         auth.restoreStoredCookies()
         #endif
         guard auth.hasAuthCookies else {
+            DeviceChoices.signedOutAtLaunch(defaults: defaults)
             phase = .signedOut
             return
         }
@@ -242,6 +243,8 @@ final class AppState {
 
     /// Applies a fresh user object and runs the once-per-launch steps (design doc §4.5).
     func didLoad(_ newUser: CurrentUser) {
+        // Before any form reads them: remembered choices stay with their account.
+        DeviceChoices.signedIn(userId: newUser.id, defaults: defaults)
         user = newUser
         phase = .signedIn
         // Waiting for approval, the account cannot open the page its
