@@ -154,6 +154,12 @@ final class NodeFormModel {
 
     let drafts: DraftAutosaver
     @ObservationIgnored private var started = false
+    /// An edit draft last saved before the entry changed (#761): the form shows
+    /// the entry's text and offers this one (use, copy, discard).
+    private(set) var olderDraft: Draft?
+    /// The server still holds `olderDraft` (until the person types: the
+    /// autosave then keeps what they type now in its place).
+    @ObservationIgnored private var olderDraftStored = false
 
     init(config: NodeFormConfig, app: AppState, defaults: UserDefaults = .standard) {
         self.config = config
@@ -206,8 +212,20 @@ final class NodeFormModel {
         }
         await draftLoad
         if let draft = drafts.draft, !draft.content.isEmpty {
-            content = draft.content
-            hasDraft = true
+            if let edit = config.edit, draft.olderThanEntry {
+                // Saved before the entry changed (a ticked checkbox, an edit on
+                // another device): loaded in place of the entry's text, its
+                // Save would put the older text over the newer one (#761). The
+                // form keeps the entry's text and offers the draft; one with
+                // the entry's own text has nothing to offer.
+                if draft.content != edit.initialContent {
+                    olderDraft = draft
+                    olderDraftStored = true
+                }
+            } else {
+                content = draft.content
+                hasDraft = true
+            }
         }
         if let draft = drafts.draft, let sid = draft.sessionId, draft.hasStoredChunks {
             await recoverAudio(sessionId: sid)
@@ -295,6 +313,9 @@ final class NodeFormModel {
         if !new.jsTrimmed.isEmpty {
             drafts.save(new)
             hasDraft = true
+            // The entry's draft is what the person types now; the older one
+            // stays on offer in the form until it closes.
+            olderDraftStored = false
         }
         if !config.isEdit && uploadedFile != nil { uploadedFile = nil }
     }
@@ -303,6 +324,44 @@ final class NodeFormModel {
         Task { await drafts.delete() }
         hasDraft = false
         content = config.edit?.initialContent ?? ""
+    }
+
+    // MARK: An older edit draft (#761)
+
+    /// The words above the older edit's text.
+    static func olderDraftNotice(_ draft: Draft, timeZone: TimeZone = .current) -> String {
+        let saved = LooreDateFormat.dateTime(draft.updatedAt, timeZone: timeZone)
+        let changed = draft.entryUpdatedAt.map { " (\(LooreDateFormat.dateTime($0, timeZone: timeZone)))" } ?? ""
+        return (saved.isEmpty ? "Your unsaved edit." : "Your unsaved edit from \(saved).")
+            + " The entry changed after it\(changed), so the form shows the entry as it is now."
+    }
+
+    /// "Use my edit" is offered while the form still shows the entry's text:
+    /// it never replaces text typed here.
+    var canUseOlderDraft: Bool {
+        olderDraft != nil && content == (config.edit?.initialContent ?? "")
+    }
+
+    /// "Use my edit": the older unsaved edit becomes the form's text (and the
+    /// entry's current draft); Send saves it.
+    func useOlderDraft() {
+        guard canUseOlderDraft, let older = olderDraft else { return }
+        olderDraft = nil
+        olderDraftStored = false
+        content = older.content
+        drafts.save(older.content)
+        hasDraft = true
+    }
+
+    /// "Discard": the older unsaved edit goes (from the server too while it
+    /// still holds it).
+    func discardOlderDraft() {
+        guard olderDraft != nil else { return }
+        olderDraft = nil
+        if olderDraftStored {
+            olderDraftStored = false
+            Task { await drafts.delete() }
+        }
     }
 
     // MARK: Audio file
@@ -571,9 +630,13 @@ final class NodeFormModel {
         return NodeFormResult(id: created.id, tipId: created.tipId, privacy: entryPrivacy)
     }
 
+    /// A successful send deletes the place's drafts, an older edit on offer
+    /// included (#761: Save with it on screen keeps the entry's text).
     private func clearAfterSend() async {
         await drafts.delete()
         hasDraft = false
+        olderDraft = nil
+        olderDraftStored = false
     }
 
     // MARK: Upload and transcription

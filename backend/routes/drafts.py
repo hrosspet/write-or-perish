@@ -293,6 +293,16 @@ def get_draft():
             "Original parent was deleted; this draft is now top-level."
         )
 
+    # An edit draft last saved before the entry changed (#761: a checkbox
+    # ticked on the thread page, an edit on another device). Loaded in place
+    # of the entry's text, its Save would put the older text over the newer
+    # one; the iPhone shows the entry's text and offers the draft instead.
+    # Any change to the entry counts (updated_at), so none is missed.
+    if (node_id and draft.updated_at and node.updated_at
+            and draft.updated_at < node.updated_at):
+        response_data["older_than_entry"] = True
+        response_data["entry_updated_at"] = node.updated_at.isoformat() + "Z"
+
     # Include streaming session info so frontend can trigger recovery
     if draft.session_id:
         response_data["session_id"] = draft.session_id

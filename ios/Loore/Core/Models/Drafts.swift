@@ -15,6 +15,11 @@ struct Draft: Decodable, Identifiable, Sendable {
     var warning: String?
     var sessionId: String?
     var hasStoredChunks: Bool
+    /// An edit draft last saved before its entry changed (#761): not loaded in
+    /// place of the entry's text.
+    var olderThanEntry: Bool
+    /// When the entry last changed (set with `olderThanEntry`).
+    var entryUpdatedAt: Date?
 
     enum CodingKeys: String, CodingKey {
         case id, content, warning
@@ -25,6 +30,8 @@ struct Draft: Decodable, Identifiable, Sendable {
         case parentDeleted = "parent_deleted"
         case sessionId = "session_id"
         case hasStoredChunks = "has_stored_chunks"
+        case olderThanEntry = "older_than_entry"
+        case entryUpdatedAt = "entry_updated_at"
     }
 
     init(from decoder: Decoder) throws {
@@ -39,6 +46,8 @@ struct Draft: Decodable, Identifiable, Sendable {
         warning = c.tolerant(.warning)
         sessionId = c.tolerant(.sessionId)
         hasStoredChunks = c.tolerant(.hasStoredChunks, default: false)
+        olderThanEntry = c.tolerant(.olderThanEntry, default: false)
+        entryUpdatedAt = c.tolerant(.entryUpdatedAt)
     }
 }
 

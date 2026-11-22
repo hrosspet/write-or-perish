@@ -303,6 +303,123 @@ final class NodeFormModelTests: StubbedAppTestCase {
         XCTAssertEqual(DraftAutosaver.timeAgo(now.addingTimeInterval(-600), now: now), "10m ago")
         XCTAssertEqual(DraftAutosaver.timeAgo(now.addingTimeInterval(-7300), now: now), "2h ago")
     }
+
+    // MARK: An edit draft older than the entry's last change (#761)
+
+    private static let olderDraft = #"{"id":3,"content":"- [ ] milk\n- [ ] eggs","node_id":9,"updated_at":"2026-11-20T14:03:00Z","older_than_entry":true,"entry_updated_at":"2026-11-21T09:12:00Z"}"#
+
+    /// The entry as the thread page shows it: the checkbox ticked after the edit was left.
+    private func editForm(_ draftJSON: String, entry: String = "- [x] milk") -> NodeFormModel {
+        StubURLProtocol.install { request in
+            let path = request.url?.path(percentEncoded: true)
+            if request.httpMethod == "GET" && path == "/api/drafts/" { return .json(200, draftJSON) }
+            if request.httpMethod == "PUT" {
+                return .json(200, #"{"node":{"id":9,"content":"saved"},"descendants_updated":0}"#)
+            }
+            return .json(200, #"{"id":3,"content":"saved","updated_at":"2026-11-22T10:00:00Z"}"#)
+        }
+        return NodeFormModel(config: NodeFormConfig(edit: .init(nodeId: 9, initialContent: entry, initialPrivacy: .private,
+                                                                initialAIUsage: .chat)),
+                             app: app, defaults: defaults)
+    }
+
+    private func eventually(_ condition: () -> Bool) async -> Bool {
+        for _ in 0..<60 {
+            if condition() { return true }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        return condition()
+    }
+
+    func testAnEditDraftOlderThanTheEntryIsOfferedNotLoaded() async {
+        let model = editForm(Self.olderDraft)
+        await model.start()
+        XCTAssertEqual(model.content, "- [x] milk", "the entry's newer text")
+        XCTAssertEqual(model.olderDraft?.content, "- [ ] milk\n- [ ] eggs")
+        XCTAssertFalse(model.hasDraft)
+        XCTAssertTrue(model.canUseOlderDraft)
+        XCTAssertFalse(calls.contains { $0.hasPrefix("DELETE") }, "the person's text stays on the server")
+    }
+
+    func testUsingTheOlderEditMakesItTheFormsText() async {
+        let model = editForm(Self.olderDraft)
+        await model.start()
+        model.useOlderDraft()
+        XCTAssertEqual(model.content, "- [ ] milk\n- [ ] eggs")
+        XCTAssertNil(model.olderDraft)
+        XCTAssertTrue(model.hasDraft)
+        await model.drafts.flush()
+        XCTAssertEqual(body(of: "POST /api/drafts/")?["content"] as? String, "- [ ] milk\n- [ ] eggs",
+                       "saved again, now newer than the entry")
+    }
+
+    func testDiscardingTheOlderEditDeletesIt() async {
+        let model = editForm(Self.olderDraft)
+        await model.start()
+        model.discardOlderDraft()
+        XCTAssertNil(model.olderDraft)
+        let deleted = await eventually { calls.contains("DELETE /api/drafts/") }
+        XCTAssertTrue(deleted)
+        XCTAssertEqual(model.content, "- [x] milk")
+    }
+
+    // Typing works on the entry's text: the autosave keeps it as the entry's
+    // draft, and "Use my edit" no longer appears (it would replace the typing).
+    func testTypingKeepsTheOlderEditOnOfferUntilTheFormCloses() async throws {
+        let model = editForm(Self.olderDraft)
+        await model.start()
+        model.content = "- [x] milk\n- [x] bread"
+        model.contentChanged(from: "- [x] milk", to: model.content)
+        XCTAssertFalse(model.canUseOlderDraft)
+        model.useOlderDraft()
+        XCTAssertEqual(model.content, "- [x] milk\n- [x] bread", "typed text is never replaced")
+        XCTAssertNotNil(model.olderDraft, "still there to copy from")
+
+        model.discardOlderDraft()
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertNil(model.olderDraft)
+        XCTAssertFalse(calls.contains("DELETE /api/drafts/"), "the server's draft is the newly typed text")
+    }
+
+    func testADraftNewerThanTheEntryLoadsAsBefore() async {
+        let model = editForm(#"{"id":3,"content":"- [x] milk\n- [ ] eggs","node_id":9,"updated_at":"2026-11-22T09:00:00Z"}"#)
+        await model.start()
+        XCTAssertEqual(model.content, "- [x] milk\n- [ ] eggs")
+        XCTAssertTrue(model.hasDraft)
+        XCTAssertNil(model.olderDraft)
+    }
+
+    func testAnOlderDraftWithTheEntrysOwnTextIsNotOffered() async {
+        let model = editForm(#"{"id":3,"content":"- [x] milk","node_id":9,"updated_at":"2026-11-20T14:03:00Z","older_than_entry":true}"#)
+        await model.start()
+        XCTAssertNil(model.olderDraft)
+        XCTAssertFalse(model.hasDraft)
+        XCTAssertEqual(model.content, "- [x] milk")
+    }
+
+    // Save with the older edit on screen keeps the entry's text, and the
+    // successful save clears the entry's drafts, the older edit included.
+    func testSavingTheEditClearsTheEntrysDraft() async {
+        let model = editForm(Self.olderDraft)
+        await model.start()
+        await model.submit()
+        XCTAssertEqual(body(of: "PUT /api/nodes/9")?["content"] as? String, "- [x] milk")
+        let delete = StubURLProtocol.requests.last { $0.httpMethod == "DELETE" }
+        XCTAssertEqual(delete?.url?.path(percentEncoded: true), "/api/drafts/")
+        XCTAssertEqual(delete?.url?.query, "node_id=9")
+        XCTAssertNil(model.olderDraft)
+    }
+
+    func testTheOlderEditsNoticeSaysWhenEachWasMade() throws {
+        let draft = try decode(Draft.self, Self.olderDraft)
+        XCTAssertTrue(draft.olderThanEntry)
+        XCTAssertEqual(NodeFormModel.olderDraftNotice(draft, timeZone: TimeZone(identifier: "UTC")!),
+                       "Your unsaved edit from 2026/11/20 14:03. The entry changed after it (2026/11/21 09:12), "
+                       + "so the form shows the entry as it is now.")
+        let plain = try decode(Draft.self, #"{"id":4,"content":"x"}"#)
+        XCTAssertFalse(plain.olderThanEntry)
+        XCTAssertNil(plain.entryUpdatedAt)
+    }
 }
 
 /// Review M5: the draft survives the form leaving the screen.
