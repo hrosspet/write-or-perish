@@ -22,6 +22,33 @@ SEARCH_REFUSED_MESSAGE = (
     "Search needs AI to find things by meaning. Your Default AI usage is "
     "set to None, so Loore keeps your entries away from AI. You can change "
     "it in Account settings.")
+# Search by meaning sends the search words to the embedding model's
+# provider. An account that answered that its writing stays with its own
+# provider, when that is another one, has no search by meaning
+# (utils/profile_providers.kept_from_embeddings): 403 with this code and
+# the provider's id. The clients show their own copy of the text (web
+# SearchModal, iOS SearchView) and read `search_kept_to_provider` of the
+# user (profile_providers.search_kept_to_provider) to say so before a
+# search is made.
+SEARCH_ONE_PROVIDER_CODE = "search_one_provider"
+SEARCH_ONE_PROVIDER_MESSAGE = (
+    "Search finds things by meaning with a model from OpenAI. You chose "
+    "to keep your writing with {provider} only, so Loore sends neither "
+    "your entries nor your search words to OpenAI, and there is no "
+    "search. You can change this under Background tasks in Account "
+    "settings on loore.org.")
+_PROVIDER_NAMES = {"anthropic": "Anthropic", "openai": "OpenAI"}
+
+
+def search_one_provider_response(provider):
+    name = _PROVIDER_NAMES.get(provider, "your default model's provider")
+    return jsonify({
+        "error": SEARCH_ONE_PROVIDER_MESSAGE.format(provider=name),
+        "code": SEARCH_ONE_PROVIDER_CODE,
+        "provider": provider,
+    }), 403
+
+
 KEYWORD_SEARCH_ADMIN_ONLY_MESSAGE = "Keyword search is only for admins."
 
 
@@ -327,7 +354,9 @@ def semantic_search():
     chunked scan in Python). Only AI-readable nodes are embedded, so
     ai_usage='none' content never appears here (keyword search still
     covers it). An account set to None is refused before anything else
-    (SEARCH_REFUSED_MESSAGE); an account at its spend cap gets the spend
+    (SEARCH_REFUSED_MESSAGE), and so is an account that keeps to a
+    provider other than the embedding model's
+    (SEARCH_ONE_PROVIDER_MESSAGE); an account at its spend cap gets the spend
     cap's 402, as for its other billed calls.
     """
     from flask import current_app
@@ -342,6 +371,10 @@ def semantic_search():
     if not account_allows_ai(current_user):
         return ai_usage_refused_response(
             AIUsageRefused(SEARCH_REFUSED_MESSAGE, "account"))
+    from backend.utils.profile_providers import search_kept_to_provider
+    kept_to = search_kept_to_provider(current_user)
+    if kept_to is not None:
+        return search_one_provider_response(kept_to)
 
     q = request.args.get("q", "").strip()
     limit = min(request.args.get("limit", 20, type=int), 50)

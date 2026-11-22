@@ -138,15 +138,42 @@ enum SearchAccess: Equatable {
     case keywordOnly
     /// The sheet says why there is no search.
     case needsAI
+    /// The account keeps its writing with this provider (its id) and the search
+    /// model is OpenAI's, so nothing is sent to it: the sheet says so. The server
+    /// refuses the search with `search_one_provider`.
+    case oneProvider(String)
 
     static let title = "Search needs AI"
     static let body = "Search needs AI to find things by meaning. Your Default AI usage is set to None, "
         + "so Loore keeps your entries away from AI. You can change it in Account settings."
 
+    static let oneProviderCode = "search_one_provider"
+    static let oneProviderTitle = "Search is off"
+
+    /// The web's `searchOneProviderText`; the setting is on the web's Account page.
+    static func oneProviderBody(_ provider: String) -> String {
+        let names = ["anthropic": "Anthropic", "openai": "OpenAI"]
+        let own = names[provider] ?? "your default model's provider"
+        return "Search finds things by meaning with a model from OpenAI. You chose to keep your writing with "
+            + "\(own) only, so Loore sends neither your entries nor your search words to OpenAI, and there is "
+            + "no search. You can change this under Background tasks in Account settings on loore.org."
+    }
+
     /// No user loaded yet: search by meaning, which the server refuses if it must.
-    static func decide(accountAIUsage: AIUsage?, isAdmin: Bool) -> SearchAccess {
-        guard let accountAIUsage, !accountAIUsage.allowsAI else { return .semantic }
-        return isAdmin ? .keywordOnly : .needsAI
+    static func decide(accountAIUsage: AIUsage?, isAdmin: Bool, keptToProvider: String? = nil) -> SearchAccess {
+        if let accountAIUsage, !accountAIUsage.allowsAI {
+            return isAdmin ? .keywordOnly : .needsAI
+        }
+        if let keptToProvider, !keptToProvider.isEmpty {
+            return isAdmin ? .keywordOnly : .oneProvider(keptToProvider)
+        }
+        return .semantic
+    }
+
+    /// The provider id of the server's one-provider refusal (403 `search_one_provider`).
+    static func oneProviderRefusal(_ error: Error) -> String? {
+        guard let api = error as? APIError, api.code == oneProviderCode else { return nil }
+        return api.body?.extra["provider"]?.stringValue ?? "unknown"
     }
 
     /// The server's refusal (403 `ai_usage_none`): the setting changed elsewhere.
@@ -166,6 +193,7 @@ struct SearchView: View {
     @State private var query = ""
     @State private var chosenSemantic = true
     @State private var refused = false
+    @State private var refusedProvider: String?
     @State private var showDates = false
     @State private var from: Date?
     @State private var to: Date?
@@ -180,16 +208,25 @@ struct SearchView: View {
     private var external: Bool { scope == .external }
 
     private var access: SearchAccess {
-        SearchAccess.decide(accountAIUsage: app.user?.defaultAIUsage, isAdmin: app.capabilities.isAdmin)
+        SearchAccess.decide(accountAIUsage: app.user?.defaultAIUsage, isAdmin: app.capabilities.isAdmin,
+                            keptToProvider: app.user?.searchKeptToProvider ?? refusedProvider)
     }
 
-    private var searchOff: Bool { refused || access == .needsAI }
+    /// The provider the notice names, when that is why there is no search.
+    private var keptToProvider: String? {
+        if case .oneProvider(let provider) = access { return provider }
+        return nil
+    }
+
+    private var searchOff: Bool { refused || access == .needsAI || keptToProvider != nil }
 
     /// Search by meaning: the admin's choice, never for an account set to None.
     private var semantic: Bool { chosenSemantic && access == .semantic }
 
     var body: some View {
-        if searchOff {
+        if let provider = keptToProvider, !refused, access != .needsAI {
+            oneProviderView(provider)
+        } else if searchOff {
             needsAIView
         } else {
             searchSheet
@@ -217,6 +254,31 @@ struct SearchView: View {
             }
             .buttonStyle(LooreButtonStyle(kind: .link))
             .accessibilityIdentifier("search.needsAI.account")
+            Spacer(minLength: 0)
+        }
+        .multilineTextAlignment(.center)
+        .padding(.top, 40)
+        .padding(.horizontal, 24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(LooreColor.bgCard.ignoresSafeArea())
+        .presentationDragIndicator(.visible)
+    }
+
+    /// In place of the search box and its results, for an account that keeps to a
+    /// provider other than the search model's. The setting is on the web.
+    private func oneProviderView(_ provider: String) -> some View {
+        VStack(spacing: 0) {
+            Text(SearchAccess.oneProviderTitle)
+                .font(LooreFont.serif(19.2, .light, italic: true, relativeTo: .title2))
+                .foregroundStyle(LooreColor.textMuted)
+                .padding(.bottom, 16)
+                .accessibilityAddTraits(.isHeader)
+            Text(SearchAccess.oneProviderBody(provider))
+                .font(LooreFont.sans(14.4, .light))
+                .foregroundStyle(LooreColor.textSecondary)
+                .lineSpacing(5)
+                .frame(maxWidth: 340)
+                .accessibilityIdentifier("search.oneProvider")
             Spacer(minLength: 0)
         }
         .multilineTextAlignment(.center)
@@ -418,6 +480,7 @@ struct SearchView: View {
         } catch {
             if (error as? APIError)?.isCancelled == true { return }
             if SearchAccess.isRefusal(error) { refused = true }
+            if let provider = SearchAccess.oneProviderRefusal(error) { refusedProvider = provider }
             results = []
             total = 0
         }

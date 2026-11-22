@@ -89,6 +89,7 @@ from backend.utils.artifact_versions import (
 from backend.utils.privacy import (
     AI_ALLOWED, X_API_INPUT, account_allows_ai, chat_at_most,
 )
+from backend.utils.profile_providers import kept_from_embeddings
 from backend.utils.proposals import is_own_live_proposal
 from backend.utils.placeholders import (
     CA_TWEETS_PATTERN,
@@ -965,6 +966,14 @@ ARTIFACT_KEPT_FROM_AI_ERROR = (
 SEARCH_TOOL_ACCOUNT_NONE_ERROR = (
     "Search is off for this user: their Default AI usage is set to None, "
     "so nothing is sent to the search model. Nothing was searched.")
+
+# semantic_search for a user who keeps their writing with a provider
+# other than the embedding model's (profile_providers.kept_from_embeddings):
+# the search words would go to that model, so nothing is searched.
+SEARCH_TOOL_ONE_PROVIDER_ERROR = (
+    "Search is off for this user: they chose to keep their writing with "
+    "one provider, and the search model belongs to another, so nothing "
+    "is sent to it. Nothing was searched.")
 
 
 def _todo_index_line(user_id, pinned_node=None):
@@ -2860,6 +2869,12 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                     # (gated_voice_tools: the cache prefix).
                     result["status"] = "error"
                     result["error"] = SEARCH_TOOL_ACCOUNT_NONE_ERROR
+                elif kept_from_embeddings(User.query.get(user_id)):
+                    # The same for an account that keeps to a provider
+                    # other than the embedding model's. The tool stays
+                    # in the list here too.
+                    result["status"] = "error"
+                    result["error"] = SEARCH_TOOL_ONE_PROVIDER_ERROR
                 else:
                     from backend.utils.api_keys import get_openai_chat_key
                     from backend.utils.embeddings import (

@@ -6,6 +6,7 @@ import { useUser } from '../contexts/UserContext';
 import { authorLabel, sourceLabel } from '../utils/references';
 import { highlightRuns } from '../utils/searchHighlight';
 import { isAiAllowed, isAiUsageRefusedError } from '../utils/aiUsage';
+import { PROVIDER_NAMES } from './BothProvidersDialog';
 
 // Search by meaning sends the search words to an embedding model, so an
 // account whose Default AI usage is None has no search (Peter, 2026-11-13;
@@ -16,8 +17,36 @@ export const SEARCH_NEEDS_AI_TEXT = 'Search needs AI to find things by '
   + 'meaning. Your Default AI usage is set to None, so Loore keeps your '
   + 'entries away from AI. You can change it in Account settings.';
 
+// Search by meaning uses an embedding model from OpenAI. An account that
+// answered that its writing stays with another provider has no search:
+// nothing of it is sent to OpenAI (the server refuses the search with
+// this code; backend/routes/search.py SEARCH_ONE_PROVIDER_MESSAGE). The
+// user JSON carries the provider's id in `search_kept_to_provider`.
+// The iPhone app says the same (SearchView).
+export const SEARCH_ONE_PROVIDER_CODE = 'search_one_provider';
+export const SEARCH_ONE_PROVIDER_TITLE = 'Search is off';
+export function searchOneProviderText(provider) {
+  const own = PROVIDER_NAMES[provider] || "your default model's provider";
+  return 'Search finds things by meaning with a model from OpenAI. You '
+    + `chose to keep your writing with ${own} only, so Loore sends neither `
+    + 'your entries nor your search words to OpenAI, and there is no '
+    + 'search. You can change this under Background tasks in Account '
+    + 'settings.';
+}
+
+/** The provider id of the server's one-provider refusal, else null. */
+function oneProviderRefusal(err) {
+  const data = err && err.response && err.response.data;
+  if (!data || data.code !== SEARCH_ONE_PROVIDER_CODE) return null;
+  return data.provider || 'unknown';
+}
+
 // In place of the search box and its results.
-function SearchNeedsAi({ onAccount }) {
+function SearchNeedsAi({
+  onAccount,
+  title = SEARCH_NEEDS_AI_TITLE,
+  text = SEARCH_NEEDS_AI_TEXT,
+}) {
   return (
     <div style={{ padding: '32px 28px', textAlign: 'center' }}>
       <p style={{
@@ -28,7 +57,7 @@ function SearchNeedsAi({ onAccount }) {
         color: 'var(--text-muted)',
         margin: '0 0 16px 0',
       }}>
-        {SEARCH_NEEDS_AI_TITLE}
+        {title}
       </p>
       <p style={{
         fontFamily: 'var(--sans)',
@@ -39,7 +68,7 @@ function SearchNeedsAi({ onAccount }) {
         maxWidth: '420px',
         margin: '0 auto 24px auto',
       }}>
-        {SEARCH_NEEDS_AI_TEXT}
+        {text}
       </p>
       <button
         type="button"
@@ -77,11 +106,18 @@ function SearchModal({ onClose, onOpenNode, scope = 'archive' }) {
   const accountAiOff = !!user && !isAiAllowed(user.default_ai_usage);
   // The server said the same (the setting changed elsewhere).
   const [refused, setRefused] = useState(false);
-  const searchOff = refused || (accountAiOff && !isAdmin);
+  // An account that keeps to a provider other than the embedding
+  // model's: the same, with its own text. From the user JSON, or from
+  // the server's refusal (the answer changed elsewhere).
+  const [refusedProvider, setRefusedProvider] = useState(null);
+  const keptToProvider = (user && user.search_kept_to_provider)
+    || refusedProvider;
+  const meaningOff = accountAiOff || !!keptToProvider;
+  const searchOff = refused || (meaningOff && !isAdmin);
   const [query, setQuery] = useState('');
   // Semantic is the default for everyone; the Keyword toggle is admin-only.
   const [chosenMode, setMode] = useState('semantic'); // 'keyword' | 'semantic'
-  const mode = accountAiOff ? 'keyword' : chosenMode;
+  const mode = meaningOff ? 'keyword' : chosenMode;
   const [showDateFilter, setShowDateFilter] = useState(false);
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
@@ -131,6 +167,8 @@ function SearchModal({ onClose, onOpenNode, scope = 'archive' }) {
     } catch (err) {
       if (isAiUsageRefusedError(err)) {
         setRefused(true);
+      } else if (oneProviderRefusal(err)) {
+        setRefusedProvider(oneProviderRefusal(err));
       } else if (err.response?.status !== 400) {
         console.error('Search error:', err);
       }
@@ -250,8 +288,14 @@ function SearchModal({ onClose, onOpenNode, scope = 'archive' }) {
           overflow: 'hidden',
         }}
       >
-        {searchOff ? (
+        {searchOff && (refused || accountAiOff) ? (
           <SearchNeedsAi onAccount={() => { onClose(); navigate('/account#ai-usage'); }} />
+        ) : searchOff ? (
+          <SearchNeedsAi
+            title={SEARCH_ONE_PROVIDER_TITLE}
+            text={searchOneProviderText(keptToProvider)}
+            onAccount={() => { onClose(); navigate('/account#background-tasks'); }}
+          />
         ) : (<>
         {/* Search input row */}
         <div style={{
@@ -284,7 +328,7 @@ function SearchModal({ onClose, onOpenNode, scope = 'archive' }) {
               fontFamily: 'var(--sans)',
             }}
           />
-          {isAdmin && !accountAiOff && (
+          {isAdmin && !meaningOff && (
             <button
               onClick={() => setMode(mode === 'keyword' ? 'semantic' : 'keyword')}
               title={mode === 'semantic'

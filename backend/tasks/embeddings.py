@@ -8,8 +8,10 @@ each of them. New/edited nodes become searchable within one sweep period.
 Only nodes with ai_usage in AI_ALLOWED are embedded: embedding submits
 content to OpenAI, so 'none' nodes are never sent (their keyword search
 still works). Nothing new is embedded for an owner whose account setting
-is 'none' (#346); their existing vectors are kept. Deleted nodes'
-embeddings are removed.
+is 'none' (#346); their existing vectors are kept. The same holds for an
+owner who answered that their writing stays with their own provider when
+that is not the embedding model's (profile_providers.kept_from_embeddings).
+Deleted nodes' embeddings are removed.
 
 One sweep runs at a time (a Redis lock, utils/run_locks), and a new row
 that another sweep wrote in the meantime is left as it is (INSERT ... ON
@@ -34,6 +36,7 @@ from backend.utils.embeddings import (
 from backend.utils.encryption import key_service_unavailable
 from backend.utils.error_privacy import describe_exception
 from backend.utils.privacy import AI_ALLOWED
+from backend.utils.profile_providers import kept_from_embeddings_clause
 
 from backend.utils.hidden_rows import account_on_hold_user_ids, hidden_ids
 
@@ -180,6 +183,9 @@ def _candidate_query(limit, dialect=None):
             # The nodes a "Delete all my content" hid are soft-deleted,
             # so they are left out above (#590).
             ~User.id.in_(account_on_hold_user_ids()),
+            # An owner who keeps to a provider other than the embedding
+            # model's: nothing of theirs is sent to it.
+            ~kept_from_embeddings_clause(),
             *_paid_features_filter(),
         )
         .filter(or_(
@@ -196,7 +202,8 @@ def _candidate_query(limit, dialect=None):
 
 def _candidate_external_items(limit):
     """Saved references without an embedding, whose owner's account
-    setting allows AI (#346)."""
+    setting allows AI (#346) and who does not keep to a provider other
+    than the embedding model's."""
     return (
         db.session.query(ExternalItem, ExternalItemEmbedding)
         .outerjoin(ExternalItemEmbedding,
@@ -205,6 +212,7 @@ def _candidate_external_items(limit):
         .filter(ExternalItemEmbedding.id.is_(None),
                 User.default_ai_usage.in_(AI_ALLOWED),
                 ~User.id.in_(account_on_hold_user_ids()),   # #269
+                ~kept_from_embeddings_clause(),
                 *_paid_features_filter(),
                 # A Read pick nobody saved is not a reference (#352).
                 ExternalItem.saved())

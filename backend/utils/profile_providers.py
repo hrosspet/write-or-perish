@@ -13,7 +13,7 @@ asked are at the end of this module (``both_providers_ask``).
 from datetime import datetime, timedelta
 
 from flask import current_app
-from sqlalchemy import func, not_, or_
+from sqlalchemy import and_, false, func, not_, or_
 from sqlalchemy.orm import aliased
 
 from backend.extensions import db
@@ -265,3 +265,64 @@ def ask_after_import(user, ai_usage, added):
         current_app.logger.warning(
             "Both-providers check after import failed", exc_info=False)
         return False
+
+
+# ── Search data and the one-provider answer ──────────────────────────────
+# Search by meaning needs an embedding of every AI-readable entry and of
+# the search words, and the embedding model is one provider's
+# (utils/embeddings.EMBEDDING_PROVIDER). A user who answered that their
+# writing stays with their own provider, when that provider is another
+# one, gets no embedding call: nothing new is embedded for them and
+# search by meaning is off, which the apps say where the search would be.
+# A user who never answered is not covered by this rule ("we don't
+# know", as above). Vectors stored before the answer are kept.
+
+def _answered_one_provider():
+    return and_(User.profile_both_providers_answered_at.isnot(None),
+                   User.profile_both_providers.is_(False))
+
+
+def _pref_keeps_from_embeddings(preferred_model):
+    """Whether an account with this saved model (None or "": the default
+    model) is on a provider other than the embedding model's. A provider
+    that cannot be told counts as another one."""
+    from types import SimpleNamespace
+    from backend.utils.embeddings import EMBEDDING_PROVIDER
+    return profile_provider(
+        SimpleNamespace(preferred_model=preferred_model or None)
+    ) != EMBEDDING_PROVIDER
+
+
+def kept_from_embeddings(user):
+    """Whether no embedding call may be made for this user: they answered
+    "one provider" (``both_providers_answer`` is False) and their provider
+    is not the embedding model's."""
+    if both_providers_answer(user) is not False:
+        return False
+    return _pref_keeps_from_embeddings(user.preferred_model)
+
+
+def search_kept_to_provider(user):
+    """The id of the provider the user keeps to when that turns search by
+    meaning off for them, else None (the user JSON's
+    `search_kept_to_provider`; "unknown" for a provider that cannot be
+    told)."""
+    if not kept_from_embeddings(user):
+        return None
+    return profile_provider(user) or "unknown"
+
+
+def kept_from_embeddings_clause():
+    """``kept_from_embeddings`` as a SQL clause on User, for the search-data
+    sweep. The provider of a saved model comes from the configuration, so
+    the saved models of the accounts that answered "one provider" are read
+    first (one short query) and the clause names those on another
+    provider. Never NULL, so it can be negated."""
+    answered_no = _answered_one_provider()
+    pref = func.coalesce(User.preferred_model, "")
+    prefs = [p for (p,) in db.session.query(pref).filter(
+        answered_no).distinct()]
+    kept = [p for p in prefs if _pref_keeps_from_embeddings(p)]
+    if not kept:
+        return false()
+    return and_(answered_no, pref.in_(kept))

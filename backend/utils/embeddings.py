@@ -35,6 +35,10 @@ from backend.utils.cost import EMBEDDING_PRICE_PER_MTOK
 logger = logging.getLogger(__name__)
 
 EMBEDDING_MODEL = "text-embedding-3-small"
+# The provider that runs EMBEDDING_MODEL: every embedding call sends its
+# text there. An account that keeps its writing with another provider
+# gets no embedding call (utils/profile_providers.kept_from_embeddings).
+EMBEDDING_PROVIDER = "openai"
 # Dimension of EMBEDDING_MODEL's vectors; the pgvector copies are typed to it.
 EMBEDDING_DIM = 1536
 # text-embedding-3-small hard-caps each input at 8191 tokens. We cap by
