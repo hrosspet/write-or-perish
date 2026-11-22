@@ -14,7 +14,10 @@ the audio storage root:
   folder that no row points at any more;
 * a streaming session folder (``streaming/<uid>/<session>/``) that no
   node not yet finalized and no draft names, once unchanged for the
-  grace period.
+  grace period;
+* the pieces of an audio file's upload (``chunks/<uid>/<upload>/``) once
+  unchanged for 48 hours, when the entry no longer takes pieces; that
+  entry, if it still waits for its file, then ends ``failed``.
 
 Never a file a row points at, a live node's recording, a node within the
 grace period, a row a waiting "Delete all my content" hid, a folder with
