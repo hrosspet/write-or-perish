@@ -716,6 +716,75 @@ final class ChunkUploaderTests: XCTestCase {
         XCTAssertEqual(outcome.totalForFinalize, 3)
     }
 
+    // #765 with #764: Continue's claim (the server's next index is 1) can be
+    // answered before the left recording's last piece (0) reaches the queue,
+    // or after it. Finalize counts each index once either way.
+    func testTheTotalDoesNotDependOnWhetherALatePieceOrTheClaimComesFirst() async throws {
+        uploader.transport = { [unowned self] request, _ in self.answer(request, 202) }
+        let url = URL(string: "http://x/c")!
+
+        // The claim first, while the manifest holds no chunk yet.
+        uploader.open(sessionId: "s44", uploadURL: url)
+        XCTAssertEqual(uploader.open(sessionId: "s44", uploadURL: url, firstIndex: 1), 1)
+        uploader.enqueue(sessionId: "s44", chunk: chunk(0))
+        uploader.enqueue(sessionId: "s44", chunk: chunk(1))
+        let claimFirst = await uploader.settle(sessionId: "s44")
+        XCTAssertEqual(claimFirst.failed, [])
+        XCTAssertEqual(claimFirst.totalForFinalize, 2)
+
+        // The late piece first.
+        uploader.open(sessionId: "s45", uploadURL: url)
+        uploader.enqueue(sessionId: "s45", chunk: chunk(0))
+        XCTAssertEqual(uploader.open(sessionId: "s45", uploadURL: url, firstIndex: 1), 1)
+        uploader.enqueue(sessionId: "s45", chunk: chunk(1))
+        let settled45 = await uploader.settle(sessionId: "s45")
+        XCTAssertEqual(settled45.totalForFinalize, 2)
+
+        // The server holds 0 and this phone never had it: with an empty
+        // manifest from an earlier open, and without one.
+        uploader.open(sessionId: "s46", uploadURL: url)
+        XCTAssertEqual(uploader.open(sessionId: "s46", uploadURL: url, firstIndex: 1), 1)
+        uploader.enqueue(sessionId: "s46", chunk: chunk(1))
+        let settled46 = await uploader.settle(sessionId: "s46")
+        XCTAssertEqual(settled46.totalForFinalize, 2)
+        XCTAssertEqual(uploader.open(sessionId: "s47", uploadURL: url, firstIndex: 1), 1)
+        uploader.enqueue(sessionId: "s47", chunk: chunk(1))
+        let settled47 = await uploader.settle(sessionId: "s47")
+        XCTAssertEqual(settled47.totalForFinalize, 2)
+    }
+
+    // The review's probes: two Continues in a row, each stopped offline, and
+    // then a Continue after a relaunch. Every index is counted once.
+    func testRepeatedContinuesAndARelaunchCountEveryIndexOnce() async throws {
+        var online = false
+        var sent: [Int] = []
+        uploader.transport = { [unowned self] request, file in
+            let i = self.index(of: request, file: file)
+            if i >= 2 && !online { throw URLError(.notConnectedToInternet) }
+            sent.append(i)
+            return self.answer(request, 202)
+        }
+        let url = URL(string: "http://x/c")!
+        uploader.open(sessionId: "s48", uploadURL: url)
+        for i in 0..<4 { uploader.enqueue(sessionId: "s48", chunk: chunk(i)) }
+        _ = await uploader.settle(sessionId: "s48")
+        XCTAssertEqual(uploader.open(sessionId: "s48", uploadURL: url, firstIndex: 2), 4)
+        for i in 4..<6 { uploader.enqueue(sessionId: "s48", chunk: chunk(i)) }
+        let settled48 = await uploader.settle(sessionId: "s48")
+        XCTAssertEqual(settled48.failed, [2, 3, 4, 5])
+
+        let relaunched = ChunkUploader(root: root, useBackgroundSession: false)
+        relaunched.delay = { _ in 0.001 }
+        relaunched.transport = uploader.transport
+        XCTAssertEqual(relaunched.open(sessionId: "s48", uploadURL: url, firstIndex: 2), 6)
+        online = true
+        for i in 6..<8 { relaunched.enqueue(sessionId: "s48", chunk: chunk(i)) }
+        let outcome = await relaunched.settle(sessionId: "s48")
+        XCTAssertEqual(sent, [0, 1, 2, 3, 4, 5, 6, 7])
+        XCTAssertEqual(outcome.failed, [])
+        XCTAssertEqual(outcome.totalForFinalize, 8)
+    }
+
     // #754: a number already queued is never written again.
     func testAQueuedChunkIsNeverWrittenOver() async throws {
         uploader.transport = { _, _ in throw URLError(.notConnectedToInternet) }

@@ -89,16 +89,27 @@ final class ChunkUploader: NSObject {
         /// builds: the first account that signs in takes them, as those
         /// builds did.
         var account: Int?
-        /// The session's chunks before `firstIndex` that this manifest does
-        /// not hold, when it holds some (#754: a recording continued while
-        /// pieces of it were still queued here). nil: all of them.
-        var prior: Int?
+        /// The session's next index on the server when this phone last opened
+        /// it (the claim's `next_chunk_index`, 0 for a new session): the
+        /// server held every chunk below it. nil in manifests from earlier
+        /// builds, where it was `firstIndex`.
+        var serverHeld: Int?
         /// Taken by the first account that signed in from an earlier build,
         /// which recorded no account: whose recording it is, is not known, so
         /// a "not found" answer deletes nothing of it (`sessionNotFound`).
         var adopted: Bool?
 
         var isDead: Bool { chunks.values.contains { $0.status == .fatal } }
+
+        /// The session's chunks on the server that this manifest has no record
+        /// of: every index below `serverHeld` it does not hold. Counted when
+        /// asked, so a chunk that reaches the queue after a continuation's
+        /// `open` (a left recording's last piece, #753) is counted once,
+        /// whichever came first.
+        var priorCount: Int {
+            let held = serverHeld ?? firstIndex
+            return held - chunks.keys.filter { $0 < held }.count
+        }
     }
 
     /// What `settle` reports before finalize.
@@ -229,17 +240,20 @@ final class ChunkUploader: NSObject {
         if manifests[sessionId]?.isDead == true {
             forget(sessionId: sessionId)
         }
-        guard var manifest = manifests[sessionId], !manifest.chunks.isEmpty else {
+        guard var manifest = manifests[sessionId] else {
             var manifest = Manifest(sessionId: sessionId, uploadURL: uploadURL)
             manifest.firstIndex = firstIndex
+            manifest.serverHeld = firstIndex
             manifest.account = account
             manifests[sessionId] = manifest
             persist(sessionId)
             return firstIndex
         }
+        // Kept, also while it holds no chunk yet: a chunk of the recording
+        // before may still reach the queue (a left recording's last piece,
+        // #753), and `priorCount` counts it once whenever it comes.
         let first = max(firstIndex, (manifest.chunks.keys.max() ?? -1) + 1)
-        // Every chunk below `first` the manifest does not hold is on the server.
-        manifest.prior = first - manifest.chunks.count
+        manifest.serverHeld = max(manifest.serverHeld ?? manifest.firstIndex, firstIndex)
         manifest.firstIndex = first
         manifest.uploadURL = uploadURL
         // The server let this account claim or start it: its recording.
@@ -253,7 +267,9 @@ final class ChunkUploader: NSObject {
         }
         manifests[sessionId] = manifest
         persist(sessionId)
-        log.info("continuing a session with chunks still on this phone; new chunks from \(first)")
+        if !manifest.chunks.isEmpty {
+            log.info("continuing a session with chunks still on this phone; new chunks from \(first)")
+        }
         startWorker(sessionId)
         return first
     }
@@ -330,7 +346,7 @@ final class ChunkUploader: NSObject {
                        failed: chunks.filter { $0.status != .stored && $0.status != .beyond }
                            .map(\.index).sorted(),
                        fatalMessage: fatal ? fatalMessages[sessionId] : nil,
-                       prior: manifests[sessionId].map { $0.prior ?? $0.firstIndex } ?? 0,
+                       prior: manifests[sessionId]?.priorCount ?? 0,
                        beyond: chunks.filter { $0.status == .beyond }.count)
     }
 
