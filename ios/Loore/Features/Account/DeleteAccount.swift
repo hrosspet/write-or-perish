@@ -370,12 +370,14 @@ struct ConfirmAccountDeletionView: View {
 
     @Environment(AppState.self) private var app
     @State private var model: ConfirmAccountDeletionModel?
+    @State private var signOutQuestion = false
 
     var body: some View {
         AccountMessagePage(heading: model?.heading ?? "Delete your account", message: model?.message ?? "One moment.") {
             if let model { actions(model) }
         }
         .navigationBarTitleDisplayMode(.inline)
+        .signOutQuestion($signOutQuestion)
         .onAppear {
             if model == nil { model = ConfirmAccountDeletionModel(app: app, token: token) }
         }
@@ -403,7 +405,7 @@ struct ConfirmAccountDeletionView: View {
                         .accessibilityIdentifier("confirmAccountDeletion.error")
                     if model.offersSignOut {
                         PageLinkButton(title: "Sign out and use the other account →") {
-                            Task { await app.signOut() }
+                            app.requestSignOut(question: $signOutQuestion)
                         }
                     }
                 }

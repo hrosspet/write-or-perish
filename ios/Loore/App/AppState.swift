@@ -242,7 +242,7 @@ final class AppState {
         syncTimezoneIfNeeded()
         fetchUpdatesIfNeeded()
         openLaunchRouteIfReady()
-        audio.didSignIn()
+        audio.didSignIn(account: newUser.id)
         if newUser.approved, !newUser.notLetIn { profileWatcher.userLoaded(newUser) }
     }
 
@@ -415,7 +415,8 @@ final class AppState {
     /// (401s) do not start a second sign-out, and leaving the page never
     /// waits for the web data removal.
     func accountDeletionScheduled(deleteOn: Date?) async {
-        resetSessionState(to: .accountDeleted(deleteOn: deleteOn))
+        // Recorded audio not yet on the server goes with the account (#763).
+        resetSessionState(to: .accountDeleted(deleteOn: deleteOn), unsentAudio: .delete(account: user?.id))
         await auth.clearLocalSession()
     }
 
@@ -439,20 +440,43 @@ final class AppState {
         await signOutLocally()
     }
 
-    /// Logout: `GET /auth/logout`, then forget everything local.
+    /// Logout: `GET /auth/logout`, then forget everything local, with this
+    /// account's recorded audio that has not reached the server (#763: a
+    /// button asks first, `requestSignOut`).
     func signOut() async {
+        let account = user?.id
         await auth.signOut()
-        resetSessionState()
+        resetSessionState(unsentAudio: .delete(account: account))
     }
 
-    /// Forget everything local without calling the server (after a 401).
+    /// Forget everything local without calling the server: the server refused
+    /// the sign-in (a 401), or the person left the restore question. Recorded
+    /// audio not yet on the server stays on the phone and is sent when the same
+    /// account signs in again (#763).
     func signOutLocally() async {
         await auth.clearLocalSession()
-        resetSessionState()
+        resetSessionState(unsentAudio: .keep)
     }
 
-    private func resetSessionState(to newPhase: Phase = .signedOut) {
-        audio.signedOut()
+    /// Whether Logout would delete recorded audio of this account that has not
+    /// reached Loore (#763; any account's when the user could not be loaded).
+    var signOutDeletesUnsentAudio: Bool { audio.uploader.holdsUnsentAudio(account: user?.id) }
+
+    /// A sign-out button (#763): signs out at once, or, when this phone holds
+    /// audio of the account that has not reached Loore, sets `question` so
+    /// the screen asks first (`signOutQuestion`).
+    /// - Returns: the sign-out when it started at once.
+    @discardableResult
+    func requestSignOut(question: Binding<Bool>) -> Task<Void, Never>? {
+        guard !signOutDeletesUnsentAudio else {
+            question.wrappedValue = true
+            return nil
+        }
+        return Task { await signOut() }
+    }
+
+    private func resetSessionState(to newPhase: Phase = .signedOut, unsentAudio: AudioCenter.UnsentAudio) {
+        audio.signedOut(unsentAudio: unsentAudio)
         user = nil
         phase = newPhase
         spendCapped = false

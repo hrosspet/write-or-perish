@@ -34,6 +34,8 @@ final class AudioCenter {
     var appState: AppState? { app }
     /// The writing form's recorder while it runs (interruptions go to it).
     @ObservationIgnored weak var activeDictation: DictationController?
+    /// The recordings' upload queue (tests set their own).
+    @ObservationIgnored var uploader: ChunkUploader = .shared
     @ObservationIgnored private var voiceController: VoiceTurnController?
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
     @ObservationIgnored var listenTask: Task<Void, Never>?
@@ -158,7 +160,7 @@ final class AudioCenter {
             #endif
         }()
         let controller = VoiceTurnController(backend: backend,
-                                             recorder: VoiceRecorder(debugFile: debugFile),
+                                             recorder: VoiceRecorder(uploader: uploader, debugFile: debugFile),
                                              audio: self, notices: self)
         controller.model = { [weak self] in self?.app?.user?.preferredModel }
         controller.aiUsage = { [weak self] in self?.app?.user?.defaultAIUsage.rawString ?? "none" }
@@ -294,15 +296,30 @@ final class AudioCenter {
         #endif
     }
 
+    /// What a sign-out does with recorded audio that has not reached the server (#763).
+    enum UnsentAudio: Equatable {
+        /// A sign-out the person did not ask for (the server refused the
+        /// sign-in): kept on the phone, and sent when the same account signs
+        /// in again.
+        case keep
+        /// The person signed out or deleted the account: the account's audio
+        /// is deleted (every account's when nil: it could not be loaded).
+        case delete(account: Int?)
+    }
+
     /// Sign-out: stop everything, forget the conversation, and delete this user's
-    /// audio and temporary files (upload queue, dictation, exports, downloads; M2).
-    func signedOut() {
+    /// temporary files (dictation, exports, downloads; M2). Recorded audio not
+    /// yet on the server is kept or deleted as `unsentAudio` says (#763).
+    func signedOut(unsentAudio: UnsentAudio) {
         voiceController?.tearDown()
         voiceController = nil
         voiceApprovals = nil
         queuedAnnouncementValue = nil
         activeDictation?.cancel()
-        ChunkUploader.shared.reset()
+        switch unsentAudio {
+        case .keep: uploader.hold()
+        case .delete(let account): uploader.reset(account: account)
+        }
         PrivateFiles.sweepTemporary()
         RecordingLog.shared.deleteAll()
         listenTask?.cancel()
@@ -707,9 +724,11 @@ enum LocalNotifier {
 }
 
 extension AudioCenter {
-    /// Signed in with cookies restored: finish uploads a killed app left behind.
-    func didSignIn() {
-        releaseAbandonedRecordings(ChunkUploader.shared.resumePending(releaseMargin: AudioCenter.releaseTimeout))
+    /// Signed in with cookies restored: finish the uploads of this account that
+    /// a killed app, or a sign-out the person did not ask for, left behind (#763).
+    func didSignIn(account: Int) {
+        releaseAbandonedRecordings(uploader.resumePending(account: account,
+                                                          releaseMargin: AudioCenter.releaseTimeout))
         #if DEBUG
         // `-LooreDebugListenNode <id>`: play a node's audio in the global player
         // at launch (the speaker icon's path) until the thread view lands (M2).

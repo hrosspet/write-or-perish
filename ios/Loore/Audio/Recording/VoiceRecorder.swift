@@ -70,9 +70,11 @@ final class VoiceRecorder: VoiceRecording {
     func releaseHeldChunks(firstChunkIndex: Int) {
         guard holdingChunks, let sessionId, let uploadURL else { return }
         holdingChunks = false
-        indexShift = firstChunkIndex - heldFirstIndex
-        uploader.open(sessionId: sessionId, uploadURL: uploadURL, firstIndex: firstChunkIndex)
-        recordingLog.note("claim answered: chunks from \(firstChunkIndex)")
+        // Past the pieces of the session still queued on this phone, if any (#754).
+        let first = uploader.open(sessionId: sessionId, uploadURL: uploadURL, firstIndex: firstChunkIndex)
+        indexShift = first - heldFirstIndex
+        recordingLog.note("claim answered: chunks from \(firstChunkIndex)"
+                          + (first == firstChunkIndex ? "" : "; this phone still holds earlier ones, so from \(first)"))
         drainInbox()
     }
 
@@ -95,7 +97,8 @@ final class VoiceRecorder: VoiceRecording {
             self.onLimit?(message)
         }
         if !holdChunks {
-            uploader.open(sessionId: sessionId, uploadURL: uploadURL, firstIndex: firstChunkIndex)
+            indexShift = uploader.open(sessionId: sessionId, uploadURL: uploadURL, firstIndex: firstChunkIndex)
+                - firstChunkIndex
         }
         recordingLog.note("recorder start: session \(sessionId.prefix(8)), first chunk \(firstChunkIndex)"
                           + (holdChunks ? " (held until the claim answers)" : ""))

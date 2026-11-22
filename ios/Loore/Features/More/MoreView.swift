@@ -12,6 +12,8 @@ struct MoreView: View {
     @State private var exportFile: ExportFile?
     @State private var exportOnDisk: URL?
     @State private var confirmLogout = false
+    /// Logout would delete recorded audio that has not reached Loore (#763).
+    @State private var logoutDeletesAudio = false
     @State private var writingNewEntry = false
 
     var body: some View {
@@ -66,7 +68,10 @@ struct MoreView: View {
                 }
 
                 MenuGroup {
-                    MenuRow(title: "Logout") { confirmLogout = true }
+                    MenuRow(title: "Logout") {
+                        logoutDeletesAudio = app.signOutDeletesUnsentAudio
+                        confirmLogout = true
+                    }
                         .accessibilityIdentifier("more.logout")
                 }
             }
@@ -91,8 +96,11 @@ struct MoreView: View {
                 onCancel: { craftDialog = false })
         }
         .confirmationDialog("Log out of Loore?", isPresented: $confirmLogout, titleVisibility: .visible) {
-            Button("Logout", role: .destructive) { Task { await app.signOut() } }
-            Button("Cancel", role: .cancel) {}
+            let words = SignOutQuestion.logOut
+            Button(logoutDeletesAudio ? words.confirm : "Logout", role: .destructive) { Task { await app.signOut() } }
+            Button(logoutDeletesAudio ? words.cancel : "Cancel", role: .cancel) {}
+        } message: {
+            if logoutDeletesAudio { Text(SignOutQuestion.logOut.message) }
         }
         .sheet(isPresented: $writingNewEntry) {
             WriteNewEntrySheet()

@@ -32,8 +32,14 @@ import os
 ///   (`onLimit`, `Outcome.totalForFinalize`). A chunk that came after the
 ///   finalize (`chunk_not_announced`) is not the bound: it alone is `beyond`,
 ///   and nothing is said.
-/// - A relaunch resumes whatever is left (`resumePending()`); sign-out deletes
-///   the whole queue (`reset()`).
+/// - A relaunch resumes whatever is left (`resumePending()`).
+/// - Each session belongs to the account it was recorded under, and uploads
+///   only while that account is signed in (#763). A sign-out the person did
+///   not ask for (the server refused the sign-in) stops the uploads and keeps
+///   the queue (`hold()`); it goes on when that account signs in again. The
+///   person's own Logout deletes their account's audio (`reset(account:)`).
+/// - A continued recording is numbered past every piece of it this phone
+///   still holds, which go first; no queued file is written over (#754).
 @MainActor
 final class ChunkUploader: NSObject {
     static let shared = ChunkUploader()
@@ -63,7 +69,9 @@ final class ChunkUploader: NSObject {
         var chunks: [Int: ChunkRecord] = [:]
         /// Set when the recorder stopped: no more chunks will come.
         var closed = false
-        /// Chunks the session already had on the server (a resumed recording).
+        /// The first chunk of this phone's latest recording into the session
+        /// (its init segment). Chunks before it were on the server already (a
+        /// resumed recording), or are still in this manifest (`prior`).
         var firstIndex = 0
         /// When this phone began its last upload the server stored (nil in
         /// manifests from earlier builds). No later than the server's own stamp
@@ -74,6 +82,17 @@ final class ChunkUploader: NSObject {
         /// until then, and in manifests from earlier builds): no chunk from it
         /// on is sent.
         var limitFrom: Int?
+        /// The account the session was recorded under (#763): it uploads only
+        /// while that account is signed in. nil in manifests from earlier
+        /// builds: the first account that signs in takes them, as those
+        /// builds did.
+        var account: Int?
+        /// The session's chunks before `firstIndex` that this manifest does
+        /// not hold, when it holds some (#754: a recording continued while
+        /// pieces of it were still queued here). nil: all of them.
+        var prior: Int?
+
+        var isDead: Bool { chunks.values.contains { $0.status == .fatal } }
     }
 
     /// What `settle` reports before finalize.
@@ -127,6 +146,15 @@ final class ChunkUploader: NSObject {
     private var limitsSaid: Set<String> = []
     /// Called when a background relaunch finished its events.
     var backgroundCompletionHandler: (() -> Void)?
+    /// The account signed in now (#763): only sessions recorded under it
+    /// upload. nil while nobody is (and in tests, whose sessions have none).
+    private(set) var account: Int?
+    /// The app signed out without the person asking (`hold`): nothing
+    /// uploads until an account signs in (`resumePending`).
+    private(set) var isHeld = false
+    /// Sessions in memory at `hold`: the next sign-in reads them again from
+    /// disk, as a relaunch does.
+    private var heldSessions: Set<String> = []
 
     private var manifests: [String: Manifest] = [:]
     private var workers: [String: Task<Void, Never>] = [:]
@@ -173,21 +201,53 @@ final class ChunkUploader: NSObject {
 
     // MARK: Public API
 
-    /// Starts tracking a session (before its first chunk).
-    func open(sessionId: String, uploadURL: URL, firstIndex: Int = 0) {
+    /// Starts tracking a session (before its first chunk), for the account
+    /// signed in now.
+    /// - Returns: the index the recording's first chunk takes: `firstIndex`
+    ///   (the server's next index), or one past the highest chunk this phone
+    ///   still holds of the session, whichever is higher (#754). Those chunks
+    ///   (a Stop that could not send them) stay and are sent first; the new
+    ///   ones never take their numbers or files.
+    @discardableResult
+    func open(sessionId: String, uploadURL: URL, firstIndex: Int = 0) -> Int {
+        // On disk only: read it, so its queued chunks are neither lost nor
+        // written over.
+        if manifests[sessionId] == nil, let saved = loadManifest(sessionId) {
+            manifests[sessionId] = saved
+        }
+        heldSessions.remove(sessionId)
         // A session that died here (a fatal answer) and is recorded into again:
         // this phone claimed it back from the device that continued it (#388).
         // Its audio was deleted at the fatal answer, and its fatal state would
         // drop every new chunk, so it starts over.
-        if manifests[sessionId]?.chunks.values.contains(where: { $0.status == .fatal }) == true {
+        if manifests[sessionId]?.isDead == true {
             forget(sessionId: sessionId)
         }
-        if manifests[sessionId] == nil {
+        guard var manifest = manifests[sessionId], !manifest.chunks.isEmpty else {
             var manifest = Manifest(sessionId: sessionId, uploadURL: uploadURL)
             manifest.firstIndex = firstIndex
+            manifest.account = account
             manifests[sessionId] = manifest
             persist(sessionId)
+            return firstIndex
         }
+        let first = max(firstIndex, (manifest.chunks.keys.max() ?? -1) + 1)
+        // Every chunk below `first` the manifest does not hold is on the server.
+        manifest.prior = first - manifest.chunks.count
+        manifest.firstIndex = first
+        manifest.uploadURL = uploadURL
+        manifest.account = account
+        manifest.closed = false
+        // Given-up chunks whose body is still here get another chance, as at a relaunch.
+        for (index, record) in manifest.chunks where record.status == .failed
+            && fileManager.fileExists(atPath: bodyFile(sessionId, index).path) {
+            manifest.chunks[index]?.status = .pending
+        }
+        manifests[sessionId] = manifest
+        persist(sessionId)
+        log.info("continuing a session with chunks still on this phone; new chunks from \(first)")
+        startWorker(sessionId)
+        return first
     }
 
     /// Writes the chunk to disk and schedules its upload.
@@ -197,7 +257,13 @@ final class ChunkUploader: NSObject {
             return
         }
         // A dead session (fatal answer): its audio is not kept.
-        if manifest.chunks.values.contains(where: { $0.status == .fatal }) { return }
+        if manifest.isDead { return }
+        // A number this phone already used in the session is never written
+        // again (#754): its audio is queued here, or the server has it.
+        if manifest.chunks[chunk.index] != nil {
+            log.fault("chunk \(chunk.index) is already queued for this session; not written over")
+            return
+        }
         // Past the recording's limit: the server takes no more, so nothing is
         // written or sent (dictation keeps its own copy for "Save audio").
         if let limit = manifest.limitFrom, chunk.index >= limit {
@@ -256,7 +322,7 @@ final class ChunkUploader: NSObject {
                        failed: chunks.filter { $0.status != .stored && $0.status != .beyond }
                            .map(\.index).sorted(),
                        fatalMessage: fatal ? fatalMessages[sessionId] : nil,
-                       prior: manifests[sessionId]?.firstIndex ?? 0,
+                       prior: manifests[sessionId].map { $0.prior ?? $0.firstIndex } ?? 0,
                        beyond: chunks.filter { $0.status == .beyond }.count)
     }
 
@@ -264,16 +330,27 @@ final class ChunkUploader: NSObject {
     func forget(sessionId: String) {
         workers[sessionId]?.cancel()
         workers[sessionId] = nil
+        dropFromMemory(sessionId)
+        try? fileManager.removeItem(at: directory(for: sessionId))
+    }
+
+    /// Forgets a session's state in memory; its files stay.
+    private func dropFromMemory(_ sessionId: String) {
         manifests[sessionId] = nil
         fatalMessages[sessionId] = nil
         degraded.remove(sessionId)
         limitsSaid.remove(sessionId)
-        try? fileManager.removeItem(at: directory(for: sessionId))
+        heldSessions.remove(sessionId)
     }
 
-    /// After a relaunch: upload whatever a killed app left behind.
-    /// - Parameter releaseMargin: the release request's own time in flight
-    ///   (see `mayRelease`).
+    /// An account signed in (at launch, or again after a sign-out): upload
+    /// whatever a killed app, or a sign-out the person did not ask for (`hold`),
+    /// left of this account's recordings. Sessions recorded under another
+    /// account stay on the phone, unsent, until that account signs in (#763).
+    /// - Parameters:
+    ///   - account: the account signed in (nil only in tests).
+    ///   - releaseMargin: the release request's own time in flight
+    ///     (see `mayRelease`).
     /// - Returns: sessions to release on the server: a recorder was still writing
     ///   them when the app ended, nothing is left to upload, and the server still
     ///   hides them from every other client (`mayRelease`). Released, they are
@@ -281,7 +358,11 @@ final class ChunkUploader: NSObject {
     ///   walk test). A session with chunks still to upload is not returned:
     ///   recovered before they land, its continuation would reuse their indexes.
     @discardableResult
-    func resumePending(releaseMargin: TimeInterval = 0) -> [String] {
+    func resumePending(account: Int? = nil, releaseMargin: TimeInterval = 0) -> [String] {
+        self.account = account
+        isHeld = false
+        // Held at a sign-out: read again from disk below, as after a relaunch.
+        heldSessions.forEach(dropFromMemory)
         guard let dirs = try? fileManager.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return [] }
         var abandoned: [String] = []
         for dir in dirs {
@@ -293,12 +374,17 @@ final class ChunkUploader: NSObject {
                 continue
             }
             if manifests[manifest.sessionId] != nil { continue }
-            // A dead session (fatal answer) is never resumed (M2).
-            if manifest.chunks.values.contains(where: { $0.status == .fatal }) {
+            // A dead session (fatal answer) is never resumed (M2). It holds no audio.
+            if manifest.isDead {
                 try? fileManager.removeItem(at: dir)
                 continue
             }
+            // Another account's recording: it stays for that account, and is
+            // never sent with this one's sign-in (#763).
+            if let owner = manifest.account, owner != account { continue }
             var resumed = manifest
+            // From an earlier build: this account takes it, as that build did.
+            resumed.account = account
             // Given-up chunks whose body is still here get another chance (B1).
             for (index, record) in manifest.chunks where record.status == .failed
                 && fileManager.fileExists(atPath: bodyFile(manifest.sessionId, index).path) {
@@ -339,23 +425,69 @@ final class ChunkUploader: NSObject {
         return age >= 0 && age < serverLiveWindow - margin
     }
 
-    /// Sign-out: stop every upload (foreground and background, which carry this
-    /// user's cookie) and delete the queue, so nothing of this user's audio stays
-    /// on disk or is sent with the next user's cookies (M2).
-    func reset() {
-        workers.values.forEach { $0.cancel() }
-        workers = [:]
+    /// The app signed out without the person asking: the server no longer
+    /// takes this sign-in (a 401), or the person left the restore question
+    /// (#763). Every upload stops (each carries that sign-in's cookie), and
+    /// the queue stays on the phone with the account each session was
+    /// recorded under. A chunk the recorder still hands over is kept the same
+    /// way. When that account signs in again, its sessions upload
+    /// (`resumePending`); under another account they are never sent.
+    func hold() {
+        isHeld = true
+        account = nil
+        stopEveryUpload()
+        heldSessions.formUnion(manifests.keys)
+    }
+
+    /// The person signed out (Logout, M2) or deleted their account: stop every
+    /// upload (foreground and background, which carry this sign-in's cookie)
+    /// and delete the audio recorded under `account`, so none of it stays on
+    /// disk (`holdsUnsentAudio` lets the screen say so first, #763). Audio
+    /// another account recorded on this phone stays for that account; it is
+    /// never sent with another account's cookies.
+    /// - Parameter owner: the account signing out; nil (it could not be
+    ///   loaded) deletes every session's audio.
+    func reset(account owner: Int?) {
+        stopEveryUpload()
         manifests = [:]
         fatalMessages = [:]
         refusalsSaid = []
         limitsSaid = []
         degraded = []
+        heldSessions = []
+        account = nil
+        isHeld = false
+        for dir in (try? fileManager.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? [] {
+            if let owner, let recordedBy = savedManifest(in: dir)?.account, recordedBy != owner { continue }
+            try? fileManager.removeItem(at: dir)
+        }
+    }
+
+    /// Whether this phone holds audio recorded under `owner` (under any
+    /// account when nil) that has not reached the server: what `reset`
+    /// deletes. A chunk's file is deleted once the server has it.
+    func holdsUnsentAudio(account owner: Int?) -> Bool {
+        for dir in (try? fileManager.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? [] {
+            let manifest = manifests[dir.lastPathComponent] ?? savedManifest(in: dir)
+            if let owner, let recordedBy = manifest?.account, recordedBy != owner { continue }
+            let files = (try? fileManager.contentsOfDirectory(atPath: dir.path)) ?? []
+            if files.contains(where: { $0.hasSuffix(".body") }) { return true }
+        }
+        return false
+    }
+
+    private func stopEveryUpload() {
+        workers.values.forEach { $0.cancel() }
+        workers = [:]
         if useBackgroundSession {
             backgroundSession.getAllTasks { tasks in tasks.forEach { $0.cancel() } }
         }
-        for dir in (try? fileManager.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? [] {
-            try? fileManager.removeItem(at: dir)
-        }
+    }
+
+    /// Only the signed-in account's sessions upload, and nothing while held (#763).
+    private func mayUpload(_ sessionId: String) -> Bool {
+        guard !isHeld, let manifest = manifests[sessionId] else { return false }
+        return manifest.account == account
     }
 
     // MARK: Worker
@@ -367,7 +499,7 @@ final class ChunkUploader: NSObject {
     private var degraded: Set<String> = []
 
     private func startWorker(_ sessionId: String) {
-        guard workers[sessionId] == nil else { return }
+        guard workers[sessionId] == nil, mayUpload(sessionId) else { return }
         workers[sessionId] = Task { [weak self] in
             guard let self else { return }
             await self.drain(sessionId)
@@ -535,7 +667,8 @@ final class ChunkUploader: NSObject {
     }
 
     private func attemptUpload(_ sessionId: String, index: Int) async -> AttemptResult {
-        guard let manifest = manifests[sessionId], let record = manifest.chunks[index] else { return .giveUp }
+        guard let manifest = manifests[sessionId], let record = manifest.chunks[index],
+              mayUpload(sessionId) else { return .giveUp }
         let file = bodyFile(sessionId, index)
         guard fileManager.fileExists(atPath: file.path) else { return .giveUp }
         manifests[sessionId]?.chunks[index]?.attempts += 1
@@ -640,7 +773,7 @@ final class ChunkUploader: NSObject {
     /// The app is going to the background: every chunk not yet stored gets a
     /// background copy that finishes even if the app is suspended.
     func handOffPendingToBackground() {
-        for (sessionId, manifest) in manifests {
+        for (sessionId, manifest) in manifests where mayUpload(sessionId) {
             let holdBack = initMissing(manifest)
             for record in manifest.chunks.values where record.status == .pending {
                 // Nothing overtakes the init segment (B1).
@@ -651,7 +784,8 @@ final class ChunkUploader: NSObject {
     }
 
     private func startBackgroundUpload(_ sessionId: String, index: Int) {
-        guard useBackgroundSession, let manifest = manifests[sessionId], let record = manifest.chunks[index] else { return }
+        guard useBackgroundSession, mayUpload(sessionId), let manifest = manifests[sessionId],
+              let record = manifest.chunks[index] else { return }
         let file = bodyFile(sessionId, index)
         guard fileManager.fileExists(atPath: file.path) else { return }
         let task = backgroundSession.uploadTask(with: makeRequest(manifest.uploadURL, contentType: record.contentType),
@@ -665,8 +799,9 @@ final class ChunkUploader: NSObject {
               let index = Int(parts[1]) else { return }
         let sessionId = String(parts[0])
         guard let status, (200..<300).contains(status) else { return }
-        if manifests[sessionId] == nil, let restored = loadManifest(sessionId) {
-            manifests[sessionId] = restored
+        let restored = manifests[sessionId] == nil
+        if restored, let saved = loadManifest(sessionId) {
+            manifests[sessionId] = saved
         }
         guard manifests[sessionId]?.chunks[index] != nil else { return }
         mark(sessionId, index, .stored)
@@ -675,6 +810,9 @@ final class ChunkUploader: NSObject {
         if manifests[sessionId]?.chunks.values.contains(where: { $0.status == .pending }) == true {
             startWorker(sessionId)
         }
+        // Not this account's (or nobody signed in yet): the next sign-in of
+        // its account reads it from disk (#763).
+        if restored && !mayUpload(sessionId) { manifests[sessionId] = nil }
     }
 
     // MARK: Files
@@ -700,7 +838,11 @@ final class ChunkUploader: NSObject {
     }
 
     private func loadManifest(_ sessionId: String) -> Manifest? {
-        let file = directory(for: sessionId).appendingPathComponent("manifest.json")
+        savedManifest(in: directory(for: sessionId))
+    }
+
+    private func savedManifest(in dir: URL) -> Manifest? {
+        let file = dir.appendingPathComponent("manifest.json")
         return (try? Data(contentsOf: file)).flatMap { try? JSONDecoder().decode(Manifest.self, from: $0) }
     }
 }
