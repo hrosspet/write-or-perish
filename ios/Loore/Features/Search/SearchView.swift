@@ -77,8 +77,9 @@ struct SearchResponse: Decodable, Sendable {
     }
 }
 
-/// Search snippets arrive as HTML with `<mark>` around matches (not escaped by
-/// the server): keep the text, highlight the marked runs, drop other tags.
+/// Search snippets arrive with `<mark>` around matches; the server escapes the
+/// text itself (`&lt;`, `&amp;`, ...). Keep the text, highlight the marked runs,
+/// decode the entities, and drop any other tag.
 enum SearchSnippet {
     struct Run: Equatable {
         var text: String
