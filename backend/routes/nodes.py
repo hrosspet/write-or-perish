@@ -618,6 +618,11 @@ def create_node():
         err = assert_parent_alive(parent_id)
         if err is not None:
             return err
+        # A day's public replies under other people's posts.
+        from backend.utils.public_reply_limits import public_reply_refusal
+        err = public_reply_refusal(current_user.id, parent_id, privacy_level)
+        if err is not None:
+            return err
 
         # Public threads stay fully public (#228) — see the text path.
         if parent_id:
@@ -756,6 +761,11 @@ def create_node():
     err = assert_parent_alive(parent_id)
     if err is not None:
         return err
+    # A day's public replies under other people's posts.
+    from backend.utils.public_reply_limits import public_reply_refusal
+    err = public_reply_refusal(current_user.id, parent_id, privacy_level)
+    if err is not None:
+        return err
 
     # Public threads stay fully public (#228): a reply under a public node
     # must itself be public — private interaction with public content goes
@@ -888,6 +898,15 @@ def update_node(node_id):
                 "error": REPLY_IN_PROGRESS_MESSAGE,
                 "code": REPLY_IN_PROGRESS_CODE,
             }), 409
+        # Becoming public in someone else's thread counts as a public
+        # reply there.
+        if privacy_level == "public" and node.privacy_level != "public":
+            from backend.utils.public_reply_limits import (
+                public_reply_refusal)
+            err = public_reply_refusal(
+                current_user.id, node.parent_id, privacy_level)
+            if err is not None:
+                return err
         node.set_privacy_level(privacy_level)
         # Auto-unpin if node is made private
         if privacy_level == "private" and node.pinned_at is not None:
@@ -2891,6 +2910,11 @@ def init_chunked_upload():
     err = assert_parent_alive(parent_id)
     if err is not None:
         return err
+    # A day's public replies under other people's posts.
+    from backend.utils.public_reply_limits import public_reply_refusal
+    err = public_reply_refusal(current_user.id, parent_id, privacy_level)
+    if err is not None:
+        return err
 
     agentic, auto_reply_model, err, auto_off = _upload_reply_options(
         data, parent_id, ai_usage, privacy_level)
@@ -3376,6 +3400,11 @@ def init_streaming_transcription():
     # Race A guard: lock parent and reject if soft-deleted.
     from backend.utils.node_deletion import assert_parent_alive
     err = assert_parent_alive(parent_id)
+    if err is not None:
+        return err
+    # A day's public replies under other people's posts.
+    from backend.utils.public_reply_limits import public_reply_refusal
+    err = public_reply_refusal(current_user.id, parent_id, privacy_level)
     if err is not None:
         return err
     # This path's recordings wait for their transcript as entries, counted

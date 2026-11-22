@@ -106,6 +106,22 @@ class _PublicRenderer(mistune.HTMLRenderer):
         return striptags(text)
 
 
+# What a link in a reply under someone else's piece carries: search
+# engines neither follow it nor count it for the linked site ("ugc" is
+# their name for text a site's visitors wrote), and the opened page gets
+# no handle on this one.
+REPLY_LINK_REL = "nofollow ugc noopener"
+
+
+class _ReplyRenderer(_PublicRenderer):
+    """_PublicRenderer for a reply under another person's piece: every
+    link the reply's text makes carries REPLY_LINK_REL."""
+
+    def link(self, text, url, title=None):
+        html = super().link(text, url, title)
+        return html.replace("<a ", f'<a rel="{REPLY_LINK_REL}" ', 1)
+
+
 def _check_deadline(state):
     deadline = state.env.get("render_deadline")
     if deadline is not None and _render_clock() > deadline:
@@ -124,9 +140,9 @@ class _TimedInlineParser(mistune.InlineParser):
         return super().parse_method(m, state)
 
 
-def _create_markdown():
+def _create_markdown(renderer_cls=_PublicRenderer):
     md = mistune.Markdown(
-        renderer=_PublicRenderer(escape=True),
+        renderer=renderer_cls(escape=True),
         block=_TimedBlockParser(),
         inline=_TimedInlineParser(hard_wrap=False),
         plugins=[mistune.plugins.import_plugin(name) for name in
@@ -165,6 +181,7 @@ _BOUNDED_INLINE_HTML = (
 
 
 _markdown = _create_markdown()
+_reply_markdown = _create_markdown(_ReplyRenderer)
 
 _H1 = re.compile(r"<(/?)h1>")
 _BLANK_LINES = re.compile(r"\n\s*\n")
@@ -202,8 +219,11 @@ def _plain_paragraphs(text):
         for p in paragraphs if p.strip())
 
 
-def render_markdown(text, budget=None, node_id=None):
+def render_markdown(text, budget=None, node_id=None, guest_reply=False):
     """User markdown → HTML with raw HTML escaped, h1s demoted to h2.
+
+    *guest_reply*: the text is a reply under another person's piece; its
+    links carry REPLY_LINK_REL.
 
     The page reserves its single <h1> for the article title, so headings
     inside bodies shift down one notch (only h1→h2; deeper levels keep
@@ -220,10 +240,11 @@ def render_markdown(text, budget=None, node_id=None):
     started = _render_clock()
     html = None
     if allowed > 0:
-        state = _markdown.block.state_cls()
+        markdown = _reply_markdown if guest_reply else _markdown
+        state = markdown.block.state_cls()
         state.env["render_deadline"] = started + allowed
         try:
-            html = _markdown.parse(text, state)[0]
+            html = markdown.parse(text, state)[0]
         except _OutOfTime:
             reason = "render time"
         except RecursionError:

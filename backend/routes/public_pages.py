@@ -159,17 +159,21 @@ def _display_author(item):
     return f"@{name}" if name else "anonymous"
 
 
-def _render_reply(item, budget):
+def _render_reply(item, budget, piece_author):
     """A reply and its replies, while the page's RenderBudget has room
-    for their text; the rest of the thread is left to the app."""
+    for their text; the rest of the thread is left to the app. A reply
+    by someone other than *piece_author* (the username of the piece's
+    author; for an AI reply, of whoever asked for it) is rendered as a
+    guest's: its links are not followed by search engines."""
     content = item.get("content") or ""
     if not budget.take(content):
         return ""
     author = escape(_display_author(item))
     when = item.get("created_at") or ""
     date = when[:10]
-    body = render_markdown(content, budget, node_id=item.get("id"))
-    children = "".join(_render_reply(c, budget)
+    body = render_markdown(content, budget, node_id=item.get("id"),
+                           guest_reply=item.get("username") != piece_author)
+    children = "".join(_render_reply(c, budget, piece_author)
                        for c in item.get("children", []))
     if children:
         children = f'<div class="ssr-children">{children}</div>'
@@ -206,7 +210,7 @@ def _article_document(root, author_user):
     parts.append(render_markdown(body_md, budget, node_id=root.id))
     if replies:
         parts.append('<section aria-label="Replies"><h2>Replies</h2>')
-        parts.extend(_render_reply(r, budget) for r in replies)
+        parts.extend(_render_reply(r, budget, username) for r in replies)
         parts.append("</section>")
     parts.append("</article>")
 

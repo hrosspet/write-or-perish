@@ -331,6 +331,12 @@ def add_message(conversation_id):
         refusal = publish_refusal(content, current_user.id)
         if refusal is not None:
             return refusal
+        # A day's public replies under other people's posts.
+        from backend.utils.public_reply_limits import public_reply_refusal
+        refusal = public_reply_refusal(
+            current_user.id, last_node.id, privacy_level)
+        if refusal is not None:
+            return refusal
 
     # This route always replies: refused before the message is written
     # when the thread (or the message's own setting) keeps AI out.
@@ -511,6 +517,12 @@ def continue_from_node(node_id):
     if privacy_level == "public":
         from backend.utils.publish_quotes import publish_refusal
         refusal = publish_refusal(content, current_user.id)
+        if refusal is not None:
+            return refusal
+        # A day's public replies under other people's posts.
+        from backend.utils.public_reply_limits import public_reply_refusal
+        refusal = public_reply_refusal(
+            current_user.id, node.id, privacy_level)
         if refusal is not None:
             return refusal
     auto_generate = bool(data.get("auto_generate", True))

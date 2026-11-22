@@ -1835,6 +1835,14 @@ def save_streaming_as_node(session_id):
                 "code": "public_reply_required",
             }), 400
 
+    # A day's public replies under other people's posts; the session
+    # stays, so the entry can be saved later.
+    from backend.utils.public_reply_limits import public_reply_refusal
+    err = public_reply_refusal(
+        current_user.id, draft.parent_id, privacy_level)
+    if err is not None:
+        return err
+
     # A public entry quotes only public nodes (Peter, 2026-11-12); the
     # session stays, so the text can be changed and saved again.
     if privacy_level == "public":
