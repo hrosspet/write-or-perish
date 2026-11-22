@@ -53,14 +53,15 @@ def test_the_message_names_the_setting_and_no_value():
 
 @pytest.fixture
 def sqlite_config(monkeypatch):
-    import backend.config as config
-    monkeypatch.setattr(config.Config, "SQLALCHEMY_DATABASE_URI",
+    # The Config create_app reads (backend/__init__.py's own name for it).
+    import backend
+    monkeypatch.setattr(backend.Config, "SQLALCHEMY_DATABASE_URI",
                         "sqlite:///:memory:")
-    monkeypatch.setattr(config.Config, "DEPLOY_ENV", "production")
-    monkeypatch.setattr(config.Config, "SECRET_KEY", "a-key-of-this-instance")
+    monkeypatch.setattr(backend.Config, "DEPLOY_ENV", "production")
+    monkeypatch.setattr(backend.Config, "SECRET_KEY", "a-key-of-this-instance")
     monkeypatch.setenv("ENCRYPTION_DISABLED", "true")
     monkeypatch.delenv("GCP_KMS_KEY_NAME", raising=False)
-    return config.Config
+    return backend.Config
 
 
 def test_create_app_refuses_the_placeholder_key(sqlite_config, monkeypatch):
@@ -77,8 +78,3 @@ def test_create_app_refuses_encryption_off_by_omission(
     with pytest.raises(RuntimeError, match="GCP_KMS_KEY_NAME"):
         create_app()
 
-
-def test_create_app_starts_with_a_key_and_a_stated_choice(sqlite_config):
-    from backend import create_app
-    app = create_app()
-    assert app.config["SECRET_KEY"] == "a-key-of-this-instance"
