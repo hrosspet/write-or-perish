@@ -1881,7 +1881,8 @@ def save_streaming_as_node(session_id):
         # A recorded reply inside an existing thread (the reply box under
         # a read reply, #323): the textmode prompt goes under the parent
         # when no agentic prompt sits above it, as POST /textmode/from-node
-        # does for a typed reply; inside an agentic thread nothing is added.
+        # does for a typed reply; inside an agentic thread nothing is added,
+        # nor under someone else's node (a plain reply there).
         from backend.utils.session_helpers import attach_agentic_prompt_under
         parent_node = Node.query.get(draft.parent_id)
         if parent_node is None:
