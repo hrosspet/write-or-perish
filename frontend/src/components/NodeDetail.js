@@ -1401,6 +1401,13 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
       && node.tool_calls_meta.some(tc => ['_batch', '_read', '_live'].includes(tc?.name)))
     || ['read', 'read_thread'].includes(parentAncestor?.prompt_key)
   );
+  // A reply typed or recorded under a read reply is a Text-mode message
+  // (#323, submitReadReplyMessage). Under someone else's Glean shared
+  // with a circle the reader replies as under any node of that shared
+  // thread: the plain reply path (POST /nodes/, save-as-node), which
+  // holds the reply to the thread's rules.
+  const readReplyMessage = isReadReply
+    && (isOwner || node.privacy_level !== 'circles');
   // A read reply's picks are its {quote_ext:ID} markers. Their read state
   // and good / bad verdicts live in externalQuotes, kept in step by the
   // bubbles' own controls and the tail's "Mark all as read", so the
@@ -2201,11 +2208,11 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
             hidePowerFeatures={!craftMode}
             hideAudioUpload={!craftMode}
             compact
-            placeholder={isReadReply
+            placeholder={readReplyMessage
               ? "Ask about these picks, or say what you make of them…"
               : "Type what's on your mind…"}
-            onSubmitOverride={isReadReply ? submitReadReplyMessage : undefined}
-            onSuccess={isReadReply ? handleReadReplySuccess : handleInlineSuccess}
+            onSubmitOverride={readReplyMessage ? submitReadReplyMessage : undefined}
+            onSuccess={readReplyMessage ? handleReadReplySuccess : handleInlineSuccess}
           />
         </div>
       )}

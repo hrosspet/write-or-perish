@@ -362,6 +362,14 @@ final class ThreadModel {
             || ["read", "read_thread"].contains(parentAncestor?.systemPrompt.promptKey ?? "")
     }
 
+    /// A reply typed or recorded under a read reply is a Text-mode message (#323,
+    /// `submitReadReply`). Under someone else's Glean shared with a circle the reader
+    /// replies as under any node of that shared thread: the plain reply path (the form's
+    /// own `POST /api/nodes/` and save-as-node), which holds the reply to the thread's rules.
+    var readReplyMessage: Bool {
+        isReadReply && (isOwner || node?.privacyLevel != .circles)
+    }
+
     var inReadThread: Bool { (node?.inReadThread ?? false) || isReadReply }
     var readReplyAbove: Bool { (node?.readReplyAbove ?? false) || isReadReply }
 
