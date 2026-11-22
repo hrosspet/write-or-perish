@@ -536,3 +536,125 @@ def test_an_event_for_an_earlier_period_leaves_the_carry(app):
     assert u.spend_period_carry_microdollars == 8_000_000
     r = enforce_user_spend_cap(u.id, CONFIG, now=FEB_LATE, send_email=send)
     assert r["carried_usd"] == 8.0
+
+
+# ── A period is charged the ceiling it ran under ─────────────────────────
+
+LATER = datetime(2027, 5, 3, 10, 0, 0)
+LATER_END = datetime(2027, 6, 3, 10, 0, 0)
+LATER_MID = datetime(2027, 5, 10, 12, 0, 0)
+
+
+def _end(user, start, end, level):
+    """Stripe's event for the subscription's end."""
+    stripe_billing.apply_subscription(
+        _stripe_sub(user, start, end, status="canceled", level=level),
+        CONFIG)
+    _db.session.commit()
+
+
+def _use(user, usd, when):
+    emails, send = _mailbox()
+    _log_cost(user.id, usd, when)
+    return enforce_user_spend_cap(user.id, CONFIG, now=when, send_email=send)
+
+
+@pytest.mark.parametrize("used,carried", [(105.0, 5.0), (57.0, 0.0)])
+def test_a_return_at_a_lower_level_counts_what_went_above_the_higher_one(
+        app, used, carried):
+    """Supporter ($100), ended, then a new subscription at Standard."""
+    u = _stripe_subscriber(level="supporter")
+    _use(u, used, JAN_LATE)
+    _end(u, PAID, PERIOD_END, "supporter")
+    assert ceiling_period_start(u) is None
+
+    _renew(u, LATER, LATER_END, level="standard")
+
+    assert get_user_spend_limit_usd(u, CONFIG) == 50.0
+    assert u.spend_period_carry_microdollars == int(carried * 1_000_000)
+    assert not user_is_capped(u, now=LATER_MID)
+
+
+def test_a_late_payment_after_a_change_to_a_lower_level_carries_nothing(app):
+    """Supporter used $57; the next period comes at Standard with its
+    payment late, and is paid afterwards."""
+    u = _stripe_subscriber(level="supporter")
+    _use(u, 57.0, JAN_LATE)
+    stripe_billing.apply_subscription(
+        _stripe_sub(u, PERIOD_END, NEXT_END, status="past_due",
+                    level="standard"), CONFIG)
+    _db.session.commit()
+
+    _renew(u, PERIOD_END, NEXT_END, level="standard")
+
+    assert u.spend_period_carry_microdollars == 0
+    assert not user_is_capped(u, now=FEB_LATE)
+
+
+def test_a_return_at_a_higher_level_keeps_what_went_above_the_lower_one(app):
+    """Standard used $70, ended, then a new subscription at Supporter."""
+    u = _stripe_subscriber()
+    _use(u, 70.0, JAN_LATE)
+    _end(u, PAID, PERIOD_END, "standard")
+
+    _renew(u, LATER, LATER_END, level="supporter")
+
+    assert u.spend_period_carry_microdollars == 20_000_000
+    r = _use(u, 79.0, LATER_MID)
+    assert r["status"] == "ok" and r["carried_usd"] == 20.0
+    r = _use(u, 1.0, LATER_MID)
+    assert r["status"] == "blocked"
+
+
+def test_a_higher_level_inside_a_period_is_the_ceiling_it_ran_under(app):
+    """Standard, then Supporter inside the same period: $90 used is
+    inside the ceiling the period ended under."""
+    u = _stripe_subscriber()
+    _use(u, 40.0, JAN_LATE)
+    _renew(u, PAID, PERIOD_END, level="supporter")
+    _use(u, 50.0, FEB_EARLY)
+    assert u.spend_period_limit_usd == 100.0
+    _renew(u, PERIOD_END, NEXT_END, level="supporter")
+    assert u.spend_period_carry_microdollars == 0
+
+
+def test_a_stored_period_without_its_ceiling_is_charged_as_before(app):
+    u = _stripe_subscriber(level="supporter")
+    _use(u, 100.5, JAN_LATE)
+    u.spend_period_limit_usd = None
+    _db.session.commit()
+    _renew(u, PERIOD_END, NEXT_END, level="standard")
+    # The limit before the event (Supporter's).
+    assert u.spend_period_carry_microdollars == 500_000
+
+
+# ── The admin's plan edit ────────────────────────────────────────────────
+
+def test_removing_a_plan_set_by_hand_sets_the_block_from_the_period(app):
+    """Blocked at Standard, a plan set by hand, a higher level meanwhile,
+    the plan removed: $70 against $100 is not blocked."""
+    u = _stripe_subscriber()
+    _use(u, 22.0, JAN_LATE)
+    r = _use(u, 48.0, JAN_LATE)
+    assert r["status"] == "blocked"
+    spend.set_user_plan(u, "alpha", CONFIG, now=JAN_LATE)
+    _db.session.commit()
+    _renew(u, PAID, PERIOD_END, level="supporter")
+
+    state = spend.set_user_plan(u, "free", CONFIG, now=FEB_EARLY)
+    _db.session.commit()
+
+    assert u.plan == "free"
+    assert state["blocked"] is False and state["spend_usd"] == 70.0
+    assert not user_is_capped(u, now=FEB_EARLY)
+
+
+def test_removing_a_plan_set_by_hand_keeps_a_block_at_the_ceiling(app):
+    u = _stripe_subscriber()
+    _use(u, 70.0, JAN_LATE)
+    spend.set_user_plan(u, "alpha", CONFIG, now=JAN_LATE)
+    _db.session.commit()
+    state = spend.set_user_plan(u, "free", CONFIG, now=FEB_EARLY)
+    _db.session.commit()
+    assert state["blocked"] is True
+    assert user_is_capped(u, now=FEB_EARLY)

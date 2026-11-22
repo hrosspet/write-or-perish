@@ -1033,7 +1033,10 @@ def update_user_plan(user_id):
     if plan not in User.ALLOWED_PLANS:
         return jsonify({"error": f"Invalid plan. Allowed: {sorted(User.ALLOWED_PLANS)}"}), 400
     user = User.query.get_or_404(user_id)
-    user.plan = plan
+    # The usage block follows the ceiling the new plan gives, as after a
+    # limit edit.
+    from backend.utils.spend import set_user_plan
+    set_user_plan(user, plan, current_app.config)
     db.session.commit()
     return jsonify({"message": "Plan updated", "plan": user.plan}), 200
 

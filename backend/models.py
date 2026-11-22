@@ -285,6 +285,11 @@ class User(db.Model, UserMixin):
     spend_period_start = db.Column(db.DateTime, nullable=True)
     spend_period_carry_microdollars = db.Column(
         db.BigInteger, nullable=False, default=0, server_default="0")
+    # The ceiling (USD) the period at spend_period_start ran under: what
+    # that period counted above it is carried, whatever the ceiling is
+    # when the next period arrives (another level, time without access
+    # in between). NULL: not recorded.
+    spend_period_limit_usd = db.Column(db.Float, nullable=True)
 
     # Per-user defaults for new nodes (overridable per-node)
     default_privacy_level = db.Column(

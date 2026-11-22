@@ -373,10 +373,19 @@ def roll_period_carry(user, config, start):
     for an earlier period arrived after it). Does not commit. Returns
     True when it changed the row."""
     stored = user.spend_period_start
-    if stored == start or (stored is not None and stored > start):
+    if stored is not None and stored > start:
         return False
+    limit_usd = get_user_spend_limit_usd(user, config)
+    if stored == start:
+        # The ceiling the period runs under, kept current (a change of
+        # level inside the period).
+        if user.spend_period_limit_usd == limit_usd:
+            return False
+        user.spend_period_limit_usd = limit_usd
+        return True
     user.spend_period_start = start
     user.spend_period_carry_microdollars = 0
+    user.spend_period_limit_usd = limit_usd
     return True
 
 
@@ -392,6 +401,7 @@ def _forget_period_count(user):
         return False
     user.spend_period_start = None
     user.spend_period_carry_microdollars = 0
+    user.spend_period_limit_usd = None
     return True
 
 
@@ -400,12 +410,14 @@ def carry_into_next_period(user, config, previous, limit_usd):
     later period than the stored one, what the stored period counted
     above its ceiling is carried into the new one, and when the carry
     alone reaches the ceiling now in force the account is blocked for
-    the period. The stored period's ceiling is *limit_usd* (the limit
-    before the event) when it is the period that just ended (*previous*),
-    and the ceiling now in force when the account comes back after time
-    without access (*previous* is None). Nothing changes while the
-    account is not counted per period, and for an event about an earlier
-    period than the stored one. Does not commit."""
+    the period. The stored period is charged the ceiling it ran under
+    (User.spend_period_limit_usd), whatever the level now and however
+    long the account was without access in between. For a row without
+    that record it is *limit_usd* (the limit before the event) when the
+    stored period is the one that just ended (*previous*), else the
+    ceiling now in force. Nothing changes while the account is not
+    counted per period, and for an event about an earlier period than
+    the stored one. Does not commit."""
     start = ceiling_period_start(user)
     stored = user.spend_period_start
     if start is None or stored == start:
@@ -415,14 +427,19 @@ def carry_into_next_period(user, config, previous, limit_usd):
     carry = 0
     now_limit = _usd_to_microdollars(get_user_spend_limit_usd(user, config))
     if stored is not None:
-        limit = (_usd_to_microdollars(limit_usd) if previous is not None
-                 else now_limit)
+        if user.spend_period_limit_usd is not None:
+            limit = _usd_to_microdollars(user.spend_period_limit_usd)
+        elif previous is not None:
+            limit = _usd_to_microdollars(limit_usd)
+        else:
+            limit = now_limit
         if limit > 0:
             carry = max(0, (user.spend_period_carry_microdollars or 0)
                         + _user_spend_between_microdollars(
                             user.id, stored, start) - limit)
     user.spend_period_start = start
     user.spend_period_carry_microdollars = carry
+    user.spend_period_limit_usd = get_user_spend_limit_usd(user, config)
     if now_limit > 0 and carry >= now_limit:
         user.spend_blocked_period_start = start
         logger.warning(
@@ -625,6 +642,16 @@ def set_user_spend_limit(user, limit_usd, config, now=None):
     when the new limit is 0). Does not commit."""
     roll_spend_carry(user, config, now)
     user.monthly_spend_limit_usd = limit_usd
+    return reconcile_user_spend_block(user, config, now=now)
+
+
+def set_user_plan(user, plan, config, now=None):
+    """The admin's plan edit: the carry is rolled with what was in force
+    before, then the plan applies and the block follows what is counted
+    under it (reconcile_user_spend_block), as for a limit edit. Does not
+    commit."""
+    roll_spend_carry(user, config, now)
+    user.plan = plan
     return reconcile_user_spend_block(user, config, now=now)
 
 
