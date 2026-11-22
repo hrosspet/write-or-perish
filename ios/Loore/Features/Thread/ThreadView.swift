@@ -277,7 +277,7 @@ private struct ThreadContent: View {
             }
             NodeFormView(config: inlineConfig(node)) { result in
                 formToken += 1
-                if model.isReadReply {
+                if model.readReplyMessage {
                     model.readReplySent(result)
                 } else {
                     Task { await model.inlineReplySent(result, autoGenerate: $autoGenerate) }
@@ -335,9 +335,9 @@ private struct ThreadContent: View {
     private func inlineConfig(_ node: NodeDetail) -> NodeFormConfig {
         var config = NodeFormConfig(parentId: node.id, parentPrivacy: node.privacyLevel,
                                     hidePowerFeatures: !craftMode, hideAudioUpload: !craftMode, compact: true,
-                                    placeholder: model.isReadReply ? "Ask about these picks, or say what you make of them…"
+                                    placeholder: model.readReplyMessage ? "Ask about these picks, or say what you make of them…"
                                         : "Type what's on your mind…")
-        if model.isReadReply {
+        if model.readReplyMessage {
             config.submitOverride = { [model, autoGenerate] submission in
                 try await model.submitReadReply(submission, autoGenerate: autoGenerate)
             }
