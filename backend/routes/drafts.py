@@ -1887,8 +1887,15 @@ def save_streaming_as_node(session_id):
         parent_node = Node.query.get(draft.parent_id)
         if parent_node is None:
             return jsonify({"error": "Parent node not found"}), 404
+        # The prompt node takes the message's level only where the parent
+        # has it too; otherwise it is private (under a private parent a
+        # public message's prompt node stays private, as for a typed one).
+        prompt_level = (
+            privacy_level
+            if (parent_node.privacy_level or "private") == privacy_level
+            else "private")
         system_node = attach_agentic_prompt_under(
-            parent_node, current_user.id, "textmode", privacy_level, ai_usage)
+            parent_node, current_user.id, "textmode", prompt_level, ai_usage)
         if system_node is not None:
             user_parent_id = system_node.id
     elif agentic:

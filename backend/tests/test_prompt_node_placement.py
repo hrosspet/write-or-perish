@@ -253,3 +253,60 @@ def test_a_reply_recorded_under_ones_own_node_starts_a_session(app):
     assert prompt.privacy_level == "private"
     assert message.parent_id == prompt.id
     assert _db.session.get(Node, data["llm_node_id"]).parent_id == message.id
+
+
+# ── The prompt node's level ───────────────────────────────────────────
+
+
+def test_a_public_message_recorded_under_a_private_node_keeps_the_prompt_private(
+        app):
+    """As for a typed message (POST /textmode/from-node): the message is
+    public, with a page of its own; the prompt node between it and the
+    private node is private."""
+    gleaning = _gleaning("anna", "private")
+
+    resp = _record(app, "anna", gleaning, agentic=True,
+                   privacy_level="public", ai_usage="chat")
+
+    assert resp.status_code == 201, resp.get_json()
+    data = resp.get_json()
+    prompt = _db.session.get(Node, data["conversation_id"])
+    message = _db.session.get(Node, data["user_node_id"])
+    assert prompt.parent_id == gleaning.id
+    assert message.parent_id == prompt.id
+    assert (message.privacy_level, prompt.privacy_level) == (
+        "public", "private")
+
+    assert _public_thread(app, prompt.id).status_code == 404
+    thread = _public_thread(app, message.id)
+    assert thread.status_code == 200
+    assert thread.get_json()["thread"]["id"] == message.id
+    assert "Anna's own instructions" not in thread.get_data(as_text=True)
+
+
+def test_a_private_message_recorded_under_a_private_node_has_a_private_prompt(
+        app):
+    gleaning = _gleaning("anna", "private")
+
+    resp = _record(app, "anna", gleaning, agentic=True,
+                   privacy_level="private", ai_usage="chat")
+
+    assert resp.status_code == 201, resp.get_json()
+    prompt = _db.session.get(Node, resp.get_json()["conversation_id"])
+    assert prompt.privacy_level == "private"
+
+
+def test_without_a_level_under_ones_own_public_node_the_prompt_is_private(
+        app):
+    """A client that sends no level: the recording's own (private) for
+    the message, and the prompt node with it, as before."""
+    gleaning = _gleaning("anna", "public")
+
+    resp = _record(app, "anna", gleaning, agentic=True)
+
+    assert resp.status_code == 201, resp.get_json()
+    data = resp.get_json()
+    prompt = _db.session.get(Node, data["conversation_id"])
+    message = _db.session.get(Node, data["user_node_id"])
+    assert (message.privacy_level, prompt.privacy_level) == (
+        "private", "private")
