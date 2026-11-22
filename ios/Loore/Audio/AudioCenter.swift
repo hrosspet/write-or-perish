@@ -441,10 +441,9 @@ final class AudioCenter {
                                     skip: { [weak self] in self?.player.skip(by: $0) },
                                     seek: { [weak self] in self?.player.seek(to: $0) },
                                     rate: { [weak self] in self?.player.setRate($0) })
-        var title = player.title.isEmpty ? "Loore" : player.title
-        if player.chapters.count > 1, let i = player.currentChapterIndex {
-            title += " — " + player.chapters[i].title
-        }
+        // The entry's title and its headings stay inside the app (mini-player,
+        // chapter list): the lock screen shows one of two fixed titles.
+        let title = NowPlayingController.playbackTitle(voice: player.source == .voice)
         nowPlaying.update(.playback(title: title, elapsed: player.cumulativeTime, duration: player.totalDuration,
                                     rate: player.rate, playing: player.isPlaying))
     }

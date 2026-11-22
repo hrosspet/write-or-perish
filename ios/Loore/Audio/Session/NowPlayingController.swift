@@ -9,7 +9,7 @@ import SwiftUI
 /// |---|---|---|
 /// | recording | `Recording m:ss` / `Paused m:ss` | play = resume, pause = pause, next = stop and send |
 /// | thinking | `Voice…` | none (#397: the web's next = cancel read as "next track" and only saved a TTS call) |
-/// | playback | `Voice` (+ chapter) or the listen-aloud title | play/pause, ±10 s, seek, rate |
+/// | playback | `Voice`, or `Listening` for an entry read aloud | play/pause, ±10 s, seek, rate |
 ///
 /// The recording row is the fallback for when the voice Live Activity is not shown.
 /// "Next track" has a handler only while that row uses it, so iOS has no reason to
@@ -55,6 +55,12 @@ final class NowPlayingController {
     nonisolated static func recordingTitle(elapsed: Double, paused: Bool) -> String {
         let time = AudioTimeFormat.clock(elapsed)
         return paused ? "Paused \(time)" : "Recording \(time)"
+    }
+
+    /// The lock-screen title while audio plays: the same words for every entry.
+    /// What the entry is called, and the heading being read, show in the app only.
+    nonisolated static func playbackTitle(voice: Bool) -> String {
+        voice ? "Voice" : "Listening"
     }
 
     func update(_ newPhase: Phase) {

@@ -1,4 +1,5 @@
 import AVFoundation
+import MediaPlayer
 import SwiftUI
 import XCTest
 @testable import Loore
@@ -551,6 +552,26 @@ final class VoiceApprovalAppTests: StubbedAppTestCase {
         app.audio.player.load(urls: [Self.reply], durations: [6], title: "Reply", source: .node(77), autoplay: false)
         await app.audio.appendApprovalAnnouncement(nodeId: 77)
         XCTAssertEqual(queued, [Self.reply])
+    }
+
+    func testTheLockScreenTitleIsTheSameForEveryEntry() {
+        let player = app.audio.player
+        let lockScreenTitle = { MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPMediaItemPropertyTitle] as? String }
+        let chapters = [QueueChapter(title: "First heading", chunkIndex: 0, startTime: 0),
+                        QueueChapter(title: "Second heading", chunkIndex: 1, startTime: 6)]
+        player.load(urls: [Self.reply, Self.clip], durations: [6, 4.5], title: "A morning entry", source: .node(77),
+                    chapters: chapters, autoplay: false)
+        app.audio.refreshNowPlaying()
+        XCTAssertEqual(lockScreenTitle(), "Listening")
+        XCTAssertEqual(player.title, "A morning entry", "the app's own player keeps the entry's title")
+        XCTAssertEqual(player.chapters.map(\.title), ["First heading", "Second heading"])
+        XCTAssertEqual(MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPMediaItemPropertyPlaybackDuration] as? Double,
+                       10.5)
+
+        player.load(urls: [Self.reply, Self.clip], durations: [6, 4.5], title: "Voice", source: .voice,
+                    chapters: chapters, autoplay: false)
+        app.audio.refreshNowPlaying()
+        XCTAssertEqual(lockScreenTitle(), "Voice")
     }
 
     func testDropTrailingTakesOffOnlyThatLastChunk() {
