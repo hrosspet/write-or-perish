@@ -496,6 +496,13 @@ def continue_from_node(node_id):
     node = Node.query.get_or_404(node_id)
     if node.human_owner_id != current_user.id:
         return jsonify({"error": "Unauthorized"}), 403
+    # Only under a node the user can open, the parent check of the other
+    # reply routes (POST /nodes/, save-as-node): a node of theirs in a
+    # shared thread that is closed to them gets the same 404.
+    from backend.utils.node_deletion import parent_visibility_error
+    err = parent_visibility_error(node, current_user.id)
+    if err is not None:
+        return err
 
     data = request.get_json() or {}
     content = data.get("content")

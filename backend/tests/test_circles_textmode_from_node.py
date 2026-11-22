@@ -275,6 +275,29 @@ def test_a_member_removed_from_the_circle_is_refused_as_on_a_typed_reply(
     assert _count() == before
 
 
+@pytest.mark.parametrize("auto", [False, True])
+def test_a_removed_member_cannot_write_under_his_glean_closed_to_him(
+        app, glean, auto):  # noqa: F811
+    """His Glean in her thread is closed to him once he is removed: the
+    same 404 as a typed or a recorded reply under it, nothing written."""
+    close, _, _, gid = _bens_glean_in_annas_thread(app, glean)
+    assert _client(app, "anna").delete(
+        f"/api/circles/{close}/members",
+        json={"username": "ben"}).status_code == 200
+    assert _seen(app, "ben", gid) == 404
+    before = _count()
+    typed = _client(app, "ben").post("/api/nodes/", json={
+        "content": "words", "privacy_level": "private", "ai_usage": "chat",
+        "parent_id": gid})
+    recorded = _save_agentic(app, "ben", _recorded("ben", gid, "private"),
+                             "private", auto=auto)
+    r = _from_node(app, "ben", gid, auto_generate=auto)
+    for answer in (typed, recorded, r):
+        assert (answer.status_code, answer.get_json()["error"]) == (
+            404, "Parent node not found")
+    assert _count() == before
+
+
 def test_a_message_quoting_what_the_circle_cannot_read_is_refused(
         app, glean):  # noqa: F811
     close = _circle(app, "anna", "Close", ["ben", "chidi"])
