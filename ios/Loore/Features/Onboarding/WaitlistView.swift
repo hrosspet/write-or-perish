@@ -463,6 +463,7 @@ final class StartingPointModel {
 /// The ⋯ menu an unapproved user gets on the web: About links and Logout.
 struct AboutAndLogoutMenu: View {
     @Environment(AppState.self) private var app
+    @State private var signOutQuestion = false
 
     var body: some View {
         Menu {
@@ -471,7 +472,7 @@ struct AboutAndLogoutMenu: View {
                 Button("Vision") { app.open(.webPage(path: "/vision")) }
                 Button("How To") { app.open(.webPage(path: "/how-to")) }
             }
-            Button("Logout") { Task { await app.signOut() } }
+            Button("Logout") { app.requestSignOut(question: $signOutQuestion) }
         } label: {
             Image(systemName: "ellipsis")
                 .font(.system(size: 17, weight: .regular))
@@ -481,5 +482,6 @@ struct AboutAndLogoutMenu: View {
         }
         .accessibilityLabel("Menu")
         .accessibilityIdentifier("waitlist.menu")
+        .signOutQuestion($signOutQuestion, .logOut)
     }
 }
