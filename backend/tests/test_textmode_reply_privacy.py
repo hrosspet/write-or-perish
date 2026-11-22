@@ -306,3 +306,34 @@ def test_textmode_message_takes_its_parents_level(app):
 
     assert resp.status_code == 202, resp.get_json()
     assert _message(resp).privacy_level == "private"
+
+
+# ── A level that is not text, and a deleted node ──────────────────────
+
+
+@pytest.mark.parametrize("level", [["public"], {"level": "public"}, [], {},
+                                   0, 1, True])
+def test_a_level_that_is_not_text_is_refused(app, level):
+    gleaning = _gleaning("private")
+    before = Node.query.count()
+
+    resp = _post(app, gleaning, privacy_level=level)
+
+    assert resp.status_code == 400, resp.get_json()
+    assert Node.query.count() == before
+
+
+@pytest.mark.parametrize("body", [{}, {"privacy_level": "public"},
+                                  {"privacy_level": "private"}])
+def test_nothing_is_written_under_a_deleted_node(app, body):
+    """As POST /nodes/ answers for a deleted parent: 410."""
+    from datetime import datetime
+    gleaning = _gleaning("private")
+    gleaning.deleted_at = datetime.utcnow()
+    _db.session.commit()
+    before = Node.query.count()
+
+    resp = _post(app, gleaning, **body)
+
+    assert resp.status_code == 410, resp.get_json()
+    assert Node.query.count() == before
