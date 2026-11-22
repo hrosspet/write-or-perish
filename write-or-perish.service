@@ -10,7 +10,13 @@ WorkingDirectory=/home/hrosspet/write-or-perish
 EnvironmentFile=/home/hrosspet/write-or-perish/.env.production
 PIDFile=/home/hrosspet/write-or-perish/gunicorn.pid
 
-ExecStart=/bin/bash -c 'source ~/miniconda3/etc/profile.d/conda.sh && conda activate write-or-perish && gunicorn -c backend/gunicorn_conf.py -w 4 -k gevent -b 127.0.0.1:8000 --timeout 900 --daemon --access-logfile /home/hrosspet/write-or-perish/logs/gunicorn-access.log --error-logfile /home/hrosspet/write-or-perish/logs/gunicorn-error.log --pid /home/hrosspet/write-or-perish/gunicorn.pid backend.app:app'
+# The access log's line: address, time, method, path without the part after
+# the question mark, protocol, status, size and client; no referring page.
+# Each % of gunicorn's format is written %% here (systemd reads a single %
+# as one of its own specifiers), and the format holds no quote, backslash
+# or dollar sign, so it reaches gunicorn as the one word bash's double
+# quotes make of it.
+ExecStart=/bin/bash -c 'source ~/miniconda3/etc/profile.d/conda.sh && conda activate write-or-perish && gunicorn --access-logformat "%%(h)s %%(l)s %%(u)s %%(t)s %%(m)s %%(U)s %%(H)s %%(s)s %%(b)s %%(a)s" -w 4 -k gevent -b 127.0.0.1:8000 --timeout 900 --daemon --access-logfile /home/hrosspet/write-or-perish/logs/gunicorn-access.log --error-logfile /home/hrosspet/write-or-perish/logs/gunicorn-error.log --pid /home/hrosspet/write-or-perish/gunicorn.pid backend.app:app'
 
 ExecReload=/bin/kill -s HUP $MAINPID
 ExecStop=/bin/kill -s TERM $MAINPID
