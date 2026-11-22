@@ -1757,19 +1757,25 @@ final class VoiceTurnController {
     /// Leaving the Voice screen (the web's unmount cleanup).
     func tearDown() {
         timing.endTurn()
-        // Left before the first chunk: no audio will ever reach the session.
-        // Kept, it stayed in 'recording' on the server, where Text mode found
-        // it as a draft that no Send or Discard removed. Only while recording:
-        // in `.starting`, `sessionId` may still name the last turn's session
-        // (kept on the phone or the server after an error); a new session
-        // created meanwhile is discarded by the start flow.
-        let emptySession = state == .recording && !recorder.hasProducedChunks ? sessionId : nil
-        if state == .recording || state == .starting { recorder.cancel() }
-        resetTurn(keepQueue: false)
-        if let emptySession {
-            recorder.forget(sessionId: emptySession)
-            Task { [backend] in await backend.discard(sessionId: emptySession) }
+        // Left mid-recording (#753): the recorder queues the unfinished
+        // segment with the others, so the recovery banner has everything said,
+        // and is free at once (`resetTurn`'s cancel finds nothing running).
+        // Then a recording with no earlier piece and under
+        // `VoiceRecorder.shortestKeptRecording` (a Record tapped by accident)
+        // is discarded: kept, it stayed in 'recording' on the server, where
+        // Text mode found it as a draft that no Send or Discard removed. One
+        // whose chunks are all on the server is released, so the next Voice
+        // screen offers it at once instead of after the server's live window.
+        // One with chunks still on the phone is left as it is, and so is one
+        // this phone continued meanwhile. In `.starting` the recorder runs only
+        // for a continued session waiting for its claim, which sends nothing
+        // (#388); `sessionId` may still name the last turn's session, and a
+        // new session created meanwhile is discarded by the start flow.
+        if state == .recording || state == .starting {
+            recorder.leave(release: { [backend] sid in await backend.release(sessionId: sid) },
+                           discard: { [backend] sid in await backend.discard(sessionId: sid) })
         }
+        resetTurn(keepQueue: false)
         state = .idle
         aiBlock = nil
         lengthNotice = false
