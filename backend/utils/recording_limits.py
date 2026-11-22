@@ -602,7 +602,8 @@ def _usage_ceilings(user, config):
     microdollars:
 
     - the monthly limit (utils/spend.get_user_spend_limit_usd), against
-      the carry and this month's spend;
+      the carry and this month's spend, or the paid period's
+      (spend.counted_spend_microdollars);
     - the trial's or an alpha tester's free month's ceiling
       (spend.trial_limit_usd), against the spend since its start
       (spend.trial_ceiling_start), as spend.enforce_trial_cap counts it.
@@ -613,8 +614,7 @@ def _usage_ceilings(user, config):
     limit = spend._usd_to_microdollars(
         spend.get_user_spend_limit_usd(user, config))
     if limit > 0:
-        ceilings.append((spend.rolled_spend_carry(user, config)
-                         + spend.get_user_month_spend_microdollars(user.id),
+        ceilings.append((spend.counted_spend_microdollars(user, config),
                          limit, False))
     trial = spend._usd_to_microdollars(spend.trial_limit_usd(user, config))
     since = spend.trial_ceiling_start(user)

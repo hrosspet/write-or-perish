@@ -817,6 +817,8 @@ def _as_ended(user):
             "customer": user.stripe_customer_id,
             "status": "canceled", "metadata": meta,
             "items": {"data": [{
+                "current_period_start": stamp(
+                    user.subscription_period_start),
                 "current_period_end": stamp(user.subscription_period_end)}]},
             "trial_start": stamp(user.subscription_trial_start),
             "trial_end": stamp(user.subscription_trial_end)}
@@ -935,7 +937,8 @@ def apply_subscription(sub, config=None):
     when the ceiling changed, the spend block): never ``plan`` or an
     admin's limit. Does not commit."""
     from backend.utils.spend import (
-        get_user_spend_limit_usd, reconcile_user_spend_block)
+        ceiling_period_start, get_user_spend_limit_usd,
+        reconcile_user_spend_block)
     cfg = _config(config)
     user = _user_for_subscription(sub)
     if user is None:
@@ -964,11 +967,14 @@ def apply_subscription(sub, config=None):
                     sub.get("status"), user.id)
         return user
     limit_before = get_user_spend_limit_usd(user, cfg)
+    ceiling_period_before = ceiling_period_start(user)
 
     item = _first_item(sub)
     level = level_for_price(item.get("price"), sub.get("metadata"))
     period_end = _ts(item.get("current_period_end")
                      or sub.get("current_period_end"))
+    period_start = _ts(item.get("current_period_start")
+                       or sub.get("current_period_start"))
     cancel_at = _ts(sub.get("cancel_at"))
     cancelling = bool(sub.get("cancel_at_period_end")) or cancel_at is not None
     _apply_payment_state(user, sub, status)
@@ -976,6 +982,7 @@ def apply_subscription(sub, config=None):
     user.subscription_level = level
     user.subscription_status = status
     user.subscription_period_end = cancel_at or period_end
+    user.subscription_period_start = period_start
     user.subscription_trial_end = _ts(sub.get("trial_end"))
     user.subscription_cancel_at_period_end = cancelling and status != "ended"
     user.subscription_trial_start = _ts(sub.get("trial_start"))
@@ -991,7 +998,10 @@ def apply_subscription(sub, config=None):
         customer = sub.get("customer")
         user.stripe_customer_id = (customer.get("id")
                                    if isinstance(customer, dict) else customer)
-    if get_user_spend_limit_usd(user, cfg) != limit_before:
+    if (get_user_spend_limit_usd(user, cfg) != limit_before
+            or ceiling_period_start(user) != ceiling_period_before):
+        # A new ceiling, or a new period to count it over (a renewal):
+        # the block follows what is counted now.
         reconcile_user_spend_block(user, cfg)
     return user
 

@@ -1163,14 +1163,15 @@ def _short_of_headroom(user, estimate):
     None. What is left is the limit less this month's spend and the carry
     from earlier months (#594). A user with no limit (0) is never short."""
     from backend.utils.spend import (
-        get_user_month_spend_microdollars, get_user_spend_limit_usd,
-        rolled_spend_carry)
+        carried_spend_microdollars, counted_spend_microdollars,
+        get_user_spend_limit_usd)
     config = current_app.config
     limit = get_user_spend_limit_usd(user, config) or 0
     if limit <= 0:
         return None
-    carried = rolled_spend_carry(user, config) / 1e6
-    counted = carried + get_user_month_spend_microdollars(user.id) / 1e6
+    # Of the paid period for an account counted per period.
+    carried = carried_spend_microdollars(user, config) / 1e6
+    counted = counted_spend_microdollars(user, config) / 1e6
     if estimate > limit - counted:
         return counted, limit, carried
     return None

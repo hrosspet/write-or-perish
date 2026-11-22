@@ -221,6 +221,19 @@ def _intentions_status_map():
     return out
 
 
+def _period_spend_fields(user, config):
+    from backend.utils.spend import (
+        ceiling_period_start, counted_spend_microdollars)
+    start = ceiling_period_start(user)
+    if start is None:
+        return {"spend_period_start": None, "spend_period_usd": None}
+    return {
+        "spend_period_start": iso_utc(start),
+        "spend_period_usd": counted_spend_microdollars(
+            user, config) / 1_000_000,
+    }
+
+
 @admin_bp.route("/users", methods=["GET"])
 @login_required
 @admin_required
@@ -326,6 +339,10 @@ def list_users():
             # spend. Rolled from the stored carry without writing it (a
             # query per user only before the month's first roll).
             "spend_carried_usd": rolled_spend_carry(user, config, now) / 1_000_000,
+            # An account whose ceiling is counted per paid period
+            # (spend.ceiling_period_start): the period's start and what
+            # counts against the ceiling in it; null for the others.
+            **_period_spend_fields(user, config),
             "profile_batch_pending": bool(user.profile_batch_pending),
             "profile_force_batch": bool(user.profile_force_batch),
             "prefilled_handle": user.prefilled_handle,

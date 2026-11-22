@@ -1493,6 +1493,14 @@ function AdminPanel() {
               </td>
               <td style={{ border: "1px solid var(--border)", padding: "8px", width: "140px", whiteSpace: "nowrap" }}>
                 ${(u.current_month_spending_usd || 0).toFixed(2)}
+                {u.spend_period_start && (
+                  <span
+                    title={`Counted against the limit in the paid period since ${new Date(u.spend_period_start).toLocaleDateString()}`}
+                    style={{ color: "var(--text-muted)", marginLeft: "6px", fontSize: "0.85em" }}
+                  >
+                    (period ${(u.spend_period_usd || 0).toFixed(2)})
+                  </span>
+                )}
                 {u.spend_blocked && (
                   <FaTimesCircle
                     title="Blocked this month"

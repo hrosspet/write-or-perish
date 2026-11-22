@@ -179,6 +179,12 @@ class User(db.Model, UserMixin):
     # When the paid period (or the trial) ends, UTC: the next payment, or
     # the end of a subscription cancelled at period end.
     subscription_period_end = db.Column(db.DateTime, nullable=True)
+    # When the subscription's current period began, UTC (Stripe's
+    # current_period_start). The level's usage ceiling is counted over
+    # this period (utils/spend.ceiling_period_start). NULL: not known
+    # (no subscription event since the column exists), and the ceiling
+    # is counted over the calendar month.
+    subscription_period_start = db.Column(db.DateTime, nullable=True)
     subscription_trial_end = db.Column(db.DateTime, nullable=True)
     subscription_cancel_at_period_end = db.Column(
         db.Boolean, nullable=False, default=False,
@@ -267,6 +273,18 @@ class User(db.Model, UserMixin):
     # spending carries nothing into the next month (a limit of 0 clears
     # the carry, also when a limit is set again later in the month).
     spend_carry_free_month = db.Column(db.String(7), nullable=True)
+
+    # The ceiling of a paid period (utils/spend.ceiling_period_start), for
+    # an account whose ceiling comes from its subscription. The start of
+    # the period the account is blocked for: the block holds while it is
+    # the current period's start and ends by itself with the period.
+    spend_blocked_period_start = db.Column(db.DateTime, nullable=True)
+    # What earlier periods spent above the ceiling, counted toward the
+    # period that starts at spend_period_start (the #594 rule, per
+    # period), in microdollars. NULL start: never counted per period.
+    spend_period_start = db.Column(db.DateTime, nullable=True)
+    spend_period_carry_microdollars = db.Column(
+        db.BigInteger, nullable=False, default=0, server_default="0")
 
     # Per-user defaults for new nodes (overridable per-node)
     default_privacy_level = db.Column(

@@ -221,7 +221,10 @@ class Config:
     # Monthly model-cost ceiling of a subscribed account, in USD (Peter,
     # 2026-11-12): the per-user spend cap for an account whose access
     # comes from its subscription. An admin's per-user limit still wins;
-    # accounts set by hand keep PER_USER_MONTHLY_LIMIT_USD.
+    # accounts set by hand keep PER_USER_MONTHLY_LIMIT_USD. It is counted
+    # over the subscription's paid period, not the calendar month
+    # (utils/spend.ceiling_period_start); an admin's limit and
+    # PER_USER_MONTHLY_LIMIT_USD are counted over the calendar month.
     SUBSCRIPTION_SPEND_LIMIT_USD_STANDARD = float_from_env(
         "SUBSCRIPTION_SPEND_LIMIT_USD_STANDARD", 50.0)
     SUBSCRIPTION_SPEND_LIMIT_USD_SUPPORTER = float_from_env(
@@ -230,8 +233,8 @@ class Config:
         "SUBSCRIPTION_SPEND_LIMIT_USD_DISCOUNTED", 50.0)
     # Model cost a trial may use in all, whatever the level: nothing has
     # been paid yet. Counted from the trial's start, not per month. From
-    # the first successful payment the level's monthly ceiling applies, and
-    # it counts the whole calendar month, trial usage in that month
+    # the first successful payment the level's ceiling applies, and the
+    # first paid period counts from the trial's start, trial usage
     # included. 0: no separate trial ceiling. Peter, 2026-11-12: "let's go
     # with $30 for the free trial period, and if the user pays, extend
     # this to the subscription's cap" — a starting value, to be checked
