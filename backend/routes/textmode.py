@@ -496,6 +496,12 @@ def continue_from_node(node_id):
     node = Node.query.get_or_404(node_id)
     if node.human_owner_id != current_user.id:
         return jsonify({"error": "Unauthorized"}), 403
+    # Nothing is written under a deleted node (410), as in POST /nodes/;
+    # the row is locked against a delete that is under way.
+    from backend.utils.node_deletion import assert_parent_alive
+    err = assert_parent_alive(node.id)
+    if err is not None:
+        return err
 
     data = request.get_json() or {}
     content = data.get("content")
@@ -520,7 +526,8 @@ def continue_from_node(node_id):
     privacy_level = node_privacy
     if data.get("privacy_level") is not None:
         privacy_level = data["privacy_level"]
-        if not validate_privacy_level(privacy_level):
+        if (not isinstance(privacy_level, str)
+                or not validate_privacy_level(privacy_level)):
             return jsonify(
                 {"error": f"Invalid privacy_level: {privacy_level}"}), 400
         if node_privacy == "public" and privacy_level != "public":
