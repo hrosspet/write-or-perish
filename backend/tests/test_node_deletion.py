@@ -1782,3 +1782,87 @@ def test_cache_step_walks_up_the_thread_once_however_much_the_cascade_took(
     # One start id either way: the walk binds as many parameters for
     # the chain of 30 as for the chain of 3.
     assert len(walks[0][0]) == len(walks[1][0])
+
+
+# ── A deleted reply's other text columns go with its content ────────────
+
+_TOOL_META = (
+    '[{"name": "semantic_search", "input": {"query": "walks by the river"},'
+    ' "status": "success", "matches": []},'
+    ' {"name": "update_artifact", "input": {"title": "River notes"}}]')
+
+
+def _deleted_reply_with_follow_up(alice, days=31):
+    root = _make_node(alice, content="question")
+    reply = _make_node(alice, parent=root, content="answer", node_type="llm")
+    reply.tool_calls_meta = _TOOL_META
+    reply.streaming_content = "part of the answer"
+    reply.llm_task_warnings = '["warning text"]'
+    reply.llm_task_error = "error text"
+    reply.transcription_error = "transcription note"
+    follow_up = _make_node(alice, parent=reply, content="follow-up")
+    reply.deleted_at = datetime.utcnow() - timedelta(days=days)
+    _db.session.commit()
+    return reply, follow_up
+
+
+def _text_columns(node_id):
+    _db.session.expire_all()
+    row = _db.session.get(Node, node_id)
+    return (row.content, row.tool_calls_meta, row.streaming_content,
+            row.llm_task_warnings, row.llm_task_error,
+            row.transcription_error)
+
+
+def test_cleanup_clears_tool_record_and_notes_of_a_deleted_reply(app, alice):
+    from backend.tasks.node_cleanup import finalize_deleted_nodes
+    reply, follow_up = _deleted_reply_with_follow_up(alice)
+
+    finalize_deleted_nodes()
+
+    assert _text_columns(reply.id) == (None,) * 6
+    row = _db.session.get(Node, reply.id)
+    assert row.deleted_at is not None          # the row stays as the anchor
+    kept = _db.session.get(Node, follow_up.id)
+    assert kept.deleted_at is None and kept.get_content() == "follow-up"
+
+
+def test_cleanup_clears_a_reply_whose_content_went_on_an_earlier_run(
+        app, alice):
+    """A row whose content an earlier run cleared, with the tool record
+    still set: the next run clears the rest, and a run after that has
+    nothing to do with it."""
+    from backend.tasks.node_cleanup import finalize_deleted_nodes
+    reply, _ = _deleted_reply_with_follow_up(alice)
+    reply.content = None
+    _db.session.commit()
+
+    finalize_deleted_nodes()
+    assert _text_columns(reply.id) == (None,) * 6
+
+    assert finalize_deleted_nodes()["wiped"] == 0
+
+
+def test_cleanup_keeps_everything_inside_the_grace_period(app, alice):
+    from backend.tasks.node_cleanup import finalize_deleted_nodes
+    reply, _ = _deleted_reply_with_follow_up(alice, days=3)
+
+    finalize_deleted_nodes()
+
+    content, meta, streaming, warnings, error, note = _text_columns(reply.id)
+    assert content is not None and meta == _TOOL_META
+    assert (streaming, warnings, error, note) == (
+        "part of the answer", '["warning text"]', "error text",
+        "transcription note")
+
+
+def test_cleanup_leaves_a_living_reply_alone(app, alice):
+    from backend.tasks.node_cleanup import finalize_deleted_nodes
+    root = _make_node(alice, content="question")
+    reply = _make_node(alice, parent=root, content="answer", node_type="llm")
+    reply.tool_calls_meta = _TOOL_META
+    _db.session.commit()
+
+    finalize_deleted_nodes()
+
+    assert _text_columns(reply.id)[1] == _TOOL_META
