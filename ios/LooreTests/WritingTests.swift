@@ -316,7 +316,7 @@ final class NodeFormModelTests: StubbedAppTestCase {
             if request.httpMethod == "PUT" {
                 return .json(200, #"{"node":{"id":9,"content":"saved"},"descendants_updated":0}"#)
             }
-            return .json(200, #"{"id":3,"content":"saved","updated_at":"2026-11-22T10:00:00Z"}"#)
+            return .json(200, #"{"id":5,"content":"saved","updated_at":"2026-11-22T10:00:00Z"}"#)
         }
         return NodeFormModel(config: NodeFormConfig(edit: .init(nodeId: 9, initialContent: entry, initialPrivacy: .private,
                                                                 initialAIUsage: .chat)),
@@ -341,6 +341,10 @@ final class NodeFormModelTests: StubbedAppTestCase {
         XCTAssertFalse(calls.contains { $0.hasPrefix("DELETE") }, "the person's text stays on the server")
     }
 
+    private func deleteQueries() -> [String] {
+        StubURLProtocol.requests.filter { $0.httpMethod == "DELETE" }.map { $0.url?.query ?? "" }
+    }
+
     func testUsingTheOlderEditMakesItTheFormsText() async {
         let model = editForm(Self.olderDraft)
         await model.start()
@@ -348,24 +352,33 @@ final class NodeFormModelTests: StubbedAppTestCase {
         XCTAssertEqual(model.content, "- [ ] milk\n- [ ] eggs")
         XCTAssertNil(model.olderDraft)
         XCTAssertTrue(model.hasDraft)
-        await model.drafts.flush()
-        XCTAssertEqual(body(of: "POST /api/drafts/")?["content"] as? String, "- [ ] milk\n- [ ] eggs",
-                       "saved again, now newer than the entry")
+        // Saved as the newest draft first, then its older row goes.
+        let deleted = await eventually { self.deleteQueries() == ["node_id=9&draft_id=3"] }
+        XCTAssertTrue(deleted, "\(deleteQueries())")
+        XCTAssertEqual(body(of: "POST /api/drafts/")?["content"] as? String, "- [ ] milk\n- [ ] eggs")
+        let post = StubURLProtocol.requests.firstIndex { $0.httpMethod == "POST" }
+        let delete = StubURLProtocol.requests.firstIndex { $0.httpMethod == "DELETE" }
+        XCTAssertLessThan(post ?? .max, delete ?? .max)
     }
 
-    func testDiscardingTheOlderEditDeletesIt() async {
+    func testDiscardingTheOlderEditDeletesOnlyItsRow() async {
         let model = editForm(Self.olderDraft)
         await model.start()
         model.discardOlderDraft()
         XCTAssertNil(model.olderDraft)
-        let deleted = await eventually { calls.contains("DELETE /api/drafts/") }
-        XCTAssertTrue(deleted)
+        let deleted = await eventually { self.deleteQueries() == ["node_id=9&draft_id=3"] }
+        XCTAssertTrue(deleted, "\(deleteQueries())")
         XCTAssertEqual(model.content, "- [x] milk")
     }
 
-    // Typing works on the entry's text: the autosave keeps it as the entry's
-    // draft, and "Use my edit" no longer appears (it would replace the typing).
-    func testTypingKeepsTheOlderEditOnOfferUntilTheFormCloses() async throws {
+    /// What the server answers after the person typed next to the older edit
+    /// (#766): the typing is the newest draft, the older edit is kept beside it.
+    private static let typedNextToOlder = #"{"id":4,"content":"- [x] milk\n- [x] bread","node_id":9,"updated_at":"2026-11-22T10:00:00Z","older_draft":{"id":3,"content":"- [ ] milk\n- [ ] eggs","updated_at":"2026-11-20T14:03:00Z"},"entry_updated_at":"2026-11-21T09:12:00Z"}"#
+
+    // #766 review: typing in the entry's text, then closing the form, keeps
+    // the older edit: nothing deletes it, and on the next open the typed text
+    // loads with the older edit offered beside it.
+    func testTheOlderEditSurvivesTypingClosingAndReopening() async throws {
         let model = editForm(Self.olderDraft)
         await model.start()
         model.content = "- [x] milk\n- [x] bread"
@@ -373,12 +386,30 @@ final class NodeFormModelTests: StubbedAppTestCase {
         XCTAssertFalse(model.canUseOlderDraft)
         model.useOlderDraft()
         XCTAssertEqual(model.content, "- [x] milk\n- [x] bread", "typed text is never replaced")
-        XCTAssertNotNil(model.olderDraft, "still there to copy from")
+        XCTAssertNotNil(model.olderDraft)
+        await model.drafts.suspend()  // the form closes
+        XCTAssertEqual(body(of: "POST /api/drafts/")?["content"] as? String, "- [x] milk\n- [x] bread")
+        XCTAssertTrue(deleteQueries().isEmpty, "nothing deletes the older edit")
 
-        model.discardOlderDraft()
-        try await Task.sleep(nanoseconds: 200_000_000)
-        XCTAssertNil(model.olderDraft)
-        XCTAssertFalse(calls.contains("DELETE /api/drafts/"), "the server's draft is the newly typed text")
+        let reopened = editForm(Self.typedNextToOlder)
+        await reopened.start()
+        XCTAssertEqual(reopened.content, "- [x] milk\n- [x] bread", "the typed text loads")
+        XCTAssertTrue(reopened.hasDraft)
+        XCTAssertEqual(reopened.olderDraft?.id, 3)
+        XCTAssertEqual(reopened.olderDraft?.content, "- [ ] milk\n- [ ] eggs")
+        XCTAssertFalse(reopened.canUseOlderDraft, "never replaces the typed text")
+    }
+
+    // "Discard draft" next to a kept older edit deletes only the typed text.
+    func testDiscardingTheTypedDraftKeepsTheOlderEdit() async {
+        let model = editForm(Self.typedNextToOlder)
+        await model.start()
+        model.discardDraft()
+        XCTAssertEqual(model.content, "- [x] milk")
+        XCTAssertNotNil(model.olderDraft)
+        XCTAssertTrue(model.canUseOlderDraft)
+        let deleted = await eventually { self.deleteQueries() == ["node_id=9&draft_id=4"] }
+        XCTAssertTrue(deleted, "\(deleteQueries())")
     }
 
     func testADraftNewerThanTheEntryLoadsAsBefore() async {
@@ -411,14 +442,25 @@ final class NodeFormModelTests: StubbedAppTestCase {
     }
 
     func testTheOlderEditsNoticeSaysWhenEachWasMade() throws {
+        let utc = TimeZone(identifier: "UTC")!
         let draft = try decode(Draft.self, Self.olderDraft)
         XCTAssertTrue(draft.olderThanEntry)
-        XCTAssertEqual(NodeFormModel.olderDraftNotice(draft, timeZone: TimeZone(identifier: "UTC")!),
+        let older = Draft.OlderEdit(id: draft.id, content: draft.content, updatedAt: draft.updatedAt)
+        XCTAssertEqual(NodeFormModel.olderDraftNotice(older, entryChangedAt: draft.entryUpdatedAt,
+                                                      formShowsNewerText: false, timeZone: utc),
                        "Your unsaved edit from 2026/11/20 14:03. The entry changed after it (2026/11/21 09:12), "
                        + "so the form shows the entry as it is now.")
+        let typed = try decode(Draft.self, Self.typedNextToOlder)
+        XCTAssertFalse(typed.olderThanEntry)
+        let kept = try XCTUnwrap(typed.olderDraft)
+        XCTAssertEqual(NodeFormModel.olderDraftNotice(kept, entryChangedAt: typed.entryUpdatedAt,
+                                                      formShowsNewerText: true, timeZone: utc),
+                       "Your unsaved edit from 2026/11/20 14:03. The entry changed after it (2026/11/21 09:12), "
+                       + "so the form shows what you typed since.")
         let plain = try decode(Draft.self, #"{"id":4,"content":"x"}"#)
         XCTAssertFalse(plain.olderThanEntry)
         XCTAssertNil(plain.entryUpdatedAt)
+        XCTAssertNil(plain.olderDraft)
     }
 }
 

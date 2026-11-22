@@ -170,6 +170,126 @@ def test_a_new_entrys_draft_is_never_marked(client, alice):
     assert "older_than_entry" not in body
 
 
+def _left_edit_then_tick(client, entry):
+    """Steps 1-2 of #761: an edit left unsaved, then a checkbox ticked."""
+    saved = client.post("/drafts/", json={
+        "content": "- [ ] milk\n- [ ] bread\n- [ ] eggs", "node_id": entry.id})
+    _age_draft(saved.get_json()["id"], 60)
+    assert client.put(f"/nodes/{entry.id}",
+                      json={"content": "- [x] milk\n- [ ] bread"}).status_code == 200
+    return saved.get_json()["id"]
+
+
+def test_typing_after_the_mark_keeps_the_older_edit_beside_it(client, alice):
+    # #766 review: typing in the entry's text must not overwrite the older
+    # edit; both stay until the person chooses.
+    entry = _entry(alice)
+    older_id = _left_edit_then_tick(client, entry)
+
+    typed = client.post("/drafts/", json={
+        "content": "- [x] milk\n- [x] bread", "node_id": entry.id})
+    assert typed.status_code == 200
+    assert typed.get_json()["id"] != older_id
+    assert Draft.query.get(older_id).get_content() == (
+        "- [ ] milk\n- [ ] bread\n- [ ] eggs")
+
+    # More typing updates the new row, not the older one.
+    client.post("/drafts/", json={
+        "content": "- [x] milk\n- [x] bread\n- [ ] tea", "node_id": entry.id})
+    assert Draft.query.filter_by(node_id=entry.id).count() == 2
+
+    body = client.get(f"/drafts/?node_id={entry.id}").get_json()
+    # Every client gets the newest draft, as before.
+    assert body["id"] == typed.get_json()["id"]
+    assert body["content"] == "- [x] milk\n- [x] bread\n- [ ] tea"
+    assert "older_than_entry" not in body
+    # The older edit comes back beside it.
+    assert body["older_draft"]["id"] == older_id
+    assert body["older_draft"]["content"] == "- [ ] milk\n- [ ] bread\n- [ ] eggs"
+    assert body["older_draft"]["updated_at"].endswith("Z")
+    assert body["entry_updated_at"].endswith("Z")
+
+
+def test_discarding_the_older_edit_deletes_only_that_row(client, alice):
+    entry = _entry(alice)
+    older_id = _left_edit_then_tick(client, entry)
+    typed = client.post("/drafts/", json={"content": "typed", "node_id": entry.id})
+
+    resp = client.delete(f"/drafts/?node_id={entry.id}&draft_id={older_id}")
+
+    assert resp.status_code == 200
+    assert Draft.query.get(older_id) is None
+    body = client.get(f"/drafts/?node_id={entry.id}").get_json()
+    assert body["id"] == typed.get_json()["id"]
+    assert "older_draft" not in body
+    # Another entry's draft id is not this entry's to delete.
+    other = _entry(alice)
+    other_draft = client.post("/drafts/", json={"content": "x", "node_id": other.id})
+    assert client.delete(
+        f"/drafts/?node_id={entry.id}&draft_id={other_draft.get_json()['id']}"
+    ).status_code == 404
+    assert Draft.query.get(other_draft.get_json()["id"]) is not None
+
+
+def test_saving_the_entry_deletes_both(client, alice):
+    entry = _entry(alice)
+    _left_edit_then_tick(client, entry)
+    client.post("/drafts/", json={"content": "typed", "node_id": entry.id})
+
+    assert client.delete(f"/drafts/?node_id={entry.id}").status_code == 200
+
+    assert Draft.query.filter_by(node_id=entry.id).count() == 0
+
+
+def test_at_most_one_older_edit_is_kept(client, alice):
+    # A second round: the typing that replaced an older edit itself becomes
+    # older than the entry, and the person types again. It becomes the kept
+    # older edit; the earlier kept one (on offer while it was typed) goes.
+    entry = _entry(alice)
+    first_id = _left_edit_then_tick(client, entry)
+    second = client.post("/drafts/", json={"content": "second", "node_id": entry.id})
+    second_id = second.get_json()["id"]
+    _age_draft(second_id, 30)
+    client.put(f"/nodes/{entry.id}", json={"content": "- [x] milk\n- [x] bread"})
+
+    marked = client.get(f"/drafts/?node_id={entry.id}").get_json()
+    assert marked["id"] == second_id and marked["older_than_entry"] is True
+
+    third = client.post("/drafts/", json={"content": "third", "node_id": entry.id})
+
+    assert Draft.query.get(first_id) is None
+    assert Draft.query.get(second_id).get_content() == "second"
+    body = client.get(f"/drafts/?node_id={entry.id}").get_json()
+    assert body["id"] == third.get_json()["id"]
+    assert body["older_draft"]["id"] == second_id
+
+
+def test_an_older_edit_with_the_newest_drafts_own_text_is_not_offered(
+        client, alice):
+    # "Use my edit": the older text saved again as the newest draft.
+    entry = _entry(alice)
+    _left_edit_then_tick(client, entry)
+    client.post("/drafts/", json={
+        "content": "- [ ] milk\n- [ ] bread\n- [ ] eggs", "node_id": entry.id})
+
+    body = client.get(f"/drafts/?node_id={entry.id}").get_json()
+
+    assert body["content"] == "- [ ] milk\n- [ ] bread\n- [ ] eggs"
+    assert "older_draft" not in body
+    assert "older_than_entry" not in body
+
+
+def test_a_new_entrys_drafts_are_updated_in_place_as_before(client, alice):
+    parent = _entry(alice)
+    first = client.post("/drafts/", json={"content": "a", "parent_id": parent.id})
+    _age_draft(first.get_json()["id"], 60)
+    client.put(f"/nodes/{parent.id}", json={"content": "parent edited"})
+    again = client.post("/drafts/", json={"content": "ab", "parent_id": parent.id})
+
+    assert again.get_json()["id"] == first.get_json()["id"]
+    assert Draft.query.filter_by(parent_id=parent.id).count() == 1
+
+
 def test_the_edit_forms_save_clears_the_entrys_draft(client, alice):
     # The form's Save: PUT, then DELETE of the context's drafts.
     entry = _entry(alice)

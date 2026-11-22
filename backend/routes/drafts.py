@@ -143,6 +143,33 @@ def _no_session_in_progress_clause():
     )
 
 
+def _older_than_entry(draft, node):
+    """The edit draft was last saved before its entry changed (#761)."""
+    return bool(draft.updated_at and node.updated_at
+                and draft.updated_at < node.updated_at)
+
+
+def _edit_drafts(node_id):
+    """The current user's typed edit drafts of *node_id*, newest first."""
+    return _input_drafts(node_id, None).filter(
+        _no_session_in_progress_clause(), Draft.session_id.is_(None))
+
+
+def _kept_older_edit(node, newest):
+    """The older edit kept beside the newest edit draft (#766 review): the
+    newest row saved before the entry's last change, when the person has
+    typed since. None when there is none, or when it holds the newest
+    draft's own text (nothing to offer)."""
+    newest_content = newest.get_content()
+    for row in _edit_drafts(node.id).filter(Draft.id != newest.id):
+        if not _older_than_entry(row, node):
+            continue
+        if row.get_content() == newest_content:
+            return None
+        return row
+    return None
+
+
 def _dead_session_clause():
     """A recording session with no sign of life within the liveness window
     (#320) and not one chunk stored. Most were left before their first
@@ -298,10 +325,22 @@ def get_draft():
     # of the entry's text, its Save would put the older text over the newer
     # one; the iPhone shows the entry's text and offers the draft instead.
     # Any change to the entry counts (updated_at), so none is missed.
-    if (node_id and draft.updated_at and node.updated_at
-            and draft.updated_at < node.updated_at):
+    if node_id and _older_than_entry(draft, node):
         response_data["older_than_entry"] = True
         response_data["entry_updated_at"] = node.updated_at.isoformat() + "Z"
+    elif node_id:
+        # The person typed in the entry's text after such a draft was
+        # offered: that typing is the newest draft (above, as every client
+        # gets it), and the older edit is kept beside it (save_draft) until
+        # they use or discard it.
+        kept = _kept_older_edit(node, draft)
+        if kept is not None:
+            response_data["older_draft"] = {
+                "id": kept.id,
+                "content": kept.get_content(),
+                "updated_at": kept.updated_at.isoformat() + "Z",
+            }
+            response_data["entry_updated_at"] = node.updated_at.isoformat() + "Z"
 
     # Include streaming session info so frontend can trigger recovery
     if draft.session_id:
@@ -462,6 +501,17 @@ def save_draft():
     draft = _input_drafts(node_id, parent_id).filter(
         _no_session_in_progress_clause()).first()
 
+    if draft and node_id and _older_than_entry(draft, node):
+        # The entry changed after this edit draft was saved (#761), and the
+        # person now types in the entry's newer text. That typing gets a row
+        # of its own and the older edit is kept until they use or discard it
+        # (#766 review: neither text is thrown away without their say).
+        # At most one older edit is kept: this one, the most recent. Any
+        # earlier kept row was on offer while this one was typed.
+        for earlier in _edit_drafts(node_id).filter(Draft.id != draft.id):
+            db.session.delete(earlier)
+        draft = None
+
     if draft:
         # Update existing draft
         draft.set_content(content)
@@ -498,12 +548,15 @@ def delete_draft():
     Query params:
       - node_id: If editing an existing node (optional)
       - parent_id: If creating a new node under a parent (optional)
+      - draft_id: Only this draft of the context (optional; an older edit
+        the person discards, #766)
 
     Called when user saves their work or explicitly discards the draft.
     Drafts are private - only the owner can delete them.
     """
     node_id = request.args.get("node_id", type=int)
     parent_id = request.args.get("parent_id", type=int)
+    draft_id = request.args.get("draft_id", type=int)
 
     # Validate node_id if provided - user must own the node OR be LLM
     # requester (parent node owner); any other node answers 404.
@@ -517,8 +570,11 @@ def delete_draft():
     # composing draft under a proposal node must not take the pending
     # proposal with it) nor a session in progress (#320), a dead one
     # included (see _dead_session_clause).
-    drafts = _input_drafts(node_id, parent_id).filter(
-        _no_session_in_progress_clause()).all()
+    query = _input_drafts(node_id, parent_id).filter(
+        _no_session_in_progress_clause())
+    if draft_id:
+        query = query.filter(Draft.id == draft_id)
+    drafts = query.all()
 
     if not drafts:
         return jsonify({"error": "No draft found"}), 404

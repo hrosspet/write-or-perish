@@ -158,7 +158,8 @@ private struct NodeFormBody: View {
     @ViewBuilder private var olderDraftBox: some View {
         if let older = model.olderDraft {
             VStack(alignment: .leading, spacing: 8) {
-                Text(NodeFormModel.olderDraftNotice(older))
+                Text(NodeFormModel.olderDraftNotice(older, entryChangedAt: model.entryChangedAt,
+                                                    formShowsNewerText: model.hasDraft))
                     .font(LooreFont.sans(12.8, .light))
                     .foregroundStyle(LooreColor.textMuted)
                     .fixedSize(horizontal: false, vertical: true)

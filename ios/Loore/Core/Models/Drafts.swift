@@ -18,8 +18,36 @@ struct Draft: Decodable, Identifiable, Sendable {
     /// An edit draft last saved before its entry changed (#761): not loaded in
     /// place of the entry's text.
     var olderThanEntry: Bool
-    /// When the entry last changed (set with `olderThanEntry`).
+    /// When the entry last changed (set with `olderThanEntry` or `olderDraft`).
     var entryUpdatedAt: Date?
+    /// An older edit kept beside this newer draft (#766): the person typed in
+    /// the entry's text while it was offered, and has not used or discarded it.
+    var olderDraft: OlderEdit?
+
+    /// An edit draft saved before its entry last changed (#761, #766).
+    struct OlderEdit: Decodable, Equatable, Sendable {
+        var id: Int
+        var content: String
+        var updatedAt: Date?
+
+        enum CodingKeys: String, CodingKey {
+            case id, content
+            case updatedAt = "updated_at"
+        }
+
+        init(id: Int, content: String, updatedAt: Date?) {
+            self.id = id
+            self.content = content
+            self.updatedAt = updatedAt
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            id = try c.decode(Int.self, forKey: .id)
+            content = c.tolerant(.content, default: "")
+            updatedAt = c.tolerant(.updatedAt)
+        }
+    }
 
     enum CodingKeys: String, CodingKey {
         case id, content, warning
@@ -32,6 +60,7 @@ struct Draft: Decodable, Identifiable, Sendable {
         case hasStoredChunks = "has_stored_chunks"
         case olderThanEntry = "older_than_entry"
         case entryUpdatedAt = "entry_updated_at"
+        case olderDraft = "older_draft"
     }
 
     init(from decoder: Decoder) throws {
@@ -48,6 +77,7 @@ struct Draft: Decodable, Identifiable, Sendable {
         hasStoredChunks = c.tolerant(.hasStoredChunks, default: false)
         olderThanEntry = c.tolerant(.olderThanEntry, default: false)
         entryUpdatedAt = c.tolerant(.entryUpdatedAt)
+        olderDraft = c.tolerant(.olderDraft)
     }
 }
 
