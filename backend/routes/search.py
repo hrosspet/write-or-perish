@@ -32,11 +32,11 @@ SEARCH_REFUSED_MESSAGE = (
 # search is made.
 SEARCH_ONE_PROVIDER_CODE = "search_one_provider"
 SEARCH_ONE_PROVIDER_MESSAGE = (
-    "Search finds things by meaning with a model from OpenAI. You chose "
-    "to keep your writing with {provider} only, so Loore sends neither "
-    "your entries nor your search words to OpenAI, and there is no "
-    "search. You can change this under Background tasks in Account "
-    "settings on loore.org.")
+    "Search by meaning is off for this account, in the app and in the "
+    "AI's search of your archive. Search data would be computed by "
+    "OpenAI, and you chose to keep your background work with {provider}. "
+    "You can change this under Background tasks in Account settings on "
+    "loore.org.")
 _PROVIDER_NAMES = {"anthropic": "Anthropic", "openai": "OpenAI"}
 
 

@@ -138,8 +138,8 @@ enum SearchAccess: Equatable {
     case keywordOnly
     /// The sheet says why there is no search.
     case needsAI
-    /// The account keeps its writing with this provider (its id) and the search
-    /// model is OpenAI's, so nothing is sent to it: the sheet says so. The server
+    /// The account keeps its background work with this provider (its id) and search
+    /// data would be computed by OpenAI, so there is no search by meaning: the sheet says so. The server
     /// refuses the search with `search_one_provider`.
     case oneProvider(String)
 
@@ -154,9 +154,9 @@ enum SearchAccess: Equatable {
     static func oneProviderBody(_ provider: String) -> String {
         let names = ["anthropic": "Anthropic", "openai": "OpenAI"]
         let own = names[provider] ?? "your default model's provider"
-        return "Search finds things by meaning with a model from OpenAI. You chose to keep your writing with "
-            + "\(own) only, so Loore sends neither your entries nor your search words to OpenAI, and there is "
-            + "no search. You can change this under Background tasks in Account settings on loore.org."
+        return "Search by meaning is off for this account, in the app and in the AI's search of your "
+            + "archive. Search data would be computed by OpenAI, and you chose to keep your background work "
+            + "with \(own). You can change this under Background tasks in Account settings on loore.org."
     }
 
     /// No user loaded yet: search by meaning, which the server refuses if it must.

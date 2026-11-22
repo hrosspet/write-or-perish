@@ -18,8 +18,9 @@ export const SEARCH_NEEDS_AI_TEXT = 'Search needs AI to find things by '
   + 'entries away from AI. You can change it in Account settings.';
 
 // Search by meaning uses an embedding model from OpenAI. An account that
-// answered that its writing stays with another provider has no search:
-// nothing of it is sent to OpenAI (the server refuses the search with
+// answered that its background work stays with another provider has no
+// search by meaning: no search data is computed for it (the server
+// refuses the search with
 // this code; backend/routes/search.py SEARCH_ONE_PROVIDER_MESSAGE). The
 // user JSON carries the provider's id in `search_kept_to_provider`.
 // The iPhone app says the same (SearchView).
@@ -27,11 +28,11 @@ export const SEARCH_ONE_PROVIDER_CODE = 'search_one_provider';
 export const SEARCH_ONE_PROVIDER_TITLE = 'Search is off';
 export function searchOneProviderText(provider) {
   const own = PROVIDER_NAMES[provider] || "your default model's provider";
-  return 'Search finds things by meaning with a model from OpenAI. You '
-    + `chose to keep your writing with ${own} only, so Loore sends neither `
-    + 'your entries nor your search words to OpenAI, and there is no '
-    + 'search. You can change this under Background tasks in Account '
-    + 'settings.';
+  return 'Search by meaning is off for this account, in the app and in '
+    + "the AI's search of your archive. Search data would be computed by "
+    + `OpenAI, and you chose to keep your background work with ${own}. `
+    + 'You can change this under Background tasks in Account settings on '
+    + 'loore.org.';
 }
 
 /** The provider id of the server's one-provider refusal, else null. */

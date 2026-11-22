@@ -124,7 +124,11 @@ describe('an account that keeps to Anthropic', () => {
     render(<MemoryRouter><SearchModal onClose={onClose} /></MemoryRouter>);
     expect(screen.getByText(SEARCH_ONE_PROVIDER_TITLE)).toBeTruthy();
     expect(screen.getByText(searchOneProviderText('anthropic'))).toBeTruthy();
-    expect(searchOneProviderText('anthropic')).toContain('with Anthropic only');
+    expect(searchOneProviderText('anthropic')).toBe('Search by meaning is off for this account, in the app and in '
+      + "the AI's search of your archive. Search data would be computed by "
+      + 'OpenAI, and you chose to keep your background work with Anthropic. '
+      + 'You can change this under Background tasks in Account settings on '
+      + 'loore.org.');
     expect(screen.queryByText(SEARCH_NEEDS_AI_TEXT)).toBeNull();
     expect(screen.queryByPlaceholderText('Search your entries...')).toBeNull();
     await pause();

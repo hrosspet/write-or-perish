@@ -82,9 +82,9 @@ final class SearchAccessTests: XCTestCase {
     func testOneProviderCopy() {
         XCTAssertEqual(SearchAccess.oneProviderTitle, "Search is off")
         XCTAssertEqual(SearchAccess.oneProviderBody("anthropic"),
-                       "Search finds things by meaning with a model from OpenAI. You chose to keep your writing "
-                       + "with Anthropic only, so Loore sends neither your entries nor your search words to OpenAI, "
-                       + "and there is no search. You can change this under Background tasks in Account settings "
-                       + "on loore.org.")
+                       "Search by meaning is off for this account, in the app and in the AI's search of "
+                       + "your archive. Search data would be computed by OpenAI, and you chose to keep your "
+                       + "background work with Anthropic. You can change this under Background tasks in "
+                       + "Account settings on loore.org.")
     }
 }

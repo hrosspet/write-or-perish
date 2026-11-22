@@ -971,9 +971,9 @@ SEARCH_TOOL_ACCOUNT_NONE_ERROR = (
 # other than the embedding model's (profile_providers.kept_from_embeddings):
 # the search words would go to that model, so nothing is searched.
 SEARCH_TOOL_ONE_PROVIDER_ERROR = (
-    "Search is off for this user: they chose to keep their writing with "
-    "one provider, and the search model belongs to another, so nothing "
-    "is sent to it. Nothing was searched.")
+    "Search of the archive is off for this user: search data would be "
+    "computed by another provider than the one they chose to keep their "
+    "background work with. Nothing was searched.")
 
 
 def _todo_index_line(user_id, pinned_node=None):
