@@ -30,10 +30,26 @@ struct AuthenticatedWebView: UIViewRepresentable {
     /// Decide on each navigation (e.g. detect the final `?x_login=` URL). Return
     /// `.cancel` to stop it. Default: allow everything.
     var decide: ((URL) -> WKNavigationActionPolicy)?
+    /// When set, the page stays on these hosts: a web link to any other host is
+    /// not loaded here but handed to `onLeave` (`leaves`). Frames inside a page
+    /// are not affected.
+    var stayOnHosts: Set<String>?
+    var onLeave: (URL) -> Void = { _ in }
     @Binding var isLoading: Bool
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(decide: decide, isLoading: $isLoading)
+        Coordinator(decide: decide, stayOnHosts: stayOnHosts, onLeave: onLeave, isLoading: $isLoading)
+    }
+
+    /// Whether a navigation takes the page (not a frame inside it) to a web
+    /// address outside `hosts`. `inFrame`: the navigation is for a frame inside
+    /// the page. Other schemes (about:, blob:, data:) are not web addresses.
+    static func leaves(_ url: URL, inFrame: Bool, hosts: Set<String>) -> Bool {
+        guard !inFrame, let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
+            return false
+        }
+        guard let host = url.host?.lowercased() else { return true }
+        return !hosts.contains(host)
     }
 
     func makeUIView(context: Context) -> WKWebView {
@@ -61,15 +77,28 @@ struct AuthenticatedWebView: UIViewRepresentable {
 
     final class Coordinator: NSObject, WKNavigationDelegate {
         let decide: ((URL) -> WKNavigationActionPolicy)?
+        let stayOnHosts: Set<String>?
+        let onLeave: (URL) -> Void
         @Binding var isLoading: Bool
 
-        init(decide: ((URL) -> WKNavigationActionPolicy)?, isLoading: Binding<Bool>) {
+        init(decide: ((URL) -> WKNavigationActionPolicy)?, stayOnHosts: Set<String>?,
+             onLeave: @escaping (URL) -> Void, isLoading: Binding<Bool>) {
             self.decide = decide
+            self.stayOnHosts = stayOnHosts
+            self.onLeave = onLeave
             _isLoading = isLoading
         }
 
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                      decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            // No target frame: a link that asks for a new window.
+            if let url = navigationAction.request.url, let stayOnHosts,
+               AuthenticatedWebView.leaves(url, inFrame: navigationAction.targetFrame?.isMainFrame == false,
+                                           hosts: stayOnHosts) {
+                decisionHandler(.cancel)
+                onLeave(url)
+                return
+            }
             guard let url = navigationAction.request.url, let decide else {
                 decisionHandler(.allow)
                 return
@@ -99,6 +128,8 @@ struct AuthenticatedWebView: UIViewRepresentable {
 struct WebPresentationView: View {
     let presentation: WebPresentation
     let cookies: [HTTPCookie]
+    /// The signed-in page stays on Loore's own hosts; other sites open in the browser.
+    let sessionHosts: Set<String>
     @Environment(\.dismiss) private var dismiss
     @State private var isLoading = true
 
@@ -109,7 +140,10 @@ struct WebPresentationView: View {
                 .ignoresSafeArea()
         case .authenticated:
             NavigationStack {
-                AuthenticatedWebView(url: presentation.url, cookies: cookies, isLoading: $isLoading)
+                AuthenticatedWebView(url: presentation.url, cookies: cookies,
+                                     stayOnHosts: sessionHosts,
+                                     onLeave: { UIApplication.shared.open($0) },
+                                     isLoading: $isLoading)
                     .ignoresSafeArea(edges: .bottom)
                     .navigationTitle(presentation.title ?? "")
                     .navigationBarTitleDisplayMode(.inline)
