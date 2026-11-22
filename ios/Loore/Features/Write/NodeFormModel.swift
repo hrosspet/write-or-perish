@@ -575,7 +575,14 @@ final class NodeFormModel {
                     json: .object(["source_mode": .string("textmode"), "auto_generate": .bool(true)]))
                 return NodeFormResult(id: reply.nodeId, awaitLLM: reply.nodeId, tipId: created.tipId, privacy: entryPrivacy)
             } catch {
-                if let message = LLMRequestError.toastMessage(error) { app.toasts.show(message, duration: 8) }
+                switch error as? APIError {
+                case .subscriptionRequired?:
+                    // No subscription (#438): the banner says it, as on this form's
+                    // other paths and on the web, with no toast beside it.
+                    break
+                default:
+                    if let message = LLMRequestError.toastMessage(error) { app.toasts.show(message, duration: 8) }
+                }
             }
         }
         return NodeFormResult(id: created.id, tipId: created.tipId, privacy: entryPrivacy)

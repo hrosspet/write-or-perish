@@ -21,6 +21,8 @@ private let focalJSON = """
  "ancestors":[{"id":9,"content":"root","node_type":"user","user_id":5,"ai_usage":"chat","privacy_level":"private"}]}
 """
 private let spendCapJSON = #"{"error":"monthly_spend_limit_reached","message":"You've reached your monthly usage limit."}"#
+private let subscriptionMessage = "Loore doesn't reply on an account without a subscription. Your writing is saved."
+private let subscriptionJSON = #"{"error":"subscription_required","message":"\#(subscriptionMessage)"}"#
 
 final class LLMRequestErrorTests: XCTestCase {
     private func apiError(_ status: Int, _ body: String) -> APIError {
@@ -118,6 +120,21 @@ final class WriteNewEntryReplyRefusalTests: StubbedAppTestCase {
         let result = await sendTyped(llm: .json(402, spendCapJSON))
         XCTAssertTrue(toastMessages.isEmpty)
         XCTAssertEqual(result?.id, 20)
+    }
+
+    /// Payments on, no AI replies on this account (#438): the banner alone, as on this
+    /// form's other paths and on the web (review of #750).
+    func testATypedEntryWithoutASubscriptionShowsTheBannerAlone() async {
+        let result = await sendTyped(llm: .json(402, subscriptionJSON))
+        var bannerShown = false
+        for _ in 0..<40 where !bannerShown {
+            bannerShown = app.subscriptionBannerMessage == subscriptionMessage
+            if !bannerShown { try? await Task.sleep(nanoseconds: 50_000_000) }
+        }
+        XCTAssertTrue(bannerShown, "the banner says it")
+        XCTAssertTrue(toastMessages.isEmpty, "no toast beside the banner")
+        XCTAssertEqual(result?.id, 20)
+        XCTAssertNil(result?.awaitLLM)
     }
 
     func testATypedEntrysReplyThatStartsOpensIt() async {
