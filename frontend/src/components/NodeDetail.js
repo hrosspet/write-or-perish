@@ -20,6 +20,7 @@ import {
   isSharedPrivacy, onlyYouSeeReply,
 } from "../utils/sharedThread";
 import { useCheckboxToggle, useTaskInsert } from "../utils/markdown";
+import { llmRequestErrorToast } from "../utils/llmRequestError";
 import {
   contextAllowsAi, isAiUsageRefusedError, keptFromTrainRepliesNote,
 } from "../utils/aiUsage";
@@ -891,23 +892,20 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // used by the explicit button and the auto-generate-on-submit/edit paths.
   // - 402 (monthly spend cap): surfaced globally by SpendCapBanner — return
   //   silently so the thread stays exactly where the user was.
-  // - otherwise: toast. Never setError() here — that replaces the whole
-  //   node view (thread, inline form and all) with the failure text and
-  //   strands the user on a dead end.
+  // - otherwise: toast (llmRequestErrorToast, which Write New Entry uses
+  //   too). Never setError() here — that replaces the whole node view
+  //   (thread, inline form and all) with the failure text and strands the
+  //   user on a dead end.
   const handleLlmRequestError = (err) => {
     console.error(err);
-    const status = err?.response?.status;
-    const apiErr = err?.response?.data?.error;
-    if (status === 402) return;
-    // No automatic reply under a shared node: LLM Response stays offered.
-    if (isAutoGenerateOff(err)) return;
     // The thread is too long for another reply (#648): the reply form
     // says so, with the way to a new thread, in place of LLM Response.
     if (isThreadTooLong(err)) {
-      markThreadTooLong(apiErr);
+      markThreadTooLong(err.response.data?.error);
       return;
     }
-    addToast(apiErr || err.message || "Error requesting LLM response.", 8000);
+    const message = llmRequestErrorToast(err);
+    if (message) addToast(message, 8000);
   };
 
   // The server refused a reply for the thread's length: the page shows the
