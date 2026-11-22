@@ -39,7 +39,9 @@ jest.mock('./NodeFooter', () => ({ children }) => <div>{children}</div>);
 jest.mock('./QuotedContent', () => ({ content }) => <div>{content}</div>);
 
 import React from 'react';
-import { render, screen, act, fireEvent } from '@testing-library/react';
+import {
+  render, screen, act, fireEvent, waitFor,
+} from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import NodeDetailWrapper from './NodeDetailWrapper';
 import {
@@ -186,6 +188,111 @@ test('a reply finishing in place brings the thread length with it (this turn, no
 
   expect(await screen.findByText('The answer.')).toBeInTheDocument();
   expect(await screen.findByText(THREAD_NOTICE_TEXT)).toBeInTheDocument();
+});
+
+describe('a reply refused for the thread length while its own page watches it', () => {
+  const VOICE_ROOT = {
+    id: 9, username: 'peter', user_id: 1, node_type: 'user', content: '',
+    is_system_prompt: true, prompt_key: 'voice', ai_usage: 'chat',
+    privacy_level: 'private', child_count: 1,
+  };
+  const ENTRY = {
+    id: 20, username: 'peter', user_id: 1, node_type: 'user',
+    content: 'I keep going back and forth.', ai_usage: 'chat',
+    privacy_level: 'private', child_count: 1,
+  };
+  const READ_PROMPT = {
+    id: 31, username: 'peter', user_id: 1, node_type: 'user', content: '',
+    is_system_prompt: true, prompt_key: 'read_thread', ai_usage: 'chat',
+    privacy_level: 'private', child_count: 1,
+  };
+  // The Glean entry, open: since #717 a refused Glean never counts as the
+  // thread's length, so the server answers no limit here.
+  const gleanEntry = {
+    ...READ_PROMPT, user: { id: 1, username: 'peter' },
+    ancestors: [VOICE_ROOT, ENTRY], children: [], child_count: 0,
+    in_read_thread: true, read_reply_above: false, glean_thread: true,
+    thread_length: null,
+  };
+  const pendingGleaning = (id) => ({
+    id, node_type: 'llm', llm_model: 'claude-haiku-5.5',
+    user: { id: 3, username: 'claude-haiku-5.5' }, user_id: 3, parent_user_id: 1,
+    content: '', llm_task_status: 'processing',
+    tool_calls_meta: [{ name: '_live' }],
+    ai_usage: 'chat', privacy_level: 'private',
+    ancestors: [VOICE_ROOT, ENTRY, READ_PROMPT], children: [], child_count: 0,
+    in_read_thread: true, read_reply_above: true, glean_thread: true,
+  });
+  const refused = (id, error) => ({
+    node_id: id, status: 'failed', error, error_code: 'thread_too_long',
+  });
+  const gleanButton = () => Array.from(
+    document.querySelectorAll('[data-action-group] button'),
+  ).find((b) => b.textContent === 'Glean') || null;
+
+  const serve = (statuses) => {
+    mockGet.mockImplementation((url) => {
+      const polled = url.match(/^\/nodes\/(\d+)\/llm-status$/);
+      if (polled) return Promise.resolve({ data: statuses[polled[1]] });
+      if (url.endsWith('/resolve-quotes')) {
+        return Promise.resolve({ data: { quotes: {}, external_quotes: {}, has_quotes: false } });
+      }
+      if (url in routes) return Promise.resolve({ data: routes[url] });
+      return Promise.reject(new Error(`unexpected GET ${url}`));
+    });
+  };
+
+  test('a Glean says why with the limit sentence, on every press (#746)', async () => {
+    mockUser = { ...ME, glean_enabled: true };
+    routes['/nodes/31'] = gleanEntry;
+    routes['/nodes/41'] = pendingGleaning(41);
+    routes['/nodes/42'] = pendingGleaning(42);
+    serve({ 41: refused(41, THREAD_LIMIT_TEXT), 42: refused(42, THREAD_LIMIT_TEXT) });
+    mockPost
+      .mockResolvedValueOnce({ data: { prompt_node_id: null, llm_node_id: 41 } })
+      .mockResolvedValueOnce({ data: { prompt_node_id: null, llm_node_id: 42 } });
+    renderAt('/node/31');
+
+    for (const n of [1, 2]) {
+      await waitFor(() => expect(gleanButton()).toBeInTheDocument());
+      fireEvent.click(gleanButton());
+      // The gleaning page watches the Glean, which the server refuses: a
+      // toast with the server's sentence, and back to the Glean entry.
+      await waitFor(() => expect(mockAddToast).toHaveBeenCalledTimes(n));
+      expect(mockAddToast).toHaveBeenLastCalledWith(THREAD_LIMIT_TEXT, 8000);
+      await waitFor(() => expect(gleanButton()).toBeInTheDocument());
+    }
+    expect(mockPost.mock.calls.map(([url]) => url))
+      .toEqual(['/read/from-node/31', '/read/from-node/31']);
+    // #717 stays: the refusal is not the thread's length, so the entry's
+    // form shows no limit and Glean is still offered.
+    expect(screen.queryByText(THREAD_LIMIT_TEXT)).not.toBeInTheDocument();
+  });
+
+  test('a Glean refused without a text gets the app\'s limit sentence', async () => {
+    mockUser = { ...ME, glean_enabled: true };
+    routes['/nodes/31'] = gleanEntry;
+    routes['/nodes/43'] = pendingGleaning(43);
+    serve({ 43: refused(43, null) });
+    renderAt('/node/43');
+    await waitFor(() => expect(mockAddToast).toHaveBeenCalledWith(THREAD_LIMIT_TEXT, 8000));
+  });
+
+  test('a chat reply is not toasted: its entry shows the limit (#648)', async () => {
+    routes['/nodes/10'] = entry(10, 'Grew past it.', { thread_length: 'limit' });
+    routes['/nodes/80'] = entry(80, '', {
+      node_type: 'llm', llm_model: 'gpt-5', llm_task_status: 'processing',
+      user: { id: 9, username: 'gpt-5' }, user_id: 9, parent_user_id: 1,
+      ancestors: [{ id: 10, username: 'peter', user_id: 1, node_type: 'user',
+        content: 'Grew past it.', ai_usage: 'chat', privacy_level: 'private' }],
+    });
+    serve({ 80: refused(80, THREAD_LIMIT_TEXT) });
+    renderAt('/node/80');
+
+    expect(await screen.findByText(THREAD_LIMIT_TEXT)).toBeInTheDocument();
+    expect(screen.queryByText('LLM Response')).not.toBeInTheDocument();
+    expect(mockAddToast).not.toHaveBeenCalled();
+  });
 });
 
 test('at the limit an entry is written without asking for an automatic reply', async () => {

@@ -308,6 +308,68 @@ final class ThreadLengthModelTests: StubbedAppTestCase {
         reply.stop()
     }
 
+    /// A reply the server refused for the thread's length while its own page
+    /// watched it: the page goes back to where it was asked. A chat reply is not
+    /// toasted, since its entry's page shows the limit (#648). A Glean is: its
+    /// refusal never counts as the thread's length (#717), so that page shows
+    /// nothing, and the toast gives the server's sentence (#746).
+    private func watchRefusal(_ id: Int, glean: Bool, error: String?) async -> ThreadModel {
+        let parent = glean
+            ? #"{"id":31,"content":"","node_type":"user","user_id":5,"ai_usage":"chat","privacy_level":"private","is_system_prompt":true,"prompt_key":"read_thread"}"#
+            : #"{"id":31,"content":"entry","node_type":"user","user_id":5,"ai_usage":"chat","privacy_level":"private"}"#
+        let meta = glean ? #","tool_calls_meta":[{"name":"_live"}]"# : ""
+        let pending = """
+        {"id":\(id),"node_type":"llm","llm_model":"claude-haiku-5.5","user":{"id":3,"username":"claude-haiku-5.5"},
+         "parent_user_id":5,"privacy_level":"private","ai_usage":"chat","child_count":0,"children":[],
+         "content":"[LLM response generation pending...]","llm_task_status":"pending"\(meta),
+         "ancestors":[\(parent)]}
+        """
+        let errorField = error.map { #","error":"\#($0)""# } ?? ""
+        let refused = #"{"node_id":\#(id),"status":"failed","error_code":"thread_too_long"\#(errorField)}"#
+        StubURLProtocol.install { request in
+            switch request.url?.path(percentEncoded: true) ?? "" {
+            case "/api/nodes/\(id)": return .json(200, pending)
+            case "/api/nodes/\(id)/llm-status": return .json(200, refused)
+            default: return .json(200, "{}")
+            }
+        }
+        let tab = app.router.selectedTab
+        app.router.setPath([.thread(id: 31, awaitLLM: nil), .thread(id: id, awaitLLM: id)], for: tab)
+        let model = ThreadModel(nodeId: id, awaitLLM: id, app: app)
+        await model.start()
+        return model
+    }
+
+    func testARefusedGleanSaysWhyEachTime() async {
+        for (n, id) in [41, 42].enumerated() {
+            let model = await watchRefusal(id, glean: true, error: limitText)
+            XCTAssertTrue(model.isReadReply)
+            let toasted = await eventually { self.app.toasts.toasts.count == n + 1 }
+            XCTAssertTrue(toasted, "press \(n + 1) says why")
+            XCTAssertEqual(app.toasts.toasts.last?.message, limitText)
+            let back = await eventually { self.lastRoute == .thread(id: 31, awaitLLM: nil) }
+            XCTAssertTrue(back, "back to the Glean entry")
+            model.stop()
+        }
+    }
+
+    func testARefusedGleanWithoutATextGetsTheAppsSentence() async {
+        let model = await watchRefusal(43, glean: true, error: nil)
+        let toasted = await eventually { !self.app.toasts.toasts.isEmpty }
+        XCTAssertTrue(toasted)
+        XCTAssertEqual(app.toasts.toasts.last?.message, ThreadLength.limitText)
+        model.stop()
+    }
+
+    func testARefusedChatReplyIsNotToasted() async {
+        let model = await watchRefusal(44, glean: false, error: limitText)
+        XCTAssertFalse(model.isReadReply)
+        let back = await eventually { self.lastRoute == .thread(id: 31, awaitLLM: nil) }
+        XCTAssertTrue(back, "back to the entry, whose page shows the limit")
+        XCTAssertTrue(app.toasts.toasts.isEmpty)
+        model.stop()
+    }
+
     func testOnlyTheOwnerSeesIt() async {
         let focal = focalJSON("limit").replacingOccurrences(of: #""id":5,"username":"seowriter""#,
                                                             with: #""id":6,"username":"someone""#)

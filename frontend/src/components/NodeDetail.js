@@ -23,7 +23,9 @@ import { useCheckboxToggle, useTaskInsert } from "../utils/markdown";
 import {
   contextAllowsAi, isAiUsageRefusedError, keptFromTrainRepliesNote,
 } from "../utils/aiUsage";
-import { THREAD_TOO_LONG_CODE, isThreadTooLong } from "../utils/threadLength";
+import {
+  THREAD_LIMIT_TEXT, THREAD_TOO_LONG_CODE, isThreadTooLong,
+} from "../utils/threadLength";
 import ThreadLengthNotice from "./ThreadLengthNotice";
 import NodeFormModal from "./NodeFormModal";
 import Bubble from "./Bubble";
@@ -526,7 +528,14 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
       }
       setLlmTaskNodeId(null);
     } else if (llmStatus === 'failed') {
-      if (llmData?.error_code === THREAD_TOO_LONG_CODE) {
+      const lengthRefusal = llmData?.error_code === THREAD_TOO_LONG_CODE;
+      // A Glean refused for the thread's length (#746): its refusal never
+      // counts as the thread's length (#717), so the entry this page goes
+      // back to shows no limit. The toast gives the server's sentence.
+      if (lengthRefusal && String(llmTaskNodeId) === String(id)
+          && isGleaningNode(node)) {
+        addToast(llmData?.error || THREAD_LIMIT_TEXT, 8000);
+      } else if (lengthRefusal) {
         // Refused for the thread's length (#648): the reply form of the
         // entry says so, with the way to a new thread, instead of a toast.
         if (String(llmTaskNodeId) !== String(id)) {

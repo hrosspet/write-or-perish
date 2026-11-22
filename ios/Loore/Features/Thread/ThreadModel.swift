@@ -553,6 +553,10 @@ final class ThreadModel {
             // toast: the entry's page, where this goes back to, shows the limit.
             if !ThreadLength.isRefusal(data.errorCode) {
                 app.toasts.show(data.error ?? "Task failed", duration: 8)
+            } else if trackedId == nodeId && isReadReply {
+                // A Glean's refusal never counts as the thread's length (#717),
+                // so that page shows no limit: the toast says why (#746).
+                app.toasts.show(ThreadLength.message(data.error) ?? ThreadLength.limitText, duration: 8)
             }
             if trackedId == nodeId, let parent = parentAncestor, !parent.deleted {
                 // Back to the entry: pop when we came from it, else replace this dead node.
