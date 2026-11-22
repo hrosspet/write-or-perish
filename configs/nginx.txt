@@ -5,8 +5,21 @@
 # must differ from staging's: both files are loaded into one nginx.
 limit_conn_zone $binary_remote_addr zone=loore_sse_per_address:10m;
 
+# The access log: one line per request with the address, time, method, path,
+# protocol, status, size and client. The path is written without the part
+# after the question mark, and the referring page's address is left out.
+# The names must differ from staging's, as for the zone above.
+map $request_uri $loore_request_path {
+    "~^(?<loore_path_only>[^?]*)" $loore_path_only;
+    default "";
+}
+log_format loore_no_query '$remote_addr - $remote_user [$time_local] '
+    '"$request_method $loore_request_path $server_protocol" '
+    '$status $body_bytes_sent "$http_user_agent"';
+
 server {
    server_name loore.org www.loore.org;
+   access_log /var/log/nginx/access.log loore_no_query;
    root /home/hrosspet/write-or-perish/frontend/build;
    index index.html index.htm;
 
@@ -184,6 +197,7 @@ server {
 
    listen 80;
    server_name loore.org www.loore.org;
+   access_log /var/log/nginx/access.log loore_no_query;
     return 404; # managed by Certbot
 
 

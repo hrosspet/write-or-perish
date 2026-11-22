@@ -214,6 +214,9 @@ fi
 
 # Install/update Gunicorn service
 log "Installing Gunicorn service..."
+# A changed unit file means a changed command line, which a reload (HUP)
+# does not pick up: the restart step below then restarts in full.
+GUNICORN_UNIT_CHANGED=0
 GUNICORN_SERVICE_SOURCE="$PROJECT_DIR/write-or-perish.service"
 GUNICORN_SERVICE_TARGET="/etc/systemd/system/write-or-perish.service"
 
@@ -229,6 +232,7 @@ if [ -f "$GUNICORN_SERVICE_SOURCE" ]; then
         sudo systemctl daemon-reload || error "Failed to reload systemd daemon"
 
         log "Gunicorn service file updated"
+        GUNICORN_UNIT_CHANGED=1
     else
         log "Gunicorn service file unchanged"
     fi
@@ -415,7 +419,9 @@ fi
 # fall back to a full restart.
 GUNICORN_PID=$(cat "$PROJECT_DIR/gunicorn.pid" 2>/dev/null || true)
 NEED_FULL_RESTART=1
-if [ "$SERVICES_STOPPED" -eq 0 ] && [ -n "$GUNICORN_PID" ] && sudo systemctl is-active --quiet write-or-perish; then
+if [ "$GUNICORN_UNIT_CHANGED" -eq 1 ]; then
+    log "Gunicorn service file changed — full restart instead of reload"
+elif [ "$SERVICES_STOPPED" -eq 0 ] && [ -n "$GUNICORN_PID" ] && sudo systemctl is-active --quiet write-or-perish; then
     MASTER_START=$(date -d "$(ps -o lstart= -p "$GUNICORN_PID" 2>/dev/null)" +%s 2>/dev/null || echo 0)
     ENV_MTIME=$(stat -c %Y "$PROJECT_DIR/.env.production" 2>/dev/null || echo 0)
     if [ "$MASTER_START" -gt 0 ] && [ "$ENV_MTIME" -le "$MASTER_START" ]; then

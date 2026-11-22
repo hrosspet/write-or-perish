@@ -35,7 +35,7 @@ services:
     environment:
       - FLASK_ENV=production
     # Production Gunicorn settings (gevent for SSE long-lived connections)
-    command: gunicorn --bind 0.0.0.0:5010 --workers 4 -k gevent --timeout 900 --access-logfile - --error-logfile - backend.app:app
+    command: gunicorn -c backend/gunicorn_conf.py --bind 0.0.0.0:5010 --workers 4 -k gevent --timeout 900 --access-logfile - --error-logfile - backend.app:app
     # Health check
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5010/api/dashboard"]
