@@ -51,8 +51,12 @@ stored truncated, say), the stored text is replaced with the fuller one.
 ## Security model
 
 - The token is scoped to `external:write`. It can add references to your
-  account and nothing else; it cannot read a single entry. Revoke it any time
-  on the Import page.
+  account and replace one saved before with a fuller copy of the same page.
+  It cannot read a single entry or the text of a reference; Loore answers it
+  with what the extension shows: whether the page was new, your username and
+  the number of clipped pages. Revoke it any time on the Import page.
+- An account can save 500 new pages a day through the clipper; saving a page
+  again is not counted.
 - Only the token's hash is stored server-side.
 - The extension asks for `activeTab`, not `<all_urls>`: it can read a page
   only at the moment you press the shortcut or click its button.

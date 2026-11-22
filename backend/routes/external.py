@@ -872,6 +872,26 @@ def twitter_sync():
 # which to negotiate.
 MAX_TOKENS_PER_USER = 10  # active tokens; a sanity bound, not a plan limit
 MAX_TITLE_CHARS = 512
+# New pages and posts one account may save through the clipper in a day
+# (a counter that begins with the day's first new clip). The extension
+# saves one page per key press: one a minute for eight hours is 480.
+# Saving a page again is not counted, and neither are the bookmark sync,
+# Community Archive fetches and document uploads.
+CLIPS_PER_DAY = 500
+CLIP_COUNT_KEY = "loore:clip_count:{user_id}"
+# The extension shows `error` after "Loore answered 429:".
+CLIPS_PER_DAY_MESSAGE = (
+    "You saved many pages today. Please try again tomorrow")
+
+
+def _clip_answer(payload, status):
+    """The clip route's answer. The extension reads `created`, `updated`,
+    `source` and `truncated`; a request made with a token gets those and
+    not the reference's id or its stored title."""
+    if g.api_token is not None:
+        payload.pop("id", None)
+        payload.pop("title", None)
+    return jsonify(payload), status
 
 
 def _parse_posted_at(value):
@@ -961,11 +981,11 @@ def clip():
             existing.public_source = False
         if updated or locked:
             db.session.commit()
-        return jsonify({
+        return _clip_answer({
             "created": False, "updated": updated, "id": existing.id,
             "source": source, "title": existing.title,
             "truncated": truncated if updated else False,
-        }), 200
+        }, 200)
 
     def lookup():
         return ExternalItem.query.filter_by(
@@ -974,6 +994,13 @@ def clip():
     existing = lookup()
     if existing is not None:
         return reclip(existing)
+
+    from backend.utils import run_locks
+    new_today = run_locks.count(
+        CLIP_COUNT_KEY.format(user_id=user.id), 24 * 3600)
+    if new_today is not None and new_today > CLIPS_PER_DAY:
+        return jsonify({"error": CLIPS_PER_DAY_MESSAGE,
+                        "code": "too_many_clips"}), 429
 
     if source in TWEET_SOURCES:
         # A tweet a Read picked becomes the saved reference in place, so
@@ -987,10 +1014,10 @@ def clip():
             if author_protected:
                 pick_row.public_source = False
             db.session.commit()
-            return jsonify({
+            return _clip_answer({
                 "created": True, "id": pick_row.id, "source": source,
                 "title": pick_row.title, "truncated": truncated,
-            }), 201
+            }, 201)
 
     item = ExternalItem(
         user_id=user.id, source=source, external_id=external_id,
@@ -1015,22 +1042,26 @@ def clip():
         if existing is None:
             raise
         return reclip(existing)
-    return jsonify({
+    return _clip_answer({
         "created": True, "id": item.id, "source": source,
         "title": title, "truncated": truncated,
-    }), 201
+    }, 201)
 
 
 @external_bp.route("/clip/status", methods=["GET"])
 @token_or_login_required(SCOPE_EXTERNAL_WRITE)
 def clip_status():
-    """Connection check for the extension's options page."""
+    """Connection check for the extension's options page, which shows the
+    username and the number of clipped pages. A request made with a token
+    gets that one count; a session gets the count of every source."""
     user = g.api_user
     counts = dict(
         db.session.query(ExternalItem.source, db.func.count())
         .filter(ExternalItem.user_id == user.id, ExternalItem.saved())
         .group_by(ExternalItem.source).all()
     )
+    if g.api_token is not None:
+        counts = {SOURCE_WEB_CLIP: counts.get(SOURCE_WEB_CLIP, 0)}
     return jsonify({
         "ok": True, "username": user.username, "counts": counts,
         "token_name": g.api_token.name if g.api_token else None,
