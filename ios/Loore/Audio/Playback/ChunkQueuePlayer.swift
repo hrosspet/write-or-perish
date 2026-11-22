@@ -278,8 +278,14 @@ final class ChunkQueuePlayer {
         isLoaded = false
         generatingTTS = false
         onFirstPlaying = nil
+        // Assets hold the cookies of the sign-in that made them: none are kept
+        // past a close (sign-out closes the player).
+        assets.removeAll()
         onStateChange?()
     }
+
+    /// How many assets are held for reuse.
+    var heldAssetCount: Int { assets.count }
 
     func seek(to t: Double) {
         // A jump leaves an announcement that was to go once it had played.
