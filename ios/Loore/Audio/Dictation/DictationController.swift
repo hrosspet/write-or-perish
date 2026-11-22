@@ -58,9 +58,12 @@ final class DictationController {
     @ObservationIgnored private var holdKeepsCapture = false
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private let log = Logger(subsystem: "org.loore.app", category: "dictation")
+    /// The upload queue (`.shared`; tests pass their own).
+    @ObservationIgnored private let uploader: ChunkUploader?
 
-    init(app: AppState) {
+    init(app: AppState, uploader: ChunkUploader? = nil) {
         self.app = app
+        self.uploader = uploader
     }
 
     var isActive: Bool { state == .initializing || state == .recording || state == .finalizing }
@@ -162,7 +165,7 @@ final class DictationController {
             return nil
             #endif
         }()
-        let recorder = VoiceRecorder(debugFile: debugFile)
+        let recorder = VoiceRecorder(uploader: uploader, debugFile: debugFile)
         recorder.onFatal = { [weak self] message in self?.fatalUpload(message) }
         recorder.onLimit = { [weak self] message in self?.reachedLimit(message) }
         recorder.onSourceEnded = { [weak self] in self?.stop() }
@@ -422,42 +425,41 @@ final class DictationController {
     /// - Recording: capture stops at once, the unfinished piece is queued with
     ///   the others, and nothing is finalized: the Voice page's recovery banner
     ///   offers the recording. Once the server has every chunk the session is
-    ///   released, so it is offered at once; one with no audio is discarded.
+    ///   released, so it is offered at once. A recording under
+    ///   `VoiceRecorder.shortestKeptRecording` with no earlier piece is
+    ///   discarded. A session continued meanwhile is left alone.
     /// - Starting: no recording starts, and the session made for it is discarded.
     /// - Finalizing: the Stop already on its way finishes, and its transcript is
     ///   saved in the form's draft, as before.
-    func leave() {
+    /// - Returns: the left recording's task (tests await it), when one was left.
+    @discardableResult
+    func leave() -> Task<RecordingLeft, Never>? {
         switch state {
         case .recording:
-            guard let app, let recorder else { return cancel() }
+            guard let app, let recorder else {
+                cancel()
+                return nil
+            }
             generation += 1
-            let left = recorder.leave()
+            let api = app.api
+            let left = recorder.leave(
+                release: { sid in _ = try? await api.data(for: .streamingRelease(sid)) },
+                discard: { sid in _ = try? await api.data(for: APIRequest(.delete, APIPath.streamingDiscard(sid))) })
             [sseTask, flowTask, tickTask].forEach { $0?.cancel() }
             app.audio.session.deactivate()
             if app.audio.activeDictation === self { app.audio.activeDictation = nil }
             endInterruption()
             reset()
             callbacks.failed(nil, false)
-            let api = app.api
-            Task {
-                switch await left.value {
-                case .empty(let sid):
-                    recorder.forget(sessionId: sid)
-                    _ = try? await api.data(for: APIRequest(.delete, APIPath.streamingDiscard(sid)))
-                case .stored(let sid):
-                    recorder.forget(sessionId: sid)
-                    _ = try? await api.data(for: .streamingRelease(sid))
-                case .pending, .nothing:
-                    break
-                }
-            }
+            return left
         case .initializing:
             // The start flow sees the new generation and discards its session.
             generation += 1
             state = .idle
             callbacks.failed(nil, false)
+            return nil
         case .finalizing, .idle, .error:
-            break
+            return nil
         }
     }
 

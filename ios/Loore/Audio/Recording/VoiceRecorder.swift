@@ -45,6 +45,21 @@ final class VoiceRecorder: VoiceRecording {
     /// the claim's index replaces it, and the difference is added to every chunk.
     private var heldFirstIndex = 0
     private var indexShift = 0
+    /// Which recording owns each session on this phone (#753 review). Every
+    /// start takes a new token, in any recorder (Voice's, a dictation's). A
+    /// recording left mid-way keeps its token until its uploads settle; its
+    /// clean-up (forget, release, discard) runs only if the token is still the
+    /// session's, so it never touches a session continued meanwhile.
+    private static var owners: [String: UUID] = [:]
+    private var ownerToken: UUID?
+
+    /// INTRODUCED HEURISTIC (#753 review): the least audio a recording left
+    /// mid-way keeps when it has no earlier piece (none cut yet, not a
+    /// continued session). Below it the leave is taken as a Record tapped by
+    /// accident: the session is discarded as before #753, so Voice does not
+    /// offer it and Text mode does not transcribe it. 2 s tells a tap followed
+    /// by Back from a spoken sentence. Peter's call (PR #764).
+    static let shortestKeptRecording: Double = 2
 
     init(uploader: ChunkUploader? = nil, debugFile: URL? = nil, recordingLog: RecordingLog = .shared) {
         self.uploader = uploader ?? .shared
@@ -83,6 +98,9 @@ final class VoiceRecorder: VoiceRecording {
         cancel()
         inbox = ChunkInbox()
         self.sessionId = sessionId
+        let token = UUID()
+        ownerToken = token
+        Self.owners[sessionId] = token
         self.uploadURL = uploadURL
         self.elapsedOffset = elapsedOffset
         secondsBeforeWriter = 0
@@ -117,9 +135,18 @@ final class VoiceRecorder: VoiceRecording {
         } catch {
             gate.set(open: false)
             writer = nil
+            releaseOwnership()
             throw error
         }
         self.source = source
+    }
+
+    /// This recorder no longer records its session (stopped, cancelled).
+    private func releaseOwnership() {
+        if let sessionId, let ownerToken, Self.owners[sessionId] == ownerToken {
+            Self.owners[sessionId] = nil
+        }
+        ownerToken = nil
     }
 
     /// Read from the capture thread; replaced only on the main actor while the gate is shut.
@@ -206,6 +233,7 @@ final class VoiceRecorder: VoiceRecording {
         recordingLog.note("recorder stop: \(outcome.produced) chunks produced, \(outcome.stored) stored, failed \(outcome.failed)")
         writer = nil
         currentWriterUnsafe = nil
+        releaseOwnership()
         return outcome
     }
 
@@ -222,6 +250,7 @@ final class VoiceRecorder: VoiceRecording {
             holdingChunks = false
         }
         if let sessionId { uploader.close(sessionId: sessionId) }
+        releaseOwnership()
     }
 
     /// Leaving mid-recording (the Voice screen or the writing form went away,
@@ -231,11 +260,18 @@ final class VoiceRecorder: VoiceRecording {
     ///
     /// The recorder is free for a new recording at once; the returned task
     /// finishes this one (its writer, inbox and session go with it) and says
-    /// what became of it. A continued recording still held for its claim sends
-    /// nothing (#388), and nothing running is only cancelled: `.nothing`.
+    /// what became of it. Then, unless a recorder on this phone has opened the
+    /// session again meanwhile (`.reopened`), its upload state is forgotten and
+    /// - `discard` is called for a recording under `shortestKeptRecording`
+    ///   with no earlier piece (`.empty`, as before #753);
+    /// - `release` is called once the server has every piece (`.stored`).
+    /// Chunks still on the phone stay queued (`.pending`). A continued
+    /// recording still held for its claim sends nothing (#388), and nothing
+    /// running is only cancelled: `.nothing`.
     @discardableResult
-    func leave() -> Task<RecordingLeft, Never> {
-        guard source != nil, !holdingChunks, let sessionId else {
+    func leave(release: @escaping @MainActor (String) async -> Void,
+               discard: @escaping @MainActor (String) async -> Void) -> Task<RecordingLeft, Never> {
+        guard source != nil, !holdingChunks, let sessionId, let token = ownerToken else {
             cancel()
             return Task { .nothing }
         }
@@ -248,33 +284,57 @@ final class VoiceRecorder: VoiceRecording {
         let shift = indexShift
         let uploader = uploader
         let recordingLog = recordingLog
-        // The session has audio: a chunk (a continued session numbers after
-        // its stored ones), or samples not cut yet. Without any, finishing
-        // would make a chunk of the encoder's padding alone.
-        let hasAudio = (writer?.nextChunkIndex ?? 0) > 0 || (writer?.secondsWritten ?? 0) > 0
+        // Worth keeping: an earlier piece (cut already, or a continued session,
+        // which numbers after its stored chunks), or enough audio not cut yet.
+        let recorded = secondsBeforeWriter + (writer?.secondsWritten ?? 0)
+        let keep = (writer?.nextChunkIndex ?? 0) > 0 || recorded >= Self.shortestKeptRecording
         // Detached: a chunk the writer hands over from now on lands in its own
-        // inbox, never in the next recording's.
+        // inbox, never in the next recording's. The session stays this leave's
+        // (its token) until the task below ends.
         self.writer = nil
         currentWriterUnsafe = nil
         self.inbox = ChunkInbox()
         self.sessionId = nil
+        ownerToken = nil
         return Task { @MainActor in
-            guard hasAudio else {
-                uploader.close(sessionId: sessionId)
-                recordingLog.note("recorder left: no audio")
-                return .empty(sessionId: sessionId)
+            let left: RecordingLeft
+            if keep {
+                if let writer { await writer.finish() }
+                for var chunk in inbox.popAll() {
+                    chunk.index += shift
+                    recordingLog.note("chunk \(chunk.index): \(String(format: "%.1f", chunk.duration)) s, \(chunk.data.count / 1024) KB (left)")
+                    uploader.enqueue(sessionId: sessionId, chunk: chunk)
+                }
+                let outcome = await uploader.settle(sessionId: sessionId)
+                recordingLog.note("recorder left: \(outcome.produced) chunks produced, \(outcome.stored) stored, failed \(outcome.failed)")
+                if outcome.fatalMessage != nil || outcome.produced == 0 {
+                    // Nothing queued at all: the queue was deleted meanwhile (sign-out).
+                    left = .nothing
+                } else {
+                    left = outcome.failed.isEmpty ? .stored(sessionId: sessionId) : .pending(sessionId: sessionId)
+                }
+            } else {
+                recordingLog.note("recorder left: \(String(format: "%.1f", recorded)) s, not kept")
+                left = .empty(sessionId: sessionId)
             }
-            if let writer { await writer.finish() }
-            for var chunk in inbox.popAll() {
-                chunk.index += shift
-                recordingLog.note("chunk \(chunk.index): \(String(format: "%.1f", chunk.duration)) s, \(chunk.data.count / 1024) KB (left)")
-                uploader.enqueue(sessionId: sessionId, chunk: chunk)
+            // Opened again on this phone while the uploads settled (Continue
+            // recording): the session is that recording's now.
+            guard Self.owners[sessionId] == token else {
+                recordingLog.note("recorder left: the session was opened again; left as it is")
+                return .reopened(sessionId: sessionId)
             }
-            let outcome = await uploader.settle(sessionId: sessionId)
-            recordingLog.note("recorder left: \(outcome.produced) chunks produced, \(outcome.stored) stored, failed \(outcome.failed)")
-            // Nothing queued at all: the queue was deleted meanwhile (sign-out).
-            if outcome.fatalMessage != nil || outcome.produced == 0 { return .nothing }
-            return outcome.failed.isEmpty ? .stored(sessionId: sessionId) : .pending(sessionId: sessionId)
+            Self.owners[sessionId] = nil
+            switch left {
+            case .empty:
+                uploader.forget(sessionId: sessionId)
+                await discard(sessionId)
+            case .stored:
+                uploader.forget(sessionId: sessionId)
+                await release(sessionId)
+            case .pending, .nothing, .reopened:
+                break
+            }
+            return left
         }
     }
 

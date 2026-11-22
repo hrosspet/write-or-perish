@@ -1738,31 +1738,22 @@ final class VoiceTurnController {
         // Left mid-recording (#753): the recorder queues the unfinished
         // segment with the others, so the recovery banner has everything said,
         // and is free at once (`resetTurn`'s cancel finds nothing running).
-        // Then a session that got no audio is discarded: kept, it stayed in
-        // 'recording' on the server, where Text mode found it as a draft that
-        // no Send or Discard removed. One whose chunks are all on the server is
-        // released, so the next Voice screen offers it at once instead of
-        // after the server's live window. One with chunks still on the phone
-        // is left as it is. In `.starting` the recorder runs only for a
-        // continued session waiting for its claim, which sends nothing (#388);
-        // `sessionId` may still name the last turn's session, and a new session
-        // created meanwhile is discarded by the start flow.
-        let left = state == .recording || state == .starting ? recorder.leave() : nil
-        resetTurn(keepQueue: false)
-        if let left {
-            Task { [backend, recorder] in
-                switch await left.value {
-                case .empty(let sid):
-                    recorder.forget(sessionId: sid)
-                    await backend.discard(sessionId: sid)
-                case .stored(let sid):
-                    recorder.forget(sessionId: sid)
-                    await backend.release(sessionId: sid)
-                case .pending, .nothing:
-                    break
-                }
-            }
+        // Then a recording with no earlier piece and under
+        // `VoiceRecorder.shortestKeptRecording` (a Record tapped by accident)
+        // is discarded: kept, it stayed in 'recording' on the server, where
+        // Text mode found it as a draft that no Send or Discard removed. One
+        // whose chunks are all on the server is released, so the next Voice
+        // screen offers it at once instead of after the server's live window.
+        // One with chunks still on the phone is left as it is, and so is one
+        // this phone continued meanwhile. In `.starting` the recorder runs only
+        // for a continued session waiting for its claim, which sends nothing
+        // (#388); `sessionId` may still name the last turn's session, and a
+        // new session created meanwhile is discarded by the start flow.
+        if state == .recording || state == .starting {
+            recorder.leave(release: { [backend] sid in await backend.release(sessionId: sid) },
+                           discard: { [backend] sid in await backend.discard(sessionId: sid) })
         }
+        resetTurn(keepQueue: false)
         state = .idle
         aiBlock = nil
         lengthNotice = false

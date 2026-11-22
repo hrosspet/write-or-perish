@@ -86,9 +86,13 @@ protocol VoiceRecording: AnyObject {
     func cancel()
     /// Leaving mid-recording (#753): capture stops, the unfinished segment is
     /// queued with the others, nothing is finalized. Free for a new recording
-    /// at once; the task says what became of the session.
+    /// at once; the task says what became of the session. When its uploads
+    /// have settled, and only if no recorder on this phone opened the session
+    /// again meanwhile, its upload state is forgotten and `discard` (nothing
+    /// worth keeping) or `release` (the server has every piece) is called.
     @discardableResult
-    func leave() -> Task<RecordingLeft, Never>
+    func leave(release: @escaping @MainActor (String) async -> Void,
+               discard: @escaping @MainActor (String) async -> Void) -> Task<RecordingLeft, Never>
     /// The session is finished: forget its local upload state.
     func forget(sessionId: String)
 }
@@ -98,16 +102,20 @@ enum RecordingLeft: Equatable {
     /// Nothing was recording, or a continued recording still waited for its
     /// claim (nothing of it was sent, #388).
     case nothing
-    /// Nothing was recorded into the session: it will never have audio (the
-    /// caller discards it).
+    /// No earlier piece and less than `VoiceRecorder.shortestKeptRecording` of
+    /// audio (a Record tapped by accident): the session is discarded, as
+    /// before #753.
     case empty(sessionId: String)
-    /// The server has every chunk: the caller releases the session, so it is
-    /// offered for recovery at once instead of after the server's live window.
+    /// The server has every chunk: the session is released, so it is offered
+    /// for recovery at once instead of after the server's live window.
     case stored(sessionId: String)
     /// Chunks are still on the phone (offline, refused): they stay queued and
     /// the session is not released (a continue before they land would reuse
     /// their numbers).
     case pending(sessionId: String)
+    /// A recorder on this phone opened the session again before the uploads
+    /// settled (Continue recording): nothing more is done to it.
+    case reopened(sessionId: String)
 }
 
 /// The queue player as the turn sees it (live: `ChunkQueuePlayer`).

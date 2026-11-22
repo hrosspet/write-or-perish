@@ -208,11 +208,14 @@ final class FakeRecorder: VoiceRecording {
         calls.append("cancel")
         running = nil
     }
-    /// Whether the recording so far reached a chunk (after the leave's flush).
+    /// Whether the recording so far is worth keeping (an earlier piece, or
+    /// `VoiceRecorder.shortestKeptRecording` of audio).
     var hasProducedChunks = true
-    /// What a leave of a recording with chunks reports (default: all stored).
+    /// What a leave of a recording worth keeping reports (default: all stored).
     var leaveResult: RecordingLeft?
-    func leave() -> Task<RecordingLeft, Never> {
+    /// Like the real recorder: forgets, then discards or releases the session.
+    func leave(release: @escaping @MainActor (String) async -> Void,
+               discard: @escaping @MainActor (String) async -> Void) -> Task<RecordingLeft, Never> {
         calls.append("leave")
         let result: RecordingLeft
         if let sid = running, !holding {
@@ -221,7 +224,19 @@ final class FakeRecorder: VoiceRecording {
             result = .nothing
         }
         running = nil
-        return Task { result }
+        return Task { @MainActor in
+            switch result {
+            case .empty(let sid):
+                self.forget(sessionId: sid)
+                await discard(sid)
+            case .stored(let sid):
+                self.forget(sessionId: sid)
+                await release(sid)
+            case .pending, .nothing, .reopened:
+                break
+            }
+            return result
+        }
     }
     var forgotten: [String] = []
     func forget(sessionId: String) {
