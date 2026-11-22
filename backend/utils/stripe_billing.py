@@ -937,8 +937,8 @@ def apply_subscription(sub, config=None):
     when the ceiling changed, the spend block): never ``plan`` or an
     admin's limit. Does not commit."""
     from backend.utils.spend import (
-        ceiling_period_start, get_user_spend_limit_usd,
-        reconcile_user_spend_block)
+        carry_into_next_period, ceiling_period_start,
+        get_user_spend_limit_usd, reconcile_user_spend_block)
     cfg = _config(config)
     user = _user_for_subscription(sub)
     if user is None:
@@ -1001,7 +1001,11 @@ def apply_subscription(sub, config=None):
     if (get_user_spend_limit_usd(user, cfg) != limit_before
             or ceiling_period_start(user) != ceiling_period_before):
         # A new ceiling, or a new period to count it over (a renewal):
-        # the block follows what is counted now.
+        # what the ended period counted above the ceiling it ran under
+        # (the level before a change of level) goes into the new one,
+        # and the block follows what is counted now.
+        carry_into_next_period(user, cfg, ceiling_period_before,
+                               limit_before)
         reconcile_user_spend_block(user, cfg)
     return user
 

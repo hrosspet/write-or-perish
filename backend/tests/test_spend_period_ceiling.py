@@ -101,6 +101,39 @@ def _mailbox():
     return emails, send
 
 
+def _stamp(value):
+    return int(value.replace(tzinfo=timezone.utc).timestamp())
+
+
+def _stripe_sub(user, start, end, status="active", level="standard"):
+    return {
+        "id": "sub_1", "object": "subscription", "customer": "cus_1",
+        "status": status, "cancel_at_period_end": False, "cancel_at": None,
+        "trial_start": None, "trial_end": None,
+        "metadata": {"loore_user_id": str(user.id)},
+        "items": {"data": [{
+            "current_period_start": _stamp(start),
+            "current_period_end": _stamp(end),
+            "price": {"id": f"price_{level}",
+                      "lookup_key":
+                          stripe_billing.PRICE_LOOKUP_KEYS[level]},
+        }]},
+    }
+
+
+def _stripe_subscriber(**kw):
+    return _subscriber(stripe_subscription_id="sub_1",
+                       stripe_customer_id="cus_1", **kw)
+
+
+def _renew(user, start, end, level="standard"):
+    """Stripe's event for the next period (and, with *level*, a change
+    of level that arrives with it)."""
+    stripe_billing.apply_subscription(
+        _stripe_sub(user, start, end, level=level), CONFIG)
+    _db.session.commit()
+
+
 # ── One period, one ceiling ──────────────────────────────────────────────
 
 @pytest.mark.parametrize("level", ["standard", "discounted"])
@@ -161,14 +194,12 @@ def test_the_block_ends_when_the_next_period_starts(app):
 
 
 def test_what_a_period_spends_above_the_ceiling_counts_in_the_next(app):
-    u = _subscriber()
+    u = _stripe_subscriber()
     emails, send = _mailbox()
     _log_cost(u.id, 58.0, JAN_LATE)
     enforce_user_spend_cap(u.id, CONFIG, now=JAN_LATE, send_email=send)
 
-    u.subscription_period_start = PERIOD_END
-    u.subscription_period_end = NEXT_END
-    _db.session.commit()
+    _renew(u, PERIOD_END, NEXT_END)
     _log_cost(u.id, 41.0, FEB_LATE)
     r = enforce_user_spend_cap(u.id, CONFIG, now=FEB_LATE, send_email=send)
     assert r["status"] == "ok"
@@ -181,17 +212,14 @@ def test_what_a_period_spends_above_the_ceiling_counts_in_the_next(app):
 
 
 def test_a_carry_of_a_whole_ceiling_blocks_the_next_period_at_once(app):
-    u = _subscriber()
+    u = _stripe_subscriber()
     _log_cost(u.id, 154.0, JAN_LATE)
     emails, send = _mailbox()
     enforce_user_spend_cap(u.id, CONFIG, now=JAN_LATE, send_email=send)
 
-    u.subscription_period_start = PERIOD_END
-    u.subscription_period_end = NEXT_END
-    state = reconcile_user_spend_block(u, CONFIG, now=FEB_LATE)
-    _db.session.commit()
+    _renew(u, PERIOD_END, NEXT_END)
 
-    assert state["blocked"] is True and state["carried_usd"] == 104.0
+    assert u.spend_period_carry_microdollars == 104_000_000
     assert user_is_capped(u, now=FEB_LATE)
     # $104 counted against $50: $54 go on into the next period, which
     # they block too; the one after it starts with $4.
@@ -335,26 +363,6 @@ def test_months_under_the_period_rule_carry_nothing_into_the_calendar(app):
 
 # ── The period's start comes from Stripe ─────────────────────────────────
 
-def _stamp(value):
-    return int(value.replace(tzinfo=timezone.utc).timestamp())
-
-
-def _stripe_sub(user, start, end, status="active"):
-    return {
-        "id": "sub_1", "object": "subscription", "customer": "cus_1",
-        "status": status, "cancel_at_period_end": False, "cancel_at": None,
-        "trial_start": None, "trial_end": None,
-        "metadata": {"loore_user_id": str(user.id)},
-        "items": {"data": [{
-            "current_period_start": _stamp(start),
-            "current_period_end": _stamp(end),
-            "price": {"id": "price_standard",
-                      "lookup_key":
-                          stripe_billing.PRICE_LOOKUP_KEYS["standard"]},
-        }]},
-    }
-
-
 def test_the_subscription_event_stores_the_periods_start(app):
     u = User(username="new", plan="free")
     _db.session.add(u)
@@ -385,3 +393,99 @@ def test_a_renewal_event_lifts_the_last_periods_block(app):
     # The $2 above the ceiling were carried when the event arrived.
     assert u.spend_period_start == PERIOD_END
     assert u.spend_period_carry_microdollars == 2_000_000
+
+
+# ── A change of level, time counted by the month, the admin's clear ──────
+
+MAR_END = datetime(2027, 4, 20, 10, 0, 0)
+MAR_LATE = datetime(2027, 3, 25, 12, 0, 0)
+
+
+def test_a_lower_level_starts_without_the_higher_levels_use(app):
+    """Supporter ($100) used $95 of its period, inside its ceiling; the
+    change to Standard ($50) arrives with the next period."""
+    u = _stripe_subscriber(level="supporter")
+    emails, send = _mailbox()
+    _log_cost(u.id, 95.0, JAN_LATE)
+    r = enforce_user_spend_cap(u.id, CONFIG, now=JAN_LATE, send_email=send)
+    assert r["status"] == "ok"
+
+    _renew(u, PERIOD_END, NEXT_END, level="standard")
+
+    assert get_user_spend_limit_usd(u, CONFIG) == 50.0
+    assert u.spend_period_carry_microdollars == 0
+    assert not user_is_capped(u, now=FEB_LATE)
+
+
+def test_a_lower_level_carries_only_what_went_above_the_higher_ceiling(app):
+    u = _stripe_subscriber(level="supporter")
+    emails, send = _mailbox()
+    _log_cost(u.id, 100.5, JAN_LATE)
+    enforce_user_spend_cap(u.id, CONFIG, now=JAN_LATE, send_email=send)
+
+    _renew(u, PERIOD_END, NEXT_END, level="standard")
+
+    assert u.spend_period_carry_microdollars == 500_000
+    assert not user_is_capped(u, now=FEB_LATE)
+
+
+def test_periods_under_an_admins_limit_count_nothing_after_it_is_removed(app):
+    """The admin gives a subscriber $200 a month over two renewals, the
+    subscriber uses $45 in each period, then the limit is removed."""
+    u = _stripe_subscriber()
+    emails, send = _mailbox()
+    _log_cost(u.id, 45.0, JAN_LATE)
+    enforce_user_spend_cap(u.id, CONFIG, now=JAN_LATE, send_email=send)
+    assert u.spend_period_start == PAID
+
+    spend.set_user_spend_limit(u, 200.0, CONFIG, now=FEB_EARLY)
+    _db.session.commit()
+    _renew(u, PERIOD_END, NEXT_END)
+    _log_cost(u.id, 45.0, FEB_LATE)
+    _renew(u, NEXT_END, MAR_END)
+
+    state = spend.set_user_spend_limit(u, None, CONFIG, now=MAR_LATE)
+    _db.session.commit()
+    assert state["carried_usd"] == 0 and state["spend_usd"] == 0
+    assert not user_is_capped(u, now=MAR_LATE)
+
+
+def test_a_period_after_a_plan_set_by_hand_starts_at_zero(app):
+    u = _stripe_subscriber()
+    emails, send = _mailbox()
+    _log_cost(u.id, 80.0, JAN_LATE)
+    enforce_user_spend_cap(u.id, CONFIG, now=JAN_LATE, send_email=send)
+    u.plan = "alpha"
+    _db.session.commit()
+    _renew(u, PERIOD_END, NEXT_END)
+    u.plan = "free"
+    state = reconcile_user_spend_block(u, CONFIG, now=FEB_LATE)
+    _db.session.commit()
+    assert state["carried_usd"] == 0
+    assert not user_is_capped(u, now=FEB_LATE)
+
+
+def test_the_admins_clear_action_clears_the_periods_carry(app):
+    u = _stripe_subscriber()
+    emails, send = _mailbox()
+    _log_cost(u.id, 154.0, JAN_LATE)
+    enforce_user_spend_cap(u.id, CONFIG, now=JAN_LATE, send_email=send)
+    _renew(u, PERIOD_END, NEXT_END)
+    assert user_is_capped(u, now=FEB_LATE)        # $104 carried
+
+    state = spend.clear_spend_carry(u, CONFIG, now=FEB_LATE)
+    _db.session.commit()
+
+    assert state["carried_usd"] == 0 and state["blocked"] is False
+    assert not user_is_capped(u, now=FEB_LATE)
+    assert u.spend_period_carry_microdollars == 0
+
+
+def test_the_same_event_twice_carries_once(app):
+    u = _stripe_subscriber()
+    emails, send = _mailbox()
+    _log_cost(u.id, 58.0, JAN_LATE)
+    enforce_user_spend_cap(u.id, CONFIG, now=JAN_LATE, send_email=send)
+    _renew(u, PERIOD_END, NEXT_END)
+    _renew(u, PERIOD_END, NEXT_END)
+    assert u.spend_period_carry_microdollars == 8_000_000

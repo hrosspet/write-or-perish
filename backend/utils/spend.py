@@ -307,7 +307,14 @@ def enforce_trial_cap(user, config, send_email=None):
 #
 # The #594 rule holds per period: what a period spends above the ceiling
 # counts toward the next one (User.spend_period_carry_microdollars, for
-# the period starting at User.spend_period_start). The block is the start
+# the period starting at User.spend_period_start). The carry is taken on
+# only where the next period arrives (the subscription event,
+# carry_into_next_period), from the period that just ended and with the
+# ceiling that period ran under, and only when the account was counted
+# per period through it. A period that starts any other way (the account
+# was counted by the month before: an admin's limit removed, a plan no
+# longer set by hand) starts at 0, as a month never rolled does. The
+# admin's clear action clears it (clear_spend_carry). The block is the start
 # of the period it is for (User.spend_blocked_period_start), so it ends
 # by itself when Stripe starts the next period. While an account is
 # counted per period its calendar-month block is not read, and its
@@ -350,37 +357,51 @@ def _user_spend_between_microdollars(user_id, start, end):
 
 def rolled_period_carry(user, config, start):
     """The carry into the period that starts at *start*, in microdollars,
-    from what is stored, without writing it: what was counted since the
-    stored period's start, above one ceiling. 0 for an account never
-    counted per period, and with no limit."""
-    stored = getattr(user, "spend_period_start", None)
-    carry = getattr(user, "spend_period_carry_microdollars", None) or 0
-    if stored == start:
-        return carry
-    limit = _usd_to_microdollars(get_user_spend_limit_usd(user, config))
-    if stored is None or stored > start or limit <= 0:
+    as stored: 0 when what is stored is for another period (the carry
+    is taken on only by carry_into_next_period)."""
+    if getattr(user, "spend_period_start", None) != start:
         return 0
-    return max(0, carry + _user_spend_between_microdollars(
-        user.id, stored, start) - limit)
+    return getattr(user, "spend_period_carry_microdollars", None) or 0
 
 
 def roll_period_carry(user, config, start):
-    """Bring the stored period carry to the period that starts at *start*
-    and, when the carry alone reaches the ceiling, block the account for
-    the period. Does not commit. Returns True when it changed the row."""
+    """Make the period that starts at *start* the one the stored carry is
+    for: 0 unless it is already. Does not commit. Returns True when it
+    changed the row."""
     if user.spend_period_start == start:
         return False
-    carry = rolled_period_carry(user, config, start)
+    user.spend_period_start = start
+    user.spend_period_carry_microdollars = 0
+    return True
+
+
+def carry_into_next_period(user, config, previous, limit_usd):
+    """The subscription's next period has arrived (the caller has written
+    it on *user*): what the period that started at *previous* counted
+    above *limit_usd*, the ceiling it ran under, is carried into the new
+    one, and when the carry alone reaches the ceiling now in force the
+    account is blocked for the period. Nothing is carried when the
+    account was not counted per period before (*previous* is None) or
+    the stored count is not that period's. Does not commit."""
+    start = ceiling_period_start(user)
+    if start is None or start == previous:
+        return
+    carry = 0
+    limit = _usd_to_microdollars(limit_usd)
+    if (previous is not None and previous < start and limit > 0
+            and user.spend_period_start == previous):
+        carry = max(0, (user.spend_period_carry_microdollars or 0)
+                    + _user_spend_between_microdollars(
+                        user.id, previous, start) - limit)
     user.spend_period_start = start
     user.spend_period_carry_microdollars = carry
-    limit = _usd_to_microdollars(get_user_spend_limit_usd(user, config))
-    if limit > 0 and carry >= limit:
+    now_limit = _usd_to_microdollars(get_user_spend_limit_usd(user, config))
+    if now_limit > 0 and carry >= now_limit:
         user.spend_blocked_period_start = start
         logger.warning(
             "User %s capped for the period from %s by the carry: $%.2f "
             "carried >= $%.2f limit", user.id, start.isoformat(),
-            carry / 1e6, limit / 1e6)
-    return True
+            carry / 1e6, now_limit / 1e6)
 
 
 def carried_spend_microdollars(user, config, now=None):
@@ -582,9 +603,15 @@ def set_user_spend_limit(user, limit_usd, config, now=None):
 
 def clear_spend_carry(user, config, now=None):
     """The admin's clear action: the carry into this month goes to 0 and
-    the block follows the month's own spend. Does not commit."""
+    the block follows the month's own spend; for an account counted per
+    paid period, the carry into the period and the period's own spend.
+    Does not commit."""
     user.spend_carry_month = current_month(now)
     user.spend_carry_microdollars = 0
+    period_start = ceiling_period_start(user)
+    if period_start is not None:
+        user.spend_period_start = period_start
+        user.spend_period_carry_microdollars = 0
     return reconcile_user_spend_block(user, config, now=now)
 
 
