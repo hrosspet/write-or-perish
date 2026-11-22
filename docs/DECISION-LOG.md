@@ -4834,6 +4834,243 @@ Kinds (one per entry and per table row):
 - **Applies to:** the Beta release
 - **Rule:** candidate: before telling Peter that something does not exist or can't be done, look for how the project did it before
 
+### 2026-11-20 · The list before the Beta held issues and pull requests
+
+- **Kind:** process
+- **Situation:** once the steps before the Beta were collected into one list in Loore, the list held Peter's own steps together with code work still owed: issues and pull requests.
+- **Decision:** kept the owed code work in the list, next to his steps.
+- **Peter:** "the list shouldn't contain issues or PRs, these should go into the triage board. This list is for steps that I personally need to do, usually originated from merged PRs" · "Also things that shouldn't become public and are not a good fit for the triage board."
+- **Score:** miss
+- **Why it missed:** the list was built as everything that stands between now and the Beta. Peter keeps his own hands-on steps apart from code work, which already has its place on the board.
+- **Source:** Claude Code session 2026-11-20 (Opus 5.5)
+- **Applies to:** the Beta release
+- **Rule:** candidate: the list before a release holds only the owner's own steps; code work goes to the issue board
+
+### 2026-11-20 · The list before the Beta: a node, with one node of commands for all items
+
+- **Kind:** process
+- **Situation:** as in the entry before. The list was a Loore node, and the commands for all of its items were in one child node, a section per item.
+- **Decision:** a node for the list and one shared node for the commands.
+- **Peter:** in the terminal: the list moves into a Loore artifact, which keeps a list that changes over several sessions in one place, with its versions and ticks; an item that needs steps links to its own steps node.
+- **Score:** 2 × miss
+- **Why it missed:** the list was treated like a message, which is what a node is for. A list Peter returns to over weeks needs one fixed place, and an item's steps are easiest to follow from the item itself.
+- **Source:** Claude Code session 2026-11-20 (Opus 5.5)
+- **Applies to:** the Beta release; the summary nodes of merge trains
+- **Rule:** candidate: a standing list lives in an artifact; each checklist item links to its own steps node
+
+### 2026-11-20 · A test that depended on the date
+
+- **Kind:** testing
+- **Situation:** the deploy after #716 stopped at one failing backend test, so the payments train (#680) and train #708 had not reached production. The test checked how the archive's old interface matches handles and expected "not found" for an unknown handle. Since that interface's retirement date (2026-11-19), the code raises an error for its empty answer when no key is set, as #690 meant it to. Peter asked whether changing the test was the proper fix.
+- **Decision:** fixed the test, not the code: it moves the retirement date into the future (#720). The follow-up #721 removes the keyless path once the key works on production.
+- **Peter:** in the terminal: agreed, after asking whether this was the proper fix.
+- **Score:** hit
+- **Source:** Claude Code session 2026-11-20 (Opus 5.5)
+- **Applies to:** #690, #720, #721
+
+### 2026-11-20 · The TestFlight build after the train
+
+- **Kind:** release/ops
+- **Situation:** the iPhone changes of the trains merged on 20 November reach phones only with a new TestFlight build.
+- **Decision:** recommended making the build after the day's train (#730).
+- **Peter:** in the terminal: agreed.
+- **Score:** hit
+- **Source:** Claude Code session 2026-11-20 (Opus 5.5)
+- **Applies to:** #730
+
+### 2026-11-20 · A thread's privacy change also reaches imported entries below it
+
+- **Kind:** privacy
+- **Situation:** since #699 an import is always private. Changing the privacy of a thread's top entry also changes the entries below it, imported ones included, so a person can make imported entries public that way. The builder proposed filing this as an issue against #699.
+- **Decision:** proposed an issue to keep imported entries out of that change.
+- **Peter:** in the terminal: this is fine; nothing to file.
+- **Score:** miss
+- **Why it missed:** "imports are always private" was read as a rule about imported entries for good. It is about the import itself; a later choice of the person's applies to imported entries as to any other.
+- **Source:** Claude Code session 2026-11-20 (Opus 5.5)
+- **Applies to:** #699
+- **Rule:** candidate: "imports are always private" covers the import; the person's later choices apply to imported entries like to any other
+
+### 2026-11-20 · The purpose statement: the wording
+
+- **Kind:** user-facing text
+- **Situation:** Peter wants a short statement of Loore's purpose in the legal pages, one that users can hold Loore to. The builder drafted it in node 201982: what Loore is for, five things it will not do, and what to do if it falls short. It also asked whether the statement is the first section of the Terms (recommended) or a separate page.
+- **Prediction:** he changes the wording (70 %; accepts it as it is, 25 %); the first section of the Terms (65 %; a separate page, 25 %).
+- **Peter:** "I like the purpose statement." · "Maybe what's missing is exactly the risk I mentioned - that every tool brings something and takes something." · "I think this risk is fair to be mentioned there and possibly with our intention to help the user strike the right trade-off."
+- **Score:** hit. He added a paragraph on the trade-off. The placement got no answer, and the default, the first section of the Terms, was applied.
+- **Source:** Loore, node 201984 answering node 201982, 2026-11-20 (Opus 5.5)
+- **Applies to:** #660
+
+### 2026-11-20 · The purpose statement: the paragraph on what it costs
+
+- **Kind:** user-facing text
+- **Situation:** the builder wrote the added paragraph, "What it costs you" (node 201985), and recommended it as drafted.
+- **Prediction:** accepts it (60 %); rewords it (35 %).
+- **Peter:** "I like the new paragraph in spirit, but the wording feels repetitive. Could you try another wording? Or just make it shorter without the perceived repetition"
+- **Score:** miss
+- **Why it missed:** the draft said the same thing three times (in general, for Loore, and as a consequence), and it was not read for repetition before it was sent.
+- **Source:** Loore, node 201986 answering node 201985, 2026-11-20 (Opus 5.5)
+- **Applies to:** #660
+
+### 2026-11-20 · The purpose statement: two shorter versions
+
+- **Kind:** user-facing text
+- **Situation:** two shorter versions of the paragraph, A (four sentences) and B (three), with A recommended (node 201987).
+- **Prediction:** A (55 %); B (25 %); his own wording (20 %).
+- **Peter:** "Yes, let's go with A"
+- **Score:** hit
+- **Source:** Loore, node 201988 answering node 201987, 2026-11-20 (Opus 5.5)
+- **Applies to:** #660
+
+### 2026-11-20 · The purpose statement: "It asks before it answers"
+
+- **Kind:** product scope
+- **Situation:** each line of the statement was checked against the code and the prompts. No reply prompt asks before it answers, as the line "It asks before it answers" says. Recommended: change the three reply prompts (Reflect, Voice, the agentic reply) in a pull request for Peter to try, and keep the line.
+- **Prediction:** he wants the prompt change (65 %); softens the text instead (25 %).
+- **Peter:** "actually, upon reflection I'd prefer changing the wording of the purpose. What I think should go there was something more like A good question is preferred to a good answer, but that's more directional than what a purpose should probably be like" · "when it comes to code the fully socratic approach would be a big UX change. I have it as a design direction on my mind and that's enough for Beta"
+- **Score:** miss
+- **Why it missed:** Peter had described Loore as Socratic, and that was taken as a wish to make every reply work that way now. Before the Beta he prefers a statement that says what is true and names the direction over a change to how every reply feels.
+- **Source:** Loore, node 201990 answering node 201989, 2026-11-20 (Opus 5.5)
+- **Applies to:** #660
+- **Rule:** candidate: where a written promise says more than the product does, correct the words and name the direction; change the product only when Peter asks for it
+
+### 2026-11-20 · The purpose statement: "it points you toward other people"
+
+- **Kind:** product scope
+- **Situation:** as in the entry before. Only Glean's prompt points a person toward other people. Recommended: one line in the reply prompts, in the same pull request.
+- **Prediction:** the prompt line (60 %); softens the text (30 %).
+- **Peter:** "yes, this is a stretch." · "what I had on my mind was mainly the intention markets - it's about connecting people with shared purpose / complementary intentions"
+- **Score:** miss
+- **Why it missed:** as in the entry before, and the line was read as being about replies, where Peter meant the Intention Market.
+- **Source:** Loore, node 201990 answering node 201989, 2026-11-20 (Opus 5.5)
+- **Applies to:** #660, #449
+
+### 2026-11-20 · The purpose statement: what a person has agreed to
+
+- **Kind:** user-facing text
+- **Situation:** the line "It will not use what you write for anything you have not agreed to" sounds as if Loore uses nothing before a person agrees, while the Beta prepares accounts from public posts before that. Recommended: "It will not use what you write in Loore for anything you have not agreed to", with a pointer to the privacy page.
+- **Prediction:** accepts it (70 %).
+- **Peter:** "yeah, that's better"
+- **Score:** hit
+- **Source:** Loore, node 201990 answering node 201989, 2026-11-20 (Opus 5.5)
+- **Applies to:** #660
+
+### 2026-11-20 · The purpose statement: "engagement" in the admin's Activity tab
+
+- **Kind:** user-facing text
+- **Situation:** next to the line "Time spent in Loore is not something we measure success by", the admin's Activity tab was described as headed "per-user engagement", with counts of active days and of returns. Recommended: keep the counts, rename the heading to "activity", and keep the line.
+- **Prediction:** keep the counts and rename the heading (75 %).
+- **Peter:** "I don't see anything like that on the admin Activity tab. If it's hidden somewhere, do rename it to Activity"
+- **Score:** hit. The word is renamed wherever it is.
+- **Source:** Loore, node 201990 answering node 201989, 2026-11-20 (Opus 5.5)
+- **Applies to:** #660
+
+### 2026-11-21 · #694: the length of a recording
+
+- **Kind:** reliability
+- **Situation:** #694 bounded recordings and audio uploads on the server: one recording turned into text up to six hours, its audio taken up to about twelve hours or about 1 GB, and an uploaded file turned into text up to eight hours (Needs Peter 1, recommended and the default). Node 201992 listed the values.
+- **Decision:** six hours turned into text, about twelve hours or 1 GB of audio, eight hours of a file.
+- **Peter:** in the terminal: two hours turned into text, four hours of audio, an uploaded file's first four hours; "1 GB is too much"; the byte bound left to the builder; in train #730, not as a follow-up. The mechanism: "ok".
+- **Score:** miss, on the values. The mechanism was accepted. The builder set the byte bound from four hours at the highest audio rate allowed for: about 346 MB.
+- **Why it missed:** the bounds were set by what no recording had reached yet, not by how much one entry should be turned into text and stored.
+- **Source:** Claude Code session 2026-11-21, on node 201992; the values were #694's builder's (Opus 5.5)
+- **Applies to:** #694, #730
+
+### 2026-11-21 · #702: a late merge replaces the profile without a notice
+
+- **Kind:** UX
+- **Situation:** when a prepared account is loaded, one final profile merge runs. If it takes longer than three minutes, the person is let in with the loaded profile, and the merged one replaces it later (#702, Needs Peter 3, as built). Node 201992 listed it as a choice left as built.
+- **Decision:** the merged profile replaces the loaded one with no notice on screen.
+- **Peter:** "could we notify them as with the usual new profile version"
+- **Score:** miss. Filed as #731 (PR #741).
+- **Why it missed:** the merged profile was seen as the same profile, only better, so there was nothing to tell. For the person it is a new version of what they just read, and Loore tells them about every other new version.
+- **Source:** Claude Code session 2026-11-21, on node 201992; the choice was #702's builder's (Opus 5.5)
+- **Applies to:** #702, #731, #741
+
+### 2026-11-21 · #702: search data for accounts nobody claims
+
+- **Kind:** process
+- **Situation:** #702's Needs Peter 2, a cost note: loaded tweets get their search data later from the existing job, about half a cent and about eight hours per 10,000 tweets. Node 201992 said this happens "also for accounts nobody claims".
+- **Decision:** described the job as running for every loaded account.
+- **Peter:** in the terminal: search data only for accounts someone claims, as a follow-up.
+- **Score:** miss. With payments on, an account nobody claims already gets no search data, so nothing was filed; the node's line was broader than what Loore does.
+- **Why it missed:** the line was written without checking which accounts the job reaches once payments are on.
+- **Source:** Claude Code session 2026-11-21, on node 201992 (Opus 5.5)
+- **Applies to:** #702
+
+### 2026-11-21 · #702: an account held as spam that says Yes
+
+- **Kind:** cost
+- **Situation:** with payments on, an account marked as spam that was never approved is held (#725). If it signs in with X and answers Yes to "Start from your tweets", #702 still loads its prepared material and runs the one final merge, about 10 cents, and the account is not let in. Node 201993 listed it among the smaller points left as built.
+- **Decision:** left as built.
+- **Peter:** "pls fix this as a followup after this train, but before Beta"
+- **Score:** miss. Filed as #732 (PR #740).
+- **Why it missed:** two pull requests of the same train met in a rare case, and the sum was small. Peter does not spend on an account he has judged as spam, however little.
+- **Source:** Claude Code session 2026-11-21, on node 201993 (Opus 5.5)
+- **Applies to:** #702, #725, #732, #740
+
+### 2026-11-21 · #726: a Glean on Haiku over its price step
+
+- **Kind:** cost
+- **Situation:** #726 gives every Glean model one budget: the thread limit less 2 %. Haiku 5.5 bills at a higher rate above 100,000 input tokens, so a Glean on Haiku can cross that step, as before #726. #726 left it to Peter ("Keeping Haiku under 100k trades tweets for cost"), and node 201993 listed it as a smaller point left as built.
+- **Decision:** left as built.
+- **Peter:** "pls fix as a followup"
+- **Score:** miss. Filed as #733 (PR #743).
+- **Why it missed:** #726 kept the default Glean model under its price step, and Haiku's step was left as it was before. Peter wanted the same care for every model.
+- **Source:** Claude Code session 2026-11-21, on node 201993; the choice was #726's builder's (Opus 5.5)
+- **Applies to:** #726, #733, #743
+
+### 2026-11-21 · iPhone Voice: the four-hour stop shown for ten seconds
+
+- **Kind:** UX
+- **Situation:** at the four-hour bound set on 21 November, the recording stops and the entry is made. In the iPhone's Voice mode the message shows for ten seconds, without a sound or a notification, and the one-time "longer than two hours" message is not shown there. Node 201992 listed it as left as built.
+- **Decision:** left as built.
+- **Peter:** "it should stay there until the user sees it and dismisses; it should also make the sound"
+- **Score:** miss. Filed as #736 (PR #738).
+- **Why it missed:** the rarity of the case was weighed, not the person in it. Voice mode is used hands-free with the screen off, so a message that disappears is not seen.
+- **Source:** Claude Code session 2026-11-21, on node 201992; the choice was made with the limits change (Fable 5.2)
+- **Applies to:** #730, #736, #738
+
+### 2026-11-21 · #728: "Did someone prepare a Loore account for you?"
+
+- **Kind:** user-facing text
+- **Situation:** #728 lets an invited person who signed in by email open the account prepared for them with Sign in with X. The subscribe page asks "Did someone prepare a Loore account for you?" above the button.
+- **Decision:** wrote that line.
+- **Peter:** "sounds weird"
+- **Score:** miss. The new wording waits for Peter's design of the first experience; the sign-in cases are recorded on #147. #728's line on node 201992 stays unticked.
+- **Why it missed:** the line names what Loore did (someone prepared an account) instead of what the person knows: that they were invited. The pattern "User-facing text written by the builder gets corrected".
+- **Source:** Claude Code session 2026-11-21; the line was #728's builder's (Opus 5.5)
+- **Applies to:** #147, #714, #728
+
+### 2026-11-21 · #725: an account approved by hand and marked as spam
+
+- **Kind:** product scope
+- **Situation:** #725's Needs Peter: with payments on, an account Peter approved by hand during the alpha and later marked as spam keeps working (it still needs a subscription), because nothing records which came first and the issue keeps Activate by hand above the mark. Recommended: as built, and Block whatever a count turns up.
+- **Prediction:** as built (65 %); the mark also holds accounts approved by hand (30 %); other (5 %).
+- **Peter:** ticked the line on node 201992 and merged the train.
+- **Score:** hit
+- **Source:** Claude Code session 2026-11-21; the prediction was #725's builder's, adopted by the coordinating builder on 2026-11-20 (Opus 5.5)
+- **Applies to:** #713, #725, #730
+
+### 2026-11-21 · #726: how much a Glean reads
+
+- **Kind:** cost
+- **Situation:** #726's Needs Peter: a Glean stays under the thread limit less 2 %, 245,000 tokens, about 6,400 tweets and about 5 cents (built and recommended). The other way exempts Glean from the thread limit and keeps it under its default model's price step less 2 %: about 600 more tweets, at twice the price if the count is off by more than 2 %.
+- **Prediction:** as built (75 %); the other way (20 %).
+- **Peter:** asked what "the other way" meant, then ticked the line on node 201992 and merged the train.
+- **Score:** hit
+- **Source:** Claude Code session 2026-11-21; the prediction was written on 2026-11-20 (Opus 5.5)
+- **Applies to:** #717, #726, #730
+
+### 2026-11-21 · Train #730: the choices left as built: ask or decide
+
+- **Kind:** escalation
+- **Situation:** node 201992 and its child node 201993 listed the choices left as built in the twelve pull requests of train #730, for Peter to object to.
+- **Decision:** asked Peter instead of deciding.
+- **Peter:** five of his answers changed the plan: the recording lengths, #731, #732, #733 and #736. Two lines stay open for the following week.
+- **Score:** hit
+- **Source:** Claude Code session 2026-11-21 (Opus 5.5)
+- **Applies to:** #730, #731, #732, #733, #736
+
 ## Decided by the builder
 
 Choices that agents flagged in PRs and that the builder decided because a rule above already covers them (Peter, 2026-10-02: decide what the log supports, raise only real judgement calls). Each is also recorded on its PR, or in the session where Peter asked. The Decided column holds only the builder's part; a rule or decision of Peter's goes in the Rule column. Questions raised to Peter instead are not listed; his answers become entries. Model is the model that wrote the PR (its Co-Authored-By line). Result is "accepted by merge (PR #N, date)" once the PR has merged and Peter didn't correct the choice, "pending" until it merges, and "corrected → entry <title>" when he overrules it; the entry is then scored as a miss.
@@ -6440,3 +6677,88 @@ Builder decisions listed in PRs that merged without Peter correcting them, backf
 | 2026-11-20 | #700 | cost | One free trial per card as well as per account; the testers' free month is exempt (ticked on node 201963) | Fable 5.2 | accepted by merge (PR #708, 2026-11-20) |
 | 2026-11-20 | #700 | reliability | No background job runs for a blocked account | Fable 5.2 | accepted by merge (PR #708, 2026-11-20) |
 | 2026-11-20 | #700 | reliability | Introduced value: new accounts are marked "new" in the Users tab for 7 days | Opus 5.5 | accepted by merge (PR #708, 2026-11-20) |
+| 2026-11-21 | #694 | data safety | A recording that holds audio is turned into text to its end, within the length bound, whatever its pauses, calls or time offline; the usage limit is asked only when it starts (#341) | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #694 | reliability | A recording untouched for more than a day counts as a new start when it takes audio again, so at the usage limit continuing it is refused; its stored audio is kept (ticked on node 201992) | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #694 | cost | Lengths and the transcription cost come from the audio as decoded, not from the length a file's container states | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #694 | data safety | Audio that cannot be measured is re-encoded on the server and only the measured audio is sent; audio that cannot be read at all is kept with the recording, its part is marked as not turned into text, and the entry says so | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #694 | reliability | At most six unfinished recordings with audio, thirty starts without audio in fifteen minutes, and five uploads waiting at once; an interrupted upload can continue for 24 hours (ticked on node 201992) | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #694 | user-facing text | The refusal for too many unfinished recordings says what the person can do: "Save, finish or discard one of them, then start a new one." when recovery offers one, and to wait for one to finish when it offers none | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #694 | data safety | A daily task removes recordings that never received audio once they are a week old, never one with a chunk, a file or draft text; a phone that could not send its first piece for that long keeps the audio (ticked on node 201993) | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #694 | cost | An upload accepted at its start is turned into text without asking the usage limit again at its end, as a recording is (#341) | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #694 | data safety | Past a size or count bound, further audio is refused and nothing of it stored, and what came before is kept; the web stops the recorder and keeps the audio for "Save audio" | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #694 | UX | Offline from the start for more than 15 minutes with the limit reached meanwhile: the iPhone keeps the audio on the phone, the web keeps it in the page for "Save audio"; no storage that outlives the page is added for this case | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #694 | reliability | A data download runs one at a time per account and at most 10 times within an hour | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #694 | product scope | The limits sit in the routes and tasks, not in the access gate, so they hold for every account, also for a recording an account may finish after its access ends | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #694 | reliability | Introduced values, besides the lengths Peter set: 8 MB a chunk; 2 minutes of audio a chunk on average; 15 minutes before a recording without audio counts as a new start; the clean-up after 7 days, 500 a run; 8 MB pieces and at most 200 for a file upload; 20 minutes of local audio work per task run and 3 follow-up runs; a start waits at most 10 s for another start of the same account | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #709 | cost | Every start counts the account's audio stored or queued but not yet recorded as cost, at the transcription price | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #709 | cost | A chunk counts 15 s until its part is measured merged; an upload counts nothing until its finalize, then its measured length, or the largest of three estimates when it cannot be measured within 15 s | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #709 | UX | A refusal that comes only from waiting audio is not the monthly limit: "Loore is still working through your earlier recordings. Try again in a minute.", and the apps don't mark the account as capped | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #709 | UX | At the limit, only the recording being spoken into (the newest started, within 15 minutes) takes its first audio without the limit being asked | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #709 | UX | If the limit is reached between a start on the phone and a later start on the laptop, the phone's first audio is refused and the phone keeps it (ticked on node 201993) | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #709 | UX | On the web, a recording that is not the newest stops when the server answers "try again in a minute"; the iPhone sends it again (ticked on node 201993) | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #709 | cost | An upload whose transcription was interrupted counts as waiting audio for up to a day, so a person close to the limit is asked to try again until then (ticked on node 201993) | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #709 | reliability | Introduced values: 15 s for a chunk not yet measured; 15 s to measure an upload at its finalize; 32 kbps for a file counted by its size; waiting audio counts for 24 hours; Retry-After 60 s | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #702 | privacy | A bundle loads only into the account whose X id an X sign-in or Connect X proved; a handle or an email never finds an account | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #702 | privacy | A No or no answer starts nothing; a No to the tweets and AI usage None are refused on every path | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #702 | data safety | A No during a load keeps what was loaded, and a later Yes continues with the rest | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #702 | UX | The Yes does no storage work; the card shows "Preparing your starting point…" only once material is found | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #702 | data safety | The admin's load refuses an account someone signed in to or one with writing of its own, unless "Load anyway" is ticked; the person's own Yes refuses only an account with writing of its own | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #702 | privacy | Old pre-fills without a record of their source are refused with their own reason, not guessed | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #702 | privacy | Nothing in a bundle is taken beyond what a pre-fill makes: every row passes an allow-list, everything is stored private with AI usage at most Chat, and encrypted on write | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #702 | product scope | The person is let in when the load is done, through #700's rules, never an account blocked or marked as spam; the admin's load lets nobody in | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #702 | cost | One final merge costs about 10 cents, up to about 2 dollars in the worst case over three attempts; it is the one call exempt from the subscription gate, so Loore pays it before the person has a trial (ticked on node 201992) | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #702 | reliability | Exactly one merge call per account: never for AI usage None or after a No, never for a deactivated or deleted account, never over a profile version the person wrote | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #702 | UX | "Preparing your starting point…" waits at most 3 minutes for the merge, then the person is let in with the loaded profile and the merged one replaces it later (ticked on node 201992; the missing notice is the entry "#702: a late merge replaces the profile without a notice") | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #702 | data safety | A merge that lands after the person edited their profile is not saved: the user's edit wins | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #702 | reliability | A failed merge is not saved and has its own cost type, so it never delays the account's ordinary profile updates | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #702 | release/ops | A load reads the bundle part by part, checks every part before writing anything, keeps one part in memory and nothing on the worker's disk | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #702 | privacy | The lab export refuses to run where content is encrypted, and a deletion requested during an export holds | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #702 | privacy | A lab account counts as used by a person only from real signs of a person, never from an address on the account | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #702 | privacy | An account made ready that nobody signs in to stays recognisably unclaimed for #701's 90 days, and loading it again restarts them | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #702 | provider | The load does not take the lab's model choice; an account keeps its own model | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #702 | data safety | A load is safe to repeat: a second one answers "already loaded" and nothing is added twice | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #702 | reliability | A failed load says why in the admin panel and is logged as an error; a storage failure becomes a short error within seconds; three runs in a row without progress stop the load | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #702 | privacy | Deleting an account on production does not delete its bundle; one command on the lab removes it and excludes the X id | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #702 | privacy | A person's No on production does not remove their bundle from storage; removal is one command on the lab (ticked on node 201992) | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #702 | product scope | "Make ready" in the admin approves nobody, so the account shows as unapproved until its first sign-in (ticked on node 201993) | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #702 | UX | With payments off, if "Make ready" runs first and the person says Yes while it loads, the person stays on the waitlist and the card says the starting point is ready (ticked on node 201993) | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #702 | reliability | Introduced values: parts of 500 entries; runs of 120 s; a load without a sign of life for 5 minutes is sent again; 60 s after an error; 10 s per storage call; the apps poll every 3 s; the merge is polled every 10 s and tried 3 times, after 60 and 300 s; a running merge counts as under way for 65 minutes | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #722 | reliability | One signup email per account, claimed in the database before it is sent; only a first acceptance of the terms counts, and with payments off the approval email is now sent once per account too | Fable 5.2 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #722 | UX | The email goes once to the existing admin mailbox if at least one admin has the setting on | Fable 5.2 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #722 | privacy | The information email holds only the username, how the person signed in, whether the account was prepared, and the time; log lines name the user id | Fable 5.2 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #722 | product scope | An account already marked as spam when it accepts the terms sends no email | Fable 5.2 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #722 | UX | A plain checkbox in the Users tab that saves on change, on for existing admin accounts | Fable 5.2 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #722 | reliability | A signup email that fails to send is not sent again; the account still shows at the top of the Users list as new (ticked on node 201993) | Fable 5.2 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #722 | product scope | An admin account in its deletion grace period still counts as wanting the signup email (ticked on node 201993) | Fable 5.2 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #723 | user-facing text | A customer deleted in Stripe gets the issue's own sentence, "Something is wrong with your billing record", with Loore's contact address, answered as 409 since a retry does not help | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #723 | UX | For a referral's free week the plain message comes as a notification; the side is recorded as failed and the admin gives the week by hand later | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #723 | cost | Nothing is created in place of the deleted customer, on any path | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #723 | data safety | The clearing command reads a subscription the account still records from Stripe, records it as ended if Stripe says so, and refuses while it is still running | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #723 | data safety | The command also checks the customer at Stripe and refuses while Stripe still has it or cannot be reached | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #723 | data safety | A late or resent Stripe event no longer writes a cleared customer back onto the account | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #723 | reliability | The next checkout gets a new customer also within Stripe's 24-hour window for repeated requests: a counter on the account changes the request's key | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #725 | UX | An account the gate let in and later marked as spam reads as not approved: both apps show their existing not-active screen, and its API tokens are refused | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #725 | product scope | The spam mark stays after Activate, and Unblock never approves an account marked as spam | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #725 | UX | The Users tab shows such an account as "Held (spam)"; the Subscriptions tab does not show it (ticked on node 201993) | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #725 | user-facing text | The Spam button's tooltip says what the mark does while payments are on | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #725 | cost | A paying subscriber marked as spam loses access while Stripe keeps charging, as for a blocked account; the person can still cancel (ticked on node 201993) | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #726 | product scope | The place in the day lives nowhere new: a Glean leaves out the tweets the thread's earlier Gleans of the same day read; two threads page on their own, and a deleted or failed Glean's tweets come back | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #726 | UX | When a thread has gleaned all of the day's tweets, Glean says so as a refusal: no model call, nothing billed, said aloud in Voice mode | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #726 | product scope | A day that fits one Glean is read as before; a second Glean on it says the day is done | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #726 | cost | The earlier Glean list is no longer sent again for the prompt cache; what comes before the list is the cached part of a later Glean | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #726 | cost | Counting the list adds no billed call: a local count on OpenAI models, an estimate on the others | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #726 | product scope | A Glean on a model without a local count reads about a third as many tweets; calibrating Anthropic Gleans is left for later (ticked on node 201993) | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #726 | provider | The Glean model choice is untouched | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #726 | reliability | A refused Glean no longer counts towards the thread's length, and the length check before a Glean leaves the fitting to the Glean itself | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #726 | UX | In two rare cases the thread page shows no limit although the next reply is still refused; nothing over the limit is sent (ticked on node 201993) | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #726 | UX | The line above a gleaning shows when its own tweets were posted | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #726 | user-facing text | No changelog section while Glean is behind its rollout gate | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #727 | release/ops | Three libraries and the test runner are held below their newest versions, which break Loore on the newer Python; upgrading them is separate work (ticked on node 201993) | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #727 | user-facing text | A PDF too large for the import's memory limit is reported as too large, not as damaged, also where loading a module fails first; the log line names only the error type | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #728 | UX | On the iPhone, Connect X that finds a prepared account sends the person to the website instead of asking there (ticked on node 201993) | Opus 5.5 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #730 | reliability | The audio bound for one recording in bytes, about 346 MB: four hours at the highest audio rate allowed for (Peter left the size to the builder; ticked on node 201992) | Fable 5.2 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #730 | UX | At the four-hour bound the web and the iPhone stop the recording, say so, and make the entry and the Voice reply from the audio taken (ticked on node 201992) | Fable 5.2 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #730 | user-facing text | "This recording has reached the longest Loore takes, about four hours, and has stopped. Everything before this is saved." (ticked on node 201992) | Fable 5.2 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #730 | user-facing text | The 59-minute warning keeps its time and reads "You've been recording for 59 minutes. One recording is turned into text up to two hours; for longer, continue in a new recording." (ticked on node 201992) | Fable 5.2 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #730 | release/ops | The four-hour bound ships before the iPhone build that handles it; until then an older app's recording past four hours ends with "Part of your recording hasn't reached Loore yet (no connection?)", and the recovery banner offers the first four hours (ticked on node 201992) | Fable 5.2 | accepted by merge (PR #730, 2026-11-21) |
+| 2026-11-21 | #730 | testing | Not measured: a four-hour recording keeps about 230 MB in the web page and about 115 MB in iPhone dictation for "Save audio" (ticked on node 201992) | Fable 5.2 | accepted by merge (PR #730, 2026-11-21) |
