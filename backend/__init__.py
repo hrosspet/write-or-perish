@@ -91,6 +91,42 @@ def validate_profile_models(config):
             f"PROFILE_MERGE_GROUP_SIZE={size!r} must be at least 2.")
 
 
+def validate_keys(config, environ=None):
+    """Refuse to boot in production and on staging (DEPLOY_ENV: every
+    FLASK_ENV but "development" and "testing") without the two keys the
+    data depends on.
+
+    SECRET_KEY signs the sign-in cookies and links. Without the line in
+    the env file the app ran on the placeholder in config.py; with an
+    empty one no session could be opened. GCP_KMS_KEY_NAME names the key
+    users' writing is encrypted with. Without it the app ran and stored
+    new writing as plain text, with no error anywhere. An instance that
+    is meant to run without encryption says so with
+    ENCRYPTION_DISABLED=true (the staging and local Compose files do).
+
+    A boot failure turns either gap into a red deploy, as for LLM_NAME
+    below. The messages name the setting, never a value."""
+    from backend.config import PLACEHOLDER_SECRET_KEY
+    environ = os.environ if environ is None else environ
+    env = (config.get("DEPLOY_ENV") or "production").lower()
+    if env in ("development", "testing"):
+        return
+    key = config.get("SECRET_KEY")
+    if not key or key == PLACEHOLDER_SECRET_KEY:
+        raise RuntimeError(
+            f"SECRET_KEY is not set (FLASK_ENV counts as {env!r}). Set it "
+            "in the env file this instance reads; an instance that had "
+            "one must get the same value back.")
+    disabled = (environ.get("ENCRYPTION_DISABLED") or "").lower() in (
+        "true", "1", "yes")
+    if not disabled and not environ.get("GCP_KMS_KEY_NAME"):
+        raise RuntimeError(
+            f"GCP_KMS_KEY_NAME is not set (FLASK_ENV counts as {env!r}), "
+            "so new writing would be stored unencrypted. Set it in the "
+            "env file this instance reads, or set ENCRYPTION_DISABLED=true "
+            "on an instance that is meant to run without encryption.")
+
+
 def validate_default_model(config):
     """Refuse to boot on an ``LLM_NAME`` that is not an active (non-
     deprecated) chat (not ``"chat": False``) SUPPORTED_MODELS key, on
@@ -291,6 +327,7 @@ def create_app():
     app.request_class = request_size.SizedRequest
     app.config["MAX_CONTENT_LENGTH"] = request_size.DEFAULT_MAX_BODY_BYTES
     app.register_error_handler(413, request_size.too_large_response)
+    validate_keys(app.config)
     validate_default_model(app.config)
     # Payments (#438): never on in production with a sandbox key.
     from backend.utils.subscriptions import check_payments_config

@@ -59,6 +59,23 @@ def neutralize_provider_environment():
 neutralize_provider_environment()
 
 
+def keys_for_the_app_to_start():
+    """create_app() starts only with a SECRET_KEY and a stated choice
+    about encryption (validate_keys), and the tests run with FLASK_ENV
+    unset, which counts as production. A checkout without a .env (CI)
+    gets a key for the tests, and no KMS key name means no encryption."""
+    from backend.config import PLACEHOLDER_SECRET_KEY
+    if not os.environ.get("SECRET_KEY"):
+        os.environ["SECRET_KEY"] = "test-secret"
+    if Config.SECRET_KEY in (None, "", PLACEHOLDER_SECRET_KEY):
+        Config.SECRET_KEY = os.environ["SECRET_KEY"]
+    if not os.environ.get("GCP_KMS_KEY_NAME"):
+        os.environ.setdefault("ENCRYPTION_DISABLED", "true")
+
+
+keys_for_the_app_to_start()
+
+
 def align_package_attributes():
     """Point every backend package's attribute for a submodule at the
     module in sys.modules.

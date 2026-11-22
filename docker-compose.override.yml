@@ -37,6 +37,10 @@ services:
       context: ./backend
       dockerfile: Dockerfile.dev
     command: watchmedo auto-restart --directory=/app/backend --pattern="*.py" --recursive -- python backend/celery_queues.py interactive --loglevel=info --concurrency=2
+    environment:
+      # The local stack has no KMS key: it runs without encryption, and
+      # the workers (which count as production: no FLASK_ENV) say so.
+      - ENCRYPTION_DISABLED=true
     volumes:
       - ./backend:/app/backend
       - media_data:/app/data
@@ -49,6 +53,8 @@ services:
       context: ./backend
       dockerfile: Dockerfile.dev
     command: watchmedo auto-restart --directory=/app/backend --pattern="*.py" --recursive -- python backend/celery_queues.py background --loglevel=info --concurrency=1
+    environment:
+      - ENCRYPTION_DISABLED=true
     volumes:
       - ./backend:/app/backend
       - media_data:/app/data
@@ -68,6 +74,8 @@ services:
       context: ./backend
       dockerfile: Dockerfile.dev
     command: watchmedo auto-restart --directory=/app/backend --pattern="*.py" --recursive -- celery -A backend.celery_app.celery beat --loglevel=info
+    environment:
+      - ENCRYPTION_DISABLED=true
     volumes:
       - ./backend:/app/backend
       - media_data:/app/data

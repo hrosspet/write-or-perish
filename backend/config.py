@@ -29,8 +29,14 @@ def stripe_key_from_env(name, sandbox_name, environ=None):
     return value or None
 
 
+# What SECRET_KEY is when the environment has none. Development and the
+# tests may run on it; production and staging do not start on it
+# (validate_keys in backend/__init__.py).
+PLACEHOLDER_SECRET_KEY = "this-should-be-changed"
+
+
 class Config:
-    SECRET_KEY = os.environ.get("SECRET_KEY", "this-should-be-changed")
+    SECRET_KEY = os.environ.get("SECRET_KEY", PLACEHOLDER_SECRET_KEY)
     # Make sure your DATABASE_URL looks something like
     # "postgresql://username:password@localhost/writeorperish"
     SQLALCHEMY_DATABASE_URI = os.environ.get("DATABASE_URL", "postgresql://localhost/writeorperish")
