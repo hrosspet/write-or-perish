@@ -6,7 +6,8 @@ and a recorded one (save-as-node): under a shared node it is "circles"
 and joins the thread, where the thread's people read it; in someone
 else's shared thread it is never Everyone; where those routes refuse, it
 is refused too, before anything is written. With Circles off the route
-is as it was before Circles.
+is as it was before Circles. A reply recorded in the same box
+(save-as-node with ``agentic``) is placed the same way.
 
 The route stores the message at one level (``message_level``, the
 node's). Tests that send a level in the body hold whatever the route
@@ -16,10 +17,12 @@ that the rule is asked about the level that is stored.
 
 anna shares with "Close" (ben, chidi); stan has Circles and no tie. No
 model is called (the task module is a MagicMock)."""
+import uuid
+
 import pytest
 
 from backend.tests.test_circles_review import (  # noqa: F401 (fixture)
-    app, _user, _client, _circle, _share, _reply, _db, Node, User)
+    app, _user, _client, _circle, _share, _reply, _db, Node, User, Draft)
 
 
 def _seen(app, who, nid):  # noqa: F811
@@ -355,3 +358,142 @@ def test_with_circles_off_the_route_is_as_before(app, asked, monkeypatch):  # no
         "private", "public", "private", "public", "private"]
     _db.session.expire_all()
     assert Node.query.filter(Node.audience_root_id.isnot(None)).count() == 0
+
+
+# ── A reply recorded in the same box is placed the same way ─────────────
+
+def _recorded(who, parent_id, stored="circles"):
+    """A finished recording of *who*'s under *parent_id*; the URL that
+    saves it as an entry."""
+    d = Draft(user_id=_user(who).id, node_id=None, parent_id=parent_id,
+              session_id=str(uuid.uuid4()), streaming_status="completed",
+              streaming_total_chunks=1, streaming_completed_chunks=1,
+              privacy_level=stored, ai_usage="chat")
+    d.set_content("recorded words")
+    _db.session.add(d)
+    _db.session.commit()
+    return f"/api/drafts/streaming/{d.session_id}/save-as-node"
+
+
+def _save_agentic(app, who, url, level, auto=True):  # noqa: F811
+    """What the box under a Glean sends for a recording (NodeDetail
+    submitReadReplyMessage, ThreadModel.submitReadReply)."""
+    return _client(app, who).post(url, json={
+        "content": "RECORDED ON THE PICKS", "privacy_level": level,
+        "ai_usage": "chat", "agentic": True, "auto_generate": auto,
+        "model": "gpt-5"})
+
+
+def test_a_recorded_circles_reply_under_a_shared_glean_joins_like_a_typed_one(
+        app, glean):  # noqa: F811
+    close = _circle(app, "anna", "Close", ["ben", "chidi"])
+    gid = glean("anna", _private(app, "anna", "anna's note"))
+    assert _client(app, "anna").put(f"/api/nodes/{gid}/audience", json={
+        "circle_ids": [close]}).status_code == 200
+    before = _count()
+    r = _save_agentic(app, "anna", _recorded("anna", gid), "circles")
+    assert r.status_code == 201, r.get_json()
+    out = r.get_json()
+    # Directly under the Glean, no Text-mode prompt in between, and no
+    # automatic reply in a shared thread.
+    assert "conversation_id" not in out
+    assert out["llm_error_code"] == "auto_generate_off"
+    assert "llm_node_id" not in out
+    assert _count() == before + 1
+    node = _db.session.get(Node, out["id"])
+    assert (node.parent_id, node.privacy_level, node.audience_root_id) == (
+        gid, "circles", gid)
+    # Placed as the typed one is.
+    typed = _from_node(app, "anna", gid).get_json()
+    t = _db.session.get(Node, typed["user_node_id"])
+    assert (t.parent_id, t.audience_root_id) == (node.parent_id,
+                                                 node.audience_root_id)
+    for reader in ("ben", "chidi"):
+        assert _seen(app, reader, node.id) == 200
+        tree = _client(app, reader).get(f"/api/nodes/{gid}").get_json()
+        assert node.id in [c["id"] for c in tree["children"]]
+    assert _seen(app, "stan", node.id) == 404
+
+
+def test_a_members_recorded_reply_under_his_reply_joins_the_thread(app):  # noqa: F811
+    close = _circle(app, "anna", "Close", ["ben", "chidi"])
+    entry = _share(app, circle_ids=[close])
+    reply = _reply(app, "ben", entry, "ben replies").get_json()["id"]
+    r = _save_agentic(app, "ben", _recorded("ben", reply), "circles")
+    assert r.status_code == 201, r.get_json()
+    node = _db.session.get(Node, r.get_json()["id"])
+    assert (node.parent_id, node.privacy_level, node.audience_root_id) == (
+        reply, "circles", entry)
+    for reader in ("anna", "chidi"):
+        assert _seen(app, reader, node.id) == 200
+
+
+def test_a_recorded_reply_under_his_only_me_glean_keeps_its_prompt(
+        app, glean):  # noqa: F811
+    """Not a reply that joins: the Text-mode prompt is attached under the
+    Glean as before, and the entry is his alone."""
+    _, entry, _, gid = _bens_glean_in_annas_thread(app, glean)
+    r = _save_agentic(app, "ben", _recorded("ben", gid, stored="private"),
+                      "private", auto=False)
+    assert r.status_code == 201, r.get_json()
+    out = r.get_json()
+    prompt = _db.session.get(Node, out["conversation_id"])
+    node = _db.session.get(Node, out["id"])
+    assert (prompt.parent_id, prompt.privacy_level,
+            prompt.get_prompt_key()) == (gid, "private", "textmode")
+    assert (node.parent_id, node.privacy_level, node.audience_root_id) == (
+        prompt.id, "private", None)
+    for other in ("anna", "chidi"):
+        assert _seen(app, other, node.id) == 404
+
+
+@pytest.mark.parametrize("level", ["circles", "public"])
+def test_a_recorded_reply_refused_in_someone_elses_thread_writes_nothing(
+        app, level):  # noqa: F811
+    """Refused before anything is placed, as a typed reply is: Circles
+    where the thread is closed to him, Everyone under a shared node. The
+    session stays."""
+    close = _circle(app, "anna", "Close", ["ben"])
+    entry = _share(app, circle_ids=[close])
+    reply = _reply(app, "ben", entry, "ben replies").get_json()["id"]
+    assert _client(app, "anna").delete(
+        f"/api/circles/{close}/members",
+        json={"username": "ben"}).status_code == 200
+    url = _recorded("ben", reply)
+    before = _count()
+    typed = _client(app, "ben").post("/api/nodes/", json={
+        "content": "words", "privacy_level": level, "ai_usage": "chat",
+        "parent_id": reply})
+    r = _save_agentic(app, "ben", url, level)
+    expected = ((403, "circle_thread_closed") if level == "circles"
+                else (400, "circle_reply_required"))
+    assert (r.status_code, r.get_json()["code"]) == expected
+    assert (typed.status_code, typed.get_json()["code"]) == expected
+    assert _count() == before
+    assert Draft.query.count() == 1
+
+
+def test_with_circles_off_a_recorded_reply_keeps_its_prompt(
+        app, monkeypatch):  # noqa: F811
+    from backend.utils import privacy
+    monkeypatch.setitem(privacy._pointers_seen, "at", 0.0)
+    monkeypatch.setitem(privacy._pointers_seen, "any", False)
+    app.config["CIRCLES_V1"] = False
+    app.config["CIRCLES_USER_IDS"] = set()
+    for level in ("private", "public"):
+        r = _client(app, "anna").post("/api/nodes/", json={
+            "content": f"a {level} note", "privacy_level": level,
+            "ai_usage": "chat"})
+        assert r.status_code == 201, r.get_json()
+        nid = r.get_json()["id"]
+        r = _client(app, "anna").post(
+            _recorded("anna", nid, stored=level),
+            json={"content": "words", "privacy_level": level,
+                  "ai_usage": "chat", "agentic": True})
+        assert r.status_code == 201, r.get_json()
+        out = r.get_json()
+        prompt = _db.session.get(Node, out["conversation_id"])
+        node = _db.session.get(Node, out["id"])
+        assert (prompt.parent_id, prompt.privacy_level) == (nid, level)
+        assert (node.parent_id, node.privacy_level,
+                node.audience_root_id) == (prompt.id, level, None)
