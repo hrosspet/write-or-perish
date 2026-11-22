@@ -71,6 +71,7 @@ TASK_QUEUES = {
     # The carry into the new month (#594): hourly, a no-op after the
     # month's first run but for new accounts.
     "backend.tasks.spend_monitor.roll_carries": _B,
+    "backend.tasks.spend_monitor.check_trials": _B,
 
     # Profiles, recent context, intentions, digests, poll drafts.
     "backend.tasks.exports.update_user_profile": _B,
