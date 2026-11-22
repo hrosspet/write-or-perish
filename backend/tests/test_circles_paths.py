@@ -259,26 +259,48 @@ def test_every_path_that_creates_a_node_under_a_shared_entry(app, monkeypatch):
     before = ids()
     anna.post(f"/api/voice/from-node/{e}", json={})
     anna.post(f"/api/read/from-node/{e}", json={})
-    anna.post(f"/api/textmode/from-node/{e}", json={
-        "content": "ANNA TEXT MODE", "auto_generate": False,
-        "ai_usage": "chat"})
     anna.post(f"/api/nodes/{e}/link", json={"content": "a link"})
     kept = new_under(e, before)
-    assert len(kept) >= 3, [(n.id, n.node_type, n.parent_id) for n in kept]
+    # At least the Voice session's prompt and its reply.
+    assert len(kept) >= 2, [(n.id, n.node_type, n.parent_id) for n in kept]
     for n in kept:
         assert n.audience_root_id is None, (n.id, n.node_type, n.parent_id)
         assert _seen(app, "ben", n.id) == 404, (n.id, n.node_type)
         assert _seen(app, "anna", n.id) == 200
 
-    # 3. And what a reader starts from his own reply in her thread.
+    # 2b. Her typed Text-mode message there is a reply into the thread
+    #     (the reply rules of a typed reply): it joins, directly under
+    #     the entry, with no Text-mode prompt of hers in between.
+    before = ids()
+    r = anna.post(f"/api/textmode/from-node/{e}", json={
+        "content": "ANNA TEXT MODE", "auto_generate": False,
+        "ai_usage": "chat"})
+    assert r.status_code == 202, r.get_json()
+    assert r.get_json()["prompt_node_id"] is None
+    made = new_under(e, before)
+    assert [n.id for n in made] == [r.get_json()["user_node_id"]]
+    msg = made[0]
+    assert (msg.parent_id, msg.privacy_level, msg.audience_root_id) == (
+        e, "circles", e)
+    assert _seen(app, "ben", msg.id) == 200
+
+    # 3. And what a reader starts from his own reply in her thread: his
+    #    Voice session stays his, his typed Text-mode message joins.
     before = ids()
     rid = _reply(app, "ben", e, "ben again").get_json()["id"]
-    ben.post(f"/api/textmode/from-node/{rid}", json={
+    r = ben.post(f"/api/textmode/from-node/{rid}", json={
         "content": "BEN TEXT MODE", "auto_generate": False,
         "ai_usage": "chat"})
+    assert r.status_code == 202, r.get_json()
+    typed = r.get_json()["user_node_id"]
     ben.post(f"/api/voice/from-node/{rid}", json={})
     for n in new_under(rid, before):
         if n.id == rid:
+            continue
+        if n.id == typed:
+            assert (n.parent_id, n.privacy_level, n.audience_root_id) == (
+                rid, "circles", e)
+            assert _seen(app, "anna", n.id) == 200
             continue
         assert n.audience_root_id is None, (n.id, n.node_type)
         assert _seen(app, "anna", n.id) == 404, (n.id, n.node_type)
