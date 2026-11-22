@@ -166,6 +166,8 @@ struct UnreachableView: View {
         .padding(LooreSpacing.xl)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .loorePageBackground()
-        .signOutQuestion($signOutQuestion)
+        // The user could not be loaded, so the sign-out deletes every account's
+        // unsent audio (`signOutDeletesUnsentAudio`), and the question says so.
+        .signOutQuestion($signOutQuestion, app.user == nil ? .everyAccount : .signOut)
     }
 }

@@ -17,6 +17,14 @@ struct SignOutQuestion: Equatable {
         confirm: "Sign out and delete it",
         cancel: "Stay signed in")
 
+    /// Where the account could not be loaded ("can't reach Loore"): the
+    /// sign-out deletes the unsent audio of every account on this phone.
+    static let everyAccount = SignOutQuestion(
+        title: "Sign out of Loore?",
+        message: "This phone holds recorded audio that hasn't reached Loore yet. Signing out deletes all of it from this phone, for every account that recorded on it. If you stay signed in, your account's audio uploads once Loore can be reached.",
+        confirm: "Sign out and delete it all",
+        cancel: "Stay signed in")
+
     /// The More screen's Logout, in its words.
     static let logOut = SignOutQuestion(
         title: "Log out of Loore?",

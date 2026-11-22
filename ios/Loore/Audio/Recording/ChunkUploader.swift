@@ -22,8 +22,10 @@ import os
 ///   without it.
 /// - `init_parse_failed` on chunk 0 is fatal (the session is dead, its audio is
 ///   deleted at once); so is `session_taken_over` (#388: another device
-///   continued the session, which no longer takes this phone's chunks). Other
-///   4xx answers are given up without retry.
+///   continued the session, which no longer takes this phone's chunks), and
+///   `session_not_found` for a session recorded under the signed-in account
+///   (it was discarded or ended elsewhere; `sessionNotFound`). Other 4xx
+///   answers are given up without retry.
 /// - A chunk past what one recording may hold (`chunk_index_out_of_range`,
 ///   `recording_too_large`, `chunk_too_large`; backend/utils/recording_limits)
 ///   ends the session's uploads there: it and every later chunk are `beyond`,
@@ -91,6 +93,10 @@ final class ChunkUploader: NSObject {
         /// not hold, when it holds some (#754: a recording continued while
         /// pieces of it were still queued here). nil: all of them.
         var prior: Int?
+        /// Taken by the first account that signed in from an earlier build,
+        /// which recorded no account: whose recording it is, is not known, so
+        /// a "not found" answer deletes nothing of it (`sessionNotFound`).
+        var adopted: Bool?
 
         var isDead: Bool { chunks.values.contains { $0.status == .fatal } }
     }
@@ -236,7 +242,9 @@ final class ChunkUploader: NSObject {
         manifest.prior = first - manifest.chunks.count
         manifest.firstIndex = first
         manifest.uploadURL = uploadURL
+        // The server let this account claim or start it: its recording.
         manifest.account = account
+        manifest.adopted = nil
         manifest.closed = false
         // Given-up chunks whose body is still here get another chance, as at a relaunch.
         for (index, record) in manifest.chunks where record.status == .failed
@@ -384,6 +392,7 @@ final class ChunkUploader: NSObject {
             if let owner = manifest.account, owner != account { continue }
             var resumed = manifest
             // From an earlier build: this account takes it, as that build did.
+            if manifest.account == nil && account != nil { resumed.adopted = true }
             resumed.account = account
             // Given-up chunks whose body is still here get another chance (B1).
             for (index, record) in manifest.chunks where record.status == .failed
@@ -527,7 +536,11 @@ final class ChunkUploader: NSObject {
         return record.status != .stored
     }
 
-    private enum AttemptResult { case stored, retry, giveUp, fatal(String), refused(String), limit(String), dropped }
+    private enum AttemptResult {
+        case stored, retry, giveUp, fatal(String), refused(String), limit(String), dropped
+        /// 404 `session_not_found`: the signed-in account has no such recording.
+        case notFound
+    }
 
     private func upload(_ sessionId: String, index: Int) async {
         var attempt = 0
@@ -555,6 +568,9 @@ final class ChunkUploader: NSObject {
                 return
             case .dropped:
                 drop(sessionId, index)
+                return
+            case .notFound:
+                sessionNotFound(sessionId, index)
                 return
             case .retry:
                 if isInit && manifests[sessionId]?.closed == false {
@@ -621,6 +637,31 @@ final class ChunkUploader: NSObject {
         onFatal?(sessionId, message)
     }
 
+    /// The server answered that the signed-in account has no such recording
+    /// (404 `session_not_found`): it was discarded or ended elsewhere (the
+    /// web's #320), or cleaned up. Nothing of it can ever be stored, so the
+    /// session is dead, its pieces are deleted from the phone and no longer
+    /// count as unsent audio, and a recorder still writing it stops (as at a
+    /// takeover). Only for a session recorded under the account signed in
+    /// now, while it still is: under another account the request is never
+    /// sent (`mayUpload`), and a queue an earlier build left (`adopted`) may
+    /// be another account's, so its pieces stay.
+    /// - Returns: whether the session is dead now.
+    @discardableResult
+    private func sessionNotFound(_ sessionId: String, _ index: Int) -> Bool {
+        guard mayUpload(sessionId), manifests[sessionId]?.adopted != true else {
+            mark(sessionId, index, .failed)
+            return false
+        }
+        log.info("the server has no such recording; its pieces on this phone are deleted")
+        failFatally(sessionId, index, Self.sessionNotFoundMessage)
+        return true
+    }
+
+    /// For a recorder still writing a session the server no longer has (web
+    /// `SESSION_ENDED_MESSAGE`).
+    static let sessionNotFoundMessage = "This recording was ended in another tab or on another device, so recording stopped here. Any audio this phone had not sent yet is not part of it."
+
     /// Stop: one more attempt for every chunk the server does not have, in
     /// index order; if the init segment still fails, nothing after it is sent.
     private func finalPass(_ sessionId: String) async {
@@ -646,6 +687,8 @@ final class ChunkUploader: NSObject {
                 reachedLimit(sessionId, from: index, message)
             case .dropped:
                 drop(sessionId, index)
+            case .notFound:
+                if sessionNotFound(sessionId, index) || isInit { return }
             case .giveUp, .retry, .refused:
                 mark(sessionId, index, .failed)
                 if isInit { return }
@@ -693,6 +736,8 @@ final class ChunkUploader: NSObject {
     /// A chunk past the count a finalizing recording announced: the recording
     /// was finished without it. Not the bound: dropped, nothing said.
     static let notAnnouncedCode = "chunk_not_announced"
+    /// The signed-in account has no such recording (backend `upload_streaming_chunk`).
+    static let sessionNotFoundCode = "session_not_found"
     /// The server's words at the four-hour bound (backend `LONGEST_RECORDING_TEXT`),
     /// for an answer that carries none (web `LONGEST_RECORDING_MESSAGE`).
     static let longestRecordingMessage = "This recording has reached the longest Loore takes, about four hours, and has stopped. Everything before this is saved."
@@ -712,6 +757,12 @@ final class ChunkUploader: NSObject {
                 return .limit(words ?? (code == "chunk_index_out_of_range" ? longestRecordingMessage : limitMessage))
             }
             if code == notAnnouncedCode { return .dropped }
+        }
+        if status == 404 {
+            // Keyed on the code: a 404 without it (a proxy, a route moved) is
+            // not the recording being gone.
+            let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+            if json?["code"] as? String == sessionNotFoundCode { return .notFound }
         }
         switch status {
         case 200..<300:
