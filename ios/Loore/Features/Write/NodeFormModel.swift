@@ -520,6 +520,11 @@ final class NodeFormModel {
             streamingSessionId = nil
             if answer.spendCapped { app.notifySpendBlocked(liftsWithPayment: answer.spendCapLiftsWithPayment) }
             if let notice = answer.subscriptionNotice { app.notifySubscriptionRequired(notice) }
+            // Saved, but the reply was refused: say why, as the typed paths do (#747).
+            // A thread too long for a reply shows the limit on the entry's page.
+            if let llmError = answer.llmError, !ThreadLength.isRefusal(answer.llmErrorCode) {
+                app.toasts.show(llmError, duration: 10)
+            }
             return NodeFormResult(id: answer.id, awaitLLM: answer.llmNodeId, userNodeId: answer.userNodeId,
                                   llmNodeId: answer.llmNodeId, tipId: answer.tipId, spendCapped: answer.spendCapped,
                                   llmError: answer.llmError, llmErrorCode: answer.llmErrorCode)
@@ -558,14 +563,19 @@ final class NodeFormModel {
         // Auto-generate without Agentic Reply (Write New Entry only). A long entry is
         // saved as a chain of parts: the reply goes under the last one so it reads all of it.
         // The request says it is automatic: the server refuses it (409
-        // `auto_generate_off`) under a shared entry, and a refusal just means no reply.
+        // `auto_generate_off`) under a shared entry, which just means no reply. Any
+        // other refusal or failure keeps the entry and says why, as the thread page
+        // does (#747); a thread too long for a reply shows on the entry's page.
         let entryPrivacy = created.privacyLevel ?? privacyLevel
         if autoGenerateOn && !entryPrivacy.isSharedWithOthers && config.allowAgenticPrompt && config.parentId == nil
             && aiUsage != .off && !useAgenticPrompt {
-            if let reply: LLMRequestResponse = try? await api.post(
-                APIPath.nodeLLM(created.tipId ?? created.id),
-                json: .object(["source_mode": .string("textmode"), "auto_generate": .bool(true)])) {
+            do {
+                let reply: LLMRequestResponse = try await api.post(
+                    APIPath.nodeLLM(created.tipId ?? created.id),
+                    json: .object(["source_mode": .string("textmode"), "auto_generate": .bool(true)]))
                 return NodeFormResult(id: reply.nodeId, awaitLLM: reply.nodeId, tipId: created.tipId, privacy: entryPrivacy)
+            } catch {
+                if let message = LLMRequestError.toastMessage(error) { app.toasts.show(message, duration: 8) }
             }
         }
         return NodeFormResult(id: created.id, tipId: created.tipId, privacy: entryPrivacy)

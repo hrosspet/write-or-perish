@@ -583,18 +583,17 @@ final class ThreadModel {
 
     func handleLLMRequestError(_ error: Error) {
         guard let app else { return }
-        if SpendCap.isSpendCapError(error) { return }
-        // No automatic reply under a shared node: not an error, LLM Response stays.
-        if (error as? APIError)?.isAutoGenerateOff == true { return }
         // The thread is too long for another reply (#648): the form says so and
         // offers a new thread, instead of a toast.
         if let apiError = error as? APIError, apiError.isThreadTooLong {
             threadReachedLimit(message: apiError.body?.error)
             return
         }
-        let message = (error as? APIError)?.userMessage(fallback: "Error requesting LLM response.")
-            ?? "Error requesting LLM response."
-        app.toasts.show(message, duration: 8)
+        // The spend cap's banner and a shared node's refused automatic reply show
+        // no toast (LLMRequestError, which Write New Entry uses too).
+        if let message = LLMRequestError.toastMessage(error) {
+            app.toasts.show(message, duration: 8)
+        }
     }
 
     /// The craft bar's LLM Response: the reply is watched on its own page (#367).
@@ -616,7 +615,9 @@ final class ThreadModel {
     /// otherwise turns auto-generate off with the web's toast. `entryPrivacy` is
     /// the new entry's: a public or circles entry gets no automatic reply,
     /// whatever the page it was written on, and neither does one the server
-    /// refuses as shared (nil: no reply, nothing shown).
+    /// refuses as shared (nil: no reply, nothing shown). Any other refusal is
+    /// thrown, the thread's length (#648) included, as the web's
+    /// `tryAutoGenerateFor`: the caller knows which page shows the limit.
     func tryAutoGenerate(for parentId: Int, chainAIUsages: [AIUsage?], autoGenerate: Binding<Bool>,
                          entryPrivacy: PrivacyLevel? = nil) async throws -> Int? {
         guard autoGenerateActive(autoGenerate.wrappedValue) else { return nil }
@@ -631,8 +632,7 @@ final class ThreadModel {
         }
         do {
             return try await requestLLM(for: parentId, automatic: true)
-        } catch let error as APIError where error.isAutoGenerateOff || error.isThreadTooLong {
-            // This entry took the thread past the limit (#648): its page shows it.
+        } catch let error as APIError where error.isAutoGenerateOff {
             return nil
         }
     }
@@ -656,6 +656,9 @@ final class ThreadModel {
             }
         } catch {
             openThread(newId, awaitLLM: nil)
+            // This entry took the thread past the limit (#648): its page, opening
+            // now, shows it. This page's own next reply would not include the entry.
+            if (error as? APIError)?.isThreadTooLong == true { return }
             handleLLMRequestError(error)
         }
     }
@@ -1029,6 +1032,9 @@ final class ThreadModel {
                 openThread(llmId, awaitLLM: llmId)
             }
         } catch {
+            // The edit is saved. An edit that made the thread too long for a reply
+            // (#648) switches this page's form to the limit now (#747), as the web
+            // does; the PUT's answer does not carry the thread's length.
             handleLLMRequestError(error)
         }
     }
