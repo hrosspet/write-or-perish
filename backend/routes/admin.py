@@ -1199,8 +1199,9 @@ def activate_and_welcome(user_id):
         from backend.utils.sign_in_links import record_link
         record_link(user.email, token_h, welcome_max_age, user.id)
 
-        backend_url = request.host_url.rstrip("/")
-        magic_link_url = f"{backend_url}/auth/magic-link/verify?token={token}"
+        # On the configured address, as every sign-in link.
+        frontend_url = current_app.config.get("FRONTEND_URL", "").rstrip("/")
+        magic_link_url = f"{frontend_url}/auth/magic-link/verify?token={token}"
 
         send_welcome_email(user.email, magic_link_url, user_id=user.id)
     except Exception:
