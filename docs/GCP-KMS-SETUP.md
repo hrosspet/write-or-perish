@@ -270,7 +270,7 @@ For local development without GCP, disable encryption:
 export ENCRYPTION_DISABLED=true
 ```
 
-This line is the only thing that turns encryption off, whether or not `GCP_KMS_KEY_NAME` is set beside it. In every environment the app refuses to start when encryption is not turned off and `GCP_KMS_KEY_NAME` is not set (`encryption_choice()` in `backend/utils/encryption.py`). An instance that starts with encryption off writes one line to its log saying so, and whether a key name is set. With the line and a key name, content that was stored encrypted earlier is still decrypted when it is read, and everything written from then on is stored unencrypted; with the line and no key name, nothing can be decrypted. The local and staging Compose files set the line.
+This line is the only thing that turns encryption off, whether or not `GCP_KMS_KEY_NAME` is set beside it. In every environment the app refuses to start when encryption is not turned off and `GCP_KMS_KEY_NAME` is not set (`encryption_choice()` in `backend/utils/encryption.py`). An instance that starts with encryption off writes one line to its log saying so, and whether a key name is set. With the line and a key name, content that was stored encrypted earlier is still decrypted when it is read, and everything written from then on is stored unencrypted (except text that itself begins with `ENC:v1:` or `ENC:v2:`, which is encrypted so that it reads back as written); with the line and no key name, nothing can be decrypted. The local and staging Compose files set the line.
 
 For local development **with** encryption (e.g., testing), you can use a JSON key file since Workload Identity is only available on GCE VMs:
 

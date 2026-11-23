@@ -87,7 +87,8 @@ OFF_LINES = {
     "no": OFF_LINE + "no.",
     "yes": OFF_LINE + "yes. Content that was stored encrypted earlier is "
                       "still read with that key; nothing new is encrypted "
-                      "with it."}
+                      "with it, except text that itself begins with "
+                      "ENC:v1: or ENC:v2:."}
 
 
 @pytest.mark.parametrize("environ,key_name", [

@@ -61,7 +61,8 @@ ENCRYPTION_OFF_NOTICE = (
     "content is stored unencrypted. GCP_KMS_KEY_NAME is set: %s.")
 ENCRYPTION_OFF_KEY_NAME_NOTICE = (
     " Content that was stored encrypted earlier is still read with that "
-    "key; nothing new is encrypted with it.")
+    "key; nothing new is encrypted with it, except text that itself "
+    "begins with ENC:v1: or ENC:v2:.")
 
 
 def encryption_choice(environ=None) -> bool:
@@ -72,8 +73,10 @@ def encryption_choice(environ=None) -> bool:
     encryption off, in every environment (Peter, 2026-11-23). So:
 
     - ENCRYPTION_DISABLED=true: off, whether or not GCP_KMS_KEY_NAME is
-      set. Nothing new is encrypted; a key name beside the switch only
-      serves reads of what was stored encrypted earlier (reads_decrypt).
+      set. A key name beside the switch serves reads of what was stored
+      encrypted earlier (reads_decrypt); the one thing still encrypted
+      with it is text that itself begins with ENC:v1:/ENC:v2:
+      (encrypt_content), so that it reads back as written.
     - not turned off, GCP_KMS_KEY_NAME set: on.
     - not turned off, no GCP_KMS_KEY_NAME: EncryptionNotConfigured.
       Nothing is stored as plain text for want of a key name.
@@ -423,13 +426,21 @@ def encrypt_content(plaintext: str) -> str:
     Args:
         plaintext: The content to encrypt
 
+    With encryption off the text is returned as it is, with one
+    exception: where a key name is set, stored values with the prefix
+    are decrypted on read (reads_decrypt), so text that itself begins
+    with the prefix is encrypted there too, with that key. It then reads
+    back as written, with the switch and after it is removed. Without a
+    key name nothing is decrypted, and such text is stored as it is.
+
     Returns:
         Encrypted content with v2 prefix, or original if encryption disabled
     """
     if not plaintext:
         return plaintext
 
-    if not is_encryption_enabled():
+    if not is_encryption_enabled() and not (
+            is_encrypted(plaintext) and reads_decrypt()):
         return plaintext
 
     try:
@@ -497,9 +508,13 @@ def encrypt_with_dek(plaintext: str, dek_pair) -> str:
     """Encrypt *plaintext* with a DEK from new_dek(), in the same v2
     envelope decrypt_content() reads. A fresh nonce per call, so reusing
     the DEK across writes is safe. With no DEK (encryption disabled)
-    returns the plaintext."""
-    if not plaintext or dek_pair is None:
+    returns the plaintext, except text that itself begins with
+    ENC:v1:/ENC:v2:, which goes to encrypt_content (see there)."""
+    if not plaintext:
         return plaintext
+    if dek_pair is None:
+        return (encrypt_content(plaintext) if is_encrypted(plaintext)
+                else plaintext)
     dek, wrapped_b64 = dek_pair
     nonce = os.urandom(NONCE_SIZE)
     ciphertext = AESGCM(dek).encrypt(nonce, plaintext.encode("utf-8"), None)
