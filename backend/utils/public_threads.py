@@ -16,8 +16,9 @@ feed.xml, the sitemap) therefore list "thread tops":
 
 The slug is what makes such a node a listed thread, and only creation
 gives it: a Text-mode thread created at Public gets it on its first
-message (/textmode/start, a recorded or uploaded entry that starts a
-thread). The edit route gives none, so a message, a Voice entry or a
+message (/textmode/start, a recorded entry that starts a thread; an
+uploaded recording when its transcript is stored,
+slugs.slug_transcribed_thread). The edit route gives none, so a message, a Voice entry or a
 gleaning that its owner sets public later is read by its link and is in
 no listing, as before this rule. scripts/set_prompt_entries_private.py
 gives the slug to the first public message of a stored thread whose

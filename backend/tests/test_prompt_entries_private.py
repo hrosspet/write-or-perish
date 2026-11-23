@@ -315,7 +315,8 @@ def test_an_uploaded_recording_that_starts_a_thread_has_a_private_prompt_entry(
     prompt = _get(message.parent_id)
     assert prompt.prompt_key == "textmode" and prompt.parent_id is None
     assert (message.privacy_level, prompt.privacy_level) == (level, "private")
-    assert bool(message.public_slug) == (level == "public")
+    # No address of its own before its transcript exists.
+    assert message.public_slug is None
 
 
 @pytest.mark.parametrize("level", ["public", "private"])
@@ -731,33 +732,186 @@ def test_an_older_client_that_records_a_public_thread_gets_the_permalink(
     assert _listed_ids(app)["share"] == [message.id]
 
 
-def test_an_uploaded_public_thread_is_listed_and_named_by_its_transcript(app):
+# ── An uploaded recording that starts a public thread ─────────────────
+
+
+def _upload(app, level="public", **more):
     resp = _client(app, "anna").post("/api/nodes/upload/init", json={
         "filename": "note.webm", "filesize": 1000, "total_chunks": 1,
-        "upload_id": uuid.uuid4().hex, "privacy_level": "public",
-        "ai_usage": "chat", "agentic": True})
+        "upload_id": uuid.uuid4().hex, "privacy_level": level,
+        "ai_usage": "chat", "agentic": True, **more})
     assert resp.status_code in (200, 201), resp.get_json()
-    message = _get(resp.get_json()["node_id"])
-    assert message.public_slug == "recording"
+    return _get(resp.get_json()["node_id"])
+
+
+def _transcribe(app, monkeypatch, tmp_path, node_id, text="spoken words",
+                during=None, fail=False):
+    """The real transcription task body for *node_id* (the celery glue
+    and the provider are stand-ins): the provider answers *text*, or
+    fails; *during* runs while it is being asked."""
+    import pathlib
+    glue = ("backend.celery_app", "backend.tasks.transcription")
+    saved = {k: sys.modules.get(k) for k in glue}
+    fake = MagicMock()
+    fake.celery.task = lambda *a, **k: (lambda f: f)
+    fake.flask_app = app
+    sys.modules["backend.celery_app"] = fake
+    sys.modules.pop("backend.tasks.transcription", None)
+    try:
+        import backend.tasks.transcription as tr
+        tr.flask_app = app
+
+        def create(**kwargs):
+            if during is not None:
+                during()
+            if fail:
+                raise RuntimeError("provider down")
+            return type("R", (), {"text": text})()
+        openai = MagicMock()
+        openai.return_value.audio.transcriptions.create.side_effect = create
+        monkeypatch.setattr(tr, "compress_audio_if_needed", lambda p, log: p)
+        monkeypatch.setattr(tr, "decoded_audio_seconds", lambda p, **k: 15.0)
+        monkeypatch.setattr(tr, "get_openai_chat_key", lambda cfg: "key")
+        monkeypatch.setattr(tr, "OpenAI", openai)
+        audio = pathlib.Path(tmp_path) / f"note-{uuid.uuid4().hex}.webm"
+        audio.write_bytes(b"fake audio")
+        try:
+            tr.transcribe_audio(MagicMock(), node_id, str(audio), "note.webm")
+        except RuntimeError:
+            pass
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+        _db.session.rollback()
+    return _get(node_id)
+
+
+def _on_no_public_surface(app, node):
+    """By its /node/<id> link only: no permalink, in no listing, feed or
+    sitemap."""
+    assert _get(node.id).public_slug is None
+    data = _client(app, "anna").get(f"/api/nodes/{node.id}").get_json()
+    assert not data.get("permalink")
+    assert _listed_ids(app) == {"feed": [], "share": []}
+    assert _client(app).get("/@anna").status_code == 404
+    assert _client(app).get("/@anna/feed.xml").status_code == 404
+    assert "/@anna" not in _body(_client(app).get("/sitemap.xml"))
+
+
+def test_an_uploaded_public_thread_gets_its_address_with_its_transcript(
+        app, monkeypatch, tmp_path):
+    message = _upload(app)
+    _on_no_public_surface(app, message)
+    assert _client(app).get(f"/node/{message.id}").status_code == 200
+
+    done = _transcribe(app, monkeypatch, tmp_path, message.id,
+                       text="A walk by the river\n\nand more")
+
+    assert done.transcription_status == "completed"
+    assert done.public_slug == "a-walk-by-the-river"
+    assert _listed_ids(app) == {"feed": [message.id], "share": [message.id]}
+    assert _client(app).get("/@anna/a-walk-by-the-river").status_code == 200
+    assert "/@anna/a-walk-by-the-river" in _body(
+        _client(app).get("/@anna/feed.xml"))
+    assert "/@anna/a-walk-by-the-river</loc>" in _body(
+        _client(app).get("/sitemap.xml"))
+    data = _client(app, "anna").get(f"/api/nodes/{message.id}").get_json()
+    assert data["permalink"] == "/@anna/a-walk-by-the-river"
+    # A second upload with the same first line gets its own address.
+    second = _transcribe(app, monkeypatch, tmp_path, _upload(app).id,
+                         text="A walk by the river")
+    assert second.public_slug == "a-walk-by-the-river-2"
+
+
+def test_a_failed_transcription_leaves_no_address_and_a_retry_gives_it(
+        app, monkeypatch, tmp_path):
+    message = _upload(app)
+
+    failed = _transcribe(app, monkeypatch, tmp_path, message.id, fail=True)
+
+    assert failed.transcription_status == "failed"
+    _on_no_public_surface(app, message)
+
+    again = _transcribe(app, monkeypatch, tmp_path, message.id,
+                        text="Said on the second try")
+    assert again.transcription_status == "completed"
+    assert again.public_slug == "said-on-the-second-try"
     assert _listed_ids(app)["share"] == [message.id]
 
-    # What the transcription task does once the text exists.
-    from backend.utils.slugs import settle_pending_slug
-    message.set_content("A walk by the river\n\nand more")
-    settle_pending_slug(message, message.get_content())
+
+def test_an_empty_transcript_leaves_no_address(app, monkeypatch, tmp_path):
+    message = _upload(app)
+
+    _transcribe(app, monkeypatch, tmp_path, message.id, text="  ")
+
+    _on_no_public_surface(app, message)
+    assert _client(app).get(f"/node/{message.id}").status_code == 200
+
+
+def test_an_upload_set_private_or_deleted_meanwhile_gets_no_address(
+        app, monkeypatch, tmp_path):
+    private = _upload(app)
+    deleted = _upload(app)
+
+    def set_private():
+        Node.query.filter(Node.id == private.id).update(
+            {Node.privacy_level: "private"}, synchronize_session=False)
+        _db.session.commit()
+
+    def delete():
+        from datetime import datetime
+        Node.query.filter(Node.id == deleted.id).update(
+            {Node.deleted_at: datetime.utcnow()}, synchronize_session=False)
+        _db.session.commit()
+
+    _transcribe(app, monkeypatch, tmp_path, private.id, during=set_private)
+    _transcribe(app, monkeypatch, tmp_path, deleted.id, during=delete)
+
+    assert _get(private.id).public_slug is None
+    assert _get(deleted.id).public_slug is None
+    assert _listed_ids(app) == {"feed": [], "share": []}
+    # Set public again later, through the edit route: by its link only.
+    resp = _put(app, "anna", private.id,
+                content=_get(private.id).get_content(),
+                privacy_level="public")
+    assert resp.status_code == 200, resp.get_json()
+    assert _get(private.id).public_slug is None
+    assert _listed_ids(app) == {"feed": [], "share": []}
+
+
+def test_only_the_first_entry_under_a_private_text_root_gets_the_address(
+        app):
+    """The rule of slugs.slug_transcribed_thread, case by case."""
+    from backend.utils.slugs import slug_transcribed_thread
+
+    def given(node):
+        slug = slug_transcribed_thread(node, "Spoken words here")
+        _db.session.rollback()
+        return slug
+
+    private_upload = _upload(app, level="private")
+    plain_root = _node("anna", "x", privacy="public")
+    prompt, first = _stored_prompt_entry(
+        "anna", None, "private", message_privacy="public")
+    second = _node("anna", "second branch", parent=prompt, privacy="public")
+    voice_prompt, voice = _stored_prompt_entry(
+        "anna", None, "private", message_privacy="public")
+    voice_prompt.prompt_key = "voice"
+    public_prompt, under_public = _stored_prompt_entry("anna", None, "public")
+    inside, under_inside = _stored_prompt_entry(
+        "anna", plain_root, "private", message_privacy="public")
+    has_one = _node("anna", "y", parent=_stored_prompt_entry(
+        "anna", None, "private")[0], privacy="public", slug="kept")
     _db.session.commit()
 
-    assert _get(message.id).public_slug == "a-walk-by-the-river"
-    assert _client(app).get("/@anna/a-walk-by-the-river").status_code == 200
-    assert _client(app).get("/@anna/recording").status_code == 404
-    # An entry that is no longer public, or has a slug of its own, keeps
-    # what it has.
-    kept = _node("anna", "Other words", privacy="public", slug="my-own")
-    settle_pending_slug(kept, "Other words")
-    assert kept.public_slug == "my-own"
-    private = _node("anna", "Words", slug="recording-2")
-    settle_pending_slug(private, "Words")
-    assert private.public_slug == "recording-2"
+    for node in (private_upload, plain_root, second, voice, under_public,
+                 under_inside, _get(has_one.id)):
+        assert given(_get(node.id)) is None, node.id
+    assert given(_get(first.id)) == "spoken-words-here"
+    assert slug_transcribed_thread(_get(first.id), "  ") is None
 
 
 def test_a_deleted_message_and_a_paused_account_leave_the_listings(app):

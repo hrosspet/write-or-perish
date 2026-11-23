@@ -15,6 +15,8 @@ public messages above the prompt entry, and never the entry.
 Runs the real task body through the test_retrieval_loop harness;
 nothing reaches a real model.
 """
+import re
+
 from backend.tests.test_retrieval_loop import (  # noqa: F401 (fixture)
     app, _ScriptedProvider,
 )
@@ -60,7 +62,10 @@ def test_the_owners_prompt_text_is_the_same_at_either_level(app, people):  # noq
         _db.session.commit()
         _ask(tip, alice)
         assert BODY in _ScriptedProvider.calls[-1]["messages"][0]["text"]
-        blocks.append(_system_block())
+        # The block names the second it was rendered at: the two
+        # renders are compared without it.
+        blocks.append(re.sub(r"\d\d:\d\d:\d\d UTC", "TIME UTC",
+                             _system_block()))
     assert "ALICE PROFILE" in blocks[0]
     assert blocks[0] == blocks[1]
 

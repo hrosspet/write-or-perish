@@ -390,10 +390,6 @@ def transcribe_audio(self, node_id: int, audio_file_path: str, filename: str = N
 
             final_content = final_content or node.get_content()
             node.set_content(final_content)
-            # A public upload that started a thread: its address is now
-            # made from its text (utils/slugs).
-            from backend.utils.slugs import settle_pending_slug
-            settle_pending_slug(node, final_content)
             from backend.utils.tokens import approximate_token_count
             node.token_count = approximate_token_count(final_content)
             # Per-node cap: very long recordings (~2h+ of speech) can
@@ -415,6 +411,25 @@ def transcribe_audio(self, node_id: int, audio_file_path: str, filename: str = N
             node.transcription_status = 'completed'
             node.transcription_completed_at = datetime.utcnow()
             db.session.commit()
+            # A public upload that started a Text-mode thread gets its
+            # permalink now that its text is stored, in a transaction of
+            # its own (utils/slugs); the transcript is kept whatever
+            # happens here.
+            try:
+                from backend.utils.slugs import slug_transcribed_thread
+                if slug_transcribed_thread(node, transcript):
+                    db.session.commit()
+                    from backend.utils.public_cache import (
+                        invalidate_for_node,
+                    )
+                    invalidate_for_node(node)
+                else:
+                    db.session.rollback()
+            except Exception as e:
+                db.session.rollback()
+                logger.warning(
+                    "Node %s: no permalink given after transcription (%s)",
+                    node_id, type(e).__name__)
 
             logger.info(f"Transcription successful for node {node_id}: {len(transcript)} characters")
 
