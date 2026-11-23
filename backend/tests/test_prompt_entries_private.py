@@ -932,3 +932,166 @@ def test_no_route_gives_the_prompt_text_to_anyone_but_its_owner(app):
         seen, count = _sweep(app, viewer, ints, strings, extra)
         assert count > 500
         assert seen == {}, (viewer, seen)
+
+
+# ── The script for entries stored earlier ─────────────────────────────
+
+
+def _script():
+    from backend.scripts import set_prompt_entries_private as script
+    return script
+
+
+def _earlier_state(app):
+    """Entries as stored before the rule: a public Text-mode thread
+    (public prompt root, public message without a slug), one from before
+    the prompt key, a public prompt entry inside a thread, one at the
+    circles level, and a private thread that must stay as it is."""
+    thread = _stored_prompt_entry(
+        "anna", None, "public", text="# Earlier thread\n\nbody")
+    unstamped = _stored_prompt_entry(
+        "anna", None, "public", stamped=False,
+        text="# Before the key\n\nbody")
+    gleaning = _gleaning("anna", "public")
+    inside = _stored_prompt_entry("anna", gleaning, "public")
+    circles = _stored_prompt_entry("anna", None, "circles")
+    private = _stored_prompt_entry("anna", None, "private")
+    return thread, unstamped, inside, circles, private
+
+
+def _levels(*pairs):
+    return [_get(p.id).privacy_level for p, _ in pairs]
+
+
+def test_the_script_reports_without_writing(app, capsys):
+    thread, unstamped, inside, circles, private = _earlier_state(app)
+    stamps = {n.id: n.updated_at for n in Node.query.all()}
+
+    levels, slugs = _script().run(apply=False, pause=0)
+
+    assert levels["found"] == 4 and levels["set_private"] == 0
+    assert levels["stamped"] == 1
+    assert sorted(levels["ids"]) == sorted(
+        p.id for p, _ in (thread, unstamped, inside, circles))
+    assert sorted(slugs["ids"]) == sorted([thread[1].id, unstamped[1].id])
+    assert _levels(thread, unstamped, inside, circles, private) == [
+        "public", "public", "public", "circles", "private"]
+    assert _get(thread[1].id).public_slug is None
+    assert _get(unstamped[0].id).prompt_key is None
+    assert {n.id: n.updated_at for n in Node.query.all()} == stamps
+
+
+def test_the_script_sets_them_private_and_a_second_run_finds_nothing(app):
+    thread, unstamped, inside, circles, private = _earlier_state(app)
+    stamps = {n.id: n.updated_at for n in Node.query.all()}
+    assert sorted(_listed_ids(app)["share"])[:2] == sorted(
+        [thread[0].id, unstamped[0].id])
+
+    levels, slugs = _script().run(apply=True, pause=0, batch_size=2)
+
+    assert levels["set_private"] == 4 and levels["stamped"] == 1
+    assert slugs["slugged"] == 2 and slugs["moved"] == 0
+    assert _levels(thread, unstamped, inside, circles, private) == [
+        "private"] * 5
+    assert _get(unstamped[0].id).prompt_key == "textmode"
+    assert _get(thread[1].id).public_slug == "earlier-thread"
+    assert _get(unstamped[1].id).public_slug == "before-the-key"
+    # The messages keep their level; the one inside a thread and the
+    # circles one get no slug.
+    assert _get(thread[1].id).privacy_level == "public"
+    assert _get(inside[1].id).public_slug is None
+    assert _get(circles[1].id).public_slug is None
+    assert {n.id: n.updated_at for n in Node.query.all()} == stamps
+    # Each thread is listed once, from its message, with its permalink.
+    listed = _listed_ids(app)["share"]
+    assert thread[1].id in listed and unstamped[1].id in listed
+    assert thread[0].id not in listed and unstamped[0].id not in listed
+    assert _client(app).get("/@anna/earlier-thread").status_code == 200
+    _no_prompt_text(_body(_client(app).get(f"/node/{thread[1].id}")))
+    _no_prompt_text(_body(_client(app).get(f"/node/{inside[1].id}")))
+
+    levels, slugs = _script().run(apply=True, pause=0)
+
+    assert levels["found"] == 0 and levels["set_private"] == 0
+    assert slugs["slugged"] == 0
+    assert _get(thread[1].id).public_slug == "earlier-thread"
+
+
+def test_the_script_moves_a_roots_permalink_to_the_message(app):
+    prompt, message = _stored_prompt_entry(
+        "anna", None, "public", text="# Earlier thread\n\nbody")
+    prompt.public_slug = "the-old-address"
+    _db.session.commit()
+    assert _client(app).get("/@anna/the-old-address").status_code == 200
+
+    levels, slugs = _script().run(apply=True, pause=0)
+
+    assert slugs["slugged"] == 1 and slugs["moved"] == 1
+    assert _get(prompt.id).public_slug is None
+    assert _get(message.id).public_slug == "the-old-address"
+    page = _client(app).get("/@anna/the-old-address")
+    assert page.status_code == 200
+    assert "<h1>Earlier thread</h1>" in _body(page)
+    _no_prompt_text(_body(page))
+
+
+def test_the_script_encrypts_text_an_entry_holds_itself(app, monkeypatch):
+    prompt, message = _stored_prompt_entry("anna", None, "public")
+    r = _put(app, "anna", prompt.id, detach_prompt=True,
+             privacy_level="public",
+             content="ANNA-EDITED-IN-THREAD " + PROMPT)
+    assert r.status_code == 200, r.get_json()
+    assert not _get(prompt.id).has_artifact("prompt")
+    calls = []
+    real = Node.set_privacy_level
+
+    def _spy(self, level, dek=None):
+        calls.append((self.id, level))
+        return real(self, level, dek=dek)
+    monkeypatch.setattr(Node, "set_privacy_level", _spy)
+
+    _script().run(apply=True, pause=0)
+
+    assert calls == [(prompt.id, "private")]
+    assert _get(prompt.id).get_content().startswith("ANNA-EDITED-IN-THREAD")
+
+
+def test_the_script_leaves_entries_changed_after_the_given_time(app):
+    from datetime import datetime, timedelta
+    old = _stored_prompt_entry("anna", None, "public")
+    chosen = _stored_prompt_entry("anna", None, "public")
+    deploy = datetime.utcnow() - timedelta(days=1)
+    for node, when in ((old[0], deploy - timedelta(days=3)),
+                       (chosen[0], deploy + timedelta(hours=2))):
+        Node.query.filter(Node.id == node.id).update(
+            {Node.updated_at: when, Node.created_at: when - timedelta(1)},
+            synchronize_session=False)
+    _db.session.commit()
+
+    levels, _ = _script().run(apply=True, pause=0, before=deploy)
+
+    assert levels["set_private"] == 1
+    assert _levels(old, chosen) == ["private", "public"]
+
+
+def test_the_script_prints_ids_and_counts_only(app, capsys, monkeypatch):
+    thread, unstamped, inside, circles, private = _earlier_state(app)
+    script = _script()
+    import backend
+    monkeypatch.setattr(backend, "create_app", lambda: app)
+
+    assert script.main(["--pause", "0"]) == 0
+    dry = capsys.readouterr().out
+    assert _levels(thread) == ["public"]
+    assert script.main(["--apply", "--pause", "0"]) == 0
+    applied = capsys.readouterr().out
+    assert script.main(["--apply", "--pause", "0"]) == 0
+    again = capsys.readouterr().out
+
+    assert "Dry run" in dry and "public or shared with circles: 4" in dry
+    assert "set to private: 4" in applied
+    assert "set to private: 0" in again
+    for out in (dry, applied, again):
+        for text in PROMPT_MARKS + PERSONAL + [
+                "Earlier thread", "earlier-thread", "body", "anna"]:
+            assert text not in out, text
