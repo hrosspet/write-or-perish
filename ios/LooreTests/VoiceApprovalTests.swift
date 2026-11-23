@@ -460,18 +460,7 @@ final class VoiceApprovalAppTests: StubbedAppTestCase {
     private static let clip = silence("approval-announcement-one", seconds: 4.5)
 
     private static func silence(_ name: String, seconds: Double) -> String {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("loore-tests-\(name).wav")
-        if !FileManager.default.fileExists(atPath: url.path) {
-            let format = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 8000, channels: 1, interleaved: true)!
-            let frames = AVAudioFrameCount(seconds * 8000)
-            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames)!
-            buffer.frameLength = frames
-            if let file = try? AVAudioFile(forWriting: url, settings: format.settings, commonFormat: .pcmFormatInt16,
-                                           interleaved: true) {
-                try? file.write(from: buffer)
-            }
-        }
-        return url.absoluteString
+        SilentAudio.file(name, seconds: seconds)
     }
 
     /// The Voice queue as a turn leaves it: the reply's chunk (a chapter) and the
@@ -564,18 +553,13 @@ final class VoiceApprovalAppTests: StubbedAppTestCase {
     private static let headings = [QueueChapter(title: "First heading", chunkIndex: 0, startTime: 0),
                                    QueueChapter(title: "Second heading", chunkIndex: 1, startTime: 6)]
 
-    /// Files of their own: these tests load and seek in quick succession, and in
-    /// the simulator the test that came next could then not play the same files.
-    private static let first = silence("heading-one", seconds: 6)
-    private static let second = silence("heading-two", seconds: 4.5)
-
     private func loadEntry() {
-        app.audio.player.load(urls: [Self.first, Self.second], durations: [6, 4.5], title: "A morning entry",
+        app.audio.player.load(urls: [Self.reply, Self.clip], durations: [6, 4.5], title: "A morning entry",
                               source: .node(77), chapters: Self.headings, autoplay: false)
     }
 
     private func loadVoiceReply() {
-        app.audio.player.load(urls: [Self.first, Self.second], durations: [6, 4.5], title: "Voice", source: .voice,
+        app.audio.player.load(urls: [Self.reply, Self.clip], durations: [6, 4.5], title: "Voice", source: .voice,
                               chapters: Self.headings, autoplay: false)
     }
 
@@ -592,7 +576,7 @@ final class VoiceApprovalAppTests: StubbedAppTestCase {
                        10.5)
 
         for source in [ChunkQueuePlayer.Source.profile(3), .item(5)] {
-            player.load(urls: [Self.first, Self.second], durations: [6, 4.5], title: "A title of its own", source: source,
+            player.load(urls: [Self.reply, Self.clip], durations: [6, 4.5], title: "A title of its own", source: source,
                         chapters: Self.headings, autoplay: false)
             XCTAssertEqual(nowPlayingTitle, "Listening", "\(source)")
         }
@@ -611,7 +595,7 @@ final class VoiceApprovalAppTests: StubbedAppTestCase {
         loadVoiceReply()
         XCTAssertEqual(nowPlayingTitle, "Voice — First heading")
 
-        app.audio.player.load(urls: [Self.first], durations: [6], title: "", source: .node(78), autoplay: false)
+        app.audio.player.load(urls: [Self.reply], durations: [6], title: "", source: .node(78), autoplay: false)
         XCTAssertEqual(nowPlayingTitle, "Loore", "an entry with no title and no headings")
     }
 
