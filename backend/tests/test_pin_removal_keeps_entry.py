@@ -11,7 +11,9 @@ Postgres the save answered 500 and nothing was saved; on sqlite the
 entry itself was deleted. The cascade is on the node's side now:
 deleting a node deletes its pins, and deleting a pin deletes nothing
 else (not the node, its replies, its edit history, the prompt version or
-the document version the pin pointed at).
+the document version the pin pointed at). An edit removes only the pins
+of placeholders the old text had and the new text lacks, so the versions
+an AI reply's turn read with a tool stay pinned on the reply.
 
 Through the real PUT /nodes/<id> route and the 30-day clean-up's purge,
 on sqlite and, when LOORE_TEST_POSTGRES_URL names a throwaway database
@@ -283,6 +285,83 @@ def test_entry_edit_that_drops_a_placeholder_keeps_the_entry(
     _documents_kept(world)
 
 
+def _tool_pins(node, world):
+    """The pins the retrieval loop (_pin_shown) leaves on the node whose
+    turn read the to-do list and a document with a tool."""
+    _db.session.add_all([
+        NodeContextArtifact(node_id=node.id, artifact_type="todo",
+                            artifact_id=world.todo.id),
+        NodeContextArtifact(node_id=node.id, artifact_type="user_artifact",
+                            artifact_id=world.intentions.id),
+    ])
+
+
+def test_ai_reply_edit_keeps_the_versions_its_turn_read(app, world):
+    """An AI reply whose turn read the to-do list and a document with a
+    tool carries pins to those versions, so the export names what it
+    read. Its text names no placeholder. Its human owner edits it: the
+    text is saved and both pins stay (review of #788: an edit removed
+    every pin no placeholder in the NEW text needed)."""
+    model = User(username="model-account", approved=True)
+    _db.session.add(model)
+    _db.session.flush()
+    question = _node(world.alice, "What is on my list?")
+    reply = Node(user_id=model.id, human_owner_id=world.alice.id,
+                 node_type="llm", llm_model="test-model",
+                 privacy_level="private", ai_usage="chat", token_count=1,
+                 parent_id=question.id)
+    reply.set_content("I read your list. Here is the answer.")
+    _db.session.add(reply)
+    _db.session.flush()
+    _tool_pins(reply, world)
+    follow_up = _node(world.alice, "Thanks.", parent=reply)
+    _db.session.commit()
+    reply_id, follow_up_id = reply.id, follow_up.id
+    before = _pins(reply_id)
+    assert set(before) == {("todo", world.todo.id),
+                           ("user_artifact", world.intentions.id)}
+    new_text = "I read your list. Here is a better answer."
+
+    resp = _client(app, world.alice).put(f"/nodes/{reply_id}", json={
+        "content": new_text, "privacy_level": "private", "ai_usage": "chat",
+    })
+
+    assert resp.status_code == 200, resp.get_json()
+    _db.session.expire_all()
+    _unchanged(reply_id, question.id, new_text)
+    assert _pins(reply_id) == before
+    _unchanged(follow_up_id, reply_id, "Thanks.")
+    _documents_kept(world)
+
+
+def test_edit_removes_only_the_dropped_placeholders_pins(app, world):
+    """An entry with {user_profile} in its text and a to-do pin no
+    placeholder accounts for: dropping {user_profile} removes the
+    profile pin only."""
+    from backend.utils.context_artifacts import sync_context_artifacts
+    entry = _node(world.alice, "Notes {user_profile}")
+    sync_context_artifacts(entry.id, world.alice.id, "Notes {user_profile}")
+    _db.session.add(NodeContextArtifact(node_id=entry.id,
+                                        artifact_type="todo",
+                                        artifact_id=world.todo.id))
+    _db.session.commit()
+    entry_id = entry.id
+    before = _pins(entry_id)
+    assert set(before) == {("profile", world.profile.id),
+                           ("todo", world.todo.id)}
+
+    resp = _client(app, world.alice).put(f"/nodes/{entry_id}", json={
+        "content": "Notes", "privacy_level": "private", "ai_usage": "chat",
+    })
+
+    assert resp.status_code == 200, resp.get_json()
+    _db.session.expire_all()
+    _unchanged(entry_id, None, "Notes")
+    assert _pins(entry_id) == {("todo", world.todo.id):
+                               before[("todo", world.todo.id)]}
+    _documents_kept(world)
+
+
 # ── Deleting a pin, deleting a node ─────────────────────────────────────
 
 
@@ -333,11 +412,12 @@ def test_deleting_a_node_deletes_its_pins(app, world):
 @pytest.mark.parametrize("pins_loaded", [False, True],
                          ids=["pins-unloaded", "pins-loaded"])
 def test_thirty_day_cleanup_purges_a_pinned_entry(app, world, pins_loaded):
-    """The clean-up's full purge deletes the pins in bulk, then the node
-    through the ORM. The node's pins go, nothing is deleted twice (a
-    DELETE that matches no row warns), and another entry's pins and the
-    versions stay. With the pins already loaded on the node (the cascade
-    then meets rows the bulk delete removed) as without."""
+    """The clean-up's full purge deletes the node through the ORM, and
+    Node.context_artifacts' cascade deletes its pins (the purge's own
+    bulk delete of them is gone: with the pins already loaded on the
+    node, the cascade deleted them a second time, and a DELETE that
+    matches no row warns). The node's pins go, another entry's pins and
+    the versions stay. With the pins loaded on the node and without."""
     from backend.tasks.node_cleanup import _full_purge
     entry, reply = _plain_entry(world)
     kept, _ = _plain_entry(world)
