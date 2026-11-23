@@ -169,7 +169,6 @@ def world(tmp_path, monkeypatch):
 
 def _lab_mode(monkeypatch):
     monkeypatch.setenv("ENCRYPTION_DISABLED", "true")
-    monkeypatch.setenv("GCP_KMS_KEY_NAME", "")
 
 
 def _prod_mode(monkeypatch):

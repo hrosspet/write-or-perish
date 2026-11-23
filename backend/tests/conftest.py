@@ -60,8 +60,8 @@ neutralize_provider_environment()
 
 
 def keys_for_the_app_to_start():
-    """create_app() starts only with a SECRET_KEY and a stated choice
-    about encryption (validate_keys), and the tests run with FLASK_ENV
+    """create_app() starts only with a SECRET_KEY and, unless encryption
+    is turned off, a key name (validate_keys), and the tests run with FLASK_ENV
     unset, which counts as production. A checkout without a .env (CI)
     gets a key for the tests.
 

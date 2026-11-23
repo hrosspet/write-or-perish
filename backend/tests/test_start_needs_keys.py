@@ -1,7 +1,8 @@
-"""The app starts, in every environment, only with a stated choice about
-encryption: a KMS key name, or ENCRYPTION_DISABLED=true, never neither
-and never both. In production and on staging it also needs a SECRET_KEY
-of its own (validate_keys)."""
+"""ENCRYPTION_DISABLED=true is the only switch that turns encryption off,
+in every environment, with or without a KMS key name beside it. Where it
+is not set the app starts only with a key name. In production and on
+staging it also needs a SECRET_KEY of its own (validate_keys)."""
+import logging
 import os
 import pathlib
 import subprocess
@@ -9,7 +10,8 @@ import sys
 
 import pytest
 
-from backend import validate_keys
+import backend
+from backend import note_encryption_off, validate_keys
 from backend.config import PLACEHOLDER_SECRET_KEY
 from backend.utils import encryption
 from backend.utils.encryption import EncryptionNotConfigured
@@ -36,7 +38,7 @@ def test_no_start_without_a_secret_key(env, key):
 @pytest.mark.parametrize("environ", [
     {}, {"GCP_KMS_KEY_NAME": ""}, {"ENCRYPTION_DISABLED": "false"},
     {"ENCRYPTION_DISABLED": ""}, {"ENCRYPTION_DISABLED": "off"}])
-def test_no_start_with_neither_line_in_any_environment(env, environ):
+def test_no_start_when_not_turned_off_and_without_a_key_name(env, environ):
     with pytest.raises(RuntimeError, match="GCP_KMS_KEY_NAME is not set"):
         validate_keys(_config(env), environ)
 
@@ -48,6 +50,7 @@ def test_no_start_with_neither_line_in_any_environment(env, environ):
     {"ENCRYPTION_DISABLED": "TRUE", "GCP_KMS_KEY_NAME": ""}])
 def test_starts_with_encryption_turned_off_by_name(env, environ):
     assert validate_keys(_config(env), environ) is None
+    assert encryption.encryption_choice(environ) is False
 
 
 @pytest.mark.parametrize("env", EVERY_ENV)
@@ -60,9 +63,10 @@ def test_starts_with_the_key_name_alone(env, environ):
 
 @pytest.mark.parametrize("env", EVERY_ENV)
 @pytest.mark.parametrize("off", ["true", "1", "Yes"])
-def test_no_start_with_both_lines(env, off):
-    with pytest.raises(RuntimeError, match="are both set"):
-        validate_keys(_config(env), dict(WITH_KMS, ENCRYPTION_DISABLED=off))
+def test_turned_off_with_a_key_name_set_starts_with_encryption_off(env, off):
+    environ = dict(WITH_KMS, ENCRYPTION_DISABLED=off)
+    assert validate_keys(_config(env), environ) is None
+    assert encryption.encryption_choice(environ) is False
 
 
 @pytest.mark.parametrize("env", ["development", "testing", "Development"])
@@ -72,14 +76,36 @@ def test_development_and_testing_start_without_a_secret_key(env, key):
     assert validate_keys(_config(env, key), off) is None
 
 
-def test_the_refusals_about_encryption_name_no_value():
-    with pytest.raises(RuntimeError) as refused:
-        validate_keys(_config("development"),
-                      dict(WITH_KMS, ENCRYPTION_DISABLED="true"))
-    assert KMS_NAME not in str(refused.value)
+def _notices(caplog):
+    return [r.getMessage() for r in caplog.records
+            if r.getMessage().startswith("Encryption is off")]
 
 
-def test_without_either_line_nothing_is_stored_as_plain_text(
+@pytest.mark.parametrize("environ,unused", [
+    ({"ENCRYPTION_DISABLED": "true"}, "no"),
+    ({"ENCRYPTION_DISABLED": "true", "GCP_KMS_KEY_NAME": ""}, "no"),
+    (dict(WITH_KMS, ENCRYPTION_DISABLED="true"), "yes")])
+def test_a_start_with_encryption_off_writes_one_fixed_line(
+        caplog, monkeypatch, environ, unused):
+    monkeypatch.setattr(backend, "_encryption_off_noted", False)
+    with caplog.at_level(logging.WARNING, logger="backend"):
+        note_encryption_off(environ)
+        note_encryption_off(environ)
+    assert _notices(caplog) == [
+        "Encryption is off on this instance (ENCRYPTION_DISABLED=true): "
+        "new content is stored unencrypted. GCP_KMS_KEY_NAME set but "
+        f"unused: {unused}."]
+    assert KMS_NAME not in caplog.text
+
+
+def test_a_start_with_encryption_on_writes_no_such_line(caplog, monkeypatch):
+    monkeypatch.setattr(backend, "_encryption_off_noted", False)
+    with caplog.at_level(logging.WARNING, logger="backend"):
+        note_encryption_off(WITH_KMS)
+    assert _notices(caplog) == []
+
+
+def test_not_turned_off_and_without_a_key_name_nothing_is_stored(
         monkeypatch, tmp_path):
     monkeypatch.setenv("ENCRYPTION_DISABLED", "")
     monkeypatch.setenv("GCP_KMS_KEY_NAME", "")
@@ -110,11 +136,40 @@ def test_the_key_name_alone_encrypts(monkeypatch):
     assert encryption.encrypt_content("a note").startswith("ENC:v2:")
 
 
-def test_both_lines_store_nothing(monkeypatch):
+def _no_key_service(monkeypatch):
+    def called(*args, **kwargs):
+        raise AssertionError("the key service was called")
+    monkeypatch.setattr(encryption, "_kms_encrypt", called)
+    monkeypatch.setattr(encryption, "_kms_decrypt", called)
+
+
+def test_turned_off_with_a_key_name_set_stores_unencrypted(
+        monkeypatch, tmp_path):
     monkeypatch.setenv("ENCRYPTION_DISABLED", "true")
     monkeypatch.setenv("GCP_KMS_KEY_NAME", KMS_NAME)
-    with pytest.raises(EncryptionNotConfigured, match="are both set"):
-        encryption.encrypt_content("a note")
+    _no_key_service(monkeypatch)
+    assert encryption.is_encryption_enabled() is False
+    assert encryption.encrypt_content("a note") == "a note"
+    assert encryption.decrypt_content("a note") == "a note"
+    assert encryption.new_dek() is None
+    audio = tmp_path / "a.webm"
+    audio.write_bytes(b"audio")
+    assert encryption.encrypt_file(str(audio)) == str(audio)
+    assert audio.read_bytes() == b"audio"
+
+
+def test_turned_off_with_a_key_name_set_leaves_an_encrypted_value_as_it_is(
+        monkeypatch):
+    """What an instance does with a value stored while it encrypted,
+    once it is started with the switch: the key name beside the switch
+    is not used, so the value comes back as stored, not as written."""
+    monkeypatch.setenv("ENCRYPTION_DISABLED", "false")
+    monkeypatch.setenv("GCP_KMS_KEY_NAME", KMS_NAME)
+    monkeypatch.setattr(encryption, "_wrap_dek", lambda dek: b"wrapped")
+    stored = encryption.encrypt_content("a note")
+    monkeypatch.setenv("ENCRYPTION_DISABLED", "true")
+    _no_key_service(monkeypatch)
+    assert encryption.decrypt_content(stored) == stored
 
 
 def test_the_message_names_the_setting_and_no_value():
@@ -155,12 +210,40 @@ def test_create_app_refuses_encryption_off_by_omission(
 
 
 @pytest.mark.parametrize("env", ["production", "development", "testing"])
-def test_create_app_refuses_both_lines(sqlite_config, monkeypatch, env):
+def test_create_app_turned_off_with_a_key_name_set_starts_and_stores_unencrypted(
+        sqlite_config, monkeypatch, caplog, env):
+    from sqlalchemy import text
     from backend import create_app
+    from backend.extensions import db
+    from backend.models import Node, User
     monkeypatch.setattr(sqlite_config, "DEPLOY_ENV", env)
     monkeypatch.setenv("GCP_KMS_KEY_NAME", KMS_NAME)
-    with pytest.raises(RuntimeError, match="are both set"):
-        create_app()
+    _no_key_service(monkeypatch)
+    monkeypatch.setattr(backend, "_encryption_off_noted", False)
+    with caplog.at_level(logging.WARNING, logger="backend"):
+        app = create_app()
+    assert len(_notices(caplog)) == 1
+    assert _notices(caplog)[0].endswith("unused: yes.")
+    assert KMS_NAME not in caplog.text
+    with app.app_context():
+        db.create_all()
+        try:
+            user = User(twitter_id="t-off", username="off")
+            db.session.add(user)
+            db.session.flush()
+            node = Node(user_id=user.id, node_type="user",
+                        privacy_level="private")
+            node.set_content("a private note")
+            db.session.add(node)
+            db.session.commit()
+            stored = db.session.execute(
+                text("SELECT content FROM node WHERE id = :id"),
+                {"id": node.id}).scalar()
+            assert stored == "a private note"
+            assert node.get_content() == "a private note"
+        finally:
+            db.session.remove()
+            db.drop_all()
 
 
 _START = "import backend.app\nimport backend.celery_app\nprint('started')"
@@ -179,21 +262,26 @@ def _start(flask_env, off, key_name):
 
 
 @pytest.mark.parametrize("flask_env", ["production", "development"])
-@pytest.mark.parametrize("off,key_name", [("true", ""), ("", KMS_NAME)])
-def test_web_and_workers_start_with_exactly_one_line(
-        flask_env, off, key_name):
+@pytest.mark.parametrize("off,key_name,unused", [
+    ("true", "", "no"), ("true", KMS_NAME, "yes"), ("", KMS_NAME, None)])
+def test_web_and_workers_start_turned_off_or_with_a_key_name(
+        flask_env, off, key_name, unused):
     result = _start(flask_env, off, key_name)
     assert result.returncode == 0, result.stderr[-3000:]
     assert result.stdout.strip().endswith("started")
+    if unused is None:
+        assert "Encryption is off" not in result.stderr
+    else:
+        assert result.stderr.count(
+            f"GCP_KMS_KEY_NAME set but unused: {unused}.") == 1
+        assert result.stderr.count("Encryption is off") == 1
+    assert KMS_NAME not in result.stderr
 
 
 @pytest.mark.parametrize("flask_env", ["production", "development"])
-@pytest.mark.parametrize("off,key_name,message", [
-    ("", "", "GCP_KMS_KEY_NAME is not set"),
-    ("true", KMS_NAME, "are both set")])
-def test_web_and_workers_do_not_start_with_neither_or_both(
-        flask_env, off, key_name, message):
-    result = _start(flask_env, off, key_name)
+@pytest.mark.parametrize("off", ["", "false"])
+def test_web_and_workers_do_not_start_when_not_turned_off_without_a_key_name(
+        flask_env, off):
+    result = _start(flask_env, off, "")
     assert result.returncode != 0
-    assert message in result.stderr
-    assert KMS_NAME not in result.stderr
+    assert "GCP_KMS_KEY_NAME is not set" in result.stderr

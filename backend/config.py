@@ -1036,9 +1036,10 @@ class Config:
     # Format: projects/{project}/locations/{location}/keyRings/{keyring}/cryptoKeys/{key}
     GCP_KMS_KEY_NAME = os.environ.get("GCP_KMS_KEY_NAME")
     # "true" is the only thing that turns encryption off (local
-    # development, staging, tests). The app starts with exactly one of
-    # the two: see encryption_choice() in backend/utils/encryption.py,
-    # which reads the environment itself.
+    # development, staging, tests), with or without a key name above.
+    # Without it the app starts only with the key name: see
+    # encryption_choice() in backend/utils/encryption.py, which reads
+    # the environment itself.
     ENCRYPTION_DISABLED = os.environ.get("ENCRYPTION_DISABLED", "false").lower() in ("true", "1", "yes")
 
     # Production Security Settings

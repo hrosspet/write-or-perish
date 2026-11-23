@@ -52,51 +52,60 @@ _TRUE_VALUES = ("true", "1", "yes")
 
 
 class EncryptionNotConfigured(RuntimeError):
-    """The environment does not say, in exactly one way, whether content
-    is encrypted here."""
+    """Encryption is not turned off here and there is no key name to
+    encrypt with."""
+
+
+ENCRYPTION_OFF_NOTICE = (
+    "Encryption is off on this instance (ENCRYPTION_DISABLED=true): new "
+    "content is stored unencrypted. GCP_KMS_KEY_NAME set but unused: %s.")
 
 
 def encryption_choice(environ=None) -> bool:
     """Whether this instance encrypts: the one rule every caller follows,
     the start check (validate_keys in backend/__init__.py) included.
 
-    Encryption is on unless ENCRYPTION_DISABLED=true (or 1, yes) is set;
-    that line is the only thing that turns it off, in every environment
-    (Peter, 2026-11-23). On needs GCP_KMS_KEY_NAME, the key users'
-    writing is encrypted with. So:
+    ENCRYPTION_DISABLED=true (or 1, yes) is the only switch that turns
+    encryption off, in every environment (Peter, 2026-11-23). So:
 
-    - GCP_KMS_KEY_NAME set, ENCRYPTION_DISABLED not true: on.
-    - ENCRYPTION_DISABLED=true, no GCP_KMS_KEY_NAME: off.
-    - neither: EncryptionNotConfigured. A missing key name used to mean
-      "store plain text", with no error anywhere.
-    - both: EncryptionNotConfigured. The two lines contradict each other
-      and either reading could be the wrong one: writing stored plain on
-      an instance that has a key, or text that is already encrypted
-      handed out undecrypted.
+    - ENCRYPTION_DISABLED=true: off, whether or not GCP_KMS_KEY_NAME is
+      set. A key name beside the switch is not used.
+    - not turned off, GCP_KMS_KEY_NAME set: on.
+    - not turned off, no GCP_KMS_KEY_NAME: EncryptionNotConfigured. A
+      missing key name used to mean "store plain text", with no error
+      anywhere.
 
-    The messages name the settings, never a value."""
+    The message names the settings, never a value."""
     environ = os.environ if environ is None else environ
-    disabled = (environ.get("ENCRYPTION_DISABLED") or "").lower() in _TRUE_VALUES
-    has_key_name = bool(environ.get("GCP_KMS_KEY_NAME"))
-    if disabled and has_key_name:
-        raise EncryptionNotConfigured(
-            "GCP_KMS_KEY_NAME and ENCRYPTION_DISABLED=true are both set, "
-            "and they contradict each other. Keep GCP_KMS_KEY_NAME on an "
-            "instance that encrypts, or ENCRYPTION_DISABLED=true on one "
-            "that is meant to run without encryption, not both.")
-    if not disabled and not has_key_name:
+    if (environ.get("ENCRYPTION_DISABLED") or "").lower() in _TRUE_VALUES:
+        return False
+    if not environ.get("GCP_KMS_KEY_NAME"):
         raise EncryptionNotConfigured(
             "GCP_KMS_KEY_NAME is not set, so new writing could not be "
             "encrypted. Set it in the env file this instance reads, or "
             "set ENCRYPTION_DISABLED=true on an instance that is meant to "
             "run without encryption (local development, staging, tests).")
-    return not disabled
+    return True
+
+
+def encryption_off_notice(environ=None):
+    """The one line an instance writes to its log when it starts with
+    encryption off, or None when it encrypts. The line says yes or no
+    about a key name that is set beside the switch and therefore unused,
+    so an instance that was meant to encrypt shows it in its log. No
+    value is in the line."""
+    environ = os.environ if environ is None else environ
+    if encryption_choice(environ):
+        return None
+    unused = "yes" if environ.get("GCP_KMS_KEY_NAME") else "no"
+    return ENCRYPTION_OFF_NOTICE % unused
 
 
 def is_encryption_enabled() -> bool:
     """True when content is encrypted here, False only under
-    ENCRYPTION_DISABLED=true; raises EncryptionNotConfigured when the
-    environment states neither or both (see encryption_choice)."""
+    ENCRYPTION_DISABLED=true; raises EncryptionNotConfigured when
+    encryption is not turned off and no key name is set (see
+    encryption_choice)."""
     return encryption_choice()
 
 

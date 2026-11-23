@@ -27,10 +27,8 @@ services:
     environment:
       - FLASK_ENV=staging
       # Staging holds test data only and has no KMS key: it runs without
-      # encryption, and says so (the app does not start otherwise). The
-      # key name is emptied so a line in .env.staging cannot contradict it.
+      # encryption, and says so (the app does not start otherwise).
       - ENCRYPTION_DISABLED=true
-      - GCP_KMS_KEY_NAME=
       - FRONTEND_URL=${FRONTEND_URL:-https://staging.loore.org}
       # Dark features live on staging by design.
       - SHARE_V1=true
@@ -58,7 +56,6 @@ services:
       - SEMANTIC_SEARCH_AGENTIC=true
       # As the backend: no KMS key on staging.
       - ENCRYPTION_DISABLED=true
-      - GCP_KMS_KEY_NAME=
     deploy:
       resources:
         limits:
@@ -78,7 +75,6 @@ services:
     command: celery -A backend.celery_app.celery beat --loglevel=warning
     environment:
       - ENCRYPTION_DISABLED=true
-      - GCP_KMS_KEY_NAME=
     deploy:
       resources:
         limits:

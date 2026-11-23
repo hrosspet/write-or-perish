@@ -118,8 +118,9 @@ MEDIA_DEST="${DEST}/media/${PERIOD}"
 # Encryption is on when GCP_KMS_KEY_NAME is set and ENCRYPTION_DISABLED is
 # not true/1/yes. With it off, every stored file is plain and is backed up.
 # The app itself (encryption_choice() in backend/utils/encryption.py) does
-# not start with neither line or with both; this script only chooses which
-# files to copy, and in those two cases it keeps every file.
+# not start when encryption is not turned off and no key name is set; this
+# script only chooses which files to copy, and in that case it keeps every
+# file.
 MEDIA_EXCLUDE_TRANSIENT='^(drafts|chunks|streaming)/.*'
 MEDIA_EXCLUDE_PLAINTEXT='.*(?<!\.enc)$'
 ENC_ONLY=false

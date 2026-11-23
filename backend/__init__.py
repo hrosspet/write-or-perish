@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify, redirect, url_for, current_app
 from dotenv import load_dotenv
+import logging
 import os
 
 # Load environment variables - check for .env.production first, then fall back to .env
@@ -91,18 +92,35 @@ def validate_profile_models(config):
             f"PROFILE_MERGE_GROUP_SIZE={size!r} must be at least 2.")
 
 
+_encryption_off_noted = False
+
+
+def note_encryption_off(environ=None):
+    """Write the line about encryption being off to the log, once per
+    process (a process builds the app more than once: the web app's
+    imports build the Celery app's). Nothing when this instance
+    encrypts."""
+    global _encryption_off_noted
+    from backend.utils.encryption import encryption_off_notice
+    notice = encryption_off_notice(environ)
+    if notice and not _encryption_off_noted:
+        _encryption_off_noted = True
+        logging.getLogger(__name__).warning(notice)
+
+
 def validate_keys(config, environ=None):
     """Refuse to boot without the two keys the data depends on.
 
-    Encryption, in every environment: GCP_KMS_KEY_NAME names the key
-    users' writing is encrypted with, and the app starts without it only
-    when ENCRYPTION_DISABLED=true says this instance is meant to run
-    without encryption (the local and staging Compose files and the
-    tests do). Without either line the app used to run and store new
-    writing as plain text, with no error anywhere. Both lines together
-    contradict each other and are refused too. The rule is
-    encryption_choice() in backend/utils/encryption.py, the same one
-    every write and read follows afterwards.
+    Encryption, in every environment: ENCRYPTION_DISABLED=true is the
+    only switch that turns it off (the local and staging Compose files
+    and the tests set it), with or without a key name beside it. Where
+    it is not turned off, GCP_KMS_KEY_NAME names the key users' writing
+    is encrypted with, and the app does not start without it: it used to
+    run and store new writing as plain text, with no error anywhere. The
+    rule is encryption_choice() in backend/utils/encryption.py, the same
+    one every write and read follows afterwards. An instance that starts
+    with encryption off writes one fixed line to its log saying so
+    (note_encryption_off).
 
     SECRET_KEY, in production and on staging (DEPLOY_ENV: every
     FLASK_ENV but "development" and "testing"): it signs the sign-in
@@ -328,6 +346,7 @@ def create_app():
     app.config["MAX_CONTENT_LENGTH"] = request_size.DEFAULT_MAX_BODY_BYTES
     app.register_error_handler(413, request_size.too_large_response)
     validate_keys(app.config)
+    note_encryption_off()
     validate_default_model(app.config)
     # Payments (#438): never on in production with a sandbox key.
     from backend.utils.subscriptions import check_payments_config

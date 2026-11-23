@@ -187,8 +187,6 @@ def test_a_title_that_looks_like_a_stored_value_reads_back_as_written(
 
 
 def test_with_encryption_off_the_plain_columns_are_used(app, monkeypatch):
-    # Off is the line alone: with a key name beside it nothing starts.
-    monkeypatch.setenv("GCP_KMS_KEY_NAME", "")
     monkeypatch.setenv("ENCRYPTION_DISABLED", "true")
     row = _artifact()
     stored = _row(row.id)
