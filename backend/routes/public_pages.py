@@ -37,6 +37,7 @@ from backend.routes.commons import (
     public_root_order,
 )
 from backend.utils import public_cache
+from backend.utils.public_threads import thread_top_filter
 from backend.utils.public_html import (
     RenderBudget,
     base_url,
@@ -276,11 +277,13 @@ def _article_document(root, author_user):
 
 
 def _public_roots_query(user, query=None):
-    """The user's living public root nodes — the same set the public JSON
-    API serves. *query* selects what to read (default: whole rows)."""
+    """The user's living public thread tops (roots, and the public first
+    entry under a private prompt root: utils/public_threads) — the same
+    set the public JSON API serves. *query* selects what to read
+    (default: whole rows)."""
     query = query if query is not None else Node.query
     return _public_alive(query.filter(
-        Node.parent_id.is_(None),
+        thread_top_filter(),
         (Node.human_owner_id == user.id) | (Node.user_id == user.id),
     ))
 
@@ -633,7 +636,7 @@ def _render_sitemap():
                     User.username, Node.public_slug, Node.updated_at,
                     Node.created_at)
                 .join(User, User.id == Node.human_owner_id)
-                .filter(Node.parent_id.is_(None),
+                .filter(thread_top_filter(),
                         Node.privacy_level == "public",
                         Node.deleted_at.is_(None),
                         Node.public_slug.isnot(None),

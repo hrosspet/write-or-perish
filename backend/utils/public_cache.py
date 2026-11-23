@@ -129,23 +129,49 @@ def _roots_of(nodes):
     return [roots.get(root_id_of.get(n.id, n.id), n) for n in nodes]
 
 
-def _paths_for_root(root, also=None):
+def _top_slugs(root_ids):
+    """{root id: slugs of the entries directly under it} for *root_ids*,
+    in one query per 1,000 ids. In a thread whose root is a private
+    prompt entry the first entry is the top the public pages list
+    (utils/public_threads) and carries the thread's slug, so its article
+    pages are the thread's. Privacy-blind and not limited to prompt
+    roots: this is cache accounting, and a path nobody cached costs
+    nothing to drop."""
+    from backend.extensions import db
+    from backend.models import Node
+
+    ids = list({int(i) for i in root_ids})
+    slugs = {}
+    for start in range(0, len(ids), 1000):
+        for parent_id, slug in db.session.query(
+                Node.parent_id, Node.public_slug).filter(
+                    Node.parent_id.in_(ids[start:start + 1000]),
+                    Node.public_slug.isnot(None)).all():
+            slugs.setdefault(parent_id, []).append(slug)
+    return slugs
+
+
+def _paths_for_root(root, also=None, top_slugs=()):
     """The pages a thread root is served on: its id URL and, under its
     owner's handle, the profile, feed and (with a slug) article pages.
     *also* maps a user id to further handles the same pages are cached
-    under — the old one, right after a rename."""
+    under — the old one, right after a rename. *top_slugs*: the slugs of
+    the entries directly under the root (_top_slugs), whose article
+    pages show the same thread."""
     from backend.models import User
 
     paths = [f"/node/{root.id}"]
     owner_id = root.human_owner_id or root.user_id
     owner = User.query.get(owner_id) if owner_id else None
     if owner is not None:
+        slugs = ([root.public_slug] if root.public_slug else []) + [
+            s for s in top_slugs if s != root.public_slug]
         for handle in [owner.username, *(also or {}).get(owner.id, [])]:
             paths.append(f"/@{handle}")
             paths.append(f"/@{handle}/feed.xml")
-            if root.public_slug:
-                paths.append(f"/@{handle}/{root.public_slug}")
-                paths.append(f"/@{handle}/{root.public_slug}.md")
+            for slug in slugs:
+                paths.append(f"/@{handle}/{slug}")
+                paths.append(f"/@{handle}/{slug}.md")
     return paths
 
 
@@ -171,7 +197,8 @@ def invalidate_in_thread(member_id, node_ids):
         Node.id, Node.human_owner_id, Node.user_id, Node.public_slug,
     ).filter(Node.id == root_id).first()
     if root is not None:
-        paths.update(_paths_for_root(root))
+        paths.update(_paths_for_root(
+            root, top_slugs=_top_slugs([root.id]).get(root.id, ())))
         paths.update(_thread_node_paths([root.id]))
     invalidate(*paths)
 
@@ -210,8 +237,10 @@ def invalidate_for_nodes(node_ids):
             for node, root in zip(rows, _roots_of(rows)):
                 paths.add(f"/node/{node.id}")
                 roots[root.id] = root
+            top_slugs = _top_slugs(roots)
             for root in roots.values():
-                paths.update(_paths_for_root(root))
+                paths.update(_paths_for_root(
+                    root, top_slugs=top_slugs.get(root.id, ())))
             paths.update(_thread_node_paths(roots))
         invalidate(*paths)
     except Exception:
@@ -293,9 +322,12 @@ def invalidate_for_user(user, former_handle=None):
         Node.privacy_level == "public",
     ).all()
     root_ids = set()
-    for node, root in zip(rows, _roots_of(rows)):
+    roots = _roots_of(rows)
+    top_slugs = _top_slugs(r.id for r in roots)
+    for node, root in zip(rows, roots):
         paths.add(f"/node/{node.id}")
-        paths.update(_paths_for_root(root, also))
+        paths.update(_paths_for_root(
+            root, also, top_slugs.get(root.id, ())))
         root_ids.add(root.id)
     paths.update(_thread_node_paths(root_ids))
     invalidate(*paths)

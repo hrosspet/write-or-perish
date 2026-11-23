@@ -392,7 +392,8 @@ def public_shares(username):
     user, moved = resolve_public_handle(username)
     if not user:
         return jsonify({"error": "Not found"}), 404
-    # The user's living public roots — shares are enriched with their
+    # The user's living public thread tops (roots, and the public first
+    # entry under a private prompt root) — shares are enriched with their
     # type/publish date; direct-created public roots (craft path) appear
     # too, so everything public has a home page (#228). One page of them
     # (?page=N, PUBLIC_LISTING_PAGE_SIZE), as the Commons feed pages:
@@ -401,8 +402,9 @@ def public_shares(username):
         PUBLIC_LISTING_PAGE_SIZE, listing_page, public_root_order)
     page = listing_page()
     size = PUBLIC_LISTING_PAGE_SIZE
+    from backend.utils.public_threads import thread_top_filter
     nodes = Node.query.filter(
-        Node.parent_id.is_(None),
+        thread_top_filter(),
         Node.deleted_at.is_(None),
         Node.privacy_level == "public",
         (Node.human_owner_id == user.id) | (Node.user_id == user.id),

@@ -113,7 +113,7 @@ def _node(user, parent=None, content="words", **kwargs):
 def _session_root(user, prompt_key):
     """The empty prompt node Voice / Text / Read sessions start with."""
     from backend.utils.session_helpers import create_agentic_root
-    root = create_agentic_root(user.id, prompt_key, "private", "chat")
+    root = create_agentic_root(user.id, prompt_key, "chat")
     _db.session.commit()
     return root
 

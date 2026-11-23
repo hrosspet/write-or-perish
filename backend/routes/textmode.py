@@ -6,7 +6,6 @@ from backend.extensions import db
 from backend.utils.serialization import serialize_node_status
 from backend.utils.timefmt import iso_utc
 from backend.utils.tool_meta import tool_calls_meta_for
-from backend.utils.prompts import get_user_prompt_record
 from backend.utils.placeholders import UserExportValidationError
 from backend.utils.thread_size import ThreadTooLong, reply_skipped_fields
 from backend.utils.llm_nodes import (
@@ -15,8 +14,9 @@ from backend.utils.llm_nodes import (
     pick_model_for_generation, read_only_model_refusal,
     read_only_model_response, reply_ai_usage, reply_refusal,
 )
-from backend.utils.context_artifacts import attach_context_artifacts
-from backend.utils.session_helpers import attach_agentic_prompt_under
+from backend.utils.session_helpers import (
+    attach_agentic_prompt_under, create_agentic_root,
+)
 from backend.utils.request_size import LONG_TEXT_MAX_BODY_BYTES, body_limit
 from backend.utils.privacy import (
     can_user_see_node_or_placeholder, validate_ai_usage,
@@ -134,21 +134,9 @@ def start_conversation():
         if refused is not None:
             return read_only_model_response(refused)
 
-    # 1. System node with the textmode prompt
-    prompt_record = get_user_prompt_record(current_user.id, PROMPT_KEY)
-    system_node = Node(
-        user_id=current_user.id,
-        human_owner_id=current_user.id,
-        parent_id=None,
-        node_type="user",
-        privacy_level=privacy_level,
-        ai_usage=ai_usage,
-    )
-    db.session.add(system_node)
-    db.session.flush()
-    attach_context_artifacts(
-        system_node.id, current_user.id, prompt_record=prompt_record,
-    )
+    # 1. System node with the textmode prompt: private, whatever the
+    # entry's level (session_helpers.PROMPT_ENTRY_PRIVACY).
+    system_node = create_agentic_root(current_user.id, PROMPT_KEY, ai_usage)
     # Started from the Glean card (#435): every turn offers Glean.
     from backend.utils.glean import stamp_glean_entry
     stamp_glean_entry(system_node, current_user, data.get("entry"))
@@ -172,6 +160,13 @@ def start_conversation():
         token_count=approximate_token_count(segments[0]),
     )
     user_node.set_content(segments[0])
+    if privacy_level == "public":
+        # A public entry is the top of its thread on the public pages
+        # (utils/public_threads): it gets its permalink slug at birth, as
+        # a typed public root does (POST /nodes/, #228).
+        from backend.utils.slugs import generate_unique_public_slug
+        user_node.public_slug = generate_unique_public_slug(
+            current_user.id, segments[0])
     db.session.add(user_node)
     db.session.flush()
     parts = split_node_into_chain(user_node, segments=segments)
@@ -582,7 +577,7 @@ def continue_from_node(node_id):
             return read_only_model_response(refused)
 
     prompt_node = attach_agentic_prompt_under(
-        node, current_user.id, PROMPT_KEY, node_privacy, ai_usage)
+        node, current_user.id, PROMPT_KEY, ai_usage)
     parent_id = prompt_node.id if prompt_node is not None else node.id
 
     from backend.utils.tokens import approximate_token_count

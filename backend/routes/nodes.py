@@ -644,7 +644,7 @@ def create_node():
             from backend.utils.session_helpers import create_agentic_root
             from backend.utils.glean import stamp_glean_entry
             system_node = create_agentic_root(
-                current_user.id, "textmode", privacy_level, ai_usage)
+                current_user.id, "textmode", ai_usage)
             # Started from the Glean card (#435).
             stamp_glean_entry(system_node, current_user,
                               request.form.get("entry"))
@@ -2929,7 +2929,7 @@ def init_chunked_upload():
         from backend.utils.session_helpers import create_agentic_root
         from backend.utils.glean import stamp_glean_entry
         system_node = create_agentic_root(
-            current_user.id, "textmode", privacy_level, ai_usage)
+            current_user.id, "textmode", ai_usage)
         # Started from the Glean card (#435).
         stamp_glean_entry(system_node, current_user, data.get("entry"))
 

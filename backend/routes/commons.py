@@ -1,6 +1,6 @@
 """Commons routes (the public forum) (#228, dark behind SHARE_V1 with the Share family).
 
-- /feed (members): public root nodes by everyone, newest first — the
+- /feed (members): public thread tops by everyone, newest first — the
   Commons. Log's public sibling.
 - /node/<id> (NO auth — the funnel): a public node and its PUBLIC
   descendants, readable logged out so a link shared on the open web shows
@@ -22,6 +22,7 @@ from backend.extensions import db
 from backend.utils.encryption import key_service_unavailable
 from backend.utils.error_privacy import describe_exception
 from backend.utils.privacy import PrivacyLevel
+from backend.utils.public_threads import thread_top_filter
 from backend.utils.slugs import permalink_for
 from backend.utils.timefmt import iso_utc
 
@@ -104,14 +105,16 @@ def _author_name(node):
 @commons_bp.route("/feed", methods=["GET"])
 @login_required
 def feed():
-    """Public root nodes, everyone, newest first. Members-only surface —
-    needs the user's own opt-in (#228 dark ship)."""
+    """Public thread tops, everyone, newest first: public roots, and the
+    public first entry of a thread whose prompt root is private
+    (utils/public_threads). Members-only surface — needs the user's own
+    opt-in (#228 dark ship)."""
     if not _enabled() or not current_user.public_sharing_enabled:
         return jsonify({"error": "Not found"}), 404
     page = request.args.get("page", 1, type=int)
     per_page = min(request.args.get("per_page", 20, type=int), 100)
     query = _public_alive(
-        Node.query.filter(Node.parent_id.is_(None))
+        Node.query.filter(thread_top_filter())
     ).order_by(Node.created_at.desc())
     pagination = query.paginate(page=page, per_page=per_page,
                                 error_out=False)
