@@ -268,6 +268,28 @@ final class StartingPointTests: StubbedAppTestCase {
         XCTAssertEqual(app.router.workspace, .profile, "their profile opens")
     }
 
+    /// #731: let in while the final merge goes on, the person's profile
+    /// watcher follows the merge (and its version gets the usual toast).
+    func testLetInWhileTheMergeGoesOnTheWatcherFollowsIt() async throws {
+        try signIn(["starting_point": ["status": "preparing"]])
+        StubURLProtocol.install { request in
+            switch request.url?.path ?? "" {
+            case "/api/dashboard/starting-point":
+                return .json(200, #"{"starting_point":{"status":"ready","done":7,"total":7},"approved":true}"#)
+            case "/api/export/profile-progress":
+                return .json(200, #"{"running":true,"source":"merge","status":"progress","merge_id":7,"message":"Integrating profile versions"}"#)
+            default:
+                return .json(200, #"{"user":{"id":5,"username":"seowriter","approved":true,"terms_up_to_date":true,"twitter_login":true,"profile_merge_pending":true}}"#)
+            }
+        }
+        let model = StartingPointModel(app: app, initial: "preparing")
+        _ = await model.checkOnce()
+        XCTAssertTrue(app.profileWatcher.active)
+        app.profileWatcher.clearUserFlags()
+        XCTAssertEqual(app.user?.profileMergePending, false, "the watcher drops the flag when it ends")
+        app.profileWatcher.stop()
+    }
+
     func testWhileLoadingItKeepsAskingAndANothingStops() async throws {
         try signIn(["starting_point": ["status": "checking"]])
         StubURLProtocol.install { _ in .json(200, #"{"starting_point":{"status":"preparing"},"approved":false}"#) }
@@ -379,9 +401,80 @@ final class ProfileGenerationWatcherTests: XCTestCase {
         var cleared = 0
         w.showToast = { text, _ in toasts.append(text) }
         w.clearUserFlags = { cleared += 1 }
-        w.fetch = { _ in try await Task.sleep(nanoseconds: 60_000_000_000); throw CancellationError() }
+        w.fetch = { _, _ in try await Task.sleep(nanoseconds: 60_000_000_000); throw CancellationError() }
         w.start()
         return (w, { toasts }, { cleared })
+    }
+
+    private static let mergeRunning = ProfileProgress(
+        running: true, source: "merge", status: "progress", progress: 95, message: "Integrating profile versions",
+        mergeId: 7, latestProfile: .init(id: 1))
+
+    /// #731: the payload's `profile_merge_pending` starts the watcher, as the
+    /// build flags do; when the late merge saves its version, the usual toast.
+    func testALateMergeIsFollowedAndItsVersionSaysUpdated() throws {
+        let w = ProfileGenerationWatcher()
+        var toasts: [String] = []
+        w.showToast = { text, _ in toasts.append(text) }
+        w.fetch = { _, _ in try await Task.sleep(nanoseconds: 60_000_000_000); throw CancellationError() }
+        let user = try decode(CurrentUser.self, #"{"id":5,"approved":true,"profile_merge_pending":true}"#)
+        XCTAssertTrue(user.profileMergePending)
+        w.userLoaded(user)
+        XCTAssertTrue(w.active)
+        w.handle(Self.mergeRunning)
+        XCTAssertEqual(w.mergeId, 7, "the poll after it ends asks with its id")
+        XCTAssertEqual(ProfilePage.progressLabel(w.progress), "Integrating profile versions", "one call: no percentage")
+        XCTAssertEqual(w.handle(ProfileProgress(running: false, status: "completed", latestProfile: .init(id: 2))),
+                       .completed)
+        XCTAssertEqual(toasts, ["Your profile has been updated ✓"])
+        XCTAssertNil(w.mergeId)
+        w.stop()
+    }
+
+    func testALateMergeEndingWithoutAVersionSaysNothing() {
+        let (w, toasts, cleared) = watcher()
+        w.handle(Self.mergeRunning)
+        // Even when another version landed (the person's own edit won over the
+        // merge): the endpoint's `unchanged` decides.
+        XCTAssertNil(w.handle(ProfileProgress(running: false, status: "unchanged", latestProfile: .init(id: 2))))
+        XCTAssertTrue(toasts().isEmpty)
+        XCTAssertEqual(w.doneCount, 1)
+        XCTAssertEqual(cleared(), 1)
+        XCTAssertFalse(w.active)
+        w.stop()
+    }
+
+    /// A batch build saves its version while a late merge still runs, and the merge
+    /// then ends without one: the build's toast still comes, as when no merge runs.
+    func testABatchBuildSeenBeforeAnUnchangedMergeKeepsItsToast() {
+        let (w, toasts, _) = watcher()
+        w.handle(ProfileProgress(running: true, source: "batch", status: "progress", latestProfile: .init(id: 1)))
+        w.handle(ProfileProgress(running: true, source: "merge", status: "progress", message: "Integrating profile versions",
+                                 mergeId: 7, latestProfile: .init(id: 2)))
+        XCTAssertEqual(w.handle(ProfileProgress(running: false, status: "unchanged", latestProfile: .init(id: 2))),
+                       .completed)
+        XCTAssertEqual(toasts(), ["Your profile has been updated ✓"])
+        w.stop()
+    }
+
+    /// As after a usual build: an app opened once the merge has ended gets no
+    /// running flag, so nothing is followed and no toast comes.
+    func testNoRunningFlagStartsNothing() throws {
+        let w = ProfileGenerationWatcher()
+        let user = try decode(CurrentUser.self, #"{"id":5,"approved":true}"#)
+        XCTAssertFalse(user.profileMergePending)
+        w.userLoaded(user)
+        XCTAssertFalse(w.active)
+    }
+
+    func testThePollAsksWithTheTaskAndTheMerge() throws {
+        XCTAssertEqual(ProfileGenerationWatcher.query(taskId: nil, mergeId: nil), [])
+        XCTAssertEqual(ProfileGenerationWatcher.query(taskId: nil, mergeId: 7),
+                       [URLQueryItem(name: "merge_id", value: "7")])
+        XCTAssertEqual(ProfileGenerationWatcher.query(taskId: "t1", mergeId: 7),
+                       [URLQueryItem(name: "task_id", value: "t1"), URLQueryItem(name: "merge_id", value: "7")])
+        let answer = try decode(ProfileProgress.self, #"{"running":true,"source":"merge","status":"progress","merge_id":7}"#)
+        XCTAssertEqual(answer.mergeId, 7)
     }
 
     func testGivingUpOnErrorsWithStaleRunningDataIsQuiet() {

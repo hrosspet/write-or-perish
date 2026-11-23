@@ -462,12 +462,9 @@ class Config:
     DEV_UPDATES_V1 = os.environ.get(
         "DEV_UPDATES_V1", "true").lower() in ("1", "true", "yes")
 
-    # Community Archive pre-fill (admin): accounts with at least this many
-    # tweets are read from the nightly parquet snapshot (downloaded once per
-    # export to COMMUNITY_ARCHIVE_SNAPSHOT_DIR, ~1 GB) instead of the REST
-    # API. Env vars reach containers as empty strings when unset — guard.
-    COMMUNITY_ARCHIVE_PARQUET_MIN_TWEETS = int(
-        os.environ.get("COMMUNITY_ARCHIVE_PARQUET_MIN_TWEETS") or "5000")
+    # Where the nightly parquet snapshot of the archive (downloaded once per
+    # export, ~1 GB) is kept. Env vars reach containers as empty strings
+    # when unset — guard.
     COMMUNITY_ARCHIVE_SNAPSHOT_DIR = (
         os.environ.get("COMMUNITY_ARCHIVE_SNAPSHOT_DIR") or None)
     # Where tiktoken keeps o200k_base (#717: a Glean's list is fitted with
@@ -476,10 +473,10 @@ class Config:
     # on a machine downloads the file there once (~3.6 MB).
     TIKTOKEN_CACHE_DIR = os.environ.get("TIKTOKEN_CACHE_DIR") or None
     # Personal key for the Community Archive API v1 (#688; created at
-    # community-archive.org, settings, API keys). Set: the pre-fill and
-    # archive lookups use API v1, and Glean reads the last day from it
-    # while the bulk export is stale. Unset: the Supabase REST API, which
-    # the archive retires on 2026-11-19. A secret: never logged.
+    # community-archive.org, settings, API keys). The pre-fill, the archive
+    # lookups and Glean's last-day fetch use API v1 with it. Unset: each
+    # says the key is missing (the old REST API is gone, #721). A secret:
+    # never logged.
     COMMUNITY_ARCHIVE_API_KEY = (
         os.environ.get("COMMUNITY_ARCHIVE_API_KEY") or "").strip() or None
 
