@@ -1690,12 +1690,41 @@ class UserArtifact(db.Model):
                     | {"external_digest"})
 
     def _row_key(self):
-        """The data key one of this row's values is already stored
-        under, or None: the text, the title and the description of a
-        version share one key, so reading all three is one key-service
-        call, as reading the text alone was."""
+        """The data key for this row's values, or None for a new one.
+
+        The one a value of the row is already stored under: the text,
+        the title and the description of a version share one key, so
+        reading all three is one key-service call, as reading the text
+        alone was. Else the key of the artifact's version before this
+        one: the versions list shows every version's title without its
+        text, and with one key down the history that is one call, not
+        one per version."""
         from backend.utils.encryption import dek_of
         for stored in (self.content, self.title_enc, self.description_enc):
+            key = dek_of(stored)
+            if key is not None:
+                return key
+        return self._earlier_version_key()
+
+    def _earlier_version_key(self):
+        """The data key of the newest other live version of this
+        artifact, or None (no such version, or the row does not say yet
+        whose artifact it is: writers name the account and the kind
+        first)."""
+        from backend.utils.encryption import dek_of
+        if self.user_id is None or not self.kind:
+            return None
+        cls = type(self)
+        with db.session.no_autoflush:
+            query = db.session.query(
+                cls.content, cls.title_enc, cls.description_enc,
+            ).filter(cls.user_id == self.user_id, cls.kind == self.kind,
+                     cls.deleted_at.is_(None))
+            if self.id is not None:
+                query = query.filter(cls.id != self.id)
+            earlier = query.order_by(
+                cls.created_at.desc(), cls.id.desc()).first()
+        for stored in earlier or ():
             key = dek_of(stored)
             if key is not None:
                 return key

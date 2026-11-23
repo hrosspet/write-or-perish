@@ -7,7 +7,8 @@ the deploy that added those columns. Versions written before hold them
 in the ``title`` and ``description`` columns as plain text. The app
 reads both, so nothing depends on this script having run; it moves the
 earlier rows' values to the encrypted columns and empties the plain
-ones.
+ones. Rows hidden by a waiting "Delete all my content" request are
+included: a cancelled request brings them back.
 
 What it does: walks the artifact rows whose ``title_enc`` is empty, in
 id order, --batch-size at a time (default 200). One new data key per
@@ -48,6 +49,7 @@ sys.path.insert(0, os.getcwd())
 from backend.extensions import db  # noqa: E402
 from backend.models import UserArtifact  # noqa: E402
 from backend.utils import encryption  # noqa: E402
+from backend.utils.hidden_rows import including_hidden_rows  # noqa: E402
 
 # Rows per batch. Small on purpose: the production machine has 4 GB, and
 # a batch is one transaction.
@@ -60,7 +62,7 @@ DESCRIPTION_LENGTH = 255
 A = UserArtifact
 
 
-def survey():
+def _survey():
     """(rows with a plain title, rows with an encrypted title)."""
     plain = db.session.query(A.id).filter(A.title_enc.is_(None)).count()
     stored = db.session.query(A.id).filter(A.title_enc.isnot(None)).count()
@@ -86,7 +88,7 @@ def _counts(after_id):
             "accounts": 0, "last_id": after_id}
 
 
-def convert(apply=False, batch_size=BATCH_SIZE, after_id=0, limit=None,
+def _convert(apply=False, batch_size=BATCH_SIZE, after_id=0, limit=None,
             pause=PAUSE_SECONDS, report=None):
     """Move plain titles and descriptions to the encrypted columns.
     Returns counts: {"found", "converted", "changed_meanwhile",
@@ -126,7 +128,7 @@ def convert(apply=False, batch_size=BATCH_SIZE, after_id=0, limit=None,
     return counts
 
 
-def undo(apply=False, batch_size=BATCH_SIZE, after_id=0, limit=None,
+def _undo(apply=False, batch_size=BATCH_SIZE, after_id=0, limit=None,
          pause=PAUSE_SECONDS, report=None):
     """Move encrypted titles and descriptions back to the plain columns.
     Same counts."""
@@ -160,6 +162,25 @@ def undo(apply=False, batch_size=BATCH_SIZE, after_id=0, limit=None,
         if apply and pause:
             time.sleep(pause)
     return counts
+
+
+def survey():
+    """As _survey, over every row: the rows a waiting "Delete all my
+    content" request hides from the app's queries (utils/hidden_rows)
+    come back with their titles if the request is cancelled, so they
+    are counted and moved like the rest."""
+    with including_hidden_rows():
+        return _survey()
+
+
+def convert(**kwargs):
+    with including_hidden_rows():
+        return _convert(**kwargs)
+
+
+def undo(**kwargs):
+    with including_hidden_rows():
+        return _undo(**kwargs)
 
 
 def _print_progress(counts):

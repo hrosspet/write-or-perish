@@ -303,6 +303,13 @@ def get_artifact_versions(kind):
         user_id=current_user.id, kind=kind
     ).order_by(UserArtifact.created_at.desc(), UserArtifact.id.desc()).all()
 
+    # Each version's title and description are read, not its text: the
+    # keys in one concurrent batch (versions written one after another
+    # share a key, so this is usually one call).
+    from backend.utils.encryption import prefetch_deks
+    prefetch_deks([r.title_enc for r in rows]
+                  + [r.description_enc for r in rows])
+
     total = len(rows)
     versions = [
         _serialize(row, version_number=total - i, include_content=False)
@@ -390,8 +397,6 @@ def revert_artifact(kind, version_id):
     new = UserArtifact(
         user_id=current_user.id,
         kind=kind,
-        title=old.title,
-        description=old.description,
         generated_by="revert",
         tokens_used=0,
         privacy_level=old.privacy_level,
@@ -402,6 +407,9 @@ def revert_artifact(kind, version_id):
     )
     # Copy the encrypted content directly (no decrypt/re-encrypt round).
     new.content = old.content
+    # After the text, so they are stored under the text's key.
+    new.title = old.title
+    new.description = old.description
     db.session.add(new)
     db.session.commit()
 

@@ -349,8 +349,94 @@ def test_a_carried_title_costs_no_call_of_its_own(app, client, keys):
     db.session.expire_all()
     keys.forget()
     client.put("/api/artifacts/lisbon-plan", json={"content": "Again."})
-    # One to read the earlier version's title, one for the new version.
-    assert (keys.wraps, keys.unwraps) == (1, 1)
+    # One to read the earlier version's title; the new version takes
+    # that version's key.
+    assert (keys.wraps, keys.unwraps) == (0, 1)
+
+
+def test_thirty_versions_and_a_revert_are_listed_with_one_call(
+        app, client, keys):
+    first_id = None
+    for i in range(30):
+        db.session.remove()
+        keys.forget()                       # each save in a new process
+        row = _artifact(kind="memory", title="Memory",
+                        description="Durable facts", content=f"v{i}",
+                        at=datetime.utcnow() - timedelta(minutes=60 - i))
+        first_id = first_id or row.id
+        assert keys.wraps == (1 if i == 0 else 0)
+    db.session.remove()
+    keys.forget()
+    r = client.post(f"/api/artifacts/memory/revert/{first_id}")
+    assert r.status_code in (200, 201)
+    assert r.get_json()["artifact"]["title"] == "Memory"
+    assert keys.wraps == 0
+    db.session.remove()
+    keys.forget()
+    r = client.get("/api/artifacts/memory/versions")
+    versions = r.get_json()["versions"]
+    assert len(versions) == 31
+    assert {v["title"] for v in versions} == {"Memory"}
+    assert {v["description"] for v in versions} == {"Durable facts"}
+    assert (keys.wraps, keys.unwraps) == (0, 1)
+    # The reverted version: its text, title and description, one key.
+    db.session.remove()
+    keys.forget()
+    latest = UserArtifact.latest_for(_uid(), "memory")
+    assert (latest.title, latest.description, latest.get_content()) == (
+        "Memory", "Durable facts", "v0")
+    assert keys.unwraps == 1
+
+
+def test_a_revert_to_a_version_from_before_has_one_key(app, client, keys):
+    old_id = _artifact(at=datetime.utcnow() - timedelta(days=2)).id
+    _artifact(content="Later text.", at=datetime.utcnow() - timedelta(days=1))
+    _store_as_before(old_id)
+    db.session.remove()
+    keys.forget()
+    assert client.post(
+        f"/api/artifacts/lisbon-plan/revert/{old_id}").status_code in (200, 201)
+    db.session.remove()
+    keys.forget()
+    latest = UserArtifact.latest_for(_uid(), "lisbon-plan")
+    assert (latest.title, latest.description, latest.get_content()) == (
+        TITLE, DESCRIPTION, TEXT)
+    assert _row(latest.id).title == ""
+    assert keys.unwraps == 1
+
+
+def test_versions_from_before_are_listed_with_no_call(app, client, keys):
+    for i in range(5):
+        row = _artifact(content=f"v{i}",
+                        at=datetime.utcnow() - timedelta(minutes=10 - i))
+        _store_as_before(row.id)
+    db.session.remove()
+    keys.forget()
+    assert len(client.get(
+        "/api/artifacts/lisbon-plan/versions").get_json()["versions"]) == 5
+    assert (keys.wraps, keys.unwraps) == (0, 0)
+
+
+def test_another_artifact_or_account_does_not_lend_its_key(app, keys):
+    other = User(username="other")
+    db.session.add(other)
+    db.session.commit()
+    mine = _artifact(kind="plan")
+    theirs = _artifact(kind="plan", user_id=other.id)
+    second = _artifact(kind="notes")
+    key = encryption.wrapped_dek_of
+    assert len({key(mine.content), key(theirs.content),
+                key(second.content)}) == 3
+
+
+def test_a_description_the_model_writes_is_cut_like_the_pages(app):
+    long_description = "d" * 300
+    result = _run_tool(app, "update_artifact", {
+        "kind": "lisbon-plan", "updated_content": TEXT, "title": TITLE,
+        "description": long_description}, _uid())
+    assert result["status"] == "success"
+    row = UserArtifact.latest_for(_uid(), "lisbon-plan")
+    assert row.description == "d" * 255
 
 
 # -- the script for earlier rows ---------------------------------------------
@@ -412,6 +498,28 @@ def test_the_script_moves_rows_with_one_key_per_account(app, keys):
     assert UserArtifact.query.get(ids[-1]).description is None
     assert UserArtifact.query.get(ids[0]).description == DESCRIPTION
     assert script.convert(apply=True, pause=0)["found"] == 0
+
+
+def test_the_script_moves_rows_a_waiting_deletion_hides(app):
+    from backend.models import UserDataPurge, UserDataPurgeHidden
+    script = _script()
+    ids = _earlier_rows()
+    job = UserDataPurge(user_id=_uid(), source="user", scope="hidden",
+                        scheduled_for=datetime.utcnow())
+    db.session.add(job)
+    db.session.flush()
+    db.session.add(UserDataPurgeHidden(
+        job_id=job.id, kind="user_artifact", row_id=ids[1]))
+    db.session.commit()
+    assert UserArtifact.query.get(ids[1]) is None      # hidden from the app
+    assert script.survey() == (5, 0)
+    assert script.convert(pause=0)["found"] == 5
+    assert script.convert(apply=True, pause=0)["converted"] == 5
+    assert script.survey() == (0, 5)
+    hidden = _row(ids[1])
+    assert hidden.title == "" and "Lisbon" not in hidden.title_enc
+    assert script.undo(apply=True, pause=0)["converted"] == 5
+    assert _row(ids[1]).title == TITLE
 
 
 def test_the_script_continues_after_a_stop(app):

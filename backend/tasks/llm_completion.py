@@ -2783,7 +2783,10 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                             user_id=user_id,
                             kind=kind,
                             title=title[:128],
-                            description=description,
+                            # Cut like the page's own saves
+                            # (routes/artifacts.update_artifact).
+                            description=(description[:255]
+                                         if description else None),
                             generated_by=(llm_node.llm_model
                                           or "agentic_session"),
                             tokens_used=0,
