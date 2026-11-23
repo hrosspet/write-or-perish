@@ -111,6 +111,22 @@ if [[ "$CURRENT_REMOTE" == https://* ]]; then
     log "Git remote updated to: $SSH_REMOTE"
 fi
 
+# Start check, before the schema step and before anything is stopped,
+# restarted or reloaded: the app is imported once with the new code and the
+# env file the services read (backend/__init__.py loads .env.production
+# itself). An app that refuses to start (a setting missing from the env
+# file, or two that contradict each other) then stops the deploy here,
+# while the running processes keep serving; without this check the reload
+# below would replace them with processes that cannot start. The reason
+# stays in deployment.log on the VM; this script prints fixed lines only.
+log "Checking that the app starts with this code and .env.production..."
+START_STATUS=0
+python -c "import backend.app" >> "$LOG_FILE" 2>&1 || START_STATUS=$?
+if [ "$START_STATUS" -ne 0 ]; then
+    error "The app does not start with this code and .env.production. Nothing was stopped, restarted or reloaded; the reason is in deployment.log on the VM"
+fi
+log "The app starts"
+
 # Database migrations.
 #
 # Services are stopped ONLY when a migration is actually pending, and only
