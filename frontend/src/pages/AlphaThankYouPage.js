@@ -6,6 +6,7 @@ import api from "../api";
 import PrefillConsentCard from "../components/PrefillConsentCard";
 import { emailState } from "../utils/emailState";
 import DeleteAccountDialog from "../components/DeleteAccountDialog";
+import { betaOpensSentence } from "../constants/beta";
 
 export default function AlphaThankYouPage() {
   const { user, setUser, loading: userLoading } = useUser();
@@ -75,6 +76,9 @@ export default function AlphaThankYouPage() {
     sendLink(email);
   };
 
+  // Only while the opening day is still ahead.
+  const opensSentence = betaOpensSentence();
+
   return (
     <div style={{
       minHeight: "100vh", display: "flex", flexDirection: "column",
@@ -116,9 +120,10 @@ export default function AlphaThankYouPage() {
           lineHeight: 1.8, color: "var(--text-secondary)", maxWidth: 480,
           marginBottom: "3rem",
         }}>
-          Thank you for signing up for the Loore Alpha. We're letting people in
+          Thank you for signing up for the Loore Beta. We're letting people in
           gradually — to keep things intimate and to give each person the attention
           they deserve as they begin.
+          {opensSentence && <> {opensSentence}</>}
         </p>
       </Fade>
 

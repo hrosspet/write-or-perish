@@ -607,7 +607,7 @@ _MARKETING_META = {
     "/login": ("Sign in — Loore", "Sign in to Loore."),
     "/alpha-thank-you": (
         "Thank you — Loore",
-        "Thanks for your interest in the Loore alpha.",
+        "Thanks for your interest in the Loore Beta.",
     ),
 }
 
