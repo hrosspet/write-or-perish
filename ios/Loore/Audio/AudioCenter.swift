@@ -86,17 +86,23 @@ final class AudioCenter {
         observers.append(NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification,
                                                                 object: nil, queue: .main) { [weak self] _ in
             RecordingLog.shared.note("app active")
-            MainActor.assumeIsolated {
-                self?.voiceController?.appDidBecomeActive()
-                // A change may have been decided on another device meanwhile.
-                self?.recheckQueuedAnnouncement()
-            }
+            MainActor.assumeIsolated { self?.appDidBecomeActive() }
         })
         observers.append(NotificationCenter.default.addObserver(forName: UIApplication.didEnterBackgroundNotification,
                                                                 object: nil, queue: .main) { [weak self] _ in
             RecordingLog.shared.note("app in background")
             MainActor.assumeIsolated { self?.voiceController?.appDidEnterBackground() }
         })
+    }
+
+    /// The app came to the foreground (also at launch).
+    func appDidBecomeActive() {
+        voiceController?.appDidBecomeActive()
+        // A change may have been decided on another device meanwhile.
+        recheckQueuedAnnouncement()
+        // A deleted account's 30 days may have ended while the app was in
+        // the background (#777).
+        uploader.removeEnded()
     }
 
     /// Connects to the app (API client, cookies, toasts). Called once by `AppState`.
@@ -302,8 +308,13 @@ final class AudioCenter {
         /// sign-in): kept on the phone, and sent when the same account signs
         /// in again.
         case keep
-        /// The person signed out or deleted the account: the account's audio
-        /// is deleted (every account's when nil: it could not be loaded).
+        /// The account is deleted (#777: deleted here, or the server refused
+        /// its sign-in and said so): kept like `keep` while the account can
+        /// still be restored, so a restore and sign-in sends it, and removed
+        /// when it no longer can (`ChunkUploader.accountDeleted`).
+        case keepUntilDeleted(DeletedAccount)
+        /// The person logged out: the account's audio is deleted (every
+        /// account's when nil: it could not be loaded).
         case delete(account: Int?)
     }
 
@@ -318,6 +329,9 @@ final class AudioCenter {
         activeDictation?.cancel()
         switch unsentAudio {
         case .keep: uploader.hold()
+        case .keepUntilDeleted(let deleted):
+            uploader.hold()
+            uploader.accountDeleted(deleted)
         case .delete(let account): uploader.reset(account: account)
         }
         PrivateFiles.sweepTemporary()

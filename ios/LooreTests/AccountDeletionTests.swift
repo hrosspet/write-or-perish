@@ -123,7 +123,7 @@ final class DeleteAccountModelTests: AccountDeletionTestCase {
         XCTAssertEqual(AccountDeletedView.message(deleteOn: nil),
                        "You are signed out. If you change your mind, you can still restore it by signing in within 30 days; after that it is deleted forever, with everything in it.")
         // Answers still in flight from the signed-out session change nothing.
-        app.handle(.unauthorized)
+        app.handle(.unauthorized())
         XCTAssertEqual(app.phase, .accountDeleted(deleteOn: LooreDate.parse("2026-11-08T12:00:00Z")))
         await app.leaveAccountDeletionScreen()
         XCTAssertEqual(app.phase, .signedOut)

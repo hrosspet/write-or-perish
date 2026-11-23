@@ -49,6 +49,7 @@ import time
 from collections import Counter
 from datetime import datetime, timedelta
 
+from flask import jsonify, session
 from itsdangerous import BadSignature, SignatureExpired
 from sqlalchemy import func, null, or_
 
@@ -112,6 +113,50 @@ def session_user(user_id):
     if user is None or user.deleted_at is not None:
         return None
     return user
+
+
+# The 401 of a sign-in whose account was deleted (#777).
+DELETED_ACCOUNT_CODE = "account_deleted"
+
+
+def refused_sign_in():
+    """When this request's sign-in stopped working because its account
+    was deleted: the fields the 401 adds, else None.
+
+    A deleted account loads as nobody (``session_user``), so its sessions
+    get the 401 of a request without a sign-in. The iPhone keeps audio it
+    has not sent yet under the account it was recorded under, and this
+    tells it until when (#777): ``delete_on`` while the deletion waits
+    and a sign-in can still restore the account; ``restorable`` false
+    once the deletion has started, or the account is gone.
+
+    Read after flask-login has tried the session and the remember cookie:
+    either leaves the account id it carried in ``session["_user_id"]``.
+    Both cookies are signed by this server and already carry that id, so
+    the answer adds only whether and when the account is deleted. Ids and
+    a date only.
+    """
+    try:
+        user_id = int(session.get("_user_id"))
+    except (TypeError, ValueError):
+        return None
+    user = db.session.get(User, user_id)
+    if user is not None and user.deleted_at is None:
+        return None
+    from backend.utils.timefmt import iso_utc
+    job = deletion_job(user_id) if user is not None else None
+    return {
+        "code": DELETED_ACCOUNT_CODE,
+        "user_id": user_id,
+        "delete_on": iso_utc(job.scheduled_for) if job else None,
+        "restorable": user is not None and not _deletion_started(user_id),
+    }
+
+
+def unauthorized_answer():
+    """flask-login's 401 for an /api request without a working sign-in
+    (backend/__init__.py), with ``refused_sign_in`` when it applies."""
+    return jsonify({"error": "Unauthorized", **(refused_sign_in() or {})}), 401
 
 
 # ── Who may be deleted ──────────────────────────────────────────────────
@@ -509,13 +554,15 @@ def deletion_job(user_id):
 
 def restore_offer(user):
     """What the restore page shows for a deleted account in its grace
-    period: the username, when it is deleted, and whether it can still
-    be restored."""
+    period: the username and id, when it is deleted, and whether it can
+    still be restored."""
     from backend.models import UserDataPurgeHidden
     from backend.utils.timefmt import iso_utc
     job = deletion_job(user.id)
     return {
         "username": user.username,
+        # The iPhone keeps unsent audio under the account id (#777).
+        "user_id": user.id,
         "delete_on": iso_utc(job.scheduled_for) if job else None,
         "restorable": not _deletion_started(user.id),
         # The deletion replaced a "Delete all my content" whose writing is

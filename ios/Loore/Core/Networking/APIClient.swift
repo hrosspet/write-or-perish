@@ -4,7 +4,8 @@ import os
 /// App-wide signals the client raises while handling answers. `AppState` turns
 /// them into a sign-out, the spend-cap banner, or a re-check of the user.
 enum APIEvent: Sendable, Equatable {
-    case unauthorized
+    /// With the account when the server said it is deleted (#777).
+    case unauthorized(DeletedAccount? = nil)
     case spendCapped(message: String)
     /// Payments on, no AI replies on this account (#438).
     case subscriptionRequired(message: String)
@@ -208,7 +209,7 @@ final class APIClient: @unchecked Sendable {
                                   contentType: http.value(forHTTPHeaderField: "Content-Type"),
                                   data: data)
         switch error {
-        case .unauthorized: emit(.unauthorized)
+        case .unauthorized(let deleted): emit(.unauthorized(deleted))
         case .spendCap(let message): emit(.spendCapped(message: message))
         case .subscriptionRequired(let message): emit(.subscriptionRequired(message: message))
         case .notApproved: emit(.notApproved)
@@ -297,7 +298,7 @@ final class APIClient: @unchecked Sendable {
             try? FileManager.default.removeItem(at: fileURL)
             let error = APIError.from(status: http.statusCode,
                                       contentType: http.value(forHTTPHeaderField: "Content-Type"), data: data)
-            if case .unauthorized = error { emit(.unauthorized) }
+            if case .unauthorized(let deleted) = error { emit(.unauthorized(deleted)) }
             throw error
         }
         return (fileURL, http)
@@ -324,7 +325,7 @@ final class APIClient: @unchecked Sendable {
         let error = APIError.from(status: http.statusCode,
                                   contentType: http.value(forHTTPHeaderField: "Content-Type"), data: data)
         switch error {
-        case .unauthorized: emit(.unauthorized)
+        case .unauthorized(let deleted): emit(.unauthorized(deleted))
         case .spendCap(let message): emit(.spendCapped(message: message))
         case .subscriptionRequired(let message): emit(.subscriptionRequired(message: message))
         case .notApproved: emit(.notApproved)

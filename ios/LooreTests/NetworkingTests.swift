@@ -7,8 +7,27 @@ final class APIErrorMappingTests: XCTestCase {
     }
 
     func testUnauthorized() {
-        XCTAssertEqual(map(401, #"{"error":"Unauthorized"}"#), .unauthorized)
-        XCTAssertEqual(map(401, "<html>", contentType: "text/html"), .unauthorized)
+        XCTAssertEqual(map(401, #"{"error":"Unauthorized"}"#), .unauthorized())
+        XCTAssertEqual(map(401, "<html>", contentType: "text/html"), .unauthorized())
+    }
+
+    /// #777: a 401 whose sign-in belongs to a deleted account says which and
+    /// until when (backend `refused_sign_in`); any other 401 carries nothing.
+    func testUnauthorizedForADeletedAccount() {
+        XCTAssertEqual(map(401, #"{"error":"Unauthorized","code":"account_deleted","user_id":5,"delete_on":"2026-12-23T10:00:00Z","restorable":true}"#),
+                       .unauthorized(DeletedAccount(account: 5, deleteOn: LooreDate.parse("2026-12-23T10:00:00Z"), restorable: true)))
+        let gone = map(401, #"{"error":"Unauthorized","code":"account_deleted","user_id":5,"delete_on":null,"restorable":false}"#)
+        XCTAssertEqual(gone, .unauthorized(DeletedAccount(account: 5, deleteOn: nil, restorable: false)))
+        XCTAssertEqual(DeletedAccount(account: 5, deleteOn: nil, restorable: false).audioRemovedAt, .distantPast, "removed at once")
+        XCTAssertNil(DeletedAccount(account: 5, deleteOn: nil, restorable: true).audioRemovedAt, "no date known: kept")
+        XCTAssertEqual(gone.status, 401)
+        // Another code, no account, or no JSON: a plain sign-out.
+        XCTAssertEqual(map(401, #"{"error":"Unauthorized","code":"other","user_id":5}"#), .unauthorized())
+        XCTAssertEqual(map(401, #"{"error":"Unauthorized","code":"account_deleted"}"#), .unauthorized())
+        XCTAssertEqual(map(401, #"{"code":"account_deleted","user_id":5}"#, contentType: "text/html"), .unauthorized())
+        // A missing "restorable" keeps the audio until the date.
+        XCTAssertEqual(map(401, #"{"code":"account_deleted","user_id":5,"delete_on":"2026-12-23T10:00:00Z"}"#),
+                       .unauthorized(DeletedAccount(account: 5, deleteOn: LooreDate.parse("2026-12-23T10:00:00Z"), restorable: true)))
     }
 
     func testSpendCap() {
@@ -49,7 +68,7 @@ final class APIErrorMappingTests: XCTestCase {
         XCTAssertTrue(offline.isOffline)
         XCTAssertNil(offline.status)
         XCTAssertTrue(APIError.from(transport: URLError(.cancelled)).isCancelled)
-        XCTAssertEqual(APIError.from(transport: APIError.unauthorized), .unauthorized)
+        XCTAssertEqual(APIError.from(transport: APIError.unauthorized()), .unauthorized())
     }
 }
 
@@ -159,7 +178,7 @@ final class APIClientTests: XCTestCase {
                 XCTFail("expected an error for \(path)")
             } catch {}
         }
-        XCTAssertEqual(box.events, [.unauthorized, .spendCapped(message: "capped"), .notApproved, .notLetIn])
+        XCTAssertEqual(box.events, [.unauthorized(), .spendCapped(message: "capped"), .notApproved, .notLetIn])
     }
 
     /// Review M1: the in-memory jar posts no `NSHTTPCookieManagerCookiesChanged`;

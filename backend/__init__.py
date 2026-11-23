@@ -309,7 +309,10 @@ def create_app():
     @login_manager.unauthorized_handler
     def unauthorized():
         if request.path.startswith("/api"):
-            return jsonify({"error": "Unauthorized"}), 401
+            # A sign-in of a deleted account also says until when it can
+            # be restored (#777).
+            from backend.utils.account_deletion import unauthorized_answer
+            return unauthorized_answer()
         return redirect(url_for("auth_bp.login"))
 
     @login_manager.user_loader
