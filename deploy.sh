@@ -167,7 +167,9 @@ if [ -d "migrations" ]; then
         # here, before anything is stopped.
         PENDING_CURRENT=$( (flask db current 2>/dev/null || true) | grep -oE '^[a-f0-9]+' | head -1 || true)
         PENDING_HEAD=$( (flask db heads 2>/dev/null || true) | grep -oE '^[a-f0-9]+' | head -1 || true)
-        if [ -n "$PENDING_HEAD" ] && [ "$PENDING_CURRENT" != "$PENDING_HEAD" ]; then
+        # (A database that cannot be reached gives no current revision:
+        # that is not this case, and ends the deploy too.)
+        if [ -n "$PENDING_CURRENT" ] && [ -n "$PENDING_HEAD" ] && [ "$PENDING_CURRENT" != "$PENDING_HEAD" ]; then
             warn "flask db migrate exited with status $MIGRATE_STATUS while an earlier migration is not applied yet; it is applied below. Model changes of this deploy were not checked: deploy once more after this one. Its output is in deployment.log on the VM"
         else
             error "flask db migrate exited with status $MIGRATE_STATUS, so no migration was generated for this code. Nothing was stopped, restarted or reloaded by this deploy; its output is in deployment.log on the VM"

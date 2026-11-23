@@ -52,6 +52,8 @@ flask() {
             return "$MIGRATE_EXIT" ;;
         heads) echo "bbbb2222 (head)" ;;
         current)
+            if [ "$NO_DATABASE" = 1 ]; then
+                echo "could not connect to server" >&2; return 1; fi
             if [ -f "$PROJECT_DIR/upgraded" ] || [ "$AT_HEAD" = 1 ]; then
                 echo "bbbb2222 (head)";
             else echo "aaaa1111"; fi ;;
@@ -68,7 +70,8 @@ flask() {
 """
 
 
-def _run(tmp_path, migrate_exit=0, upgrade_exit=0, at_head=False):
+def _run(tmp_path, migrate_exit=0, upgrade_exit=0, at_head=False,
+         no_database=False):
     (tmp_path / "migrations").mkdir()
     script = _FAKES + _deploy_block() + '\necho "the deploy went on"'
     result = subprocess.run(
@@ -78,6 +81,7 @@ def _run(tmp_path, migrate_exit=0, upgrade_exit=0, at_head=False):
              "PROJECT_DIR": str(tmp_path), "BACKEND_DIR": str(tmp_path),
              "MIGRATE_EXIT": str(migrate_exit),
              "AT_HEAD": "1" if at_head else "0",
+             "NO_DATABASE": "1" if no_database else "0",
              "UPGRADE_EXIT": str(upgrade_exit)})
     log_file = tmp_path / "deployment.log"
     return result, log_file
@@ -130,6 +134,22 @@ def test_a_failed_migrate_ends_the_deploy_before_anything_is_stopped(
     assert "the deploy went on" not in printed
     assert VALUE not in printed
     assert VALUE in log_file.read_text()
+
+
+def test_a_database_that_cannot_be_reached_ends_the_deploy_too(tmp_path):
+    """`flask db migrate` fails and `flask db current` prints no
+    revision: not a migration still to apply."""
+    result, _ = _run(tmp_path, migrate_exit=1, upgrade_exit=1,
+                     no_database=True)
+
+    printed = result.stdout + result.stderr
+    assert result.returncode == 1
+    assert "so no migration was generated for this code" in printed
+    assert "Nothing was stopped, restarted or reloaded by this deploy" \
+        in printed
+    assert "an earlier migration is not applied yet" not in printed
+    assert "services stopped" not in printed
+    assert "the deploy went on" not in printed
 
 
 def test_a_failed_migrate_with_a_migration_still_to_apply_goes_on(tmp_path):
