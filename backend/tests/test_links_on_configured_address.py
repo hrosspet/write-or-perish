@@ -69,6 +69,14 @@ def test_the_welcome_link_is_on_the_configured_address(real_app, mails, headers)
     assert link.startswith(f"{FRONTEND_URL}/auth/magic-link/verify?token=")
 
 
+@pytest.fixture
+def x_app_keys(monkeypatch):
+    """Keys for the app's registration at X, set before create_app()."""
+    import backend.config as _config
+    monkeypatch.setattr(_config.Config, "TWITTER_API_KEY", "key")
+    monkeypatch.setattr(_config.Config, "TWITTER_API_SECRET", "secret")
+
+
 def _x_request_token_answer():
     r = requests.Response()
     r.status_code = 200
@@ -79,7 +87,8 @@ def _x_request_token_answer():
 
 
 @HEADER_SETS
-def test_x_is_given_the_callback_on_the_configured_address(real_app, headers):
+def test_x_is_given_the_callback_on_the_configured_address(
+        x_app_keys, real_app, headers):
     """X sign-in and Connect X both start at /auth/twitter."""
     callbacks = []
 
