@@ -445,6 +445,13 @@ class User(db.Model, UserMixin):
     # approves the account by hand. With payments off again, such an
     # account without the paid set waits for approval like a new one.
     let_in_at = db.Column(db.DateTime, nullable=True)
+    # When the approval gate, while payments were on, did not let this new
+    # account in because the day's number of new accounts not prepared in
+    # advance was reached (utils/trial_alerts.held_at_gate): it waits for
+    # the admin's approval, as every new account did before payments, also
+    # after the day's count has fallen. Cleared when the account is
+    # approved. NULL: never held that way.
+    approval_hold_at = db.Column(db.DateTime, nullable=True)
     # Whether the account was approved when the admin blocked it (#697,
     # utils/approval.block), so Unblock restores exactly that. NULL: not
     # blocked by Block (an account deactivated before payments, or none).
@@ -3184,9 +3191,10 @@ class TrialCard(db.Model):
 
 
 class TrialAlert(db.Model):
-    """A UTC day on which the admin was emailed that many trials started
-    (utils/trial_alerts): one row per day, so the hourly check emails at
-    most once a day. Holds the count at the time, nothing of any account.
+    """A UTC day on which the admin was emailed that many trials of
+    accounts not prepared in advance started (utils/trial_alerts): one row
+    per day, so the hourly check emails at most once a day. Holds the
+    count at the time, nothing of any account.
     """
     __tablename__ = "trial_alert"
 

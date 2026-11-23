@@ -1,8 +1,10 @@
 """The daily count of trials started and the admin's email.
 
-More than TRIALS_STARTED_ALERT trials started in 24 hours: one email to
-the admin, at most once per UTC day. At or below the number, nothing.
-Nothing is stopped: every trial stays as it is.
+More than OUTSIDE_TRIALS_EMAIL_PER_DAY accounts that were not prepared in
+advance started a trial in 24 hours: one email to the admin, at most once
+per UTC day. At or below the number, nothing. An account prepared in
+advance is never counted. The email stops nothing: every trial stays as
+it is. (The waiting list from the higher number: test_trial_waiting_list.)
 """
 import os
 import sys
@@ -30,8 +32,12 @@ for _mod in ["backend.models", "backend.extensions"]:
 from backend.extensions import db as _db  # noqa: E402
 from backend.models import TrialAlert, User  # noqa: E402
 from backend.utils.trial_alerts import (  # noqa: E402
-    TRIALS_STARTED_ALERT, check_trials_started, trials_started_since,
+    OUTSIDE_TRIALS_EMAIL_PER_DAY, OUTSIDE_TRIALS_HOLD_PER_DAY,
+    check_trials_started, outside_places_since,
+    outside_trials_started_since,
 )
+
+TRIALS_STARTED_ALERT = OUTSIDE_TRIALS_EMAIL_PER_DAY
 
 NOW = datetime(2027, 1, 20, 12, 0, 0)
 CONFIG = {
@@ -83,6 +89,8 @@ def test_many_trials_in_a_day_email_the_admin_once(app):
         "to_email": "alerts@example.com",
         "trials": TRIALS_STARTED_ALERT + 1,
         "alert_above": TRIALS_STARTED_ALERT,
+        "places": TRIALS_STARTED_ALERT + 1,
+        "hold_from": OUTSIDE_TRIALS_HOLD_PER_DAY,
         "trial_limit_usd": 30.0,
     }]
     # Every trial is as it was.
@@ -128,7 +136,7 @@ def test_only_the_last_24_hours_count(app):
             prefix="old")
     _trials(TRIALS_STARTED_ALERT, started=NOW - timedelta(hours=5),
             prefix="new")
-    assert trials_started_since(NOW - timedelta(hours=24)) == \
+    assert outside_trials_started_since(NOW - timedelta(hours=24)) == \
         TRIALS_STARTED_ALERT
     emails, send = _mailbox()
     assert check_trials_started(
@@ -176,10 +184,81 @@ def test_the_email_states_the_numbers(app, monkeypatch):
         lambda to, subject, text, html, *a, **kw: sent.append(
             (to, subject, text, html)))
     email_mod.send_trials_started_email(
-        to_email="alerts@example.com", trials=31, alert_above=25,
-        trial_limit_usd=30.0)
+        to_email="alerts@example.com", trials=12, alert_above=10,
+        trial_limit_usd=30.0, places=15, hold_from=20)
     (to, subject, text, html), = sent
     assert to == "alerts@example.com"
-    assert "31 trials" in subject
-    assert "31" in text and "25" in text and "$30.00" in text
-    assert "31" in html
+    assert "12 trials" in subject
+    assert ("Trials started in the last 24 hours by accounts that were not "
+            "prepared in advance: 12") in text
+    assert "This email is sent above: 10" in text
+    assert "$30.00" in text
+    assert ("New accounts let in or on a trial in the last 24 hours: 15. "
+            "From 20, a new account that was not prepared in advance waits "
+            "for your approval") in text
+    assert "12" in html and "From 20" in html
+
+
+def test_an_account_prepared_in_advance_is_not_counted(app):
+    # Pre-filled now (both fields), pre-filled before the date was kept
+    # (the handle only), and loaded again after its content was deleted
+    # (the date only).
+    _trials(TRIALS_STARTED_ALERT + 3, prefix="ca", prefilled_handle="h",
+            prefilled_at=NOW - timedelta(days=9))
+    _trials(4, prefix="early", prefilled_handle="h")
+    _trials(4, prefix="again", prefilled_at=NOW - timedelta(days=2))
+    _trials(2, prefix="outside")
+    since = NOW - timedelta(hours=24)
+    assert outside_trials_started_since(since) == 2
+    assert outside_places_since(since) == 2
+    emails, send = _mailbox()
+    result = check_trials_started(CONFIG, now=NOW, send_email=send)
+    assert result["trials"] == 2 and result["alerted"] is False
+    assert emails == []
+
+
+def test_the_number_comes_from_the_settings(app):
+    _trials(3)
+    emails, send = _mailbox()
+    result = check_trials_started(
+        dict(CONFIG, OUTSIDE_TRIALS_EMAIL_PER_DAY=2), now=NOW,
+        send_email=send)
+    assert result["alerted"] is True and result["alert_above"] == 2
+    assert emails[0]["alert_above"] == 2
+
+
+def test_the_number_zero_sends_nothing(app):
+    _trials(TRIALS_STARTED_ALERT + 1)
+    emails, send = _mailbox()
+    result = check_trials_started(
+        dict(CONFIG, OUTSIDE_TRIALS_EMAIL_PER_DAY=0), now=NOW,
+        send_email=send)
+    assert result == {"status": "off"} and emails == []
+
+
+def test_the_default_numbers(app):
+    from backend.config import Config
+    assert (Config.OUTSIDE_TRIALS_EMAIL_PER_DAY,
+            Config.OUTSIDE_TRIALS_HOLD_PER_DAY) == (10, 20)
+    assert (OUTSIDE_TRIALS_EMAIL_PER_DAY, OUTSIDE_TRIALS_HOLD_PER_DAY) \
+        == (10, 20)
+
+
+def test_places_count_trials_and_accounts_let_in_without_one(app):
+    since = NOW - timedelta(hours=24)
+    _trials(3, prefix="trial")
+    # Let in by the gate in the window, no trial yet: a place each.
+    for i in range(2):
+        _db.session.add(User(username=f"in{i}", plan="free", approved=True,
+                             let_in_at=NOW - timedelta(hours=1)))
+    # Let in two days ago, approved by the admin (no let_in_at), and one
+    # the admin turned off since: no place.
+    _db.session.add(User(username="older", plan="free", approved=True,
+                         let_in_at=NOW - timedelta(hours=50)))
+    _db.session.add(User(username="byhand", plan="free", approved=True))
+    _db.session.add(User(username="off", plan="free", approved=False,
+                         let_in_at=NOW - timedelta(hours=1),
+                         deactivated_at=NOW))
+    _db.session.commit()
+    assert outside_trials_started_since(since) == 3
+    assert outside_places_since(since) == 5

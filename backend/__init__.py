@@ -364,8 +364,10 @@ def create_app():
         # An account never approved is approved on its first request and
         # goes on to the trial step (block_accounts_without_subscription
         # below); one the admin blocked or marked as spam is refused here,
-        # with its own text. No-op while payments are off.
-        if approval.let_in(current_user):
+        # with its own text. From a day's number of new accounts not
+        # prepared in advance, the next one waits for approval as before
+        # payments (approval.let_in_at_gate). No-op while payments are off.
+        if approval.let_in_at_gate(current_user):
             db.session.commit()
             return
 

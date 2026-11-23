@@ -241,6 +241,19 @@ class Config:
     # with the prices before the switch is turned on.
     SUBSCRIPTION_TRIAL_SPEND_LIMIT_USD = float_from_env(
         "SUBSCRIPTION_TRIAL_SPEND_LIMIT_USD", 30.0)
+    # Trials of accounts that were not prepared in advance, per 24 hours
+    # (backend/utils/trial_alerts.py; Peter, 2026-11-23: "One -> email me.
+    # A higher one -> hard stop, put them on a waiting list as it was in
+    # Alpha"). HEURISTICS, both: 10 for the email is Peter's number
+    # (2026-11-23); 20 for the waiting list was proposed to him with it.
+    # More than the first: one email to the admin a day, nothing stopped.
+    # From the second: a new such account waits for the admin's approval
+    # instead of going on to the trial. 0 turns a level off. Only while
+    # PAYMENTS_ENABLED is on.
+    OUTSIDE_TRIALS_EMAIL_PER_DAY = int(
+        float_from_env("OUTSIDE_TRIALS_EMAIL_PER_DAY", 10))
+    OUTSIDE_TRIALS_HOLD_PER_DAY = int(
+        float_from_env("OUTSIDE_TRIALS_HOLD_PER_DAY", 20))
     # Wrong discount codes one account may try per hour before the code
     # field answers "try again later". 10: a typo or two is never
     # refused, guessing an 8-character code is out of reach.

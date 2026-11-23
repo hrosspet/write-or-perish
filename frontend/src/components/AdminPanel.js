@@ -629,12 +629,15 @@ export function purgeLabel(job) {
 
 // The Users tab's Status cell. Payments on (#697): "Blocked" for an
 // account the admin blocked; "Held (spam)" for one the spam mark holds
-// (#713: not let in, Activate lets it in); "Inactive" is then one that has
-// not come back since payments went on (it is let in at its next visit).
+// (#713: not let in, Activate lets it in); "Waiting" for a new account
+// held for approval because the day's number of new accounts was reached
+// (Activate lets it in); "Inactive" is then one that has not come back
+// since payments went on (it is let in at its next visit).
 export function statusLabel(u, letInWithoutApproval) {
   if (u.approved) return "Active";
   if (letInWithoutApproval && u.blocked) return "Blocked";
   if (letInWithoutApproval && u.held_as_spam) return "Held (spam)";
+  if (letInWithoutApproval && u.waits_for_approval) return "Waiting";
   return "Inactive";
 }
 

@@ -385,32 +385,42 @@ def send_spend_alert_email(to_email, provider, spend_usd, limit_usd, threshold):
 
 
 def send_trials_started_email(to_email, trials, alert_above,
-                              trial_limit_usd=0):
-    """Tell the admin that more trials started in the last 24 hours than
-    the alert number (utils/trial_alerts). Counts only: no account is
-    named."""
+                              trial_limit_usd=0, places=None, hold_from=0):
+    """Tell the admin that more accounts not prepared in advance started
+    a trial in the last 24 hours than OUTSIDE_TRIALS_EMAIL_PER_DAY
+    (utils/trial_alerts). *places*: those trials plus the new accounts let
+    in that have not started one yet; from *hold_from* places a new
+    account waits for approval. Counts only: no account is named."""
     ceiling_line = (
         f"Each trial can use up to ${trial_limit_usd:,.2f} of model cost "
-        f"before its first payment.\n" if trial_limit_usd else "")
-    text_body = (
-        f"Trials started\n\n"
-        f"Trials started in the last 24 hours: {trials}\n"
-        f"This email is sent above: {alert_above}\n"
-        f"{ceiling_line}\n"
-        f"Nothing was stopped or cancelled. It is sent at most once a day.\n"
-        f"Review the new accounts in the admin dashboard: "
-        f"https://loore.org/admin\n"
-    )
+        f"before its first payment." if trial_limit_usd else "")
+    hold_line = (
+        f"New accounts let in or on a trial in the last 24 hours: "
+        f"{int(places)}. From {int(hold_from)}, a new account that was not "
+        f"prepared in advance waits for your approval (Users tab, "
+        f"Activate)." if hold_from and places is not None else "")
+    closing = ("Nothing was stopped or cancelled by this email. It is sent "
+               "at most once a day.")
+    lines = [
+        "Trials started",
+        "",
+        f"Trials started in the last 24 hours by accounts that were not "
+        f"prepared in advance: {trials}",
+        f"This email is sent above: {alert_above}",
+    ]
+    lines += [line for line in (ceiling_line, hold_line) if line]
+    lines += ["", closing,
+              "Review the new accounts in the admin dashboard: "
+              "https://loore.org/admin", ""]
+    text_body = "\n".join(lines)
     paragraphs = [
-        f'<strong style="color: #c4956a;">{int(trials)}</strong> trials '
-        f'started in the last 24 hours\n'
+        f'<strong style="color: #c4956a;">{int(trials)}</strong> accounts '
+        f'that were not prepared in advance started a trial in the last '
+        f'24 hours\n'
         f'      (this email is sent above '
-        f'<strong style="color: #ede8dd;">{int(alert_above)}</strong>).',
-        "Nothing was stopped or cancelled. It is sent at most once a day."]
-    if trial_limit_usd:
-        paragraphs.insert(1, (
-            f"Each trial can use up to ${trial_limit_usd:,.2f} of model "
-            f"cost before its first payment."))
+        f'<strong style="color: #ede8dd;">{int(alert_above)}</strong>).']
+    paragraphs += [line for line in (ceiling_line, hold_line) if line]
+    paragraphs.append(closing)
     html_body = _card("Trials started", paragraphs,
                       "Open admin dashboard", "https://loore.org/admin")
     _send(to_email,

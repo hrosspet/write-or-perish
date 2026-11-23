@@ -244,6 +244,7 @@ def list_users():
     )
     from backend.utils.approval import (
         approval_waived, counts_as_approved, held_as_spam, is_blocked)
+    from backend.utils.trial_alerts import waits_for_approval
 
     config = current_app.config
     waived = approval_waived(config)
@@ -311,8 +312,12 @@ def list_users():
             # Payments on (#697): the admin blocked it (Inactive otherwise
             # only means it has not come back since payments went on), or
             # the spam mark holds it (#713: not let in at its next visit).
+            # Or the gate holds it for approval because the day's number
+            # of new accounts was reached (utils/trial_alerts).
             **({"blocked": is_blocked(user),
-                "held_as_spam": held_as_spam(user, config)}
+                "held_as_spam": held_as_spam(user, config),
+                "waits_for_approval": (waits_for_approval(user)
+                                       and not is_blocked(user))}
                if waived else {}),
             "email": user.email,
             "plan": user.plan,

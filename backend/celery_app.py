@@ -131,8 +131,9 @@ celery.conf.update(
             'task': 'backend.tasks.spend_monitor.roll_carries',
             'schedule': schedules.crontab(minute=7),  # hourly, at :07 UTC
         },
-        # The day's count of trials started, with an email to the admin
-        # above utils/trial_alerts.TRIALS_STARTED_ALERT. A fixed minute,
+        # The day's count of trials started by accounts not prepared in
+        # advance, with an email to the admin above
+        # OUTSIDE_TRIALS_EMAIL_PER_DAY (utils/trial_alerts). A fixed minute,
         # so a deploy does not put the check off. Nothing while payments
         # are off.
         'check-trials-started': {

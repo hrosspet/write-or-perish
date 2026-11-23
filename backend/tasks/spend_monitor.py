@@ -54,8 +54,9 @@ def roll_carries():
 
 @celery.task(name='backend.tasks.spend_monitor.check_trials')
 def check_trials():
-    """Hourly: email the admin, at most once a day, when more trials
-    started in the last 24 hours than utils/trial_alerts allows for.
+    """Hourly: email the admin, at most once a day, when more accounts
+    not prepared in advance started a trial in the last 24 hours than
+    OUTSIDE_TRIALS_EMAIL_PER_DAY (utils/trial_alerts).
     Nothing while payments are off."""
     with flask_app.app_context():
         result = check_trials_started(flask_app.config)
