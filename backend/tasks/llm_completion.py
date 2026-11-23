@@ -69,6 +69,7 @@ from backend.utils.llm_batch import (
 from backend.utils.ca_feed import (
     CA_CHAT_TURN_NOTE, CA_READ_AGAIN_TURN, CA_READ_OLDER_TURN,
     CA_TWEETS_CHAT_STUB, GLEAN_DAY_DONE_CODE, GLEAN_DAY_DONE_MESSAGE,
+    GLEAN_TOO_LONG_FOR_MODEL_CODE, glean_too_long_for_model,
     FEED_AI_USAGE, READ_FURTHER_MARKER,
     FeedReplyError, count_dropped_picks, read_reply_ids, record_feed_render,
     ca_turn as _ca_turn,
@@ -1950,7 +1951,11 @@ def _fit_read_list(messages, tweets_text, stats, refs, model_id, config,
     as LLMProvider.count_tokens counts it; on any other model the rest is
     *estimate*d as the thread limit estimates a prompt (a function
     messages -> thread_size.Size) and the tweets at the tweets prior, the
-    upper end of what was measured, so the list errs short."""
+    upper end of what was measured, so the list errs short. On Haiku 5.5
+    that estimate is what keeps a Glean under its 100k price step (the
+    budget there, #733): the claude_new prior counts a character of the
+    list at 0.775 tokens, 1.5 to 2.2 times what Claude's tokenizer is
+    expected to make of it (test_glean_price_step has the numbers)."""
     from backend.llm_providers import message_text
     from backend.utils import community_archive as ca
     from backend.utils.thread_size import CHARS_PER_UNIT
@@ -5003,7 +5008,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     **diag_fields,
                 ))
 
-            def _refuse_thread_too_long(size):
+            def _refuse_thread_too_long(size, message=None, code=None):
                 """The assembled prompt is over THREAD_PROMPT_TOKEN_LIMIT
                 (#648): the reply fails with the limit's message (for
                 its reason) before any generation call, and the
@@ -5013,25 +5018,29 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 certain (a count, or the thread's own ratio), else the
                 row is never a base and the next request measures again.
                 The marker gives the clients the code (llm-status
-                ``error_code``)."""
+                ``error_code``). *message* and *code* replace the limit's
+                for a Glean refused by its model's price step (#733)."""
                 from backend.utils.thread_size import (
                     THREAD_TOO_LONG_CODE, prompt_limit, record_refusal,
                     refusal_message,
                 )
+                code = code or THREAD_TOO_LONG_CODE
                 logger.warning(
                     "Node %s: prompt ~%d tokens >= limit %d (%s, %s); "
-                    "reply refused before any generation call",
+                    "reply refused before any generation call (%s)",
                     llm_node_id, size.tokens, prompt_limit(flask_app.config),
-                    size.reason, "certain" if size.certain else "estimate")
+                    size.reason, "certain" if size.certain else "estimate",
+                    code)
                 record_refusal(user_id, model_id, parent_node_id,
                                size.tokens,
                                size.chars if size.certain else None)
                 llm_node.llm_task_status = 'failed'
-                llm_node.llm_task_error = refusal_message(size.reason)
+                llm_node.llm_task_error = (message
+                                           or refusal_message(size.reason))
                 llm_node.llm_task_progress = 100
                 llm_node.streaming_content = None
                 update_tool_meta(llm_node, REFUSED_MARKER,
-                                 {"code": THREAD_TOO_LONG_CODE},
+                                 {"code": code},
                                  append_if_missing=True)
                 db.session.commit()
                 if speech_turn is not None:
@@ -5040,7 +5049,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     'parent_node_id': parent_node_id,
                     'llm_node_id': llm_node_id,
                     'status': 'refused',
-                    'reason': THREAD_TOO_LONG_CODE,
+                    'reason': code,
                 }
 
             def _read_on_hold():
@@ -5698,7 +5707,18 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             reads=ca_reply_ids, whole=True))
                     if fit.text is None:
                         # The rest of the prompt leaves no room for even
-                        # one tweet: the thread itself is too long.
+                        # one tweet: the thread itself is too long, or,
+                        # where the model's price step sets the budget
+                        # and the thread limit would leave room, too long
+                        # for a Glean on this model (#733), which the
+                        # sentence says so as not to send the person away
+                        # from a thread that works with another model.
+                        too_long_here = glean_too_long_for_model(
+                            model_id, flask_app.config, fit.rest.tokens)
+                        if too_long_here:
+                            return _refuse_thread_too_long(
+                                fit.rest, message=too_long_here,
+                                code=GLEAN_TOO_LONG_FOR_MODEL_CODE)
                         return _refuse_thread_too_long(fit.rest)
                     if fit.text is not ca_tweets_content:
                         logger.info(
