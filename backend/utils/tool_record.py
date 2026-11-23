@@ -97,7 +97,7 @@ def sealed_parts(nodes):
     """The encrypted parts of *nodes*' records, for
     encryption.prefetch_deks. A record stored under the key of its
     entry's text adds no call there; one under a key of its own (a public
-    reply, a row converted later, a reply whose text was edited since)
+    reply, a row converted later, a reply loaded with a bulk writer's key)
     is then fetched with the rest instead of alone."""
     parts = (sealed_part(n.tool_calls_meta_stored) for n in nodes)
     return [p for p in parts if p]

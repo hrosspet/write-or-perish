@@ -8,7 +8,8 @@ Flask-SQLAlchemy>=3.0.0
 # <2.1: SQLAlchemy 2.1 (Python 3.11+) connects postgresql:// URLs with
 # psycopg 3 instead of psycopg2, so on Python 3.12 the app could not reach
 # the database. Python 3.9 resolves 2.0.x either way.
-SQLAlchemy>=2.0,<2.1
+# >=2.0.4: hybrid_property.inplace (models.Node.tool_calls_meta).
+SQLAlchemy>=2.0.4,<2.1
 Flask-Migrate>=3.0.0
 Flask-Login>=0.6.3
 Flask-Dance>=6.0.0,<7.0.0

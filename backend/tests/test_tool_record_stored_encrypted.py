@@ -398,13 +398,137 @@ def test_a_record_written_before_the_text_keeps_one_key_per_reply(app, keys):
     node.set_content("The answer.")
     node.tool_calls_meta = RECORD_TEXT
     db.session.commit()
-    assert (keys.wraps, keys.unwraps) == (2, 0)
+    assert (keys.wraps, keys.unwraps) == (1, 0)     # the text took that key
     db.session.expire_all()
     keys.forget()
     node = Node.query.get(node.id)
     assert (node.get_content(), node.tool_calls_meta) == (
         "The answer.", RECORD_TEXT)
     assert keys.unwraps == 1
+
+
+MARKER = json.dumps([{"name": "_client", "client": "web"}])
+
+
+def _placeholder_then_answer(keys, user_id, parent_id=None, record=None):
+    """One reply as the web process and then a worker write it: the
+    placeholder with the app's marker, then the answer (and, with tool
+    calls, the record). Returns (id, the worker's (wraps, unwraps))."""
+    db.session.remove()
+    keys.forget()                                   # the web process
+    node = Node(user_id=user_id, human_owner_id=user_id, node_type="llm",
+                llm_model="m", parent_id=parent_id,
+                llm_task_status="pending")
+    node.set_content("...")
+    node.tool_calls_meta = MARKER
+    db.session.add(node)
+    db.session.commit()
+    assert (keys.wraps, keys.unwraps) == (1, 0)
+    node_id = node.id
+    db.session.remove()
+    keys.forget()                                   # a worker process
+    from backend.utils.tool_meta import get_tool_meta_entry
+    node = Node.query.get(node_id)
+    assert get_tool_meta_entry(node, "_client")["client"] == "web"
+    node.set_content("The answer.")
+    if record is not None:
+        node.tool_calls_meta = record
+    db.session.commit()
+    return node_id, (keys.wraps, keys.unwraps)
+
+
+@pytest.mark.parametrize("record", [None, RECORD_TEXT])
+def test_ten_replies_are_read_with_ten_calls(app, keys, record):
+    user_id = _user().id
+    ids = []
+    for _ in range(10):
+        node_id, worker = _placeholder_then_answer(
+            keys, user_id, record=record)
+        assert worker == (0, 1)       # the placeholder's key, nothing new
+        ids.append(node_id)
+    db.session.remove()
+    keys.forget()
+    for node_id in ids:
+        node = Node.query.get(node_id)
+        assert node.get_content() == "The answer."
+        assert node.tool_calls_meta == (record or MARKER)
+    assert (keys.wraps, keys.unwraps) == (0, 10)
+
+
+def test_a_text_mode_conversation_of_ten_replies_is_ten_calls(app, keys):
+    from backend.routes.textmode import _serialize_message
+    user_id = _user().id
+    parent, ids = None, []
+    for _ in range(10):
+        parent, _worker = _placeholder_then_answer(
+            keys, user_id, parent_id=parent)
+        ids.append(parent)
+    db.session.remove()
+    keys.forget()
+    messages = [_serialize_message(Node.query.get(i), user_id) for i in ids]
+    assert [m["content"] for m in messages] == ["The answer."] * 10
+    assert all("tool_calls_meta" not in m for m in messages)  # marker only
+    assert (keys.wraps, keys.unwraps) == (0, 10)
+
+
+@pytest.mark.parametrize("words", [
+    "ENC:v2:AAAA:BBBB", "ENC:v1:AAAA", "Plain words."])
+def test_text_written_after_the_record_reads_back_as_written(app, words):
+    """Whatever the text looks like, it is encrypted afresh under the
+    record's key; another stored value given as text stays text."""
+    node = _reply(_user())
+    other = _reply(_user("bo"), content="Someone else's words.")
+    for value in (words, other.content):
+        node.set_content(value)
+        db.session.commit()
+        db.session.expire_all()
+        node = Node.query.get(node.id)
+        assert node.content != value and node.content.startswith("ENC:v2:")
+        assert node.get_content() == value
+        assert node.tool_calls_meta == RECORD_TEXT
+
+
+def test_a_public_replys_text_stays_plain_beside_its_record(app, keys):
+    node = _reply(_user(), privacy="public", content="First.")
+    node.set_content("Public words.")
+    db.session.commit()
+    assert node.content == "Public words."
+    # Text that looks like a stored value is encrypted, as before.
+    node.set_content("ENC:v2:AAAA:BBBB")
+    db.session.commit()
+    assert node.content.startswith("ENC:v2:") \
+        and node.content != "ENC:v2:AAAA:BBBB"
+    assert Node.query.get(node.id).get_content() == "ENC:v2:AAAA:BBBB"
+
+
+def test_privacy_changes_keep_text_and_record_and_one_key(app, keys):
+    from backend.utils.tool_record import sealed_part
+    node = _reply(_user())
+    node.set_privacy_level("public")
+    db.session.commit()
+    assert node.content == "A reply."
+    assert Node.query.get(node.id).tool_calls_meta == RECORD_TEXT
+    for words in PRIVATE_WORDS:
+        assert words not in _stored(node.id)
+    node.set_privacy_level("private")
+    db.session.commit()
+    assert node.content.startswith("ENC:v2:")
+    assert encryption.wrapped_dek_of(node.content) == \
+        encryption.wrapped_dek_of(sealed_part(_stored(node.id)))
+    db.session.expire_all()
+    keys.forget()
+    node = Node.query.get(node.id)
+    assert (node.get_content(), node.tool_calls_meta) == (
+        "A reply.", RECORD_TEXT)
+    assert keys.unwraps == 1
+
+
+def test_a_bulk_writers_key_is_used_when_given(app, keys):
+    node = _reply(_user())
+    key = encryption.new_dek()
+    node.set_content("Loaded text.", dek=key)
+    assert encryption.wrapped_dek_of(node.content) == \
+        __import__("base64").b64decode(key[1])
 
 
 # -- the script for earlier rows ---------------------------------------------

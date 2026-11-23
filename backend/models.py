@@ -1080,13 +1080,27 @@ class Node(db.Model):
         Public text that itself begins with ENC:v1:/ENC:v2: is encrypted
         too: reads decrypt by that prefix (public rows from before #257
         are still stored encrypted), so storing such text as it is would
-        make it read as something else."""
+        make it read as something else.
+
+        Without *dek*, a node that holds a tool record takes the
+        record's data key for its text (a reply's placeholder is written
+        with its record; the reply task then writes the text), so a
+        reply keeps one key and its text and record are read with one
+        key-service call. The text is encrypted afresh either way."""
         if self.privacy_level == "public" and not is_encrypted(plaintext):
             self.content = plaintext
-        elif dek is not None:
+            return
+        if dek is None:
+            dek = self._tool_record_key()
+        if dek is not None:
             self.content = encrypt_with_dek(plaintext, dek)
         else:
             self.content = encrypt_content(plaintext)
+
+    def _tool_record_key(self):
+        """The data key the node's tool record is stored under, or None."""
+        from backend.utils.encryption import dek_of
+        return dek_of(tool_record.sealed_part(self.tool_calls_meta_stored))
 
     def set_privacy_level(self, level: str, dek=None):
         """The one sanctioned way to change privacy_level: moves the
@@ -1103,6 +1117,8 @@ class Node(db.Model):
                 if not is_encrypted(plaintext):
                     self.content = plaintext
         elif not is_encrypted(self.content):
+            if dek is None:
+                dek = self._tool_record_key()   # as set_content
             self.content = (encrypt_with_dek(self.content, dek)
                             if dek is not None
                             else encrypt_content(self.content))
@@ -1147,9 +1163,13 @@ class Node(db.Model):
         """Store the tool record. Whatever the reply's privacy level: the
         full record is its owner's only (utils/tool_meta), so it is
         encrypted under a public reply too. The data key is the one the
-        entry's text is stored under when there is one, so reading the
-        record of an entry whose text is read costs no key-service call
-        of its own; then the record's own earlier key; else a new one."""
+        entry's text is stored under when there is one; then the
+        record's own earlier key; else a new one. set_content takes the
+        record's key in turn, so a reply's text and record stay under
+        one key whichever is written first, and reading both is one
+        key-service call (a public reply's record, and a reply whose
+        text was written with a bulk writer's key after its record,
+        have a key of their own)."""
         if not value:
             self.tool_calls_meta_stored = value
             self.__dict__.pop("_tool_record_read", None)
