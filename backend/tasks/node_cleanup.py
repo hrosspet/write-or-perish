@@ -53,7 +53,7 @@ from backend.constants import SOFT_DELETE_GRACE_DAYS
 from backend.extensions import db
 from backend.models import (
     Node, NodeVersion, NodeTranscriptChunk, TTSChunk, Draft,
-    NodeContextArtifact, ReferenceAction, ShareDraft, Thread,
+    ReferenceAction, ShareDraft, Thread,
 )
 
 logger = get_task_logger(__name__)
@@ -102,7 +102,10 @@ def _full_purge(node):
     Draft.query.filter_by(parent_id=node.id).update({"parent_id": None})
     Draft.query.filter_by(llm_node_id=node.id).delete()
 
-    NodeContextArtifact.query.filter_by(node_id=node.id).delete()
+    # The node's pins (NodeContextArtifact) go with the db.session.delete
+    # below, through Node.context_artifacts' cascade (#786). A bulk
+    # delete here as well left any pins already loaded on the node for
+    # that cascade to delete a second time.
     # What the reader did with the reply's recommendations (#352). Its
     # FeedPick rows go with the node (ORM cascade); the actions are
     # deleted rather than set to NULL, which would read as done outside
