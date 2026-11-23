@@ -2,10 +2,12 @@ from datetime import datetime
 from flask_login import UserMixin
 import logging
 from sqlalchemy import and_, event, or_
+from sqlalchemy.ext.hybrid import hybrid_property
 from backend.extensions import db
 from backend.utils.encryption import (
     encrypt_content, decrypt_content, encrypt_with_dek, is_encrypted,
     is_encryption_enabled)
+from backend.utils import tool_record
 
 logger = logging.getLogger(__name__)
 
@@ -880,8 +882,14 @@ class Node(db.Model):
     # Session ID for streaming upload (groups chunks together)
     streaming_session_id = db.Column(db.String(64), nullable=True)
 
-    # Tool call metadata for LLM nodes (JSON list of tool call logs)
-    tool_calls_meta = db.Column(db.Text, nullable=True)
+    # Tool call metadata for LLM nodes (JSON list of tool call logs), as
+    # stored (utils/tool_record): each entry's name and status as they
+    # are, the whole list encrypted beside them. Rows written before that
+    # hold the list itself. Code reads and writes ``tool_calls_meta``
+    # below, which gives and takes the list as JSON text; SQL filters on
+    # ``Node.tool_calls_meta`` match the stored names.
+    tool_calls_meta_stored = db.Column("tool_calls_meta", db.Text,
+                                       nullable=True)
 
     # The reply's text so far while an LLM node is being generated (#367),
     # for display only. `content` stays final-only, so embeddings, exports,
@@ -1115,6 +1123,52 @@ class Node(db.Model):
         if not self.streaming_content:
             return ""
         return decrypt_content(self.streaming_content)
+
+    # ----- Tool record ------------------------------------------------------
+
+    @hybrid_property
+    def tool_calls_meta(self):
+        """The reply's tool record as JSON text (a list of entries), or
+        None. Read from the stored form (utils/tool_record); the result
+        is kept on the instance while the stored value stays the same, so
+        the many readers of one request decrypt it once."""
+        stored = self.tool_calls_meta_stored
+        if not stored:
+            return stored
+        cached = self.__dict__.get("_tool_record_read")
+        if cached is not None and cached[0] == stored:
+            return cached[1]
+        text = tool_record.read(stored)
+        self.__dict__["_tool_record_read"] = (stored, text)
+        return text
+
+    @tool_calls_meta.inplace.setter
+    def _set_tool_calls_meta(self, value):
+        """Store the tool record. Whatever the reply's privacy level: the
+        full record is its owner's only (utils/tool_meta), so it is
+        encrypted under a public reply too. The data key is the one the
+        entry's text is stored under when there is one, so reading the
+        record of an entry whose text is read costs no key-service call
+        of its own; then the record's own earlier key; else a new one."""
+        if not value:
+            self.tool_calls_meta_stored = value
+            self.__dict__.pop("_tool_record_read", None)
+            return
+        if self.tool_calls_meta_stored:
+            try:
+                if self.tool_calls_meta == value:
+                    return   # unchanged: the row is not written again
+            except Exception:  # noqa: BLE001 - unreadable: replaced below
+                pass
+        stored = tool_record.store(
+            value, near=(self.content, self.tool_calls_meta_stored))
+        self.tool_calls_meta_stored = stored
+        self.__dict__["_tool_record_read"] = (stored, value)
+
+    @tool_calls_meta.inplace.expression
+    @classmethod
+    def _tool_calls_meta_expression(cls):
+        return cls.tool_calls_meta_stored
 
 @event.listens_for(Node, "before_insert")
 @event.listens_for(Node, "before_update")

@@ -50,7 +50,7 @@ def _serialize_message(node, viewer_id):
         "llm_model": node.llm_model,
         "llm_task_status": node.llm_task_status,
     }
-    if is_llm and node.tool_calls_meta:
+    if is_llm and node.tool_calls_meta_stored:
         meta = tool_calls_meta_for(node, viewer_id)
         if meta:
             msg["tool_calls_meta"] = meta

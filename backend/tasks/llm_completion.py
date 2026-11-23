@@ -1194,9 +1194,11 @@ def _load_node_chain(parent_node, user_id):
     if not node_chain:
         from backend.utils.llm_nodes import AIUsageRefused
         raise AIUsageRefused()
-    # Not the deleted nodes: their text is never read.
-    prefetch_deks(n.content for n in node_chain
-                  if not shown_as_deleted(n, user_id))
+    # Not the deleted nodes: their text is never read. The replies' tool
+    # records are read with the texts (the history's replays and notes).
+    from backend.utils.tool_record import sealed_parts
+    live = [n for n in node_chain if not shown_as_deleted(n, user_id)]
+    prefetch_deks([n.content for n in live] + sealed_parts(live))
     return node_chain
 
 
@@ -2472,13 +2474,13 @@ def _auto_create_drafts(llm_text, llm_node, node_chain, user_id):
 
 
 # Tool-input keys that carry free-text user content. These are stripped
-# before the input is persisted to the plaintext ``tool_calls_meta`` column:
-# the content is already stored encrypted in its own row (UserArtifact /
-# UserFeedback / Draft), and a plaintext copy on the node would defeat
-# encryption-at-rest. The cross-turn scan, the frontend and exports key on
-# other fields; the replay of an update_artifact call in later turns
-# (#604) shows its input without the redacted keys, and the answer to it
-# shows what the write changed, from the stored version ids.
+# before the input is persisted to the ``tool_calls_meta`` column: the
+# content is already stored encrypted in its own row (UserArtifact /
+# UserFeedback / Draft), and the node keeps no second copy of it. The
+# cross-turn scan, the frontend and exports key on other fields; the
+# replay of an update_artifact call in later turns (#604) shows its input
+# without the redacted keys, and the answer to it shows what the write
+# changed, from the stored version ids.
 _REDACTED_INPUT_KEYS = {"content", "updated_content", "edits"}
 _REDACTED = "[redacted]"
 
@@ -2554,7 +2556,7 @@ def _resolve_artifact_write(inp, previous):
 
 def _redact_tool_input(inp):
     """Return a copy of a tool-call input with free-text content removed,
-    safe to persist to the plaintext tool_calls_meta column."""
+    safe to persist to the tool_calls_meta column."""
     if not isinstance(inp, dict):
         return inp
     return {
@@ -2605,7 +2607,7 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
     for tc in tool_calls:
         name = tc["name"]
         inp = tc.get("input", {})
-        # Persisted to plaintext tool_calls_meta — redact free-text content
+        # Persisted to tool_calls_meta — redact free-text content
         # (handlers below read the live ``inp``, which keeps the real values).
         result = {"name": name, "input": _redact_tool_input(inp)}
 
@@ -2857,7 +2859,7 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                 # model's query, ranks NodeEmbedding rows (excluding nodes
                 # already in this thread), and stores only matched node ids +
                 # scores — snippet content is re-resolved at injection time
-                # (never in plaintext tool_calls_meta), like read_artifact.
+                # (never in tool_calls_meta), like read_artifact.
                 query = (inp.get("query") or "").strip()
                 if not query:
                     result["status"] = "error"
@@ -6107,7 +6109,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     'total_tokens': f_total_tokens,
                 }
                 if f_tool_meta:
-                    f_result['tool_calls_meta'] = f_tool_meta
+                    # The task's result is kept by the result backend for
+                    # a day; the record itself is on the node. Nothing
+                    # reads this copy: it names the actions only.
+                    from backend.utils.tool_meta import SHARED_TOOL_FIELDS
+                    f_result['tool_calls_meta'] = [
+                        {k: m[k] for k in SHARED_TOOL_FIELDS if k in m}
+                        for m in f_tool_meta if isinstance(m, dict)]
                 return f_result
 
             # ── Within-turn retrieval loop gating (#158) ───────────────────

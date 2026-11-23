@@ -223,12 +223,10 @@ def _is_llm(node):
 
 
 def _has_read_marker(node):
-    try:
-        meta = json.loads(node.tool_calls_meta or "[]") or []
-    except (json.JSONDecodeError, TypeError):
-        return False
-    return any(isinstance(m, dict) and m.get("name") == READ_FURTHER_MARKER
-               for m in meta)
+    """Entry names are read without decrypting (utils/tool_record): the
+    chain walk reads no text."""
+    from backend.utils.tool_record import entry_names
+    return READ_FURTHER_MARKER in entry_names(node)
 
 
 class _Chain:
@@ -254,7 +252,7 @@ class _Chain:
         # prompt (utils/thread_size, #648).
         self.nodes = [] if node is None else ancestor_chain(
             node.id, Node.id, Node.parent_id, Node.node_type, Node.llm_model,
-            Node.deleted_at, Node.prompt_key, Node.tool_calls_meta,
+            Node.deleted_at, Node.prompt_key, Node.tool_calls_meta_stored,
             Node.ai_usage, Node.user_id, Node.human_owner_id,
             Node.privacy_level, Node.token_count, Node.continuation_node_id,
             max_depth=_MAX_ANCESTRY_HOPS)

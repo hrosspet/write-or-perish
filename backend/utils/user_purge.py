@@ -87,6 +87,7 @@ from backend.models import (
     User, UserArtifact, UserDataPurge, UserDataPurgeHidden, UserFeedback,
     UserNotification, UserProfile, UserPrompt, UserRecentContext, UserTodo,
 )
+from backend.utils import tool_record
 from backend.utils.hidden_rows import (
     hidden_ids, including_hidden_rows, item_read_at,
 )
@@ -836,7 +837,8 @@ def _node_batch_entries(plan=None, job_id=None):
                 *conds, Node.llm_task_status.in_(IN_FLIGHT_STATUSES),
                 Node.tool_calls_meta.like('%"_batch"%')):
             try:
-                entries = json.loads(meta) or []
+                # The column as selected is the stored value.
+                entries = json.loads(tool_record.read(meta)) or []
             except (TypeError, ValueError):
                 continue
             for m in entries:

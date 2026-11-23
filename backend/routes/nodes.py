@@ -1178,7 +1178,7 @@ def _focal_own_fields(node, viewer_id):
         data["streaming_content"] = node.get_streaming_content()
     # Include tool call metadata for LLM nodes: in full for the reply's
     # owner, each action's name and outcome for anyone else.
-    if node.tool_calls_meta:
+    if node.tool_calls_meta_stored:
         from backend.utils.tool_meta import tool_calls_meta_for
         visible = tool_calls_meta_for(node, viewer_id)
         # A reply whose only entry was the app marker reads as a node
@@ -1404,7 +1404,11 @@ def get_node(node_id):
     from backend.utils.thread_tree import visible_child_counts
     ancestor_child_counts = visible_child_counts(
         [a.id for a in ancestor_nodes], current_user.id)
-    prefetch_deks(_render_set_ciphertexts(render_set))
+    from backend.utils.tool_record import sealed_parts
+    # The focal node's tool record goes to its owner in full.
+    prefetch_deks(_render_set_ciphertexts(render_set)
+                  + (sealed_parts([node])
+                     if is_node_owner(node, current_user.id) else []))
 
     # Build ancestors. Soft-deleted ancestors the viewer had pre-deletion
     # access to render as tombstones — without this the breadcrumb chain
@@ -2601,7 +2605,7 @@ def get_llm_status(node_id):
 
     # Include tool call metadata if present: in full for the reply's
     # owner, each action's name and outcome for anyone else.
-    if node.tool_calls_meta:
+    if node.tool_calls_meta_stored:
         from backend.utils.tool_meta import tool_calls_meta_for
         visible = tool_calls_meta_for(node, current_user.id)
         if visible:

@@ -10,7 +10,6 @@ Accepting one, by the card's button, by the voice and text tools, or by a
 todo merge that is started, applied again or retried, acts only on the
 user's own live proposal (is_own_live_proposal).
 """
-import json
 
 from backend.models import Draft
 from backend.utils.privacy import can_user_access_node
@@ -31,16 +30,9 @@ def node_is_users(node, user_id):
 
 
 def _has_tool_entry(node, tool_name):
-    if not node.tool_calls_meta:
-        return False
-    try:
-        meta = json.loads(node.tool_calls_meta)
-    except (json.JSONDecodeError, TypeError):
-        return False
-    if not isinstance(meta, list):
-        return False
-    return any(isinstance(e, dict) and e.get("name") == tool_name
-               for e in meta)
+    # Names are read without decrypting: this runs up a thread.
+    from backend.utils.tool_record import entry_names
+    return tool_name in entry_names(node)
 
 
 def is_own_live_proposal(node, user_id, label):

@@ -372,6 +372,10 @@ def _newer_proposal_applied(proposal_node, user_id):
         Node.id > proposal_node.id,
         Node.tool_calls_meta.like('%propose_todo%'),
     ).all()
+    # Their records are read below: the keys in one concurrent batch.
+    from backend.utils.encryption import prefetch_deks
+    from backend.utils.tool_record import sealed_parts
+    prefetch_deks(sealed_parts(newer))
     for node in newer:
         entry = get_tool_meta_entry(node, "propose_todo")
         if entry and entry.get("apply_status") in _APPLIED_STATUSES:
