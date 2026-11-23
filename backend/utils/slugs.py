@@ -73,3 +73,32 @@ def generate_unique_public_slug(owner_id, content):
         candidate = f"{base}-{suffix}"
         suffix += 1
     return candidate
+
+
+# The slug a public entry gets while its text does not exist yet (an
+# uploaded recording that starts a Text-mode thread): "recording",
+# "recording-2", ... The slug marks the entry as a listed thread from
+# its creation (utils/public_threads); the transcript replaces it.
+PENDING_SLUG_BASE = "recording"
+_PENDING_SLUG = re.compile(r"^%s(-\d+)?$" % PENDING_SLUG_BASE)
+
+
+def pending_public_slug(owner_id):
+    return generate_unique_public_slug(owner_id, PENDING_SLUG_BASE)
+
+
+def settle_pending_slug(node, content):
+    """Once the text of an entry created with pending_public_slug
+    exists: the slug made from its first line, when the entry is still
+    public and still has the pending slug. The pages cached under the
+    pending address are dropped first. Any other node is left as it is."""
+    if (not node.public_slug or not _PENDING_SLUG.match(node.public_slug)
+            or node.privacy_level != PrivacyLevel.PUBLIC):
+        return
+    owner_id = node.human_owner_id or node.user_id
+    slug = generate_unique_public_slug(owner_id, content)
+    if _PENDING_SLUG.match(slug) or slug == "shared":
+        return   # nothing better to name it by
+    from backend.utils.public_cache import invalidate_for_node
+    invalidate_for_node(node)
+    node.public_slug = slug

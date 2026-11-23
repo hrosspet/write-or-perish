@@ -127,6 +127,16 @@ def _allowed_file(filename: str) -> bool:
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
+def _slug_new_public_thread(node, system_node):
+    """An uploaded recording that starts a Text-mode thread at Public is
+    a listed thread, as a typed one is (utils/public_threads): it gets a
+    permalink slug at creation, a pending one until its transcript
+    exists (utils/slugs)."""
+    if system_node is not None and node.privacy_level == PrivacyLevel.PUBLIC:
+        from backend.utils.slugs import pending_public_slug
+        node.public_slug = pending_public_slug(node.human_owner_id)
+
+
 def _upload_reply_options(values, parent_id, ai_usage, privacy_level=None):
     """Parse an audio upload's Text-mode decisions (#342): `agentic` (the
     new thread gets a system node with the textmode prompt, as a typed or
@@ -692,6 +702,7 @@ def create_node():
             token_count=_atc2(placeholder_text),
         )
         node.set_content(placeholder_text)
+        _slug_new_public_thread(node, system_node)
         # Counted again under the account's lock right before the insert
         # (utils/recording_limits).
         from backend.utils.recording_limits import upload_start_refusal
@@ -2986,6 +2997,7 @@ def init_chunked_upload():
         token_count=_atc3(placeholder_text),
     )
     node.set_content(placeholder_text)
+    _slug_new_public_thread(node, system_node)
     # Counted again under the account's lock right before the insert.
     refused = upload_start_refusal(current_user.id)
     if refused is not None:

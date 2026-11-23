@@ -703,6 +703,8 @@ def finalize_streaming(self, node_id: int, session_id: str, total_chunks: int):
         # Update node
         from backend.utils.tokens import approximate_token_count
         node.set_content(final_content)
+        from backend.utils.slugs import settle_pending_slug
+        settle_pending_slug(node, final_content)   # utils/slugs
         node.token_count = approximate_token_count(final_content)
         # Per-node cap: very long recordings (~2h+ of speech) can exceed
         # it; split into a serial chain (audio stays on this head node).

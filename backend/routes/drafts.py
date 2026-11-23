@@ -1917,11 +1917,13 @@ def save_streaming_as_node(session_id):
     from backend.utils.tokens import approximate_token_count
     node.set_content(content)
     node.token_count = approximate_token_count(content)
-    if form_settings and privacy_level == "public" and draft.parent_id is None:
+    if (privacy_level == "public" and draft.parent_id is None
+            and (form_settings or system_node is not None)):
         # A public entry that starts a thread gets its permalink slug at
-        # birth, as a typed one does (POST /nodes/, #228): a root, or the
-        # first entry under the thread's private prompt root, which the
-        # public pages list as the top of its thread
+        # birth, as a typed one does (POST /nodes/, #228): a root (when
+        # the form sent the settings), or the first entry under the
+        # thread's private prompt root, which the public pages list as
+        # the top of its thread because it has the slug
         # (utils/public_threads).
         from backend.utils.slugs import generate_unique_public_slug
         node.public_slug = generate_unique_public_slug(

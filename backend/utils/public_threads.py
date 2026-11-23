@@ -10,17 +10,28 @@ The public listings (Commons feed, a person's public page and its JSON,
 feed.xml, the sitemap) therefore list "thread tops":
 
 - a root (no parent), as before; or
-- a node directly under a root that is a prompt entry, is not public and
-  belongs to the same person.
+- a node that has a permalink slug and hangs directly under a living
+  root that is a prompt entry, is not public and belongs to the same
+  person.
+
+The slug is what makes such a node a listed thread, and only creation
+gives it: a Text-mode thread created at Public gets it on its first
+message (/textmode/start, a recorded or uploaded entry that starts a
+thread). The edit route gives none, so a message, a Voice entry or a
+gleaning that its owner sets public later is read by its link and is in
+no listing, as before this rule. scripts/set_prompt_entries_private.py
+gives the slug to the first public message of a stored thread whose
+public prompt root it sets private.
 
 The prompt entry itself is never listed and never read here: the rule
-looks at four of its columns, by primary key, inside the listing's own
-query (a correlated EXISTS, no extra query and no row load).
+looks at five of its columns, by primary key, inside the listing's own
+query (a correlated EXISTS, no extra query and no row load). The
+listings start from the public nodes (Node's partial index
+ix_node_public_created_at), not from the roots.
 
 A prompt entry is recognised by its stamped ``prompt_key``. Entries from
-before that column (2026-09-02) only link a prompt version; they were
-all created at their message's level, and
-scripts/set_prompt_entries_private.py stamps the ones it sets private.
+before that column (2026-09-02) only link a prompt version; the script
+stamps the ones it sets private.
 
 A prompt entry in the middle of a thread (Text mode continued under an
 entry of one's own) is passed through by every thread view of someone
@@ -45,30 +56,18 @@ def thread_top_filter(node=Node):
     above = aliased(Node, flat=True)
     return or_(
         node.parent_id.is_(None),
-        exists().where(and_(
-            above.id == node.parent_id,
-            above.parent_id.is_(None),
-            above.prompt_key.isnot(None),
-            above.privacy_level != PrivacyLevel.PUBLIC.value,
-            func.coalesce(above.human_owner_id, above.user_id)
-            == func.coalesce(node.human_owner_id, node.user_id),
-        )),
+        and_(
+            node.public_slug.isnot(None),
+            exists().where(and_(
+                above.id == node.parent_id,
+                above.parent_id.is_(None),
+                above.deleted_at.is_(None),
+                above.prompt_key.isnot(None),
+                above.privacy_level != PrivacyLevel.PUBLIC.value,
+                func.coalesce(above.human_owner_id, above.user_id)
+                == func.coalesce(node.human_owner_id, node.user_id),
+            ))),
     )
-
-
-def is_thread_top(node):
-    """thread_top_filter for one node in hand (one primary-key read of
-    the parent, usually already in the session)."""
-    if node.parent_id is None:
-        return True
-    above = Node.query.get(node.parent_id)
-    return bool(
-        above is not None
-        and above.parent_id is None
-        and above.prompt_key
-        and above.privacy_level != PrivacyLevel.PUBLIC.value
-        and (above.human_owner_id or above.user_id)
-        == (node.human_owner_id or node.user_id))
 
 
 def owner_id_of(node):

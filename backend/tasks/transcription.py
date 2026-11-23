@@ -390,6 +390,10 @@ def transcribe_audio(self, node_id: int, audio_file_path: str, filename: str = N
 
             final_content = final_content or node.get_content()
             node.set_content(final_content)
+            # A public upload that started a thread: its address is now
+            # made from its text (utils/slugs).
+            from backend.utils.slugs import settle_pending_slug
+            settle_pending_slug(node, final_content)
             from backend.utils.tokens import approximate_token_count
             node.token_count = approximate_token_count(final_content)
             # Per-node cap: very long recordings (~2h+ of speech) can
