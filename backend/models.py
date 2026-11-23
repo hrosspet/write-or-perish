@@ -1561,11 +1561,22 @@ class UserArtifact(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
     # Slug identifying the artifact across versions, e.g. "memory".
     kind = db.Column(db.String(48), nullable=False, index=True)
-    title = db.Column(db.String(128), nullable=False)
+    # The title and the description are the user's words (or the AI's,
+    # from the user's writing), so they are stored like the text:
+    # encrypted, in title_enc / description_enc. Code reads and writes
+    # ``title`` and ``description`` below. The two plain columns hold the
+    # values of versions written before (title_enc NULL marks such a
+    # row: a column, not a prefix inside the text, says which form a row
+    # is in) and of every row while encryption is off; on an encrypted
+    # row they are '' and NULL. Not usable in SQL filters or sorting.
+    title_plain = db.Column("title", db.String(128), nullable=False)
+    title_enc = db.Column(db.Text, nullable=True)
     # One-line summary of what this artifact is for / contains. Powers the
     # agentic artifacts index (so the AI can judge what to read) and the nav
     # dropdown subtitle. Carried forward across versions like title.
-    description = db.Column(db.String(255), nullable=True)
+    description_plain = db.Column("description", db.String(255),
+                                  nullable=True)
+    description_enc = db.Column(db.Text, nullable=True)
     content = db.Column(db.Text, nullable=False)
     generated_by = db.Column(db.String(64), nullable=False)
     # LLM tokens a job spent on this version; 0 for the user's saves,
@@ -1658,11 +1669,59 @@ class UserArtifact(db.Model):
     SYSTEM_KINDS = (frozenset(DEFAULT_KINDS) | frozenset(RESERVED_KINDS)
                     | {"external_digest"})
 
+    def _row_key(self):
+        """The data key one of this row's values is already stored
+        under, or None: the text, the title and the description of a
+        version share one key, so reading all three is one key-service
+        call, as reading the text alone was."""
+        from backend.utils.encryption import dek_of
+        for stored in (self.content, self.title_enc, self.description_enc):
+            key = dek_of(stored)
+            if key is not None:
+                return key
+        return None
+
     def set_content(self, plaintext):
-        self.content = encrypt_content(plaintext)
+        key = self._row_key()
+        self.content = (encrypt_with_dek(plaintext, key) if key is not None
+                        else encrypt_content(plaintext))
 
     def get_content(self):
         return decrypt_content(self.content)
+
+    def _sealed(self, value):
+        """*value* (not None) encrypted under the row's key, or a new
+        one. Always encrypts: a title is text and may look like a stored
+        value. The empty string stays empty."""
+        from backend.utils.encryption import new_dek
+        return encrypt_with_dek(value, self._row_key() or new_dek())
+
+    @property
+    def title(self):
+        if self.title_enc is not None:
+            return decrypt_content(self.title_enc)
+        return self.title_plain
+
+    @title.setter
+    def title(self, value):
+        if value is None or not is_encryption_enabled():
+            self.title_plain, self.title_enc = value, None
+        else:
+            self.title_enc, self.title_plain = self._sealed(value), ""
+
+    @property
+    def description(self):
+        if self.description_enc is not None:
+            return decrypt_content(self.description_enc)
+        return self.description_plain
+
+    @description.setter
+    def description(self, value):
+        if value is None or not is_encryption_enabled():
+            self.description_plain, self.description_enc = value, None
+        else:
+            self.description_enc = self._sealed(value)
+            self.description_plain = None
 
     @classmethod
     def is_deletable_kind(cls, kind):
