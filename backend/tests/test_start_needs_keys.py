@@ -217,46 +217,31 @@ def test_create_app_refuses_encryption_off_by_omission(
         create_app()
 
 
-@pytest.mark.parametrize("env", ["production", "development", "testing"])
-def test_create_app_turned_off_with_a_key_name_set_starts_and_stores_unencrypted(
-        sqlite_config, monkeypatch, caplog, env):
-    from sqlalchemy import text
-    from backend import create_app
-    from backend.extensions import db
-    from backend.models import Node, User
-    monkeypatch.setattr(sqlite_config, "DEPLOY_ENV", env)
-    monkeypatch.setenv("GCP_KMS_KEY_NAME", KMS_NAME)
-    _no_key_service(monkeypatch)
-    monkeypatch.setattr(backend, "_encryption_off_noted", False)
-    with caplog.at_level(logging.WARNING, logger="backend"):
-        app = create_app()
-    assert _notices(caplog) == [OFF_LINES["yes"]]
-    assert KMS_NAME not in caplog.text
-    with app.app_context():
-        db.create_all()
-        try:
-            user = User(twitter_id="t-off", username="off")
-            db.session.add(user)
-            db.session.flush()
-            node = Node(user_id=user.id, node_type="user",
-                        privacy_level="private")
-            node.set_content("a private note")
-            db.session.add(node)
-            db.session.commit()
-            stored = db.session.execute(
-                text("SELECT content FROM node WHERE id = :id"),
-                {"id": node.id}).scalar()
-            assert stored == "a private note"
-            assert node.get_content() == "a private note"
-        finally:
-            db.session.remove()
-            db.drop_all()
-
-
 _START = "import backend.app\nimport backend.celery_app\nprint('started')"
 
 
-def _start(flask_env, off, key_name):
+_STORE = """
+import backend.app
+from sqlalchemy import text
+from backend.extensions import db
+from backend.models import Node, User
+with backend.app.app.app_context():
+    db.create_all()
+    user = User(username="off")
+    db.session.add(user)
+    db.session.flush()
+    node = Node(user_id=user.id, node_type="user", privacy_level="private")
+    node.set_content("a private note")
+    db.session.add(node)
+    db.session.commit()
+    print("stored:", db.session.execute(
+        text("SELECT content FROM node WHERE id = :i"),
+        {"i": node.id}).scalar())
+    print("read:", node.get_content())
+"""
+
+
+def _start(flask_env, off, key_name, script=None):
     """Import the web app and the Celery app (workers and beat) in a
     process of their own, as a server does."""
     env = dict(os.environ)
@@ -264,8 +249,19 @@ def _start(flask_env, off, key_name):
                 "SECRET_KEY": "a-key-of-this-instance",
                 "FLASK_ENV": flask_env, "ENCRYPTION_DISABLED": off,
                 "GCP_KMS_KEY_NAME": key_name, "PYTHONPATH": str(REPO)})
-    return subprocess.run([sys.executable, "-c", _START], cwd=REPO, env=env,
+    return subprocess.run([sys.executable, "-c", script or _START], cwd=REPO, env=env,
                           capture_output=True, text=True, timeout=180)
+
+
+@pytest.mark.parametrize("flask_env", ["production", "development"])
+def test_the_app_turned_off_with_a_key_name_set_starts_and_stores_unencrypted(
+        flask_env):
+    result = _start(flask_env, "true", KMS_NAME, _STORE)
+    assert result.returncode == 0, result.stderr[-3000:]
+    assert "stored: a private note" in result.stdout
+    assert "read: a private note" in result.stdout
+    assert result.stderr.count(OFF_LINES["yes"]) == 1
+    assert KMS_NAME not in result.stderr
 
 
 @pytest.mark.parametrize("flask_env", ["production", "development"])
