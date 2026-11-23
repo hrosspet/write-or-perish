@@ -116,8 +116,7 @@ def validate_keys(config, environ=None):
     and the tests set it), with or without a key name beside it (a key
     name then only serves reads of what was stored encrypted earlier). Where
     it is not turned off, GCP_KMS_KEY_NAME names the key users' writing
-    is encrypted with, and the app does not start without it: it used to
-    run and store new writing as plain text, with no error anywhere. The
+    is encrypted with, and the app does not start without it. The
     rule is encryption_choice() in backend/utils/encryption.py, the same
     one every write and read follows afterwards. An instance that starts
     with encryption off writes one fixed line to its log saying so
@@ -125,11 +124,10 @@ def validate_keys(config, environ=None):
 
     SECRET_KEY, in production and on staging (DEPLOY_ENV: every
     FLASK_ENV but "development" and "testing"): it signs the sign-in
-    cookies and links. Without the line in the env file the app ran on
-    the placeholder in config.py; with an empty one no session could be
-    opened.
+    cookies and links. It must be set in the env file and differ from
+    the placeholder in config.py.
 
-    A boot failure turns either gap into a red deploy, as for LLM_NAME
+    A missing or placeholder value stops the start, as for LLM_NAME
     below. The messages name the setting, never a value."""
     from backend.config import PLACEHOLDER_SECRET_KEY
     from backend.utils.encryption import encryption_choice

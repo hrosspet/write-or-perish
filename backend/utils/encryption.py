@@ -75,9 +75,8 @@ def encryption_choice(environ=None) -> bool:
       set. Nothing new is encrypted; a key name beside the switch only
       serves reads of what was stored encrypted earlier (reads_decrypt).
     - not turned off, GCP_KMS_KEY_NAME set: on.
-    - not turned off, no GCP_KMS_KEY_NAME: EncryptionNotConfigured. A
-      missing key name used to mean "store plain text", with no error
-      anywhere.
+    - not turned off, no GCP_KMS_KEY_NAME: EncryptionNotConfigured.
+      Nothing is stored as plain text for want of a key name.
 
     The message names the settings, never a value."""
     environ = os.environ if environ is None else environ

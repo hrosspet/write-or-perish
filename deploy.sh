@@ -115,7 +115,7 @@ fi
 # restarted or reloaded: the app is imported once with the new code and the
 # env file the services read (backend/__init__.py loads .env.production
 # itself). An app that refuses to start (a setting missing from the env
-# file, or two that contradict each other) then stops the deploy here,
+# file, or one with a value the app does not take) then stops the deploy here,
 # while the running processes keep serving; without this check the reload
 # below would replace them with processes that cannot start. The reason
 # stays in deployment.log on the VM; this script prints fixed lines only.
