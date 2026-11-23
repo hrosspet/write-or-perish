@@ -3,6 +3,10 @@
 only) and prints only what happened: what the script prints is the
 Actions log of the repo.
 
+A `flask db migrate` that fails ends the deploy with a fixed line before
+anything is stopped, unless an earlier migration is still to be applied
+(then the upgrade applies it and the deploy goes on).
+
 Runs deploy.sh's own block in bash, with `flask` and the service stop
 replaced by shell functions that print a database error naming a row's
 value.
@@ -48,7 +52,8 @@ flask() {
             return "$MIGRATE_EXIT" ;;
         heads) echo "bbbb2222 (head)" ;;
         current)
-            if [ -f "$PROJECT_DIR/upgraded" ]; then echo "bbbb2222 (head)";
+            if [ -f "$PROJECT_DIR/upgraded" ] || [ "$AT_HEAD" = 1 ]; then
+                echo "bbbb2222 (head)";
             else echo "aaaa1111"; fi ;;
         upgrade)
             echo "INFO  [alembic.runtime.migration] Running upgrade aaaa1111 -> bbbb2222"
@@ -63,15 +68,16 @@ flask() {
 """
 
 
-def _run(tmp_path, migrate_exit=0, upgrade_exit=0):
+def _run(tmp_path, migrate_exit=0, upgrade_exit=0, at_head=False):
     (tmp_path / "migrations").mkdir()
-    script = _FAKES + _deploy_block()
+    script = _FAKES + _deploy_block() + '\necho "the deploy went on"'
     result = subprocess.run(
         ["bash", "-c", script], cwd=tmp_path, capture_output=True,
         text=True, timeout=60,
         env={"PATH": os.environ.get("PATH", ""), "VALUE": VALUE,
              "PROJECT_DIR": str(tmp_path), "BACKEND_DIR": str(tmp_path),
              "MIGRATE_EXIT": str(migrate_exit),
+             "AT_HEAD": "1" if at_head else "0",
              "UPGRADE_EXIT": str(upgrade_exit)})
     log_file = tmp_path / "deployment.log"
     return result, log_file
@@ -85,7 +91,9 @@ def test_a_failed_upgrade_prints_no_database_text(tmp_path):
     assert VALUE not in printed
     assert "Database migration failed" in printed
     assert "deployment.log on the VM" in printed
-    assert "flask db migrate exited with status 1" in printed
+    assert "flask db migrate exited with status 1 while an earlier " \
+        "migration is not applied yet" in printed
+    assert "the deploy went on" not in printed
     # The full text stays on the VM, for the owner only.
     kept = log_file.read_text()
     assert kept.count(VALUE) == 2
@@ -104,3 +112,45 @@ def test_a_successful_upgrade_prints_its_revisions(tmp_path):
     assert "Running upgrade" not in printed
     assert VALUE not in printed
     assert "Running upgrade aaaa1111 -> bbbb2222" in log_file.read_text()
+
+
+def test_a_failed_migrate_ends_the_deploy_before_anything_is_stopped(
+        tmp_path):
+    result, log_file = _run(tmp_path, migrate_exit=1, at_head=True)
+
+    printed = result.stdout + result.stderr
+    assert result.returncode == 1
+    assert "flask db migrate exited with status 1, so no migration was " \
+        "generated for this code" in printed
+    assert "Nothing was stopped, restarted or reloaded by this deploy" \
+        in printed
+    assert "deployment.log on the VM" in printed
+    assert "services stopped" not in printed
+    assert "Database already at head" not in printed
+    assert "the deploy went on" not in printed
+    assert VALUE not in printed
+    assert VALUE in log_file.read_text()
+
+
+def test_a_failed_migrate_with_a_migration_still_to_apply_goes_on(tmp_path):
+    result, log_file = _run(tmp_path, migrate_exit=1)
+
+    printed = result.stdout + result.stderr
+    assert result.returncode == 0, printed
+    assert "an earlier migration is not applied yet" in printed
+    assert "deploy once more after this one" in printed
+    assert "services stopped" in printed
+    assert "Database now at bbbb2222" in printed
+    assert "the deploy went on" in printed
+    assert VALUE not in printed
+
+
+def test_the_migrate_step_comes_before_anything_is_stopped():
+    text = DEPLOY.read_text()
+    failed = text.index("so no migration was generated for this code")
+    assert failed < text.index("\n        stop_services_for_upgrade\n")
+    # Outside the helper that the upgrade calls, no service is stopped,
+    # restarted or reloaded before that line.
+    for m in re.finditer(r"^(sudo )?systemctl (stop|restart|reload)",
+                         text, re.M):
+        assert m.start() > failed

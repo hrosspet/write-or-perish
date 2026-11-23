@@ -158,7 +158,20 @@ if [ -d "migrations" ]; then
     # Kept on the VM only (see LOG_FILE); the lines below say what it did.
     echo "$MIGRATION_OUTPUT" >> "$LOG_FILE"
     if [ "$MIGRATE_STATUS" -ne 0 ]; then
-        warn "flask db migrate exited with status $MIGRATE_STATUS; its output is in deployment.log on the VM"
+        # Without the generated migration the services below would
+        # restart on the new code against the old schema. One failure is
+        # expected and goes on: a migration that is already in
+        # migrations/versions and not applied yet (an earlier deploy
+        # stopped at its upgrade) makes `flask db migrate` refuse, and
+        # the upgrade below applies it. Any other failure ends the deploy
+        # here, before anything is stopped.
+        PENDING_CURRENT=$( (flask db current 2>/dev/null || true) | grep -oE '^[a-f0-9]+' | head -1 || true)
+        PENDING_HEAD=$( (flask db heads 2>/dev/null || true) | grep -oE '^[a-f0-9]+' | head -1 || true)
+        if [ -n "$PENDING_HEAD" ] && [ "$PENDING_CURRENT" != "$PENDING_HEAD" ]; then
+            warn "flask db migrate exited with status $MIGRATE_STATUS while an earlier migration is not applied yet; it is applied below. Model changes of this deploy were not checked: deploy once more after this one. Its output is in deployment.log on the VM"
+        else
+            error "flask db migrate exited with status $MIGRATE_STATUS, so no migration was generated for this code. Nothing was stopped, restarted or reloaded by this deploy; its output is in deployment.log on the VM"
+        fi
     fi
 
     if echo "$MIGRATION_OUTPUT" | grep -q "Generating"; then
