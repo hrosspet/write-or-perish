@@ -1545,6 +1545,23 @@ class TestReadOnlyModels:
             assert (cfg["api_model"], cfg["provider"]) == (api_model, provider)
             assert not cfg.get("deprecated") and not cfg.get("featured")
 
+    def test_gpt_6_2_astra_is_a_featured_chat_model(self):
+        """Peter, 2026-11-23: "we should add Astra 6.2 to Loore". A chat
+        model in the short list, heading OpenAI's models (the pickers keep
+        the dict's order), beside GPT-6 Astra, which stays offered and
+        featured; not a Read model, like GPT-6 Astra."""
+        from backend.config import Config
+        cfg = Config.SUPPORTED_MODELS["gpt-6.2-astra"]
+        assert (cfg["provider"], cfg["api_model"]) == ("openai", "gpt-6.2-astra")
+        assert cfg["display_name"] == "GPT-6.2 Astra"
+        assert cfg.get("chat", True) and cfg["featured"]
+        assert not cfg.get("read") and not cfg.get("deprecated")
+        openai_ids = [k for k, c in Config.SUPPORTED_MODELS.items()
+                      if c.get("provider") == "openai"]
+        assert openai_ids[0] == "gpt-6.2-astra"
+        old = Config.SUPPORTED_MODELS["gpt-6-astra"]
+        assert old["featured"] and not old.get("deprecated")
+
 
 # ── Glean (#435, Peter 2026-10-09) ───────────────────────────────────────
 

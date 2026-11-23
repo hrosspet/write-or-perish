@@ -502,8 +502,8 @@ class Config:
     # Sources:
     #   Anthropic: https://platform.claude.com/docs/en/about-claude/pricing
     #   OpenAI:    https://developers.openai.com/api/docs/pricing
-    PRICING_VERSION = "9"
-    PRICING_UPDATED_AT = "2026-10-08"
+    PRICING_VERSION = "10"
+    PRICING_UPDATED_AT = "2026-11-23"
 
     # Supported models configuration (single source of truth for all model metadata)
     #
@@ -556,6 +556,38 @@ class Config:
     # The picker's full list follows this dict's order: newest first
     # within each provider.
     SUPPORTED_MODELS = {
+        "gpt-6.2-astra": {
+            # ASSUMED o200k, as for gpt-6-sol: OpenAI names no tokenizer.
+            # Only selects the cap-check prior until the user's first chunk
+            # is measured.
+            "tokenizer_family": "o200k",
+            "provider": "openai",
+            "api_model": "gpt-6.2-astra",
+            # OpenAI's diagnostics guide: "GPT-5.6 and later" (2026-11-23).
+            "cache_diagnostics": True,
+            # Model page (2026-11-23): 1.05M window, 922k max input, 128k
+            # max output (above DEFAULT_MAX_OUTPUT_TOKENS, so no
+            # max_output_tokens entry). Reasoning effort "none" is
+            # rejected; Loore sends no effort on a live call.
+            "max_input_tokens": 922000,
+            "display_name": "GPT-6.2 Astra",
+            # Added at Peter's request (2026-11-23: "we should add Astra
+            # 6.2 to Loore"); featured beside GPT-6 Astra.
+            "featured": True,
+            "context_window": 1050000,
+            # Verified 2026-11-23 on the OpenAI pricing + model pages:
+            # $8.00 / $40.00, cached input $0.40 (0.05x, where gpt-6-astra
+            # is 0.1x), 30-minute cache writes $10.00 (the default 1.25x;
+            # Loore sets no 12-hour ttl, which bills 2.5x); >272k input:
+            # $16.00 / $60.00, cached $0.80, writes $20.00 (2x input and
+            # cache, 1.5x output for the whole request); batch half.
+            "input_price_per_mtok": 8.00,
+            "output_price_per_mtok": 40.00,
+            "cached_input_multiplier": 0.05,
+            "long_context_threshold": 272000,
+            "long_context_input_multiplier": 2.0,
+            "long_context_output_multiplier": 1.5,
+        },
         "gpt-6.1-sol": {
             # ASSUMED o200k, as for gpt-6-sol.
             "tokenizer_family": "o200k",
