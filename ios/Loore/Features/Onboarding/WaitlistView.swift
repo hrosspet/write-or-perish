@@ -4,6 +4,32 @@ import SwiftUI
 /// (web `AlphaThankYouPage`, route `/alpha-thank-you`). Every other API is 403
 /// for them, so this screen is all they get, plus About and Logout in the ⋯ menu,
 /// and "Delete my account" (#269): every account can delete itself.
+/// The day the Beta opens, for the waiting screen. The owner will change this
+/// one constant when the date is fixed (the web copy is `BETA_OPENS_ON` in
+/// `frontend/src/constants/beta.js`).
+enum BetaRelease {
+    static let opensOn = DateComponents(year: 2026, month: 12, day: 21)
+
+    private static let months = ["January", "February", "March", "April", "May", "June", "July",
+                                 "August", "September", "October", "November", "December"]
+
+    /// "The Beta opens on 21 December." while that day (in the phone's time
+    /// zone) is still ahead; nil from the start of that day on.
+    static func opensSentence(now: Date = Date(), opensOn: DateComponents = BetaRelease.opensOn,
+                              calendar: Calendar = .current) -> String? {
+        guard let day = opensOn.day, let month = opensOn.month,
+              let start = calendar.date(from: opensOn), now < start else { return nil }
+        return "The Beta opens on \(day) \(months[month - 1])."
+    }
+
+    static let waitingIntro = "Thank you for signing up for the Loore Beta. We're letting people in gradually — to keep things intimate and to give each person the attention they deserve as they begin."
+
+    static func waitingText(now: Date = Date(), calendar: Calendar = .current) -> String {
+        if let sentence = opensSentence(now: now, calendar: calendar) { return waitingIntro + " " + sentence }
+        return waitingIntro
+    }
+}
+
 struct WaitlistView: View {
     @Environment(AppState.self) private var app
 
@@ -42,7 +68,7 @@ struct WaitlistView: View {
                         .padding(.bottom, 24)
                         .looreFadeIn(delay: 0.1)
                         .accessibilityAddTraits(.isHeader)
-                    Text("Thank you for signing up for the Loore Alpha. We're letting people in gradually — to keep things intimate and to give each person the attention they deserve as they begin.")
+                    Text(BetaRelease.waitingText())
                         .font(LooreFont.sans(16.8, .light))
                         .foregroundStyle(LooreColor.textSecondary)
                         .multilineTextAlignment(.center)

@@ -146,3 +146,23 @@ test('without account deletion on the server the page offers none', () => {
   renderPage();
   expect(screen.queryByRole('button', { name: /delete my account/i })).toBeNull();
 });
+
+describe('the page names the Beta and its opening day', () => {
+  afterEach(() => jest.useRealTimers());
+
+  test('before the date: says Beta and gives the date', () => {
+    jest.useFakeTimers().setSystemTime(new Date(2026, 10, 23, 12));
+    renderPage();
+    expect(screen.getByText(/signing up for the Loore Beta\./)).toBeTruthy();
+    expect(screen.getByText(/The Beta opens on 21 December\./)).toBeTruthy();
+    expect(screen.queryByText(/Alpha/)).toBeNull();
+  });
+
+  test('from the date on: the sentence is gone, the rest reads as before', () => {
+    jest.useFakeTimers().setSystemTime(new Date(2026, 11, 21, 0, 0));
+    renderPage();
+    expect(screen.getByText(/signing up for the Loore Beta\./)).toBeTruthy();
+    expect(screen.queryByText(/The Beta opens on/)).toBeNull();
+    expect(screen.getByText(/they deserve as they begin\.$/)).toBeTruthy();
+  });
+});
