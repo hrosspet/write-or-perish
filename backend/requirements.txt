@@ -37,7 +37,7 @@ google-cloud-kms>=2.0.0
 # imported only when a gs:// location is set.
 google-cloud-storage>=2.10,<4
 cryptography>=41.0.0
-sentry-sdk[flask]>=2.0.0
+sentry-sdk[flask]>=2.0.0,<3
 # Server-side markdown for the public pages (escape=True: raw HTML in
 # user content is escaped, matching react-markdown's behavior)
 mistune>=3.0.0,<4

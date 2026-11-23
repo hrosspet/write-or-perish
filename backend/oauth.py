@@ -1,10 +1,11 @@
 import logging
 from urllib.parse import parse_qs, parse_qsl, urlparse
 
-from flask import g, request, session
+from flask import current_app, g, request, session
 from flask_dance.consumer import (
     OAuth1ConsumerBlueprint, oauth_authorized, oauth_before_login,
     oauth_error)
+from flask_dance.consumer.requests import OAuth1Session
 from flask_dance.contrib.twitter import make_twitter_blueprint
 
 logger = logging.getLogger(__name__)
@@ -80,6 +81,20 @@ def _refuse_foreign_callback():
     return refuse_x_callback()
 
 
+class _ConfiguredCallbackSession(OAuth1Session):
+    """The address X sends the browser back to is the configured one
+    (FRONTEND_URL; nginx and the dev server send /auth/ there to this
+    app). flask-dance builds it from the request's host just before it
+    asks X for a request token; it is replaced here."""
+
+    def fetch_request_token(self, url, *args, **kwargs):
+        frontend_url = current_app.config.get("FRONTEND_URL", "").rstrip("/")
+        # flask-dance's callback route, under the blueprint's /auth prefix.
+        self._client.client.callback_uri = (
+            f"{frontend_url}/auth/twitter/authorized")
+        return super().fetch_request_token(url, *args, **kwargs)
+
+
 _make_session = OAuth1ConsumerBlueprint.__dict__["session"].fget
 
 
@@ -122,7 +137,8 @@ def init_twitter_blueprint(app):
     twitter_bp = make_twitter_blueprint(
         api_key=app.config["TWITTER_API_KEY"],
         api_secret=app.config["TWITTER_API_SECRET"],
-        redirect_url = redirect_url
+        redirect_url=redirect_url,
+        session_class=_ConfiguredCallbackSession,
     )
     # make_twitter_blueprint always builds a plain OAuth1ConsumerBlueprint;
     # the subclass only replaces how `session` is stored.

@@ -291,8 +291,11 @@ def create_app():
     if _payments_off:
         app.logger.error(_payments_off)
 
-    # Fix for running behind nginx reverse proxy - handles X-Forwarded-* headers
-    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+    # Behind nginx: the client address and scheme come from the
+    # X-Forwarded-For and X-Forwarded-Proto nginx sets. The host is the Host
+    # header nginx sets; X-Forwarded-Host and X-Forwarded-Prefix are not
+    # read: the app is served at the root of one host.
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=0, x_prefix=0)
 
     # Configure CORS to allow credentials from your frontend
     CORS(app, supports_credentials=True, origins=[app.config.get("FRONTEND_URL")])
