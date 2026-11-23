@@ -88,6 +88,16 @@ def real_app(monkeypatch):
     sys.modules.update(stubs)
 
 
+@pytest.fixture(autouse=True)
+def hold_mail(monkeypatch):
+    """The waiting-list emails of a test, never sent anywhere."""
+    from backend.utils import email as email_mod
+    sent = []
+    monkeypatch.setattr(email_mod, "send_trials_hold_email",
+                        lambda **kw: sent.append(kw))
+    return sent
+
+
 @pytest.fixture
 def payments_off(real_app):
     real_app.config["PAYMENTS_ENABLED"] = False
@@ -468,3 +478,176 @@ class TestTwoAtOnce:
         assert executed == [(
             "SELECT pg_advisory_xact_lock(:namespace, 0)",
             {"namespace": trial_alerts._GATE_LOCK_NAMESPACE})]
+
+
+# ── The admin is told once a day that the waiting list is in effect ─────
+
+class TestTheAdminIsToldOnceADay:
+    def test_the_first_account_held_in_a_day_sends_one_email(
+            self, real_app, hold_mail):
+        real_app.config["SPEND_ALERT_EMAIL"] = "alerts@example.com"
+        now = datetime.utcnow()
+        _trials(HOLD - 3)
+        for i in range(3):
+            _add(username=f"in{i}", plan="free", approved=True,
+                 let_in_at=now - timedelta(minutes=5))
+        first = _add(username="first")
+        assert _me(_client(real_app, first))["approved"] is False
+        assert hold_mail == [{
+            "to_email": "alerts@example.com",
+            "places": HOLD, "hold_from": HOLD,
+            "trials": HOLD - 3, "waiting": 1,
+        }]
+        # More accounts held the same day, and more requests of the
+        # first: no second email.
+        second = _add(username="second")
+        assert _me(_client(real_app, second))["approved"] is False
+        assert _me(_client(real_app, first))["approved"] is False
+        assert len(hold_mail) == 1
+
+    def test_the_next_day_sends_again(self, real_app, hold_mail):
+        from backend.models import TrialAlert
+        from backend.utils import trial_alerts
+        day_one = datetime(2027, 1, 20, 22, 0, 0)
+        started = day_one - timedelta(hours=1)
+        for i in range(HOLD):
+            _add(username=f"t{i}", plan="free", approved=True,
+                 let_in_at=started, subscription_trial_start=started)
+        a, b = _add(username="a"), _add(username="b")
+        with real_app.test_request_context():
+            assert trial_alerts.held_at_gate(a, now=day_one) is True
+            assert trial_alerts.held_at_gate(
+                b, now=day_one + timedelta(hours=3)) is True
+        assert [m["waiting"] for m in hold_mail] == [1, 2]
+        assert sorted((r.day, r.kind) for r in TrialAlert.query.all()) == [
+            ("2027-01-20", "hold"), ("2027-01-21", "hold")]
+
+    def test_the_email_goes_out_after_the_account_is_stored_as_waiting(
+            self, real_app, monkeypatch):
+        from backend.models import TrialAlert
+        from backend.utils import email as email_mod
+        seen = []
+
+        def send(**kw):
+            # Whatever is not committed is dropped here: the waiting
+            # mark and the day's record are both stored already.
+            _db.session.rollback()
+            held = User.query.filter_by(username="held").one()
+            seen.append((held.approval_hold_at is not None,
+                         TrialAlert.query.filter_by(kind="hold").count()))
+        monkeypatch.setattr(email_mod, "send_trials_hold_email", send)
+        _trials(HOLD)
+        u = _add(username="held")
+        assert _me(_client(real_app, u))["approved"] is False
+        assert seen == [(True, 1)]
+
+    def test_a_failed_email_changes_nothing_for_the_account(
+            self, real_app, monkeypatch):
+        from backend.utils import email as email_mod
+        calls = []
+
+        def failing(**kw):
+            calls.append(kw)
+            raise RuntimeError("mail server down")
+        monkeypatch.setattr(email_mod, "send_trials_hold_email", failing)
+        _trials(HOLD)
+        u = _add(username="held")
+        c = _client(real_app, u)
+        me = _me(c)                      # the request itself answers 200
+        assert me["approved"] is False and me["account_blocked"] is False
+        r = c.post("/api/nodes/", json={"content": "hello"})
+        assert r.status_code == 403 and r.get_json() == {"error": WAITING}
+        assert _fresh(u).approval_hold_at is not None
+        # Still at most one a day: the next held account does not send.
+        other = _add(username="other")
+        assert _me(_client(real_app, other))["approved"] is False
+        assert len(calls) == 1
+
+    def test_two_requests_at_once_send_one_email(self, real_app, hold_mail,
+                                                 monkeypatch):
+        """Both found no record of the day; the second one's record is
+        refused by the database and it does not send."""
+        from backend.models import TrialAlert
+        from backend.utils import trial_alerts
+        now = datetime(2027, 1, 20, 12, 0, 0)
+        _db.session.add(TrialAlert(day="2027-01-20", kind="hold", trials=20))
+        _db.session.commit()
+
+        class _NoneFound:
+            def filter_by(self, **kw):
+                return self
+
+            def first(self):
+                return None
+        monkeypatch.setattr(TrialAlert, "query", _NoneFound())
+        with real_app.test_request_context():
+            assert trial_alerts._tell_admin_of_hold(now) is False
+        assert hold_mail == []
+
+    def test_no_email_when_nobody_is_held(self, real_app, hold_mail):
+        _trials(HOLD - 1)
+        assert _me(_client(real_app, _add(username="in")))["approved"] is True
+        _trials(5, prefix="more")
+        prepared = _add(username="prepared", prefilled_handle="prepared")
+        assert _me(_client(real_app, prepared))["approved"] is True
+        assert hold_mail == []
+
+    def test_control_no_email_while_payments_are_off(self, payments_off,
+                                                     hold_mail):
+        _trials(HOLD + 5)
+        u = _add(username="newcomer")
+        assert _me(_client(payments_off, u))["approved"] is False
+        assert hold_mail == []
+
+    def test_both_emails_can_go_out_on_one_day(self, real_app, hold_mail):
+        from backend.models import TrialAlert
+        from backend.utils import trial_alerts
+        _trials(HOLD)
+        u = _add(username="held")
+        assert _me(_client(real_app, u))["approved"] is False
+        trials_mail = []
+        result = trial_alerts.check_trials_started(
+            real_app.config, send_email=lambda **kw: trials_mail.append(kw))
+        assert result["alerted"] is True
+        assert len(hold_mail) == 1 and len(trials_mail) == 1
+        assert sorted(r.kind for r in TrialAlert.query.all()) == [
+            "hold", "trials"]
+
+
+def test_the_waiting_list_email_states_counts_and_what_to_do(monkeypatch):
+    from backend.utils import email as email_mod
+    monkeypatch.undo()   # the real sender, with only the delivery replaced
+    sent = []
+    monkeypatch.setattr(
+        email_mod, "_send",
+        lambda to, subject, text, html, *a, **kw: sent.append(
+            (to, subject, text, html)))
+    email_mod.send_trials_hold_email(
+        to_email="alerts@example.com", places=20, hold_from=20,
+        trials=7, waiting=1)
+    (to, subject, text, html), = sent
+    assert to == "alerts@example.com"
+    assert subject == "Loore: new accounts are waiting for approval"
+    assert text == (
+        "The waiting list is in effect\n"
+        "\n"
+        "A new account that was not prepared in advance was put on the "
+        "waiting list instead of going on to the trial. Until the "
+        "number falls below the limit, every new such account waits. "
+        "Accounts prepared in advance are let in as always.\n"
+        "\n"
+        "New accounts let in or on a trial in the last 24 hours: 20 "
+        "(new ones wait from 20)\n"
+        "Of them, trials started: 7\n"
+        "Accounts waiting for your approval now: 1\n"
+        "\n"
+        "To let a waiting account in: admin dashboard, Users tab, "
+        "status \"Waiting\", Activate. It stays waiting until you do.\n"
+        "To stop holding new accounts: set "
+        "OUTSIDE_TRIALS_HOLD_PER_DAY=0 in the server's environment and "
+        "restart (a higher number raises the limit).\n"
+        "\n"
+        "This email is sent at most once a day.\n"
+        "Admin dashboard: https://loore.org/admin\n")
+    assert "Accounts waiting for your approval now: 1" in html
+    assert "OUTSIDE_TRIALS_HOLD_PER_DAY=0" in html

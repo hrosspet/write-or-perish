@@ -24,7 +24,9 @@ Nothing here runs while payments are off.
   for approval, and Activate (or Activate & Welcome) in the Users tab
   lets it in to the step where the trial starts. It keeps waiting when
   the day's count falls again (``User.approval_hold_at``): the admin
-  decides, as before payments.
+  decides, as before payments. The first time in a UTC day that an
+  account is held, the admin gets one email saying so
+  (``_tell_admin_of_hold``), with counts only.
 
 A place (``outside_places_since``) is such an account that started a
 trial in the window, or that the gate let in during the window and that
@@ -64,6 +66,10 @@ OUTSIDE_TRIALS_EMAIL_PER_DAY = 10
 # $600 at most before a first payment.
 OUTSIDE_TRIALS_HOLD_PER_DAY = 20
 TRIALS_STARTED_WINDOW = timedelta(hours=24)
+
+# TrialAlert.kind: the two emails, each at most once per UTC day.
+KIND_TRIALS = "trials"
+KIND_HOLD = "hold"
 
 # The first key of the advisory lock under which a new account's place is
 # counted and taken (as utils/todo_lock: a fixed number, so it cannot
@@ -187,7 +193,62 @@ def held_at_gate(user, now=None, config=None):
     logger.warning(
         "New account %s waits for approval: %s places taken in 24 hours",
         user.id, limit)
+    # After the commit, so outside the lock: the account waits whatever
+    # happens to the email.
+    _tell_admin_of_hold(now, config)
     return True
+
+
+def waiting_accounts():
+    """How many accounts the gate holds for approval now."""
+    from backend.models import User
+    return db.session.query(User.id).filter(
+        User.approved.is_(False),
+        User.approval_hold_at.isnot(None),
+        User.deactivated_at.is_(None)).count()
+
+
+def _tell_admin_of_hold(now, config=None, send_email=None):
+    """One email to the admin the first time in a UTC day that the gate
+    holds an account: the waiting list is in effect. The day is recorded
+    first (one TrialAlert row of kind "hold"; of two requests at once only
+    the one whose row is stored sends), so there is at most one such
+    email a day, also when sending fails. Nothing here reaches the
+    caller: a failure is logged and the account waits as it does anyway.
+    Counts only, no account is named. Returns whether it sent."""
+    from backend.models import TrialAlert
+    try:
+        day = now.strftime("%Y-%m-%d")
+        if TrialAlert.query.filter_by(
+                day=day, kind=KIND_HOLD).first() is not None:
+            return False
+        since = now - TRIALS_STARTED_WINDOW
+        places = outside_places_since(since)
+        db.session.add(TrialAlert(day=day, kind=KIND_HOLD, trials=places))
+        try:
+            db.session.commit()
+        except IntegrityError:
+            # Another request recorded the day a moment ago and sends.
+            db.session.rollback()
+            return False
+        trials = outside_trials_started_since(since)
+        waiting = waiting_accounts()
+        cfg = _config(config)
+        if send_email is None:
+            from backend.utils.email import send_trials_hold_email
+            send_email = send_trials_hold_email
+        send_email(
+            to_email=cfg.get("SPEND_ALERT_EMAIL") or "signup@loore.org",
+            places=places, hold_from=hold_from(config), trials=trials,
+            waiting=waiting)
+        return True
+    except Exception:
+        logger.exception("Failed to send the waiting-list email")
+        try:
+            db.session.rollback()
+        except Exception:
+            pass
+        return False
 
 
 def check_trials_started(config, now=None, send_email=None):
@@ -212,7 +273,8 @@ def check_trials_started(config, now=None, send_email=None):
     if count <= above:
         return summary
     day = now.strftime("%Y-%m-%d")
-    if TrialAlert.query.filter_by(day=day).first() is not None:
+    if TrialAlert.query.filter_by(
+            day=day, kind=KIND_TRIALS).first() is not None:
         summary["status"] = "already_alerted"
         return summary
     if send_email is None:
@@ -230,7 +292,7 @@ def check_trials_started(config, now=None, send_email=None):
         logger.exception("Failed to send the trials-started email")
         summary["status"] = "email_failed"
         return summary
-    db.session.add(TrialAlert(day=day, trials=count))
+    db.session.add(TrialAlert(day=day, kind=KIND_TRIALS, trials=count))
     try:
         db.session.commit()
     except IntegrityError:

@@ -3191,15 +3191,23 @@ class TrialCard(db.Model):
 
 
 class TrialAlert(db.Model):
-    """A UTC day on which the admin was emailed that many trials of
-    accounts not prepared in advance started (utils/trial_alerts): one row
-    per day, so the hourly check emails at most once a day. Holds the
-    count at the time, nothing of any account.
+    """A UTC day on which the admin was emailed about the trials of
+    accounts not prepared in advance (utils/trial_alerts): one row per day
+    and kind, so each email goes out at most once a day. ``kind``
+    "trials": more trials started than the email's number (``trials`` is
+    that count). ``kind`` "hold": the waiting list took effect, a new
+    account was held for approval (``trials`` is the places taken then).
+    Holds counts, nothing of any account.
     """
     __tablename__ = "trial_alert"
+    __table_args__ = (
+        db.UniqueConstraint("day", "kind", name="uq_trial_alert_day_kind"),
+    )
 
     id = db.Column(db.Integer, primary_key=True)
-    day = db.Column(db.String(10), nullable=False, unique=True)  # YYYY-MM-DD
+    day = db.Column(db.String(10), nullable=False)  # YYYY-MM-DD
+    kind = db.Column(db.String(16), nullable=False, default="trials",
+                     server_default="trials")
     trials = db.Column(db.Integer, nullable=False)
     created_at = db.Column(db.DateTime, nullable=False,
                            default=datetime.utcnow)
