@@ -183,7 +183,11 @@ def main(argv=None):
         earlier, stored = survey()
         print(f"tool records in the earlier form: {earlier}")
         print(f"tool records in the stored form:  {stored}")
-        if not encryption.is_encryption_enabled():
+        if not encryption.is_encryption_enabled() and not (
+                args.undo and encryption.reads_decrypt()):
+            # Off: nothing is stored encrypted, so there is nothing to
+            # convert. --undo still runs where a key name is set: what
+            # was stored encrypted earlier is read with it.
             print("Encryption is off here: records are stored as they "
                   "are. Nothing to do.")
             return 0

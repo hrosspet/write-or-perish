@@ -58,7 +58,10 @@ class EncryptionNotConfigured(RuntimeError):
 
 ENCRYPTION_OFF_NOTICE = (
     "Encryption is off on this instance (ENCRYPTION_DISABLED=true): new "
-    "content is stored unencrypted. GCP_KMS_KEY_NAME set but unused: %s.")
+    "content is stored unencrypted. GCP_KMS_KEY_NAME is set: %s.")
+ENCRYPTION_OFF_KEY_NAME_NOTICE = (
+    " Content that was stored encrypted earlier is still read with that "
+    "key; nothing new is encrypted with it.")
 
 
 def encryption_choice(environ=None) -> bool:
@@ -69,7 +72,8 @@ def encryption_choice(environ=None) -> bool:
     encryption off, in every environment (Peter, 2026-11-23). So:
 
     - ENCRYPTION_DISABLED=true: off, whether or not GCP_KMS_KEY_NAME is
-      set. A key name beside the switch is not used.
+      set. Nothing new is encrypted; a key name beside the switch only
+      serves reads of what was stored encrypted earlier (reads_decrypt).
     - not turned off, GCP_KMS_KEY_NAME set: on.
     - not turned off, no GCP_KMS_KEY_NAME: EncryptionNotConfigured. A
       missing key name used to mean "store plain text", with no error
@@ -88,17 +92,31 @@ def encryption_choice(environ=None) -> bool:
     return True
 
 
+def reads_decrypt(environ=None) -> bool:
+    """Whether a value or file that is stored encrypted is decrypted
+    when it is read: wherever a key name is set, with encryption on or
+    off. An instance that holds encrypted content and is started with
+    ENCRYPTION_DISABLED=true and its key name keeps reading that content
+    as it was written, with the same key-service calls as before; only
+    what it writes from then on is stored unencrypted. Without a key
+    name (and encryption off) nothing can be decrypted, and a stored
+    value comes back as it is. Raises as encryption_choice does."""
+    environ = os.environ if environ is None else environ
+    return encryption_choice(environ) or bool(environ.get("GCP_KMS_KEY_NAME"))
+
+
 def encryption_off_notice(environ=None):
     """The one line an instance writes to its log when it starts with
     encryption off, or None when it encrypts. The line says yes or no
-    about a key name that is set beside the switch and therefore unused,
-    so an instance that was meant to encrypt shows it in its log. No
-    value is in the line."""
+    about a key name set beside the switch, and what that key is then
+    used for, so an instance that was meant to encrypt shows it in its
+    log. No value is in the line."""
     environ = os.environ if environ is None else environ
     if encryption_choice(environ):
         return None
-    unused = "yes" if environ.get("GCP_KMS_KEY_NAME") else "no"
-    return ENCRYPTION_OFF_NOTICE % unused
+    if environ.get("GCP_KMS_KEY_NAME"):
+        return ENCRYPTION_OFF_NOTICE % "yes" + ENCRYPTION_OFF_KEY_NAME_NOTICE
+    return ENCRYPTION_OFF_NOTICE % "no"
 
 
 def is_encryption_enabled() -> bool:
@@ -356,7 +374,7 @@ def prefetch_deks(ciphertexts):
     hits. Duplicates collapse (many rows share a DEK only if they were
     encrypted together, but the check is free). Returns the number of KMS
     calls issued."""
-    if not is_encryption_enabled():
+    if not reads_decrypt():
         return 0
     missing = {}
     for ciphertext in ciphertexts:
@@ -374,11 +392,11 @@ def prefetch_deks(ciphertexts):
 
 
 def dek_cached(ciphertext) -> bool:
-    """True when decrypting *ciphertext* makes no KMS call: encryption is
-    off, it is no v2 envelope, or its DEK is in the cache. A v1 blob
-    needs KMS on every decrypt, which no prefetch can save, so it counts
-    as cached here too."""
-    if not is_encryption_enabled():
+    """True when decrypting *ciphertext* makes no KMS call: nothing is
+    decrypted here (reads_decrypt), it is no v2 envelope, or its DEK is
+    in the cache. A v1 blob needs KMS on every decrypt, which no
+    prefetch can save, so it counts as cached here too."""
+    if not reads_decrypt():
         return True
     wrapped = wrapped_dek_of(ciphertext)
     if wrapped is None:
@@ -507,11 +525,11 @@ def decrypt_content(ciphertext: str) -> str:
     if not ciphertext.startswith((ENCRYPTED_PREFIX_V1, ENCRYPTED_PREFIX_V2)):
         return ciphertext
 
-    if not is_encryption_enabled():
+    if not reads_decrypt():
         import logging
         logging.getLogger(__name__).warning(
-            "Found encrypted content but encryption is disabled. "
-            "Cannot decrypt - returning as-is."
+            "Found encrypted content but encryption is disabled and no "
+            "key name is set. Cannot decrypt - returning as-is."
         )
         return ciphertext
 
@@ -659,7 +677,7 @@ def decrypt_file(filepath: str) -> bytes:
     Returns:
         Decrypted file contents as bytes
     """
-    if not is_encryption_enabled():
+    if not reads_decrypt():
         with open(filepath, 'rb') as f:
             return f.read()
 

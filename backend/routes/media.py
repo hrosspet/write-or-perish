@@ -212,9 +212,9 @@ def serve_media(filename):
         response = send_file(file_path)
 
     else:
-        from backend.utils.encryption import is_encryption_enabled
+        from backend.utils.encryption import reads_decrypt
 
-        if not is_encryption_enabled():
+        if not reads_decrypt():
             return jsonify({"error": "Encrypted file found but encryption is disabled"}), 500
 
         try:

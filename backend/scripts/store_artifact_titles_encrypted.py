@@ -214,7 +214,11 @@ def main(argv=None):
         plain, stored = survey()
         print(f"artifact rows with a plain title:      {plain}")
         print(f"artifact rows with an encrypted title: {stored}")
-        if not encryption.is_encryption_enabled():
+        if not encryption.is_encryption_enabled() and not (
+                args.undo and encryption.reads_decrypt()):
+            # Off: nothing is stored encrypted, so there is nothing to
+            # convert. --undo still runs where a key name is set: what
+            # was stored encrypted earlier is read with it.
             print("Encryption is off here: titles are stored as they "
                   "are. Nothing to do.")
             return 0

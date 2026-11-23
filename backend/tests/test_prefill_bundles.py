@@ -168,7 +168,9 @@ def world(tmp_path, monkeypatch):
 
 
 def _lab_mode(monkeypatch):
+    # The lab: encryption off and no key name, so nothing is decrypted.
     monkeypatch.setenv("ENCRYPTION_DISABLED", "true")
+    monkeypatch.setenv("GCP_KMS_KEY_NAME", "")
 
 
 def _prod_mode(monkeypatch):
@@ -698,6 +700,11 @@ def test_export_only_and_the_encryption_guard(world, monkeypatch):
     assert not world.storage.exists("bundles/1001/manifest.json")
     # Where content is encrypted (any server but the lab) export refuses.
     _prod_mode(monkeypatch)
+    with world.lab.app_context(), pytest.raises(SystemExit):
+        cli.run_export(world.storage, out=lambda *_: None)
+    # The same with encryption off and a key name set: what was stored
+    # encrypted earlier would be decrypted on read there.
+    monkeypatch.setenv("ENCRYPTION_DISABLED", "true")
     with world.lab.app_context(), pytest.raises(SystemExit):
         cli.run_export(world.storage, out=lambda *_: None)
 

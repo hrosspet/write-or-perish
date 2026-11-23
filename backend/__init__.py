@@ -113,7 +113,8 @@ def validate_keys(config, environ=None):
 
     Encryption, in every environment: ENCRYPTION_DISABLED=true is the
     only switch that turns it off (the local and staging Compose files
-    and the tests set it), with or without a key name beside it. Where
+    and the tests set it), with or without a key name beside it (a key
+    name then only serves reads of what was stored encrypted earlier). Where
     it is not turned off, GCP_KMS_KEY_NAME names the key users' writing
     is encrypted with, and the app does not start without it: it used to
     run and store new writing as plain text, with no error anywhere. The

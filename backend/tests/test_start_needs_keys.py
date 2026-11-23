@@ -81,20 +81,26 @@ def _notices(caplog):
             if r.getMessage().startswith("Encryption is off")]
 
 
-@pytest.mark.parametrize("environ,unused", [
+OFF_LINE = ("Encryption is off on this instance (ENCRYPTION_DISABLED=true): "
+            "new content is stored unencrypted. GCP_KMS_KEY_NAME is set: ")
+OFF_LINES = {
+    "no": OFF_LINE + "no.",
+    "yes": OFF_LINE + "yes. Content that was stored encrypted earlier is "
+                      "still read with that key; nothing new is encrypted "
+                      "with it."}
+
+
+@pytest.mark.parametrize("environ,key_name", [
     ({"ENCRYPTION_DISABLED": "true"}, "no"),
     ({"ENCRYPTION_DISABLED": "true", "GCP_KMS_KEY_NAME": ""}, "no"),
     (dict(WITH_KMS, ENCRYPTION_DISABLED="true"), "yes")])
 def test_a_start_with_encryption_off_writes_one_fixed_line(
-        caplog, monkeypatch, environ, unused):
+        caplog, monkeypatch, environ, key_name):
     monkeypatch.setattr(backend, "_encryption_off_noted", False)
     with caplog.at_level(logging.WARNING, logger="backend"):
         note_encryption_off(environ)
         note_encryption_off(environ)
-    assert _notices(caplog) == [
-        "Encryption is off on this instance (ENCRYPTION_DISABLED=true): "
-        "new content is stored unencrypted. GCP_KMS_KEY_NAME set but "
-        f"unused: {unused}."]
+    assert _notices(caplog) == [OFF_LINES[key_name]]
     assert KMS_NAME not in caplog.text
 
 
@@ -158,16 +164,18 @@ def test_turned_off_with_a_key_name_set_stores_unencrypted(
     assert audio.read_bytes() == b"audio"
 
 
-def test_turned_off_with_a_key_name_set_leaves_an_encrypted_value_as_it_is(
+def test_turned_off_without_a_key_name_leaves_an_encrypted_value_as_it_is(
         monkeypatch):
-    """What an instance does with a value stored while it encrypted,
-    once it is started with the switch: the key name beside the switch
-    is not used, so the value comes back as stored, not as written."""
+    """With the switch and no key name nothing can be decrypted: a value
+    stored while the instance encrypted comes back as stored. (With a
+    key name it is read as written:
+    test_reads_with_encryption_off_and_a_key_name.py.)"""
     monkeypatch.setenv("ENCRYPTION_DISABLED", "false")
     monkeypatch.setenv("GCP_KMS_KEY_NAME", KMS_NAME)
     monkeypatch.setattr(encryption, "_wrap_dek", lambda dek: b"wrapped")
     stored = encryption.encrypt_content("a note")
     monkeypatch.setenv("ENCRYPTION_DISABLED", "true")
+    monkeypatch.setenv("GCP_KMS_KEY_NAME", "")
     _no_key_service(monkeypatch)
     assert encryption.decrypt_content(stored) == stored
 
@@ -222,8 +230,7 @@ def test_create_app_turned_off_with_a_key_name_set_starts_and_stores_unencrypted
     monkeypatch.setattr(backend, "_encryption_off_noted", False)
     with caplog.at_level(logging.WARNING, logger="backend"):
         app = create_app()
-    assert len(_notices(caplog)) == 1
-    assert _notices(caplog)[0].endswith("unused: yes.")
+    assert _notices(caplog) == [OFF_LINES["yes"]]
     assert KMS_NAME not in caplog.text
     with app.app_context():
         db.create_all()
@@ -262,18 +269,17 @@ def _start(flask_env, off, key_name):
 
 
 @pytest.mark.parametrize("flask_env", ["production", "development"])
-@pytest.mark.parametrize("off,key_name,unused", [
+@pytest.mark.parametrize("off,key_name,line", [
     ("true", "", "no"), ("true", KMS_NAME, "yes"), ("", KMS_NAME, None)])
 def test_web_and_workers_start_turned_off_or_with_a_key_name(
-        flask_env, off, key_name, unused):
+        flask_env, off, key_name, line):
     result = _start(flask_env, off, key_name)
     assert result.returncode == 0, result.stderr[-3000:]
     assert result.stdout.strip().endswith("started")
-    if unused is None:
+    if line is None:
         assert "Encryption is off" not in result.stderr
     else:
-        assert result.stderr.count(
-            f"GCP_KMS_KEY_NAME set but unused: {unused}.") == 1
+        assert result.stderr.count(OFF_LINES[line]) == 1
         assert result.stderr.count("Encryption is off") == 1
     assert KMS_NAME not in result.stderr
 
