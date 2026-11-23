@@ -51,8 +51,7 @@ struct ThreadSheets: ViewModifier {
                                               set: { if !$0 { model.leavePlan = nil } })) {
                 if let plan = model.leavePlan {
                     CircleConfirmDialog(title: CirclesWording.leaveThreadTitle,
-                                        message: CirclesWording.leaveThreadBody(author: plan.author, closes: plan.closes,
-                                                                                circles: plan.circles),
+                                        message: CirclesWording.leaveThreadBody(author: plan.author, closes: plan.closes),
                                         note: CirclesWording.leaveNote(author: plan.author),
                                         confirmLabel: CirclesWording.leaveLabel, busy: model.leaving,
                                         onConfirm: { Task { await model.confirmLeave() } },

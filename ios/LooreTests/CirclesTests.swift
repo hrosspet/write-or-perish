@@ -135,8 +135,8 @@ final class CirclesModelTests: XCTestCase {
     }
 
     func testLeavingAndTheRecordingDecode() throws {
-        let plan = try decode(CircleLeavePlan.self, #"{"author":"anna","closes":3,"circles":1,"left":true}"#)
-        XCTAssertEqual(plan, CircleLeavePlan(author: "anna", closes: 3, circles: 1))
+        let plan = try decode(CircleLeavePlan.self, #"{"author":"anna","closes":3,"left":true}"#)
+        XCTAssertEqual(plan, CircleLeavePlan(author: "anna", closes: 3))
         let leavable = try decode(SharedWithMe.self, #"{"people":[],"hidden":["anna","emeka"],"hidden_leavable":["anna"]}"#)
         XCTAssertEqual(leavable.hiddenLeavable, ["anna"])
         // An older server sends no list: nothing is offered.
@@ -356,14 +356,12 @@ final class CirclesWordingTests: XCTestCase {
         XCTAssertEqual(CirclesWording.leaveLabel, "Leave")
         XCTAssertEqual(CirclesWording.leaveThreadTitle, "Leave this thread?")
         // Only this entry closes (named for it, or nothing else shared that way).
-        XCTAssertEqual(CirclesWording.leaveThreadBody(author: "anna", closes: 1, circles: 0),
+        XCTAssertEqual(CirclesWording.leaveThreadBody(author: "anna", closes: 1),
                        "You will no longer read this thread or reply in it, and nobody sees your name among its readers any more, @anna included.")
-        XCTAssertEqual(CirclesWording.leaveThreadBody(author: "anna", closes: 1, circles: 1),
-                       "You will no longer read this thread or reply in it, and nobody sees your name among its readers any more, @anna included.")
-        XCTAssertEqual(CirclesWording.leaveThreadBody(author: "anna", closes: 2, circles: 1),
-                       "You will no longer read this thread or reply in it, and nobody sees your name among its readers any more, @anna included. You also stop reading one other entry @anna shared with you through the same circle.")
-        XCTAssertEqual(CirclesWording.leaveThreadBody(author: "anna", closes: 4, circles: 2),
-                       "You will no longer read this thread or reply in it, and nobody sees your name among its readers any more, @anna included. You also stop reading three other entries @anna shared with you through the same circles.")
+        XCTAssertEqual(CirclesWording.leaveThreadBody(author: "anna", closes: 2),
+                       "You will no longer read this thread or reply in it, and nobody sees your name among its readers any more, @anna included. You also stop reading one other entry @anna shared with you the same way as this one.")
+        XCTAssertEqual(CirclesWording.leaveThreadBody(author: "anna", closes: 4),
+                       "You will no longer read this thread or reply in it, and nobody sees your name among its readers any more, @anna included. You also stop reading three other entries @anna shared with you the same way as this one.")
         XCTAssertEqual(CirclesWording.leaveNote(author: "anna"),
                        "Your replies stay where they are, with your name. @anna gets no note, and can add you again.")
         XCTAssertEqual(CirclesWording.leavePersonTitle(author: "anna"), "Leave everything @anna shares with you?")
@@ -460,10 +458,10 @@ final class CirclesFormTests: StubbedAppTestCase {
         StubURLProtocol.install { [self] request in
             switch (request.httpMethod ?? "", path(request)) {
             case ("POST", "/api/circles/leave/preview"):
-                return previewStatus == 200 ? .json(200, #"{"author":"anna","closes":3,"circles":1}"#)
+                return previewStatus == 200 ? .json(200, #"{"author":"anna","closes":3}"#)
                     : .json(previewStatus, #"{"error":"Not found"}"#)
             case ("POST", "/api/circles/leave"):
-                return .json(200, #"{"left":true,"author":"anna","closes":3,"circles":1}"#)
+                return .json(200, #"{"left":true,"author":"anna","closes":3}"#)
             case ("GET", "/api/circles/shared-with-me"):
                 return .json(200, #"{"people":[],"hidden":["anna"],"hidden_leavable":[]}"#)
             default: return .json(200, "{}")
@@ -480,13 +478,12 @@ final class CirclesFormTests: StubbedAppTestCase {
         stubLeave()
         await model.beginLeave()
         // The dialog's numbers come from the preview, which changes nothing.
-        XCTAssertEqual(model.leavePlan, CircleLeavePlan(author: "anna", closes: 3, circles: 1))
+        XCTAssertEqual(model.leavePlan, CircleLeavePlan(author: "anna", closes: 3))
         XCTAssertEqual(body(of: "POST /api/circles/leave/preview")?["entry_id"] as? Int, 31)
         XCTAssertFalse(calls.contains("POST /api/circles/leave"))
         let plan = try? XCTUnwrap(model.leavePlan)
-        XCTAssertEqual(CirclesWording.leaveThreadBody(author: plan?.author ?? "", closes: plan?.closes ?? 0,
-                                                      circles: plan?.circles ?? 0),
-                       "You will no longer read this thread or reply in it, and nobody sees your name among its readers any more, @anna included. You also stop reading two other entries @anna shared with you through the same circle.")
+        XCTAssertEqual(CirclesWording.leaveThreadBody(author: plan?.author ?? "", closes: plan?.closes ?? 0),
+                       "You will no longer read this thread or reply in it, and nobody sees your name among its readers any more, @anna included. You also stop reading two other entries @anna shared with you the same way as this one.")
         await model.confirmLeave()
         XCTAssertEqual(body(of: "POST /api/circles/leave")?["entry_id"] as? Int, 31)
         XCTAssertNil(model.leavePlan)

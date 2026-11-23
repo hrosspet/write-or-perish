@@ -353,26 +353,24 @@ struct SharedWithMe: Decodable, Sendable {
 }
 
 /// `POST /api/circles/leave/preview` and `/leave` (Peter, 2026-11-23): whose
-/// audience the user leaves, how many of that person's entries close to them
-/// with it (the entry left included) and how many of their circles they leave.
+/// audience the user leaves, and how many of that person's entries close to
+/// them with it (the entry left included). How many circles that is stays the
+/// author's: only she sees her circles.
 struct CircleLeavePlan: Decodable, Equatable, Sendable {
     var author: String
     var closes: Int
-    var circles: Int
 
-    enum CodingKeys: String, CodingKey { case author, closes, circles }
+    enum CodingKeys: String, CodingKey { case author, closes }
 
-    init(author: String, closes: Int, circles: Int) {
+    init(author: String, closes: Int) {
         self.author = author
         self.closes = closes
-        self.circles = circles
     }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         author = c.tolerant(.author, default: "")
         closes = c.tolerant(.closes, default: 0)
-        circles = c.tolerant(.circles, default: 0)
     }
 }
 

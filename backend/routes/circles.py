@@ -490,11 +490,13 @@ def add_mute():
 def _leave_target():
     """(author, entry or None, plan) for a leave request, or None when
     there is nothing for the user to leave there. ``entry_id``: a shared
-    entry whose audience holds the user (leaving from its page).
-    ``username`` (in the body): a person whose circles or entries hold
-    the user (leaving someone they hid). Any other request gets the
-    answer of one that names nothing, so this is no way to test a name
-    or an entry."""
+    entry the user can open now (the read routes' own check) and whose
+    audience holds them (leaving from its page). ``username`` (in the
+    body): a person the user hid whose circles or entries hold them (the
+    list of hidden people offers it, because their entries cannot be
+    opened). Any other request gets the answer of one that names
+    nothing, so this is no way to test a name or an entry."""
+    from backend.utils.privacy import can_user_access_node
     data = request.get_json(silent=True) or {}
     entry = None
     if data.get("entry_id") is not None:
@@ -505,6 +507,7 @@ def _leave_target():
         if (entry is None or entry.deleted_at is not None
                 or not cz.is_shared_entry(entry)
                 or cz.entry_owner_id(entry) == current_user.id
+                or not can_user_access_node(entry, current_user.id)
                 or current_user.id not in cz.reader_ids(entry.id)):
             return None
         author = db.session.get(User, cz.entry_owner_id(entry))
@@ -512,8 +515,11 @@ def _leave_target():
         name = _name_in_body()
         if not name:
             return None
-        author = User.query.filter(
-            func.lower(User.username) == name.lower()).first()
+        author = (db.session.query(User)
+                  .join(CircleMute, CircleMute.muted_user_id == User.id)
+                  .filter(CircleMute.user_id == current_user.id,
+                          func.lower(User.username) == name.lower())
+                  .first())
     if author is None or author.id == current_user.id:
         return None
     plan = cz.leave_plan(current_user.id, author.id, entry=entry)
@@ -523,8 +529,7 @@ def _leave_target():
 
 
 def _leave_answer(author, plan):
-    return {"author": author.username, "closes": plan.closes,
-            "circles": plan.circles}
+    return {"author": author.username, "closes": plan.closes}
 
 
 @circles_bp.route("/leave/preview", methods=["POST"])
@@ -544,8 +549,8 @@ def leave_preview():
 def leave():
     """The user leaves: ``entry_id``, the circles through which they read
     that entry and their name on it; ``username``, everything of that
-    person's that holds them. They then get the answers a removed reader
-    gets, and nobody sees their name among the readers any more."""
+    hidden person's that holds them. They then get the answers a removed
+    reader gets, and nobody sees their name among the readers any more."""
     target = _leave_target()
     if target is None:
         return jsonify({"error": "Not found"}), 404

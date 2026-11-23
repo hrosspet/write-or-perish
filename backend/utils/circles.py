@@ -1451,14 +1451,13 @@ class LeavePlan:
     rows (``named_ids``, NodeReader ids), the memberships
     (``member_ids``, CircleMember ids) and how many of the author's
     shared entries close to the reader with them (``closes``, the entry
-    left included). ``circles``: how many of the author's circles the
-    reader leaves."""
+    left included). How many circles that is stays the author's: only
+    she sees her circles."""
 
-    def __init__(self, named_ids, member_ids, closes, circles):
+    def __init__(self, named_ids, member_ids, closes):
         self.named_ids = named_ids
         self.member_ids = member_ids
         self.closes = closes
-        self.circles = circles
 
     def __bool__(self):
         return bool(self.named_ids or self.member_ids)
@@ -1478,8 +1477,9 @@ def leave_plan(user_id, author_id, entry=None):
     those circles close too, which the dialog states.
 
     Without *entry* (leaving a person the user hid, whose entries they
-    cannot open): every place in the author's circles and every entry of
-    the author's that names the user.
+    cannot open; the route offers it for those people only): every place
+    in the author's circles and every entry of the author's that names
+    the user.
 
     ``closes`` counts the author's live shared entries whose audience
     holds the user now and would not afterwards. Mutes play no part: a
@@ -1524,7 +1524,7 @@ def leave_plan(user_id, author_id, entry=None):
     after = named_after | {nid for nid, cid, at in shares
                            if cid not in left and grants(cid, at)}
     member_ids = [mid for mid, cid, _ in members if cid in left]
-    return LeavePlan(named_ids, member_ids, len(before - after), len(left))
+    return LeavePlan(named_ids, member_ids, len(before - after))
 
 
 def leave(plan):

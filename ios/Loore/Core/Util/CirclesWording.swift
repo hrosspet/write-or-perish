@@ -218,16 +218,15 @@ enum CirclesWording {
     static let leaveThreadTitle = "Leave this thread?"
     static let leaveFailed = "That did not work. Try again."
 
-    /// Leaving from a shared entry: what closes, from the preview's numbers
-    /// (`closes` counts the entry left; `circles` the author's circles left).
-    static func leaveThreadBody(author: String, closes: Int, circles: Int) -> String {
+    /// Leaving from a shared entry: what closes, from the preview's `closes`
+    /// (the entry left included). How many circles that is stays the author's.
+    static func leaveThreadBody(author: String, closes: Int) -> String {
         let who = at(author)
         let first = "You will no longer read this thread or reply in it, and nobody sees your name among its readers any more, \(who) included."
         let others = closes - 1
         guard others > 0 else { return first }
         let entries = others == 1 ? "entry" : "entries"
-        let through = circles <= 1 ? "circle" : "circles"
-        return "\(first) You also stop reading \(countWord(others)) other \(entries) \(who) shared with you through the same \(through)."
+        return "\(first) You also stop reading \(countWord(others)) other \(entries) \(who) shared with you the same way as this one."
     }
 
     /// The small print of both leave dialogs.

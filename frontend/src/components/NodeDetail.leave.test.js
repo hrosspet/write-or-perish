@@ -89,10 +89,10 @@ test('a reader leaves from the banner: the dialog says what closes, then the thr
   mockUser = BEN;
   mockPost.mockImplementation((url) => {
     if (url === '/circles/leave/preview') {
-      return Promise.resolve({ data: { author: 'anna', closes: 3, circles: 1 } });
+      return Promise.resolve({ data: { author: 'anna', closes: 3 } });
     }
     if (url === '/circles/leave') {
-      return Promise.resolve({ data: { left: true, author: 'anna', closes: 3, circles: 1 } });
+      return Promise.resolve({ data: { left: true, author: 'anna', closes: 3 } });
     }
     return Promise.reject(new Error(`unexpected POST ${url}`));
   });
@@ -104,7 +104,7 @@ test('a reader leaves from the banner: the dialog says what closes, then the thr
   expect(screen.getByText(
     'You will no longer read this thread or reply in it, and nobody sees '
     + 'your name among its readers any more, @anna included. You also stop '
-    + 'reading two other entries @anna shared with you through the same circle.',
+    + 'reading two other entries @anna shared with you the same way as this one.',
   )).toBeInTheDocument();
   expect(screen.getByText(
     'Your replies stay where they are, with your name. @anna gets no note, '
@@ -122,7 +122,7 @@ test('a reader leaves from the banner: the dialog says what closes, then the thr
 
 test('Cancel leaves nothing', async () => {
   mockUser = BEN;
-  mockPost.mockResolvedValue({ data: { author: 'anna', closes: 1, circles: 0 } });
+  mockPost.mockResolvedValue({ data: { author: 'anna', closes: 1 } });
   renderAt('/node/10');
   await screen.findByText('A shared entry.');
   await press('Leave');

@@ -28,11 +28,11 @@ beforeEach(() => {
   mockGet.mockImplementation(() => Promise.resolve({ data: page }));
   mockPost.mockImplementation((url) => {
     if (url === '/circles/leave/preview') {
-      return Promise.resolve({ data: { author: 'anna', closes: 2, circles: 1 } });
+      return Promise.resolve({ data: { author: 'anna', closes: 2 } });
     }
     if (url === '/circles/leave') {
       page = { ...page, hidden_leavable: [] };
-      return Promise.resolve({ data: { left: true, author: 'anna', closes: 2, circles: 1 } });
+      return Promise.resolve({ data: { left: true, author: 'anna', closes: 2 } });
     }
     return Promise.reject(new Error(`unexpected POST ${url}`));
   });

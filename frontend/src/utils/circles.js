@@ -163,8 +163,9 @@ export function showPersonAgainRequest(client, username) {
 
 // Leaving (Peter, 2026-11-23). From a shared entry's page: the circles
 // through which the reader reads it and their name on it. `preview` is
-// the server's answer: { author, closes, circles }, where `closes` counts
-// the entries that close with it, this one included.
+// the server's answer: { author, closes }, where `closes` counts the
+// entries that close with it, this one included. How many circles that
+// is stays the author's (only she sees her circles).
 export function leaveEntryBody(preview) {
   const author = atName(preview?.author);
   const others = Math.max((preview?.closes || 0) - 1, 0);
@@ -172,9 +173,8 @@ export function leaveEntryBody(preview) {
     + `nobody sees your name among its readers any more, ${author} included.`;
   if (others === 0) return base;
   const what = others === 1 ? 'entry' : 'entries';
-  const via = (preview?.circles || 0) > 1 ? 'circles' : 'circle';
   return `${base} You also stop reading ${countWord(others)} other ${what} `
-    + `${author} shared with you through the same ${via}.`;
+    + `${author} shared with you the same way as this one.`;
 }
 
 // From the list of people the reader hid: everything of that person's.

@@ -12,14 +12,13 @@ import {
 test('leaving from an entry says what closes with it', () => {
   const base = 'You will no longer read this thread or reply in it, and '
     + 'nobody sees your name among its readers any more, @anna included.';
-  expect(leaveEntryBody({ author: 'anna', closes: 1, circles: 0 })).toBe(base);
-  expect(leaveEntryBody({ author: 'anna', closes: 1, circles: 1 })).toBe(base);
-  expect(leaveEntryBody({ author: 'anna', closes: 2, circles: 1 })).toBe(
+  expect(leaveEntryBody({ author: 'anna', closes: 1 })).toBe(base);
+  expect(leaveEntryBody({ author: 'anna', closes: 2 })).toBe(
     `${base} You also stop reading one other entry @anna shared with you `
-    + 'through the same circle.');
-  expect(leaveEntryBody({ author: 'anna', closes: 4, circles: 2 })).toBe(
+    + 'the same way as this one.');
+  expect(leaveEntryBody({ author: 'anna', closes: 4 })).toBe(
     `${base} You also stop reading three other entries @anna shared with you `
-    + 'through the same circles.');
+    + 'the same way as this one.');
 });
 
 test('leaving a hidden person, and the note under both dialogs', () => {
