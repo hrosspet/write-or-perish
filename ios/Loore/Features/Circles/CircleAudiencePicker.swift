@@ -26,6 +26,9 @@ final class CircleAudienceState {
     private(set) var quotesRefusal: QuotesNotPublic?
     /// The audience the entry was saved with (edit): nil = not shared before.
     private(set) var savedKey: String?
+    /// The names the entry was shared with when the edit form opened (nil
+    /// for a new entry). The save sends them (`circle_usernames_from`).
+    private(set) var startedNames: [String]?
     /// An entry of the author's own with something above it in its thread:
     /// "Share also the discussion leading up to this node?" is offered, off
     /// by default. Sharing an entry does not share what is above it.
@@ -37,6 +40,13 @@ final class CircleAudienceState {
     /// time of that share, so a person added since with "Only new entries"
     /// does not read it and is not named. nil for a new entry.
     var entryId: Int?
+    /// The entry being edited has an original recording (`has_recording`).
+    var entryHasRecording = false
+    /// The form holds a recording or an audio upload for a new entry.
+    var formHasRecording = false
+    /// Its readers can play the original recording, also after the text is
+    /// edited, and the picker says so (Peter, 2026-11-23: "keep & say so").
+    var showsRecordingNote: Bool { entryHasRecording || formHasRecording }
     @ObservationIgnored private var request = 0
     @ObservationIgnored private var previewTask: Task<Void, Never>?
     @ObservationIgnored private var loaded = false
@@ -69,6 +79,11 @@ final class CircleAudienceState {
     var fields: [String: JSONValue] {
         var fields: [String: JSONValue] = ["circle_ids": .array(circleIds.map(JSONValue.int)),
                                            "circle_usernames": .array(names.map(JSONValue.string))]
+        // Editing: the names the form started with, so a person who left
+        // since is not named again by this save (the server leaves them off).
+        if let startedNames {
+            fields["circle_usernames_from"] = .array(startedNames.map(JSONValue.string))
+        }
         if offersSharePath {
             if sharePath {
                 fields["share_path"] = .bool(true)
@@ -128,6 +143,7 @@ final class CircleAudienceState {
     /// The entry's saved audience (edit).
     func seed(circleIds: [Int], usernames: [String]) {
         self.circleIds = circleIds
+        startedNames = usernames
         namesText = usernames.map { "@\($0)" }.joined(separator: ", ")
         committed = names
         savedKey = key
@@ -350,6 +366,13 @@ struct CircleAudiencePicker: View {
                         .foregroundStyle(LooreColor.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+            }
+            if state.showsRecordingNote {
+                Text(CirclesWording.recordingNote)
+                    .font(LooreFont.sans(12.8, .light))
+                    .foregroundStyle(LooreColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("circles.recordingNote")
             }
             Text("You can change this later, or take the entry back to only you.")
                 .font(LooreFont.sans(12.8, .light))

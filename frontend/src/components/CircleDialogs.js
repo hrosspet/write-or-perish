@@ -189,14 +189,22 @@ export function AddCircleMemberDialog({ open, name: rawName, circleName, sharedC
   );
 }
 
-/** A plain yes/no with the app's dialog look (delete a circle, hide a person). */
-export function CircleConfirmDialog({ open, title, body, confirmLabel, busy = false, onClose, onConfirm }) {
+/**
+ * A plain yes/no with the app's dialog look (delete a circle, hide a
+ * person, leave). `note`: a smaller line under the body; `error`: what
+ * went wrong with the last try.
+ */
+export function CircleConfirmDialog({ open, title, body, note = null, error = '', confirmLabel, busy = false, onClose, onConfirm }) {
   useEscape(open, onClose);
   if (!open) return null;
   return (
     <Shell onClose={onClose} labelledBy="circle-confirm-title">
       <h2 id="circle-confirm-title" style={titleStyle}>{title}</h2>
       <p style={bodyStyle}>{body}</p>
+      {note && <p style={smallStyle}>{note}</p>}
+      {error && (
+        <p role="alert" style={{ ...smallStyle, color: 'var(--error)' }}>{error}</p>
+      )}
       <div style={rowStyle}>
         <button type="button" style={quietButton} onClick={onClose} disabled={busy}>
           Cancel

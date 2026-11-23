@@ -223,6 +223,10 @@ struct NodeAudienceAnswer: Decodable, Sendable {
     /// path; `shared` says the path is shared with the node's audience now.
     /// nil when the node has nothing above it.
     var threadPath: ThreadPath?
+    /// For the node's owner: the node has an original recording. Its readers
+    /// can play it, also after the text is edited, and the share step says so
+    /// (Peter, 2026-11-23: "keep & say so").
+    var hasRecording: Bool
 
     struct ThreadPath: Decodable, Hashable, Sendable {
         var count: Int
@@ -241,6 +245,7 @@ struct NodeAudienceAnswer: Decodable, Sendable {
         case audience
         case threadAudience = "thread_audience"
         case threadPath = "thread_path"
+        case hasRecording = "has_recording"
     }
 
     init(from decoder: Decoder) throws {
@@ -248,6 +253,7 @@ struct NodeAudienceAnswer: Decodable, Sendable {
         audience = c.tolerant(.audience)
         threadAudience = c.tolerant(.threadAudience)
         threadPath = c.tolerant(.threadPath)
+        hasRecording = c.tolerant(.hasRecording, default: false)
     }
 }
 
@@ -312,11 +318,15 @@ struct SharedWithMe: Decodable, Sendable {
     var people: [Person]
     /// The people whose entries the user chose not to see.
     var hidden: [String]
+    /// Those of `hidden` whose circles or entries still hold the user: their
+    /// entries cannot be opened to leave from, so the list offers leaving.
+    var hiddenLeavable: [String]
     /// `?before=` for the next, older page; nil on the last one.
     var nextBefore: Int?
 
     enum CodingKeys: String, CodingKey {
         case people, hidden
+        case hiddenLeavable = "hidden_leavable"
         case nextBefore = "next_before"
     }
 
@@ -324,6 +334,7 @@ struct SharedWithMe: Decodable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         people = c.tolerant(.people, default: [])
         hidden = c.tolerant(.hidden, default: [])
+        hiddenLeavable = c.tolerant(.hiddenLeavable, default: [])
         nextBefore = c.tolerant(.nextBefore)
     }
 
@@ -338,6 +349,28 @@ struct SharedWithMe: Decodable, Sendable {
             }
         }
         return merged
+    }
+}
+
+/// `POST /api/circles/leave/preview` and `/leave` (Peter, 2026-11-23): whose
+/// audience the user leaves, and how many of that person's entries close to
+/// them with it (the entry left included). How many circles that is stays the
+/// author's: only she sees her circles.
+struct CircleLeavePlan: Decodable, Equatable, Sendable {
+    var author: String
+    var closes: Int
+
+    enum CodingKeys: String, CodingKey { case author, closes }
+
+    init(author: String, closes: Int) {
+        self.author = author
+        self.closes = closes
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        author = c.tolerant(.author, default: "")
+        closes = c.tolerant(.closes, default: 0)
     }
 }
 

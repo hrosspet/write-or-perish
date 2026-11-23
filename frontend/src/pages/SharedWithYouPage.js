@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import api from '../api';
 import { useUser } from '../contexts/UserContext';
 import { CircleConfirmDialog } from '../components/CircleDialogs';
+import { LeavePersonButton } from '../components/CircleLeave';
 import { parseTimestamp } from '../utils/date';
 import { atName, possessive, showPersonAgainRequest } from '../utils/circles';
 
@@ -36,6 +37,7 @@ function SharedWithYouPage() {
   const { user } = useUser();
   const [people, setPeople] = useState(null);
   const [hidden, setHidden] = useState([]);
+  const [leavable, setLeavable] = useState([]);
   const [nextBefore, setNextBefore] = useState(null);
   const [error, setError] = useState('');
   const [hiding, setHiding] = useState(null);
@@ -45,6 +47,7 @@ function SharedWithYouPage() {
     api.get('/circles/shared-with-me', { params: before ? { before } : {} })
       .then((res) => {
         setHidden(res.data.hidden || []);
+        setLeavable(res.data.hidden_leavable || []);
         setNextBefore(res.data.next_before || null);
         setPeople((current) => {
           if (!before || !current) return res.data.people || [];
@@ -231,11 +234,20 @@ function SharedWithYouPage() {
               <div key={name} style={{
                 display: 'flex', justifyContent: 'space-between',
                 alignItems: 'center', gap: '12px', minHeight: '44px',
+                flexWrap: 'wrap',
               }}>
                 <span style={{ fontSize: '0.94rem' }}>{atName(name)}</span>
-                <button type="button" style={quietButton} onClick={() => show(name)}>
-                  Show {possessive(name)} entries again
-                </button>
+                <span style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                  <button type="button" style={quietButton} onClick={() => show(name)}>
+                    Show {possessive(name)} entries again
+                  </button>
+                  {/* Hidden, but still in their circles or named on their
+                      entries: their entries cannot be opened to leave
+                      from, so leaving is offered here. */}
+                  {leavable.includes(name) && (
+                    <LeavePersonButton username={name} onLeft={() => load()} />
+                  )}
+                </span>
               </div>
             ))}
           </section>

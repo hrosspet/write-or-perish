@@ -56,6 +56,9 @@ const PrivacySelector = ({
   // Imports are always private (#677): no choice, one line in its place.
   hidePrivacy = false,
   privacyNote = null,
+  // The entry has an original recording (the Circles panel says its
+  // readers can play it).
+  hasRecording = false,
 }) => {
   // No provider in some tests and embeds: then Circles is off.
   const user = useUser()?.user;
@@ -199,6 +202,7 @@ const PrivacySelector = ({
               disabled={disabled}
               nodeId={audienceNodeId}
               commitSignal={audienceCommitSignal}
+              hasRecording={hasRecording}
             />
           )
         )}

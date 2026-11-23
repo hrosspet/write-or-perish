@@ -38,6 +38,7 @@ import { ReadWindowLine, ReadReplyTail, ReadCancelledLine } from "./ReadReply";
 import DeleteConfirmDialog from "./DeleteConfirmDialog";
 import { SharedMark } from "./CircleReaders";
 import { CircleReplyDialog } from "./CircleDialogs";
+import { LeaveThreadButton } from "./CircleLeave";
 import {
   aiReplyAckKey, aiReplyOffReason,
   sharedBannerText,
@@ -2265,11 +2266,17 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
         }}>
           <SharedMark />
           <div style={{
+            flex: 1,
             fontFamily: 'var(--sans)', fontWeight: 300, fontSize: '0.875rem',
             lineHeight: 1.55, color: 'var(--text-primary)',
           }}>
             {sharedBannerText(audience)}
           </div>
+          {/* The thread closes to the reader once they leave. */}
+          <LeaveThreadButton
+            entryId={audience.entry_id}
+            onLeft={() => navigate('/shared', { replace: true })}
+          />
         </div>
       )}
       <SemanticNeighbors nodeId={node.id} openNode={openNode} />

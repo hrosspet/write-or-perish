@@ -131,10 +131,12 @@ struct AddCircleMemberDialog: View {
     }
 }
 
-/// A plain yes/no (delete a circle, remove or hide a person).
+/// A plain yes/no (delete a circle, remove or hide a person, leave). `note`:
+/// a line of small print under the message.
 struct CircleConfirmDialog: View {
     let title: String
     let message: String
+    var note: String? = nil
     let confirmLabel: String
     var busy = false
     let onConfirm: () -> Void
@@ -143,6 +145,7 @@ struct CircleConfirmDialog: View {
     var body: some View {
         LooreDialogCard(title: title) {
             CircleDialogBody(text: message)
+            if let note { CircleDialogNote(text: note) }
             FlowLayout(spacing: 10, lineSpacing: 10) {
                 Button("Cancel", action: onCancel).buttonStyle(.looreOutline)
                 Button(confirmLabel, action: onConfirm)
@@ -235,25 +238,43 @@ struct CircleReadersButton: View {
     }
 }
 
-/// The banner over a shared entry, for a reader.
+/// The banner over a shared entry, for a reader. `onLeave`: the quiet "Leave"
+/// under the sentence (Peter, 2026-11-23); nil shows none.
 struct SharedEntryBanner: View {
     let audience: NodeAudience
+    var onLeave: (() -> Void)?
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             SharedMark().padding(.top, 2)
-            Text(CirclesWording.sharedBannerText(audience))
-                .font(LooreFont.sans(14, .light))
-                .foregroundStyle(LooreColor.textPrimary)
-                .lineSpacing(4)
-                .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 0) {
+                Text(CirclesWording.sharedBannerText(audience))
+                    .font(LooreFont.sans(14, .light))
+                    .foregroundStyle(LooreColor.textPrimary)
+                    .lineSpacing(4)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("thread.sharedBannerText")
+                if let onLeave {
+                    Button(action: onLeave) {
+                        Text(CirclesWording.leaveLabel)
+                            .font(LooreFont.sans(13, .light))
+                            .foregroundStyle(LooreColor.textSecondary)
+                            .frame(minWidth: 44, minHeight: 44, alignment: .leading)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Stop reading this thread and take your name off its readers")
+                    .accessibilityIdentifier("thread.leave")
+                }
+            }
         }
-        .padding(.vertical, 14)
+        .padding(.top, 14)
+        .padding(.bottom, onLeave == nil ? 14 : 4)
         .padding(.horizontal, 16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(LooreColor.bgSurface, in: RoundedRectangle(cornerRadius: LooreRadius.small))
         .overlay(RoundedRectangle(cornerRadius: LooreRadius.small).strokeBorder(LooreColor.borderHover))
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("thread.sharedBanner")
     }
 }

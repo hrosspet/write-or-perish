@@ -559,8 +559,10 @@ def magic_link_send():
                         f"user {user.id}" if user else "no account")
             return _link_sent_answer()
 
-        backend_url = request.host_url.rstrip("/")
-        magic_link_url = f"{backend_url}/auth/magic-link/verify?token={token}"
+        # On the configured address, whichever host the request names
+        # (nginx and the dev server send /auth/ there to this app).
+        frontend_url = current_app.config.get("FRONTEND_URL", "").rstrip("/")
+        magic_link_url = f"{frontend_url}/auth/magic-link/verify?token={token}"
         send_magic_link_email(email, magic_link_url,
                               user_id=user.id if user else None)
     except Exception:

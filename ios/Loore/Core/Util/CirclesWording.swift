@@ -212,6 +212,43 @@ enum CirclesWording {
         return "\(when). \(entry.lastReplyByMe ? "You" : at(by)) replied."
     }
 
+    // MARK: Leaving (Peter, 2026-11-23)
+
+    static let leaveLabel = "Leave"
+    static let leaveThreadTitle = "Leave this thread?"
+    static let leaveFailed = "That did not work. Try again."
+
+    /// Leaving from a shared entry: what closes, from the preview's `closes`
+    /// (the entry left included). How many circles that is stays the author's.
+    static func leaveThreadBody(author: String, closes: Int) -> String {
+        let who = at(author)
+        let first = "You will no longer read this thread or reply in it, and nobody sees your name among its readers any more, \(who) included."
+        let others = closes - 1
+        guard others > 0 else { return first }
+        let entries = others == 1 ? "entry" : "entries"
+        return "\(first) You also stop reading \(countWord(others)) other \(entries) \(who) shared with you the same way as this one."
+    }
+
+    /// The small print of both leave dialogs.
+    static func leaveNote(author: String) -> String {
+        "Your replies stay where they are, with your name. \(at(author)) gets no note, and can add you again."
+    }
+
+    /// Leaving a person the user hid (whose entries they cannot open).
+    static func leavePersonTitle(author: String) -> String { "Leave everything \(at(author)) shares with you?" }
+
+    static func leavePersonBody(author: String) -> String {
+        let who = at(author)
+        return "You leave \(possessive(author)) circles and the entries \(who) named you for, and nobody sees your name among their readers any more, \(who) included."
+    }
+
+    // MARK: The share step
+
+    /// Under the picker when the entry has an original recording: its readers
+    /// can play it, also after the text is edited (Peter, 2026-11-23: "keep &
+    /// say so").
+    static let recordingNote = "They can also play its original recording, even after you edit the text."
+
     /// The "Remove <name>" dialog. A person reads an entry through any of
     /// its circles or by being named for it, so the dialog says what
     /// removing them from this one circle does, and what it does not.

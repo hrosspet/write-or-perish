@@ -7,6 +7,9 @@ final class SharedWithYouModel {
     @ObservationIgnored private let api: APIClient
     private(set) var people: [SharedWithMe.Person]?
     private(set) var hidden: [String] = []
+    /// Hidden people whose circles or entries still hold the user: "Leave" is
+    /// offered beside them (Peter, 2026-11-23).
+    private(set) var hiddenLeavable: [String] = []
     private(set) var nextBefore: Int?
     private(set) var error: String?
     private(set) var busy = false
@@ -22,6 +25,7 @@ final class SharedWithYouModel {
             let query = before.map { [URLQueryItem(name: "before", value: String($0))] } ?? []
             let answer: SharedWithMe = try await api.get(APIPath.circlesSharedWithMe, query: query)
             hidden = answer.hidden
+            hiddenLeavable = answer.hiddenLeavable
             nextBefore = answer.nextBefore
             if before != nil, let current = people {
                 people = SharedWithMe.merge(current, older: answer.people)
@@ -58,6 +62,21 @@ final class SharedWithYouModel {
             self.error = (error as? APIError)?.userMessage(fallback: Self.failed) ?? Self.failed
         }
     }
+
+    /// Leaves everything of a hidden person's that holds the user: their
+    /// circles and the entries they named the user for. The person stays hidden.
+    func leave(_ username: String) async {
+        busy = true
+        defer { busy = false }
+        do {
+            // The name goes in the body, never in the address.
+            _ = try await api.post(APIPath.circlesLeave, json: .object(["username": .string(username)]),
+                                   as: CircleLeavePlan.self)
+            await load()
+        } catch {
+            self.error = (error as? APIError)?.userMessage(fallback: Self.failed) ?? Self.failed
+        }
+    }
 }
 
 /// "Shared with you" (web `SharedWithYouPage`): the entries people chose to
@@ -68,6 +87,7 @@ struct SharedWithYouView: View {
     @Environment(AppState.self) private var app
     @State private var model: SharedWithYouModel?
     @State private var hiding: String?
+    @State private var leavingPerson: String?
 
     static let intro = "Entries that people chose to show you. They stay here; nothing is added to your own log or your profile."
     static let nothing = "Nothing is shared with you right now."
@@ -113,6 +133,23 @@ struct SharedWithYouView: View {
                                         }
                                     },
                                     onCancel: { hiding = nil })
+            }
+        }
+        // Leaving a hidden person (Peter, 2026-11-23): their entries cannot be
+        // opened to leave from, so the list offers it.
+        .looreDialog(isPresented: Binding(get: { leavingPerson != nil }, set: { if !$0 { leavingPerson = nil } })) {
+            if let name = leavingPerson {
+                CircleConfirmDialog(title: CirclesWording.leavePersonTitle(author: name),
+                                    message: CirclesWording.leavePersonBody(author: name),
+                                    note: CirclesWording.leaveNote(author: name),
+                                    confirmLabel: CirclesWording.leaveLabel, busy: model?.busy ?? false,
+                                    onConfirm: {
+                                        Task {
+                                            await model?.leave(name)
+                                            leavingPerson = nil
+                                        }
+                                    },
+                                    onCancel: { leavingPerson = nil })
             }
         }
     }
@@ -250,6 +287,20 @@ struct SharedWithYouView: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityIdentifier("shared.show.\(name)")
+                    if model.hiddenLeavable.contains(name) {
+                        Button {
+                            leavingPerson = name
+                        } label: {
+                            Text(CirclesWording.leaveLabel)
+                                .font(LooreFont.sans(13, .light))
+                                .foregroundStyle(LooreColor.textSecondary)
+                                .frame(minWidth: 44, minHeight: 44)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Leave \(CirclesWording.possessive(name)) circles")
+                        .accessibilityIdentifier("shared.leave.\(name)")
+                    }
                 }
             }
         }

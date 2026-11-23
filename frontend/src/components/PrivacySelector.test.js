@@ -162,6 +162,33 @@ test('an entry with nothing above it has no such box', async () => {
   expect(screen.queryByLabelText('Share also the discussion leading up to this node?')).toBeNull();
 });
 
+// Readers of a shared entry can play its original recording, also after
+// the text is edited, and the share step says so (Peter, 2026-11-23:
+// "keep & say so").
+test('an entry with a recording says its readers can play it', async () => {
+  api.get.mockResolvedValue({ data: { circles: [] } });
+  renderSelector({
+    privacyLevel: 'circles',
+    audience: { circleIds: [], namesText: '' },
+    onAudienceChange: () => {},
+    hasRecording: true,
+  });
+  expect(await screen.findByText(
+    'They can also play its original recording, even after you edit the text.',
+  )).toBeInTheDocument();
+});
+
+test('an entry without a recording says nothing about one', async () => {
+  api.get.mockResolvedValue({ data: { circles: [] } });
+  renderSelector({
+    privacyLevel: 'circles',
+    audience: { circleIds: [], namesText: '' },
+    onAudienceChange: () => {},
+  });
+  await screen.findByLabelText('Or name people for this entry only');
+  expect(screen.queryByText(/original recording/)).toBeNull();
+});
+
 test('imports keep two choices', () => {
   renderSelector({ allowCircles: false });
   expect(screen.getByRole('button', { name: 'Only me' })).toBeInTheDocument();

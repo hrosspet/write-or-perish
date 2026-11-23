@@ -133,13 +133,23 @@ final class NodeFormModel {
     }
 
     // Audio upload (craft) and recorded transcripts (M3 dictation).
-    var uploadedFile: PickedAudioFile?
+    // Either one gives a new entry an original recording, which the picker
+    // names (`CircleAudienceState.formHasRecording`).
+    var uploadedFile: PickedAudioFile? {
+        didSet { syncFormRecording() }
+    }
     private(set) var isUploading = false
     private(set) var uploadProgress = 0
     private(set) var transcriptionStatus: TaskStatus?
     private(set) var transcriptionProgress = 0
     /// Set when a recording's transcript is in the form (saved through `save-as-node`).
-    var streamingSessionId: String?
+    var streamingSessionId: String? {
+        didSet { syncFormRecording() }
+    }
+
+    private func syncFormRecording() {
+        audience.formHasRecording = !config.isEdit && (uploadedFile != nil || streamingSessionId != nil)
+    }
     /// True while the dictation recorder runs (M3).
     var isRecording = false
     private(set) var isRecoveringAudio = false
@@ -236,6 +246,8 @@ final class NodeFormModel {
         // for a reply in a shared thread, the thread's people.
         if let edit = config.edit, circlesOn,
            let answer = try? await app.api.get(APIPath.nodeAudience(edit.nodeId), as: NodeAudienceAnswer.self) {
+            // Its readers can play the original recording; the picker says so.
+            audience.entryHasRecording = answer.hasRecording
             if let own = answer.audience, own.isEntry, own.isAuthor {
                 audience.seed(circleIds: own.circleIds ?? [], usernames: own.usernames ?? [])
             } else {

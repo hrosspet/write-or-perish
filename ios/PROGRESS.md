@@ -1210,6 +1210,18 @@ privacy select is greyed out (`SelectField.unavailable`), as on the web.
   "Loore Circles iPhone 17" simulator: 8 of 8 pass; after the third review 9 of 9 (a fresh scratch
   backend on its own port, three fake users, the model call stubbed).
 - Not checked: a phone; light theme; Dynamic Type at accessibility sizes on the Circles screens.
+- **Leaving (Peter, 2026-11-23)**: `SharedEntryBanner(onLeave:)` shows a quiet "Leave" under the
+  reader's banner (`thread.leave`). `ThreadModel.beginLeave` asks `POST /circles/leave/preview`
+  (`{"entry_id"}`) for `CircleLeavePlan` (author, `closes`, `circles`), the dialog
+  (`CirclesWording.leaveThreadBody`, `leaveNote`) says what closes, and `confirmLeave` posts
+  `/circles/leave`, then goes back to Shared with you (pops when the thread was opened from it). In
+  "People you have hidden", a person in `hidden_leavable` gets "Leave" (`shared.leave.<name>`,
+  `SharedWithYouModel.leave`, `{"username"}` in the body). `CircleConfirmDialog` takes an optional
+  small-print `note`.
+- **The recording line (Peter, 2026-11-23: "keep & say so")**: the picker shows
+  `CirclesWording.recordingNote` ("They can also play its original recording, even after you edit
+  the text.") when the edited entry has `has_recording` (`GET /nodes/<id>/audience`) or a new entry
+  holds a recording or an audio upload (`CircleAudienceState.showsRecordingNote`).
 
 ## Long threads: a notice, then no AI reply (#648, Peter 2026-11-12)
 

@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../api';
-import { readersSentence, splitNames } from '../utils/circles';
+import { RECORDING_SHARED_NOTE, readersSentence, splitNames } from '../utils/circles';
 
 /**
  * The panel under "Who can read this" when Circles is chosen: the
@@ -27,6 +27,9 @@ function CircleAudiencePicker({
   // Raised by the form when the names typed so far must be looked up now
   // (its check before sharing found readers the sentence did not name).
   commitSignal = 0,
+  // The entry has an original recording: its readers can play it, also
+  // after the text is edited, and the panel says so (Peter, 2026-11-23).
+  hasRecording = false,
 }) {
   const [circles, setCircles] = useState(null);
   const [loadError, setLoadError] = useState('');
@@ -242,6 +245,14 @@ function CircleAudiencePicker({
             the prompt with their own artifacts, never yours. Without it,
             only this entry is shared.
           </div>
+        </div>
+      )}
+      {hasRecording && (
+        <div style={{
+          fontSize: '0.8rem', lineHeight: 1.5, color: 'var(--text-secondary)',
+          fontFamily: 'var(--sans)', fontWeight: 300,
+        }}>
+          {RECORDING_SHARED_NOTE}
         </div>
       )}
       <div style={{
