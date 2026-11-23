@@ -69,7 +69,10 @@ private struct ThreadContent: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         if model.isForeignShared, let audience = model.audience {
-                            SharedEntryBanner(audience: audience).padding(.bottom, 14)
+                            SharedEntryBanner(audience: audience, onLeave: {
+                                Task { await model.beginLeave() }
+                            })
+                            .padding(.bottom, 14)
                         }
                         header(node)
                         ForEach(Array(node.ancestors.enumerated()), id: \.element.id) { index, ancestor in

@@ -46,6 +46,19 @@ struct ThreadSheets: ViewModifier {
                     ToolApprovalDialog(group: group, model: model.approvals)
                 }
             }
+            // A reader leaves the thread (Peter, 2026-11-23).
+            .looreDialog(isPresented: Binding(get: { model.leavePlan != nil },
+                                              set: { if !$0 { model.leavePlan = nil } })) {
+                if let plan = model.leavePlan {
+                    CircleConfirmDialog(title: CirclesWording.leaveThreadTitle,
+                                        message: CirclesWording.leaveThreadBody(author: plan.author, closes: plan.closes,
+                                                                                circles: plan.circles),
+                                        note: CirclesWording.leaveNote(author: plan.author),
+                                        confirmLabel: CirclesWording.leaveLabel, busy: model.leaving,
+                                        onConfirm: { Task { await model.confirmLeave() } },
+                                        onCancel: { model.leavePlan = nil })
+                }
+            }
             .looreDialog(isPresented: $model.showPromptEditConfirm) {
                 PromptEditConfirmDialog(
                     onConfirm: {

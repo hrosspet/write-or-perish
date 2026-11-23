@@ -37,6 +37,13 @@ final class CircleAudienceState {
     /// time of that share, so a person added since with "Only new entries"
     /// does not read it and is not named. nil for a new entry.
     var entryId: Int?
+    /// The entry being edited has an original recording (`has_recording`).
+    var entryHasRecording = false
+    /// The form holds a recording or an audio upload for a new entry.
+    var formHasRecording = false
+    /// Its readers can play the original recording, also after the text is
+    /// edited, and the picker says so (Peter, 2026-11-23: "keep & say so").
+    var showsRecordingNote: Bool { entryHasRecording || formHasRecording }
     @ObservationIgnored private var request = 0
     @ObservationIgnored private var previewTask: Task<Void, Never>?
     @ObservationIgnored private var loaded = false
@@ -350,6 +357,13 @@ struct CircleAudiencePicker: View {
                         .foregroundStyle(LooreColor.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+            }
+            if state.showsRecordingNote {
+                Text(CirclesWording.recordingNote)
+                    .font(LooreFont.sans(12.8, .light))
+                    .foregroundStyle(LooreColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("circles.recordingNote")
             }
             Text("You can change this later, or take the entry back to only you.")
                 .font(LooreFont.sans(12.8, .light))

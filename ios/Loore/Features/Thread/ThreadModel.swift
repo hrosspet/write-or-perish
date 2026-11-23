@@ -61,6 +61,10 @@ final class ThreadModel {
     var pendingPromptDelete: (targetId: Int, withDescendants: Bool)?
     var showPromptDeleteDialog = false
     private(set) var deleteChecking = false
+    /// Leaving the thread (a reader, Peter 2026-11-23): what the dialog says
+    /// closes, from the server's preview; nil while no dialog is open.
+    var leavePlan: CircleLeavePlan?
+    private(set) var leaving = false
 
     @ObservationIgnored private var awaitHandled = false
     @ObservationIgnored private var pollTask: Task<Void, Never>?
@@ -1268,6 +1272,48 @@ final class ThreadModel {
         guard let pending = pendingPromptDelete else { return }
         pendingPromptDelete = nil
         performDelete(pending.targetId, withDescendants: pending.withDescendants, includePrompt: includePrompt)
+    }
+
+    // MARK: Leaving a shared thread (Peter, 2026-11-23)
+
+    /// "Leave" on the banner: asks the server what leaving would close (the
+    /// circles through which the user reads this entry, and their name on it),
+    /// then opens the dialog with those numbers. Nothing changes yet.
+    func beginLeave() async {
+        guard let app, let audience, !audience.isAuthor, !leaving else { return }
+        do {
+            leavePlan = try await app.api.post(APIPath.circlesLeavePreview,
+                                               json: .object(["entry_id": .int(audience.entryId)]),
+                                               as: CircleLeavePlan.self)
+        } catch {
+            app.toasts.show((error as? APIError)?.userMessage(fallback: CirclesWording.leaveFailed)
+                            ?? CirclesWording.leaveFailed, duration: 8)
+        }
+    }
+
+    /// The dialog's "Leave": the user is out of the thread's audience, which is
+    /// now closed to them, so the screen goes to Shared with you (back to it
+    /// when the thread was opened from there).
+    func confirmLeave() async {
+        guard let app, let audience, !leaving else { return }
+        leaving = true
+        defer { leaving = false }
+        do {
+            _ = try await app.api.post(APIPath.circlesLeave,
+                                       json: .object(["entry_id": .int(audience.entryId)]),
+                                       as: CircleLeavePlan.self)
+            leavePlan = nil
+            if app.router.previousRoute == .sharedWithYou {
+                app.router.pop()
+            } else {
+                app.router.popToRoot()
+                app.open(.sharedWithYou)
+            }
+        } catch {
+            leavePlan = nil
+            app.toasts.show((error as? APIError)?.userMessage(fallback: CirclesWording.leaveFailed)
+                            ?? CirclesWording.leaveFailed, duration: 8)
+        }
     }
 
     private func performDelete(_ targetId: Int, withDescendants: Bool, includePrompt: Bool) {

@@ -134,6 +134,22 @@ final class CirclesModelTests: XCTestCase {
         XCTAssertNil(payload.notifications[1].actorUsername)
     }
 
+    func testLeavingAndTheRecordingDecode() throws {
+        let plan = try decode(CircleLeavePlan.self, #"{"author":"anna","closes":3,"circles":1,"left":true}"#)
+        XCTAssertEqual(plan, CircleLeavePlan(author: "anna", closes: 3, circles: 1))
+        let leavable = try decode(SharedWithMe.self, #"{"people":[],"hidden":["anna","emeka"],"hidden_leavable":["anna"]}"#)
+        XCTAssertEqual(leavable.hiddenLeavable, ["anna"])
+        // An older server sends no list: nothing is offered.
+        let older = try decode(SharedWithMe.self, #"{"people":[],"hidden":["anna"]}"#)
+        XCTAssertEqual(older.hiddenLeavable, [])
+        let recorded = try decode(NodeAudienceAnswer.self, #"{"audience":null,"has_recording":true}"#)
+        XCTAssertTrue(recorded.hasRecording)
+        let typed = try decode(NodeAudienceAnswer.self, #"{"audience":null}"#)
+        XCTAssertFalse(typed.hasRecording)
+        XCTAssertEqual(APIPath.circlesLeave, "/api/circles/leave")
+        XCTAssertEqual(APIPath.circlesLeavePreview, "/api/circles/leave/preview")
+    }
+
     func testRoutesAndPaths() {
         XCTAssertEqual(AppRoute.parse("/circles", environment: .local), .circles)
         XCTAssertEqual(AppRoute.parse("/shared", environment: .local), .sharedWithYou)
@@ -335,6 +351,28 @@ final class CirclesWordingTests: XCTestCase {
         XCTAssertEqual(SharedWithYouView.nobodySees, "Nobody sees whether you have read an entry.")
     }
 
+    /// Leaving (Peter, 2026-11-23): the web's sentences, word for word.
+    func testTheLeaveDialogsSayWhatCloses() {
+        XCTAssertEqual(CirclesWording.leaveLabel, "Leave")
+        XCTAssertEqual(CirclesWording.leaveThreadTitle, "Leave this thread?")
+        // Only this entry closes (named for it, or nothing else shared that way).
+        XCTAssertEqual(CirclesWording.leaveThreadBody(author: "anna", closes: 1, circles: 0),
+                       "You will no longer read this thread or reply in it, and nobody sees your name among its readers any more, @anna included.")
+        XCTAssertEqual(CirclesWording.leaveThreadBody(author: "anna", closes: 1, circles: 1),
+                       "You will no longer read this thread or reply in it, and nobody sees your name among its readers any more, @anna included.")
+        XCTAssertEqual(CirclesWording.leaveThreadBody(author: "anna", closes: 2, circles: 1),
+                       "You will no longer read this thread or reply in it, and nobody sees your name among its readers any more, @anna included. You also stop reading one other entry @anna shared with you through the same circle.")
+        XCTAssertEqual(CirclesWording.leaveThreadBody(author: "anna", closes: 4, circles: 2),
+                       "You will no longer read this thread or reply in it, and nobody sees your name among its readers any more, @anna included. You also stop reading three other entries @anna shared with you through the same circles.")
+        XCTAssertEqual(CirclesWording.leaveNote(author: "anna"),
+                       "Your replies stay where they are, with your name. @anna gets no note, and can add you again.")
+        XCTAssertEqual(CirclesWording.leavePersonTitle(author: "anna"), "Leave everything @anna shares with you?")
+        XCTAssertEqual(CirclesWording.leavePersonBody(author: "anna"),
+                       "You leave @anna's circles and the entries @anna named you for, and nobody sees your name among their readers any more, @anna included.")
+        XCTAssertEqual(CirclesWording.recordingNote,
+                       "They can also play its original recording, even after you edit the text.")
+    }
+
     func testThePickerChoices() {
         XCTAssertEqual(PrivacySelectorView.whoCanReadLabel, "Who can read this")
         XCTAssertEqual(PrivacySelectorView.choices(allowCircles: true).map(\.1), ["Only me", "Circles", "Everyone"])
@@ -414,6 +452,127 @@ final class CirclesFormTests: StubbedAppTestCase {
             let address = request.url?.absoluteString ?? ""
             XCTAssertFalse(address.contains("ben") || address.contains("dana"), address)
         }
+    }
+
+    // MARK: Leaving (Peter, 2026-11-23)
+
+    private func stubLeave(previewStatus: Int = 200) {
+        StubURLProtocol.install { [self] request in
+            switch (request.httpMethod ?? "", path(request)) {
+            case ("POST", "/api/circles/leave/preview"):
+                return previewStatus == 200 ? .json(200, #"{"author":"anna","closes":3,"circles":1}"#)
+                    : .json(previewStatus, #"{"error":"Not found"}"#)
+            case ("POST", "/api/circles/leave"):
+                return .json(200, #"{"left":true,"author":"anna","closes":3,"circles":1}"#)
+            case ("GET", "/api/circles/shared-with-me"):
+                return .json(200, #"{"people":[],"hidden":["anna"],"hidden_leavable":[]}"#)
+            default: return .json(200, "{}")
+            }
+        }
+    }
+
+    func testAReaderLeavesFromTheBannerAndGoesBackToSharedWithYou() async {
+        let model = await thread(sharedParent)
+        XCTAssertTrue(model.isForeignShared)
+        // Opened from Shared with you.
+        app.router.selectedTab = .more
+        app.router.setPath([.sharedWithYou, .thread(id: 31, awaitLLM: nil)], for: .more)
+        stubLeave()
+        await model.beginLeave()
+        // The dialog's numbers come from the preview, which changes nothing.
+        XCTAssertEqual(model.leavePlan, CircleLeavePlan(author: "anna", closes: 3, circles: 1))
+        XCTAssertEqual(body(of: "POST /api/circles/leave/preview")?["entry_id"] as? Int, 31)
+        XCTAssertFalse(calls.contains("POST /api/circles/leave"))
+        let plan = try? XCTUnwrap(model.leavePlan)
+        XCTAssertEqual(CirclesWording.leaveThreadBody(author: plan?.author ?? "", closes: plan?.closes ?? 0,
+                                                      circles: plan?.circles ?? 0),
+                       "You will no longer read this thread or reply in it, and nobody sees your name among its readers any more, @anna included. You also stop reading two other entries @anna shared with you through the same circle.")
+        await model.confirmLeave()
+        XCTAssertEqual(body(of: "POST /api/circles/leave")?["entry_id"] as? Int, 31)
+        XCTAssertNil(model.leavePlan)
+        // The thread is closed to the reader now: back to Shared with you.
+        XCTAssertEqual(app.router.path(for: .more), [.sharedWithYou])
+        for request in StubURLProtocol.requests {
+            XCTAssertFalse(request.url?.absoluteString.contains("anna") ?? false)
+        }
+    }
+
+    func testLeavingFromElsewhereOpensSharedWithYou() async {
+        let model = await thread(sharedParent)
+        app.router.selectedTab = .reflect
+        app.router.setPath([.log, .thread(id: 31, awaitLLM: nil)], for: .reflect)
+        stubLeave()
+        await model.beginLeave()
+        await model.confirmLeave()
+        XCTAssertEqual(app.router.path(for: .reflect), [])
+        XCTAssertEqual(app.router.path(for: app.router.selectedTab).last, .sharedWithYou)
+    }
+
+    func testNothingToLeaveOpensNoDialog() async {
+        let model = await thread(sharedParent)
+        stubLeave(previewStatus: 404)
+        await model.beginLeave()
+        XCTAssertNil(model.leavePlan)
+        XCTAssertFalse(calls.contains("POST /api/circles/leave"))
+    }
+
+    func testTheAuthorHasNoLeave() async {
+        let mine = sharedParent
+            .replacingOccurrences(of: #""user": {"id": 9, "username": "anna"}"#,
+                                  with: #""user": {"id": 5, "username": "seowriter"}"#)
+            .replacingOccurrences(of: #""is_author": false"#, with: #""is_author": true"#)
+        let model = await thread(mine)
+        XCTAssertFalse(model.isForeignShared)
+        stubLeave()
+        await model.beginLeave()
+        XCTAssertNil(model.leavePlan)
+        XCTAssertTrue(calls.isEmpty)
+    }
+
+    func testLeavingAHiddenPersonNamesThemInTheBody() async {
+        stubLeave()
+        let shared = SharedWithYouModel(api: app.api)
+        await shared.leave("anna")
+        XCTAssertNil(shared.error)
+        XCTAssertEqual(body(of: "POST /api/circles/leave")?["username"] as? String, "anna")
+        XCTAssertNil(body(of: "POST /api/circles/leave")?["entry_id"])
+        // The page is loaded again: anna stays hidden, nothing left to leave.
+        XCTAssertEqual(shared.hidden, ["anna"])
+        XCTAssertEqual(shared.hiddenLeavable, [])
+        for request in StubURLProtocol.requests {
+            XCTAssertFalse(request.url?.absoluteString.contains("anna") ?? false)
+        }
+    }
+
+    // MARK: The recording line (Peter, 2026-11-23: "keep & say so")
+
+    func testEditingARecordedEntryNamesItsRecording() async {
+        for recorded in [true, false] {
+            StubURLProtocol.install { [self] request in
+                if path(request) == "/api/nodes/31/audience" {
+                    return .json(200, #"{"audience":null,"thread_audience":null,"thread_path":null,"has_recording":\#(recorded)}"#)
+                }
+                return .json(200, "{}")
+            }
+            let model = NodeFormModel(config: NodeFormConfig(edit: .init(nodeId: 31, initialContent: "spoken",
+                                                                          initialPrivacy: .private, initialAIUsage: .chat)),
+                                      app: app, defaults: defaults)
+            await model.start()
+            XCTAssertEqual(model.audience.showsRecordingNote, recorded)
+        }
+    }
+
+    func testANewEntryWithARecordingOrAnUploadNamesIt() {
+        let (model, _) = form(NodeFormConfig(parentId: nil))
+        XCTAssertFalse(model.audience.showsRecordingNote)
+        model.streamingSessionId = "s1"
+        XCTAssertTrue(model.audience.showsRecordingNote)
+        model.streamingSessionId = nil
+        XCTAssertFalse(model.audience.showsRecordingNote)
+        model.uploadedFile = PickedAudioFile(url: URL(fileURLWithPath: "/tmp/x.m4a"), name: "x.m4a", size: 10)
+        XCTAssertTrue(model.audience.showsRecordingNote)
+        model.uploadedFile = nil
+        XCTAssertFalse(model.audience.showsRecordingNote)
     }
 
     func testANewEntryIsSharedWithItsCirclesAndNames() async {

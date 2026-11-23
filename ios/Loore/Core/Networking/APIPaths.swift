@@ -169,6 +169,11 @@ enum APIPath {
     /// the server keeps as the account's last-seen place and what error
     /// reports carry.
     static let circlesMutes = "/api/circles/mutes"
+    /// A reader leaves (Peter, 2026-11-23): `{"entry_id"}` from a shared entry,
+    /// `{"username"}` for a person they hid; the name in the body, as above.
+    /// The preview says what leaving would close and changes nothing.
+    static let circlesLeavePreview = "/api/circles/leave/preview"
+    static let circlesLeave = "/api/circles/leave"
     static let commonsFeed = "/api/commons/feed"
     static func commonsPermalink(username: String, slug: String) -> String {
         "/api/commons/permalink/\(escape(username))/\(escape(slug))"
