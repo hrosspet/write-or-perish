@@ -40,6 +40,9 @@ import os
 ///   not ask for (the server refused the sign-in) stops the uploads and keeps
 ///   the queue (`hold()`); it goes on when that account signs in again. The
 ///   person's own Logout deletes their account's audio (`reset(account:)`).
+/// - A deleted account's audio stays while the account can still be
+///   restored and uploads if it is; it leaves the phone when the 30 days end
+///   (`accountDeleted`, `removeEnded`; #777).
 /// - A continued recording is numbered past every piece of it this phone
 ///   still holds, which go first; no queued file is written over (#754).
 @MainActor
@@ -98,6 +101,13 @@ final class ChunkUploader: NSObject {
         /// which recorded no account: whose recording it is, is not known, so
         /// a "not found" answer deletes nothing of it (`sessionNotFound`).
         var adopted: Bool?
+        /// When the account it was recorded under can no longer be restored
+        /// (#777: its deletion's date; a past moment once the deletion has
+        /// started): from then on the session leaves the phone
+        /// (`removeEnded`). Cleared when that account signs in again (a
+        /// restore). nil while the account is not known to be deleted, and in
+        /// manifests from earlier builds.
+        var accountDeletedOn: Date?
 
         var isDead: Bool { chunks.values.contains { $0.status == .fatal } }
 
@@ -256,9 +266,11 @@ final class ChunkUploader: NSObject {
         manifest.serverHeld = max(manifest.serverHeld ?? manifest.firstIndex, firstIndex)
         manifest.firstIndex = first
         manifest.uploadURL = uploadURL
-        // The server let this account claim or start it: its recording.
+        // The server let this account claim or start it: its recording, and
+        // the account is not deleted.
         manifest.account = account
         manifest.adopted = nil
+        manifest.accountDeletedOn = nil
         manifest.closed = false
         // Given-up chunks whose body is still here get another chance, as at a relaunch.
         for (index, record) in manifest.chunks where record.status == .failed
@@ -387,6 +399,14 @@ final class ChunkUploader: NSObject {
         isHeld = false
         // Held at a sign-out: read again from disk below, as after a relaunch.
         heldSessions.forEach(dropFromMemory)
+        // Deleted accounts whose 30 days have ended meanwhile (#777).
+        removeEnded()
+        // The account signed in, so it is not deleted (a restore): its audio
+        // stays until it is sent, as after any sign-in.
+        for (sessionId, manifest) in manifests where manifest.account == account && manifest.accountDeletedOn != nil {
+            manifests[sessionId]?.accountDeletedOn = nil
+            persist(sessionId)
+        }
         guard let dirs = try? fileManager.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return [] }
         var abandoned: [String] = []
         for dir in dirs {
@@ -410,6 +430,7 @@ final class ChunkUploader: NSObject {
             // From an earlier build: this account takes it, as that build did.
             if manifest.account == nil && account != nil { resumed.adopted = true }
             resumed.account = account
+            resumed.accountDeletedOn = nil
             // Given-up chunks whose body is still here get another chance (B1).
             for (index, record) in manifest.chunks where record.status == .failed
                 && fileManager.fileExists(atPath: bodyFile(manifest.sessionId, index).path) {
@@ -456,7 +477,9 @@ final class ChunkUploader: NSObject {
     /// the queue stays on the phone with the account each session was
     /// recorded under. A chunk the recorder still hands over is kept the same
     /// way. When that account signs in again, its sessions upload
-    /// (`resumePending`); under another account they are never sent.
+    /// (`resumePending`); under another account they are never sent. When
+    /// the account is deleted, `accountDeleted` follows and sets when its
+    /// sessions leave the phone (#777).
     func hold() {
         isHeld = true
         account = nil
@@ -464,10 +487,11 @@ final class ChunkUploader: NSObject {
         heldSessions.formUnion(manifests.keys)
     }
 
-    /// The person signed out (Logout, M2) or deleted their account: stop every
-    /// upload (foreground and background, which carry this sign-in's cookie)
-    /// and delete the audio recorded under `account`, so none of it stays on
-    /// disk (`holdsUnsentAudio` lets the screen say so first, #763). Audio
+    /// The person signed out (Logout, M2): stop every upload (foreground and
+    /// background, which carry this sign-in's cookie) and delete the audio
+    /// recorded under `account`, so none of it stays on disk
+    /// (`holdsUnsentAudio` lets the screen say so first, #763). Deleting the
+    /// account does not come here: its audio is held (`accountDeleted`). Audio
     /// another account recorded on this phone stays for that account; it is
     /// never sent with another account's cookies.
     /// - Parameter owner: the account signing out; nil (it could not be
@@ -499,6 +523,52 @@ final class ChunkUploader: NSObject {
             if files.contains(where: { $0.hasSuffix(".body") }) { return true }
         }
         return false
+    }
+
+    /// The phone learned that `deleted.account` is deleted (#777): the
+    /// person deleted it here, the server refused its sign-in and said so,
+    /// or a sign-in reached its restore question. Its sessions stay on the
+    /// phone while the account can still be restored: a restore and
+    /// sign-in sends them (`resumePending`). They leave the phone when that
+    /// ends (`DeletedAccount.audioRemovedAt`: on the deletion's date, or at
+    /// once when it has started or the account is gone; `removeEnded`).
+    /// With no date known they are kept, as after any sign-out. An answer
+    /// about the account signed in now changes nothing: it arrived after a
+    /// sign-in, which shows the account is back.
+    func accountDeleted(_ deleted: DeletedAccount) {
+        guard let removeAt = deleted.audioRemovedAt, deleted.account != account else { return }
+        for dir in sessionDirectories() {
+            let sessionId = dir.lastPathComponent
+            if manifests[sessionId]?.account == deleted.account {
+                manifests[sessionId]?.accountDeletedOn = removeAt
+                persist(sessionId)
+            } else if manifests[sessionId] == nil, var saved = savedManifest(in: dir), saved.account == deleted.account {
+                saved.accountDeletedOn = removeAt
+                write(saved)
+            }
+        }
+        removeEnded()
+    }
+
+    /// Removes the sessions of deleted accounts whose date has passed
+    /// (#777): the account can no longer be restored, so their audio can
+    /// never be sent. Runs at launch, when the app comes back to the
+    /// foreground, at every sign-in and when the phone learns of a
+    /// deletion. Never the signed-in account's.
+    func removeEnded() {
+        let current = now()
+        for dir in sessionDirectories() {
+            let sessionId = dir.lastPathComponent
+            guard let manifest = manifests[sessionId] ?? savedManifest(in: dir),
+                  let end = manifest.accountDeletedOn, end <= current,
+                  manifest.account != account else { continue }
+            forget(sessionId: sessionId)
+            log.info("removed a deleted account's recording that had not reached the server")
+        }
+    }
+
+    private func sessionDirectories() -> [URL] {
+        (try? fileManager.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
     }
 
     private func stopEveryUpload() {
@@ -894,6 +964,11 @@ final class ChunkUploader: NSObject {
 
     private func persist(_ sessionId: String) {
         guard let manifest = manifests[sessionId] else { return }
+        write(manifest)
+    }
+
+    private func write(_ manifest: Manifest) {
+        let sessionId = manifest.sessionId
         do {
             try directory(for: sessionId).createIfNeeded(fileManager)
             let data = try JSONEncoder().encode(manifest)

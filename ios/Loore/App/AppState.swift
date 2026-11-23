@@ -187,6 +187,8 @@ final class AppState {
             for cookie in api.cookieStorage.cookies ?? [] { api.cookieStorage.deleteCookie(cookie) }
         }
         #endif
+        // Recorded audio of a deleted account whose 30 days have ended (#777).
+        audio.uploader.removeEnded()
         auth.startObservingCookies()
         #if DEBUG
         if let cookie = launch.sessionCookie {
@@ -212,8 +214,8 @@ final class AppState {
             let dashboard: DashboardResponse = try await api.get(
                 APIPath.dashboard, query: [URLQueryItem(name: "profile", value: "0")])
             didLoad(dashboard.user)
-        } catch APIError.unauthorized {
-            await signOutLocally()
+        } catch APIError.unauthorized(let deleted) {
+            await signOutLocally(deleted: deleted)
         } catch let error as APIError {
             log.error("dashboard load failed: status \(error.status ?? -1)")
             if phase != .signedIn {
@@ -417,8 +419,16 @@ final class AppState {
     /// (401s) do not start a second sign-out, and leaving the page never
     /// waits for the web data removal.
     func accountDeletionScheduled(deleteOn: Date?) async {
-        // Recorded audio not yet on the server goes with the account (#763).
-        resetSessionState(to: .accountDeleted(deleteOn: deleteOn), unsentAudio: .delete(account: user?.id))
+        // Recorded audio not yet on the server stays while the account can
+        // be restored, and goes when it no longer can (#777). Without the
+        // server's date: the grace period from now, as the page says.
+        let deleted = user.map { user in
+            DeletedAccount(account: user.id,
+                           deleteOn: deleteOn ?? AccountDeletion.dateAfter(days: user.accountDeletion?.graceDays ?? 30),
+                           restorable: true)
+        }
+        resetSessionState(to: .accountDeleted(deleteOn: deleteOn),
+                          unsentAudio: deleted.map(AudioCenter.UnsentAudio.keepUntilDeleted) ?? .keep)
         await auth.clearLocalSession()
     }
 
@@ -454,10 +464,12 @@ final class AppState {
     /// Forget everything local without calling the server: the server refused
     /// the sign-in (a 401), or the person left the restore question. Recorded
     /// audio not yet on the server stays on the phone and is sent when the same
-    /// account signs in again (#763).
-    func signOutLocally() async {
+    /// account signs in again (#763). When the 401 said the account is
+    /// deleted (`deleted`), it stays only while the account can be restored
+    /// (#777).
+    func signOutLocally(deleted: DeletedAccount? = nil) async {
         await auth.clearLocalSession()
-        resetSessionState(unsentAudio: .keep)
+        resetSessionState(unsentAudio: deleted.map(AudioCenter.UnsentAudio.keepUntilDeleted) ?? .keep)
     }
 
     /// Whether Logout would delete recorded audio of this account that has not
@@ -536,9 +548,14 @@ final class AppState {
 
     func handle(_ event: APIEvent) {
         switch event {
-        case .unauthorized:
-            guard phase == .signedIn else { return }
-            Task { await signOutLocally() }
+        case .unauthorized(let deleted):
+            guard phase == .signedIn else {
+                // Signed out already, or while one is under way: what the
+                // answer says about a deleted account still applies (#777).
+                if let deleted { audio.uploader.accountDeleted(deleted) }
+                return
+            }
+            Task { await signOutLocally(deleted: deleted) }
         case .spendCapped(let message):
             spendCapped = true
             spendCapBannerMessage = message
