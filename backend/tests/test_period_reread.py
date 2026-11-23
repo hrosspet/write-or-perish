@@ -36,9 +36,11 @@ for _mod in ["backend.models", "backend.extensions"]:
 
 from backend import celery_queues  # noqa: E402
 from backend.extensions import db as _db  # noqa: E402
-from backend.models import User, APICostLog  # noqa: E402
+from backend.models import User, APICostLog, TrialCard  # noqa: E402
 from backend.utils import period_reread, stripe_billing  # noqa: E402
-from backend.utils.period_reread import reread_ended_periods  # noqa: E402
+from backend.utils.period_reread import (  # noqa: E402
+    ReadOnlyGateway, StripeChangeRefused, reread_ended_periods)
+from backend.utils.trial_cards import card_hash  # noqa: E402
 from backend.utils.spend import (  # noqa: E402
     enforce_user_spend_cap, user_is_capped)
 
@@ -53,6 +55,7 @@ FEB_LATE = datetime(2027, 2, 22, 12, 0, 0)     # inside the next period
 CONFIG = {
     "PAYMENTS_ENABLED": True,
     "STRIPE_SECRET_KEY": "sk_test_stub",
+    "SECRET_KEY": "test-secret",
     "PER_USER_MONTHLY_LIMIT_USD": 10.0,
     "SUBSCRIPTION_SPEND_LIMIT_USD_STANDARD": 50.0,
     "SUBSCRIPTION_SPEND_LIMIT_USD_SUPPORTER": 100.0,
@@ -85,6 +88,19 @@ class StubStripe:
         self.reads = []
         self.down = False
         self.on_read = None
+        self.payment_methods = {}
+        self.changes = []
+
+    def retrieve_payment_method(self, payment_method_id):
+        return self.payment_methods[payment_method_id]
+
+    def update_subscription(self, subscription_id, params):
+        self.changes.append(("update_subscription", subscription_id))
+        return self.subs[subscription_id]
+
+    def cancel_subscription(self, subscription_id):
+        self.changes.append(("cancel_subscription", subscription_id))
+        return dict(self.subs[subscription_id], status="canceled")
 
     def retrieve_subscription(self, subscription_id):
         self.reads.append(subscription_id)
@@ -413,6 +429,121 @@ def test_a_subscription_of_another_customer_changes_nothing(app, stripe):
 
     assert result["unknown"] == 1
     assert u.subscription_period_end == PERIOD_END
+
+
+# ── The job only reads at Stripe ─────────────────────────────────────────
+
+def test_a_trial_the_event_would_cancel_is_left_to_the_event(app, stripe):
+    """Stored: a trial whose end has passed, its card never recorded.
+    Stripe: the trial still runs (it was made longer), and the card
+    started a trial on another account. The subscription's event cancels
+    it at Stripe; the job writes nothing, there or here."""
+    start = datetime(2027, 1, 10, 10)
+    trial_end = datetime(2027, 1, 24, 10)
+    other = _subscriber(2)
+    _db.session.add(TrialCard(card_hash=card_hash("fp_same", CONFIG),
+                              user_id=other.id, created_at=start))
+    u = _subscriber(1, subscription_status="trialing",
+                    subscription_ever_paid=False,
+                    subscription_trial_used=True,
+                    subscription_trial_sub_id="sub_1",
+                    subscription_trial_start=start,
+                    subscription_trial_end=trial_end,
+                    subscription_period_start=start,
+                    subscription_period_end=trial_end)
+    longer = datetime(2027, 2, 7, 10)
+    sub = _stripe_sub(u, start, longer, status="trialing")
+    sub.update(trial_start=_stamp(start), trial_end=_stamp(longer),
+               default_payment_method="pm_1")
+    stripe.subs["sub_1"] = sub
+    stripe.payment_methods["pm_1"] = {
+        "type": "card", "card": {"fingerprint": "fp_same"}}
+    now = trial_end + timedelta(hours=1)
+
+    result = reread_ended_periods(CONFIG, now=now)
+
+    assert result["failed"] == 1 and result["changed"] == 0
+    assert result["status"] == "ok"
+    assert stripe.changes == []
+    _db.session.expire_all()
+    assert u.subscription_status == "trialing"
+    assert u.subscription_period_end == trial_end
+    assert u.subscription_trial_end == trial_end
+    assert u.subscription_trial_card_refused_at is None
+    assert TrialCard.query.filter_by(user_id=u.id).count() == 0
+
+    # The event of the same subscription does cancel it.
+    _event(stripe, u)
+    assert [c[0] for c in stripe.changes] == [
+        "update_subscription", "cancel_subscription"]
+    assert u.subscription_status == "ended"
+
+
+def test_the_log_of_a_refused_change_names_ids_and_the_call(
+        app, stripe, caplog, monkeypatch):
+    u = _at_the_ceiling()
+    stripe.subs["sub_1"] = _stripe_sub(u, PERIOD_END, NEXT_END)
+
+    def settle(gateway, sub, config=None, lock=True):
+        gateway.cancel_subscription(sub["id"])
+    monkeypatch.setattr(stripe_billing, "settle_subscription", settle)
+
+    with caplog.at_level(logging.INFO, logger=period_reread.__name__):
+        result = reread_ended_periods(CONFIG, now=AN_HOUR_AFTER)
+
+    assert result["failed"] == 1 and stripe.changes == []
+    assert [r.getMessage() for r in caplog.records
+            if r.name == period_reread.__name__] == [
+        f"Period read again: subscription sub_1 of user {u.id} needs a "
+        "change at Stripe (cancel_subscription); nothing written, left to "
+        "its event"]
+
+
+def _gateway_calls():
+    return sorted(name for name, value in vars(
+        stripe_billing.StripeGateway).items()
+        if callable(value) and not name.startswith("_"))
+
+
+def test_only_the_gateways_reads_pass():
+    """Every call the gateway has: a read goes through, any other is
+    refused before it reaches the gateway."""
+    reads = [n for n in _gateway_calls()
+             if n.startswith(("retrieve_", "list_"))]
+    others = [n for n in _gateway_calls() if n not in reads]
+    assert reads and len(others) >= 15
+    assert {"cancel_subscription", "update_subscription", "create_refund",
+            "delete_customer", "expire_checkout_session",
+            "create_balance_transaction",
+            "release_subscription_schedule"} <= set(others)
+    inner = MagicMock()
+    gateway = ReadOnlyGateway(inner)
+
+    for name in others:
+        with pytest.raises(StripeChangeRefused):
+            getattr(gateway, name)("id_1", {"a": 1})
+    assert inner.mock_calls == []
+
+    for name in reads:
+        getattr(gateway, name)("id_1")
+    assert sorted(c[0] for c in inner.mock_calls) == reads
+
+
+def test_settling_gets_the_reads_only(app, stripe, monkeypatch):
+    u = _at_the_ceiling()
+    stripe.subs["sub_1"] = _stripe_sub(u, PERIOD_END, NEXT_END)
+    seen = []
+    settle = stripe_billing.settle_subscription
+
+    def recording(gateway, sub, config=None, lock=True):
+        seen.append(gateway)
+        return settle(gateway, sub, config, lock=lock)
+    monkeypatch.setattr(stripe_billing, "settle_subscription", recording)
+
+    reread_ended_periods(CONFIG, now=AN_HOUR_AFTER)
+
+    assert len(seen) == 1 and isinstance(seen[0], ReadOnlyGateway)
+    assert seen[0] is not stripe
 
 
 # ── Which accounts, and how many ─────────────────────────────────────────
