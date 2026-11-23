@@ -136,8 +136,9 @@ def test_a_chat_default_must_be_its_own_providers_chat_model():
 
 def test_the_shipped_chat_defaults_pass():
     from backend.config import Config
+    # OpenAI's moved to GPT-6.2 Astra on 2026-11-23 (Peter).
     assert (Config.CHAT_MODEL_ANTHROPIC, Config.CHAT_MODEL_OPENAI) == (
-        "claude-opus-5.5", "gpt-6-astra")
+        "claude-opus-5.5", "gpt-6.2-astra")
     validate_default_model({
         "DEFAULT_LLM_MODEL": "claude-opus-4.6",
         "READ_DEFAULT_MODEL": Config.READ_DEFAULT_MODEL,

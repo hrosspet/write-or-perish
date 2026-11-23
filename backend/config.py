@@ -75,9 +75,14 @@ class Config:
     # here applies only while LLM_NAME is another provider's model. Each
     # must be an active chat model of its own provider (checked at boot,
     # validate_default_model).
+    # OpenAI's is GPT-6.2 Astra since 2026-11-23 (Peter: "Astra 6.2 should
+    # become the new OpenAI chat default"; it was GPT-6 Astra). Moving it
+    # rewrites no saved value: an account or thread on GPT-6 Astra stays
+    # on GPT-6 Astra, which is still offered.
     CHAT_MODEL_ANTHROPIC = (os.environ.get("CHAT_MODEL_ANTHROPIC")
                             or "claude-opus-5.5")
-    CHAT_MODEL_OPENAI = os.environ.get("CHAT_MODEL_OPENAI") or "gpt-6-astra"
+    CHAT_MODEL_OPENAI = (os.environ.get("CHAT_MODEL_OPENAI")
+                         or "gpt-6.2-astra")
 
     # The model a read (routes/read.py) runs on when neither the request
     # nor an earlier read reply in the thread names one. Reads run only on
@@ -569,7 +574,8 @@ class Config:
             "max_input_tokens": 922000,
             "display_name": "GPT-6.2 Astra",
             # Added at Peter's request (2026-11-23: "we should add Astra
-            # 6.2 to Loore"); featured beside GPT-6 Astra.
+            # 6.2 to Loore"); featured beside GPT-6 Astra. OpenAI's chat
+            # default (CHAT_MODEL_OPENAI) since the same day.
             "featured": True,
             "context_window": 1050000,
             # Verified 2026-11-23 on the OpenAI pricing + model pages:
