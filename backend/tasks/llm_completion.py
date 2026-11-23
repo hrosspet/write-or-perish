@@ -1154,7 +1154,10 @@ def _load_node_chain(parent_node, user_id):
     The chain holds only what *user_id* (the user the reply is for) can
     see: the walk stops below the first ancestor they cannot see (or
     could not see before it was deleted), so nothing above it reaches
-    the model. An ancestor hidden with its owner's deleted account
+    the model. One kind of node is passed through instead: a prompt
+    entry the user may not read whose owner also wrote the node under it
+    (Text mode continued inside a public thread). It is left out, never
+    read, and the walk goes on above it. An ancestor hidden with its owner's deleted account
     (#269) is passed through like a deleted one: the message builder
     sends a notice in its place, as it does after the purge. The node
     the reply is built on must itself be visible.
@@ -1177,7 +1180,16 @@ def _load_node_chain(parent_node, user_id):
     if current is not None and not can_user_see_node_or_tombstone(
             current, user_id):
         current = None
-    while current and can_user_see_node_or_placeholder(current, user_id):
+    from backend.utils.public_threads import passes_through
+    while current:
+        if not can_user_see_node_or_placeholder(current, user_id):
+            # A prompt entry the user may not read, with a node of its
+            # owner's under it in the chain: left out, and the walk goes
+            # on above it (utils/public_threads).
+            if visible and passes_through(current, visible[0]):
+                current = current.parent
+                continue
+            break
         visible.insert(0, current)
         current = current.parent
     if not visible:

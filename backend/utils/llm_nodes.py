@@ -288,11 +288,18 @@ class _Chain:
             can_user_see_node_or_placeholder, can_user_see_node_or_tombstone,
             shown_as_deleted,
         )
+        from backend.utils.public_threads import passes_through
+        below = None
         for i, n in enumerate(self.nodes):
             seen = (can_user_see_node_or_tombstone if i == 0
                     else can_user_see_node_or_placeholder)
             if not seen(n, user_id):
+                # As the task: a prompt entry the user may not read is
+                # left out and the walk goes on above it.
+                if below is not None and passes_through(n, below):
+                    continue
                 return None
+            below = n
             if (not shown_as_deleted(n, user_id)
                     and n.ai_usage not in AI_ALLOWED):
                 return n

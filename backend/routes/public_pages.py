@@ -37,7 +37,9 @@ from backend.routes.commons import (
     public_root_order,
 )
 from backend.utils import public_cache
-from backend.utils.public_threads import thread_top_filter
+from backend.utils.public_threads import (
+    public_root_of, thread_top_filter,
+)
 from backend.utils.public_html import (
     RenderBudget,
     base_url,
@@ -132,15 +134,7 @@ def _uncached(resp):
 def _public_root_of(node):
     """Walk up to the nearest public living root (same rule as the
     commons thread endpoint)."""
-    root = node
-    visited = set()
-    while root.parent_id and root.id not in visited:
-        visited.add(root.id)
-        parent = Node.query.get(root.parent_id)
-        if not _publicly_visible(parent):
-            break
-        root = parent
-    return root
+    return public_root_of(node, _publicly_visible)
 
 
 def _published_at(root):

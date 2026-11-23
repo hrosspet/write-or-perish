@@ -22,7 +22,9 @@ from backend.extensions import db
 from backend.utils.encryption import key_service_unavailable
 from backend.utils.error_privacy import describe_exception
 from backend.utils.privacy import PrivacyLevel
-from backend.utils.public_threads import thread_top_filter
+from backend.utils.public_threads import (
+    public_children_filter, public_root_of, thread_top_filter,
+)
 from backend.utils.slugs import permalink_for
 from backend.utils.timefmt import iso_utc
 
@@ -133,7 +135,7 @@ def feed():
                            "left out", node.id, describe_exception(e))
             continue
         reply_count = _public_alive(
-            Node.query.filter(Node.parent_id == node.id)).count()
+            Node.query.filter(public_children_filter(node.id))).count()
         items.append({
             "id": node.id,
             "username": _author_name(node),
@@ -157,8 +159,10 @@ def _serialize_public_subtree(node, budget):
         return None
     budget[0] -= 1
     children = []
+    # Its children, and the public nodes under a private prompt entry of
+    # their owner's below it, shown in that entry's place.
     child_rows = _public_alive(
-        Node.query.filter(Node.parent_id == node.id)
+        Node.query.filter(public_children_filter(node.id))
     ).order_by(Node.created_at.asc()).all()
     for child in child_rows:
         serialized = _serialize_public_subtree(child, budget)
@@ -216,15 +220,9 @@ def public_thread(node_id):
         return jsonify({"error": "Not found"}), 404
 
     # Walk up to the nearest public root so a deep-linked reply still
-    # renders its thread; stop at the first non-public ancestor boundary.
-    root = node
-    visited = set()
-    while (root.parent_id and root.id not in visited):
-        visited.add(root.id)
-        parent = Node.query.get(root.parent_id)
-        if not _publicly_visible(parent):
-            break
-        root = parent
+    # renders its thread; stop at the first non-public ancestor boundary
+    # (a private prompt entry of the same person is passed through).
+    root = public_root_of(node, _publicly_visible)
 
     budget = [MAX_THREAD_NODES]
     thread = _serialize_public_subtree(root, budget)

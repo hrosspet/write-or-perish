@@ -705,6 +705,198 @@ def test_two_threads_with_the_same_title_get_their_own_permalinks(app):
     assert sorted(_listed_ids(app)["share"]) == [first.id, second.id]
 
 
+# ── A private prompt entry inside a public thread ─────────────────────
+
+
+def _typed_under(app, who, node, level="public", text="ANNA-TYPED reply"):
+    resp = _client(app, who).post(
+        f"/api/textmode/from-node/{node.id}",
+        json={"content": text, "privacy_level": level, "ai_usage": "chat",
+              "auto_generate": False})
+    assert resp.status_code == 202, resp.get_json()
+    data = resp.get_json()
+    return _get(data["prompt_node_id"]), _get(data["user_node_id"])
+
+
+def _tree_ids(thread):
+    """{node id: its children's ids} of a serialized thread."""
+    out = {}
+    stack = [thread]
+    while stack:
+        item = stack.pop()
+        out[item["id"]] = [c["id"] for c in item["children"]]
+        stack.extend(item["children"])
+    return out
+
+
+def _own_public_thread(app):
+    """Anna's public entry and gleaning, a typed public reply under the
+    gleaning (with its private prompt entry), Ben's public reply to it."""
+    entry = _node("anna", "# Anna gleans\n\nANNA-ENTRY-BODY",
+                  privacy="public", slug="anna-gleans")
+    gleaning = _ai_reply("anna", entry, "public")
+    prompt, message = _typed_under(app, "anna", gleaning)
+    assert prompt.parent_id == gleaning.id
+    assert (prompt.privacy_level, message.privacy_level) == (
+        "private", "public")
+    reply = _node("ben", "BEN-REPLY to the typed one", parent=message,
+                  privacy="public")
+    return entry, gleaning, prompt, message, reply
+
+
+def test_a_visitor_reads_the_message_inside_its_thread(app):
+    entry, gleaning, prompt, message, reply = _own_public_thread(app)
+    anon = _client(app)
+
+    for node_id in (entry.id, gleaning.id, message.id, reply.id):
+        resp = anon.get(f"/api/commons/node/{node_id}")
+        assert resp.status_code == 200
+        tree = _tree_ids(resp.get_json()["thread"])
+        assert resp.get_json()["thread"]["id"] == entry.id
+        assert tree == {entry.id: [gleaning.id], gleaning.id: [message.id],
+                        message.id: [reply.id], reply.id: []}
+        _no_prompt_text(_body(resp))
+    for url in (f"/node/{entry.id}", f"/node/{message.id}",
+                f"/node/{reply.id}", "/@anna/anna-gleans"):
+        page = anon.get(url)
+        assert page.status_code == 200
+        html = _body(page)
+        assert "<h1>Anna gleans</h1>" in html, url
+        assert "ANNA-TYPED reply" in html and "BEN-REPLY" in html, url
+        _no_prompt_text(html)
+    assert anon.get(f"/node/{prompt.id}").status_code == 404
+    assert anon.get(f"/api/commons/node/{prompt.id}").status_code == 404
+    # The thread is one entry in the listings; the message is not a top.
+    assert _listed_ids(app) == {"feed": [entry.id], "share": [entry.id]}
+
+
+def test_another_member_reads_the_message_inside_its_thread(app):
+    entry, gleaning, prompt, message, reply = _own_public_thread(app)
+    ben = _client(app, "ben")
+
+    resp = ben.get(f"/api/nodes/{gleaning.id}")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert [c["id"] for c in data["children"]] == [message.id]
+    assert data["child_count"] == 1
+    assert [c["id"] for c in data["children"][0]["children"]] == [reply.id]
+    _no_prompt_text(_body(resp))
+
+    resp = ben.get(f"/api/nodes/{entry.id}")
+    nested = resp.get_json()["children"][0]
+    assert nested["id"] == gleaning.id
+    assert [c["id"] for c in nested["children"]] == [message.id]
+    _no_prompt_text(_body(resp))
+
+    resp = ben.get(f"/api/nodes/{reply.id}")
+    data = resp.get_json()
+    assert [a["id"] for a in data["ancestors"]] == [
+        entry.id, gleaning.id, message.id]
+    assert data["ancestors"][1]["child_count"] == 1
+    _no_prompt_text(_body(resp))
+    assert ben.get(f"/api/nodes/{prompt.id}").status_code == 404
+
+
+def test_the_owner_still_sees_her_prompt_entry_where_it_is(app):
+    entry, gleaning, prompt, message, reply = _own_public_thread(app)
+
+    data = _client(app, "anna").get(f"/api/nodes/{gleaning.id}").get_json()
+
+    assert [c["id"] for c in data["children"]] == [prompt.id]
+    assert [c["id"] for c in data["children"][0]["children"]] == [message.id]
+    data = _client(app, "anna").get(f"/api/nodes/{message.id}").get_json()
+    assert [a["id"] for a in data["ancestors"]] == [
+        entry.id, gleaning.id, prompt.id]
+
+
+def test_the_message_shows_inside_another_persons_public_thread(app):
+    ben_entry = _node("ben", "# Ben gleans\n\nBEN-BODY", privacy="public",
+                      slug="ben-gleans")
+    ben_gleaning = _ai_reply("ben", ben_entry, "public")
+    annas = _node("anna", "anna replies to ben", parent=ben_gleaning,
+                  privacy="public")
+    her_ai_reply = _ai_reply("anna", annas, "public")
+    resp = _record(app, "anna", her_ai_reply, agentic=True,
+                   privacy_level="public", ai_usage="chat")
+    assert resp.status_code == 201, resp.get_json()
+    prompt = _get(resp.get_json()["conversation_id"])
+    message = _get(resp.get_json()["user_node_id"])
+    assert prompt.parent_id == her_ai_reply.id
+    assert prompt.privacy_level == "private"
+
+    for viewer in (None, "ben"):
+        resp = _client(app, viewer).get(f"/api/commons/node/{message.id}")
+        thread = resp.get_json()["thread"]
+        assert thread["id"] == ben_entry.id
+        tree = _tree_ids(thread)
+        assert tree[her_ai_reply.id] == [message.id]
+        assert prompt.id not in tree
+        _no_prompt_text(_body(resp))
+    page = _body(_client(app).get("/@ben/ben-gleans"))
+    assert "said aloud" in page
+    _no_prompt_text(page)
+    data = _client(app, "ben").get(
+        f"/api/nodes/{her_ai_reply.id}").get_json()
+    assert [c["id"] for c in data["children"]] == [message.id]
+
+
+def test_only_a_prompt_entry_is_passed_through_and_only_to_its_owners_nodes(
+        app):
+    entry = _node("anna", "# Anna entry\n\nbody", privacy="public")
+    # A private node of Anna's that is no prompt entry, a public one
+    # under it.
+    plain = _node("anna", "a private note", parent=entry)
+    under_plain = _node("anna", "UNDER-A-PRIVATE-NOTE", parent=plain,
+                        privacy="public")
+    # A private prompt entry of Anna's: her public message under it,
+    # Ben's public node directly under it, her private message under it.
+    prompt, hers = _stored_prompt_entry(
+        "anna", entry, "private", message_privacy="public",
+        text="HERS-UNDER-THE-PROMPT")
+    bens = _node("ben", "BENS-UNDER-THE-PROMPT", parent=prompt,
+                 privacy="public")
+    private_msg = _node("anna", "PRIVATE-UNDER-THE-PROMPT", parent=prompt)
+    # A deleted prompt entry is not passed through.
+    gone, under_gone = _stored_prompt_entry(
+        "anna", entry, "private", message_privacy="public",
+        text="UNDER-A-DELETED-PROMPT")
+    from datetime import datetime
+    gone.deleted_at = datetime.utcnow()
+    _db.session.commit()
+
+    resp = _client(app).get(f"/api/commons/node/{entry.id}")
+    assert _tree_ids(resp.get_json()["thread"]) == {
+        entry.id: [hers.id], hers.id: []}
+    data = _client(app, "ben").get(f"/api/nodes/{entry.id}").get_json()
+    assert [c["id"] for c in data["children"]] == [hers.id]
+    for node in (under_plain, bens, under_gone):
+        thread = _client(app).get(
+            f"/api/commons/node/{node.id}").get_json()["thread"]
+        assert thread["id"] == node.id, node.id
+    assert _client(app).get(
+        f"/api/commons/node/{private_msg.id}").status_code == 404
+
+
+def test_the_thread_page_makes_as_many_queries_with_a_prompt_entry_in_it(app):
+    """A public thread whose reply hangs directly under the gleaning,
+    and one whose reply hangs under a private prompt entry there: the
+    public thread's JSON and its page make the same number of queries
+    for both. (The member's thread view reads the prefetched subtree.)"""
+    plain_entry = _node("anna", "# Plain\n\nbody", privacy="public")
+    plain_gleaning = _ai_reply("anna", plain_entry, "public")
+    _node("anna", "a plain public reply", parent=plain_gleaning,
+          privacy="public")
+    entry = _node("anna", "# With a prompt\n\nbody", privacy="public")
+    gleaning = _ai_reply("anna", entry, "public")
+    prompt, message = _typed_under(app, "anna", gleaning)
+    assert prompt.privacy_level == "private"
+
+    for url, who in (("/api/commons/node/{}", None), ("/node/{}", None)):
+        counts = [_statements(app, lambda i=i: _client(app, who).get(
+            url.format(i))) for i in (plain_entry.id, entry.id)]
+        assert counts[0] == counts[1], url
+
+
 # ── Queries of a listing page ─────────────────────────────────────────
 
 
@@ -931,6 +1123,12 @@ def test_no_route_gives_the_prompt_text_to_anyone_but_its_owner(app):
     guest_prompt = _get(r.get_json()["conversation_id"])
     prompts = [typed_prompt, edited_prompt, recorded_prompt, own_prompt,
                guest_prompt]
+    # The two inside a public thread are passed through: their messages
+    # show in the thread, in Anna's and in Ben's.
+    for inside, top in ((own_prompt, own), (guest_prompt, ben_gleaning)):
+        tree = _client(app).get(
+            f"/api/commons/node/{top.id}").get_data(as_text=True)
+        assert "said aloud" in tree and inside.parent_id is not None
     assert {p.privacy_level for p in prompts} == {"private"}
     # Ben quotes each prompt entry from a node of his own.
     r = _client(app, "ben").post("/api/nodes/", json={

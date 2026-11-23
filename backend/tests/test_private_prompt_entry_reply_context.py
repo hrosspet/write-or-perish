@@ -8,6 +8,9 @@ entry was public (same position in the chain, same bytes). A reply
 another member asks for in the thread starts below the prompt entry:
 it reads the public messages and runs as a reply in a thread without a
 Text-mode prompt (no system block of the owner's, no Text-mode tools).
+When the prompt entry sits inside a public thread (Text mode continued
+under a public entry of the owner's), such a reply also reads the
+public messages above the prompt entry, and never the entry.
 
 Runs the real task body through the test_retrieval_loop harness;
 nothing reaches a real model.
@@ -112,3 +115,69 @@ def test_another_members_reply_in_a_thread_with_a_public_prompt_entry_is_as_befo
     assert BODY in sent
     for marker in _markers("ALICE"):
         assert marker not in sent, marker
+
+
+def _thread_with_a_prompt_entry_inside(alice):
+    """alice's public entry, her private prompt entry under it (Text
+    mode continued there), her public message under that, an AI reply."""
+    top = _node(alice, None, "alice's public entry above")
+    system = _system_node(alice, privacy_level="private")
+    system.parent_id = top.id
+    _db.session.commit()
+    entry = _node(alice, system, "alice writes in public")
+    reply = _llm(entry, alice, "An earlier answer.", status="completed")
+    return top, system, entry, reply
+
+
+def test_another_members_reply_reads_the_messages_above_a_prompt_entry_inside_the_thread(app, people):  # noqa: F811
+    alice, bob, *_ = people
+    top, system, entry, reply = _thread_with_a_prompt_entry_inside(alice)
+    question = _node(bob, reply, "bob asks a question")
+
+    llm_node = _ask(question, bob)
+
+    _db.session.refresh(llm_node)
+    assert llm_node.llm_task_status == "completed"
+    sent = _sent_text()
+    order = [sent.index(text) for text in (
+        "alice's public entry above", "alice writes in public",
+        "An earlier answer.", "bob asks a question")]
+    assert order == sorted(order)
+    assert BODY not in sent
+    for marker in _markers("ALICE"):
+        assert marker not in sent, marker
+    assert not _ScriptedProvider.calls[-1].get("tools")
+    # The rule that refuses a reply over a node that keeps AI out walks
+    # the same chain.
+    from backend.utils.llm_nodes import reply_refusal
+    assert reply_refusal(question, bob.id, "chat") is None
+    top.ai_usage = "none"
+    _db.session.commit()
+    assert reply_refusal(question, bob.id, "chat") is not None
+
+
+def test_a_private_node_that_is_no_prompt_entry_still_ends_the_chain(app, people):  # noqa: F811
+    alice, bob, *_ = people
+    top = _node(alice, None, "alice's public entry above")
+    note = _node(alice, top, "alice's private note", privacy_level="private")
+    entry = _node(alice, note, "alice writes in public")
+    question = _node(bob, entry, "bob asks a question")
+
+    _ask(question, bob)
+
+    sent = _sent_text()
+    assert "alice writes in public" in sent
+    assert "alice's private note" not in sent
+    assert "alice's public entry above" not in sent
+
+
+def test_the_owners_reply_reads_her_prompt_entry_inside_the_thread(app, people):  # noqa: F811
+    alice, bob, *_ = people
+    top, system, entry, reply = _thread_with_a_prompt_entry_inside(alice)
+
+    _ask(_node(alice, reply, "alice continues"), alice)
+
+    sent = _sent_text()
+    assert BODY in sent and "alice's public entry above" in sent
+    assert "ALICE PROFILE" in sent
+    assert _ScriptedProvider.calls[-1].get("tools")

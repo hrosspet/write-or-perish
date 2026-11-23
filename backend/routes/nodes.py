@@ -425,6 +425,32 @@ def _ai_usage_fields(node):
     return fields
 
 
+def _children_shown(n, user_id):
+    """*n*'s children as a thread view lists them for *user_id*: a
+    living prompt entry the viewer may not read is replaced by the nodes
+    under it that belong to its owner (Text mode continued inside a
+    thread: the prompt entry stays its owner's, the messages under it
+    show where it hangs; utils/public_threads). The callers filter the
+    result by what the viewer may read, as before. The subtree is
+    prefetched by the thread view, so this reads no rows."""
+    from backend.utils.public_threads import passes_through
+    shown = []
+    seen = {n.id}
+    pending = list(n.children)
+    while pending:
+        child = pending.pop(0)
+        if child.id in seen:
+            continue
+        seen.add(child.id)
+        if (child.prompt_key and child.deleted_at is None
+                and not can_user_access_node(child, user_id)):
+            pending.extend(below for below in child.children
+                           if passes_through(child, below))
+            continue
+        shown.append(child)
+    return shown
+
+
 def serialize_node_recursive(n, user_id=None, parent_user_id=None):
     """Recursively serialize a node and its accessible children.
 
@@ -466,7 +492,8 @@ def serialize_node_recursive(n, user_id=None, parent_user_id=None):
         s = serialize_node_status(child, user_id)
         return s is not None and not s.get("inaccessible")
 
-    visible_children = [c for c in n.children if _child_visible(c)]
+    visible_children = [c for c in _children_shown(n, user_id)
+                        if _child_visible(c)]
     # Mirror the focal serializer's parent_user_id derivation (nodes.py
     # ~line 822) so the frontend's ownedByMe check works the same way
     # at every depth.
@@ -1426,13 +1453,22 @@ def get_node(node_id):
     # taken here from content the loop decrypts anyway.
     read_prompt_above = False
     tombstone_below = False
+    # The chain node just below hangs under a prompt entry the viewer may
+    # not read, and is shown in its place (utils/public_threads): it is
+    # a child of this ancestor in the breadcrumb, though not in the count.
+    from backend.utils.public_threads import passes_through
+    prompt_below = False
+    chain_below = node
     for current in ancestor_nodes:
         status = serialize_node_status(current, current_user.id)
         # The count above skips deleted children, but the chain child just
         # below, when it is a tombstone in this breadcrumb, is visible.
         child_count = (ancestor_child_counts.get(current.id, 0)
-                       + (1 if tombstone_below else 0))
+                       + (1 if tombstone_below or prompt_below else 0))
         tombstone_below = bool(status and status.get("deleted"))
+        prompt_below = bool(status and status.get("inaccessible")
+                            and passes_through(current, chain_below))
+        chain_below = current
         if status is None:  # alive + accessible
             ancestor_content = current.get_content()
             if not read_prompt_above and (
@@ -1493,7 +1529,8 @@ def get_node(node_id):
         s = serialize_node_status(child, current_user.id)
         return s is not None and not s.get("inaccessible")
 
-    visible_children = [c for c in node.children if _child_visible(c)]
+    visible_children = [c for c in _children_shown(node, current_user.id)
+                        if _child_visible(c)]
 
     # Compute the focal node's effective owner so first-level children
     # carry the right parent_user_id without an N+1.
