@@ -23,6 +23,10 @@ the access is decided here.
   then the account is locked (the lock settle_subscription takes) and
   compared with what it was before the read. Changed meanwhile: an event
   was applied, and what was read here may be older, so it is dropped.
+* The job only reads at Stripe. Where settling would change something
+  there (the cases in which settle_subscription cancels a subscription),
+  nothing is written for the account, here or at Stripe; that is left to
+  an event.
 * Only ids and states are logged.
 * Nothing while payments are off.
 """
@@ -92,6 +96,29 @@ def due_account_ids(now=None, limit=None):
     return [uid for (uid,) in q.all()]
 
 
+class StripeChangeRefused(Exception):
+    """Settling asked for a call that changes something at Stripe."""
+
+
+class ReadOnlyGateway:
+    """The gateway's reads (its ``retrieve_*`` and ``list_*`` calls) and
+    nothing else: any other call raises StripeChangeRefused before it
+    reaches the gateway."""
+
+    _READS = ("retrieve_", "list_")
+
+    def __init__(self, gateway):
+        self._gateway = gateway
+
+    def __getattr__(self, name):
+        if name.startswith(self._READS):
+            return getattr(self._gateway, name)
+
+        def refused(*_args, **_kwargs):
+            raise StripeChangeRefused(name)
+        return refused
+
+
 class StripeNotReached(Exception):
     """The read at Stripe failed for a reason other than a subscription
     Stripe does not have: the run ends."""
@@ -103,7 +130,8 @@ def _reread_one(gateway, user_id, config, now):
     any more; Stripe was not asked), "event_first" (an event was applied
     between the read and the lock), "unknown" (Stripe has no such
     subscription, or it is not this account's), "failed" (it could not
-    be written). Raises StripeNotReached when Stripe cannot be asked.
+    be written, or settling it would change something at Stripe; nothing
+    of it is kept). Raises StripeNotReached when Stripe cannot be asked.
     Commits."""
     user = db.session.get(User, user_id)
     if user is None:
@@ -140,10 +168,17 @@ def _reread_one(gateway, user_id, config, now):
         if _stored(user) != before:
             db.session.rollback()
             return "event_first"
-        stripe_billing.settle_subscription(gateway, sub, config, lock=False)
+        stripe_billing.settle_subscription(
+            ReadOnlyGateway(gateway), sub, config, lock=False)
         after = _stored(user)
         status_after = user.subscription_status
         db.session.commit()
+    except StripeChangeRefused as e:
+        db.session.rollback()
+        logger.warning("Period read again: subscription %s of user %s "
+                       "needs a change at Stripe (%s); nothing written, "
+                       "left to its event", sub_id, user_id, e)
+        return "failed"
     except Exception as e:  # noqa: BLE001 - this account waits an hour
         db.session.rollback()
         logger.error("Period read again: subscription %s of user %s not "
