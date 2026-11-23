@@ -844,3 +844,96 @@ def test_one_trial_per_account_holds_for_an_account_let_in(real_app):
             "id": "p", "lookup_key": stripe_billing.PRICE_LOOKUP_KEYS[
                 "standard"]}}]}}, lock=False)
     assert gw.cancelled == ["sub_second"]
+
+
+# ── Deactivate, then Activate (#782) ─────────────────────────────────────
+
+class TestActivateAfterDeactivate:
+    """Deactivate stores ``deactivated_at``; Activate keeps it (the terms
+    are asked again), so API and clipper tokens must not read it as "this
+    account is off now": only ``approved`` says that."""
+
+    def _tokened(self, **kw):
+        from backend.models import ApiToken
+        from backend.routes.terms import CURRENT_TERMS_VERSION
+        from backend.utils.api_tokens import (
+            SCOPE_EXTERNAL_WRITE, generate_api_token, hash_token)
+        u = _add(approved=True,
+                 accepted_terms_version=CURRENT_TERMS_VERSION,
+                 accepted_terms_at=datetime.utcnow() - timedelta(days=2),
+                 **kw)
+        plain, prefix = generate_api_token()
+        _db.session.add(ApiToken(user_id=u.id, name="clipper", prefix=prefix,
+                                 scope=SCOPE_EXTERNAL_WRITE,
+                                 token_hash=hash_token(plain)))
+        _db.session.commit()
+        return u, plain
+
+    def _tokens_ok(self, plain):
+        from backend.utils.api_tokens import (
+            SCOPE_EXTERNAL_WRITE, resolve_api_token)
+        return resolve_api_token(plain, SCOPE_EXTERNAL_WRITE) is not None
+
+    def _toggle(self, admin, u):
+        from flask import g
+        g.pop("_login_user", None)
+        return admin.post(f"/api/admin/users/{u.id}/toggle")
+
+    def _cycle(self, app):
+        _a, admin = _admin(app)
+        u, plain = self._tokened(username="cycle")
+        assert self._tokens_ok(plain)
+        assert _me(_client(app, u))["terms_up_to_date"] is True
+        self._toggle(admin, u)                      # Deactivate
+        assert _fresh(u).approved is False
+        assert not self._tokens_ok(plain)
+        self._toggle(admin, u)                      # Activate
+        user = _fresh(u)
+        assert user.approved is True and user.deactivated_at is not None
+        assert self._tokens_ok(plain)
+        assert _me(_client(app, u))["terms_up_to_date"] is False
+
+    def test_activate_restores_tokens_and_asks_the_terms(self, real_app):
+        self._cycle(real_app)
+
+    def test_payments_off_the_same(self, payments_off):
+        self._cycle(payments_off)
+
+    @pytest.mark.parametrize("payments", [True, False])
+    def test_activate_and_welcome_restores_tokens(
+            self, real_app, payments, monkeypatch):
+        real_app.config["PAYMENTS_ENABLED"] = payments
+        monkeypatch.setattr("backend.routes.admin.send_welcome_email",
+                            lambda *a, **k: None)
+        _a, admin = _admin(real_app)
+        u, plain = self._tokened(username="welcomed", email="w@example.test")
+        self._toggle(admin, u)
+        assert not self._tokens_ok(plain)
+        from flask import g
+        g.pop("_login_user", None)
+        r = admin.post(f"/api/admin/users/{u.id}/activate_and_welcome",
+                       json={})
+        assert r.status_code == 200, r.get_json()
+        assert self._tokens_ok(plain)
+
+    def test_unblock_of_an_account_deactivated_before_payments(
+            self, real_app):
+        """Unblock is Activate there: its time stays, tokens work."""
+        _a, admin = _admin(real_app)
+        u, plain = self._tokened(username="old")
+        u.approved = False
+        u.deactivated_at = datetime.utcnow()
+        _db.session.commit()
+        assert not self._tokens_ok(plain)
+        _block(admin, u, False)
+        assert _fresh(u).approved is True
+        assert self._tokens_ok(plain)
+
+    def test_block_refuses_and_unblock_clears_as_before(self, real_app):
+        _a, admin = _admin(real_app)
+        u, plain = self._tokened(username="blk")
+        _block(admin, u, True)
+        assert not self._tokens_ok(plain)
+        _block(admin, u, False)
+        assert _fresh(u).deactivated_at is None
+        assert self._tokens_ok(plain)
