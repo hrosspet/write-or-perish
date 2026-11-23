@@ -161,6 +161,55 @@ export function showPersonAgainRequest(client, username) {
   return client.delete('/circles/mutes', { data: { username } });
 }
 
+// Leaving (Peter, 2026-11-23). From a shared entry's page: the circles
+// through which the reader reads it and their name on it. `preview` is
+// the server's answer: { author, closes, circles }, where `closes` counts
+// the entries that close with it, this one included.
+export function leaveEntryBody(preview) {
+  const author = atName(preview?.author);
+  const others = Math.max((preview?.closes || 0) - 1, 0);
+  const base = 'You will no longer read this thread or reply in it, and '
+    + `nobody sees your name among its readers any more, ${author} included.`;
+  if (others === 0) return base;
+  const what = others === 1 ? 'entry' : 'entries';
+  const via = (preview?.circles || 0) > 1 ? 'circles' : 'circle';
+  return `${base} You also stop reading ${countWord(others)} other ${what} `
+    + `${author} shared with you through the same ${via}.`;
+}
+
+// From the list of people the reader hid: everything of that person's.
+export function leavePersonTitle(name) {
+  return `Leave everything ${atName(name)} shares with you?`;
+}
+
+export function leavePersonBody(name) {
+  const author = atName(name);
+  return `You leave ${possessive(name)} circles and the entries ${author} `
+    + 'named you for, and nobody sees your name among their readers any '
+    + `more, ${author} included.`;
+}
+
+export function leaveNote(name) {
+  const author = atName(name);
+  return 'Your replies stay where they are, with your name. '
+    + `${author} gets no note, and can add you again.`;
+}
+
+// The two leave requests. A person is named in the body, never in the
+// address (as removeMemberRequest).
+export function leavePreviewRequest(client, target) {
+  return client.post('/circles/leave/preview', target);
+}
+
+export function leaveRequest(client, target) {
+  return client.post('/circles/leave', target);
+}
+
+// At the share step, when the entry has a recording (Peter, 2026-11-23:
+// "keep & say so").
+export const RECORDING_SHARED_NOTE = 'They can also play its original '
+  + 'recording, even after you edit the text.';
+
 export const NO_READERS_MESSAGE = "Nobody could read this entry yet. Choose "
   + "a circle with people in it, or name a person.";
 

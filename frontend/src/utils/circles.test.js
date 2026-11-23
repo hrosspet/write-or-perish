@@ -4,7 +4,43 @@ import {
   atName, aiReplyAckKey, aiReplyOffReason, possessive,
   joinPlain, aiReadsPrivateSentence,
   removeMemberRequest, showPersonAgainRequest,
+  leaveEntryBody, leavePersonBody, leavePersonTitle, leaveNote,
+  leavePreviewRequest, leaveRequest,
 } from './circles';
+
+// Leaving (Peter, 2026-11-23).
+test('leaving from an entry says what closes with it', () => {
+  const base = 'You will no longer read this thread or reply in it, and '
+    + 'nobody sees your name among its readers any more, @anna included.';
+  expect(leaveEntryBody({ author: 'anna', closes: 1, circles: 0 })).toBe(base);
+  expect(leaveEntryBody({ author: 'anna', closes: 1, circles: 1 })).toBe(base);
+  expect(leaveEntryBody({ author: 'anna', closes: 2, circles: 1 })).toBe(
+    `${base} You also stop reading one other entry @anna shared with you `
+    + 'through the same circle.');
+  expect(leaveEntryBody({ author: 'anna', closes: 4, circles: 2 })).toBe(
+    `${base} You also stop reading three other entries @anna shared with you `
+    + 'through the same circles.');
+});
+
+test('leaving a hidden person, and the note under both dialogs', () => {
+  expect(leavePersonTitle('anna')).toBe('Leave everything @anna shares with you?');
+  expect(leavePersonBody('anna')).toBe(
+    "You leave @anna's circles and the entries @anna named you for, and "
+    + 'nobody sees your name among their readers any more, @anna included.');
+  expect(leaveNote('anna')).toBe(
+    'Your replies stay where they are, with your name. @anna gets no note, '
+    + 'and can add you again.');
+});
+
+test('a leave request names the person in its body', async () => {
+  const client = { post: jest.fn().mockResolvedValue({ data: {} }) };
+  await leavePreviewRequest(client, { username: 'anna' });
+  await leaveRequest(client, { entry_id: 7 });
+  expect(client.post.mock.calls).toEqual([
+    ['/circles/leave/preview', { username: 'anna' }],
+    ['/circles/leave', { entry_id: 7 }],
+  ]);
+});
 
 test('a person is named in the request body, never in the address', async () => {
   const client = { delete: jest.fn().mockResolvedValue({ data: {} }) };

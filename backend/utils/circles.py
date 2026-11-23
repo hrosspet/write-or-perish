@@ -15,9 +15,9 @@ Nobody but the owner sees a circle or its name: a reader sees the people
 who can read an entry, never which circle they are in.
 
 This module holds what the routes share: the flag, the exact-name lookup,
-the audience of an entry, setting and clearing it, the note a reader gets
-and the per-reader mute of a sender. Ids, usernames and timestamps only:
-nothing here decrypts content.
+the audience of an entry, setting and clearing it, the note a reader gets,
+the per-reader mute of a sender and a reader leaving an audience. Ids,
+usernames and timestamps only: nothing here decrypts content.
 """
 import logging
 import threading
@@ -1407,6 +1407,131 @@ def unmute(user_id, sender_id):
         user_id=user_id, muted_user_id=sender_id).delete(
         synchronize_session=False)
     forget_circle_access()
+
+
+# ── Leaving (Peter, 2026-11-23) ─────────────────────────────────────────
+#
+# A reader takes themselves out of an audience they were put in without
+# being asked. Leaving deletes the rows that made them a reader, exactly
+# the rows the author's own "Remove" or Edit deletes, so from then on
+# they get the answers a removed reader gets (404 on the thread, nothing
+# in Shared with you, no note shown), they are no longer named to the
+# other readers, and the author's lists no longer show them (her circle's
+# members, the entry's names). The author gets no note, as the reader
+# gets none when removed; she can add them again (asking first is not
+# part of this). Their own replies in the thread stay, as after removal.
+
+class LeavePlan:
+    """What leaving would delete for one reader and author: the reader
+    rows (``named_ids``, NodeReader ids), the memberships
+    (``member_ids``, CircleMember ids) and how many of the author's
+    shared entries close to the reader with them (``closes``, the entry
+    left included). ``circles``: how many of the author's circles the
+    reader leaves."""
+
+    def __init__(self, named_ids, member_ids, closes, circles):
+        self.named_ids = named_ids
+        self.member_ids = member_ids
+        self.closes = closes
+        self.circles = circles
+
+    def __bool__(self):
+        return bool(self.named_ids or self.member_ids)
+
+
+def _owned_by(author_id):
+    return func.coalesce(Node.human_owner_id, Node.user_id) == author_id
+
+
+def leave_plan(user_id, author_id, entry=None):
+    """The LeavePlan for *user_id* leaving *author_id*'s audience.
+
+    With *entry* (leaving from a shared entry's page): the user's name on
+    that entry, and their place in each of the author's circles through
+    which they read it (a membership whose "Only new entries" cut-off
+    keeps the entry closed to them is not one). Other entries shared with
+    those circles close too, which the dialog states.
+
+    Without *entry* (leaving a person the user hid, whose entries they
+    cannot open): every place in the author's circles and every entry of
+    the author's that names the user.
+
+    ``closes`` counts the author's live shared entries whose audience
+    holds the user now and would not afterwards. Mutes play no part: a
+    reader who hid the author is still in her audience until they leave.
+    Ids only: nothing is decrypted."""
+    members = (db.session.query(CircleMember.id, CircleMember.circle_id,
+                                CircleMember.entries_from)
+               .join(Circle, Circle.id == CircleMember.circle_id)
+               .filter(CircleMember.user_id == user_id,
+                       Circle.user_id == author_id).all())
+    since = {cid: entries_from for _mid, cid, entries_from in members}
+    alive = (*_alive_shared_entry(), _owned_by(author_id))
+    named = {nid for (nid,) in db.session.query(NodeReader.node_id)
+             .join(Node, Node.id == NodeReader.node_id)
+             .filter(NodeReader.user_id == user_id, *alive)}
+    shares = []
+    if since:
+        shares = (db.session.query(NodeCircle.node_id, NodeCircle.circle_id,
+                                   NodeCircle.shared_at)
+                  .join(Node, Node.id == NodeCircle.node_id)
+                  .filter(NodeCircle.circle_id.in_(list(since)), *alive)
+                  .all())
+
+    def grants(circle_id, shared_at):
+        cut = since[circle_id]
+        return cut is None or shared_at >= cut
+
+    if entry is not None:
+        left = {cid for nid, cid, at in shares
+                if nid == entry.id and grants(cid, at)}
+        named_ids = [rid for (rid,) in db.session.query(NodeReader.id)
+                     .filter_by(node_id=entry.id, user_id=user_id)]
+        named_after = named - {entry.id}
+    else:
+        left = set(since)
+        named_ids = [rid for (rid,) in db.session.query(NodeReader.id)
+                     .join(Node, Node.id == NodeReader.node_id)
+                     .filter(NodeReader.user_id == user_id,
+                             _owned_by(author_id))]
+        named_after = set()
+    before = named | {nid for nid, cid, at in shares if grants(cid, at)}
+    after = named_after | {nid for nid, cid, at in shares
+                           if cid not in left and grants(cid, at)}
+    member_ids = [mid for mid, cid, _ in members if cid in left]
+    return LeavePlan(named_ids, member_ids, len(before - after), len(left))
+
+
+def leave(plan):
+    """Delete what *plan* names. The caller commits."""
+    if plan.named_ids:
+        NodeReader.query.filter(NodeReader.id.in_(plan.named_ids)).delete(
+            synchronize_session=False)
+    if plan.member_ids:
+        CircleMember.query.filter(
+            CircleMember.id.in_(plan.member_ids)).delete(
+            synchronize_session=False)
+    forget_circle_access()
+
+
+def leavable_authors(user_id, author_ids):
+    """Those of *author_ids* whose audience still holds *user_id* in some
+    way leaving would end: a place in one of their circles, or their name
+    on an entry of theirs. For the people the user hid, whose entries the
+    user cannot open to leave from."""
+    author_ids = list(author_ids)
+    if not author_ids:
+        return set()
+    in_circle = {uid for (uid,) in db.session.query(Circle.user_id)
+                 .join(CircleMember, CircleMember.circle_id == Circle.id)
+                 .filter(CircleMember.user_id == user_id,
+                         Circle.user_id.in_(author_ids))}
+    owner = func.coalesce(Node.human_owner_id, Node.user_id)
+    named = {uid for (uid,) in db.session.query(owner)
+             .join(NodeReader, NodeReader.node_id == Node.id)
+             .filter(NodeReader.user_id == user_id,
+                     owner.in_(author_ids)).distinct()}
+    return in_circle | named
 
 
 # ── Deletion ────────────────────────────────────────────────────────────
