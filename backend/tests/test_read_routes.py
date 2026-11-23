@@ -1545,6 +1545,23 @@ class TestReadOnlyModels:
             assert (cfg["api_model"], cfg["provider"]) == (api_model, provider)
             assert not cfg.get("deprecated") and not cfg.get("featured")
 
+    def test_gpt_6_2_astra_is_a_featured_chat_model(self):
+        """Peter, 2026-11-23: "we should add Astra 6.2 to Loore". A chat
+        model in the short list, heading OpenAI's models (the pickers keep
+        the dict's order), beside GPT-6 Astra, which stays offered and
+        featured; not a Read model, like GPT-6 Astra."""
+        from backend.config import Config
+        cfg = Config.SUPPORTED_MODELS["gpt-6.2-astra"]
+        assert (cfg["provider"], cfg["api_model"]) == ("openai", "gpt-6.2-astra")
+        assert cfg["display_name"] == "GPT-6.2 Astra"
+        assert cfg.get("chat", True) and cfg["featured"]
+        assert not cfg.get("read") and not cfg.get("deprecated")
+        openai_ids = [k for k, c in Config.SUPPORTED_MODELS.items()
+                      if c.get("provider") == "openai"]
+        assert openai_ids[0] == "gpt-6.2-astra"
+        old = Config.SUPPORTED_MODELS["gpt-6-astra"]
+        assert old["featured"] and not old.get("deprecated")
+
 
 # ── Glean (#435, Peter 2026-10-09) ───────────────────────────────────────
 
@@ -2819,3 +2836,223 @@ class TestSavedModelKeepsItsProvider:
         note = _make_node(bob, parent_id=reply.id, content="and?")
         _db.session.commit()
         assert glean_provider(note, bob) == "anthropic"
+
+
+# ── GPT-6.2 Astra is OpenAI's chat default (Peter, 2026-11-23) ───────────
+# "Astra 6.2 should become the new OpenAI chat default." The hard line
+# beside it: a user's provider or model is never switched, so a saved
+# GPT-6 Astra stays GPT-6 Astra and no saved value is rewritten. These
+# run on the shipped model list and chat defaults (Config), with
+# production's LLM_NAME (Opus 5.5, an Anthropic model).
+
+# Saved OpenAI ids Loore no longer offers for chat: deprecated, read
+# only, removed from SUPPORTED_MODELS, and Loore's first model.
+RETIRED_OPENAI = ("gpt-5.5", "gpt-5", "gpt-6.1-sol", "gpt-4.1",
+                  "gpt-4.5-preview")
+
+
+@pytest.fixture
+def app_shipped(app):
+    from backend.config import Config
+    app.config["SUPPORTED_MODELS"] = Config.SUPPORTED_MODELS
+    app.config["DEFAULT_LLM_MODEL"] = "claude-opus-5.5"
+    app.config["READ_DEFAULT_MODEL"] = Config.READ_DEFAULT_MODEL
+    app.config["GLEAN_MODEL_ANTHROPIC"] = Config.GLEAN_MODEL_ANTHROPIC
+    app.config["GLEAN_MODEL_OPENAI"] = Config.GLEAN_MODEL_OPENAI
+    app.config["CHAT_MODEL_ANTHROPIC"] = Config.CHAT_MODEL_ANTHROPIC
+    app.config["CHAT_MODEL_OPENAI"] = Config.CHAT_MODEL_OPENAI
+    from backend.routes.dashboard import dashboard_bp
+    app.register_blueprint(dashboard_bp, url_prefix="/api/dashboard")
+    return app
+
+
+def _login_as(client, user):
+    from flask import g
+    g.pop("_login_user", None)  # the fixture's app context outlives requests
+    _login(client, user.id)
+
+
+def _models_seen(client, user):
+    """What every default reads for *user*: the helpers, the pickers'
+    default (/nodes/default-model) and the Account page's model."""
+    from backend.utils.llm_nodes import (
+        default_model_for, effective_preferred_model, resolve_chat_model)
+    from backend.utils.profile_providers import profile_provider
+    _login_as(client, user)
+    return {
+        "effective": effective_preferred_model(user),
+        "background": default_model_for(user),
+        "fresh_thread": resolve_chat_model(None, user),
+        "picker": client.get("/api/nodes/default-model").get_json(),
+        "account_page": client.get(
+            "/api/dashboard/?profile=0").get_json()["user"]["preferred_model"],
+        "provider": profile_provider(user),
+    }
+
+
+class TestGpt62AstraIsOpenAIsChatDefault:
+    def test_the_openai_chat_default_is_gpt_6_2_astra(self, app_shipped):
+        from backend.utils.llm_nodes import provider_chat_model
+        assert app_shipped.config["CHAT_MODEL_OPENAI"] == "gpt-6.2-astra"
+        assert provider_chat_model("openai") == "gpt-6.2-astra"
+        # The server default and Anthropic's do not move.
+        assert provider_chat_model("anthropic") == "claude-opus-5.5"
+
+    def test_a_saved_gpt_6_astra_stays_gpt_6_astra(self, app_shipped):
+        """The hard line: an account that saved GPT-6 Astra keeps exactly
+        GPT-6 Astra everywhere, and its saved value is not rewritten."""
+        from backend.utils.llm_nodes import (
+            create_llm_placeholder, resolve_chat_model)
+        client = app_shipped.test_client()
+        alice = _make_user("alice", preferred_model="gpt-6-astra")
+        _db.session.commit()
+        assert _models_seen(client, alice) == {
+            "effective": "gpt-6-astra", "background": "gpt-6-astra",
+            "fresh_thread": ("gpt-6-astra", "user_preference"),
+            "picker": {"suggested_model": "gpt-6-astra",
+                       "source": "user_preference"},
+            "account_page": "gpt-6-astra", "provider": "openai"}
+        # A reply asked for with no model (the default path).
+        root = _make_node(alice, content="a thought")
+        _db.session.commit()
+        resp = client.post(f"/api/nodes/{root.id}/llm", json={})
+        assert resp.status_code == 202, resp.get_json()
+        assert Node.query.get(resp.get_json()["node_id"]).llm_model == (
+            "gpt-6-astra")
+        # A thread on an OpenAI model no longer offered, and an old page
+        # sending one: the account's own OpenAI model, not the new default.
+        reply = _make_node(alice, parent_id=root.id, node_type="llm",
+                           llm_model="gpt-5.5", content="hi")
+        note = _make_node(alice, parent_id=reply.id, content="and?")
+        _db.session.commit()
+        assert resolve_chat_model(note, alice) == ("gpt-6-astra",
+                                                   "predecessor")
+        node, _ = create_llm_placeholder(note.id, "gpt-5.5", alice.id,
+                                         enqueue=False)
+        assert node.llm_model == "gpt-6-astra"
+        # Still offered and still a valid choice to save.
+        offered = {m["id"] for m in
+                   client.get("/api/nodes/models").get_json()["models"]}
+        assert {"gpt-6-astra", "gpt-6.2-astra"} <= offered
+        assert client.put("/api/dashboard/user", json={
+            "preferred_model": "gpt-6-astra"}).status_code == 200
+        _db.session.expire_all()
+        assert User.query.get(alice.id).preferred_model == "gpt-6-astra"
+
+    def test_a_text_reply_in_a_gpt_6_astra_thread_stays_on_it(
+            self, app_shipped):
+        """A text reply keeps the thread's model: in a thread on GPT-6
+        Astra, a reply asked for with no model runs on GPT-6 Astra,
+        whatever the account's model. A Voice turn sends the account's
+        model and runs on it (#784; TestVoiceTurnUsesTheAccountsModel in
+        test_spend_cap_recording.py)."""
+        from backend.utils.llm_nodes import resolve_chat_model
+        client = app_shipped.test_client()
+        for name, saved in (("bob", None), ("carol", "gpt-5.5"),
+                            ("dan", "claude-opus-5.5")):
+            u = _make_user(name, preferred_model=saved)
+            root = _make_node(u, content="a thought")
+            reply = _make_node(u, parent_id=root.id, node_type="llm",
+                               llm_model="gpt-6-astra", content="hi")
+            note = _make_node(u, parent_id=reply.id, content="and?")
+            _db.session.commit()
+            assert resolve_chat_model(note, u) == ("gpt-6-astra",
+                                                   "predecessor"), name
+            _login_as(client, u)
+            assert client.get(f"/api/nodes/{note.id}/suggested-model"
+                              ).get_json()["suggested_model"] == "gpt-6-astra"
+
+    def test_an_openai_account_with_no_model_it_can_use_gets_gpt_6_2_astra(
+            self, app_shipped):
+        """An account on OpenAI whose saved model Loore no longer offers
+        has no OpenAI model of its own: it gets OpenAI's default, now
+        GPT-6.2 Astra (was GPT-6 Astra). Its saved value stays."""
+        client = app_shipped.test_client()
+        for n, saved in enumerate(RETIRED_OPENAI):
+            u = _make_user(f"u{n}", preferred_model=saved)
+            _db.session.commit()
+            assert _models_seen(client, u) == {
+                "effective": "gpt-6.2-astra", "background": "gpt-6.2-astra",
+                "fresh_thread": ("gpt-6.2-astra", "user_preference"),
+                "picker": {"suggested_model": "gpt-6.2-astra",
+                           "source": "user_preference"},
+                "account_page": "gpt-6.2-astra", "provider": "openai"}, saved
+            root = _make_node(u, content="a thought")
+            _db.session.commit()
+            resp = client.post(f"/api/nodes/{root.id}/llm", json={})
+            assert resp.status_code == 202, (saved, resp.get_json())
+            assert Node.query.get(resp.get_json()["node_id"]).llm_model == (
+                "gpt-6.2-astra"), saved
+            _db.session.expire_all()
+            assert User.query.get(u.id).preferred_model == saved
+
+    def test_a_thread_on_a_retired_openai_model_gets_gpt_6_2_astra(
+            self, app_shipped):
+        """No OpenAI model of the account's own: the thread stays on
+        OpenAI, on its default."""
+        from backend.utils.llm_nodes import (
+            create_llm_placeholder, resolve_chat_model)
+        alice = _make_user("alice", preferred_model="claude-opus-5.5")
+        root = _make_node(alice, content="a thought")
+        reply = _make_node(alice, parent_id=root.id, node_type="llm",
+                           llm_model="gpt-5.5", content="hi")
+        note = _make_node(alice, parent_id=reply.id, content="and?")
+        _db.session.commit()
+        assert resolve_chat_model(note, alice) == ("gpt-6.2-astra",
+                                                   "predecessor")
+        node, _ = create_llm_placeholder(root.id, "gpt-5.2", alice.id,
+                                         enqueue=False)
+        assert node.llm_model == "gpt-6.2-astra"
+        assert User.query.get(alice.id).preferred_model == "claude-opus-5.5"
+
+    def test_an_account_with_no_saved_model_stays_on_llm_name(
+            self, app_shipped):
+        """No saved model: LLM_NAME (Anthropic on production), as before.
+        The new OpenAI default moves nobody to OpenAI."""
+        client = app_shipped.test_client()
+        bob = _make_user("bob")
+        _db.session.commit()
+        assert _models_seen(client, bob) == {
+            "effective": None, "background": "claude-opus-5.5",
+            "fresh_thread": ("claude-opus-5.5", "default"),
+            "picker": {"suggested_model": "claude-opus-5.5",
+                       "source": "default"},
+            "account_page": None, "provider": "anthropic"}
+        assert User.query.get(bob.id).preferred_model is None
+
+    def test_the_default_path_prices_and_caps_gpt_6_2_astra(self, app_shipped):
+        """The id the default path resolves to is priced and capped by its
+        own entry: cached input at 0.05x, the whole request in the long
+        tier above 272k, and the profile pipeline's 272k plan cap."""
+        from backend.llm_providers import model_input_cap
+        from backend.utils.cost import llm_cost_log_fields
+        from backend.utils.llm_nodes import default_model_for
+        from backend.utils.tokens import tokenizer_family
+        alice = _make_user("alice", preferred_model="gpt-5.5")
+        _db.session.commit()
+        model_id = default_model_for(alice)
+        assert model_id == "gpt-6.2-astra"
+        cfg = app_shipped.config["SUPPORTED_MODELS"][model_id]
+        assert cfg["api_model"] == "gpt-6.2-astra" and cfg["cache_diagnostics"]
+
+        def cost(**resp):
+            return llm_cost_log_fields(model_id, resp)["cost_microdollars"]
+        # 100k in (90k cached, 5k written to the cache), 2k out: $0.206.
+        assert cost(input_tokens=100_000, output_tokens=2_000,
+                    cached_tokens=90_000,
+                    cache_write_subset_tokens=5_000) == 206_000
+        # Exactly 272k is the short tier; one token more reprices it all.
+        assert cost(input_tokens=272_000) == 2_176_000
+        assert cost(input_tokens=272_001) == 4_352_016
+        # Cached tokens count toward the tier: 300k in (250k cached, 10k
+        # written), 4k out: $1.28.
+        assert cost(input_tokens=300_000, output_tokens=4_000,
+                    cached_tokens=250_000,
+                    cache_write_subset_tokens=10_000) == 1_280_000
+        assert cost(input_tokens=100_000, batch=True) == 400_000
+        assert model_input_cap(cfg) == 272_000
+        assert model_input_cap(cfg, price_tier=False) == 922_000
+        # The same tokenizer family as GPT-6 Astra: a thread's measured
+        # tokens per character carry over (utils/thread_size).
+        assert tokenizer_family(model_id) == tokenizer_family(
+            "gpt-6-astra") == "o200k"
