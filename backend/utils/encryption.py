@@ -48,11 +48,56 @@ _kms_client = None
 _kms_client_lock = threading.Lock()
 
 
+_TRUE_VALUES = ("true", "1", "yes")
+
+
+class EncryptionNotConfigured(RuntimeError):
+    """The environment does not say, in exactly one way, whether content
+    is encrypted here."""
+
+
+def encryption_choice(environ=None) -> bool:
+    """Whether this instance encrypts: the one rule every caller follows,
+    the start check (validate_keys in backend/__init__.py) included.
+
+    Encryption is on unless ENCRYPTION_DISABLED=true (or 1, yes) is set;
+    that line is the only thing that turns it off, in every environment
+    (Peter, 2026-11-23). On needs GCP_KMS_KEY_NAME, the key users'
+    writing is encrypted with. So:
+
+    - GCP_KMS_KEY_NAME set, ENCRYPTION_DISABLED not true: on.
+    - ENCRYPTION_DISABLED=true, no GCP_KMS_KEY_NAME: off.
+    - neither: EncryptionNotConfigured. A missing key name used to mean
+      "store plain text", with no error anywhere.
+    - both: EncryptionNotConfigured. The two lines contradict each other
+      and either reading could be the wrong one: writing stored plain on
+      an instance that has a key, or text that is already encrypted
+      handed out undecrypted.
+
+    The messages name the settings, never a value."""
+    environ = os.environ if environ is None else environ
+    disabled = (environ.get("ENCRYPTION_DISABLED") or "").lower() in _TRUE_VALUES
+    has_key_name = bool(environ.get("GCP_KMS_KEY_NAME"))
+    if disabled and has_key_name:
+        raise EncryptionNotConfigured(
+            "GCP_KMS_KEY_NAME and ENCRYPTION_DISABLED=true are both set, "
+            "and they contradict each other. Keep GCP_KMS_KEY_NAME on an "
+            "instance that encrypts, or ENCRYPTION_DISABLED=true on one "
+            "that is meant to run without encryption, not both.")
+    if not disabled and not has_key_name:
+        raise EncryptionNotConfigured(
+            "GCP_KMS_KEY_NAME is not set, so new writing could not be "
+            "encrypted. Set it in the env file this instance reads, or "
+            "set ENCRYPTION_DISABLED=true on an instance that is meant to "
+            "run without encryption (local development, staging, tests).")
+    return not disabled
+
+
 def is_encryption_enabled() -> bool:
-    """Check if encryption is enabled (GCP KMS is configured)."""
-    if os.environ.get("ENCRYPTION_DISABLED", "").lower() in ("true", "1", "yes"):
-        return False
-    return bool(os.environ.get("GCP_KMS_KEY_NAME"))
+    """True when content is encrypted here, False only under
+    ENCRYPTION_DISABLED=true; raises EncryptionNotConfigured when the
+    environment states neither or both (see encryption_choice)."""
+    return encryption_choice()
 
 
 def get_kms_key_name() -> str:

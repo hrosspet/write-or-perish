@@ -92,22 +92,30 @@ def validate_profile_models(config):
 
 
 def validate_keys(config, environ=None):
-    """Refuse to boot in production and on staging (DEPLOY_ENV: every
-    FLASK_ENV but "development" and "testing") without the two keys the
-    data depends on.
+    """Refuse to boot without the two keys the data depends on.
 
-    SECRET_KEY signs the sign-in cookies and links. Without the line in
-    the env file the app ran on the placeholder in config.py; with an
-    empty one no session could be opened. GCP_KMS_KEY_NAME names the key
-    users' writing is encrypted with. Without it the app ran and stored
-    new writing as plain text, with no error anywhere. An instance that
-    is meant to run without encryption says so with
-    ENCRYPTION_DISABLED=true (the staging and local Compose files do).
+    Encryption, in every environment: GCP_KMS_KEY_NAME names the key
+    users' writing is encrypted with, and the app starts without it only
+    when ENCRYPTION_DISABLED=true says this instance is meant to run
+    without encryption (the local and staging Compose files and the
+    tests do). Without either line the app used to run and store new
+    writing as plain text, with no error anywhere. Both lines together
+    contradict each other and are refused too. The rule is
+    encryption_choice() in backend/utils/encryption.py, the same one
+    every write and read follows afterwards.
+
+    SECRET_KEY, in production and on staging (DEPLOY_ENV: every
+    FLASK_ENV but "development" and "testing"): it signs the sign-in
+    cookies and links. Without the line in the env file the app ran on
+    the placeholder in config.py; with an empty one no session could be
+    opened.
 
     A boot failure turns either gap into a red deploy, as for LLM_NAME
     below. The messages name the setting, never a value."""
     from backend.config import PLACEHOLDER_SECRET_KEY
+    from backend.utils.encryption import encryption_choice
     environ = os.environ if environ is None else environ
+    encryption_choice(environ)
     env = (config.get("DEPLOY_ENV") or "production").lower()
     if env in ("development", "testing"):
         return
@@ -117,14 +125,6 @@ def validate_keys(config, environ=None):
             f"SECRET_KEY is not set (FLASK_ENV counts as {env!r}). Set it "
             "in the env file this instance reads; an instance that had "
             "one must get the same value back.")
-    disabled = (environ.get("ENCRYPTION_DISABLED") or "").lower() in (
-        "true", "1", "yes")
-    if not disabled and not environ.get("GCP_KMS_KEY_NAME"):
-        raise RuntimeError(
-            f"GCP_KMS_KEY_NAME is not set (FLASK_ENV counts as {env!r}), "
-            "so new writing would be stored unencrypted. Set it in the "
-            "env file this instance reads, or set ENCRYPTION_DISABLED=true "
-            "on an instance that is meant to run without encryption.")
 
 
 def validate_default_model(config):

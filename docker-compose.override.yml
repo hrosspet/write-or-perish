@@ -14,6 +14,12 @@ services:
     environment:
       - FLASK_ENV=development
       - FLASK_DEBUG=1
+      # The local stack runs without encryption, and every service says
+      # so: this line is the only thing that turns encryption off, and
+      # the app does not start without it or a KMS key name. The key
+      # name is emptied so a line in .env cannot contradict it.
+      - ENCRYPTION_DISABLED=true
+      - GCP_KMS_KEY_NAME=
       # Dev runs plain http; without this, browsers on LAN devices
       # (http://<desktop-ip>:3001) reject the Secure session cookie and
       # login silently fails. localhost is exempt, which is why desktop
@@ -38,9 +44,9 @@ services:
       dockerfile: Dockerfile.dev
     command: watchmedo auto-restart --directory=/app/backend --pattern="*.py" --recursive -- python backend/celery_queues.py interactive --loglevel=info --concurrency=2
     environment:
-      # The local stack has no KMS key: it runs without encryption, and
-      # the workers (which count as production: no FLASK_ENV) say so.
+      # As the backend: no encryption locally.
       - ENCRYPTION_DISABLED=true
+      - GCP_KMS_KEY_NAME=
     volumes:
       - ./backend:/app/backend
       - media_data:/app/data
@@ -54,7 +60,9 @@ services:
       dockerfile: Dockerfile.dev
     command: watchmedo auto-restart --directory=/app/backend --pattern="*.py" --recursive -- python backend/celery_queues.py background --loglevel=info --concurrency=1
     environment:
+      # As the backend: no encryption locally.
       - ENCRYPTION_DISABLED=true
+      - GCP_KMS_KEY_NAME=
     volumes:
       - ./backend:/app/backend
       - media_data:/app/data
@@ -75,7 +83,9 @@ services:
       dockerfile: Dockerfile.dev
     command: watchmedo auto-restart --directory=/app/backend --pattern="*.py" --recursive -- celery -A backend.celery_app.celery beat --loglevel=info
     environment:
+      # As the backend: no encryption locally.
       - ENCRYPTION_DISABLED=true
+      - GCP_KMS_KEY_NAME=
     volumes:
       - ./backend:/app/backend
       - media_data:/app/data

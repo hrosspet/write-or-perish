@@ -63,14 +63,20 @@ def keys_for_the_app_to_start():
     """create_app() starts only with a SECRET_KEY and a stated choice
     about encryption (validate_keys), and the tests run with FLASK_ENV
     unset, which counts as production. A checkout without a .env (CI)
-    gets a key for the tests, and no KMS key name means no encryption."""
+    gets a key for the tests.
+
+    The tests run without encryption whatever the shell or a .env says:
+    ENCRYPTION_DISABLED=true, and the key name empty (not unset, so a
+    subprocess's load_dotenv cannot fill it back in), so no test reaches
+    the key service by accident. A test of the encrypted paths sets both
+    lines itself with monkeypatch."""
     from backend.config import PLACEHOLDER_SECRET_KEY
     if not os.environ.get("SECRET_KEY"):
         os.environ["SECRET_KEY"] = "test-secret"
     if Config.SECRET_KEY in (None, "", PLACEHOLDER_SECRET_KEY):
         Config.SECRET_KEY = os.environ["SECRET_KEY"]
-    if not os.environ.get("GCP_KMS_KEY_NAME"):
-        os.environ.setdefault("ENCRYPTION_DISABLED", "true")
+    os.environ["ENCRYPTION_DISABLED"] = "true"
+    os.environ["GCP_KMS_KEY_NAME"] = ""
 
 
 keys_for_the_app_to_start()

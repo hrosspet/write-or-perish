@@ -1035,7 +1035,10 @@ class Config:
     # GCP Cloud KMS configuration for content encryption at rest
     # Format: projects/{project}/locations/{location}/keyRings/{keyring}/cryptoKeys/{key}
     GCP_KMS_KEY_NAME = os.environ.get("GCP_KMS_KEY_NAME")
-    # Set to "true" to disable encryption (for local development without GCP)
+    # "true" is the only thing that turns encryption off (local
+    # development, staging, tests). The app starts with exactly one of
+    # the two: see encryption_choice() in backend/utils/encryption.py,
+    # which reads the environment itself.
     ENCRYPTION_DISABLED = os.environ.get("ENCRYPTION_DISABLED", "false").lower() in ("true", "1", "yes")
 
     # Production Security Settings

@@ -38,6 +38,12 @@ services:
       dockerfile: Dockerfile
     environment:
       - SECRET_KEY=${SECRET_KEY}
+      # The app starts with exactly one of these two (see
+      # encryption_choice() in backend/utils/encryption.py): the key
+      # name on an instance that encrypts, ENCRYPTION_DISABLED=true on
+      # one that does not. The dev and staging files set the second.
+      - GCP_KMS_KEY_NAME=${GCP_KMS_KEY_NAME:-}
+      - ENCRYPTION_DISABLED=${ENCRYPTION_DISABLED:-}
       - DATABASE_URL=postgresql://${POSTGRES_USER:-writeorperish}:${POSTGRES_PASSWORD:-writeorperish}@db:5432/${POSTGRES_DB:-writeorperish}
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
@@ -107,6 +113,12 @@ services:
     command: python backend/celery_queues.py interactive --loglevel=info --concurrency=2
     environment:
       - SECRET_KEY=${SECRET_KEY}
+      # The app starts with exactly one of these two (see
+      # encryption_choice() in backend/utils/encryption.py): the key
+      # name on an instance that encrypts, ENCRYPTION_DISABLED=true on
+      # one that does not. The dev and staging files set the second.
+      - GCP_KMS_KEY_NAME=${GCP_KMS_KEY_NAME:-}
+      - ENCRYPTION_DISABLED=${ENCRYPTION_DISABLED:-}
       - DATABASE_URL=postgresql://${POSTGRES_USER:-writeorperish}:${POSTGRES_PASSWORD:-writeorperish}@db:5432/${POSTGRES_DB:-writeorperish}
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
@@ -176,6 +188,12 @@ services:
     command: celery -A backend.celery_app.celery beat --loglevel=info
     environment:
       - SECRET_KEY=${SECRET_KEY}
+      # The app starts with exactly one of these two (see
+      # encryption_choice() in backend/utils/encryption.py): the key
+      # name on an instance that encrypts, ENCRYPTION_DISABLED=true on
+      # one that does not. The dev and staging files set the second.
+      - GCP_KMS_KEY_NAME=${GCP_KMS_KEY_NAME:-}
+      - ENCRYPTION_DISABLED=${ENCRYPTION_DISABLED:-}
       - DATABASE_URL=postgresql://${POSTGRES_USER:-writeorperish}:${POSTGRES_PASSWORD:-writeorperish}@db:5432/${POSTGRES_DB:-writeorperish}
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
