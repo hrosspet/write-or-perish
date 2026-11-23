@@ -1527,9 +1527,9 @@ def get_node_audience(node_id):
     thread = cz.parent_shared_entry(node)
     # The discussion leading up to the node, for its author: the share
     # step asks whether to share it too (off by default).
+    own = is_node_owner(node, current_user.id)
     path = (cz.thread_path(node, current_user.id)
-            if is_node_owner(node, current_user.id) and thread is None
-            else [])
+            if own and thread is None else [])
     return jsonify({
         "thread_path": ({"count": len(path),
                          "shared": cz.path_is_shared(node, path)}
@@ -1537,6 +1537,11 @@ def get_node_audience(node_id):
         "audience": cz.audience_for_viewer(node, current_user.id),
         "thread_audience": (cz.audience_for_viewer(thread, current_user.id)
                             if thread is not None else None),
+        # The share step says that readers can play the entry's original
+        # recording, also after its text is edited (Peter, 2026-11-23:
+        # "keep & say so"). For its owner only.
+        "has_recording": bool(own and (node.audio_original_url
+                                       or node.streaming_transcription)),
     }), 200
 
 

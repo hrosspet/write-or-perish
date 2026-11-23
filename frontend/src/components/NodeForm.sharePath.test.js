@@ -88,6 +88,23 @@ describe('editing a shared entry', () => {
     return mockPut.mock.calls[0][1];
   };
 
+  // Peter, 2026-11-23 ("keep & say so"): the share step says that its
+  // readers can play the entry's original recording, from the server's
+  // has_recording for the entry being edited.
+  test('an entry with a recording says its readers can play it', async () => {
+    audienceAnswer.has_recording = true;
+    renderEdit();
+    expect(await screen.findByText(
+      'They can also play its original recording, even after you edit the text.',
+    )).toBeInTheDocument();
+  });
+
+  test('a typed entry says nothing about a recording', async () => {
+    renderEdit();
+    await screen.findByLabelText(BOX);
+    expect(screen.queryByText(/original recording/)).toBeNull();
+  });
+
   test('the box is off by default, and an untouched save sends no share_path', async () => {
     const ref = renderEdit();
     expect(await screen.findByLabelText(BOX)).not.toBeChecked();

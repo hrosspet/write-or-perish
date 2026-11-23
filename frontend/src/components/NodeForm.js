@@ -201,6 +201,8 @@ const NodeForm = forwardRef(
 
     // Track if streaming is in progress (set by StreamingMicButton callbacks)
     const [isStreamingRecording, setIsStreamingRecording] = useState(false);
+    // Editing an entry that has an original recording (GET /audience).
+    const [editHasRecording, setEditHasRecording] = useState(false);
 
     // Transcription polling (for non-streaming mode)
     const {
@@ -306,6 +308,7 @@ const NodeForm = forwardRef(
           const path = res.data.thread_path || null;
           setThreadPath(path);
           setSharePath(!!path?.shared);
+          setEditHasRecording(!!res.data.has_recording);
           const own = res.data.audience;
           if (own && own.is_entry && own.is_author) {
             const seeded = {
@@ -1160,6 +1163,11 @@ const NodeForm = forwardRef(
               ? { checked: sharePath, onChange: setSharePath } : null}
             pickerKey={pickerKey}
             trainRefused={trainRefused}
+            // Readers of a shared entry can play its original recording,
+            // also after the text is edited; the share step says so
+            // (Peter, 2026-11-23: "keep & say so").
+            hasRecording={editMode ? editHasRecording
+              : !!uploadedFile || !!streamingSessionId || isStreamingRecording}
           />
         )}
 
