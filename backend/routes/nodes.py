@@ -1584,6 +1584,8 @@ def set_node_audience(node_id):
         cz.apply_requested_sharing(node, current_user, {
             "circle_ids": data.get("circle_ids") or [],
             "circle_usernames": data.get("circle_usernames") or [],
+            # The names the form started with (circles.names_not_taken_off).
+            "circle_usernames_from": data.get("circle_usernames_from"),
             **({"share_path": data["share_path"]}
                if "share_path" in data else {}),
         }, old_privacy=old_privacy)

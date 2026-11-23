@@ -944,19 +944,40 @@ def clear_audience(node):
     forget_circle_access()
 
 
-def set_audience(node, user, circle_ids, usernames, now=None):
+def names_not_taken_off(node, usernames, usernames_from):
+    """*usernames* without the people who were named on *node* when the
+    form was filled with *usernames_from* and are no longer named on it:
+    they left (or the author took them off in another form). A save from
+    a form opened before that keeps them off; a name the form did not
+    start with is named as asked, so the author adds a person who left
+    again from a form opened afterwards. Without *usernames_from* (a new
+    entry, a client that does not send it) *usernames* stand as asked."""
+    started = {n.lower() for n in split_names(usernames_from)}
+    if not started or node.id is None:
+        return usernames
+    named_now = {name.lower() for (name,) in db.session.query(User.username)
+                 .join(NodeReader, NodeReader.user_id == User.id)
+                 .filter(NodeReader.node_id == node.id)}
+    gone = started - named_now
+    return [n for n in split_names(usernames) if n.lower() not in gone]
+
+
+def set_audience(node, user, circle_ids, usernames, now=None,
+                 usernames_from=None):
     """Make *node* a shared entry read by *circle_ids* (the user's own
     circles) and *usernames* (for this entry only), replacing what it
     was shared with. A circle it was already shared with keeps the time
     of that share, which a member's "Only new entries" cut-off is
     compared with. People who can read it now and could not before get
-    their note. Raises AudienceError; refuses an audience nobody is in.
-    The caller commits. Returns the readers' usernames."""
+    their note. *usernames_from*: the names the edit form started with
+    (names_not_taken_off). Raises AudienceError; refuses an audience
+    nobody is in. The caller commits. Returns the readers' usernames."""
     now = now or datetime.utcnow()
     if node.is_system_prompt:
         # A prompt is shared only as part of the whole discussion that
         # leads up to a shared entry (share_thread_path), never alone.
         raise AudienceError(PROMPT_ALONE, code="circle_prompt_node")
+    usernames = names_not_taken_off(node, usernames, usernames_from)
     circles, people = resolve_audience(user, circle_ids, usernames)
     if not preview_readers(circles, people, user.id, entry=node):
         raise AudienceError(NO_READERS, code="circle_no_readers")
@@ -1131,7 +1152,10 @@ def apply_requested_sharing(node, user, data, *, old_privacy=None,
     * "circles" on a reply in a shared thread: it joins the thread's
       audience. A different audience for it is refused.
     * "circles" on anything else: the audience in *data* (``circle_ids``,
-      ``circle_usernames``) replaces the entry's. Without one, an entry
+      ``circle_usernames``) replaces the entry's; with
+      ``circle_usernames_from``, the names the edit form started with,
+      a person taken off since is not named again (names_not_taken_off).
+      Without one, an entry
       that is already shared keeps its audience; one that would newly
       become "circles" on an edit is refused; a new node is left without
       an audience (private) for the client to share in a second step.
@@ -1201,7 +1225,8 @@ def apply_requested_sharing(node, user, data, *, old_privacy=None,
     if (node.human_owner_id or node.user_id) != user.id:
         raise AudienceError(ONLY_AUTHOR, code="circle_not_author", status=403)
     readers = set_audience(node, user, data.get("circle_ids"),
-                           data.get("circle_usernames"))
+                           data.get("circle_usernames"),
+                           usernames_from=data.get("circle_usernames_from"))
     share_thread_path(node, user, data)
     return readers
 

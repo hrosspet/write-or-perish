@@ -75,6 +75,10 @@ const NodeForm = forwardRef(
     const circlesOn = !!user?.circles_enabled;
     const [audience, setAudience] = useState({ circleIds: [], namesText: '' });
     const [savedAudienceKey, setSavedAudienceKey] = useState(null);
+    // Editing: the names the entry was shared with when the form opened.
+    // The save sends them, so a person who left since is not named again
+    // by a form that still lists them (the server leaves them off).
+    const [startedNames, setStartedNames] = useState(null);
     const [audienceInfo, setAudienceInfo] = useState(
       { readers: [], error: '', pending: false, circles: [] });
     const [threadAudience, setThreadAudience] = useState(null);
@@ -317,6 +321,7 @@ const NodeForm = forwardRef(
             };
             setAudience(seeded);
             setSavedAudienceKey(audienceKey(seeded));
+            setStartedNames(own.usernames || []);
             setPickerKey((k) => k + 1);
           } else {
             setThreadAudience(res.data.thread_audience || (own && !own.is_entry ? own : null));
@@ -573,6 +578,7 @@ const NodeForm = forwardRef(
     const audienceFields = () => ({
       circle_ids: audience.circleIds || [],
       circle_usernames: splitNames(audience.namesText),
+      ...(editMode && startedNames && { circle_usernames_from: startedNames }),
       ...(threadPath && (sharePath || threadPath.shared)
         && { share_path: sharePath }),
     });

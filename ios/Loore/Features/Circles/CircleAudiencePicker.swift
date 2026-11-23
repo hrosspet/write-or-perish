@@ -26,6 +26,9 @@ final class CircleAudienceState {
     private(set) var quotesRefusal: QuotesNotPublic?
     /// The audience the entry was saved with (edit): nil = not shared before.
     private(set) var savedKey: String?
+    /// The names the entry was shared with when the edit form opened (nil
+    /// for a new entry). The save sends them (`circle_usernames_from`).
+    private(set) var startedNames: [String]?
     /// An entry of the author's own with something above it in its thread:
     /// "Share also the discussion leading up to this node?" is offered, off
     /// by default. Sharing an entry does not share what is above it.
@@ -76,6 +79,11 @@ final class CircleAudienceState {
     var fields: [String: JSONValue] {
         var fields: [String: JSONValue] = ["circle_ids": .array(circleIds.map(JSONValue.int)),
                                            "circle_usernames": .array(names.map(JSONValue.string))]
+        // Editing: the names the form started with, so a person who left
+        // since is not named again by this save (the server leaves them off).
+        if let startedNames {
+            fields["circle_usernames_from"] = .array(startedNames.map(JSONValue.string))
+        }
         if offersSharePath {
             if sharePath {
                 fields["share_path"] = .bool(true)
@@ -135,6 +143,7 @@ final class CircleAudienceState {
     /// The entry's saved audience (edit).
     func seed(circleIds: [Int], usernames: [String]) {
         self.circleIds = circleIds
+        startedNames = usernames
         namesText = usernames.map { "@\($0)" }.joined(separator: ", ")
         committed = names
         savedKey = key

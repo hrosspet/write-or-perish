@@ -105,6 +105,23 @@ describe('editing a shared entry', () => {
     expect(screen.queryByText(/original recording/)).toBeNull();
   });
 
+  // A person who leaves while the form is open is not named again by its
+  // save: the save sends the names the form started with, and the server
+  // leaves off whoever is no longer named.
+  test('a save sends the names the form started with', async () => {
+    audienceAnswer.audience.usernames = ['ben', 'chidi'];
+    const ref = renderEdit();
+    await screen.findByLabelText(BOX);
+    await waitFor(() => expect(
+      screen.getByLabelText('Or name people for this entry only'),
+    ).toHaveValue('@ben, @chidi'));
+    const body = await savedBody(ref);
+    expect(body).toEqual(expect.objectContaining({
+      circle_usernames: ['ben', 'chidi'],
+      circle_usernames_from: ['ben', 'chidi'],
+    }));
+  });
+
   test('the box is off by default, and an untouched save sends no share_path', async () => {
     const ref = renderEdit();
     expect(await screen.findByLabelText(BOX)).not.toBeChecked();
@@ -201,6 +218,8 @@ describe('a new entry under the user\'s own node', () => {
     const body = await createdBody(ref);
     expect(body).toEqual(expect.objectContaining({ parent_id: 40, circle_ids: [1] }));
     expect(body).not.toHaveProperty('share_path');
+    // A new entry has no names it started with.
+    expect(body).not.toHaveProperty('circle_usernames_from');
   });
 
   test('ticked, POST /nodes/ carries share_path true', async () => {

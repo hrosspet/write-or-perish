@@ -602,6 +602,7 @@ final class CirclesFormTests: StubbedAppTestCase {
         XCTAssertEqual(sent?["privacy_level"] as? String, "circles")
         XCTAssertEqual(sent?["circle_ids"] as? [Int], [3])
         XCTAssertEqual(sent?["circle_usernames"] as? [String], ["dana"])
+        XCTAssertNil(sent?["circle_usernames_from"], "a new entry starts with no names")
         XCTAssertEqual(body(of: "POST /api/circles/audience-preview")?["usernames"] as? [String], ["dana"])
         XCTAssertFalse(calls.contains("PUT /api/nodes/42/audience"), "the audience went with the entry")
     }
@@ -746,6 +747,9 @@ final class CirclesFormTests: StubbedAppTestCase {
         await model.submit()
         XCTAssertNil(model.dialog)
         XCTAssertEqual(body(of: "PUT /api/nodes/9")?["circle_ids"] as? [Int], [3])
+        // The save names the people the form started with, so a person who
+        // left meanwhile is not named again (the server leaves them off).
+        XCTAssertEqual(body(of: "PUT /api/nodes/9")?["circle_usernames_from"] as? [String], ["ben"])
         // A changed audience on an entry with replies asks whether they follow.
         model.audience.namesChanged("@ben, @chidi ")
         XCTAssertTrue(model.audience.changed)
@@ -756,6 +760,7 @@ final class CirclesFormTests: StubbedAppTestCase {
         await model.dialogSubmit?.value
         XCTAssertNotNil(result())
         XCTAssertEqual(body(of: "PUT /api/nodes/9")?["circle_usernames"] as? [String], ["ben", "chidi"])
+        XCTAssertEqual(body(of: "PUT /api/nodes/9")?["circle_usernames_from"] as? [String], ["ben"])
         XCTAssertEqual(body(of: "PUT /api/nodes/9")?["apply_to_descendants"] as? Bool, true)
         // The sentence is asked for this very entry: its circles keep the time
         // they were shared with it.
