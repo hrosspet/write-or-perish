@@ -13,6 +13,7 @@ struct NoSubscriptionView: View {
     @State private var deleteModel: DeleteAccountModel?
     @State private var exporting = false
     @State private var exportFile: ExportFile?
+    @State private var signOutQuestion = false
 
     static let message = "Your account has no active subscription yet."
     static let downloadLabel = "Download your data"
@@ -36,7 +37,7 @@ struct NoSubscriptionView: View {
                     // account comes here, not to the waitlist that asked it before.
                     PrefillConsentCard(eyebrow: "Already on X?")
                         .padding(.bottom, 40)
-                    Button("Sign out") { Task { await app.signOut() } }
+                    Button("Sign out") { app.requestSignOut(question: $signOutQuestion) }
                         .buttonStyle(.looreLink)
                         .accessibilityIdentifier("noSubscription.signOut")
                     Button(exporting ? "Preparing your data…" : Self.downloadLabel) { download() }
@@ -57,6 +58,7 @@ struct NoSubscriptionView: View {
             }
             .background(LooreColor.bgDeep.ignoresSafeArea())
         }
+        .signOutQuestion($signOutQuestion)
         .onAppear {
             if deleteModel == nil { deleteModel = DeleteAccountModel(app: app) }
         }

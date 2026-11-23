@@ -33,8 +33,11 @@ final class FakeVoiceBackend: VoiceBackend {
     /// `next_chunk_index` nil: the turn continues from the listed chunk count.
     var claimResult: Result<StreamingClaimResponse, Error> = .success(StreamingClaimResponse(nextChunkIndex: nil))
     var claimed: [String] = []
+    /// Seconds the claim takes.
+    var claimDelay: Double = 0
     func claimSession(sessionId: String) async throws -> StreamingClaimResponse {
         claimed.append(sessionId)
+        if claimDelay > 0 { try await Task.sleep(nanoseconds: UInt64(claimDelay * 1_000_000_000)) }
         return try claimResult.get()
     }
 
@@ -111,6 +114,12 @@ final class FakeVoiceBackend: VoiceBackend {
         discarded.append(sessionId)
     }
 
+    var released: [String] = []
+    func release(sessionId: String) async {
+        log.append("release")
+        released.append(sessionId)
+    }
+
     /// `GET /api/tool-approvals?node=`: the waiting calls per node asked (none
     /// listed: nothing waits). Not in `log`, so the turn sequences stay as they were.
     var approvalLists: [Int: [ToolApproval]] = [:]
@@ -155,18 +164,30 @@ final class FakeRecorder: VoiceRecording {
     weak var audio: FakeAudio?
     var calls: [String] = []
 
+    /// The session recording now (nil: nothing runs), and whether its chunks
+    /// wait for the claim.
+    private var running: String?
+    private var holding = false
+
     func start(sessionId: String, uploadURL: URL, firstChunkIndex: Int, elapsedOffset: Double) throws {
         calls.append("start \(sessionId) from \(firstChunkIndex)")
         if let startError { throw startError }
         elapsed = elapsedOffset + 3
+        running = sessionId
+        holding = false
     }
     func startHoldingChunks(sessionId: String, uploadURL: URL, firstChunkIndex: Int,
                             elapsedOffset: Double) throws {
         calls.append("start \(sessionId) holding from \(firstChunkIndex)")
         if let startError { throw startError }
         elapsed = elapsedOffset + 3
+        running = sessionId
+        holding = true
     }
-    func releaseHeldChunks(firstChunkIndex: Int) { calls.append("release from \(firstChunkIndex)") }
+    func releaseHeldChunks(firstChunkIndex: Int) {
+        calls.append("release from \(firstChunkIndex)")
+        holding = false
+    }
     var resumeError: Error?
     func pause() { calls.append("pause") }
     func resume() throws {
@@ -178,16 +199,50 @@ final class FakeRecorder: VoiceRecording {
     var stopDelay: Double = 0
     func stop() async -> ChunkUploader.Outcome {
         calls.append("stop")
+        running = nil
         audio?.events.append("recorder.stop")
         if stopDelay > 0 { try? await Task.sleep(nanoseconds: UInt64(stopDelay * 1_000_000_000)) }
         return outcome
     }
     func cancel() {
         calls.append("cancel")
-        hasProducedChunks = false  // the real recorder drops its writer
+        running = nil
     }
-    func forget(sessionId: String) { calls.append("forget") }
+    /// Whether the recording so far is worth keeping (an earlier piece, or
+    /// `VoiceRecorder.shortestKeptRecording` of audio).
     var hasProducedChunks = true
+    /// What a leave of a recording worth keeping reports (default: all stored).
+    var leaveResult: RecordingLeft?
+    /// Like the real recorder: forgets, then discards or releases the session.
+    func leave(release: @escaping @MainActor (String) async -> Void,
+               discard: @escaping @MainActor (String) async -> Void) -> Task<RecordingLeft, Never> {
+        calls.append("leave")
+        let result: RecordingLeft
+        if let sid = running, !holding {
+            result = hasProducedChunks ? leaveResult ?? .stored(sessionId: sid) : .empty(sessionId: sid)
+        } else {
+            result = .nothing
+        }
+        running = nil
+        return Task { @MainActor in
+            switch result {
+            case .empty(let sid):
+                self.forget(sessionId: sid)
+                await discard(sid)
+            case .stored(let sid):
+                self.forget(sessionId: sid)
+                await release(sid)
+            case .pending, .nothing, .reopened:
+                break
+            }
+            return result
+        }
+    }
+    var forgotten: [String] = []
+    func forget(sessionId: String) {
+        calls.append("forget")
+        forgotten.append(sessionId)
+    }
 }
 
 @MainActor
@@ -277,11 +332,19 @@ final class FakeAudio: VoiceAudio {
 @MainActor
 final class FakeNotices: VoiceNotices {
     var toasts: [String] = []
+    /// Messages that stay until dismissed (#736), in order.
+    var lasting: [String] = []
     var notified: [LocalNotice] = []
+    /// The body each notification was posted with (nil: the notice's own).
+    var notifiedBodies: [String?] = []
     var capped = 0
     func toast(_ text: String, duration: TimeInterval) -> Int { toasts.append(text); return toasts.count }
+    func lastingToast(_ text: String) { lasting.append(text) }
     func dismissToast(_ id: Int) {}
-    func notify(_ notice: LocalNotice) { notified.append(notice) }
+    func notify(_ notice: LocalNotice, body: String?) {
+        notified.append(notice)
+        notifiedBodies.append(body)
+    }
     func withdraw(_ notice: LocalNotice) { withdrawn.append(notice) }
     var withdrawn: [LocalNotice] = []
     func spendCapped() { capped += 1 }
@@ -489,7 +552,11 @@ final class VoiceTurnTests: XCTestCase {
         backend.streams[101]?.yield(.response(status: 200, body: Data(#"{"status":"completed","tts_url":"/media/full.mp3"}"#.utf8)))
         await wait("delivered") { audio.fakeQueue.urls == ["/media/full.mp3"] }
         XCTAssertEqual(turn.state, .playing)
-        XCTAssertFalse(audio.fakeQueue.generatingTTS)
+        // Nothing more comes once the approval announcement's answer is in
+        // (`finishReply` waits for it in its own task).
+        await wait("done generating") { !audio.fakeQueue.generatingTTS }
+        XCTAssertEqual(turn.state, .playing)
+        XCTAssertEqual(audio.fakeQueue.urls, ["/media/full.mp3"])
     }
 
     func testPostTTSReadyDeliversWhenTheStreamIsNotAttached() async throws {
@@ -1147,21 +1214,71 @@ final class VoiceTurnTests: XCTestCase {
     // MARK: Leaving the screen (Peter, 2026-10-06: a session left before its
     // first chunk stayed in 'recording' and came back in Text mode)
 
-    func testLeavingBeforeTheFirstChunkDiscardsTheSession() async throws {
+    // #753: even after the leave's flush no audio reached a chunk.
+    func testLeavingBeforeAnyAudioDiscardsTheSession() async throws {
         recorder.hasProducedChunks = false
         turn.start()
         await wait("recording") { turn.state == .recording }
         turn.tearDown()
         await wait("discard") { backend.log.contains("discard") }
-        XCTAssertTrue(recorder.calls.contains("forget"))
+        XCTAssertEqual(backend.discarded, ["sid-1"])
+        XCTAssertEqual(recorder.forgotten, ["sid-1"])
+        XCTAssertEqual(backend.released, [])
     }
 
-    func testLeavingWithAudioKeepsTheSessionForTheBanner() async throws {
+    // #753: leaving mid-recording queues the unfinished piece (the recorder's
+    // leave, not cancel) and, once the server has every chunk, releases the
+    // session so the next Voice screen offers it at once.
+    func testLeavingMidRecordingKeepsEverythingAndReleasesTheSession() async throws {
+        turn.start()
+        await wait("recording") { turn.state == .recording }
+        turn.tearDown()
+        XCTAssertEqual(recorder.calls.first { $0 == "leave" || $0 == "cancel" }, "leave")
+        XCTAssertEqual(turn.state, .idle)
+        await wait("released") { backend.released == ["sid-1"] }
+        XCTAssertEqual(recorder.forgotten, ["sid-1"])
+        XCTAssertFalse(backend.log.contains("discard"))
+        XCTAssertFalse(backend.log.contains { $0.hasPrefix("finalize") }, "left, not finished")
+    }
+
+    func testLeavingWhilePausedKeepsEverythingToo() async throws {
+        turn.start()
+        await wait("recording") { turn.state == .recording }
+        turn.pauseRecording()
+        turn.tearDown()
+        await wait("released") { backend.released == ["sid-1"] }
+        XCTAssertTrue(recorder.calls.contains("leave"))
+    }
+
+    // #753: pieces still on the phone (offline) stay queued; released before
+    // they land, the session could be continued over their numbers.
+    func testLeavingWithPiecesStillOnThePhoneDoesNotReleaseTheSession() async throws {
+        recorder.leaveResult = .pending(sessionId: "sid-1")
         turn.start()
         await wait("recording") { turn.state == .recording }
         turn.tearDown()
         try await Task.sleep(nanoseconds: 100_000_000)
-        XCTAssertFalse(backend.log.contains("discard"))
+        XCTAssertEqual(backend.released, [])
+        XCTAssertEqual(backend.discarded, [])
+        XCTAssertEqual(recorder.forgotten, [], "its queued pieces stay")
+    }
+
+    // #753 with #388: a continue still waiting for its claim sends nothing,
+    // releases nothing and discards nothing (the session has audio).
+    func testLeavingAContinueWaitingForItsClaimSendsNothing() async throws {
+        backend.claimDelay = 0.3
+        let draft = try decode(InterruptedDraft.self,
+            #"{"id":3,"session_id":"old","parent_id":9,"label":"Voice","content":"","chunk_count":4,"has_stored_chunks":true,"streaming_mime_type":"audio/mp4"}"#)
+        turn.resumeInterrupted(draft)
+        await wait("claiming") { backend.claimed == ["old"] }
+        XCTAssertEqual(turn.state, .starting)
+        turn.tearDown()
+        try await Task.sleep(nanoseconds: 400_000_000)
+        XCTAssertTrue(recorder.calls.contains("leave"))
+        XCTAssertFalse(recorder.calls.contains { $0.hasPrefix("release from") }, "the held chunks never go")
+        XCTAssertEqual(backend.released, [])
+        XCTAssertEqual(backend.discarded, [])
+        XCTAssertEqual(recorder.forgotten, [])
     }
 
     func testLeavingWhileTheSessionIsCreatedDiscardsIt() async throws {
@@ -1249,9 +1366,123 @@ final class VoiceTurnTests: XCTestCase {
         XCTAssertTrue(recorder.calls.contains("stop"))
         XCTAssertTrue(backend.log.contains { $0.hasPrefix("finalize total=960") }, "\(backend.log)")
         await wait("thinking") { turn.state == .awaitingAudio }
-        XCTAssertEqual(notices.toasts, [words])
+        // #736: the words stay until dismissed (no ten-second toast), with the
+        // error sound and a notification in the same words.
+        XCTAssertEqual(notices.lasting, [words])
+        XCTAssertEqual(notices.toasts, [], "no toast that goes by itself")
         XCTAssertFalse(notices.toasts.contains(VoiceTurnController.missingChunksMessage))
+        XCTAssertEqual(errorSounds, 1)
+        XCTAssertEqual(notices.notified, [.recordingStopped])
+        XCTAssertEqual(notices.notifiedBodies, [words])
         XCTAssertFalse(turn.hasError)
+    }
+
+    // #736 (Peter, 2026-11-21: "it should stay there until the user sees it and
+    // dismisses; it should also make the sound"): the message does not stop the
+    // turn. The reply after the stop plays to its end, through the app's time in
+    // the background, and nothing in the turn takes the message away.
+    func testTheStopMessageStaysThroughTheReplyAndTheBackground() async throws {
+        let words = ChunkUploader.longestRecordingMessage
+        recorder.outcome = .init(produced: 961, stored: 960, failed: [], fatalMessage: nil, beyond: 1)
+        backend.statuses = [try status("completed", llm: 101)]
+        backend.llmStatuses[101] = [try llm(101, "processing", tts: "processing", streaming: true),
+                                    try llm(101, "completed", tts: "processing", streaming: true, content: "A reply")]
+        turn.start()
+        await wait("recording") { turn.state == .recording }
+
+        recorder.onLimit?(words)
+        turn.appDidEnterBackground()
+        await wait("attached") { backend.streams[101] != nil }
+        backend.push(101, "chunk_ready", #"{"chunk_index":0,"audio_url":"/media/r0.mp3","duration":2}"#)
+        await wait("playing") { turn.state == .playing }
+        turn.appDidBecomeActive()
+        backend.push(101, "all_complete", #"{"tts_url":"/media/tts.mp3","continuation_node_id":null,"preview":"A reply"}"#)
+        await wait("generation over") { !audio.fakeQueue.generatingTTS }
+        turn.queueFinished()
+
+        XCTAssertEqual(turn.state, .done)
+        XCTAssertEqual(audio.fakeQueue.urls, ["/media/r0.mp3"])
+        XCTAssertEqual(notices.lasting, [words], "said once, and nothing took it away")
+        XCTAssertEqual(errorSounds, 1, "the sound for the stop only: the reply did not fail")
+        XCTAssertEqual(notices.notified, [.recordingStopped])
+        XCTAssertFalse(turn.hasError)
+    }
+
+    // Found at Stop (the last chunk was the one refused): said the same way, and
+    // the turn stops once.
+    func testTheLimitFoundAtStopIsSaidTheSameWay() async throws {
+        let words = ChunkUploader.longestRecordingMessage
+        recorder.outcome = .init(produced: 961, stored: 960, failed: [], fatalMessage: nil, beyond: 1)
+        recorder.stopDelay = 0.2
+        backend.statuses = [try status("completed", llm: 101)]
+        backend.llmStatuses[101] = [try llm(101, "processing")]
+        await recordAndStop()
+        XCTAssertEqual(turn.state, .stopping)
+
+        recorder.onLimit?(words)
+
+        await wait("finalized") { backend.log.contains { $0.hasPrefix("finalize total=960") } }
+        XCTAssertEqual(recorder.calls.filter { $0 == "stop" }.count, 1)
+        XCTAssertEqual(notices.lasting, [words])
+        XCTAssertEqual(errorSounds, 1)
+        XCTAssertEqual(notices.notified, [.recordingStopped])
+        XCTAssertEqual(notices.notifiedBodies, [words])
+    }
+
+    // #736: Voice does not read the transcription stream, so it says the
+    // two-hour message itself once its recording holds two hours of audio
+    // (backend MAX_TRANSCRIBED_SECONDS). Once per recording; the recording goes
+    // on; not a failure (web: no sound), so no sound and no notification.
+    func testPastTwoHoursOfAudioVoiceSaysTheRestIsNotTurnedIntoText() async throws {
+        XCTAssertEqual(VoiceTurnController.Timings().untranscribed, 2 * 60 * 60)
+        XCTAssertEqual(RecordingLimits.transcribedSeconds, 2 * 60 * 60)
+        turn.timings.untranscribed = 10
+        turn.start()
+        await wait("recording") { turn.state == .recording }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(notices.lasting, [], "3 s of audio: not yet")
+
+        recorder.elapsed = 10
+        await wait("said") { !notices.lasting.isEmpty }
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertEqual(notices.lasting, [RecordingLimits.tooLongMessage], "once")
+        XCTAssertEqual(RecordingLimits.untranscribedMessage(RecordingLimits.tooLongCode),
+                       RecordingLimits.tooLongMessage, "the words dictation and the web say")
+        XCTAssertEqual(turn.state, .recording)
+        XCTAssertEqual(errorSounds, 0)
+        XCTAssertEqual(notices.notified, [])
+        XCTAssertEqual(notices.toasts, [])
+    }
+
+    // A recording continued past two hours (its earlier chunks count) says it
+    // at once.
+    func testAContinuedRecordingPastTwoHoursSaysItAtOnce() async throws {
+        turn.timings.untranscribed = 60
+        let draft = try decode(InterruptedDraft.self,
+            #"{"id":3,"session_id":"old","parent_id":9,"label":"Voice","content":"","chunk_count":4,"has_stored_chunks":true,"streaming_mime_type":"audio/mp4"}"#)
+        turn.resumeInterrupted(draft)  // 4 chunks of 15 s, then 3 s here
+        await wait("said") { notices.lasting == [RecordingLimits.tooLongMessage] }
+    }
+
+    // Each recording of the conversation says it when it gets there.
+    func testTheTwoHourMessageIsSaidPerRecording() async throws {
+        turn.timings.untranscribed = 3
+        backend.statuses = [try status("completed", llm: 101)]
+        backend.llmStatuses[101] = [try llm(101, "completed", content: "Short.")]
+        turn.start()
+        await wait("said") { notices.lasting.count == 1 }
+        turn.stop()
+        await wait("attached") { backend.streams[101] != nil }
+        backend.push(101, "chunk_ready", #"{"chunk_index":0,"audio_url":"/media/b0.mp3","duration":2}"#)
+        backend.push(101, "all_complete", #"{"continuation_node_id":null}"#)
+        await wait("not generating") { turn.state == .playing && !audio.fakeQueue.generatingTTS }
+        turn.queueFinished()
+
+        backend.startResult = .success(StreamingInitResponse(sessionId: "sid-2", draftId: 8, sseURL: nil))
+        turn.continueConversation()
+        await wait("said again") { notices.lasting.count == 2 }
+        XCTAssertEqual(notices.lasting, [RecordingLimits.tooLongMessage, RecordingLimits.tooLongMessage])
     }
 
     func testRetriedFinalizeAnsweringNotRecordingCountsAsSuccess() async throws {

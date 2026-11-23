@@ -99,3 +99,15 @@ test('labels say what a load did, in counts', () => {
     .toBe("Failed: the bundle's checksum does not match its manifest");
   expect(bundleCheckLabel(null)).toBeNull();
 });
+
+test('a load the spam hold stopped says what happens next (#732)', () => {
+  expect(bundleLoadLabel({ status: 'held', origin: 'self', nodes_done: 500, nodes_total: 8000 }))
+    .toBe('Held: the account is marked as spam; 500 of 8,000 entries loaded (they stay). '
+      + "It goes on at the person's next visit once the mark is removed or the account is activated.");
+  expect(bundleLoadLabel({ status: 'held', origin: 'admin', nodes_done: 0, nodes_total: 7 }))
+    .toMatch(/^Held: .* Make ready again once the mark is removed or the account is activated\.$/);
+  expect(bundleLoadLabel({
+    status: 'done', username: 'alice', created: 7, skipped: 0, profiles: 2, artifacts: 1,
+    relinked: 3, approved: true, merge_status: 'skipped', merge_error: 'held_as_spam',
+  })).toMatch(/; no merge \(the account is marked as spam and held\)$/);
+});

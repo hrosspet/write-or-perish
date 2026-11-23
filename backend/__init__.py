@@ -291,8 +291,11 @@ def create_app():
     if _payments_off:
         app.logger.error(_payments_off)
 
-    # Fix for running behind nginx reverse proxy - handles X-Forwarded-* headers
-    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+    # Behind nginx: the client address and scheme come from the
+    # X-Forwarded-For and X-Forwarded-Proto nginx sets. The host is the Host
+    # header nginx sets; X-Forwarded-Host and X-Forwarded-Prefix are not
+    # read: the app is served at the root of one host.
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=0, x_prefix=0)
 
     # Configure CORS to allow credentials from your frontend
     CORS(app, supports_credentials=True, origins=[app.config.get("FRONTEND_URL")])
@@ -654,6 +657,8 @@ def create_app():
     app.cli.add_command(stripe_forget_customer_command)
     from backend.unclaimed_cli import unclaimed_accounts_command
     app.cli.add_command(unclaimed_accounts_command)
+    from backend.activity_cli import artifact_names_cleanup_command
+    app.cli.add_command(artifact_names_cleanup_command)
 
     try:
         from experiments.prompt_rct.run_rct import rct_cli

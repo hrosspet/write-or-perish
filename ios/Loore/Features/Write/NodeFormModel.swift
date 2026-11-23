@@ -154,6 +154,13 @@ final class NodeFormModel {
 
     let drafts: DraftAutosaver
     @ObservationIgnored private var started = false
+    /// An edit draft last saved before the entry changed (#761): offered beside
+    /// the form's text (use, copy, discard) until the person chooses. The
+    /// server keeps it meanwhile, also when they type in the entry's text
+    /// (#766: that typing gets a row of its own).
+    private(set) var olderDraft: Draft.OlderEdit?
+    /// When the entry last changed (the box's words).
+    @ObservationIgnored private(set) var entryChangedAt: Date?
 
     init(config: NodeFormConfig, app: AppState, defaults: UserDefaults = .standard) {
         self.config = config
@@ -206,8 +213,25 @@ final class NodeFormModel {
         }
         await draftLoad
         if let draft = drafts.draft, !draft.content.isEmpty {
-            content = draft.content
-            hasDraft = true
+            if let edit = config.edit, draft.olderThanEntry {
+                // Saved before the entry changed (a ticked checkbox, an edit on
+                // another device): loaded in place of the entry's text, its
+                // Save would put the older text over the newer one (#761). The
+                // form keeps the entry's text and offers the draft; one with
+                // the entry's own text has nothing to offer.
+                if draft.content != edit.initialContent {
+                    olderDraft = .init(id: draft.id, content: draft.content, updatedAt: draft.updatedAt)
+                    entryChangedAt = draft.entryUpdatedAt
+                }
+            } else {
+                content = draft.content
+                hasDraft = true
+                // Typed after an older edit was offered, which is still kept.
+                if config.isEdit, let older = draft.olderDraft, older.content != draft.content {
+                    olderDraft = older
+                    entryChangedAt = draft.entryUpdatedAt
+                }
+            }
         }
         if let draft = drafts.draft, let sid = draft.sessionId, draft.hasStoredChunks {
             await recoverAudio(sessionId: sid)
@@ -293,6 +317,8 @@ final class NodeFormModel {
             return
         }
         if !new.jsTrimmed.isEmpty {
+            // With an older edit on offer the server saves this in a row of
+            // its own and keeps the older one (#766).
             drafts.save(new)
             hasDraft = true
         }
@@ -300,9 +326,56 @@ final class NodeFormModel {
     }
 
     func discardDraft() {
-        Task { await drafts.delete() }
+        if let older = olderDraft {
+            // Only the text typed here; the older edit stays on offer (#766).
+            Task { await drafts.deleteOwn(keeping: older.id) }
+        } else {
+            Task { await drafts.delete() }
+        }
         hasDraft = false
         content = config.edit?.initialContent ?? ""
+    }
+
+    // MARK: An older edit draft (#761, #766)
+
+    /// The words above the older edit's text.
+    static func olderDraftNotice(_ older: Draft.OlderEdit, entryChangedAt: Date?, formShowsNewerText: Bool,
+                                 timeZone: TimeZone = .current) -> String {
+        let saved = LooreDateFormat.dateTime(older.updatedAt, timeZone: timeZone)
+        let changed = entryChangedAt.map { " (\(LooreDateFormat.dateTime($0, timeZone: timeZone)))" } ?? ""
+        return (saved.isEmpty ? "Your unsaved edit." : "Your unsaved edit from \(saved).")
+            + " The entry changed after it\(changed), so the form shows "
+            + (formShowsNewerText ? "what you typed since." : "the entry as it is now.")
+    }
+
+    /// "Use my edit" is offered while the form still shows the entry's text:
+    /// it never replaces text typed here.
+    var canUseOlderDraft: Bool {
+        olderDraft != nil && content == (config.edit?.initialContent ?? "")
+    }
+
+    /// "Use my edit": the older unsaved edit becomes the form's text and the
+    /// entry's newest draft; Send saves it. Its older row is deleted once that
+    /// save landed, so the text is on the server throughout.
+    func useOlderDraft() {
+        guard canUseOlderDraft, let older = olderDraft else { return }
+        olderDraft = nil
+        content = older.content
+        drafts.save(older.content)
+        hasDraft = true
+        let drafts = drafts
+        Task {
+            await drafts.flush()
+            if !drafts.hasPendingChanges { await drafts.deleteRow(older.id) }
+        }
+    }
+
+    /// "Discard": only the older edit's row goes; the form's text stays.
+    func discardOlderDraft() {
+        guard let older = olderDraft else { return }
+        olderDraft = nil
+        let drafts = drafts
+        Task { await drafts.deleteRow(older.id) }
     }
 
     // MARK: Audio file
@@ -520,6 +593,11 @@ final class NodeFormModel {
             streamingSessionId = nil
             if answer.spendCapped { app.notifySpendBlocked(liftsWithPayment: answer.spendCapLiftsWithPayment) }
             if let notice = answer.subscriptionNotice { app.notifySubscriptionRequired(notice) }
+            // Saved, but the reply was refused: say why, as the typed paths do (#747).
+            // A thread too long for a reply shows the limit on the entry's page.
+            if let llmError = answer.llmError, !ThreadLength.isRefusal(answer.llmErrorCode) {
+                app.toasts.show(llmError, duration: 10)
+            }
             return NodeFormResult(id: answer.id, awaitLLM: answer.llmNodeId, userNodeId: answer.userNodeId,
                                   llmNodeId: answer.llmNodeId, tipId: answer.tipId, spendCapped: answer.spendCapped,
                                   llmError: answer.llmError, llmErrorCode: answer.llmErrorCode)
@@ -558,22 +636,37 @@ final class NodeFormModel {
         // Auto-generate without Agentic Reply (Write New Entry only). A long entry is
         // saved as a chain of parts: the reply goes under the last one so it reads all of it.
         // The request says it is automatic: the server refuses it (409
-        // `auto_generate_off`) under a shared entry, and a refusal just means no reply.
+        // `auto_generate_off`) under a shared entry, which just means no reply. Any
+        // other refusal or failure keeps the entry and says why, as the thread page
+        // does (#747); a thread too long for a reply shows on the entry's page.
         let entryPrivacy = created.privacyLevel ?? privacyLevel
         if autoGenerateOn && !entryPrivacy.isSharedWithOthers && config.allowAgenticPrompt && config.parentId == nil
             && aiUsage != .off && !useAgenticPrompt {
-            if let reply: LLMRequestResponse = try? await api.post(
-                APIPath.nodeLLM(created.tipId ?? created.id),
-                json: .object(["source_mode": .string("textmode"), "auto_generate": .bool(true)])) {
+            do {
+                let reply: LLMRequestResponse = try await api.post(
+                    APIPath.nodeLLM(created.tipId ?? created.id),
+                    json: .object(["source_mode": .string("textmode"), "auto_generate": .bool(true)]))
                 return NodeFormResult(id: reply.nodeId, awaitLLM: reply.nodeId, tipId: created.tipId, privacy: entryPrivacy)
+            } catch {
+                switch error as? APIError {
+                case .subscriptionRequired?:
+                    // No subscription (#438): the banner says it, as on this form's
+                    // other paths and on the web, with no toast beside it.
+                    break
+                default:
+                    if let message = LLMRequestError.toastMessage(error) { app.toasts.show(message, duration: 8) }
+                }
             }
         }
         return NodeFormResult(id: created.id, tipId: created.tipId, privacy: entryPrivacy)
     }
 
+    /// A successful send deletes the place's drafts, an older edit on offer
+    /// included (#761: Save with it on screen keeps the form's text).
     private func clearAfterSend() async {
         await drafts.delete()
         hasDraft = false
+        olderDraft = nil
     }
 
     // MARK: Upload and transcription

@@ -13,6 +13,7 @@ struct AccountNotActiveView: View {
     @State private var deleteModel: DeleteAccountModel?
     @State private var exporting = false
     @State private var exportFile: ExportFile?
+    @State private var signOutQuestion = false
 
     static let message = "This account is not active. Write to info@loore.org."
     static let downloadLabel = "Download your data"
@@ -37,7 +38,7 @@ struct AccountNotActiveView: View {
                         .disabled(exporting)
                         .padding(.bottom, 20)
                         .accessibilityIdentifier("notActive.export")
-                    Button("Sign out") { Task { await app.signOut() } }
+                    Button("Sign out") { app.requestSignOut(question: $signOutQuestion) }
                         .buttonStyle(.looreLink)
                         .accessibilityIdentifier("notActive.signOut")
                     if let deleteModel, deleteModel.isAvailable {
@@ -53,6 +54,7 @@ struct AccountNotActiveView: View {
             }
             .background(LooreColor.bgDeep.ignoresSafeArea())
         }
+        .signOutQuestion($signOutQuestion)
         .onAppear {
             if deleteModel == nil { deleteModel = DeleteAccountModel(app: app) }
         }
